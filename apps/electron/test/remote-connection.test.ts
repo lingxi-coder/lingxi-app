@@ -10,6 +10,7 @@ import {
   CLIENT_PROTOCOL_MAJOR,
   MAX_HOST_CONNECTIONS,
   OFFER_MAX_AGE_MS,
+  REMOTE_FEATURE_BOTS,
   answerPath,
   b64uEncode,
   encodeMessage,
@@ -236,6 +237,47 @@ test('initialize preserves only a valid explicitly declared media handler capabi
     await legacy.initialize();
     await legacy.call('sessions.list', {});
     assert.equal(h.gateway.calls[1]?.viewer.media_capabilities, undefined, 'ordinary approved links stay data-only');
+  });
+});
+
+test('a viewer is Bot-aware only when it declares the bots feature; other features are ignored and a malformed list is refused', async () => {
+  await withHarness(async (h) => {
+    const bad = await h.viewer();
+    h.approveDevice(bad);
+    await bad.connect();
+    assert.equal(await bad.callError('initialize', bad.initializeParams({ features: 'bots' })), 'invalid_params');
+    assert.equal(await bad.callError('initialize', bad.initializeParams({ features: ['bots', 7] })), 'invalid_params');
+    assert.equal(await bad.callError('initialize', bad.initializeParams({ features: [{ name: 'bots' }] })), 'invalid_params');
+    assert.equal(await bad.callError('initialize', bad.initializeParams({ features: ['x'.repeat(65)] })), 'invalid_params');
+    assert.equal(await bad.callError('initialize', bad.initializeParams({ features: Array.from({ length: 33 }, (_, i) => `f${i}`) })), 'invalid_params');
+    assert.equal(h.gateway.calls.length, 0, 'a refused handshake dispatches nothing');
+
+    const aware = await h.viewer();
+    h.approveDevice(aware);
+    await aware.connect();
+    await aware.initialize({ features: ['future-thing', REMOTE_FEATURE_BOTS, 'another'] });
+    await aware.call('sessions.list', {});
+    assert.equal(h.gateway.calls[0]?.viewer.bot_aware, true);
+
+    const unaware = await h.viewer();
+    h.approveDevice(unaware);
+    await unaware.connect();
+    await unaware.initialize({ features: ['future-thing'] });
+    await unaware.call('sessions.list', {});
+    assert.equal(h.gateway.calls[1]?.viewer.bot_aware, undefined, 'unknown features change nothing');
+
+    const legacy = await h.viewer();
+    h.approveDevice(legacy);
+    await legacy.connect();
+    await legacy.initialize();
+    await legacy.call('sessions.list', {});
+    assert.equal(h.gateway.calls[2]?.viewer.bot_aware, undefined, 'a viewer that says nothing is not Bot-aware');
+    const empty = await h.viewer();
+    h.approveDevice(empty);
+    await empty.connect();
+    await empty.initialize({ features: [] });
+    await empty.call('sessions.list', {});
+    assert.equal(h.gateway.calls[3]?.viewer.bot_aware, undefined);
   });
 });
 

@@ -237,6 +237,11 @@ final class CronRepositoryTests: XCTestCase {
         XCTAssertEqual(repository.state.activeScopeID, project.scopeID)
         XCTAssertEqual(repository.state.tasks.count, 2)
         XCTAssertEqual(Set(repository.state.tasks.map(\.scope.projectName)), ["全局", "项目 A"])
+
+        repository.beginCreate()
+        XCTAssertEqual(repository.draft.scopeID, global.scopeID, "New tasks must not inherit the selected project")
+        repository.beginCreate(scopeID: project.scopeID)
+        XCTAssertEqual(repository.draft.scopeID, project.scopeID)
     }
 
     func testSchedulingPolicyUsesBestEffortBackgroundAndEarliestTask() async throws {

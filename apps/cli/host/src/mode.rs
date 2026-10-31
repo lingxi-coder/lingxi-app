@@ -2170,7 +2170,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // (/connect async effects) Shared credential store + OAuth/Copilot
     // drivers for the real store-key / device-flow / browser sign-in
     // effects, wired below.
-    let connect_key_store = tui_build.runtime.provider_key_store.clone();
+    let connect_key_store = tui_build.runtime.credentials.clone();
     let connect_oauth = tui_build.runtime.oauth_connect_driver.clone();
     let connect_copilot = tui_build.runtime.connect_copilot.clone();
     // (`!` bash mode) Sandboxed bash runner for `!`-prefixed commands, cloned

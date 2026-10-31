@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 lingxi-deep-links = { path = "../../../packages/deep-links-rs" }
+host-identity = { path = "../../../packages/host-identity" }
 lingxi-llm-client.workspace = true
 http-client.workspace = true
 configuration-admin = { workspace = true }
@@ -29,15 +30,8 @@ branding.workspace = true
 # agent, cost, anthropic-oauth, secret, tool-api, permission, sandbox) moved
 # with it and is no longer a direct CLI dependency.
 harness-runtime = { workspace = true, default-features = true, features = ["desktop"] }
-# (Plan 3c C1) The CLI `Runtime` re-projects `DesktopRuntime.credentials`
-# (`Arc<secret::CredentialManager>`) and threads it into the TUI session so the
-# `/connect` screen persists provider keys. Naming the leaf `secret` type re-adds
-# it as a direct dep.
+# The CLI's provider-key and credential commands use the shared engine store.
 secret = { workspace = true }
-# (`/connect` Copilot device-flow) The CLI `Runtime` re-projects
-# `DesktopRuntime.connect_copilot` (`Arc<dyn command_core::CopilotConnectDriver>`)
-# and threads it into the TUI session so picking GitHub Copilot in `/connect`
-# runs the real web sign-in. Naming the trait re-adds command-core as a direct dep.
 # F2-01: `harness_runtime::desktop::build` takes an `Arc<dyn client_adapter::PermissionRequestSink>`
 # whose method carries a `client_protocol::permission::PermissionRequest`. The CLI
 # defines a no-op sink (it opts into `NoOpPermissionGate`), so it names both
@@ -124,7 +118,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = "0.10"
-serde_yaml = "0.9"
+yaml_serde = "=0.10.7"
 shlex = "1.3"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -139,8 +133,6 @@ predicates = "3"
 tempfile = "3"
 # Deterministic mtime staggering for the resume-loader fixture test.
 filetime = "0.2"
-# `archive` marketplace-source download tests build a real plugin zip fixture.
-zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 platform-windows = { workspace = true }

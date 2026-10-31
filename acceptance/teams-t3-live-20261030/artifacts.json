@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "secretScan": "PASS",
+  "privateTestIdentitiesExcluded": true,
+  "files": {
+    "logs/macos-full-smoke.log.gz": {
+      "bytes": 2195,
+      "sha256": "a55dfdcfa7c0f522305cbc7a4c562da0c37589a9b144c3e5c1108344b43d2a11"
+    },
+    "logs/publication-regression.log.gz": {
+      "bytes": 735,
+      "sha256": "ff5db83f05d2689180336414fa930ba6f41efe284df29d92dea972c8f8bae33c"
+    },
+    "metadata/api-sdk.json": {
+      "bytes": 1075,
+      "sha256": "f4f5425f88a111b31521af648f07ccc3cf9060e12a66291b0c09dac34e3ffbda"
+    },
+    "metadata/browser-ui.json": {
+      "bytes": 740,
+      "sha256": "c79600a0acbcd688bec095d80a289abcaf1608486377175a0c0b40dc3eb5d302"
+    },
+    "metadata/cleanup.json": {
+      "bytes": 848,
+      "sha256": "12a76ee1362bd5ce82327b03ddc4834093ec31440fd27c8c8c4c3ac5efc94312"
+    },
+    "metadata/cloud.json": {
+      "bytes": 2247,
+      "sha256": "bd58a9983325c9c1523003890144e19645716f840a3786d16436e6c6a83626f1"
+    },
+    "metadata/events.json": {
+      "bytes": 455,
+      "sha256": "56e7be4e17a77a01fd368008c029e2c99acd5bf06d1d8869eeb33e72fdbecf7d"
+    },
+    "metadata/full-smoke.json": {
+      "bytes": 530,
+      "sha256": "f0563d4ad588fed51ef04c761e50e3122003d74de22fb3f8968c2e054c83caf8"
+    },
+    "metadata/function-source-bytes.json": {
+      "bytes": 5526,
+      "sha256": "8b8795900070f08d6fbc61e623385c27e489e98b6d316a636a3bf799ab05729f"
+    },
+    "metadata/hosting-http.json": {
+      "bytes": 4293,
+      "sha256": "6f9344be8b986c3c21e4bacce8016a5d5b15ad2b1247255e3344c58b4e862287"
+    },
+    "metadata/hosting.json": {
+      "bytes": 515,
+      "sha256": "d73c6b2cbd246d0135156cd9247bd7839d25ab7162c2afe6d02c22e85147dd92"
+    },
+    "metadata/iam-additions.json": {
+      "bytes": 918,
+      "sha256": "58aa99308dc3dc7d307300a058e18531e96a96eaab4a16099bd92c5cac554d79"
+    },
+    "metadata/independent-review.json": {
+      "bytes": 1768,
+      "sha256": "89ea908f31422c928c1b9a3cda6a9b4d0ce098f88da70f39d48e9c4e15a23090"
+    },
+    "metadata/mobile-gates.json": {
+      "bytes": 1389,
+      "sha256": "b1c90dc6f8763e1f2a7e7fc004faf20bdf50ee493a7b5f432a4a44765782f18a"
+    },
+    "metadata/native-account-boundary.json": {
+      "bytes": 369,
+      "sha256": "bf180b87d768e1a4df0a6c736a6a9e9b0ec133a8d8ad9f7d93a4f068ea2554a3"
+    },
+    "metadata/restoration.json": {
+      "bytes": 276,
+      "sha256": "d71251e7c3acc5151a29440f97c636ed144dcc0859c032a91ce40b86f5fca607"
+    },
+    "metadata/signature-diagnosis.json": {
+      "bytes": 998,
+      "sha256": "0af20e62e5053fc233e94b86110bd91e17e4f47757e8707af7b6a3a20b47d515"
+    },
+    "metadata/signature-fix.json": {
+      "bytes": 521,
+      "sha256": "8d75503d43c4cf09b562a4a1f6fc4ea44bbfa2abdb667098cdd4a5b266c927d6"
+    },
+    "metadata/wrapper-shapes.json": {
+      "bytes": 1996,
+      "sha256": "1c7401b60f57f3a1f0bd6b84405389204921f46626eac6ae418c1b483f5059d1"
+    },
+    "probes/wrapper-shape.mjs": {
+      "bytes": 4125,
+      "sha256": "7009a30b2608f3cfcddfd91d15f934ac762bf0d58747ffd4790f848f5aa5cf2b"
+    },
+    "report.md": {
+      "bytes": 6994,
+      "sha256": "4f366421354b07b8dc258b29ebe9b3e9c6ef7176df8474ee5c1a59dc30a14421"
+    },
+    "results.json": {
+      "bytes": 2331,
+      "sha256": "b5fcdf75158d136e4a5fa766a0c687bef269c2f04fb5732e7e3da2d05bb54aff"
+    },
+    "screenshots/owner-dm-narrow-full.png": {
+      "bytes": 169721,
+      "sha256": "c7417b0046fa99dc63d54fe260068d6e40aeb1c40908f257b061b5e6ebf0d5f1"
+    },
+    "screenshots/owner-dm-wide.png": {
+      "bytes": 96089,
+      "sha256": "f3478cb70ae98a4d576b41c1922e0cc29e65ca08975e8c77eb2dee5883e1dd5e"
+    }
+  }
+}

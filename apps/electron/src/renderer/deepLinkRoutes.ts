@@ -11,7 +11,13 @@ export interface SettingsLinkRequest {
   scope?: string;
   payload?: Record<string, unknown>;
 }
-export interface ScheduledLinkRequest { requestId: string; kind: 'job' | 'run'; id: string; scope?: string }
+/**
+ * Where the Scheduled page goes: to a task or one of its runs, or to the editor
+ * for a new task in a scope (as a Bot's routines panel asks).
+ */
+export type ScheduledLinkRequest =
+  | { requestId: string; kind: 'job' | 'run'; id: string; scope?: string }
+  | { requestId: string; kind: 'new'; scope: string };
 
 export function settingsLinkRequest(target: DeepLinkTarget, requestId: string): { pageId: string; linkRequest: SettingsLinkRequest } | null {
   const [kind, entity, id] = target.route.split('/');

@@ -131,6 +131,12 @@ fn prompt_appears_on_stderr_not_stdout() {
     child.stdin.as_mut().unwrap().write_all(b"/exit\n").unwrap();
 
     let output = child.wait_with_output().expect("wait failed");
+    assert!(
+        output.status.success(),
+        "REPL failed: status={:?}, stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

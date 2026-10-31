@@ -2,13 +2,13 @@ package com.lingxi.code.cron
 
 import android.content.Context
 import android.util.Log
-import com.lingxi.code.bindings.android.AndroidLaunchModeFfi
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.project.ProjectWorkspace
+import com.lingxi.code.runtimeintegration.NativeEngineFactory
+import com.lingxi.code.runtimeintegration.NativeEngineScenario
+import com.lingxi.code.runtimeintegration.resolveEngineEnvironmentOverrides
 import com.lingxi.code.settings.ProviderSettingsRepository
-import com.lingxi.code.voice.buildVoiceEngine
 import com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
-import com.lingxi.code.voice.resolveEngineEnvironmentOverrides
 
 /**
  * Builds a NO-UI [MobileEngineHandle] for the cron background path — the same
@@ -39,8 +39,9 @@ object HeadlessEngineFactory {
         val environment = resolveEngineEnvironmentOverrides(System.getenv())
         val providerLaunch = ProviderSettingsRepository(appContext).engineLaunchConfig()
         val mediaHost = AndroidNativeMediaHostProvider.get(appContext)
-        return buildVoiceEngine(
+        return NativeEngineFactory.build(
             context = appContext,
+            scenario = NativeEngineScenario.ScheduledHeadless,
             apiBase = environment.apiBase,
             apiKey = environment.apiKey,
             model = environment.model.ifBlank { providerLaunch.defaultModel },
@@ -55,13 +56,6 @@ object HeadlessEngineFactory {
                     guestPath = scope.guestPath,
                 )
             },
-            launchMode = AndroidLaunchModeFfi.SCHEDULED_HEADLESS,
-            // Discard streamed turn events — the cron result is returned by the
-            // single-task cron FFI, not by the event stream.
-            onEvent = { },
-            // Headless: no interactive answerer. Rust rejects any permission
-            // that was not already granted by the persisted policy.
-            onPermission = { },
         ).also {
             if (it == null) Log.w(TAG, "headless mobile engine is unavailable")
         }

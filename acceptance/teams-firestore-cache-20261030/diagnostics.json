@@ -1,0 +1,186 @@
+{
+  "complete": true,
+  "uniqueModifiedFiles": 30,
+  "files": {
+    "apps/electron/electron.vite.config.ts": {
+      "sha256": "1a53d9772f497ab6b94922517aa8bcc47c26ee4a0012b0d1417d45d3668f7afe",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/src/main/teams/connector.ts": {
+      "sha256": "8f9cd2dbef5607566bc3472379e1bac653c43c4fb26501243ce18e720c2d7c91",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/src/main/teams/firestore.ts": {
+      "sha256": "7aa50b64525d0b176e462d893578031a21a2fd1c9c825a89ab66ab1fd1d28021",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/src/main/teams/ipc.ts": {
+      "sha256": "6c1b842d293907071cf4f4c7bf1e6135a4ede5de40000d4abfb552fa9e859bf9",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/src/main/teams/messageWindow.ts": {
+      "sha256": "6198275720cdf800ecd79da6a8a15e4b02cf2e00ea22cd97e0f2c0585d0c19cf",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-window-final.json"
+    },
+    "apps/electron/src/main/teams/privateStore.ts": {
+      "sha256": "e5d16568fa0f12b13129ec64512b991b36ce3fba611cdcd42ce1cdbc64e08018",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/src/main/teams/service.ts": {
+      "sha256": "d05c18087c762450b23383a940aaf8aa03d216a779bbc1a0f5f97ca7f28bcd8c",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/src/preload/index.ts": {
+      "sha256": "eeb5f9a57babc641be6ba02fc15c779de503da7a39241ff965ce8b36f8956364",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/src/preload/teamsData.ts": {
+      "sha256": "c8ed3d0286d4076bef2338e8a5fe2ce02be816373d1f39b6989c773cf3231121",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/src/renderer/App.tsx": {
+      "sha256": "08e1752c597d06aa68a5f42dbea48bad3c1e78f3855c256a762b92d1753c19c5",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/src/renderer/components/Teams.tsx": {
+      "sha256": "e326f6d40eabb13854968f6de2bb30dde356f96eff58253012c685eea914684b",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/src/renderer/teams-data.ts": {
+      "sha256": "e9bf31770687f14b2baca8e4a512c18d9027176c52ae48e66874f1d52f0f3c6c",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/test/fixtures/teams-cache-main.ts": {
+      "sha256": "39ab30a8b700ddea8e6d1f6652cddd9e5174dfdbbe62848afc633964a03081e6",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-window-final.json"
+    },
+    "apps/electron/test/teams-host-runtime.integration.ts": {
+      "sha256": "a0c0c0d1436b6e35438be8f5c39e2d0ab121e1d6632c47822296d4afa8a82c43",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/electron/test/teams-host.test.ts": {
+      "sha256": "00c421472220939a1ad474d4fde165a36e42b05b900d555a3f61201c5cd87c33",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-electron-r2.json"
+    },
+    "apps/web/src/teams/api.ts": {
+      "sha256": "9158615402a4151d5156b211549b386b8954d190e0bf59444d548e77ec9dbccc",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "apps/web/src/teams/firestore.ts": {
+      "sha256": "874abb85832b745d0270ffc4140bdc5d6ea96e355b69352e0c1f751ebe52d3c2",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "apps/web/test/fixtures/teams-cache.ts": {
+      "sha256": "b611276198937817adf4b9fc72dd0b9141b02c0c9df35885a884605b512c9ec1",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "apps/web/test/teams-api.test.ts": {
+      "sha256": "cc99ffb3ddb5888375e326c87f875d2cd83e06adccd6e555ff194c6bf81eb3c6",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "apps/web/test/teams-bots-ui.test.ts": {
+      "sha256": "6e815142de4ba0e64701288aa715120d0c634aeb3c74f13c1c2aabdbf85476b1",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "apps/web/test/teams-bots.test.ts": {
+      "sha256": "a69570596a19f876363c4513fa8422f3902cee8e6e4f2528db629700cfe5c352",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "apps/web/test/teams-messages.test.ts": {
+      "sha256": "c9133db29047b8df2af9e187419852c576214b38877a010eaa4ce2f8f47fd0eb",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "apps/web/test/teams-stream.emulator.test.ts": {
+      "sha256": "fac9468d7f9f2b7824f42889b94b9a4e97f1aac63b8a756296d70997cedba894",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "apps/web/vite.config.ts": {
+      "sha256": "0cd6e73cab5cf1951553db31e14125666a60ed8d75a160c84392a80335fea6b8",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "packages/teams/MessagesPanel.tsx": {
+      "sha256": "3fbba227190089095770d13d5befc858c1748f864fd560d455166915b5dc2137",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "packages/teams/bots.ts": {
+      "sha256": "51a2642e8e2f4eb3efb7c391dad7e7f3cf471f035cf5e85b75f98be89be7959f",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "packages/teams/command-storage.ts": {
+      "sha256": "c27fa81fd5c95bcebc2dc0ab8c76147648021c44aae97013f8fd7b15f5d8947c",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "packages/teams/firestore.ts": {
+      "sha256": "c2a1d361824738b86a0b3f286a09036e2a45244e9be4d98e634998e27d16b0ce",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-firestore-final.json"
+    },
+    "packages/teams/index.ts": {
+      "sha256": "f2e23a3d808a45bf785678a98f2c442f982f6cd0af6f3643c5553473f1c9c2c5",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    },
+    "packages/teams/messages.ts": {
+      "sha256": "32b343b897382d17db813c5b73743a2ac75d747dfcd8a915c6a4e0e3c516053d",
+      "errors": 0,
+      "warnings": 0,
+      "receipt": "lsp-web-r1.json"
+    }
+  }
+}

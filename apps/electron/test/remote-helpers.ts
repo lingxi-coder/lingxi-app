@@ -425,6 +425,8 @@ export interface InitializeOptions {
   push?: unknown;
   appPlatform?: string;
   mediaCapabilities?: unknown;
+  /** `app.features`, as the viewer declares it. */
+  features?: unknown;
   /** Replace the whole params object. */
   params?: unknown;
 }
@@ -550,6 +552,7 @@ export class SimViewer {
         version: '1.0.0',
         platform: options.appPlatform ?? this.platform,
         ...(options.mediaCapabilities === undefined ? {} : { media_capabilities: options.mediaCapabilities }),
+        ...(options.features === undefined ? {} : { features: options.features }),
       },
       ...(options.push === undefined ? {} : { push_installation_id: options.push }),
     };
@@ -592,6 +595,8 @@ export interface HarnessOptions {
   files?: MemoryFiles;
   host?: { name: string; platform: string; app_version: string };
   createIdentity?: () => Promise<HostIdentity>;
+  accessStopped?: () => void;
+  deviceRevoked?: (owner: { accountUid: string; hostId: string; deviceId: string }) => void;
 }
 
 export class Harness {
@@ -638,6 +643,8 @@ export class Harness {
       host: () => host,
       clock: this.clock,
       diagnostics: this.log.diagnostics,
+      accessStopped: options.accessStopped,
+      deviceRevoked: options.deviceRevoked,
     });
     this.service.onStatus((status) => this.statuses.push(status));
   }

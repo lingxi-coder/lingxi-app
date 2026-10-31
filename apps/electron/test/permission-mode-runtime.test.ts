@@ -38,6 +38,8 @@ test('only an acknowledged selection persists, and a new runtime restores it aft
     assert.equal(store.getLastPermissionMode(), undefined);
     acknowledge(first.client, 'default');
     assert.equal(store.getLastPermissionMode(), undefined);
+    first.client.emit('event', { type: 'permission_mode_changed', mode: 'futureMode' });
+    assert.equal(store.getLastPermissionMode(), undefined);
     acknowledge(first.client, 'acceptEdits');
     await pending;
     const second = runtime(new SettingsStore(dir));

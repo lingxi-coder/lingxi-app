@@ -1,6 +1,7 @@
 @preconcurrency import AVFoundation
 @preconcurrency import AppKit
 import AudioToolbox
+import CoreFoundation
 import CryptoKit
 import Foundation
 @preconcurrency import Speech
@@ -76,6 +77,10 @@ enum HelperError: Error, Sendable {
             return message
         }
     }
+}
+
+struct HelperMediaOpenFailedWithoutResource: Error {
+    let cause: Error
 }
 
 func permissionRequestFromArguments(_ arguments: [String]) throws -> Set<String>? {
@@ -186,16 +191,39 @@ struct HelperAudioOwner: Codable, Equatable, Sendable {
     let type: String
     let sessionID: String?
     let instanceID: String?
+    let attachmentHostID: String?
+    let attachmentGeneration: UInt64?
+    let logicalKind: String?
+    let logicalOwnerID: String?
+
+    init(type: String, sessionID: String? = nil, instanceID: String? = nil,
+         attachmentHostID: String? = nil, attachmentGeneration: UInt64? = nil,
+         logicalKind: String? = nil, logicalOwnerID: String? = nil) {
+        self.type = type
+        self.sessionID = sessionID
+        self.instanceID = instanceID
+        self.attachmentHostID = attachmentHostID
+        self.attachmentGeneration = attachmentGeneration
+        self.logicalKind = logicalKind
+        self.logicalOwnerID = logicalOwnerID
+    }
 
     enum CodingKeys: String, CodingKey {
         case type
         case sessionID = "session_id"
         case instanceID = "instance_id"
+        case attachmentHostID = "attachment_host_id"
+        case attachmentGeneration = "attachment_generation"
+        case logicalKind = "logical_kind"
+        case logicalOwnerID = "logical_owner_id"
     }
 
     var helperOwner: HelperOwner {
         switch type {
         case "session": return HelperOwner(kind: type, id: sessionID ?? "")
+        // Snapshots use the existing logical display owner; admission and
+        // teardown compare the full attached owner through helperAudioOwnerKey.
+        case "attached": return HelperOwner(kind: logicalKind ?? "", id: logicalOwnerID ?? "")
         default: return HelperOwner(kind: type, id: instanceID ?? "")
         }
     }
@@ -215,6 +243,8 @@ func helperAudioIdentityKey(_ identity: HelperAudioOperationIdentity) -> String 
 func helperAudioOwnerKey(_ owner: HelperAudioOwner) -> String {
     switch owner.type {
     case "session": return "session:\(owner.sessionID ?? "")"
+    case "attached":
+        return "attached:\(owner.attachmentHostID ?? ""):\(owner.attachmentGeneration ?? 0):\(owner.logicalKind ?? ""):\(owner.logicalOwnerID ?? "")"
     default: return "\(owner.type):\(owner.instanceID ?? "")"
     }
 }
@@ -223,7 +253,7 @@ func helperAudioOwnerKey(_ owner: HelperOwner) -> String {
     "\(owner.kind):\(owner.id)"
 }
 
-func parseHelperAudioOwner(_ value: [String: Any]) -> HelperAudioOwner? {
+func parseHelperAudioOwner(_ value: [String: Any], allowAttachment: Bool = true) -> HelperAudioOwner? {
     guard let type = value["type"] as? String else { return nil }
     switch type {
     case "session":
@@ -232,6 +262,22 @@ func parseHelperAudioOwner(_ value: [String: Any]) -> HelperAudioOwner? {
     case "ui", "system":
         guard let instanceID = value["instance_id"] as? String else { return nil }
         return HelperAudioOwner(type: type, sessionID: nil, instanceID: instanceID)
+    case "attached" where allowAttachment:
+        guard Set(value.keys) == ["type", "attachment_host_id", "attachment_generation", "logical_kind", "logical_owner_id"],
+              let host = value["attachment_host_id"] as? String,
+              host.utf8.count == 36,
+              host.range(of: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil,
+              let number = value["attachment_generation"] as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite,
+              number.doubleValue.rounded(.towardZero) == number.doubleValue,
+              number.doubleValue >= 1, number.doubleValue <= 9_007_199_254_740_991,
+              let logicalKind = value["logical_kind"] as? String,
+              ["session", "ui", "system"].contains(logicalKind),
+              let logicalID = value["logical_owner_id"] as? String,
+              !logicalID.isEmpty, logicalID.utf8.count <= 256, !logicalID.contains("\0") else { return nil }
+        return HelperAudioOwner(type: type, attachmentHostID: host, attachmentGeneration: number.uint64Value,
+                                logicalKind: logicalKind, logicalOwnerID: logicalID)
     default:
         return nil
     }
@@ -363,6 +409,7 @@ struct HelperSnapshot: Encodable, Sendable {
     struct HelperState: Encodable, Sendable {
         let state: String
         let message: String?
+        var instanceId: String? = nil
     }
 
     struct Permissions: Encodable, Sendable {
@@ -400,6 +447,7 @@ struct HelperResponse: Encodable, Sendable {
     let models: [HelperModelSnapshot]?
     let model: HelperModelSnapshot?
     let error: HelperErrorPayload?
+    var closeReceipt: HelperAudioCloseReceipt? = nil
 }
 
 struct HelperErrorPayload: Encodable, Sendable {
@@ -529,10 +577,43 @@ struct HelperAudioError: Encodable, Sendable {
     let message: String
 }
 
+struct HelperAudioCloseContext: Codable, Equatable, Sendable {
+    let helperInstance: String
+    let connectionID: String
+    let resourceIncarnation: String
+    let flightID: String
+
+    enum CodingKeys: String, CodingKey {
+        case helperInstance = "helper_instance"
+        case connectionID = "connection_id"
+        case resourceIncarnation = "resource_incarnation"
+        case flightID = "flight_id"
+    }
+}
+
+func parseAudioCloseContext(_ value: Any?) -> HelperAudioCloseContext? {
+    guard let input = value as? [String: Any],
+          Set(input.keys) == Set(["helper_instance", "connection_id", "resource_incarnation", "flight_id"]),
+          let helper = input["helper_instance"] as? String, UUID(uuidString: helper) != nil,
+          let connection = input["connection_id"] as? String, UUID(uuidString: connection) != nil,
+          let resource = input["resource_incarnation"] as? String, UUID(uuidString: resource) != nil,
+          let flight = input["flight_id"] as? String, UUID(uuidString: flight) != nil else { return nil }
+    return HelperAudioCloseContext(helperInstance: helper, connectionID: connection, resourceIncarnation: resource, flightID: flight)
+}
+
+struct HelperAudioCloseReceipt: Encodable, Sendable {
+    let disposition: String
+    let context: HelperAudioCloseContext
+    let identity: HelperAudioOperationIdentity
+    let owner: HelperAudioOwner
+    let handle: String?
+}
+
 struct HelperEngineResponse: Encodable, Sendable {
     let type = "engine_result"
     let snapshot: HelperSnapshot
     let result: HelperEngineResult
+    var closeReceipt: HelperAudioCloseReceipt? = nil
 }
 
 private final class AudioListenWaiter: @unchecked Sendable {
@@ -761,15 +842,14 @@ func recordingOriginToRollback(
     for identity: HelperAudioOperationIdentity,
     operation: String?,
     owner operationOwner: HelperAudioOwner?,
+    targetRecordingOrigin: HelperAudioOperationIdentity? = nil,
     recordingOrigin: HelperAudioOperationIdentity?,
     recordingOwner: HelperAudioOwner?
 ) -> HelperAudioOperationIdentity? {
     guard let recordingOrigin else { return nil }
     if recordingOrigin == identity { return recordingOrigin }
-    guard operation == "stop_recording",
-          let operationOwner,
-          let recordingOwner,
-          helperAudioOwnerKey(operationOwner.helperOwner) == helperAudioOwnerKey(recordingOwner.helperOwner) else {
+    guard operation == "stop_recording", targetRecordingOrigin == recordingOrigin,
+          let operationOwner, let recordingOwner, operationOwner == recordingOwner else {
         return nil
     }
     return recordingOrigin
@@ -1562,6 +1642,61 @@ func listeningMonitorOutcome(
     return .continueListening
 }
 
+// Admission happens synchronously on the native callback thread, before any
+// child Task is scheduled. Closing the gate prevents late callbacks from
+// producing effects; joining covers every callback accepted before closing.
+// Every mutable field is protected by lock; continuations resume outside it.
+final class NativeCallbackFence: @unchecked Sendable {
+    private let lock = NSLock()
+    private let capacity: Int
+    private var open = true
+    private var active = 0
+    private var overflowed = false
+    private var waiters: [CheckedContinuation<Bool, Never>] = []
+
+    init(capacity: Int = 128) { precondition(capacity > 0); self.capacity = capacity }
+
+    func enter() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard open else { return false }
+        guard active < capacity else { overflowed = true; return false }
+        active += 1
+        return true
+    }
+
+    func leave() {
+        lock.lock()
+        precondition(active > 0)
+        active -= 1
+        let completed = !open && active == 0
+        let result = !overflowed
+        let pending = completed ? waiters : []
+        if completed { waiters.removeAll() }
+        lock.unlock()
+        pending.forEach { $0.resume(returning: result) }
+    }
+
+    func close() {
+        lock.lock(); open = false; lock.unlock()
+    }
+
+    func join() async -> Bool {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            guard !open else { lock.unlock(); continuation.resume(returning: false); return }
+            if active == 0 {
+                let result = !overflowed
+                lock.unlock(); continuation.resume(returning: result)
+            } else if waiters.count >= 16 {
+                lock.unlock(); continuation.resume(returning: false)
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+}
+
 @MainActor
 final class ListeningSession {
     typealias StopResult = ([Float], HelperTranscript?, Int, String?, HelperError?)
@@ -1587,8 +1722,15 @@ final class ListeningSession {
     private let onNoSpeech: @Sendable () async -> Void
     private let onLimit: @Sendable () async -> Void
     private let captureAdmissionGate = CaptureAdmissionGate()
+    private let callbackFence = NativeCallbackFence()
+    private let recognitionCallbackFence = NativeCallbackFence()
+    // Notification handlers can themselves request stop. They are joined by
+    // the independent close flight after stop(), never from performStop().
+    private let notificationFence = NativeCallbackFence()
+    private var callbackCloseSucceeded = false
 
     private let engine = AVAudioEngine()
+    private var tappedInput: AVAudioInputNode?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private let finalResultGate = SpeechFinalResultGate()
@@ -1650,9 +1792,11 @@ final class ListeningSession {
             request.shouldReportPartialResults = true
             request.requiresOnDeviceRecognition = true
             self.request = request
+            let callbackFence = self.recognitionCallbackFence
             task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-                guard let self else { return }
+                guard let self, callbackFence.enter() else { return }
                 Task { @MainActor in
+                    defer { callbackFence.leave() }
                     if let result {
                         self.transcriptText = result.bestTranscription.formattedString
                         let segments = result.bestTranscription.segments
@@ -1677,12 +1821,15 @@ final class ListeningSession {
 
         try cancellation.check()
         input.removeTap(onBus: 0)
+        let callbackFence = self.callbackFence
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            guard let self else { return }
+            guard let self, callbackFence.enter() else { return }
             Task { @MainActor in
+                defer { callbackFence.leave() }
                 self.capture(buffer: buffer)
             }
         }
+        tappedInput = input
         engine.prepare()
         try cancellation.check()
         try engine.start()
@@ -1711,12 +1858,23 @@ final class ListeningSession {
         case .continueListening:
             return !Task.isCancelled
         case .finalizeSpeech:
-            await onSilence()
+            submitNotification(onSilence)
         case .noSpeech:
-            await onNoSpeech()
+            submitNotification(onNoSpeech)
         }
         return false
     }
+
+    private func submitNotification(_ body: @escaping @Sendable () async -> Void) {
+        let fence = notificationFence
+        guard fence.enter() else { return }
+        Task {
+            defer { fence.leave() }
+            await body()
+        }
+    }
+
+    func signalCaptureLimit() { submitNotification(onLimit) }
 
     private func capture(buffer: AVAudioPCMBuffer) {
         guard captureFailure == nil, !cancellation.isCancelled else { return }
@@ -1734,7 +1892,7 @@ final class ListeningSession {
         guard outputCount <= remaining else {
             captureFailure = .mediaTooLarge("captured audio exceeds the configured payload limit")
             captureAdmissionGate.reportFirstBuffer(failure: captureFailure)
-            Task { await onLimit() }
+            signalCaptureLimit()
             return
         }
         let source = UnsafeBufferPointer(start: channelData, count: frameCount)
@@ -1744,7 +1902,7 @@ final class ListeningSession {
         if let onPCM {
             guard pcmQueue.count < 32 else {
                 captureFailure = .mediaTooLarge("the realtime input stream exceeded its bounded queue")
-                Task { await onLimit() }
+                signalCaptureLimit()
                 return
             }
             pcmQueue.append(pcm16Data(from: converted))
@@ -1768,7 +1926,13 @@ final class ListeningSession {
         if rms.isFinite, now.timeIntervalSince(lastLevelPublishedAt) >= 0.05 {
             lastLevelPublishedAt = now
             let level = Double(min(1, max(0, rms)))
-            Task { await onLevel(level) }
+            let fence = callbackFence
+            if fence.enter() {
+                Task {
+                    defer { fence.leave() }
+                    await onLevel(level)
+                }
+            }
         }
         if rms >= silenceThreshold {
             lastSpeechAt = Date()
@@ -1800,21 +1964,35 @@ final class ListeningSession {
     }
 
     private func performStop() async -> StopResult {
+        callbackFence.close()
+        notificationFence.close()
         monitorTask?.cancel()
         monitorTask = nil
-        engine.inputNode.removeTap(onBus: 0)
+        tappedInput?.removeTap(onBus: 0)
+        tappedInput = nil
         engine.stop()
+        let callbacksDrained = await callbackFence.join()
         await pcmPublishTask?.value
         request?.endAudio()
         if route == .system, request != nil, task != nil {
             _ = await finalResultGate.waitForFinalResult(timeoutNanoseconds: speechFinalResultTimeoutNanoseconds)
         }
+        recognitionCallbackFence.close()
         task?.cancel()
+        let recognitionCallbacksDrained = await recognitionCallbackFence.join()
+        callbackCloseSucceeded = callbacksDrained && recognitionCallbacksDrained && !engine.isRunning
         let trimmed = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
         let transcript = trimmed.isEmpty || recognitionFailure != nil
             ? nil
             : HelperTranscript(text: trimmed, language: languageIdentifier, confidence: confidence)
         return (samples, transcript, outputSampleRate, recognitionFailure, captureFailure)
+    }
+
+    // Called only by a separate cleanup flight after stop() has completed.
+    // A notification may be awaiting that very stop task.
+    func closeCallbacksDrained() async -> Bool {
+        let notificationsDrained = await notificationFence.join()
+        return callbackCloseSucceeded && notificationsDrained
     }
 }
 
@@ -1826,6 +2004,8 @@ final class PlaybackSession: NSObject {
     }
 
     private var mode: Mode?
+    private let callbackFence = NativeCallbackFence()
+    private var closeSucceeded = false
     private var continuation: CheckedContinuation<Void, Error>?
     private var didEmitSpeech = false
     private var operationCancellation: AudioCancellationFlag?
@@ -1871,15 +2051,24 @@ final class PlaybackSession: NSObject {
     }
 
     func stop() {
+        callbackFence.close()
         switch mode {
         case let .system(synthesizer):
-            synthesizer.stopSpeaking(at: .immediate)
+            _ = synthesizer.stopSpeaking(at: .immediate)
+            closeSucceeded = !synthesizer.isSpeaking
+            finish(with: .failure(HelperError.cancelled("speech playback was cancelled")))
         case let .audioPlayer(player):
             player.stop()
+            closeSucceeded = !player.isPlaying
             finish(with: .failure(HelperError.cancelled("speech playback was cancelled")))
         case nil:
-            break
+            closeSucceeded = true
         }
+    }
+
+    func closeCallbacksDrained() async -> Bool {
+        let drained = await callbackFence.join()
+        return closeSucceeded && drained
     }
 
     private func stopIfNeeded() throws {
@@ -1904,17 +2093,28 @@ extension PlaybackSession: AVSpeechSynthesizerDelegate {
         willSpeakRangeOfSpeechString _: NSRange,
         utterance _: AVSpeechUtterance
     ) {
-        Task { @MainActor [weak self] in self?.didEmitSpeech = true }
+        let fence = callbackFence
+        guard fence.enter() else { return }
+        Task { @MainActor [weak self] in
+            defer { fence.leave() }
+            self?.didEmitSpeech = true
+        }
     }
 
     nonisolated func speechSynthesizer(_: AVSpeechSynthesizer, didFinish _: AVSpeechUtterance) {
+        let fence = callbackFence
+        guard fence.enter() else { return }
         Task { @MainActor [weak self] in
+            defer { fence.leave() }
             self?.finish(with: .success(()))
         }
     }
 
     nonisolated func speechSynthesizer(_: AVSpeechSynthesizer, didCancel _: AVSpeechUtterance) {
+        let fence = callbackFence
+        guard fence.enter() else { return }
         Task { @MainActor [weak self] in
+            defer { fence.leave() }
             guard let self else { return }
             if self.operationCancellation?.isCancelled == true {
                 self.finish(with: .failure(HelperError.cancelled("speech playback was cancelled")))
@@ -1929,13 +2129,19 @@ extension PlaybackSession: AVSpeechSynthesizerDelegate {
 
 extension PlaybackSession: AVAudioPlayerDelegate {
     nonisolated func audioPlayerDidFinishPlaying(_: AVAudioPlayer, successfully flag: Bool) {
+        let fence = callbackFence
+        guard fence.enter() else { return }
         Task { @MainActor [weak self] in
+            defer { fence.leave() }
             self?.finish(with: flag ? .success(()) : .failure(HelperError.native("audio playback did not finish successfully")))
         }
     }
 
     nonisolated func audioPlayerDecodeErrorDidOccur(_: AVAudioPlayer, error: Error?) {
+        let fence = callbackFence
+        guard fence.enter() else { return }
         Task { @MainActor [weak self] in
+            defer { fence.leave() }
             self?.finish(with: .failure(error ?? HelperError.native("audio playback failed")))
         }
     }
@@ -2399,15 +2605,19 @@ actor HelperStateStore {
     private var activeSpeech: PlaybackSession?
     private struct ActiveMediaDeviceLease {
         let leaseID: String
+        let openRequestID: String
         let owner: HelperAudioOwner
         let identity: HelperAudioOperationIdentity
         let session: HelperMediaDeviceSession
     }
     private var mediaDeviceLease: ActiveMediaDeviceLease?
-    private var stoppedMediaLeaseIDs = Set<String>()
+    private var stoppedMediaLeaseReceipts: [String: HelperMediaCloseReceipt] = [:]
     private var stoppedMediaLeaseHistory: [String] = []
     private var mediaOpeningOwnerCounts: [String: Int] = [:]
     private var seenMediaRequestIDs = Set<String>()
+    private var unknownMediaOpenRequestIDs = Set<String>()
+    // Only the scheduler watcher may publish terminal proof after its exact task settles.
+    private var pendingMediaTerminalResponses: [String: HelperMediaDeviceResponseDto] = [:]
     private var mediaRequestHistory: [String] = []
     private var seenMediaIdentityKeys = Set<String>()
     private var mediaIdentityHistory: [String] = []
@@ -2417,7 +2627,9 @@ actor HelperStateStore {
     private var recognitionSnapshot: HelperRecognitionSnapshot?
     private var playbackSnapshot: HelperPlaybackSnapshot?
     private var activeLanguage = currentLocaleTag()
+    private let helperInstance = UUID().uuidString.lowercased()
     private let serviceEpoch = UInt64.random(in: 1...9_000_000_000_000_000)
+    private var nativeResourceAdmissions = Set<String>()
     private let supportRevision: UInt64 = 1
     private struct ActiveAudioOperation {
         let identity: HelperAudioOperationIdentity
@@ -2425,6 +2637,9 @@ actor HelperStateStore {
         let operation: String
         let cancellation: AudioCancellationFlag
         let configurationRevision: UInt64
+        let closeContext: HelperAudioCloseContext?
+        let targetRecordingOrigin: HelperAudioOperationIdentity?
+        let targetRecordingHandle: String?
     }
 
     private struct ActiveListenContext {
@@ -2462,6 +2677,35 @@ actor HelperStateStore {
     private var recordingHandle: String?
     private var recordingOwner: HelperAudioOwner?
     private var recordingOriginIdentity: HelperAudioOperationIdentity?
+    private var recordingCloseContext: HelperAudioCloseContext?
+    private struct ArchivedCapture {
+        let identity: HelperAudioOperationIdentity
+        let owner: HelperAudioOwner
+        let context: HelperAudioCloseContext
+        let handle: String
+        let session: ListeningSession
+    }
+    // Reserve before dispatch; retain exact stopped sessions until the host
+    // acknowledges their proof, so a late failure can still be reconciled.
+    private var archivedCaptures: [String: ArchivedCapture] = [:]
+    // A not-admitted outcome is not a close receipt until the scheduler has
+    // joined the task which produced it. Preserve its exact identity for that join.
+    private var archivedNotAdmitted: [String: ActiveAudioOperation] = [:]
+    private var acknowledgedCaptures = Set<String>()
+    private var archivedStopOperations: [String: ActiveAudioOperation] = [:]
+    private var completedCloseReceipts: [String: HelperAudioCloseReceipt] = [:]
+    private struct VerifiedCancellation {
+        let identity: HelperAudioOperationIdentity
+        let owner: HelperAudioOwner
+        let context: HelperAudioCloseContext
+        let operation: String
+        let targetRecordingOrigin: HelperAudioOperationIdentity?
+        let session: ListeningSession?
+        let playback: PlaybackSession?
+        let handle: String?
+    }
+    private var verifiedCancellations: [String: VerifiedCancellation] = [:]
+    private var verifiedCancellationReceipts: [String: HelperAudioCloseReceipt] = [:]
     private var recordingStreamsPCM = false
     private var recordingFormat = "wav"
     private var recordingMaximumPayloadBytes = maxInlineAudioBase64Bytes * 3 / 4
@@ -2495,7 +2739,7 @@ actor HelperStateStore {
             mediaPlaybackActive = false
         }
         return HelperSnapshot(
-            helper: .init(state: "running", message: message ?? helperMessage),
+            helper: .init(state: "running", message: message ?? helperMessage, instanceId: helperInstance),
             permissions: .init(
                 microphone: Self.microphonePermissionState(),
                 speech: Self.speechPermissionState(speechStatus)
@@ -2526,32 +2770,72 @@ actor HelperStateStore {
     func handleMediaDeviceRequest(id: String, rawRequest: Any?) async {
         let rawEnvelope = rawRequest as? [String: Any]
         let fallbackRequestID = rawEnvelope?["request_id"] as? String ?? "invalid"
+        let rawOperation = rawEnvelope?["request"] as? [String: Any]
+        let isOpen = rawOperation?["type"] as? String == "open"
+        var canProveNoResource = false
         do {
-            let request = try parseHelperMediaDeviceRequest(rawRequest)
-            guard rememberMediaRequestID(request.requestID) else {
-                throw HelperError.cancelled("the native media request identity is stale")
+            // Reserve a valid outer identity before parsing any nested fields.
+            // A malformed duplicate must never prove another open has no resource.
+            guard let requestID = rawEnvelope?["request_id"] as? String,
+                  !requestID.isEmpty, requestID.utf8.count <= 256, !requestID.contains("\0"),
+                  rememberMediaRequestID(requestID) else {
+                throw HelperError.cancelled("the native media request identity is invalid or stale")
             }
-            let result = try await executeMediaDeviceRequest(request.operation)
-            await writer.writeMediaResponse(
+            canProveNoResource = isOpen
+            let request = try parseHelperMediaDeviceRequest(rawRequest)
+            try Task.checkCancellation()
+            canProveNoResource = false
+            let result = try await executeMediaDeviceRequest(request.operation, requestID: request.requestID)
+            await recordOrWriteMediaResponse(
                 id: id,
                 response: HelperMediaDeviceResponseDto(requestID: request.requestID, result: result)
             )
         } catch {
-            await writer.writeMediaResponse(
+            let failure: HelperMediaDeviceResultDto
+            if let confirmed = error as? HelperMediaOpenFailedWithoutResource {
+                failure = .openFailedWithoutResource(helperMediaErrorDto(confirmed.cause))
+            } else if canProveNoResource {
+                failure = .openFailedWithoutResource(helperMediaErrorDto(error))
+            } else {
+                if isOpen { unknownMediaOpenRequestIDs.insert(fallbackRequestID) }
+                failure = .error(helperMediaErrorDto(error))
+            }
+            await recordOrWriteMediaResponse(
                 id: id,
                 response: HelperMediaDeviceResponseDto(
                     requestID: fallbackRequestID,
-                    result: .error(helperMediaErrorDto(error))
+                    result: failure
                 )
             )
         }
     }
 
-    private func executeMediaDeviceRequest(_ operation: HelperMediaDeviceOperation) async throws -> HelperMediaDeviceResultDto {
-        try Task.checkCancellation()
+    private func recordOrWriteMediaResponse(id: String, response: HelperMediaDeviceResponseDto) async {
+        switch response.result {
+        case .error:
+            // Generic failures convey Unknown, never a cleanup proof.
+            await writer.writeMediaResponse(id: id, response: response)
+        default:
+            // IDs remain reserved by the input scheduler until publish finishes.
+            // If a duplicate somehow reaches here, do not overwrite a receipt.
+            if pendingMediaTerminalResponses[id] == nil { pendingMediaTerminalResponses[id] = response }
+        }
+    }
+
+    func publishMediaTerminalResponse(id: String) async {
+        guard let response = pendingMediaTerminalResponses.removeValue(forKey: id) else { return }
+        await writer.writeMediaResponse(id: id, response: response)
+    }
+
+    private func executeMediaDeviceRequest(_ operation: HelperMediaDeviceOperation, requestID: String) async throws -> HelperMediaDeviceResultDto {
+        do { try Task.checkCancellation() }
+        catch {
+            if case .open = operation { throw HelperMediaOpenFailedWithoutResource(cause: error) }
+            throw error
+        }
         switch operation {
         case let .open(request):
-            let leaseID = try await openMediaDevice(request)
+            let leaseID = try await openMediaDevice(request, requestID: requestID)
             return .opened(leaseID)
         case let .nextInput(leaseID):
             let lease = try requireMediaDeviceLease(leaseID)
@@ -2572,35 +2856,36 @@ actor HelperStateStore {
             let lease = try requireMediaDeviceLease(leaseID)
             return .updated(try await lease.session.update(update))
         case let .stop(leaseID):
-            try await stopMediaDeviceLease(leaseID)
-            return .stopped
+            return .stopped(try await stopMediaDeviceLease(leaseID))
         }
     }
 
-    private func openMediaDevice(_ request: HelperMediaOpenRequest) async throws -> String {
-        let ownerKey = helperAudioOwnerKey(request.owner.helperOwner)
+    private func openMediaDevice(_ request: HelperMediaOpenRequest, requestID: String) async throws -> String {
+        let ownerKey = helperAudioOwnerKey(request.owner)
         let identityKey = helperAudioIdentityKey(request.identity)
         guard !isShuttingDown, endingOwners[ownerKey, default: 0] == 0 else {
-            throw HelperError.cancelled("the native media owner is being torn down")
+            throw HelperMediaOpenFailedWithoutResource(cause: HelperError.cancelled("the native media owner is being torn down"))
         }
         guard !seenMediaIdentityKeys.contains(identityKey) else {
-            throw HelperError.cancelled("the native media operation identity is stale")
+            throw HelperMediaOpenFailedWithoutResource(cause: HelperError.cancelled("the native media operation identity is stale"))
+        }
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+            throw HelperMediaOpenFailedWithoutResource(cause: HelperError.permission("microphone access is required"))
         }
         rememberMediaIdentity(identityKey)
         mediaOpeningOwnerCounts[ownerKey, default: 0] += 1
         defer { finishMediaOpen(ownerKey: ownerKey) }
 
-        try reservePhysical(identity: request.identity, owner: request.owner.helperOwner, activity: "listening")
+        do { try reservePhysical(identity: request.identity, owner: request.owner.helperOwner, activity: "listening") }
+        catch { throw HelperMediaOpenFailedWithoutResource(cause: error) }
         owner = request.owner.helperOwner
         activity = "listening"
         var openedSession: HelperMediaDeviceSession?
+        var openedLeaseID: String?
         do {
-            let session = try await MainActor.run {
-                let session = try HelperMediaDeviceSession(request: request)
-                try session.start()
-                return session
-            }
+            let session = try await MainActor.run { try HelperMediaDeviceSession(request: request) }
             openedSession = session
+            try await MainActor.run { try session.start() }
             try Task.checkCancellation()
             guard !isShuttingDown,
                   endingOwners[ownerKey, default: 0] == 0,
@@ -2608,8 +2893,10 @@ actor HelperStateStore {
                 throw HelperError.cancelled("the native media open was cancelled")
             }
             let leaseID = UUID().uuidString.lowercased()
+            openedLeaseID = leaseID
             mediaDeviceLease = ActiveMediaDeviceLease(
                 leaseID: leaseID,
+                openRequestID: requestID,
                 owner: request.owner,
                 identity: request.identity,
                 session: session
@@ -2625,9 +2912,16 @@ actor HelperStateStore {
             return leaseID
         } catch {
             if let openedSession { await openedSession.stop() }
+            if let openedLeaseID, mediaDeviceLease?.leaseID == openedLeaseID {
+                let receipt = HelperMediaCloseReceipt(leaseID: openedLeaseID, openRequestID: requestID,
+                    owner: request.owner, identity: request.identity)
+                mediaDeviceLease = nil
+                rememberStoppedMediaLease(receipt)
+            }
             releaseMediaPhysicalLease(identity: request.identity, owner: request.owner.helperOwner)
             await publishOwnerChanged()
             await publishSnapshotChanged()
+            if openedSession != nil { throw HelperMediaOpenFailedWithoutResource(cause: error) }
             throw error
         }
     }
@@ -2639,45 +2933,49 @@ actor HelperStateStore {
         return lease
     }
 
-    private func stopMediaDeviceLease(_ leaseID: String) async throws {
+    private func stopMediaDeviceLease(_ leaseID: String) async throws -> HelperMediaCloseReceipt {
         guard let lease = mediaDeviceLease, lease.leaseID == leaseID else {
-            if stoppedMediaLeaseIDs.contains(leaseID) { return }
+            if let receipt = stoppedMediaLeaseReceipts[leaseID] { return receipt }
             throw HelperError.notRecording("the native media lease was not found")
         }
         await lease.session.stop()
+        let receipt = HelperMediaCloseReceipt(leaseID: leaseID, openRequestID: lease.openRequestID,
+            owner: lease.owner, identity: lease.identity)
         if mediaDeviceLease?.leaseID == leaseID {
             mediaDeviceLease = nil
-            rememberStoppedMediaLease(leaseID)
+            rememberStoppedMediaLease(receipt)
             releaseMediaPhysicalLease(identity: lease.identity, owner: lease.owner.helperOwner)
             await publishOwnerChanged()
             await publishSnapshotChanged()
         }
+        return receipt
     }
 
-    private func rememberStoppedMediaLease(_ leaseID: String) {
-        guard stoppedMediaLeaseIDs.insert(leaseID).inserted else { return }
+    private func rememberStoppedMediaLease(_ receipt: HelperMediaCloseReceipt) {
+        let leaseID = receipt.leaseID
+        guard stoppedMediaLeaseReceipts[leaseID] == nil else { return }
+        stoppedMediaLeaseReceipts[leaseID] = receipt
         stoppedMediaLeaseHistory.append(leaseID)
         if stoppedMediaLeaseHistory.count > 256 {
             let oldest = stoppedMediaLeaseHistory.removeFirst()
-            stoppedMediaLeaseIDs.remove(oldest)
+            stoppedMediaLeaseReceipts.removeValue(forKey: oldest)
         }
     }
 
     private func stopMediaDeviceLease(ownerKey: String) async {
         guard let lease = mediaDeviceLease,
-              helperAudioOwnerKey(lease.owner.helperOwner) == ownerKey else { return }
-        try? await stopMediaDeviceLease(lease.leaseID)
+              helperAudioOwnerKey(lease.owner) == ownerKey else { return }
+        _ = try? await stopMediaDeviceLease(lease.leaseID)
     }
 
     private func releaseMediaPhysicalLease(identity: HelperAudioOperationIdentity, owner expectedOwner: HelperOwner) {
-        if reservedPhysicalIdentity == identity {
-            reservedPhysicalIdentity = nil
-            reservedPhysicalOwner = nil
-        }
+        guard reservedPhysicalIdentity == identity else { return }
+        reservedPhysicalIdentity = nil
+        reservedPhysicalOwner = nil
         if owner == expectedOwner,
            listeningIdentity == nil,
            speechIdentity == nil,
-           mediaDeviceLease?.identity != identity {
+           mediaDeviceLease == nil {
             owner = nil
             activity = "idle"
         } else if owner == nil, reservedPhysicalIdentity == nil {
@@ -2686,6 +2984,8 @@ actor HelperStateStore {
     }
 
     private func rememberMediaRequestID(_ requestID: String) -> Bool {
+        guard !unknownMediaOpenRequestIDs.contains(requestID),
+              mediaDeviceLease?.openRequestID != requestID else { return false }
         guard seenMediaRequestIDs.insert(requestID).inserted else { return false }
         mediaRequestHistory.append(requestID)
         if mediaRequestHistory.count > 4_096 {
@@ -2892,7 +3192,27 @@ actor HelperStateStore {
         }
     }
 
-    func rejectOverloaded(_ envelope: [String: Any]) async {
+    /// Call only after the input scheduler proves this open was never queued
+    /// and that neither its envelope ID nor its request ID conflicts in flight.
+    func rejectUnadmittedMediaOpen(_ envelope: [String: Any]) async -> Bool {
+        guard envelope["kind"] as? String == "media_request",
+              let rawRequest = envelope["request"] as? [String: Any],
+              let request = rawRequest["request"] as? [String: Any],
+              request["type"] as? String == "open",
+              let id = envelope["id"] as? String, !id.isEmpty,
+              let requestID = rawRequest["request_id"] as? String, !requestID.isEmpty,
+              requestID.utf8.count <= 256, !requestID.contains("\0"),
+              rememberMediaRequestID(requestID) else { return false }
+        await writer.writeMediaResponse(id: id, response: HelperMediaDeviceResponseDto(
+            requestID: requestID,
+            result: .openFailedWithoutResource(HelperMediaErrorDto(kind: "busy", message: "the native media helper is at its in-flight request limit"))
+        ))
+        return true
+    }
+
+    func rejectOverloaded(_ envelope: [String: Any], reason: HelperInputRejection = .invalid) async {
+        guard reason != .duplicate else { return }
+        if reason == .overloaded, await rejectUnadmittedMediaOpen(envelope) { return }
         let id = envelope["id"] as? String ?? UUID().uuidString
         if envelope["kind"] as? String == "media_request" {
             let rawRequest = envelope["request"] as? [String: Any]
@@ -2924,7 +3244,7 @@ actor HelperStateStore {
     func cancelOperation(_ rawIdentity: [String: Any]) async {
         guard let identity = parseHelperAudioIdentity(rawIdentity) else { return }
         let key = helperAudioIdentityKey(identity)
-        let activeOperation = activeOperations[key]
+        let activeOperation = activeOperations[key] ?? archivedStopOperations[key]
         rememberCancelledIdentity(key)
         removePendingListenFinish(key)
         activeOperation?.cancellation.cancel()
@@ -2936,6 +3256,7 @@ actor HelperStateStore {
             for: identity,
             operation: activeOperation?.operation,
             owner: activeOperation?.owner,
+            targetRecordingOrigin: activeOperation?.targetRecordingOrigin,
             recordingOrigin: recordingOriginIdentity,
             recordingOwner: recordingOwner
         ) {
@@ -2968,6 +3289,108 @@ actor HelperStateStore {
         await publishSnapshotChanged()
     }
 
+    // This entry point is reserved for the exact task and owner registered by
+    // the input scheduler. Unknown/mismatched commands have no side effects.
+    func beginVerifiedCancellation(_ input: [String: Any]) async {
+        guard let identity = parseHelperAudioIdentity(input["identity"] as? [String: Any] ?? [:]),
+              let requestOwner = parseHelperAudioOwner(input["owner"] as? [String: Any] ?? [:]),
+              let context = parseAudioCloseContext(input["closeContext"]),
+              context.helperInstance == helperInstance else { return }
+        let key = helperAudioIdentityKey(identity)
+        if verifiedCancellations[context.flightID] != nil { return }
+        guard verifiedCancellations.count < 512 else { return }
+        let active = activeOperations[key] ?? archivedStopOperations[key] ?? archivedNotAdmitted[key]
+        let isRecording = recordingOriginIdentity == identity && recordingOwner == requestOwner && recordingCloseContext == context
+        let archived = archivedCaptures[key]
+        let hasArchive = archived?.owner == requestOwner && archived?.context == context
+        guard (active?.owner == requestOwner && active?.closeContext == context) || isRecording || hasArchive else { return }
+        let operation = active?.operation ?? ((isRecording || hasArchive) ? "start_recording" : "")
+        let targetOrigin = active?.targetRecordingOrigin
+        let targetArchive = targetOrigin.flatMap { archivedCaptures[helperAudioIdentityKey($0)] }
+        let session = (listeningIdentity == identity ? activeSession : nil) ?? (hasArchive ? archived?.session : nil)
+            ?? (targetArchive?.owner == requestOwner ? targetArchive?.session : nil)
+        let playback = speechIdentity == identity ? activeSpeech : nil
+        let flight = VerifiedCancellation(identity: identity, owner: requestOwner, context: context,
+                                          operation: operation, targetRecordingOrigin: targetOrigin, session: session, playback: playback,
+                                          handle: isRecording ? recordingHandle : (hasArchive ? archived?.handle : active?.targetRecordingHandle))
+        verifiedCancellations[context.flightID] = flight
+        // Call the existing resource cleanup only after exact owner/context
+        // matching. It marks cancellation before the first suspension point.
+        await cancelOperation(input["identity"] as? [String: Any] ?? [:])
+    }
+
+    func verifiedCancellationReceipt(_ input: [String: Any]) async -> HelperAudioCloseReceipt? {
+        guard let identity = parseHelperAudioIdentity(input["identity"] as? [String: Any] ?? [:]),
+              let requestOwner = parseHelperAudioOwner(input["owner"] as? [String: Any] ?? [:]),
+              let context = parseAudioCloseContext(input["closeContext"]), context.helperInstance == helperInstance else { return nil }
+        if let existing = verifiedCancellationReceipts[context.flightID], existing.identity == identity,
+           existing.owner == requestOwner, existing.context == context { return existing }
+        var disposition = "unknown"
+        var handle: String?
+        if let flight = verifiedCancellations[context.flightID], flight.identity == identity,
+           flight.owner == requestOwner, flight.context == context {
+            handle = flight.handle
+            let key = helperAudioIdentityKey(identity)
+            let settled = await waitForOperation(key, timeoutMs: 2_000)
+            let rejected = archivedNotAdmitted[key]
+            if settled, rejected?.identity == identity, rejected?.owner == requestOwner, rejected?.closeContext == context {
+                disposition = "not_admitted"
+            } else if settled && flight.operation == "start_recording", let session = flight.session,
+                      await session.closeCallbacksDrained(), listeningIdentity != identity,
+                      recordingOriginIdentity != identity {
+                disposition = "closed"
+            } else if settled && flight.operation == "stop_recording", let targetOrigin = flight.targetRecordingOrigin,
+                      let session = flight.session, await session.closeCallbacksDrained(),
+                      recordingOriginIdentity != targetOrigin {
+                disposition = "closed"
+            } else if settled && flight.operation == "play", let playback = flight.playback,
+                      await playback.closeCallbacksDrained(), speechIdentity != identity {
+                disposition = "closed"
+            }
+        }
+        let receipt = HelperAudioCloseReceipt(disposition: disposition, context: context, identity: identity, owner: requestOwner, handle: handle)
+        if disposition != "unknown" { verifiedCancellationReceipts[context.flightID] = receipt }
+        return receipt
+    }
+
+    func acknowledgeVerifiedCancellation(_ input: [String: Any]) -> Bool {
+        guard let identity = parseHelperAudioIdentity(input["identity"] as? [String: Any] ?? [:]),
+              let owner = parseHelperAudioOwner(input["owner"] as? [String: Any] ?? [:]),
+              let context = parseAudioCloseContext(input["closeContext"]), context.helperInstance == helperInstance else { return false }
+        guard let receipt = verifiedCancellationReceipts[context.flightID] else {
+            // A lost ACK response can be retried. Absence only confirms that
+            // no replay slot is held; it is never a native close receipt.
+            return verifiedCancellations[context.flightID] == nil
+        }
+        guard receipt.identity == identity, receipt.owner == owner, receipt.context == context else { return false }
+        verifiedCancellationReceipts.removeValue(forKey: context.flightID)
+        verifiedCancellations.removeValue(forKey: context.flightID)
+        let key = helperAudioIdentityKey(identity)
+        if let rejected = archivedNotAdmitted[key], rejected.owner == owner, rejected.closeContext == context {
+            archivedNotAdmitted.removeValue(forKey: key)
+        }
+        if let stop = archivedStopOperations[key], stop.owner == owner, stop.closeContext == context {
+            archivedStopOperations.removeValue(forKey: key)
+            if let target = stop.targetRecordingOrigin {
+                let targetKey = helperAudioIdentityKey(target)
+                if acknowledgedCaptures.contains(targetKey),
+                   !archivedStopOperations.values.contains(where: { $0.targetRecordingOrigin == target }) {
+                    archivedCaptures.removeValue(forKey: targetKey)
+                    acknowledgedCaptures.remove(targetKey)
+                }
+            }
+        }
+        if let archived = archivedCaptures[key], archived.owner == owner, archived.context == context {
+            if archivedStopOperations.values.contains(where: { $0.targetRecordingOrigin == identity }) {
+                acknowledgedCaptures.insert(key)
+            } else {
+                archivedCaptures.removeValue(forKey: key)
+                acknowledgedCaptures.remove(key)
+            }
+        }
+        return true
+    }
+
     func pendingListenFinishCount() -> Int {
         pendingListenFinishes.count
     }
@@ -2985,13 +3408,13 @@ actor HelperStateStore {
             return nil
         }
         if let active = activeOperations[key] {
-            guard active.operation == "listen",
+            guard active.operation == "listen", active.owner.type != "attached",
                   helperAudioOwnerKey(active.owner.helperOwner) == helperAudioOwnerKey(requestOwner) else {
                 throw HelperError.invalidRequest("the finish request does not target the active listen owner")
             }
         }
         if let context = activeListenContexts[key] {
-            guard helperAudioOwnerKey(context.owner.helperOwner) == helperAudioOwnerKey(requestOwner) else {
+            guard context.owner.type != "attached", helperAudioOwnerKey(context.owner.helperOwner) == helperAudioOwnerKey(requestOwner) else {
                 throw HelperError.invalidRequest("the live listening owner does not match the finish request")
             }
             return try await finishListen(context: context)
@@ -3017,7 +3440,7 @@ actor HelperStateStore {
         let key = helperAudioIdentityKey(context.identity)
         guard let pending = pendingListenFinishes[key] else { return false }
         removePendingListenFinish(key)
-        guard pending.expiresAt > Date(),
+        guard pending.expiresAt > Date(), context.owner.type != "attached",
               helperAudioOwnerKey(pending.owner) == helperAudioOwnerKey(context.owner.helperOwner) else { return false }
         return true
     }
@@ -3043,7 +3466,8 @@ actor HelperStateStore {
         configuration: AudioConfigurationV4,
         configurationRevision: UInt64,
         maxPayloadBytes: UInt64,
-        timeoutBudgetMs: UInt64? = nil
+        timeoutBudgetMs: UInt64? = nil,
+        closeContext: HelperAudioCloseContext? = nil
     ) async {
         let identityKey = helperAudioIdentityKey(identity)
         guard !isShuttingDown,
@@ -3084,13 +3508,24 @@ actor HelperStateStore {
             await publishError(timeout, owner: requestOwner.helperOwner)
             return
         }
+        if operationName == "stop_recording", archivedStopOperations.count >= 512 {
+            await writeEngineResult(id: id, revision: configurationRevision,
+                                    result: .failed(kind: "busy", message: "native stop receipt capacity is exhausted"), message: nil)
+            return
+        }
         let cancellation = AudioCancellationFlag()
+        let targetRecordingHandle = operationName == "stop_recording" ? operation["handle"] as? String : nil
+        let targetRecordingOrigin = targetRecordingHandle == recordingHandle && recordingOwner == requestOwner
+            ? recordingOriginIdentity : nil
         activeOperations[identityKey] = ActiveAudioOperation(
             identity: identity,
             owner: requestOwner,
             operation: operationName,
             cancellation: cancellation,
-            configurationRevision: configurationRevision
+            configurationRevision: configurationRevision,
+            closeContext: closeContext?.helperInstance == helperInstance ? closeContext : nil,
+            targetRecordingOrigin: targetRecordingOrigin,
+            targetRecordingHandle: targetRecordingOrigin == nil ? nil : targetRecordingHandle
         )
         activeRequestIdentity = identity
         activeRequestOwner = requestOwner
@@ -3135,12 +3570,26 @@ actor HelperStateStore {
             failureToPublish = failure
         }
         finishingOperations.insert(identityKey)
-        activeOperations.removeValue(forKey: identityKey)
+        let finishedOperation = activeOperations.removeValue(forKey: identityKey)
+        if operationName == "stop_recording", completedCloseReceipts[identityKey] == nil,
+           let finishedOperation, finishedOperation.closeContext != nil, finishedOperation.targetRecordingOrigin != nil {
+            archivedStopOperations[identityKey] = finishedOperation
+        }
         if activeRequestIdentity == identity {
             activeRequestIdentity = recordingOriginIdentity
             activeRequestOwner = recordingOriginIdentity == nil ? nil : recordingOwner
         }
-        await writeEngineResult(id: id, revision: configurationRevision, result: result, message: failureToPublish?.message)
+        if (operationName == "start_recording" || operationName == "play"), failureToPublish != nil,
+           operationExecutor == nil, !nativeResourceAdmissions.contains(identityKey),
+           let finishedOperation, finishedOperation.closeContext != nil, archivedNotAdmitted.count < 512 {
+            archivedNotAdmitted[identityKey] = finishedOperation
+        }
+        nativeResourceAdmissions.remove(identityKey)
+        let closeReceipt = completedCloseReceipts.removeValue(forKey: identityKey)
+        // The outer scheduler task has not returned yet. Only a later exact
+        // cancellation control, after joining that task, can issue proof.
+        await writeEngineResult(id: id, revision: configurationRevision, result: result, message: failureToPublish?.message,
+                                closeReceipt: closeReceipt)
         if let failureToPublish { await publishError(failureToPublish, owner: requestOwner.helperOwner) }
         finishingOperations.remove(identityKey)
         let waiters = operationCompletionWaiters.removeValue(forKey: identityKey) ?? [:]
@@ -3159,7 +3608,7 @@ actor HelperStateStore {
             listenWaiters.removeValue(forKey: key)?.complete(.failure(.cancelled("the audio helper is shutting down")))
         }
         if let mediaDeviceLease {
-            try? await stopMediaDeviceLease(mediaDeviceLease.leaseID)
+            _ = try? await stopMediaDeviceLease(mediaDeviceLease.leaseID)
         }
         let openingOwners = Array(mediaOpeningOwnerCounts.keys)
         var mediaOpensSettled = true
@@ -3201,14 +3650,16 @@ actor HelperStateStore {
         id: String,
         revision: UInt64,
         result: HelperEngineResult,
-        message: String?
+        message: String?,
+        closeReceipt: HelperAudioCloseReceipt? = nil
     ) async {
         await writer.writeEnvelope(OutputEnvelope(
             id: id,
             type: "response",
             result: .engine(HelperEngineResponse(
                 snapshot: await snapshot(message: message, revision: revision),
-                result: result
+                result: result,
+                closeReceipt: closeReceipt
             )),
             event: nil,
             error: nil
@@ -3263,8 +3714,14 @@ actor HelperStateStore {
             try await requestPermissions(permissions)
             return HelperResponse(type: "authorization", snapshot: await snapshot(message: nil), transcript: nil, recording: nil, models: nil, model: nil, error: nil)
         case "cancel_operation":
-            await cancelOperation(input["identity"] as? [String: Any] ?? [:])
-            return HelperResponse(type: "cancelled", snapshot: await snapshot(message: nil), transcript: nil, recording: nil, models: nil, model: nil, error: nil)
+            guard let receipt = await verifiedCancellationReceipt(input) else {
+                throw HelperError.invalidRequest("cancel_operation requires exact owner and close context")
+            }
+            return HelperResponse(type: "close_receipt", snapshot: await snapshot(message: nil), transcript: nil, recording: nil,
+                                  models: nil, model: nil, error: nil, closeReceipt: receipt)
+        case "ack_close_receipt":
+            guard acknowledgeVerifiedCancellation(input) else { throw HelperError.invalidRequest("unknown close receipt") }
+            return HelperResponse(type: "close_ack", snapshot: await snapshot(message: nil), transcript: nil, recording: nil, models: nil, model: nil, error: nil)
         case "finish_listening":
             guard let identity = parseHelperAudioIdentity(input["identity"] as? [String: Any] ?? [:]),
                   let owner = parseOwner(input["owner"]) else {
@@ -3680,6 +4137,12 @@ actor HelperStateStore {
                 await self?.publishCaptureChunk(owner: requestOwner.helperOwner, identity: identity, pcm: data, sampleRate: sampleRate)
             }
         } else { pcmCallback = nil }
+        // No AVAudioEngine, tap or Speech callback for this capture has been
+        // created before this point. Reserve its close-evidence slot first.
+        if recordingOriginIdentity == identity, recordingCloseContext != nil, archivedCaptures.count >= 512 {
+            throw HelperError.busy("native capture close receipt capacity is exhausted")
+        }
+        nativeResourceAdmissions.insert(helperAudioIdentityKey(identity))
         let session = await MainActor.run {
             ListeningSession(
                 owner: requestOwner.helperOwner,
@@ -3699,6 +4162,10 @@ actor HelperStateStore {
                 onNoSpeech: onNoSpeech,
                 onLimit: onLimit
             )
+        }
+        if recordingOriginIdentity == identity, let context = recordingCloseContext, let handle = recordingHandle {
+            archivedCaptures[helperAudioIdentityKey(identity)] = ArchivedCapture(identity: identity, owner: requestOwner,
+                                                                                 context: context, handle: handle, session: session)
         }
         // Publish the provisional capture lease before starting the engine: AVAudioEngine
         // may deliver an oversized first buffer before `start()` returns to this actor.
@@ -3770,6 +4237,7 @@ actor HelperStateStore {
                 || speechIdentity != nil
                 || systemRenderIdentity != nil
         )
+        recordingCloseContext = activeOperations[helperAudioIdentityKey(identity)]?.closeContext
         recordingStreamsPCM = operation["stream_pcm"] as? Bool == true
         recordingFormat = format
         recordingMaximumPayloadBytes = payloadBytes
@@ -3846,7 +4314,15 @@ actor HelperStateStore {
         guard let origin = recordingOriginIdentity, let activeSession, listeningIdentity == origin else {
             throw HelperError.notRecording("the recording is no longer active")
         }
+        let originContext = recordingCloseContext
         let captured = await activeSession.stop()
+        let callbacksDrained = await activeSession.closeCallbacksDrained()
+        let originSettled = await waitForOperation(helperAudioIdentityKey(origin), timeoutMs: 2_000)
+        if callbacksDrained, originSettled, let originContext {
+            let receipt = HelperAudioCloseReceipt(disposition: "closed", context: originContext, identity: origin, owner: requestOwner, handle: handle)
+            completedCloseReceipts[helperAudioIdentityKey(identity)] = receipt
+            verifiedCancellationReceipts[originContext.flightID] = receipt
+        }
         let stillOwnsRecording = recordingOriginIdentity == origin && self.activeSession === activeSession
         if recordingStreamsPCM && stillOwnsRecording {
             self.clearRecordingLease(identity: origin)
@@ -4056,6 +4532,7 @@ actor HelperStateStore {
     private func startPhysicalPlayback(identity: HelperAudioOperationIdentity, owner requestOwner: HelperAudioOwner) async throws -> PlaybackSession {
         try ensureCurrent(identity)
         try reservePhysical(identity: identity, owner: requestOwner.helperOwner, activity: "speaking")
+        nativeResourceAdmissions.insert(helperAudioIdentityKey(identity))
         let session = await MainActor.run { PlaybackSession() }
         activeSpeech = session
         speechIdentity = identity
@@ -4387,6 +4864,7 @@ actor HelperStateStore {
         recordingHandle = nil
         recordingOwner = nil
         recordingOriginIdentity = nil
+        recordingCloseContext = nil
         recordingFailure = nil
     }
 
@@ -4534,6 +5012,7 @@ actor HelperStateStore {
             for: identity,
             operation: active.operation,
             owner: active.owner,
+            targetRecordingOrigin: active.targetRecordingOrigin,
             recordingOrigin: recordingOriginIdentity,
             recordingOwner: recordingOwner
         ) {
@@ -4610,38 +5089,91 @@ actor HelperStateStore {
     }
 }
 
+enum HelperInputRejection: Sendable, Equatable {
+    case overloaded
+    case duplicate
+    case invalid
+}
+
+private enum HelperInputStart {
+    case started
+    case rejected(HelperInputRejection)
+}
+
 private actor HelperInputTasks {
     private struct Entry {
         let identityKey: String?
         let ownerKey: String?
         let operation: String?
+        let mediaLeaseID: String?
+        let closeContext: HelperAudioCloseContext?
+        let mediaOpenRequestID: String?
         let task: Task<Void, Never>
     }
 
     private let maximumInFlight = 16
     private var entries: [String: Entry] = [:]
+    private var controls: [String: Task<Void, Never>] = [:]
 
     func start(
         id: String,
         identityKey: String?,
         ownerKey: String? = nil,
         operationType: String? = nil,
+        closeContext: HelperAudioCloseContext? = nil,
+        mediaOpenRequestID: String? = nil,
+        mediaLeaseID: String? = nil,
+        isMediaStop: Bool = false,
+        completion: (@Sendable () async -> Void)? = nil,
         operation: @escaping @Sendable () async -> Void
-    ) -> Bool {
-        guard entries.count < maximumInFlight, entries[id] == nil else { return false }
-        let task = Task {
-            await operation()
+    ) -> HelperInputStart {
+        guard entries[id] == nil, controls[id] == nil else { return .rejected(.duplicate) }
+        if let mediaOpenRequestID, entries.values.contains(where: { $0.mediaOpenRequestID == mediaOpenRequestID }) {
+            return .rejected(.duplicate)
+        }
+        if let mediaLeaseID, entries.values.contains(where: { $0.mediaLeaseID == mediaLeaseID && $0.operation == "media_stop" }) {
+            return .rejected(.duplicate)
+        }
+        // Keep a bounded control lane so a saturated lease can still be stopped.
+        guard entries.count < maximumInFlight || (isMediaStop && mediaLeaseID != nil && entries.count < maximumInFlight * 2) else { return .rejected(.overloaded) }
+        let targets = isMediaStop && mediaLeaseID != nil
+            ? entries.values.filter { $0.mediaLeaseID == mediaLeaseID }.map(\.task) : []
+        for target in targets { target.cancel() }
+        let task = Task { for target in targets { await target.value }; await operation() }
+        entries[id] = Entry(identityKey: identityKey, ownerKey: ownerKey, operation: operationType, mediaLeaseID: mediaLeaseID, closeContext: closeContext, mediaOpenRequestID: mediaOpenRequestID, task: task)
+        // Keep the entry through target completion and media proof publication.
+        Task {
+            await task.value
+            if let completion { await completion() }
             self.finished(id: id)
         }
-        entries[id] = Entry(identityKey: identityKey, ownerKey: ownerKey, operation: operationType, task: task)
-        return true
+        return .started
     }
 
-    func cancel(identityKey: String) {
-        for entry in entries.values where entry.identityKey == identityKey {
-            entry.task.cancel()
-        }
+    func cancel(identityKey: String, ownerKey: String, closeContext: HelperAudioCloseContext) -> Task<Void, Never>? {
+        guard let entry = entries.values.first(where: { $0.identityKey == identityKey && $0.ownerKey == ownerKey && $0.closeContext == closeContext }) else { return nil }
+        entry.task.cancel()
+        return entry.task
     }
+
+    func startControl(id: String, operation: @escaping @Sendable () async -> Void) -> HelperInputStart {
+        guard controls[id] == nil, entries[id] == nil else { return .rejected(.duplicate) }
+        guard controls.count < 16 else { return .rejected(.overloaded) }
+        let task = Task { await operation(); self.finishedControl(id: id) }
+        controls[id] = task
+        return .started
+    }
+
+    func contains(id: String) -> Bool { entries[id] != nil || controls[id] != nil }
+
+    func joinCaptureStarts(ownerKey: String, excludingID: String) async {
+        let starts = entries.filter { id, entry in
+            id != excludingID && entry.ownerKey == ownerKey && entry.operation == "start_recording"
+        }.map { $0.value.task }
+        for task in starts { await task.value }
+    }
+
+    private func finishedControl(id: String) { controls.removeValue(forKey: id) }
 
     func cancel(id: String) {
         entries[id]?.task.cancel()
@@ -4656,7 +5188,9 @@ private actor HelperInputTasks {
 
     func cancelAll() {
         for entry in entries.values { entry.task.cancel() }
+        for task in controls.values { task.cancel() }
         entries.removeAll()
+        controls.removeAll()
     }
 
     private func finished(id: String) {
@@ -4678,7 +5212,8 @@ func readInputLines<S: AsyncSequence>(
     _ lines: S,
     handle: @escaping @Sendable ([String: Any]) async -> Void,
     cancel: @escaping @Sendable ([String: Any]) async -> Void,
-    reject: @escaping @Sendable ([String: Any]) async -> Void = { _ in }
+    reject: @escaping @Sendable ([String: Any], HelperInputRejection) async -> Void = { _, _ in },
+    mediaCompleted: @escaping @Sendable (String) async -> Void = { _ in }
 ) async where S.Element == String {
     let tasks = HelperInputTasks()
     var iterator = lines.makeAsyncIterator()
@@ -4690,18 +5225,39 @@ func readInputLines<S: AsyncSequence>(
         guard let data = line.data(using: .utf8), !data.isEmpty,
               let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
         let id = parsed["id"] as? String ?? UUID().uuidString
+        if await tasks.contains(id: id) {
+            await reject(parsed, .duplicate)
+            continue
+        }
         if parsed["kind"] as? String == "media_cancel" {
             if let targetID = parsed["target_id"] as? String { await tasks.cancel(id: targetID) }
             continue
         }
         let command = parsed["command"] as? [String: Any]
-        if command?["type"] as? String == "cancel_operation",
-           let identityKey = audioIdentityKey(command?["identity"]) {
-            await cancel(parsed)
-            await tasks.cancel(identityKey: identityKey)
-            if !(await tasks.start(id: id, identityKey: nil) { await handle(parsed) }) {
-                await reject(parsed)
+        if command?["type"] as? String == "ack_close_receipt" {
+            if case .rejected(let reason) = await tasks.startControl(id: id, operation: { await handle(parsed) }) { await reject(parsed, reason) }
+            continue
+        }
+        if command?["type"] as? String == "cancel_operation" {
+            guard let identityKey = audioIdentityKey(command?["identity"]),
+                  let owner = parseHelperAudioOwner(command?["owner"] as? [String: Any] ?? [:]),
+                  let context = parseAudioCloseContext(command?["closeContext"]) else {
+                await reject(parsed, .invalid)
+                continue
             }
+            let accepted = await tasks.startControl(id: id) {
+                let target = await tasks.cancel(identityKey: identityKey, ownerKey: helperAudioOwnerKey(owner), closeContext: context)
+                await cancel(parsed)
+                if let target {
+                    await target.value
+                    // Cancellation can reach the actor before the scheduled
+                    // request is registered. Recheck after its task settles
+                    // so its exact not-admitted record can be observed.
+                    await cancel(parsed)
+                }
+                await handle(parsed)
+            }
+            if case .rejected(let reason) = accepted { await reject(parsed, reason) }
             continue
         }
         if parsed["kind"] as? String == "media_request" {
@@ -4712,8 +5268,8 @@ func readInputLines<S: AsyncSequence>(
             let owner: HelperAudioOwner?
             if operationType == "open" {
                 guard let ownerBody = openBody["owner"] as? [String: Any],
-                      let parsedOwner = parseHelperAudioOwner(ownerBody) else {
-                    await reject(parsed)
+                      let parsedOwner = parseHelperAudioOwner(ownerBody, allowAttachment: true) else {
+                    await reject(parsed, .invalid)
                     continue
                 }
                 owner = parsedOwner
@@ -4721,13 +5277,18 @@ func readInputLines<S: AsyncSequence>(
                 owner = nil
             }
             let ownerKey = owner.map(helperAudioOwnerKey)
+            let mediaLeaseID = (operation["lease_id"] as? String) ?? (openBody["lease_id"] as? String)
             let accepted = await tasks.start(
                 id: id,
                 identityKey: nil,
                 ownerKey: ownerKey,
-                operationType: operationType.map { "media_\($0)" }
+                operationType: operationType.map { "media_\($0)" },
+                mediaOpenRequestID: operationType == "open" ? mediaRequest["request_id"] as? String : nil,
+                mediaLeaseID: mediaLeaseID,
+                isMediaStop: operationType == "stop",
+                completion: { await mediaCompleted(id) }
             ) { await handle(parsed) }
-            if !accepted { await reject(parsed) }
+            if case .rejected(let reason) = accepted { await reject(parsed, reason) }
             continue
         }
         let request = parsed["request"] as? [String: Any] ?? [:]
@@ -4741,12 +5302,21 @@ func readInputLines<S: AsyncSequence>(
             id: id,
             identityKey: identityKey,
             ownerKey: ownerKey,
-            operationType: operation["type"] as? String
-        ) { await handle(parsed) }
-        if accepted, operation["type"] as? String == "end_owner", let ownerKey {
-            await tasks.cancel(ownerKey: ownerKey, excludingID: id)
-        } else if !accepted {
-            await reject(parsed)
+            operationType: operation["type"] as? String,
+            closeContext: parseAudioCloseContext(parsed["closeContext"])
+        ) {
+            if operation["type"] as? String == "stop_recording", let ownerKey {
+                await tasks.joinCaptureStarts(ownerKey: ownerKey, excludingID: id)
+            }
+            await handle(parsed)
+        }
+        switch accepted {
+        case .started:
+            if operation["type"] as? String == "end_owner", let ownerKey {
+                await tasks.cancel(ownerKey: ownerKey, excludingID: id)
+            }
+        case .rejected(let reason):
+            await reject(parsed, reason)
         }
     }
     await tasks.cancelAll()
@@ -4783,13 +5353,14 @@ func handleHelperInputEnvelope(_ parsed: [String: Any], state: HelperStateStore)
         configuration: configuration,
         configurationRevision: revision,
         maxPayloadBytes: maxPayloadBytes,
-        timeoutBudgetMs: timeoutBudgetMs
+        timeoutBudgetMs: timeoutBudgetMs,
+        closeContext: parseAudioCloseContext(parsed["closeContext"])
     )
 }
 
 func cancelHelperInputEnvelope(_ parsed: [String: Any], state: HelperStateStore) async {
     let command = parsed["command"] as? [String: Any] ?? [:]
-    await state.cancelOperation(command["identity"] as? [String: Any] ?? [:])
+    await state.beginVerifiedCancellation(command)
 }
 
 func runHelperInputLoop<S: AsyncSequence>(_ lines: S, state: HelperStateStore) async where S.Element == String {
@@ -4797,8 +5368,10 @@ func runHelperInputLoop<S: AsyncSequence>(_ lines: S, state: HelperStateStore) a
         await handleHelperInputEnvelope(parsed, state: state)
     }, cancel: { parsed in
         await cancelHelperInputEnvelope(parsed, state: state)
-    }, reject: { parsed in
-        await state.rejectOverloaded(parsed)
+    }, reject: { parsed, reason in
+        await state.rejectOverloaded(parsed, reason: reason)
+    }, mediaCompleted: { id in
+        await state.publishMediaTerminalResponse(id: id)
     })
     await state.shutdown()
 }

@@ -23,7 +23,6 @@ struct AppCover: View {
     }
 }
 
-enum AppsTab: String, Hashable { case mine, market }
 struct LocalAppDevelopmentRequest: Sendable {
     let appId: String?
     let name: String
@@ -34,89 +33,52 @@ struct LocalAppDevelopmentRequest: Sendable {
 
 struct AppsPage: View {
     @Environment(\.theme) private var t
+    @Environment(\.openURL) private var openURL
     let library: UnifiedLocalApps
     let market: UnifiedAppMarket
     let onOpenApp: (String) -> Void
     let onShowDetails: (String) -> Void
-    let onShowMarketDetails: (String) -> Void
     let onDevelop: (LocalAppDevelopmentRequest) -> Void
-    @State private var tab: AppsTab = .mine
     @State private var query = ""
     @State private var creating = false
     @State private var importing = false
-    @State private var importingLegacy: LocalAppLegacyEntry?
-    @State private var consent: MarketConsent?
     @State private var error: String?
-    private struct MarketConsent: Identifiable { var id: String { distribution.versionId }; let distribution: MarketDistribution; let remix: Bool }
     private var filtered: [UnifiedAppRecord] { library.records.filter { query.isEmpty || $0.name.localizedStandardContains(query) } }
     var body: some View {
-        VStack(spacing:0) {
-            Picker("Apps",selection:$tab) { Text("我的").tag(AppsTab.mine); Text("市场").tag(AppsTab.market) }
-                .pickerStyle(.segmented).padding()
-            List {
-                if let message = error ?? library.error { Text(message).foregroundStyle(.red).textSelection(.enabled) }
-                if tab == .mine {
-                    ForEach(filtered) { app in
-                        Button { onShowDetails(app.appId) } label: {
-                            HStack(spacing:12) {
-                                AppCover(name:app.name,category:"",size:46)
-                                VStack(alignment:.leading,spacing:4) { Text(app.name).foregroundStyle(t.text); Text(library.runs[app.appId]?.phase ?? "stopped").font(.caption).foregroundStyle(t.text3) }
-                                Spacer(); Button("打开") { onOpenApp(app.appId) }.buttonStyle(.borderless)
-                            }.padding(.vertical,4)
+        List {
+            if let message = error ?? library.error { Text(message).foregroundStyle(.red).textSelection(.enabled) }
+            ForEach(filtered) { app in
+                Button { onShowDetails(app.appId) } label: {
+                    HStack(spacing: 12) {
+                        AppCover(name: app.name, category: "", size: 46)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(app.name).foregroundStyle(t.text)
+                            Text(library.runs[app.appId]?.phase ?? "stopped").font(.caption).foregroundStyle(t.text3)
                         }
-                    }
-                    if filtered.isEmpty { ContentUnavailableView("还没有应用",systemImage:"square.grid.2x2",description:Text("创建应用或从市场安装。应用独立于开发会话保存。")) }
-                    if !library.legacyArchives.isEmpty {
-                        Section("旧应用数据") {
-                            Text("旧包和浏览器数据已保留。显式导入会创建新的应用和浏览器空间，不会自动迁移浏览器数据库。").font(.footnote).foregroundStyle(.secondary)
-                            ForEach(library.legacyEntries) { entry in Button("导入 \(entry.name)") { importingLegacy = entry } }
-                            ForEach(library.legacyArchives) { archive in Text(URL(fileURLWithPath:archive.path).lastPathComponent).font(.caption) }
-                            Button("导入源码文件夹") { importing = true }
-                        }
-                    }
-                } else {
-                    if let error = market.error { Text(error).foregroundStyle(.red) }
-                    ForEach(market.apps) { app in
-                        VStack(alignment:.leading,spacing:10) {
-                            HStack { AppCover(name:app.name,category:app.category,size:44); VStack(alignment:.leading) { Text(app.name).font(.headline); Text(app.summary).font(.caption).foregroundStyle(.secondary) } }
-                            HStack {
-                                Button("详情") { onShowMarketDetails(app.id) }
-                                Button(library.records.contains(where: { $0.marketOrigin?.appId == app.id && $0.marketOrigin?.remixedFrom == nil }) ? "检查更新" : "获取") { loadDistribution(app.id,remix:false) }
-                                if app.currentVersion?.manifest?.remix?.allowed == true { Button("制作可编辑副本") { loadDistribution(app.id,remix:true) } }
-                            }.buttonStyle(.borderless)
-                        }.padding(.vertical,6)
-                    }
-                    if market.loading { ProgressView() }
-                    if let progress = market.progress { ProgressView(value:progress) }
-                    if market.hasNextPage { Button("加载更多") { Task { await market.nextPage() } } }
-                }
-            }.listStyle(.plain)
-        }
-        .background(t.windowBg)
-        .navigationTitle("应用").navigationBarTitleDisplayMode(.inline)
-        .searchable(text:$query,prompt:"搜索应用")
-        .toolbar { ToolbarItem(placement:.topBarTrailing) { Menu { Button("创建应用") { creating = true }; Button("导入源码文件夹") { importing = true } } label: { Image(systemName:"plus") }.accessibilityLabel("创建或导入应用") } }
-        .task { await library.refresh() }
-        .task(id:"\(tab.rawValue):\(query)") {
-            guard tab == .market else { return }
-            do { try await Task.sleep(for:.milliseconds(250)); try Task.checkCancellation(); await market.search(query) } catch { }
-        }
-        .sheet(isPresented:$creating) { LocalAppCreateSheet(onCreate:onDevelop) }
-        .sheet(item:$consent) { item in
-            LocalAppConsentSheet(manifest:item.distribution.manifest,digest:item.distribution.releaseDigest,title:item.remix ? "创建可编辑副本" : "安装此版本", onCancel: { market.cancelInstall() }, canCancel: !market.installCommitting) {
-                Task {
-                    do {
-                        let app = try await market.install(item.distribution,approved:true,remix:item.remix)
-                        consent = nil
-                        if item.remix, let authoring = app.authoring { onDevelop(.init(appId:app.appId,name:app.name,sourceDirectory:authoring.sourceDirectory,authoring:authoring,prompt:"继续开发这个应用。")) }
-                    } catch { self.error = error.localizedDescription; consent = nil }
+                        Spacer()
+                        Button("打开") { onOpenApp(app.appId) }.buttonStyle(.borderless)
+                    }.padding(.vertical, 4)
                 }
             }
+            if filtered.isEmpty { ContentUnavailableView("还没有应用", systemImage: "square.grid.2x2", description: Text("创建应用或从市场安装。应用独立于开发会话保存。")) }
         }
-        .confirmationDialog("导入旧应用？", isPresented: Binding(get: { importingLegacy != nil }, set: { if !$0 { importingLegacy = nil } }), presenting: importingLegacy) { entry in
-            Button("创建新应用副本") { Task { do { let app = try await library.importLegacy(entry); importingLegacy = nil; onShowDetails(app.appId) } catch { self.error = error.localizedDescription } } }
-            Button("取消", role: .cancel) { importingLegacy = nil }
-        } message: { _ in Text("原包和浏览器数据保持原样。新副本使用新应用身份，不会复制浏览器数据库或原执行授权。") }
+        .listStyle(.plain)
+        .background(t.windowBg)
+        .navigationTitle("应用").navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $query, prompt: "搜索应用")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("应用市场", systemImage: "storefront") { openMarket() }
+                    .labelStyle(.iconOnly)
+                    .accessibilityIdentifier("apps.market.open")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu { Button("创建应用") { creating = true }; Button("导入源码文件夹") { importing = true } }
+                    label: { Image(systemName: "plus") }.accessibilityLabel("创建或导入应用")
+            }
+        }
+        .task { await library.refresh() }
+        .sheet(isPresented: $creating) { LocalAppCreateSheet(onCreate: onDevelop) }
         .fileImporter(isPresented:$importing,allowedContentTypes:[.folder, .zip]) { result in
             Task {
                 do {
@@ -128,8 +90,9 @@ struct AppsPage: View {
         }
         .accessibilityIdentifier("apps.page")
     }
-    private func loadDistribution(_ id: String, remix: Bool) {
-        Task { do { consent = .init(distribution:try await market.distribution(id),remix:remix) } catch { self.error = error.localizedDescription } }
+    private func openMarket() {
+        guard let url = market.browseURL else { error = "应用市场地址不可用。"; return }
+        openURL(url) { accepted in if !accepted { error = "无法打开浏览器。" } }
     }
 }
 
@@ -301,7 +264,19 @@ struct LocalAppDetailPage: View {
                 }
             }
         }
-        .sheet(item: $agentRelease) { release in LocalAppAgentSettingsView(client: library.client, appID: appId, release: release) }
+        .sheet(item: $agentRelease) { release in
+            LocalAppAgentSettingsView(
+                client: library.client,
+                appID: appId,
+                release: release,
+                captureConfigurationScope: {
+                    library.configurationScopeSnapshot(appID: appId, revision: release.revision)
+                },
+                onConfigurationChanged: { snapshot in
+                    await library.cancelBrowserAgentScope(snapshot)
+                }
+            )
+        }
         .sheet(item:$consent) { release in LocalAppConsentSheet(manifest:release.manifest,digest:release.digest,title:"授权此版本运行") { Task { do { try await library.grant(appId,digest:release.digest); consent = nil; await runRelease(release) } catch { self.error = error.localizedDescription; consent = nil } } } }
         .confirmationDialog("恢复可编辑源码副本？", isPresented: $restoring, titleVisibility: .visible) {
             Button("恢复副本并继续开发") { Task { do { guard let app = library.record(appId) else { return }; onDevelop(try await library.restoreAuthoring(app)) } catch { self.error = error.localizedDescription } } }
@@ -347,53 +322,85 @@ struct AppRuntimeView: View {
     @State private var opened = false
     @State private var busy = false
     @State private var consent: UnifiedAppRelease?
+    @State private var inAppBrowser: LocalAppBrowserTicket?
+    @State private var requestedInApp = false
     var body: some View {
-        VStack(spacing: 20) {
-            Text(library.record(appId)?.name ?? "本地应用").font(.title2)
-            Text("应用页面在系统默认浏览器打开。模型凭据、Agent 授权和工具审批由灵犀管理。")
-            Text("iOS 26 会为已确认的 Agent 请求申请有限后台任务；系统仍可中断任务。普通浏览器页面暂停后，请返回灵犀重新打开。")
-                .font(.footnote).foregroundStyle(.secondary)
-            if busy { ProgressView() }
-            if let error { Text(error).foregroundStyle(.red) }
-            if let wake = library.browserAgentWake(for: appId) {
-                Text("浏览器 Agent 请求等待后台任务许可。运行：\(wake.runID.prefix(8))")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text(library.record(appId)?.name ?? "本地应用").font(.title2)
+                Text("local_app_browser_intro")
+                Text("local_app_browser_lifetime")
                     .font(.footnote).foregroundStyle(.secondary)
-                Button("开始 Agent 并返回应用") {
-                    Task { await returnToBrowser(wake) }
-                }.disabled(busy)
-                Button("取消此次 Agent 请求", role: .cancel) {
-                    Task { await library.cancelBrowserAgentHandoff(wake) }
-                }.disabled(busy)
-            } else {
-                Button(launch == nil ? "启动并在默认浏览器打开" : "返回默认浏览器") { Task { await load(openBrowser: true) } }.disabled(busy)
+                if busy { ProgressView() }
+                if let error {
+                    Text(error)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let wake = library.browserAgentWake(for: appId) {
+                    Text("浏览器 Agent 请求等待后台任务许可。运行：\(wake.runID)")
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("local_app_agent_in_app_wake_unsupported")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Text("local_app_agent_default_wake_help")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Button("local_app_agent_continue_default") {
+                        guard !busy, let token = library.browserAgentWakeToken(for: wake) else { return }
+                        busy = true
+                        Task { await returnToBrowser(wake, token: token) }
+                    }.disabled(busy).accessibilityIdentifier("local-app-agent-continue-default")
+                    Button("取消此次 Agent 请求", role: .cancel) {
+                        guard !busy, let token = library.browserAgentWakeToken(for: wake) else { return }
+                        busy = true
+                        Task {
+                            await library.cancelBrowserAgentHandoff(wake, token: token)
+                            busy = false
+                        }
+                    }.disabled(busy)
+                } else {
+                    Button(launch == nil ? "启动并在默认浏览器打开" : "返回默认浏览器") {
+                        Task { await load(openBrowser: true) }
+                    }.disabled(busy)
+                    Button("remote_apps_open_in_app") { Task { await load(openBrowser: true, inApp: true) } }.disabled(busy)
+                    if hasAgent {
+                        Text("local_app_agent_in_app_unsupported").font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+                if hasAgent, let revision = library.record(appId)?.currentRevision {
+                    LocalAppAgentTasks(client: library.client, appID: appId, revision: revision)
+                }
+                Button("应用设置与 Agent 授权") { onShowDetails(appId) }
+                Button("停止应用与 Agent 任务", role: .destructive) { Task {
+                    do { try await library.stop(appId); onClose() } catch { self.error = error.localizedDescription }
+                } }
+                Button("关闭管理页面", action: onClose)
+                Text("关闭此管理页面不会停止浏览器中的应用。")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
-            Button("应用设置与 Agent 授权") { onShowDetails(appId) }
-            Button("停止应用与 Agent 任务", role: .destructive) { Task {
-                do { try await library.stop(appId); onClose() } catch { self.error = error.localizedDescription }
-            } }
-            Button("关闭管理页面", action: onClose)
-            Text("关闭此管理页面不会停止浏览器中的应用。").font(.footnote).foregroundStyle(.secondary)
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("app-runtime")
         }
-        .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: appId) { await load(openBrowser: !opened && !library.consumeBrowserReview(appId)) }
+        .sheet(item: $inAppBrowser) { ticket in LocalAppSystemBrowser(url: ticket.url) }
         .sheet(item: $consent) { release in
             LocalAppConsentSheet(manifest: release.manifest, digest: release.digest, title: "授权此版本运行") {
-                Task { do { try await library.grant(appId, digest: release.digest); consent = nil; await load(openBrowser: true) }
+                Task { do { try await library.grant(appId, digest: release.digest); consent = nil; await load(openBrowser: true, inApp: requestedInApp) }
                 catch { self.error = error.localizedDescription; consent = nil } }
             }
         }
         .background {
             if hasAgent {
                 LocalAppAgentInteractions(client: library.client, appID: appId)
-                if let revision = library.record(appId)?.currentRevision {
-                    LocalAppAgentTasks(client: library.client, appID: appId, revision: revision)
-                }
             }
         }
-        .accessibilityIdentifier("app-runtime")
     }
-    private func load(openBrowser: Bool) async {
+    private func load(openBrowser: Bool, inApp: Bool = false) async {
         guard !busy else { return }
+        requestedInApp = inApp
         busy = true; error = nil
         defer { busy = false }
         do {
@@ -402,8 +409,9 @@ struct AppRuntimeView: View {
             let release = try await library.release(appId, revision: app.currentRevision)
             hasAgent = (release.manifest.capabilities ?? []).contains("agent")
             if release.manifest.executesCode && !app.executionGrants.contains(release.digest) { consent = release; return }
-            if openBrowser, let wake = library.browserAgentWake(for: appId) {
-                await returnToBrowser(wake)
+            if openBrowser, library.browserAgentWake(for: appId) != nil {
+                // Pending input belongs to its originating browser. The user
+                // must explicitly confirm the default-browser continuation.
                 return
             }
             let value = try await library.openExternalBrowser(appId)
@@ -412,25 +420,50 @@ struct AppRuntimeView: View {
             }
             launch = value; info.markOpened(app); opened = true
             if openBrowser {
-                openURL(value.url) { accepted in if !accepted { self.error = "无法打开系统默认浏览器。请检查默认浏览器设置。" } }
+                if inApp {
+                    inAppBrowser = LocalAppBrowserTicket(url: value.url)
+                } else {
+                    let scope = LocalAppBrowserDeliveryScope(appID: appId, revision: value.run.revision)
+                    let acquisition = library.openBrowserPage(scope: scope) {
+                        openURL(value.url) { accepted in
+                            guard !accepted else { return }
+                            Task { @MainActor in
+                                library.endBrowserPageDelivery(scope)
+                                self.error = "无法打开系统默认浏览器。请检查默认浏览器设置。"
+                            }
+                        }
+                    }
+                    guard acquisition != .unavailable else {
+                        throw LocalAppServiceFailure(
+                            "BROWSER_DELIVERY_UNAVAILABLE",
+                            "iOS could not reserve a short background window to open this Local App."
+                        )
+                    }
+                }
             }
         } catch { self.error = error.localizedDescription }
     }
-    private func returnToBrowser(_ wake: LocalAppAgentWakeRequest) async {
-        let wasBusy = busy
-        busy = true
-        defer { busy = wasBusy }
+    private func returnToBrowser(_ wake: LocalAppAgentWakeRequest, token: UUID) async {
+        defer { busy = false }
+        await prepareAndReturnToBrowser(wake, token: token)
+    }
+    private func prepareAndReturnToBrowser(_ wake: LocalAppAgentWakeRequest, token: UUID) async {
         do {
-            let handoff = try await library.prepareBrowserAgentHandoff(wake)
+            let handoff = try await library.prepareBrowserAgentHandoff(wake, token: token)
+            guard library.isBrowserAgentHandoffReady(wake, token: handoff.token) else {
+                await library.cancelBrowserAgentHandoff(wake, token: handoff.token, reason: .acquireFailure)
+                return
+            }
             launch = handoff.launch
             if let app = library.record(appId) { info.markOpened(app) }
             opened = true
             openURL(handoff.readyURL) { accepted in
                 Task { @MainActor in
-                    if accepted { library.clearBrowserAgentWake(wake) }
-                    else {
+                    let handled = await library.finishBrowserAgentHandoff(
+                        wake, token: handoff.token, accepted: accepted
+                    )
+                    if !accepted && handled {
                         self.error = "iOS could not return to the app page in the system default browser."
-                        await library.cancelBrowserAgentHandoff(wake)
                     }
                 }
             }
@@ -438,18 +471,19 @@ struct AppRuntimeView: View {
     }
 }
 
-struct MarketAppDetailPage: View {
+struct MarketInstallPage: View {
+    let library: UnifiedLocalApps
     let market: UnifiedAppMarket
     let appId: String
     let onOpenApp: (String) -> Void
-    let onDevelop: (LocalAppDevelopmentRequest) -> Void
     @State private var app: MarketApp?
     @State private var distribution: MarketDistribution?
     @State private var error: String?
     @State private var consenting = false
-    @State private var remix = false
+    @State private var loading = false
     var body: some View {
         List {
+            if loading { ProgressView() }
             if let app {
                 Section { AppCover(name: app.name, category: app.category); Text(app.name).font(.title2.weight(.semibold)); Text(app.summary) }
             }
@@ -459,33 +493,24 @@ struct MarketAppDetailPage: View {
                     Text("源码 + \(release.dependencies.count) 个依赖锁定文件，在本机构建。")
                     Text("能力：" + (release.manifest.capabilities ?? []).joined(separator: ", "))
                     Text(release.releaseDigest).font(.caption.monospaced()).textSelection(.enabled)
-                    Button("安装或更新此版本") { remix = false; consenting = true }
-                }
-                if let license = release.manifest.remix, license.allowed {
-                    Section("可编辑副本") {
-                        Text(license.license ?? "")
-                        Text("副本拥有新的应用身份和源码目录，不跟随原应用更新。").font(.footnote)
-                        Button("制作副本并继续开发") { remix = true; consenting = true }
-                    }
+                    Button("安装到此设备") { consenting = true }.disabled(market.progress != nil || market.installCommitting)
                 }
             }
             if let progress = market.progress { ProgressView(value: progress) }
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             Button("刷新") { Task { await load() } }
         }
-        .navigationTitle("市场应用").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("安装应用").navigationBarTitleDisplayMode(.inline)
         .task(id: appId) { await load() }
         .sheet(isPresented: $consenting) {
             if let distribution {
                 LocalAppConsentSheet(manifest: distribution.manifest, digest: distribution.releaseDigest,
-                    title: remix ? "创建可编辑副本" : "安装此版本", onCancel: { market.cancelInstall() }, canCancel: !market.installCommitting) {
+                    title: "安装此版本", onCancel: { market.cancelInstall() }, canCancel: !market.installCommitting) {
                     Task {
                         do {
-                            let installed = try await market.install(distribution, approved: true, remix: remix)
+                            let installed = try await market.install(distribution, approved: true)
                             consenting = false
-                            if remix, let authoring = installed.authoring {
-                                onDevelop(.init(appId: installed.appId, name: installed.name, sourceDirectory: authoring.sourceDirectory, authoring: authoring, prompt: "继续开发这个应用。"))
-                            } else { onOpenApp(installed.appId) }
+                            onOpenApp(installed.appId)
                         } catch { self.error = error.localizedDescription; consenting = false }
                     }
                 }
@@ -493,7 +518,19 @@ struct MarketAppDetailPage: View {
         }
     }
     private func load() async {
-        do { app = try await market.detail(appId); distribution = try await market.distribution(appId); error = nil }
+        distribution = nil; app = nil; error = nil; loading = true
+        defer { loading = false }
+        do {
+            await library.refresh()
+            try Task.checkCancellation()
+            if let installed = library.records.first(where: { $0.marketOrigin?.appId == appId && $0.marketOrigin?.remixedFrom == nil }) {
+                onOpenApp(installed.appId); return
+            }
+            app = try await market.detail(appId)
+            let release = try await market.distribution(appId)
+            try Task.checkCancellation()
+            distribution = release; error = nil
+        } catch is CancellationError { }
         catch { self.error = error.localizedDescription }
     }
 }

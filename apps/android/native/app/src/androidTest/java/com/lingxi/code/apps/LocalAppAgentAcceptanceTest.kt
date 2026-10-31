@@ -55,6 +55,51 @@ class LocalAppAgentAcceptanceTest {
     private fun sha256(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256")
         .digest(bytes).joinToString("") { "%02x".format(it) }
 
+    /** Fixture-only helpers: recovering a page must not resubmit a Chat or Agent run. */
+    private fun browserRecoveryHelpers(): String = """
+        async function createFixtureChatOnce(options) {
+          const saved=(await localApp.agent.chats.pendingCreations()).find(item=>item.requestId===options.requestId);
+          if(saved){
+            if(saved.title!==options.title) throw new Error('Saved Chat creation input differs.');
+            const known=await localApp.agent.chats.creationStatus(options);
+            if(known){
+              if(known.id!==options.requestId) throw new Error('Recovered Chat ID differs from the request.');
+              return known;
+            }
+            const error=new Error('Chat creation is unresolved; no automatic retry was made.');
+            error.code='chat_creation_pending';
+            throw error;
+          }
+          const created=await localApp.agent.chats.create(options);
+          if(created.id!==options.requestId) throw new Error('Created Chat ID differs from the request.');
+          return created;
+        }
+        async function reserveFixtureRun(runId) {
+          const db=await new Promise((resolve,reject)=>{
+            const request=indexedDB.open('lingxi-android-acceptance-runs',1);
+            request.onupgradeneeded=()=>request.result.createObjectStore('runs');
+            request.onsuccess=()=>resolve(request.result);
+            request.onerror=()=>reject(request.error||new Error('Run recovery storage is unavailable.'));
+            request.onblocked=()=>reject(new Error('Run recovery storage is blocked.'));
+          });
+          try {
+            return await new Promise((resolve,reject)=>{
+              const tx=db.transaction('runs','readwrite');
+              const add=tx.objectStore('runs').add(true,runId);
+              let first=true;
+              add.onerror=event=>{
+                if(add.error?.name==='ConstraintError'){
+                  event.preventDefault();event.stopPropagation();first=false;
+                }
+              };
+              tx.oncomplete=()=>resolve(first);
+              tx.onabort=()=>reject(tx.error||new Error('Run recovery storage failed.'));
+              tx.onerror=()=>{};
+            });
+          } finally { db.close(); }
+        }
+    """.trimIndent()
+
     private fun persistProviderRowsForAcceptance(providers: List<GenericProvider>) {
         val encoded = ProviderSettingsRepository.encodeProvidersJson(providers)
         check(context.getSharedPreferences("provider_settings", android.content.Context.MODE_PRIVATE)
@@ -843,6 +888,9 @@ class LocalAppAgentAcceptanceTest {
         resources: SkillFixtureResources,
         scenario: SkillAcceptanceScenario,
     ): PreparedSkillApp {
+        val chatRequestId = UUID.randomUUID().toString()
+        val successRequestId = UUID.randomUUID().toString()
+        val errorRequestId = UUID.randomUUID().toString()
         val page = """
             <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Approved Skill acceptance</title>
             <style>body{font-family:system-ui;margin:20px}#result{white-space:pre-wrap;overflow-wrap:anywhere}</style>
@@ -859,6 +907,7 @@ class LocalAppAgentAcceptanceTest {
               let replayResultPresent=false;
               let replayCallbacks=[];
               let eventTimeline=[];
+              ${browserRecoveryHelpers()}
               function loadState(){try{return JSON.parse(localStorage.getItem(storageKey)||'{}');}catch(_error){return {};}}
               function saveState(value){localStorage.setItem(storageKey,JSON.stringify(value));}
               document.addEventListener('visibilitychange',()=>{
@@ -871,14 +920,15 @@ class LocalAppAgentAcceptanceTest {
                 phase='S';
                 let state=loadState();
                 if(!state.chatId){
-                  const created=await localApp.agent.chats.create({title:'${scenario.chatTitle}'});
+                  const created=await createFixtureChatOnce({requestId:'$chatRequestId',title:'${scenario.chatTitle}'});
+                  state=loadState();
                   state.chatId=created.id;
-                  state.started=false;
                   state.runId=runId;
                   saveState(state);
                 }
+                if(state.chatId!=='$chatRequestId') throw new Error('Saved Chat ID does not match this request.');
                 const chat=await localApp.agent.chats.open(state.chatId);
-                if(!state.started){
+                if(await reserveFixtureRun(runId)){
                   const input={
                     threadId:chat.id,
                     runId,
@@ -889,7 +939,6 @@ class LocalAppAgentAcceptanceTest {
                       tools:[],skills:[skillId],maxTurns:8,timeoutMs:180000
                     }}
                   };
-                  state.started=true;state.runId=runId;saveState(state);
                   phase='R';
                   const sent=await chat.send(input);
                   if(!sent.result||typeof sent.result.answer!=='string'||!Array.isArray(sent.newMessages)){
@@ -939,7 +988,7 @@ class LocalAppAgentAcceptanceTest {
                   taskState:task.state,result:replay.result,replayCallbacks,eventTypes,historyRoles:history.messages.map(message=>message.role)});
                 await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
                 phase='M';
-                await localApp.agent.chats.create({title:'agui:p:${scenario.reportKey}:${scenario.runId}'});
+                await createFixtureChatOnce({requestId:'$successRequestId',title:'agui:p:${scenario.reportKey}:${scenario.runId}'});
               } catch(error) {
                 const code=String(error&&typeof error.code==='string'?error.code:'browser_error').toLowerCase().replace(/[^a-z0-9_-]/g,'').slice(0,8)||'error';
                 const errorName=String(error&&typeof error.name==='string'?error.name:'Error').replace(/[^A-Za-z0-9_.-]/g,'').slice(0,48);
@@ -949,7 +998,7 @@ class LocalAppAgentAcceptanceTest {
                 output.textContent='SKILL_WAKE_PAGE_DIAGNOSTIC '+JSON.stringify({phase,code,errorName,taskState:safeState,
                   taskErrorCode:recoveredTaskErrorCode,replayResultPresent,eventSummary,lastReplay});
                 await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
-                try { if(window.localApp?.agent?.chats?.create) await localApp.agent.chats.create({title:'agui:e:${scenario.reportKey}:${scenario.runId}:'+phase+':'+code+':'+errorName+':'+safeState+':'+(recoveredTaskErrorCode||'none')+':'+eventSummary+':'+lastReplay}); } catch(_reportError) {}
+                try { if(window.localApp?.agent?.chats?.create) await createFixtureChatOnce({requestId:'$errorRequestId',title:('agui:e:${scenario.reportKey}:'+phase+':'+code+':'+errorName+':'+safeState+':'+(recoveredTaskErrorCode||'none')+':'+eventSummary+':'+lastReplay).slice(0,80)}); } catch(_reportError) {}
               }
             })();
             </script>
@@ -1317,7 +1366,7 @@ class LocalAppAgentAcceptanceTest {
         timeoutMs: Long = 30_000,
     ): JSONObject = withTimeout(timeoutMs) {
             val successTitle = "agui:p:$nonce:$runId"
-            val errorPrefix = "agui:e:$nonce:$runId:"
+            val errorPrefix = "agui:e:$nonce:"
             while (true) {
                 val chatPage = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONObject
                 val chats = chatPage.getJSONArray("chats")
@@ -1345,7 +1394,7 @@ class LocalAppAgentAcceptanceTest {
         }
 
     private suspend fun failOnBrowserErrorReport(launch: AppLaunch, nonce: String, runId: String) {
-        val errorPrefix = "agui:e:$nonce:$runId:"
+        val errorPrefix = "agui:e:$nonce:"
         val chatPage = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONObject
         val chats = chatPage.getJSONArray("chats")
         val failures = (0 until chats.length()).map { chats.getJSONObject(it) }
@@ -1629,6 +1678,8 @@ class LocalAppAgentAcceptanceTest {
         val runId = "external-file-" + UUID.randomUUID()
         val threadId = "external-thread-" + UUID.randomUUID()
         val reportNonce = UUID.randomUUID().toString().replace("-", "").take(8)
+        val successRequestId = UUID.randomUUID().toString()
+        val errorRequestId = UUID.randomUUID().toString()
         val quotedImage = JSONObject.quote(imageBase64)
         val page = """
             <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>External browser Agent acceptance</title>
@@ -1643,6 +1694,7 @@ class LocalAppAgentAcceptanceTest {
                 scriptOrder:['inline type=module','dynamic import /__local_app_sdk.js'],
                 scriptTypes:Array.from(document.scripts).map(script=>script.type||'classic')
               };
+              ${browserRecoveryHelpers()}
               try {
                 await import('/__local_app_sdk.js');
                 phase='S';
@@ -1673,16 +1725,23 @@ class LocalAppAgentAcceptanceTest {
                    inputSummary.parts[1].filename!=='acceptance-photo.jpg'){
                   throw new Error('Invalid File RunAgentInput ContentPart summary.');
                 }
-                client.addMessage(message);
                 const callbacks=[];
                 phase='R';
-                const run=await client.runAgent({
-                  runId:'$runId',
-                  forwardedProps:{'com.lingxi.localApp':{
-                    version:1,outputSchema:{type:'object',properties:{food:{type:'string'},detail:{type:'string'}},required:['food','detail'],additionalProperties:false},
-                    tools:[],skills:[],maxTurns:8,timeoutMs:180000
-                  }}
-                },{onEvent({event}){callbacks.push(event.type);}});
+                let run;
+                if(await reserveFixtureRun('$runId')){
+                  client.addMessage(message);
+                  run=await client.runAgent({
+                    runId:'$runId',
+                    forwardedProps:{'com.lingxi.localApp':{
+                      version:1,outputSchema:{type:'object',properties:{food:{type:'string'},detail:{type:'string'}},required:['food','detail'],additionalProperties:false},
+                      tools:[],skills:[],maxTurns:8,timeoutMs:180000
+                    }}
+                  },{onEvent({event}){callbacks.push(event.type);}});
+                }else{
+                  const existing=await localApp.agent.tasks.get('$runId');
+                  if(existing.threadId!=='$threadId') throw new Error('Saved run belongs to another thread.');
+                  run=await client.connectAgent({runId:'$runId'},{onEvent({event}){callbacks.push(event.type);}});
+                }
                 if(callbacks[0]!=='RUN_STARTED'||callbacks[callbacks.length-1]!=='RUN_FINISHED'||callbacks.includes('RUN_ERROR')){
                   throw new Error('Invalid AG-UI callback event order: '+JSON.stringify(callbacks));
                 }
@@ -1710,12 +1769,12 @@ class LocalAppAgentAcceptanceTest {
                 phase='V';
                 output.textContent=JSON.stringify({acceptance:'CALLBACK_EVENT_ORDER_PASS',bootstrap,inputSummary,runId:'$runId',run,callbacks,replay,replayCallbacks,eventTypes:eventPage.events.map(event=>event.type)});
                 await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
-                await localApp.agent.chats.create({title:'agui:p:$reportNonce:$runId'});
+                await createFixtureChatOnce({requestId:'$successRequestId',title:'agui:p:$reportNonce:$runId'});
               } catch(error) {
                 const code=String(error&&typeof error.code==='string'?error.code:'browser_error').toLowerCase().replace(/[^a-z0-9_-]/g,'').slice(0,8)||'error';
                 output.textContent='AGUI_PAGE_DIAGNOSTIC '+JSON.stringify({bootstrap,phase,code});
                 await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
-                try { if(window.localApp?.agent?.chats?.create) await localApp.agent.chats.create({title:'agui:e:$reportNonce:$runId:'+phase+':'+code}); } catch(_reportError) {}
+                try { if(window.localApp?.agent?.chats?.create) await createFixtureChatOnce({requestId:'$errorRequestId',title:'agui:e:$reportNonce:'+phase+':'+code}); } catch(_reportError) {}
               }
             })();
             </script>
@@ -1834,11 +1893,51 @@ class LocalAppAgentAcceptanceTest {
         } finally { ids.forEach { runCatching { apps.remove(it) } }; sources.forEach { it.deleteRecursively() } }
     }
 
+    private fun assertPlainChatReply(events: JSONArray, runId: String, threadId: String, expectedText: String): JSONObject {
+        val rows = (0 until events.length()).map { events.getJSONObject(it) }
+        assertEquals("RUN_STARTED", rows.first().getString("type"))
+        assertEquals("RUN_FINISHED", rows.last().getString("type"))
+        assertEquals("success", rows.last().getJSONObject("outcome").getString("type"))
+        for (event in listOf(rows.first(), rows.last())) {
+            assertEquals(runId, event.getString("runId"))
+            assertEquals(threadId, event.getString("threadId"))
+        }
+        assertEquals("A Chat turn starts once", 1, rows.count { it.optString("type") == "RUN_STARTED" })
+        assertEquals("A Chat turn finishes once", 1, rows.count { it.optString("type") == "RUN_FINISHED" })
+        assertFalse("A successful plain Chat must not contain errors or tool calls", rows.any {
+            it.optString("type") == "RUN_ERROR" || it.optString("type").startsWith("TOOL_CALL_")
+        })
+        val startIndex = rows.indexOfFirst { it.optString("type") == "TEXT_MESSAGE_START" }
+        val endIndex = rows.indexOfFirst { it.optString("type") == "TEXT_MESSAGE_END" }
+        assertEquals(1, rows.count { it.optString("type") == "TEXT_MESSAGE_START" })
+        assertEquals(1, rows.count { it.optString("type") == "TEXT_MESSAGE_END" })
+        assertTrue("Assistant text must finish before the successful terminal event", startIndex > 0 && endIndex > startIndex && endIndex < rows.lastIndex)
+        val messageId = rows[startIndex].getString("messageId")
+        assertTrue(messageId.isNotBlank())
+        assertEquals("assistant", rows[startIndex].getString("role"))
+        val content = rows.withIndex().filter { it.value.optString("type") == "TEXT_MESSAGE_CONTENT" }
+        assertTrue("The model must actually return assistant text", content.isNotEmpty())
+        for ((index, event) in content) {
+            assertTrue("Assistant content must occur inside its message", index > startIndex && index < endIndex)
+            assertEquals(messageId, event.getString("messageId"))
+        }
+        assertEquals(messageId, rows[endIndex].getString("messageId"))
+        val text = content.joinToString("") { it.value.getString("delta") }
+        assertEquals("The accepted assistant text must match the requested context probe", expectedText, text)
+        return JSONObject().put("id", messageId).put("role", "assistant").put("content", text)
+    }
+
     @Test fun externalBrowserPersistentChatStoresHistoryAndIsolatesThreads() = runBlocking<Unit> {
         val apps = UnifiedLocalApps.get(context)
         val sources = mutableListOf<File>(); val ids = mutableListOf<String>()
         val runId = "external-chat-" + UUID.randomUUID()
+        val followupRunId = "external-chat-followup-" + UUID.randomUUID()
+        val contextMarker = "ANDROID_CHAT_CONTEXT_" + UUID.randomUUID().toString().replace("-", "").take(12)
         val reportNonce = UUID.randomUUID().toString().replace("-", "").take(8)
+        val chatRequestId = UUID.randomUUID().toString()
+        val isolatedRequestId = UUID.randomUUID().toString()
+        val successRequestId = UUID.randomUUID().toString()
+        val errorRequestId = UUID.randomUUID().toString()
         val page = """
             <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>External browser Chat acceptance</title>
             <style>#result{white-space:pre-wrap;overflow-wrap:anywhere}</style>
@@ -1848,27 +1947,72 @@ class LocalAppAgentAcceptanceTest {
               const output=document.getElementById('result');
               let phase='B';
               const bootstrap={importMode:'dynamic-esm',sdkImport:'/__local_app_sdk.js'};
+              ${browserRecoveryHelpers()}
               try {
                 await import('/__local_app_sdk.js');
                 phase='S';
                 bootstrap.localAppType=typeof window.localApp;
-                const chat=await localApp.agent.chats.create({title:'AG-UI Chat acceptance $runId'});
-                const isolated=await localApp.agent.chats.create({title:'AG-UI Chat isolation $runId'});
+                const chatOptions={requestId:'$chatRequestId',title:'AG-UI Chat acceptance $runId'};
+                const chat=await createFixtureChatOnce(chatOptions);
+                const isolated=await createFixtureChatOnce({requestId:'$isolatedRequestId',title:'AG-UI Chat isolation $runId'});
+                const confirmed=await localApp.agent.chats.creationStatus(chatOptions);
+                if(!confirmed||confirmed.id!==chat.id||chat.id!==chatOptions.requestId){
+                  throw new Error('Read-only Chat creation status did not match the request.');
+                }
+                const messageText=message=>{
+                  if(typeof message?.content==='string') return message.content;
+                  if(!Array.isArray(message?.content)||message.content.some(part=>part.type!=='text'||typeof part.text!=='string')) return null;
+                  return message.content.map(part=>part.text).join('');
+                };
+                const assistantReply=(run,expected)=>{
+                  if(!Array.isArray(run?.newMessages)||run.newMessages.length!==1) throw new Error('The Chat did not return one assistant message.');
+                  const reply=run.newMessages[0];
+                  if(reply.role!=='assistant'||typeof reply.id!=='string'||!reply.id||typeof reply.content!=='string'||reply.toolCalls?.length||messageText(reply)!==expected){
+                    throw new Error('The Chat assistant text did not match its context probe.');
+                  }
+                  return reply;
+                };
                 const input={
                   threadId:chat.id,runId:'$runId',messages:[{
-                    id:'message-$runId',role:'user',content:[{type:'text',text:'Return the exact uppercase word ORBIT using the result tool.'}]
+                    id:'message-$runId',role:'user',content:[{type:'text',text:'Remember this marker for my next message: $contextMarker. For this turn, reply with exactly context-seed.'}]
                   }],
                   forwardedProps:{'com.lingxi.localApp':{
-                    version:1,outputSchema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},
+                    version:1,
                     tools:[],skills:[],maxTurns:8,timeoutMs:180000
                   }}
                 };
                 phase='R';
-                const result=await chat.send(input);
-                if(!result.result||result.result.answer!=='ORBIT'||!Array.isArray(result.newMessages)){
-                  throw new Error('Persistent Chat did not return the structured AG-UI result.');
+                let result;
+                const ownsSequence=await reserveFixtureRun('chat-sequence:$runId');
+                if(ownsSequence&&await reserveFixtureRun('$runId')){
+                  result=await chat.send(input);
+                }else{
+                  const existing=await localApp.agent.tasks.get('$runId');
+                  if(existing.threadId!==chat.id) throw new Error('Saved run belongs to another Chat.');
+                  result=await localApp.agent.createClient({threadId:chat.id}).connectAgent({runId:'$runId'});
                 }
+                const firstReply=assistantReply(result,'context-seed');
                 const task=await localApp.agent.tasks.get('$runId');
+                const followupInput={
+                  threadId:chat.id,runId:'$followupRunId',messages:[{
+                    id:'message-$followupRunId',role:'user',content:[{type:'text',text:'What exact marker did I ask you to remember in the previous message? Reply with only the marker.'}]
+                  }],
+                  forwardedProps:{'com.lingxi.localApp':{
+                    version:1,
+                    tools:[],skills:[],maxTurns:8,timeoutMs:180000
+                  }}
+                };
+                phase='R2';
+                let followupResult;
+                if(ownsSequence&&await reserveFixtureRun('$followupRunId')){
+                  followupResult=await chat.send(followupInput);
+                }else{
+                  const existing=await localApp.agent.tasks.get('$followupRunId');
+                  if(existing.threadId!==chat.id) throw new Error('Saved follow-up belongs to another Chat.');
+                  followupResult=await localApp.agent.createClient({threadId:chat.id}).connectAgent({runId:'$followupRunId'});
+                }
+                const followupReply=assistantReply(followupResult,'$contextMarker');
+                const followupTask=await localApp.agent.tasks.get('$followupRunId');
                 phase='H';
                 const history=await chat.history({limit:50});
                 phase='O';
@@ -1881,23 +2025,39 @@ class LocalAppAgentAcceptanceTest {
                 const listed=await localApp.agent.chats.list({limit:50});
                 phase='E';
                 const eventPage=await localApp.agent.tasks.events({runId:'$runId'});
+                const followupEvents=await localApp.agent.tasks.events({runId:'$followupRunId'});
                 phase='P';
                 const reconnect=localApp.agent.createClient({threadId:task.threadId});
                 const replayCallbacks=[];
                 const replay=await reconnect.connectAgent({runId:'$runId'},{onEvent({event}){replayCallbacks.push(event.type);}});
+                const replayReply=assistantReply(replay,'context-seed');
+                const expectedMessages=[input.messages[0],firstReply,followupInput.messages[0],followupReply];
+                if(history.messages.length!==4||reopenedHistory.messages.length!==4||expectedMessages.some((message,index)=>
+                   history.messages[index].id!==message.id||history.messages[index].role!==message.role||
+                   messageText(history.messages[index])!==messageText(message)||
+                   reopenedHistory.messages[index].id!==message.id||reopenedHistory.messages[index].role!==message.role||
+                   messageText(reopenedHistory.messages[index])!==messageText(message))){
+                  throw new Error('Canonical Chat history changed the accepted message identities or text.');
+                }
                 const summary={
                   chatId:chat.id,runId:'$runId',threadId:input.threadId,taskThreadId:task.threadId,taskState:task.state,
-                  result:result.result,historyRoles:history.messages.map(message=>message.role),
+                  assistantMessage:firstReply,followupRunId:'$followupRunId',followupThreadId:followupTask.threadId,
+                  followupState:followupTask.state,followupAssistantMessage:followupReply,
+                  historyRoles:history.messages.map(message=>message.role),
                   historyIds:history.messages.map(message=>message.id),reopenedIds:reopenedHistory.messages.map(message=>message.id),
                   isolatedMessageCount:isolatedHistory.messages.length,
                   chatListed:Array.isArray(listed.chats)&&listed.chats.some(item=>item.chatId===chat.id),
-                  eventTypes:eventPage.events.map(event=>event.type),replayCallbacks
+                  eventTypes:eventPage.events.map(event=>event.type),
+                  followupEventTypes:followupEvents.events.map(event=>event.type),replayCallbacks
                 };
-                if(task.threadId!==chat.id||task.state!=='succeeded'||history.messages.length<2||
+                if(task.threadId!==chat.id||task.state!=='succeeded'||followupTask.threadId!==chat.id||
+                   followupTask.state!=='succeeded'||history.messages.length<4||
                    reopenedHistory.messages.length!==history.messages.length||isolatedHistory.messages.length!==0||
                    !summary.chatListed||!eventPage.events.some(event=>event.type==='RUN_FINISHED')||
                    eventPage.events.filter(event=>event.type==='RUN_STARTED').length!==1||
-                   !replay.result||replay.result.answer!=='ORBIT'||!Array.isArray(replay.newMessages)||
+                   followupEvents.events.filter(event=>event.type==='RUN_STARTED').length!==1||
+                   followupEvents.events[followupEvents.events.length-1]?.type!=='RUN_FINISHED'||
+                   replayReply.id!==firstReply.id||
                    replayCallbacks[0]!=='RUN_STARTED'||replayCallbacks[replayCallbacks.length-1]!=='RUN_FINISHED'||
                    replayCallbacks.includes('RUN_ERROR')){
                   throw new Error('Persistent Chat history, isolation, or task correlation failed: '+JSON.stringify(summary));
@@ -1906,12 +2066,12 @@ class LocalAppAgentAcceptanceTest {
                 output.textContent=JSON.stringify({acceptance:'CHAT_FLOW_PASS',bootstrap,summary,replay});
                 await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
                 phase='M';
-                await localApp.agent.chats.create({title:'agui:p:$reportNonce:$runId'});
+                await createFixtureChatOnce({requestId:'$successRequestId',title:'agui:p:$reportNonce:$runId'});
               } catch(error) {
                 const code=String(error&&typeof error.code==='string'?error.code:'browser_error').toLowerCase().replace(/[^a-z0-9_-]/g,'').slice(0,8)||'error';
                 output.textContent='CHAT_PAGE_DIAGNOSTIC '+JSON.stringify({bootstrap,phase,code});
                 await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
-                try { if(window.localApp?.agent?.chats?.create) await localApp.agent.chats.create({title:'agui:e:$reportNonce:$runId:'+phase+':'+code}); } catch(_reportError) {}
+                try { if(window.localApp?.agent?.chats?.create) await createFixtureChatOnce({requestId:'$errorRequestId',title:'agui:e:$reportNonce:'+phase+':'+code}); } catch(_reportError) {}
               }
             })();
             </script>
@@ -1976,6 +2136,20 @@ class LocalAppAgentAcceptanceTest {
                 }
                 val task = awaitTerminal(launch, listedTask!!.getString("runId"))
                 assertEquals(task.toString(), "succeeded", task.getString("state"))
+                val followupTask = withTimeout(180_000) {
+                    while (true) {
+                        val page = agentCall(launch, "agent.tasks.list", JSONObject().put("limit", 50)) as JSONObject
+                        val tasks = page.getJSONArray("tasks")
+                        val found = (0 until tasks.length()).map { tasks.getJSONObject(it) }
+                            .firstOrNull { it.optString("runId") == followupRunId }
+                        if (found != null) return@withTimeout awaitTerminal(launch, followupRunId)
+                        failOnBrowserErrorReport(launch, reportNonce, runId)
+                        delay(500)
+                    }
+                    error("Follow-up task wait ended unexpectedly")
+                }
+                assertEquals(followupTask.toString(), "succeeded", followupTask.getString("state"))
+                assertEquals("Both turns use the same persistent Chat", task.getString("threadId"), followupTask.getString("threadId"))
                 val eventBatch = agentCall(launch, "agent.tasks.events", JSONObject().put("runId", runId)) as JSONObject
                 val events = eventBatch.getJSONArray("events")
                 assertTrue("Persistent Chat has standard event history", events.length() >= 2)
@@ -1987,8 +2161,22 @@ class LocalAppAgentAcceptanceTest {
                 assertEquals("RUN_FINISHED", lastEvent.getString("type"))
                 assertEquals(runId, lastEvent.getString("runId"))
                 assertEquals(task.getString("threadId"), lastEvent.getString("threadId"))
-                assertEquals("ORBIT", lastEvent.getJSONObject("result").getString("answer"))
+                val firstReply = assertPlainChatReply(events, runId, task.getString("threadId"), "context-seed")
                 assertFalse((0 until events.length()).any { events.getJSONObject(it).optString("type") == "RUN_ERROR" })
+                val followupBatch = agentCall(launch, "agent.tasks.events", JSONObject().put("runId", followupRunId)) as JSONObject
+                val followupEvents = followupBatch.getJSONArray("events")
+                assertTrue("The second turn has standard event history", followupEvents.length() >= 2)
+                val followupFirst = followupEvents.getJSONObject(0)
+                val followupLast = followupEvents.getJSONObject(followupEvents.length() - 1)
+                assertEquals("RUN_STARTED", followupFirst.getString("type"))
+                assertEquals(followupRunId, followupFirst.getString("runId"))
+                assertEquals(task.getString("threadId"), followupFirst.getString("threadId"))
+                assertEquals("RUN_FINISHED", followupLast.getString("type"))
+                assertEquals(followupRunId, followupLast.getString("runId"))
+                val followupReply = assertPlainChatReply(followupEvents, followupRunId, task.getString("threadId"), contextMarker)
+                assertEquals("The follow-up was started once", 1,
+                    (0 until followupEvents.length()).count { followupEvents.getJSONObject(it).optString("type") == "RUN_STARTED" })
+                assertFalse((0 until followupEvents.length()).any { followupEvents.getJSONObject(it).optString("type") == "RUN_ERROR" })
 
                 val chatId = task.getString("threadId")
                 val chatPage = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONObject
@@ -2014,13 +2202,17 @@ class LocalAppAgentAcceptanceTest {
                 val historyMessages = history.getJSONArray("messages")
                 val reopenedMessages = reopenedHistory.getJSONArray("messages")
                 val isolatedMessages = isolatedHistory.getJSONArray("messages")
-                assertTrue("Persistent Chat history contains the user and assistant messages", historyMessages.length() >= 2)
+                assertEquals("Two plain Chat turns persist exactly four messages", 4, historyMessages.length())
                 val historyRoles = (0 until historyMessages.length()).map { historyMessages.getJSONObject(it).getString("role") }
-                assertTrue(historyRoles.contains("user"))
-                assertTrue(historyRoles.contains("assistant"))
+                assertEquals(listOf("user", "assistant", "user", "assistant"), historyRoles)
                 val historyIds = (0 until historyMessages.length()).map { historyMessages.getJSONObject(it).getString("id") }
                 val reopenedIds = (0 until reopenedMessages.length()).map { reopenedMessages.getJSONObject(it).getString("id") }
                 assertEquals("A fresh history read preserves the reopened Chat messages", historyIds, reopenedIds)
+                assertEquals("Canonical history preserves both user and assistant identities",
+                    listOf("message-$runId", firstReply.getString("id"), "message-$followupRunId", followupReply.getString("id")), historyIds)
+                assertEquals("Canonical history stores the exact first assistant text", firstReply.getString("content"), historyMessages.getJSONObject(1).getString("content"))
+                assertEquals("Canonical history stores the exact recalled marker", contextMarker, historyMessages.getJSONObject(3).getString("content"))
+                assertEquals("Reopened history preserves assistant text", historyMessages.toString(), reopenedMessages.toString())
                 assertEquals("The isolated browser-created Chat stays empty", 0, isolatedMessages.length())
                 assertEquals("Only the browser-created run was started", 1,
                     (0 until events.length()).count { events.getJSONObject(it).optString("type") == "RUN_STARTED" })
@@ -2031,16 +2223,23 @@ class LocalAppAgentAcceptanceTest {
                     .put("browserPackage", browserPackage)
                     .put("appId", app.id)
                     .put("runId", runId)
+                    .put("followupRunId", followupRunId)
+                    .put("followupTaskState", followupTask.getString("state"))
+                    .put("followupAssistantMessage", followupReply)
                     .put("browserMarkerTitle", browserMarker.getString("title"))
                     .put("chatId", chatId)
                     .put("isolatedChatId", isolatedChat.getString("chatId"))
                     .put("taskState", task.getString("state"))
-                    .put("result", lastEvent.getJSONObject("result"))
+                    .put("assistantMessage", firstReply)
+                    .put("chatOutput", "plain_text")
+                    .put("structuredChatOutput", "not_supported")
                     .put("historyRoles", JSONArray(historyRoles))
                     .put("historyIds", JSONArray(historyIds))
                     .put("reopenedIds", JSONArray(reopenedIds))
                     .put("isolatedMessageCount", isolatedMessages.length())
                     .put("eventTypes", JSONArray((0 until events.length()).map { events.getJSONObject(it).getString("type") }))
+                    .put("followupEventTypes", JSONArray((0 until followupEvents.length()).map { followupEvents.getJSONObject(it).getString("type") }))
+                    .put("activeTaskInterruptionRecovery", "not_tested")
                     .put("pageScreenshotFile", "external-browser-chat-acceptance.png")
                 File(context.filesDir, "external-browser-chat-acceptance.json").writeText(evidence.toString(2))
                 val browserScreenshot = instrumentation.uiAutomation.takeScreenshot()
@@ -2051,7 +2250,7 @@ class LocalAppAgentAcceptanceTest {
                     }
                 }
                 browserScreenshot.recycle()
-                android.util.Log.i("LocalAppAgentAcceptance", "EXTERNAL_BROWSER_CHAT PASS persistent-thread history-isolation structured-result standard-events")
+                android.util.Log.i("LocalAppAgentAcceptance", "EXTERNAL_BROWSER_CHAT PASS two-turn-context persistent-thread history-isolation standard-events active-task-interruption-not-tested")
             }
         } finally { ids.forEach { runCatching { apps.remove(it) } }; sources.forEach { it.deleteRecursively() } }
     }

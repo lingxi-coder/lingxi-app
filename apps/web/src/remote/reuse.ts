@@ -41,3 +41,4 @@ export {
 } from '@lingxi/electron/shared/imageInput';
 
 export { redactSensitiveText } from '@lingxi/bridge-client/toolview';
+export { isPermissionModeId } from '@lingxi/electron/shared/permission';

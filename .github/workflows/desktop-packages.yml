@@ -59,12 +59,21 @@ jobs:
       RUST_MIN_STACK: "16777216"
 
     steps:
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
       - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Report installed Rust components
+        run: rustup component list --installed --toolchain 1.94.0
 
       - name: Restore the pinned Linux GStreamer runtime SDK cache
         if: matrix.platform == 'linux'

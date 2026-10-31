@@ -61,6 +61,59 @@ use crate::settings_bridge::{
 };
 use media_api::MediaOwner;
 
+/// Keep a boot-created attachment host-owned if later assembly fails.
+/// Dropping the guard closes admission synchronously and performs the drain on
+/// the runtime; an unconfirmed drain remains in the process registry.
+struct BootMediaAttachmentGuard {
+    attachment: Option<media_runtime::MediaAttachmentHandle>,
+    cloud: Arc<AudioProviderCloudRegistry>,
+}
+
+impl BootMediaAttachmentGuard {
+    fn new(
+        attachment: media_runtime::MediaAttachmentHandle,
+        cloud: Arc<AudioProviderCloudRegistry>,
+    ) -> Self {
+        Self {
+            attachment: Some(attachment),
+            cloud,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.attachment = None;
+    }
+}
+
+impl Drop for BootMediaAttachmentGuard {
+    fn drop(&mut self) {
+        let Some(attachment) = self.attachment.take() else {
+            return;
+        };
+        attachment.begin_revoke();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let cloud = self.cloud.clone();
+        runtime.spawn(async move {
+            use media_runtime::{MediaAttachmentPhase, MediaAttachmentRevocation};
+            let receipt = attachment.revoke(std::time::Duration::from_secs(1)).await;
+            let confirmed = match receipt {
+                MediaAttachmentRevocation::Confirmed => true,
+                MediaAttachmentRevocation::Unknown { .. }
+                    if attachment.phase() == MediaAttachmentPhase::Revoking =>
+                {
+                    attachment.wait_for_drain_completion().await == MediaAttachmentPhase::Revoked
+                }
+                MediaAttachmentRevocation::Unknown { .. } => false,
+            };
+            if confirmed {
+                cloud.unregister_attachment(attachment.id());
+            }
+        });
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "boot/workspace_resume_tests.rs"]
 mod workspace_resume_tests;
@@ -807,10 +860,11 @@ fn without_settings_credentials(
     })
 }
 
-/// User config-home: `$LINGXI_CONFIG_DIR` when set (including an empty value),
-/// else `~/.lingxi`. Shared by desktop config and lockfile resolution.
+/// Brand data home: the branding crate's configuration-directory override when
+/// set (including an empty value), otherwise the branded hidden home directory.
+/// Shared by configuration, sessions, apps, and scheduled workspaces.
 #[must_use]
-pub fn lingxi_config_home() -> Option<PathBuf> {
+pub fn brand_home() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir));
     }
@@ -837,7 +891,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let lingxi_home = args
         .session_config_home
         .clone()
-        .or_else(lingxi_config_home)
+        .or_else(brand_home)
         .unwrap_or_else(|| PathBuf::from("/dev/null"));
     let project_mcp_path = cwd.join(".mcp.json");
     // User/global-scope MCP servers live INSIDE `~/.lingxi.json` (top-level
@@ -875,7 +929,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
     );
     let api_base = resolve_api_base();
-    let anthropic_client_metadata = cli::init::native_anthropic_client_metadata_for_host(
+    let anthropic_client_metadata = host_identity::native_anthropic_client_metadata_for_host(
         &api_base,
         "lingxi-desktop",
         build_info.version,
@@ -1142,11 +1196,9 @@ pub struct BoundServer {
     /// `DesktopRuntime` carries broad handles (the tool registry among them)
     /// that nothing outside this struct has a reason to hold.
     runtime: Arc<DesktopRuntime>,
-    /// The request half of THIS connection's audio bridge — the same object
-    /// that went into `DesktopConfig::audio` and whose responder half is bound
-    /// to `connection`. Held so the pairing is visible at the composition root
-    /// rather than only implied by the order of two statements inside
-    /// [`assemble_with_provider_keys`].
+    /// The request half of this connection's audio bridge, used by the routed
+    /// audio service. Its responder half is bound to `connection`; retaining it
+    /// here keeps that pairing visible at the composition root.
     audio: Arc<AudioBridge>,
     /// The single shared media facade used by Desktop tools, UI/Remote RPC,
     /// and the legacy audio-only service projection.
@@ -1176,8 +1228,7 @@ impl BoundServer {
         self.runtime.registered_tool_names()
     }
 
-    /// This connection's `AudioService` bridge — every device operation on
-    /// this connection goes through it.
+    /// This connection's low-level `AudioService` bridge.
     #[must_use]
     pub fn audio(&self) -> &Arc<AudioBridge> {
         &self.audio
@@ -1644,20 +1695,20 @@ fn initialize_live_session(
 
 /// Resolve product directories independently of settings, policy, and credentials.
 pub fn product_paths_json(cwd: &Path) -> Result<String, String> {
-    let config_home = lingxi_config_home().ok_or("product paths require a config home")?;
-    product_paths_json_from(cwd, &config_home)
+    let brand_home = brand_home().ok_or("product paths require a brand home")?;
+    product_paths_json_from(cwd, &brand_home)
 }
 
-fn product_paths_json_from(cwd: &Path, config_home: &Path) -> Result<String, String> {
-    let config_home = if config_home.is_absolute() {
-        config_home.to_path_buf()
+fn product_paths_json_from(cwd: &Path, brand_home: &Path) -> Result<String, String> {
+    let brand_home = if brand_home.is_absolute() {
+        brand_home.to_path_buf()
     } else {
-        cwd.join(config_home)
+        cwd.join(brand_home)
     };
     serde_json::to_string(&serde_json::json!({
         "version": 1,
-        "app_projects_root": config_home.join(".apps"),
-        "config_home": config_home,
+        "app_projects_root": brand_home.join(".apps"),
+        "brand_home": brand_home,
     }))
     .map_err(|_| "failed to encode product paths".into())
 }
@@ -1665,7 +1716,7 @@ fn product_paths_json_from(cwd: &Path, config_home: &Path) -> Result<String, Str
 /// Read settings-owned environment values before the parent spawns a runtime.
 /// This path never resolves providers, credentials, hooks, MCP, or tools.
 pub async fn workspace_environment_json(cwd: &Path) -> Result<String, String> {
-    let lingxi_home = lingxi_config_home().ok_or("workspace environment requires a config home")?;
+    let lingxi_home = brand_home().ok_or("workspace environment requires a config home")?;
     let mut cfg = DesktopConfig::default();
     cfg.cwd = cwd.to_path_buf();
     cfg.lingxi_home = lingxi_home.clone();
@@ -1744,7 +1795,7 @@ fn workspace_environment_json_from(
 /// resolves one row before every session it opens.
 pub async fn list_sessions_json(cwd: &Path, session_id: Option<&str>) -> Result<String, String> {
     let lingxi_home =
-        lingxi_config_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
+        brand_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
     list_sessions_json_from(cwd, &lingxi_home, session_id).await
 }
 
@@ -1755,7 +1806,7 @@ pub async fn list_sessions_json_in_scope(
     scope: session::jsonl::SessionDiscoveryScope,
 ) -> Result<String, String> {
     let lingxi_home =
-        lingxi_config_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
+        brand_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
     list_sessions_json_from_in_scope(cwd, &lingxi_home, session_id, scope).await
 }
 
@@ -2263,18 +2314,36 @@ pub async fn assemble_with_credentials(
         client::protocol::media::MAX_MEDIA_DEVICE_FRAME_BYTES as u64,
     )
     .map_err(|error| format!("could not compose the app-scoped media host: {error}"))?;
+    // initialize_live_session canonicalized the configured session before
+    // DesktopRuntime is built; use that same ID as the initial media owner.
+    let media_owner = MediaOwner::Session {
+        session_id: cfg
+            .session_id_override
+            .clone()
+            .ok_or_else(|| "bridge session ID was not initialized before media setup".to_owned())?,
+    };
+    let media_attachment = media_host
+        .create_media_attachment()
+        .map_err(|error| format!("could not create the Bridge media attachment: {error}"))?;
+    let mut media_attachment_guard =
+        BootMediaAttachmentGuard::new(media_attachment.clone(), cloud_audio.clone());
+    media_host
+        .set_current_media_attachment(Some(media_attachment.clone()))
+        .map_err(|error| format!("could not publish the Bridge media attachment: {error}"))?;
     let media_configuration_host = media_host.clone();
     let media_configuration_snapshot: audio_provider::AudioConfigurationSnapshot =
         Arc::new(move || media_configuration_host.audio_configuration_json());
-    cfg.media_conversation_attachment = Some(AppMediaConversationAttachment::new(
-        media_host.cloud_audio_registry(),
-        media_host.media_service(),
-        media_configuration_snapshot,
-    ));
+    cfg.media_conversation_attachment =
+        Some(AppMediaConversationAttachment::new_for_attachment_slot(
+            media_host.cloud_audio_registry(),
+            media_host.media_attachment_slot(),
+            media_configuration_snapshot,
+        ));
     cfg.media_service = Some(media_host.media_service());
-    // Computer Use and public media tools share the same routed service object.
+    // Computer Use uses the app host's attachment-bound AudioService facade;
+    // it shares routing with MediaService without bypassing owner teardown.
     cfg.audio = Some(DesktopAudio {
-        service: media_host.audio_service(),
+        service: media_host.desktop_audio_service(),
     });
     let (media_connection_channel, media_connection_responder) =
         connection.media_connection_channel();
@@ -2283,7 +2352,6 @@ pub async fn assemble_with_credentials(
         Arc::new(DesktopRemoteMediaConfigProvider::from_process_environment()),
         media_host.resource_store(),
     );
-    remote_media_connector.bind_media_service(media_host.media_service());
     media_host.install_connector(remote_media_connector.clone(), []);
     let (ask_user_question_tx, ask_user_question_rx) =
         tokio::sync::mpsc::channel::<tool_api::ask_user_question::AskUserQuestionExchange>(8);
@@ -2291,6 +2359,7 @@ pub async fn assemble_with_credentials(
     let ask_user_question_broker = Arc::new(client::adapter::AskUserQuestionBroker::new(
         connection.event_sink(),
     ));
+    let official_catalog = cfg.startup_catalog.clone();
     let provider_model_catalog_listings = desktop_provider_catalog_listings(
         &cfg,
         harness_runtime::desktop::resolve_provider_region(&cfg, &settings_context.managed)
@@ -2560,13 +2629,6 @@ pub async fn assemble_with_credentials(
         audio_services,
         audio_credential_ids.clone(),
     ));
-    for profile_name in audio_credential_ids.keys() {
-        if let Err(error) =
-            cloud_audio.register_profile(profile_name.clone(), audio_provider.clone())
-        {
-            tracing::warn!(%error, "could not register a configured provider profile for media audio");
-        }
-    }
     let realtime_audio = Arc::new(
         crate::realtime_audio::RealtimeAudioController::new(
             runtime.orchestrator.clone(),
@@ -2578,21 +2640,61 @@ pub async fn assemble_with_credentials(
             ask_user_question_broker.clone(),
         )),
     );
+    // Preserve app-shared explicit-profile routes for non-session owners.
+    // Attached conversation sessions additionally receive an exact provider
+    // entry below and never fall back to this table.
+    for profile_name in audio_credential_ids.keys() {
+        if let Err(error) =
+            cloud_audio.register_profile(profile_name.clone(), audio_provider.clone())
+        {
+            tracing::warn!(%error, "could not register a configured provider profile for media audio");
+        }
+    }
+    let mut initial_media_audio_binding = None;
     if let Ok((session_id, profile_name)) = realtime_audio.session_context().await {
-        if let Err(error) = cloud_audio.register_session(
-            session_id,
-            profile_name.clone(),
-            format!("profile:{profile_name}"),
-            audio_provider,
-        ) {
-            tracing::warn!(%error, "could not register the current desktop session for media audio");
+        let owner = MediaOwner::Session {
+            session_id: session_id.clone(),
+        };
+        match media_attachment.authorize_owner(&owner) {
+            Ok(permit) => {
+                for profile_name in audio_credential_ids.keys() {
+                    if let Err(error) = cloud_audio.register_attached_profile(
+                        &permit,
+                        profile_name.clone(),
+                        audio_provider.clone(),
+                    ) {
+                        tracing::warn!(%error, "could not register an attachment-scoped media audio profile");
+                    }
+                }
+                match cloud_audio.register_attached_session(
+                    &permit,
+                    profile_name.clone(),
+                    format!("profile:{profile_name}"),
+                    audio_provider.clone(),
+                ) {
+                    Ok(generation) => {
+                        initial_media_audio_binding =
+                            Some((media_attachment.clone(), session_id, generation));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not register the current desktop attachment for media audio");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not authorize the current desktop attachment for media audio");
+            }
         }
     }
 
     // The full command-routing seam over the real engine handles.
     let handle: Arc<dyn OrchestratorHandle> = runtime.orchestrator.clone();
-    let dispatcher: Arc<dyn SlashCommandDispatcher> =
-        Arc::new(RegistrySlashDispatcherClone::wrap(&runtime));
+    let dispatcher: Arc<dyn SlashCommandDispatcher> = Arc::new(
+        runtime
+            .dispatcher
+            .clone_shared()
+            .with_injected_messages_as_turns(),
+    );
     let mut router = EngineCommandRouter::new(
         handle,
         runtime.auth.clone(),
@@ -2611,6 +2713,7 @@ pub async fn assemble_with_credentials(
     .with_credentials(runtime.credentials.clone())
     .with_catalog_registry(runtime.catalog_registry.clone())
     .with_provider_model_catalog_listings(provider_model_catalog_listings)
+    .with_official_catalog(official_catalog)
     .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
     .with_openai_host_session(openai_host_session)
     .with_http(runtime.http.clone())
@@ -2630,7 +2733,12 @@ pub async fn assemble_with_credentials(
     .with_file_changed_watcher(runtime.file_changed_watcher.controller());
     router = router
         .with_realtime_audio(realtime_audio)
-        .with_media_cloud_audio_registry(cloud_audio.clone());
+        .with_media_cloud_audio_registry(
+            cloud_audio.clone(),
+            media_host.media_attachment_slot(),
+            audio_provider.clone(),
+            initial_media_audio_binding,
+        );
     let router = Arc::new(router);
     spawn_mcp_startup_publisher(
         runtime.watch_mcp_startup(),
@@ -2638,21 +2746,14 @@ pub async fn assemble_with_credentials(
         connection.loop_wakeup_event_sink(),
     );
 
-    let media_owner = MediaOwner::Session {
-        session_id: runtime
-            .orchestrator
-            .current_session_id()
-            .await
-            .as_uuid()
-            .to_string(),
-    };
     let media_service_rpc = MediaServiceRpc::for_app_host_with_remote_connector(
         media_host.clone(),
         media_owner,
         remote_media_connector,
         media_connection_channel.clone(),
         media_control_channel.clone(),
-    );
+    )
+    .map_err(|error| format!("could not bind the Bridge media owner attachment: {error}"))?;
     let connection = connection
         .with_policy_helper_refusal(runtime.policy_helper_refusal.clone())
         .bind(gate, driver)
@@ -2671,6 +2772,7 @@ pub async fn assemble_with_credentials(
     let connection = connection
         .with_task_notification_registry(runtime.task_registry.clone())
         .with_queue_wakeup();
+    media_attachment_guard.disarm();
     Ok(BoundServer {
         connection,
         runtime,
@@ -2707,38 +2809,6 @@ fn spawn_mcp_startup_publisher(
             }
         }
     });
-}
-
-/// The `RegistrySlashDispatcher` returned by `harness_runtime::desktop::build` is owned by
-/// value on the runtime, but the router needs an `Arc<dyn SlashCommandDispatcher>`
-/// it can hold for the connection's lifetime. We cannot move the dispatcher out
-/// of the runtime (we keep the runtime alive), so this thin newtype clones the
-/// dispatcher's shared registry handle into a fresh dispatcher pointing at the
-/// SAME registry — dispatching is identical.
-struct RegistrySlashDispatcherClone {
-    inner: command_api::RegistrySlashDispatcher,
-}
-
-impl RegistrySlashDispatcherClone {
-    fn wrap(runtime: &DesktopRuntime) -> Self {
-        Self {
-            inner: runtime
-                .dispatcher
-                .clone_shared()
-                .with_injected_messages_as_turns(),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl SlashCommandDispatcher for RegistrySlashDispatcherClone {
-    async fn dispatch(
-        &self,
-        raw: lingxi_core::types::utf16_json::Utf16JsonProjection,
-        cancellation: tokio_util::sync::CancellationToken,
-    ) -> lingxi_core::host::SlashDispatchResult {
-        self.inner.dispatch(raw, cancellation).await
-    }
 }
 
 /// A running endpoint paired with the Drop-guard that reaps its discovery
@@ -2844,7 +2914,53 @@ pub fn publish_lockfile_recoverable(
 }
 
 #[cfg(test)]
+pub(crate) async fn close_unserved_for_test(bound: &BoundServer) {
+    let attachment = bound
+        .media_host
+        .current_media_attachment()
+        .expect("assembled bridge has a media attachment");
+    bridge::FramePump::on_close(&bound.connection).await;
+    assert_eq!(
+        attachment.phase(),
+        media_runtime::MediaAttachmentPhase::Revoked,
+        "the unserved bridge must finish its real media cleanup"
+    );
+    assert!(bound
+        .media_host
+        .media_attachment_host()
+        .attachment(attachment.id())
+        .is_none());
+}
+
+#[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn failed_boot_guard_closes_and_drains_its_attachment() {
+        use media_runtime::{MediaAttachmentHost, MediaAttachmentPhase, MediaRuntimeBuilder};
+        use std::{sync::Arc, time::Duration};
+        let host = MediaAttachmentHost::new();
+        let service = MediaRuntimeBuilder::new(Arc::new(
+            audio_provider::media_store::BoundedMediaResourceStore::default(),
+        ))
+        .build();
+        let attachment = host.attach(service).unwrap();
+        let cloud = Arc::new(audio_provider::media_cloud::AudioProviderCloudRegistry::new("wav"));
+        drop(super::BootMediaAttachmentGuard::new(
+            attachment.clone(),
+            cloud,
+        ));
+        assert_ne!(attachment.phase(), MediaAttachmentPhase::Active);
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                attachment.wait_for_drain_completion()
+            )
+            .await
+            .unwrap(),
+            MediaAttachmentPhase::Revoked
+        );
+        assert!(host.attachment(attachment.id()).is_none());
+    }
     use super::*;
     use lingxi_core::host::live_sessions::LiveSessionDir;
 
@@ -2913,7 +3029,7 @@ mod tests {
             serde_json::from_str(&product_paths_json_from(root.path(), &home).unwrap()).unwrap();
         assert_eq!(
             paths,
-            serde_json::json!({"version": 1, "config_home": home, "app_projects_root": home.join(".apps")})
+            serde_json::json!({"version": 1, "brand_home": home, "app_projects_root": home.join(".apps")})
         );
         assert_eq!(
             std::fs::read_to_string(settings).unwrap(),
@@ -2930,7 +3046,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            paths["config_home"],
+            paths["brand_home"],
             serde_json::json!(root.path().join("custom-product"))
         );
         assert_eq!(
@@ -4220,6 +4336,201 @@ mod tests {
         assert!(!has_no_credential_source(&cfg));
     }
 
+    // `block_on` polls the root future on its calling thread; size both that
+    // thread and Tokio's workers to the supported desktop runtime budget.
+    fn run_on_supported_runtime_stack<F, Fut>(test: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let worker = std::thread::Builder::new()
+            .name("desktop-runtime-test".into())
+            .stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+                    .build()
+                    .expect("build supported-stack Tokio runtime");
+                runtime.block_on(test());
+            })
+            .expect("spawn supported-stack test thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// Drive a local injector through the production-assembled router and an
+    /// authenticated Bridge connection. It must become an owned turn rather
+    /// than display-only output, regardless of the user's `/goal` policy.
+    #[test]
+    fn assembled_bridge_runs_injected_local_command_as_owned_turn() {
+        run_on_supported_runtime_stack(|| async {
+            use bridge::wire::Frame;
+            use bridge::{BridgeRequest, Capabilities, ClientHello, BRIDGE_PROTOCOL_VERSION};
+            use client::protocol::{commands::ClientCommand, events::ClientEvent};
+            use command_api::model::{BuiltinCommandHandler, CommandResult};
+            use futures_util::{SinkExt, StreamExt};
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::time::Duration;
+            use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+            use tokio_tungstenite::tungstenite::Message;
+
+            struct InjectFixture(Arc<AtomicBool>);
+            #[async_trait::async_trait]
+            impl BuiltinCommandHandler for InjectFixture {
+                async fn handle(
+                    &self,
+                    _: &command_api::parser::ParsedSlashCommand,
+                ) -> CommandResult {
+                    self.0.store(true, Ordering::SeqCst);
+                    CommandResult::InjectMessage {
+                        content: "test-only injected prompt".into(),
+                    }
+                }
+
+                fn name(&self) -> &str {
+                    "fixture-inject"
+                }
+
+                fn description(&self) -> &str {
+                    "Deterministic local injector"
+                }
+            }
+
+            let _loop_state = crate::driver::LOOP_KA_TEST_SERIAL
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let mut cfg = DesktopConfig::default();
+            cfg.cwd = tmp.path().to_path_buf();
+            cfg.lingxi_home = tmp.path().join(".lingxi");
+            cfg.host_workspace_trusted = Some(true);
+            cfg.restricted = true;
+            cfg.isolated_credential_storage = true;
+            cfg.api_key = String::new();
+            cfg.default_model_explicit = true;
+            cfg.use_noop_permission_gate = false;
+            cfg.permission_mode = permission::PermissionMode::Default;
+            cfg.enable_automation_scheduler = false;
+            cfg.mod_render_surface = Some(harness_runtime::desktop::ModRenderSurface::Desktop);
+            let bound = assemble(cfg).await.expect("assemble must succeed");
+            let called = Arc::new(AtomicBool::new(false));
+            bound
+                .runtime
+                .shared_command_registry
+                .write()
+                .await
+                .register_builtin_handler(Arc::new(InjectFixture(called.clone())));
+            let lifecycle = bound.session_lifecycle();
+            let endpoint =
+                McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound.connection))
+                    .await
+                    .expect("endpoint must start");
+            const TOKEN: &str = "inject-test-token-32chars00000000";
+            endpoint.set_auth_token(TOKEN.to_string());
+            let port = endpoint.port();
+            let request = http::Request::builder()
+                .method("GET")
+                .uri(format!("ws://127.0.0.1:{port}/mcp"))
+                .header("host", format!("127.0.0.1:{port}"))
+                .header("connection", "upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", generate_key())
+                .header("sec-websocket-protocol", "mcp")
+                .header("x-lingxi-ide-authorization", TOKEN)
+                .body(())
+                .unwrap();
+            let (mut ws, response) = tokio_tungstenite::connect_async(request)
+                .await
+                .expect("WebSocket upgrade");
+            assert_eq!(response.status(), 101);
+            let frame = |id, method: &str, value: serde_json::Value| {
+                Frame::Request(BridgeRequest {
+                    trace_context: None,
+                    id,
+                    method: method.into(),
+                    params: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                        &value.to_string(),
+                    )
+                    .unwrap(),
+                })
+            };
+            let hello = frame(
+                1,
+                "hello",
+                serde_json::to_value(ClientHello {
+                    protocol_version: BRIDGE_PROTOCOL_VERSION.to_string(),
+                    client_name: "inject-test".into(),
+                    capabilities: Capabilities::default(),
+                })
+                .unwrap(),
+            );
+            ws.send(Message::Text(serde_json::to_string(&hello).unwrap()))
+                .await
+                .unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(10), ws.next())
+                .await
+                .expect("hello deadline")
+                .expect("hello response")
+                .expect("hello WebSocket message");
+            let Message::Text(response) = response else {
+                panic!("hello must return a text response");
+            };
+            assert!(matches!(
+                serde_json::from_str::<Frame>(&response).unwrap(),
+                Frame::Response(response) if response.id == 1 && response.error.is_none()
+            ));
+
+            let submit = frame(
+                2,
+                "submit",
+                serde_json::to_value(ClientCommand::RunSlashCommand {
+                    raw: "/fixture-inject".into(),
+                    images: Vec::new(),
+                    turn_id: Some(47),
+                })
+                .unwrap(),
+            );
+            ws.send(Message::Text(serde_json::to_string(&submit).unwrap()))
+                .await
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let mut started = false;
+            loop {
+                let message = tokio::time::timeout_at(deadline, ws.next())
+                    .await
+                    .expect("injected command must reach a terminal turn")
+                    .expect("WebSocket remains open")
+                    .expect("WebSocket message");
+                let Message::Text(message) = message else {
+                    continue;
+                };
+                match serde_json::from_str::<Frame>(&message).unwrap() {
+                    Frame::Event(ClientEvent::TurnStarted { turn_id }) => {
+                        assert_eq!(turn_id, Some(47));
+                        assert!(!started, "command started more than one turn");
+                        assert!(called.load(Ordering::SeqCst), "fixture handler must run");
+                        started = true;
+                    }
+                    Frame::Event(ClientEvent::TurnEnded { .. }) => {
+                        assert!(started, "injected prompt must start a turn before ending");
+                        break;
+                    }
+                    Frame::Event(ClientEvent::SlashCommandResult { display, .. }) => {
+                        panic!("injected prompt must not be display-only: {display:?}");
+                    }
+                    _ => {}
+                }
+            }
+            ws.close(None).await.unwrap();
+            endpoint.shutdown().await;
+            let report = lifecycle.shutdown_and_drain().await;
+            assert!(report.complete, "shutdown errors: {:?}", report.errors);
+        });
+    }
+
     /// Assembly produces a fully-bound connection (gate + driver attached) from a
     /// deterministic config — no env reads, no live network. Proves the S2 wiring
     /// links end to end.
@@ -4230,6 +4541,15 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
+        // Allow this one test dispatch through the real policy gate without a
+        // provider-backed Auto-mode classifier or an interactive prompt.
+        let settings_dir = cwd.join(".lingxi");
+        std::fs::create_dir_all(&settings_dir).expect("create isolated settings directory");
+        std::fs::write(
+            settings_dir.join("settings.local.json"),
+            r#"{"permissions":{"defaultMode":"default","allow":["media_status"]}}"#,
+        )
+        .expect("configure the media_status allow rule");
         let cfg = {
             let mut __desktop_config = DesktopConfig::default();
             __desktop_config.remote_workspace = false;
@@ -4277,7 +4597,7 @@ mod tests {
             __desktop_config.managed_oauth_only = false;
             __desktop_config.anthropic_key_fd_present = false;
             __desktop_config.cwd = cwd.clone();
-            __desktop_config.lingxi_home = cwd.join(".lingxi");
+            __desktop_config.lingxi_home = settings_dir;
             __desktop_config.default_model = "claude-sonnet-4-20250514".to_string();
             // Deterministic across host machines: a dev keychain with real
             // provider keys must not trigger the connected-provider fallback.
@@ -4337,15 +4657,63 @@ mod tests {
             __desktop_config.bg_session_forker = None;
             __desktop_config.worktree_launch = None;
             __desktop_config.tmux_launch = None;
-            // `assemble` fills this with the connection's own bridge; a
-            // caller-supplied value would be a lie about which connection the
-            // engine's audio calls reach.
+            // `assemble` supplies the routed audio service for this connection.
             __desktop_config.audio = None;
             __desktop_config.inline_visualization = false;
             __desktop_config.local_apps = false;
             __desktop_config
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
+        assert!(
+            bound.runtime.has_audio(),
+            "assembly injects audio into the runtime"
+        );
+        assert!(
+            Arc::ptr_eq(
+                &bound
+                    .runtime
+                    .media_service()
+                    .expect("runtime media service"),
+                &bound.media_host.media_service(),
+            ),
+            "assembly injects the same app-scoped media facade into the runtime"
+        );
+        // Exercise the actual assembled tool path. A missing typed media
+        // asset produces a service-owned not-found result without requiring
+        // a device or a connection to answer a native request.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            Box::pin(
+                bound.runtime.orchestrator.call_tool_from_host(
+                    lingxi_core::types::ToolUseId::new(),
+                    "media_status".into(),
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                        r#"{"target":{"kind":"media","ref":"missing-fixture-asset"}}"#,
+                    )
+                    .unwrap(),
+                    None,
+                ),
+            ),
+        )
+        .await
+        .expect("assembled media dispatch must finish")
+        .expect("assembled media dispatch must complete")
+        .expect("media_status must be dispatchable");
+        match result {
+            lingxi_core::types::ContentBlock::ToolResult {
+                is_error, content, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(
+                    content
+                        .to_json_string()
+                        .unwrap()
+                        .contains("media asset was not found"),
+                    "the assembled media service must report its missing asset: {content:?}"
+                );
+            }
+            other => panic!("expected a media tool result, got {other:?}"),
+        }
         assert!(bound.runtime.orchestrator.workspace_trusted().await);
         // The gate handle is reachable only when bind() ran with a real gate.
         let gate = bound.connection.gate_handle();
@@ -4383,6 +4751,7 @@ mod tests {
             refusal.is_none(),
             "ordinary RequestExit is not a policy refusal"
         );
+        close_unserved_for_test(&bound).await;
         let report = bound.session_lifecycle().shutdown_and_drain().await;
         assert!(report.complete, "shutdown errors: {:?}", report.errors);
     }

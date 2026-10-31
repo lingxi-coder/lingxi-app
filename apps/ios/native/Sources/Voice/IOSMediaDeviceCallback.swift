@@ -2,6 +2,11 @@ import AVFoundation
 import CoreVideo
 import Foundation
 
+/// Only thrown before native dispatch or after this Open's devices have closed.
+private struct IOSMediaOpenRejectedWithoutResource: Error {
+    let underlying: Error
+}
+
 func iosMediaIntentAllowsPlayback(_ intent: MediaSessionIntentDto) -> Bool {
     intent == .conversation
 }
@@ -30,6 +35,10 @@ final class IOSMediaDeviceCallbackAdapter: IosMediaDevicePorts, @unchecked Senda
     func request(request: MediaDeviceRequestEnvelopeDto) async -> MediaDeviceResponseDto {
         await service.handle(request)
     }
+
+    func attachmentDrained(attachmentHostId: String, attachmentGeneration: UInt64) async {
+        await service.attachmentDrained(hostID: attachmentHostId, generation: attachmentGeneration)
+    }
 }
 
 @MainActor
@@ -37,13 +46,18 @@ final class IOSMediaDeviceService {
     static let shared = IOSMediaDeviceService()
 
     private struct OpenSignature: Equatable {
-        let ownerKey: String
+        let owner: IOSAudioOwner
         let mode: MediaSessionModeDto
         let intent: MediaSessionIntentDto
         let audioSourceID: String?
         let videoSourceID: String?
         let timeoutBudgetMs: UInt64?
         let maxPayloadBytes: UInt64
+    }
+
+    struct OpenKey: Hashable {
+        let owner: IOSAudioOwner
+        let identity: IOSAudioOperationIdentity
     }
 
     private struct OpenLease {
@@ -53,9 +67,11 @@ final class IOSMediaDeviceService {
 
     private var sessions: [String: IOSMediaDeviceSession] = [:]
     private var cameraLeaseID: String?
-    private var leasesByOpenKey: [String: OpenLease] = [:]
-    private var openKeysByLease: [String: String] = [:]
-    private var openingKeys: Set<String> = []
+    private var leasesByOpenKey: [OpenKey: OpenLease] = [:]
+    private var openKeysByLease: [String: OpenKey] = [:]
+    private var openingKeys: Set<OpenKey> = []
+    private var confirmedClosedLeases: Set<String> = []
+    private var confirmedClosedOrder: [String] = []
 
     func handle(_ envelope: MediaDeviceRequestEnvelopeDto) async -> MediaDeviceResponseDto {
         let result: MediaDeviceResultDto
@@ -86,35 +102,59 @@ final class IOSMediaDeviceService {
                 guard let session = sessions[request.leaseId] else { throw IOSMediaDeviceFailure.notFound }
                 result = .updated(status: try await session.update(request.update))
             case let .stop(leaseId):
-                if let session = sessions.removeValue(forKey: leaseId) {
+                if let session = sessions[leaseId] {
+                    // Keep the lease discoverable until the shared stop flight
+                    // really finishes; concurrent Stop must join that flight.
+                    guard await session.stop() else { throw IOSMediaDeviceFailure.nativeFailure }
+                    if sessions[leaseId] === session { sessions.removeValue(forKey: leaseId) }
                     if let openKey = openKeysByLease.removeValue(forKey: leaseId) {
                         leasesByOpenKey.removeValue(forKey: openKey)
                     }
-                    await session.stop()
                     if cameraLeaseID == leaseId { cameraLeaseID = nil }
+                    if confirmedClosedLeases.insert(leaseId).inserted {
+                        confirmedClosedOrder.append(leaseId)
+                        if confirmedClosedOrder.count > 512 {
+                            confirmedClosedLeases.remove(confirmedClosedOrder.removeFirst())
+                        }
+                    }
+                } else if !confirmedClosedLeases.contains(leaseId) {
+                    throw IOSMediaDeviceFailure.notFound
                 }
                 result = .stopped
             }
+        } catch let rejection as IOSMediaOpenRejectedWithoutResource {
+            result = .openFailedWithoutResource(error: Self.errorDto(rejection.underlying))
         } catch {
             result = .error(error: Self.errorDto(error))
         }
         return MediaDeviceResponseDto(requestId: envelope.requestId, result: result)
     }
 
+    func attachmentDrained(hostID: String, generation: UInt64) {
+        guard let attachment = IOSMediaAttachmentIdentity(hostID: hostID, generation: generation) else { return }
+        _ = IOSAudioProviderService.shared.removeConfirmedSessionRoute(attachment: attachment)
+    }
+
     private func open(_ request: MediaDeviceOpenRequestDto) async throws -> MediaDeviceLeaseDto {
-        guard request.maxPayloadBytes > 0 else { throw IOSMediaDeviceFailure.invalidRequest }
-        let ownerKey: String
-        switch request.owner {
-        case let .session(sessionId): ownerKey = "session:\(sessionId)"
-        case let .ui(instanceId): ownerKey = "ui:\(instanceId)"
-        case let .system(instanceId): ownerKey = "system:\(instanceId)"
+        let owner: IOSAudioOwner
+        do {
+            owner = try IOSMediaOwnerMapper.media(from: request.owner)
+        } catch {
+            throw IOSMediaOpenRejectedWithoutResource(underlying: IOSMediaDeviceFailure.invalidRequest)
         }
         let wantsAudio = request.request.mode != .video
         let wantsVideo = request.request.mode != .audio
         let operation = request.identity
-        let openKey = "\(ownerKey)|\(operation.id)|\(operation.generation)|\(operation.serviceEpoch)"
+        let openKey = OpenKey(
+            owner: owner,
+            identity: IOSAudioOperationIdentity(
+                id: operation.id,
+                generation: operation.generation,
+                serviceEpoch: operation.serviceEpoch
+            )
+        )
         let signature = OpenSignature(
-            ownerKey: ownerKey,
+            owner: owner,
             mode: request.request.mode,
             intent: request.request.intent,
             audioSourceID: request.request.audioSource?.id,
@@ -122,32 +162,62 @@ final class IOSMediaDeviceService {
             timeoutBudgetMs: request.timeoutBudgetMs,
             maxPayloadBytes: request.maxPayloadBytes
         )
-        if let existing = leasesByOpenKey[openKey], sessions[existing.leaseID] != nil {
+        if let existing = leasesByOpenKey[openKey], let session = sessions[existing.leaseID] {
             guard existing.signature == signature else { throw IOSMediaDeviceFailure.invalidRequest }
+            guard !session.isStopping else { throw IOSMediaDeviceFailure.busy }
             return MediaDeviceLeaseDto(leaseId: existing.leaseID)
         }
         guard !openingKeys.contains(openKey) else { throw IOSMediaDeviceFailure.busy }
+        guard request.maxPayloadBytes > 0 else {
+            throw IOSMediaOpenRejectedWithoutResource(underlying: IOSMediaDeviceFailure.invalidRequest)
+        }
         openingKeys.insert(openKey)
         defer { openingKeys.remove(openKey) }
         let audioSourceID = request.request.audioSource?.id
         let videoSourceID = request.request.videoSource?.id
         if wantsAudio, audioSourceID != "media-runtime:microphone" {
-            throw IOSMediaDeviceFailure.invalidRequest
+            throw IOSMediaOpenRejectedWithoutResource(underlying: IOSMediaDeviceFailure.invalidRequest)
         }
         if wantsVideo, videoSourceID != "media-runtime:camera" {
-            throw IOSMediaDeviceFailure.invalidRequest
+            throw IOSMediaOpenRejectedWithoutResource(underlying: IOSMediaDeviceFailure.invalidRequest)
         }
+
+        // Request permissions before constructing either native device. A
+        // denial here is a no-resource receipt even for a combined session.
+        if wantsAudio, !(await AVAudioApplication.requestRecordPermission()) {
+            throw IOSMediaOpenRejectedWithoutResource(underlying: IOSMediaDeviceFailure.permissionDenied)
+        }
+        if wantsVideo {
+            let allowed: Bool
+            switch AVCaptureDevice.authorizationStatus(for: .video) {
+            case .authorized:
+                allowed = true
+            case .notDetermined:
+                allowed = await withCheckedContinuation { continuation in
+                    AVCaptureDevice.requestAccess(for: .video) { continuation.resume(returning: $0) }
+                }
+            default:
+                allowed = false
+            }
+            guard allowed else {
+                throw IOSMediaOpenRejectedWithoutResource(underlying: IOSMediaDeviceFailure.permissionDenied)
+            }
+        }
+        do { try Task.checkCancellation() }
+        catch { throw IOSMediaOpenRejectedWithoutResource(underlying: error) }
 
         let leaseID = UUID().uuidString.lowercased()
         if wantsVideo {
-            guard cameraLeaseID == nil else { throw IOSMediaDeviceFailure.busy }
+            guard cameraLeaseID == nil else {
+                throw IOSMediaOpenRejectedWithoutResource(underlying: IOSMediaDeviceFailure.busy)
+            }
             // Reserve before awaiting permission/configuration so two opens
             // cannot start concurrent AVCaptureSessions.
             cameraLeaseID = leaseID
         }
         let session = IOSMediaDeviceSession(
             leaseID: leaseID,
-            ownerKey: ownerKey,
+            owner: owner,
             intent: request.request.intent,
             audioSourceID: audioSourceID,
             videoSourceID: videoSourceID,
@@ -164,8 +234,11 @@ final class IOSMediaDeviceService {
             openKeysByLease[leaseID] = openKey
             return MediaDeviceLeaseDto(leaseId: leaseID)
         } catch {
-            await session.stop()
-            if cameraLeaseID == leaseID { cameraLeaseID = nil }
+            let closed = await session.stop()
+            if closed, cameraLeaseID == leaseID { cameraLeaseID = nil }
+            if closed, error is IOSRealtimeAudioNotAdmitted {
+                throw IOSMediaOpenRejectedWithoutResource(underlying: IOSMediaDeviceFailure.busy)
+            }
             throw error
         }
     }
@@ -224,7 +297,7 @@ final class IOSMediaDeviceService {
 @MainActor
 private final class IOSMediaDeviceSession {
     let leaseID: String
-    let ownerKey: String
+    let owner: IOSAudioOwner
     private let allowsAudioPlayback: Bool
     private let audioSessionPurpose: VoiceAudioSessionCoordinator.Purpose
     let audioSourceID: String?
@@ -237,13 +310,17 @@ private final class IOSMediaDeviceSession {
     private var invalidationTask: Task<Void, Never>?
     private var camera: IOSMediaCameraCapture?
     private var stopped = false
+    private var stopTask: Task<Bool, Never>?
+    private var activeMutations = 0
+    private var mutationWaiters: [CheckedContinuation<Void, Never>] = []
+    var isStopping: Bool { stopped }
     private var audioEnabled = false
     private var videoEnabled = false
     private var sequence: UInt64 = 0
 
-    init(leaseID: String, ownerKey: String, intent: MediaSessionIntentDto, audioSourceID: String?, videoSourceID: String?, maxPayloadBytes: UInt64) {
+    init(leaseID: String, owner: IOSAudioOwner, intent: MediaSessionIntentDto, audioSourceID: String?, videoSourceID: String?, maxPayloadBytes: UInt64) {
         self.leaseID = leaseID
-        self.ownerKey = ownerKey
+        self.owner = owner
         self.allowsAudioPlayback = iosMediaIntentAllowsPlayback(intent)
         self.audioSessionPurpose = iosMediaAudioSessionPurpose(intent)
         self.audioSourceID = audioSourceID
@@ -252,6 +329,8 @@ private final class IOSMediaDeviceSession {
     }
 
     func start(audio: Bool, video: Bool) async throws {
+        try beginMutation()
+        defer { finishMutation() }
         if video { try await setVideoEnabled(true) }
         if audio {
             await observeAudioLeaseInvalidations()
@@ -291,7 +370,8 @@ private final class IOSMediaDeviceSession {
     }
 
     func update(_ update: MediaSessionUpdateDto) async throws -> MediaSessionStatusDto {
-        guard !stopped else { throw IOSMediaDeviceFailure.cancelled }
+        try beginMutation()
+        defer { finishMutation() }
         switch update {
         case let .setEnabled(kind, enabled):
             switch kind {
@@ -318,20 +398,55 @@ private final class IOSMediaDeviceSession {
         return status
     }
 
-    func stop() async {
-        guard !stopped else { return }
+    @discardableResult
+    func stop() async -> Bool {
+        if let stopTask { return await stopTask.value }
         stopped = true
-        invalidationTask?.cancel()
-        invalidationTask = nil
-        audioInputTask?.cancel()
-        audioInputTask = nil
-        if let audioDevice { await audioDevice.stop() }
-        audioDevice = nil
-        if let camera { await camera.stop() }
-        camera = nil
-        audioEnabled = false
-        videoEnabled = false
-        inputQueue.finish()
+        let task = Task { @MainActor [self] in
+            await waitForMutations()
+            audioEnabled = false
+            videoEnabled = false
+            invalidationTask?.cancel()
+            invalidationTask = nil
+            audioInputTask?.cancel()
+            audioInputTask = nil
+            var audioClosed = true
+            if let audioDevice {
+                audioClosed = await audioDevice.stop()
+                if audioClosed { self.audioDevice = nil }
+            }
+            var cameraClosed = true
+            if let camera {
+                cameraClosed = await camera.stop()
+                if cameraClosed { self.camera = nil }
+            }
+            inputQueue.finish()
+            return audioClosed && cameraClosed
+        }
+        stopTask = task
+        let confirmed = await task.value
+        if !confirmed { stopTask = nil }
+        return confirmed
+    }
+
+    private func beginMutation() throws {
+        guard !stopped else { throw IOSMediaDeviceFailure.cancelled }
+        guard activeMutations == 0 else { throw IOSMediaDeviceFailure.busy }
+        activeMutations += 1
+    }
+
+    private func finishMutation() {
+        activeMutations -= 1
+        if activeMutations == 0 {
+            let waiters = mutationWaiters
+            mutationWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+    }
+
+    private func waitForMutations() async {
+        guard activeMutations > 0 else { return }
+        await withCheckedContinuation { mutationWaiters.append($0) }
     }
 
     private var status: MediaSessionStatusDto {
@@ -346,6 +461,7 @@ private final class IOSMediaDeviceSession {
         guard !stopped else { throw IOSMediaDeviceFailure.cancelled }
         guard enabled != audioEnabled else { return }
         if enabled {
+            guard audioDevice == nil else { throw IOSMediaDeviceFailure.busy }
             let device = IOSRealtimeAudioDevice(coordinator: .shared)
             audioDevice = device
             let stream: AsyncThrowingStream<IOSRealtimeAudioInputFrame, Error>
@@ -358,8 +474,7 @@ private final class IOSMediaDeviceSession {
                 try Task.checkCancellation()
                 guard !stopped else { throw IOSMediaDeviceFailure.cancelled }
             } catch {
-                if audioDevice === device { audioDevice = nil }
-                await device.stop()
+                if await device.stop(), audioDevice === device { audioDevice = nil }
                 throw error
             }
             audioEnabled = true
@@ -394,7 +509,9 @@ private final class IOSMediaDeviceSession {
             audioInputTask?.cancel()
             audioInputTask = nil
             inputQueue.removeAudioFrames()
-            if let audioDevice { await audioDevice.stop() }
+            if let audioDevice, !(await audioDevice.stop()) {
+                throw IOSMediaDeviceFailure.nativeFailure
+            }
             audioDevice = nil
         }
     }
@@ -417,6 +534,7 @@ private final class IOSMediaDeviceSession {
         guard !stopped else { throw IOSMediaDeviceFailure.cancelled }
         guard enabled != videoEnabled else { return }
         if enabled {
+            guard camera == nil else { throw IOSMediaDeviceFailure.busy }
             let camera = IOSMediaCameraCapture(
                 maxPayloadBytes: maxPayloadBytes,
                 onFrame: { [weak self] frame in
@@ -442,25 +560,28 @@ private final class IOSMediaDeviceSession {
                     Task { @MainActor [weak self] in
                         guard let self else { return }
                         self.inputQueue.fail(error)
-                        await self.camera?.stop()
-                        self.camera = nil
+                        if let camera = self.camera, await camera.stop(), self.camera === camera {
+                            self.camera = nil
+                        }
                         self.videoEnabled = false
                     }
                 }
             )
+            self.camera = camera
             do {
                 try await camera.start()
                 try Task.checkCancellation()
                 guard !stopped else { throw IOSMediaDeviceFailure.cancelled }
             } catch {
-                await camera.stop()
+                if await camera.stop(), self.camera === camera { self.camera = nil }
                 throw error
             }
-            self.camera = camera
             videoEnabled = true
         } else {
             videoEnabled = false
-            if let camera { await camera.stop() }
+            if let camera, !(await camera.stop()) {
+                throw IOSMediaDeviceFailure.nativeFailure
+            }
             camera = nil
             inputQueue.removeVideoFrames()
         }
@@ -624,13 +745,15 @@ private final class IOSMediaCameraCapture: NSObject, AVCaptureVideoDataOutputSam
         }
     }
 
-    func stop() async {
+    @discardableResult
+    func stop() async -> Bool {
         await withCheckedContinuation { continuation in
             captureQueue.async { [self] in
                 if captureSession.isRunning { captureSession.stopRunning() }
+                let closed = !captureSession.isRunning
                 captureSession.outputs.forEach(captureSession.removeOutput)
                 captureSession.inputs.forEach(captureSession.removeInput)
-                continuation.resume()
+                continuation.resume(returning: closed)
             }
         }
     }

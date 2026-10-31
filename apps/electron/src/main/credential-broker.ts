@@ -1,3 +1,4 @@
+import type { ProviderModelCatalogEntryDto } from '@lingxi/bridge-client';
 import type { FusionInvocation } from '../shared/fusionStrategy.js';
 import { providerById } from '../shared/providers.js';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
@@ -246,12 +247,12 @@ export function resolveProviderIdForModel(model: string | null | undefined): str
 }
 
 /** Credential slots declared by one provider/connection, including its failover keys. */
-export function resolveProfileCredentialIds(profileId: string, settings: unknown): string[] {
+export function resolveProfileCredentialIds(profileId: string, settings: unknown, official: readonly ProviderModelCatalogEntryDto[] = []): string[] {
   const providers = isRecord(settings) && isRecord(settings.providers) ? settings.providers : {};
   const separator = profileId.search(/[:#]/);
   const group = separator < 0 ? profileId : profileId.slice(0, separator);
   const profile = providers[group];
-  if (!isRecord(profile)) return providerById(profileId) ? [profileId] : [];
+  if (!isRecord(profile)) return providerById(profileId) || official.some((entry) => entry.definition && entry.provider_id === profileId) ? [profileId] : [];
   const keys = (value: unknown, fallback: string[]): string[] => {
     if (value === undefined) return fallback;
     if (!Array.isArray(value) || value.length === 0
@@ -277,7 +278,7 @@ export function configuredCredentialProviderIds(settings: unknown): string[] {
 }
 
 /** Mirror registered custom model/alias resolution; decrypt only the selected route's keys. */
-export function resolveModelCredentialProviderIds(model: string, settings: unknown): string[] {
+export function resolveModelCredentialProviderIds(model: string, settings: unknown, official: readonly ProviderModelCatalogEntryDto[] = []): string[] {
   const config = isRecord(settings) ? settings : {};
   const providers = isRecord(config.providers) ? config.providers : {};
   const routing = isRecord(config.routing) ? config.routing : {};
@@ -304,7 +305,7 @@ export function resolveModelCredentialProviderIds(model: string, settings: unkno
     const found = rows.find((row) => row.provider === provider && row.model === id);
     if (found) return credentialProfile === provider ? found : { ...found, credentialProfile };
     // Built-in targets are explicitly provider-qualified, never inferred from an unknown alias.
-    if (providerById(provider)) return { provider, model: id, aliases: [] };
+    if (official.some((entry) => entry.definition && entry.provider_id === provider && entry.models.some((m) => m.model_id === id)) || providerById(provider)) return { provider, model: id, aliases: [] };
     return undefined;
   };
   if (isRecord(routing.aliases)) {
@@ -327,12 +328,12 @@ export function resolveModelCredentialProviderIds(model: string, settings: unkno
   const legacy = primary ? undefined : resolveProviderIdForModel(model);
   const primaryId = primary?.provider ?? (legacy && providerById(legacy) ? legacy : undefined);
   if (!primaryId) return [];
-  const ids = new Set(resolveProfileCredentialIds(primary?.credentialProfile ?? primaryId, settings));
+  const ids = new Set(resolveProfileCredentialIds(primary?.credentialProfile ?? primaryId, settings, official));
   const chain = isRecord(routing.fallback) ? routing.fallback[primary?.model ?? model] : undefined;
   if (Array.isArray(chain)) {
     for (const target of chain) {
       const row = typeof target === 'string' ? explicit(target) : undefined;
-      if (row) for (const id of resolveProfileCredentialIds(row.credentialProfile ?? row.provider, settings)) ids.add(id);
+      if (row) for (const id of resolveProfileCredentialIds(row.credentialProfile ?? row.provider, settings, official)) ids.add(id);
     }
   }
   return [...ids];
@@ -368,7 +369,7 @@ export function fusionCredentialSelection<T extends { config: Record<string, unk
 }
 
 /** Fusion routes are explicit settings choices, independent of the parent model. */
-export function resolveFusionCredentialProviderIds(settings: unknown, selection: { config: Record<string, unknown> }, explicit = false): string[] {
+export function resolveFusionCredentialProviderIds(settings: unknown, selection: { config: Record<string, unknown> }, explicit = false, official: readonly ProviderModelCatalogEntryDto[] = []): string[] {
   const fusion = selection.config;
   if (!explicit && fusion.enabled !== true) return [];
   const choices = [
@@ -381,7 +382,7 @@ export function resolveFusionCredentialProviderIds(settings: unknown, selection:
     // chains can refer to unrelated providers that this ensemble never calls.
     const profile = choice.profile.trim();
     if (!choice.model.trim()) return [];
-    return resolveProfileCredentialIds(profile, settings);
+    return resolveProfileCredentialIds(profile, settings, official);
   }))];
 }
 

@@ -119,7 +119,7 @@ class AndroidCronRepository private constructor(
                 AndroidCronRepositoryState(
                     loading = false,
                     scopes = scopes,
-                    activeScopeId = scopeScanner.activeScopeId(scopes),
+                    activeScopeId = GLOBAL_CRON_SCOPE_ID,
                     tasks = scopedTasks.map { scoped ->
                         val supported = scoped.task.mobileSupported
                         AndroidCronTask(

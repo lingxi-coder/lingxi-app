@@ -1,0 +1,23 @@
+{
+  "pid": 94187,
+  "command": [
+    "xcodebuild",
+    "-xctestrun",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/Build/Products/LingxiCodeFull_iphoneos27.1-arm64.xctestrun",
+    "-destination",
+    "id=00008030-001549902184802E",
+    "-resultBundlePath",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-device-remote-unit.xcresult",
+    "-parallel-testing-enabled",
+    "NO",
+    "-only-testing:LingxiCodeTests/RemoteBotsTests",
+    "-only-testing:LingxiCodeTests/RemoteControlTests",
+    "test-without-building"
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app",
+  "floor_gib": 4,
+  "started_at": 1793248361.814997,
+  "exit_code": 0,
+  "stopped_for_disk": false,
+  "free_gib": 6.912
+}

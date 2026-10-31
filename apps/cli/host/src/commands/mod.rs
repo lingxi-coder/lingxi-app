@@ -19,7 +19,6 @@
 
 use clap::Subcommand;
 
-pub mod deep_links;
 pub mod agents;
 pub mod attach;
 pub mod auth;
@@ -27,6 +26,7 @@ pub mod auto_mode;
 pub mod auto_mode_setup;
 pub mod bg_worker;
 pub mod daemon;
+pub mod deep_links;
 pub mod doctor;
 pub mod gateway;
 pub mod import;
@@ -120,10 +120,10 @@ pub enum Commands {
     Attach(attach::Cli),
     /// Print a background session's recent terminal output
     Logs(logs::Cli),
-    /// Stop a background session. Its conversation is kept: `claude attach <id>` opens it again, `claude --resume` works once it is stopped
+    /// Stop a background session. Its conversation is kept: `lingxi-cli attach <id>` opens it again, `lingxi-cli --resume` works once it is stopped
     #[command(name = "stop", visible_alias = "kill")]
     Stop(stop::Cli),
-    /// Restart a background session, or all of them with --all, so it runs the current Claude Code version
+    /// Restart a background session, or all of them with --all, so it runs the current LingXi version
     Respawn(respawn::Cli),
     /// Delete a background session and its worktree. Unlike `stop`, works on
     /// already-exited sessions.

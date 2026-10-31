@@ -1,9 +1,13 @@
 # Local App Agent on Desktop
 
-Protocol status: migration to the official AG-UI 1.0 Schema and SDK 1.0.3 is in
-progress. The [shared protocol contract](LOCAL_APP_AGENT_PROTOCOL.md) defines the
-input, event and client boundary. Recorded prototype tests are separate from
-current protocol and package acceptance.
+Local App Agent uses the official AG-UI 1.0 Schema and SDK 1.0.3. The
+[shared protocol contract](LOCAL_APP_AGENT_PROTOCOL.md) defines the input,
+event and client boundary. Source checks and signed-package acceptance are
+recorded separately in the acceptance report.
+
+Only the current AG-UI Agent API and persistence format are supported. Source
+import and publication require a schema 2 manifest; the library has no legacy
+archive or old-package conversion interface.
 
 Desktop Local Apps call an independent Agent through `window.localApp.agent`. The native Apps library owns the selected model, approved tools and Skills, task limits, and optional Agent background permission. The page never chooses provider credentials, a Harness session, a host path, or a permission mode.
 
@@ -74,13 +78,37 @@ Every request is owned by the trusted host's active app, immutable release diges
 
 A one-shot request with no tools or Skills runs through Harness `SideQuery`. It is stateless: it uses only that request's prompt and attachments, has no creator conversation, app-chat history, personal/project memory, or inherited tools. Strict structured output is validated through the configured SideQuery path; the host does not scrape JSON from arbitrary response text. A request with tools or Skills runs in a private `bridge-server --app-agent` subprocess that constructs an isolated Desktop Harness runtime. Persistent App Chats always use that runtime, even when a turn requests no tools, because their context belongs to the App Chat.
 
-Each App Chat has a host-assigned Harness session under `<config>/local-apps/v2/apps/<appId>/agent/chats/<chatId>`. Harness JSONL recording, cold resumption and normal compaction preserve its conversation across turns. The model context comes from that App-owned transcript; Desktop does not rebuild history by concatenating cached chat messages into a prompt. The session ID and directory stay private to the host. The separate App task/chat index is App-scoped. Canonical protocol messages are separate from the Harness model transcript; host-owned Chat assets preserve standard content parts for history and cold resumption. Private asset paths are never serialized to the page. Task metadata is separate from message content. Deleting the creator chat does not delete an App Chat.
+Each App Chat has a host-assigned Harness session under
+`<config>/local-apps/v2/apps/<appId>/agent/agui-v1/chats/<chatId>`.
+Every turn writes a fresh generation from the last successfully committed
+checkpoint. Failed or cancelled generations never become the next turn's
+history. Tool files use the separate persistent `workspaces/<chatId>` directory;
+the transcript directory is private host storage.
+
+The host retains the original conversation and inline attachments. When its
+model context approaches the selected model's limit, a controlled SideQuery
+summarizes complete earlier successful rounds for outgoing requests only. It
+does not rewrite the original transcript, re-execute earlier tools or include
+the current input in that summary. Tool calls and results stay within their
+user round. The App reads standard Chat history and sends its new user message;
+it does not implement its own compression or concatenate cached history into
+a prompt. The host still enforces finite storage, input and execution limits.
+
+Canonical protocol messages are separate from the Harness model transcript;
+managed Chat assets retain standard content parts for history and cold resume.
+Host session IDs, transcript locations and managed asset paths stay private;
+public task metadata remains separate from message content. Deleting the
+creator chat does not delete an App Chat.
 
 The runtime starts from a fresh App execution profile. It does not inherit the creating chat, its transcript, personal or project memory, user/project hooks, plugins, skills, or unselected MCP servers. Explicit managed policy and its trusted controls still apply. Built-in tools keep their normal host permission and filesystem/sandbox behavior; this profile does not add an operating-system sandbox.
 
 For each turn, requested tools must be declared by the release and granted by native Apps settings. MCP authorization binds the exact server configuration ID and revision, original tool name, and definition digest. Search, lookup, approval, execution, reconnect, and later dispatch revalidate that grant. A changed MCP definition requires renewed approval. Delegation, extension installation and configuration-administration tools are excluded from the initial catalog. Tool approval and `AskUserQuestion` are handled by trusted Desktop UI; pages have no approval API.
 
+Persistent App Chat uses only tools that explicitly support a durable, self-contained history. Tool outputs stay inline within a 2 MiB result limit; shell output has a 256 KiB limit. Shell work remains in the foreground without output spools or detached tasks. Unsupported tools fail before the first model request; opaque external result handles fail verification instead of becoming a restorable Chat result. These constraints do not change ordinary user chats.
+
 Runtime Skills are declared in `manifest.agent.skills` and separately approved by the host. The request may select only Skills in both sets. The host copies selected Skill subtrees from the immutable release into the isolated task or Chat workspace after verifying each release file's path, size and digest. Skills add instructions and files, not permissions; scripts can run only through independently granted tools and existing task permissions.
+
+Each run receives a fresh, host-pinned Skill copy. The host removes it only after tool shutdown and drain are confirmed. An unfinished drain retains both the Skill scope and the Chat concurrency fence; a process exit alone does not prove that cleanup completed.
 
 Task states are `queued`, `running`, `succeeded`, `failed`, `cancelled`, and `interrupted`. Defaults are 20 model turns and 10 minutes. Native limits can be raised up to 100 turns and one hour; an app may only lower them. One Agent task may run per App at a time. Progress reports observed model-turn counts and the configured limit, not a percentage. Usage reported by the executor is recorded by the host and mapped only to supported standard usage fields or an explicitly named host resource; unknown fields are not invented as standard AG-UI fields. Unknown values are omitted, not replaced with zero. Usage is accounting information, not a hard spending guarantee.
 

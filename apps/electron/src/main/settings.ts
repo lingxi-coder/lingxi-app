@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
+import { isInside } from './bots/files.js';
 import { isSessionId } from './sessionIdentity.js';
 
 import {
@@ -42,16 +43,31 @@ export class SettingsStore {
   // test root — would otherwise never match and the app's own scheduled
   // workspace would be rejected as "not in the project list".
   private readonly managedWorkspace: string;
+  private readonly scheduledSessionWorkspaces = new Map<string, { projectPath: string; taskId: string; memory: string }>();
+  // The app's own data folder, as a real path when it can be resolved.
+  private readonly userDataFolder: string;
 
   constructor(userData: string) {
     this.settingsPath = join(userData, 'settings.v1.json');
     const managed = join(userData, 'scheduled-workspace');
     let canonical = managed;
+    let folder = userData;
     try {
       mkdirSync(managed, { recursive: true, mode: 0o700 });
       canonical = realpathSync.native(managed);
+      folder = realpathSync.native(userData);
     } catch { /* Fall back to the literal path; requireProject still mkdirs. */ }
     this.managedWorkspace = canonical;
+    try {
+      const rows: unknown = JSON.parse(readFileSync(join(userData, 'scheduled-session-workspaces.json'), 'utf8'));
+      if (!Array.isArray(rows)) throw new Error('Invalid scheduled workspace registry.');
+      for (const row of rows) {
+        if (!row || !isSessionId(row.sessionId) || typeof row.projectPath !== 'string' || !isAbsolute(row.projectPath)
+          || typeof row.taskId !== 'string' || typeof row.memory !== 'string' || !isAbsolute(row.memory)) throw new Error('Invalid scheduled workspace registry.');
+        this.scheduledSessionWorkspaces.set(row.sessionId, { projectPath: row.projectPath, taskId: row.taskId, memory: row.memory });
+      }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    this.userDataFolder = folder;
     this.settings = this.readSettings();
   }
 
@@ -75,14 +91,29 @@ export class SettingsStore {
       const settings = parseSettings(raw);
       // Decode the managed scope separately so the Project limit cannot discard
       // sessions belonging to the app's scheduled workspace or user projects.
-      const managed = parseSettings({ ...input, projects: [this.scheduledWorkspace] });
-      if (input['activeProject'] === this.scheduledWorkspace) settings.activeProject = this.scheduledWorkspace;
-      if (managed.activeSession) settings.activeSession = managed.activeSession;
-      settings.pinnedSessions.push(...managed.pinnedSessions);
-      settings.archivedSessions = [...(settings.archivedSessions ?? []), ...(managed.archivedSessions ?? [])];
-      if (managed.sessionTranscriptSelections?.length) settings.sessionTranscriptSelections = [
-        ...(settings.sessionTranscriptSelections ?? []), ...managed.sessionTranscriptSelections,
-      ];
+      const referencedPaths = new Set<string>();
+      if (typeof input['activeProject'] === 'string') referencedPaths.add(input['activeProject']);
+      const active = input['activeSession'];
+      if (active && typeof active === 'object' && typeof (active as Record<string, unknown>)['projectPath'] === 'string') referencedPaths.add((active as { projectPath: string }).projectPath);
+      for (const key of ['pinnedSessions', 'archivedSessions', 'sessionTranscriptSelections']) {
+        const rows = input[key];
+        if (Array.isArray(rows)) for (const row of rows) {
+          if (row && typeof row.projectPath === 'string') referencedPaths.add(row.projectPath);
+        }
+      }
+      const managedPaths = this.managedWorkspacePaths();
+      for (const path of referencedPaths) {
+        if (!managedPaths.has(path)) continue;
+        if (settings.projects.includes(path)) continue;
+        const managed = parseSettings({ ...input, projects: [path] });
+        if (input['activeProject'] === path) settings.activeProject = path;
+        if (managed.activeSession) settings.activeSession = managed.activeSession;
+        settings.pinnedSessions.push(...managed.pinnedSessions);
+        settings.archivedSessions = [...(settings.archivedSessions ?? []), ...(managed.archivedSessions ?? [])];
+        if (managed.sessionTranscriptSelections?.length) settings.sessionTranscriptSelections = [
+          ...(settings.sessionTranscriptSelections ?? []), ...managed.sessionTranscriptSelections,
+        ];
+      }
       if (settings.apiBaseUrl) {
         try { settings.apiBaseUrl = validateApiBaseUrl(settings.apiBaseUrl); }
         catch { delete settings.apiBaseUrl; }
@@ -145,7 +176,7 @@ export class SettingsStore {
   }
 
   activateProject(canonical: string): void {
-    this.settings = canonical === this.scheduledWorkspace
+    this.settings = this.isManagedWorkspace(canonical)
       ? { ...this.settings, activeProject: canonical } : withActiveProject(this.settings, canonical);
     this.persist();
   }
@@ -181,6 +212,23 @@ export class SettingsStore {
     return this.getPublic();
   }
 
+  /**
+   * Show a session of a Bot in the window. The Bot's folder is not a project, so
+   * the reference is not checked against the project list; the caller has
+   * established that it is a Bot's. It lives in memory only, like an unsent
+   * draft: the session the app reopens at startup is the owner's own.
+   */
+  setActiveBotSession(ref: SessionRef): PublicSettings {
+    this.volatileActiveSession = { ...ref };
+    return this.getPublic();
+  }
+
+  /** Stop showing the in-memory session if it is one of this folder's (a Bot that is gone); the saved one shows again. */
+  dropVolatileSessionIn(folder: string): PublicSettings {
+    if (this.volatileActiveSession && this.volatileActiveSession.projectPath === folder) this.volatileActiveSession = undefined;
+    return this.getPublic();
+  }
+
   /** Move host metadata with the transcript's stable UUID in one settings write. */
   relocateSession(ref: SessionRef, projectPath: string, selection?: Omit<SessionTranscriptSelection, keyof SessionRef> | null): void {
     if (selection && (!isAbsolute(selection.catalogProjectPath) || selection.catalogProjectPath.length > 32_768
@@ -193,7 +241,7 @@ export class SettingsStore {
     const moved = { projectPath, sessionId: ref.sessionId };
     const matches = (entry: SessionRef) => entry.sessionId === ref.sessionId && entry.projectPath === ref.projectPath;
     const relocate = <T extends SessionRef>(entry: T): T => matches(entry) ? { ...entry, projectPath } : entry;
-    const next = withAddedProject(previous, projectPath);
+    const next = this.isManagedWorkspace(projectPath) ? { ...previous } : withAddedProject(previous, projectPath);
     next.activeProject = projectPath;
     // Unsent drafts have no transcript to restore after a process restart.
     // Move their visible owner without making the volatile UUID durable.
@@ -247,8 +295,47 @@ export class SettingsStore {
     return this.managedWorkspace;
   }
 
+  private managedWorkspacePaths(): Set<string> {
+    return new Set([this.scheduledWorkspace, ...[...this.scheduledSessionWorkspaces.values()].map(row => row.projectPath)]);
+  }
+
+  isManagedWorkspace(path: string): boolean {
+    return this.managedWorkspacePaths().has(path);
+  }
+
+  scheduledSessionWorkspace(sessionId: string): { projectPath: string; taskId: string; memory: string } | undefined {
+    const row = this.scheduledSessionWorkspaces.get(sessionId);
+    return row ? { ...row } : undefined;
+  }
+
+  scheduledSessionRefs(): SessionRef[] {
+    return [...this.scheduledSessionWorkspaces].map(([sessionId, row]) => ({ sessionId, projectPath: row.projectPath }));
+  }
+
+  registerScheduledSession(ref: SessionRef, taskId: string, memory: string): void {
+    if (!isSessionId(ref.sessionId) || !isAbsolute(ref.projectPath) || !isAbsolute(memory)) throw new Error('Invalid scheduled session workspace.');
+    if (this.scheduledSessionWorkspaces.has(ref.sessionId)) throw new Error('Scheduled session workspace is already registered.');
+    const rows = [...this.scheduledSessionWorkspaces].map(([sessionId, row]) => ({ sessionId, ...row }));
+    rows.push({ ...ref, taskId, memory });
+    const file = join(dirname(this.settingsPath), 'scheduled-session-workspaces.json');
+    const temporary = `${file}.tmp`;
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(temporary, JSON.stringify(rows), { mode: 0o600 });
+    renameSync(temporary, file);
+    this.scheduledSessionWorkspaces.set(ref.sessionId, { projectPath: ref.projectPath, taskId, memory });
+  }
+
   isTrustedWorkspace(path: string): boolean {
-    return path === this.scheduledWorkspace || this.hasProject(path);
+    return this.isManagedWorkspace(path) || this.hasProject(path);
+  }
+
+  /**
+   * Whether a folder belongs to the app's own data (its settings, logs and
+   * credentials, and the Bots), which is no place for a project of the owner's.
+   * The scheduled workspace is in there, and is one the app manages itself.
+   */
+  isAppDataFolder(canonical: string): boolean {
+    return isInside(canonical, this.userDataFolder) && !isInside(canonical, this.managedWorkspace);
   }
 
   hasProject(canonical: string): boolean {
@@ -284,7 +371,7 @@ export class SettingsStore {
   setSessionPinned(session: PinnedSessionRecord, pinned: boolean): PublicSettings {
     if (pinned && this.isSessionArchived(session)) throw new Error('Restore this archived chat before pinning it.');
     const projects = this.settings.projects;
-    const scoped = session.projectPath === this.scheduledWorkspace ? { ...this.settings, projects: [...projects, this.scheduledWorkspace] } : this.settings;
+    const scoped = this.isManagedWorkspace(session.projectPath) ? { ...this.settings, projects: [...projects, session.projectPath] } : this.settings;
     this.settings = { ...withSessionPinned(scoped, session, pinned), projects };
     this.persist();
     return this.getPublic();
@@ -294,6 +381,7 @@ export class SettingsStore {
     telemetryEnabled?: boolean;
     theme?: 'dark' | 'light' | 'system';
     collapseThoughtsByDefault?: boolean;
+    botsKeepAwake?: boolean;
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
@@ -336,6 +424,9 @@ export class SettingsStore {
     if ('collapseThoughtsByDefault' in patch && typeof patch.collapseThoughtsByDefault !== 'boolean') {
       throw new Error('invalid collapseThoughtsByDefault');
     }
+    if ('botsKeepAwake' in patch && typeof patch.botsKeepAwake !== 'boolean') {
+      throw new Error('invalid botsKeepAwake');
+    }
     if ('theme' in patch) {
       if (patch.theme !== 'dark' && patch.theme !== 'light' && patch.theme !== 'system') {
         throw new Error('invalid theme');
@@ -368,6 +459,9 @@ export class SettingsStore {
     }
     if (typeof patch.collapseThoughtsByDefault === 'boolean') {
       this.settings.collapseThoughtsByDefault = patch.collapseThoughtsByDefault;
+    }
+    if (typeof patch.botsKeepAwake === 'boolean') {
+      this.settings.botsKeepAwake = patch.botsKeepAwake;
     }
     this.persist();
     return this.getPublic();

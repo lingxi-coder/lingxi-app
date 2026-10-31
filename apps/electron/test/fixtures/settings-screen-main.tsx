@@ -1,5 +1,5 @@
 import { useI18n } from '../../src/renderer/i18n/useI18n';
-import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
+import { LANGUAGE_STORAGE_KEY, invalidateLanguagePreference } from '../../src/renderer/i18n/locale';
 import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
@@ -26,6 +26,7 @@ Object.assign(window, { lingxi: { account: {
 
 // Keep the pre-existing interaction scenarios deterministic across developer locales.
 if (!localStorage.getItem(LANGUAGE_STORAGE_KEY)) localStorage.setItem(LANGUAGE_STORAGE_KEY, 'zh-Hans');
+invalidateLanguagePreference();
 function Fixture() {
   useI18n();
   const fixtureTheme = new URLSearchParams(window.location.search).get('theme') === 'dark' ? 'dark' : 'light';
@@ -139,6 +140,10 @@ function Fixture() {
       models: [],
       modelDetails: [],
       currentModel: 'openai/gpt-5.4',
+      providerModelCatalog: [{
+        provider_id: 'deepseek', provider_label: 'DeepSeek', models: [],
+        definition: { base_url: 'https://api.deepseek.com', protocol: 'open_ai_chat', auth: 'api_key', credential_env: null, default_model_id: 'deepseek-flash', description: 'V4' },
+      }],
       conversationControls: null,
       fastMode: false,
       permissionMode: 'default',
@@ -290,6 +295,7 @@ function Fixture() {
       setProviderCredentials((values) => values.filter((entry) => entry.providerId !== providerId));
     },
     refreshProviderCredential: noopAsyncVoid,
+    refreshModelPicker: noopAsyncVoid,
     setModelPickerVisibility: noopAsyncVoid,
     updatePermissionRules,
     setDefaultPermissionMode: noopAsyncVoid,

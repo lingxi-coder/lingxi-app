@@ -51,7 +51,7 @@ test('a native bridge cannot open another owner or use another connection lease'
   const first = new NativeMediaDevices({ audio, owner });
   const second = new NativeMediaDevices({ audio, owner: { type: 'session', session_id: 'session-b' } });
   const foreign = await second.request(open());
-  assert.equal(foreign.result.type, 'error');
+  assert.equal(foreign.result.type, 'open_failed_without_resource');
   assert.equal(calls.length, 0);
   assert.equal((await first.request(open())).result.type, 'opened');
   const guessed = await second.request({ request_id: 'guess', request: { type: 'stop', lease_id: 'lease-a' } });
@@ -86,8 +86,9 @@ test('closing a connection stops a native lease that finishes opening later', as
   await closing;
   const result = await pending;
   assert.deepEqual(stops, ['lease-a']);
-  assert.equal(result.result.type, 'error');
-  if (result.result.type === 'error') assert.equal(result.result.error.kind, 'cancelled');
+  assert.equal(result.request_id, 'open-a');
+  assert.equal(result.result.type, 'open_failed_without_resource');
+  if (result.result.type === 'open_failed_without_resource') assert.equal(result.result.error.kind, 'cancelled');
 });
 
 test('capture permits one reader and rejects replayed frames with confirmed native cleanup', async () => {
@@ -175,4 +176,34 @@ test('a late open whose stop fails remains tracked for disposal retry', async ()
   await rejected;
   await bridge.dispose();
   assert.equal(stopAttempts, 2);
+});
+
+
+test('a live or unknown open identity stays reserved after response history rollover', async () => {
+  for (const outcome of ['opened', 'unknown'] as const) {
+    let dispatches = 0;
+    const bridge = new NativeMediaDevices({ owner, audio: { executeMediaDevice: async (request) => {
+      dispatches++;
+      if (request.request.type === 'open') return outcome === 'opened' ? opened(request.request_id)
+        : { request_id: request.request_id, result: { type: 'error', error: { kind: 'native_failure', message: 'unknown' } } };
+      if (request.request.type === 'stop') return { request_id: request.request_id, result: { type: 'stopped' } };
+      return { request_id: request.request_id, result: { type: 'input', frame: null } };
+    } } });
+    await bridge.request(open());
+    // For an unknown open, use separately rejected owner requests to roll history.
+    if (outcome === 'opened') {
+      for (let i = 0; i < 257; i++) await bridge.request({ request_id: `read-${i}`, request: { type: 'next_input', lease_id: 'lease-a' } });
+    } else {
+      // Exercise completed history through successful independent opens/stops.
+      for (let i = 0; i < 257; i++) {
+        const distinct = open(`other-${i}`);
+        await bridge.request(distinct);
+      }
+    }
+    const count = dispatches;
+    const stale = open();
+    if (stale.request.type === 'open') stale.request.request.owner = { type: 'session', session_id: 'foreign' };
+    assert.equal((await bridge.request(stale)).result.type, 'error');
+    assert.equal(dispatches, count);
+  }
 });

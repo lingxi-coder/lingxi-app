@@ -91,6 +91,34 @@ class AudioResourceCoordinatorTest {
     }
 
     @Test
+    fun mediaNativeStopRequiresTheExactActiveLeaseAndSettledCallback() = runTest {
+        val coordinator = AudioResourceCoordinator(epoch)
+        val lease = (coordinator.acquire(
+            operation("media"), AudioOwnerKey.ui("screen-a"), AudioResource.Capture,
+        ) as AudioLeaseDecision.Granted).lease
+        val stopEntered = CompletableDeferred<Unit>()
+        val finishStop = CompletableDeferred<Unit>()
+        var stopCalls = 0
+        val admission = AudioLeaseAdmission(coordinator) {
+            stopCalls += 1
+            stopEntered.complete(Unit)
+            finishStop.await()
+        }
+        var receipt: Boolean? = null
+        val stop = launch { receipt = admission.stopNativeRetainingLease(lease) }
+        runCurrent()
+        stopEntered.await()
+        assertEquals(null, receipt)
+        finishStop.complete(Unit)
+        stop.join()
+        assertEquals(true, receipt)
+        assertTrue(coordinator.isActive(lease))
+        coordinator.release(lease)
+        assertFalse(admission.stopNativeRetainingLease(lease))
+        assertEquals(1, stopCalls)
+    }
+
+    @Test
     fun cancellationDuringPreemptionStopsOldDeviceAndDoesNotInstallReplacement() = runTest {
         val coordinator = AudioResourceCoordinator(epoch)
         val playback = coordinator.acquire(

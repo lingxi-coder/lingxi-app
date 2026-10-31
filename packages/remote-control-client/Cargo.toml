@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Viewer-side client of the LingXi Remote Control protocol (lingxi-rc/1)."
+description = "Viewer-side Remote Control protocol client."
 
 [features]
 webrtc = ["dep:lingxi-webrtc-core", "dep:webrtc"]

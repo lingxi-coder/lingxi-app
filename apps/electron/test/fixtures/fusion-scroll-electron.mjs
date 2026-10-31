@@ -15,7 +15,7 @@ async function main() {
       while (Date.now() < deadline) { if (await run(expression)) return; await delay(20); }
       throw new Error(`Timed out: ${expression}\n${await run('document.body.innerText')}`);
     };
-    const trigger = `document.querySelector('button[aria-label="选择模型…"]')`;
+    const trigger = `document.querySelector('button[aria-label="选择模型"]')`;
     const key = async (keyCode) => {
       window.webContents.sendInputEvent({ type: 'keyDown', keyCode });
       window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
@@ -105,7 +105,7 @@ async function main() {
     await run(`${analyst}.click()`); await wait('Boolean(document.querySelector("[role=listbox]"))');
     await run(`[...document.querySelectorAll('[role=option]')].find(option => option.textContent.includes('Model 69')).click()`);
     await input('[aria-label="策略名称"]', '深度审查');
-    await run(`document.querySelector('[aria-label="Back to app"]').click()`); await delay(60);
+    await run(`document.querySelector('.settings-back-button').click()`); await delay(60);
     process.stderr.write('fixture: guard\n');
     result.closeGuard = await run(`window.fusionFixture.closes === 0 && document.body.innerText.includes('当前修改尚未保存')`);
     await clickText('继续编辑');

@@ -227,6 +227,7 @@ struct LingxiAppShortcuts: AppShortcutsProvider {
             shortTitle: "settings_app_open_terminal",
             systemImageName: "terminal"
         )
+#if compiler(>=6.4)
         if #available(iOS 27.0, *) {
             AppShortcut(
                 intent: RunLocalAppAgentIntent(),
@@ -235,6 +236,7 @@ struct LingxiAppShortcuts: AppShortcutsProvider {
                 systemImageName: "sparkles"
             )
         }
+#endif
     }
 
     static let shortcutTileColor: ShortcutTileColor = .purple

@@ -16,7 +16,7 @@ test('the defaults are the project database, the default STUN servers and no swi
   });
 });
 
-test('the push API address can be moved by LINGXI_REMOTE_PUSH_URL, with the same distrust as the database address', () => {
+test('the push API address can be configured with the same distrust as the database address', () => {
   assert.equal(remoteControlConfig({ LINGXI_REMOTE_PUSH_URL: 'https://push.example.com/api/' }, true).pushApiUrl, 'https://push.example.com/api');
   assert.equal(remoteControlConfig({ LINGXI_REMOTE_PUSH_URL: 'http://127.0.0.1:5001/x/us-central1/pushApi' }, true).pushApiUrl, 'http://127.0.0.1:5001/x/us-central1/pushApi');
   for (const bad of ['http://example.com', 'ftp://example.com', 'https://user:pass@example.com', 'not a url']) {

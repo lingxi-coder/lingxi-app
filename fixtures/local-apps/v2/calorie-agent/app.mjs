@@ -227,7 +227,7 @@ function renderResult(value) {
 }
 
 const phases = { starting: '正在连接模型…', thinking: '正在识别餐食…', tool: '正在处理结果…',
-  waiting_for_permission: '请在 LingXi 宿主窗口中处理工具授权。', waiting_for_answer: '请在 LingXi 宿主窗口中回答待确认问题。' };
+  waiting_for_permission: '请在宿主应用窗口中处理工具授权。', waiting_for_answer: '请在宿主应用窗口中回答待确认问题。' };
 function onTask(task) {
   const active = !terminalStates.has(task.state);
   setBusy(active);
@@ -362,7 +362,7 @@ window.addEventListener('pagehide', () => {
 });
 try { renderHistory(); } catch (failure) { error(failure.message); }
 if (!client) {
-  $('status').textContent = hostError || '请从支持 Agent 的灵犀应用库中打开，并在应用详情中选择模型与授权。普通浏览器无法调用宿主 Agent。';
+  $('status').textContent = hostError || '请从支持 Agent 的应用库中打开，并在应用详情中选择模型与授权。普通浏览器无法调用宿主 Agent。';
 } else {
   setBusy(true);
   client.resume().then((runResult) => {

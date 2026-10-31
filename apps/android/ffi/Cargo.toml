@@ -44,6 +44,7 @@ uniffi = [
     # so the stubs are inert for Git). Gated to `uniffi` so the plain build is
     # unaffected; the probe body itself is `cfg(target_os = "android")`.
     "tool-api/test-support",
+    "dep:tracing",
     "harness-runtime/uniffi",
 ]
 
@@ -73,6 +74,7 @@ orchestrator = { workspace = true, optional = true }
 # Remote Control viewer client (`lingxi-rc/1`), exposed to the app by `src/remote.rs`.
 remote-control-client = { path = "../../../packages/remote-control-client", optional = true, features = ["native-media"] }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
+tracing = { workspace = true, optional = true }
 # P3-T5: the `AndroidShellToolCtx` carrier type assigned onto `MobileConfig`
 # (the Shell-tool registration gate result). Optional + pulled under `uniffi` so
 # the plain (no-feature) build stays minimal.

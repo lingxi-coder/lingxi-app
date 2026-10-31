@@ -5,12 +5,15 @@ import { createHash } from 'node:crypto';
 import { validateCatalog, selectCatalog, compareVersions, createHandler, ApiError } from '../src/catalog.mjs';
 
 const seed = JSON.parse(readFileSync(new URL('../src/seed.json', import.meta.url), 'utf8'));
-const sample = () => ({ schemaVersion: 1, providers: [structuredClone(seed.providers[0])], models: [structuredClone(seed.models[0])] });
+const sample = () => ({ schemaVersion: 2, providers: [structuredClone(seed.providers[0])], models: [structuredClone(seed.models[0])] });
+const caps = [...new Set(seed.providers.flatMap((p) => p.requiredCapabilities))];
+const capabilitiesQuery = caps.map((c) => `&capability=${encodeURIComponent(c)}`).join('');
+const select = (catalog, platform, version) => selectCatalog(catalog, platform, version, caps);
 const admin = async () => ({ uid: 'admin', model_catalog_admin: true, email_verified: true });
-const request = (path, init) => new Request(`https://api.test${path}`, init);
+const request = (path, init) => new Request(`https://api.test${path}${path.includes('schemaVersion=') ? capabilitiesQuery : ''}`, init);
 
 test('SDK seed preserves all provider/model identities and fits bounded payload size', () => {
-  const c = validateCatalog(seed); assert.equal(c.providers.length, 46); assert.equal(c.models.length, 1327);
+  const c = validateCatalog(seed); assert.equal(c.providers.length, 11); assert.equal(c.models.length, 25);
   for (const p of c.providers) {
     assert.equal(p.executionDefinition.format, 'llm-client-preset-toml');
     assert.equal(createHash('sha256').update(p.executionDefinition.source, 'utf8').digest('hex'), p.executionDefinition.sha256);
@@ -21,9 +24,9 @@ test('execution definitions survive filtering and public JSON without lossy proj
   const source = '# 完整 SDK 定义 🧭\r\ninference = { reasoning = "thinking_type" }\r\n[pricing.peak]\r\nutc_windows = ["01:00-04:00"]\r\n';
   c.providers[0].executionDefinition = { format: 'llm-client-preset-toml', source, sha256: createHash('sha256').update(source).digest('hex') };
   const validated = validateCatalog(c);
-  assert.equal(selectCatalog(validated, 'android', '1.0.0').providers[0].executionDefinition.source, source);
+  assert.equal(select(validated, 'android', '1.0.0').providers[0].executionDefinition.source, source);
   const handle = createHandler({ current: async () => ({ id: 'release', createdAt: 1, catalog: validated }) }, admin, []);
-  const response = await handle(request('/v1/model-catalog?platform=android&appVersion=1.0.0&schemaVersion=1'));
+  const response = await handle(request('/v1/model-catalog?platform=android&appVersion=1.0.0&schemaVersion=2'));
   assert.equal(response.status, 200);
   assert.equal((await response.json()).providers[0].executionDefinition.source, source);
   validated.providers[0].executionDefinition.source += '# altered';
@@ -46,20 +49,20 @@ test('catalog validation rejects credentials, duplicate identities, missing prov
 });
 test('platform and version filtering uses inclusive bounds and respects provider disablement', () => {
   const c = sample(); Object.assign(c.models[0], { platforms: ['android'], minAppVersion: '1.0.0', maxAppVersion: '2.0.0' });
-  assert.equal(selectCatalog(c, 'desktop', '1.0.0').models.length, 0);
-  assert.equal(selectCatalog(c, 'android', '1.0.0-rc.1').models.length, 0);
-  assert.equal(selectCatalog(c, 'android', '1.0.0').models.length, 1);
-  assert.equal(selectCatalog(c, 'android', '2.0.0').models.length, 1);
-  assert.equal(selectCatalog(c, 'android', '2.0.1').models.length, 0);
-  c.providers[0].enabled = false; assert.equal(selectCatalog(c, 'android', '1.0.0').models.length, 0);
+  assert.equal(select(c, 'desktop', '1.0.0').models.length, 0);
+  assert.equal(select(c, 'android', '1.0.0-rc.1').models.length, 0);
+  assert.equal(select(c, 'android', '1.0.0').models.length, 1);
+  assert.equal(select(c, 'android', '2.0.0').models.length, 1);
+  assert.equal(select(c, 'android', '2.0.1').models.length, 0);
+  c.providers[0].enabled = false; assert.equal(select(c, 'android', '1.0.0').models[0].status, 'disabled');
 });
 test('public API returns stable ETags, rejects unsupported schemas and never exposes a draft', async () => {
   const service = { current: async () => ({ id: 'release', createdAt: 1, catalog: sample() }) };
   const handle = createHandler(service, admin, ['https://lingxios.net']);
-  const path = '/v1/model-catalog?platform=desktop&appVersion=1.0.0&schemaVersion=1';
+  const path = '/v1/model-catalog?platform=desktop&appVersion=1.0.0&schemaVersion=2';
   const first = await handle(request(path)); assert.equal(first.status, 200); assert.ok(first.headers.get('ETag'));
   const cached = await handle(request(path, { headers: { 'If-None-Match': first.headers.get('ETag') } })); assert.equal(cached.status, 304);
-  assert.equal((await handle(request('/v1/model-catalog?platform=desktop&appVersion=1.0.0&schemaVersion=2'))).status, 400);
+  assert.equal((await handle(request('/v1/model-catalog?platform=desktop&appVersion=1.0.0&schemaVersion=1'))).status, 400);
   service.current = async () => null; assert.equal((await handle(request(path))).status, 404);
 });
 test('admin API verifies token, verified email, exact claim and allowed browser origin', async () => {
@@ -77,4 +80,17 @@ test('draft conflicts remain actionable HTTP 409 rather than silently overwritin
   const handle = createHandler({ save: async () => { throw new ApiError(409, 'REVISION_CONFLICT'); } }, admin, []);
   const response = await handle(request('/v1/admin/models', { method: 'PUT', headers: { Authorization: 'Bearer test' }, body: JSON.stringify({ expectedRevision: 0, catalog: sample() }) }));
   assert.equal(response.status, 409); assert.equal((await response.json()).error.code, 'REVISION_CONFLICT');
+});
+
+test('runtime capability requirements are enforced and disabled records remain explicit', () => {
+  const c = sample();
+  c.models[0].requiredCapabilities = ['feature.future'];
+  assert.equal(select(c, 'ios', '1.0.0').models.length, 0);
+  c.models[0].requiredCapabilities = [];
+  c.models[0].status = 'deprecated';
+  assert.equal(select(c, 'ios', '1.0.0').models[0].status, 'deprecated');
+  c.models[0].status = 'disabled';
+  assert.equal(select(c, 'ios', '1.0.0').models[0].status, 'disabled');
+  c.providers[0].requiredCapabilities.push('protocol.future');
+  assert.equal(select(c, 'ios', '1.0.0').providers.length, 0);
 });

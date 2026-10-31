@@ -1,4 +1,5 @@
 import { tr } from '../i18n/locale';
+import { desktopHost } from './bridgeConnection';
 /**
  * What the renderer shows of Remote Control: the pure rules for the settings
  * page, the session toggle, the top-bar indicator and `/remote-control`, and
@@ -30,6 +31,20 @@ export function remoteAvailability(status: RemoteControlUiStatus | null): Remote
   if (!status) return { available: false, reason: tr('desktop_shell_remote_loading') };
   if (status.managedDisabled) return { available: false, reason: tr('desktop_shell_remote_disabled') };
   if (!status.signedIn) return { available: false, reason: tr('desktop_shell_remote_signin') };
+  return { available: true };
+}
+
+/**
+ * The same for a Bot's switch, which adds one more condition: Remote Control
+ * must already be on for this computer, because the Bot's switch only decides
+ * which of the computer's sessions viewers may reach. It is not a way to turn
+ * Remote Control on, as the session toggle is.
+ */
+export function botRemoteAvailability(status: RemoteControlUiStatus | null): RemoteAvailability {
+  const general = remoteAvailability(status);
+  if (!general.available || !status) return general;
+  // A running service with the setting off is the development switch.
+  if (!status.enabled && status.state === 'off') return { available: false, reason: tr('bots_remote_computer_off') };
   return { available: true };
 }
 
@@ -206,7 +221,7 @@ export class RemoteControlStore {
   }
 }
 
-const sharedStore = new RemoteControlStore(() => (typeof window === 'undefined' ? undefined : window.lingxi?.remoteControl));
+const sharedStore = new RemoteControlStore(() => desktopHost()?.remoteControl);
 
 /** Live Remote Control status and the sessions viewers may see; both `null` until first read or when the app has no Remote Control. */
 export function useRemoteControl(): RemoteControlSnapshot {
@@ -215,7 +230,7 @@ export function useRemoteControl(): RemoteControlSnapshot {
 
 /** The app's Remote Control API, when this build has one. */
 export function remoteControlApi(): RemoteControlApi | undefined {
-  return typeof window === 'undefined' ? undefined : window.lingxi?.remoteControl;
+  return desktopHost()?.remoteControl;
 }
 
 /** Re-read after a change the events do not report. */

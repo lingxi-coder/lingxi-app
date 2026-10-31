@@ -77,7 +77,7 @@ for (const controlsOnly of [false, true]) {
       assert.equal(result.checks.length, 9);
       assert.deepEqual(result.overview.sections, ['Outputs', 'Subagents', 'Sources']);
       assert.equal(result.overview.width, 300);
-      assert.deepEqual(result.heights, { chat: 44, detail: 44, panel: 390 });
+      assert.deepEqual(result.heights, { chat: 40, detail: 40, panel: 390 });
 
     } finally {
       if (child && child.exitCode === null) child.kill('SIGTERM');

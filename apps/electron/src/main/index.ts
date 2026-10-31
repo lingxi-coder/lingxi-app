@@ -12,16 +12,22 @@ import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
 import { installDeepLinks } from './deepLinks.js';
 import { installCrashReporting } from './crashReporting.js';
 import { AccountService } from './account.js';
+import { TeamsService } from './teams/service.js';
+import { installTeamsIpc } from './teams/ipc.js';
+import { TeamConnector } from './teams/connector.js';
+import { TeamPrivateStore } from './teams/privateStore.js';
+import { resolveTeamBinaries } from './teams/process.js';
 import { accountSessionStore } from './account-storage.js';
 import { brokerAccountSessionStore } from './account-broker-storage.js';
 import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
-import { app, BrowserWindow, dialog, Menu, net, powerMonitor, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
+import { app, BrowserWindow, dialog, Menu, net, powerMonitor, powerSaveBlocker, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
 import { applicationMenuTemplate } from './applicationMenu.js';
 import { CH_APPLICATION_MENU } from '../shared/applicationMenu.js';
 import { installDesktopUpdates } from './desktopUpdates.js';
 import { desktopUpdateManifestUrl } from '../shared/productConfig.js';
+import { CH_BOTS_PROMPT_SENT, CH_BOTS_TASKS_CHANGED, type BotPromptSentUi, type BotTasksChangedUi } from '../shared/bots.js';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -42,9 +48,26 @@ import { RemoteCommands } from './remoteControl/remoteCommands.js';
 import { nativeImageCodec } from './remoteControl/nativeImageCodec.js';
 import { PushRequester, RemotePush } from './remoteControl/pushRequests.js';
 import { RemoteControlUi } from './remoteControl/rendererIpc.js';
+import { BotContent } from './bots/content.js';
+import { KeepAwake } from './bots/keepAwake.js';
+import { LoginItem } from './bots/loginItem.js';
+import { ownerPreferenceHooks } from './bots/ownerPreferences.js';
+import { BotsUi } from './bots/rendererIpc.js';
+import { BotRouter } from './bots/router.js';
+import { BotService } from './bots/service.js';
+import { BotStore } from './bots/store.js';
+import { TaskChangeAnnouncer } from './bots/taskChanges.js';
+import { BotTasks } from './bots/taskService.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
+import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
+import { TeamOwnerApprovalBroker, TeamApprovalsGateway } from './remoteControl/teamApprovals.js';
+import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
+import { LocalAppRtc } from './local-apps/remoteRtc.js';
+import { PeerHost } from './remoteControl/peerHost.js';
+import { createRtcWindow } from './remoteControl/rtcWindow.js';
+import { parseRtcIceServers } from '../shared/remoteRtc.js';
 import { remoteControlConfig } from './remoteControl/config.js';
-import { systemClock } from '@lingxi/bridge-client/remote';
+import { DEFAULT_STUN_URLS, systemClock } from '@lingxi/bridge-client/remote';
 import type { RemoteControlService } from './remoteControl/RemoteControlService.js';
 import { ProviderAudioHost } from './audio/providerAudioHost.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
@@ -53,7 +76,7 @@ import { TerminalManager } from './terminal.js';
 import { HostController } from './host.js';
 import { HostNotifier } from './notifications.js';
 import { notificationPresentation } from './notificationPresentation.js';
-import { DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic, resolveModBunExecutable } from './host-utils.js';
+import { BOT_PERMISSION_TIMEOUT_SECS, DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic, resolveModBunExecutable } from './host-utils.js';
 import { SettingsStore } from './settings.js';
 import { ComputerSettingsStore } from './computerSettings.js';
 import { BrowserIntegration } from './browserIntegration.js';
@@ -108,6 +131,15 @@ let remotePolicy: RemotePolicy | null = null;
 let remoteGateway: SessionGateway | null = null;
 let remotePush: RemotePush | null = null;
 let remoteUi: RemoteControlUi | null = null;
+/** Desktop Bots; absent until the product paths are known. */
+let bots: BotService | null = null;
+let stopTeams: (() => void) | undefined;
+let teamConnector: TeamConnector | undefined;
+let teamApprovalBroker: TeamOwnerApprovalBroker | undefined;
+let teamApprovalGateway: TeamApprovalsGateway | undefined;
+/** The endpoint through which Bots hand tasks to each other; made with the Bots. */
+let botRouter: BotRouter | null = null;
+let botTasks: BotTasks | null = null;
 let remotePolicyTimer: NodeJS.Timeout | undefined;
 /** How often the administrator's `managed-settings.json` is read again. */
 const REMOTE_POLICY_RECHECK_MS = 30_000;
@@ -121,7 +153,7 @@ function quitIfNothingNeedsTheApp(): void {
   void (async () => {
     const background = await localApps?.hasBackgroundApps();
     const viewers = (remoteControl?.status().connections.length ?? 0) > 0;
-    if (!background && !viewers && BrowserWindow.getAllWindows().length === 0) app.quit();
+    if (!background && !localApps?.hasRemoteAccess() && !viewers && BrowserWindow.getAllWindows().length === 0) app.quit();
   })().catch(error => console.error('Unable to check background applications', error));
 }
 function getMainWindow(): BrowserWindow | undefined { return [...mainWindows].find(window => !window.isDestroyed()); }
@@ -221,8 +253,8 @@ function createWindow(): BrowserWindow {
     titleBarStyle: 'hiddenInset',
     // Expose the native traffic-light exclusion area to the renderer.
     titleBarOverlay: process.platform === 'darwin' ? true : undefined,
-    // Center the 12px native buttons in the renderer's 44px desktop toolbar.
-    trafficLightPosition: { x: 14, y: 16 },
+    // Center the 12px native buttons in the renderer's 40px desktop toolbar.
+    trafficLightPosition: { x: 14, y: 14 },
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(moduleDirectory, '../preload/index.cjs'),
@@ -377,7 +409,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     diagnostics.add('warn', 'host', `browser integration startup failed: ${sanitizeDiagnostic(error)}`);
   }
   const audioSessionContext = (owner?: import('@lingxi/bridge-client').AudioOwnerDto) => {
-    const sessionId = owner?.type === 'session' ? owner.session_id : settings.getPublic().activeSession?.sessionId;
+    const sessionId = owner?.type === 'session' ? owner.session_id : owner?.type === 'attached' && owner.logical_kind === 'session' ? owner.logical_owner_id : settings.getPublic().activeSession?.sessionId;
     return sessionId ? bridge?.get(sessionId)?.audioSessionContext : undefined;
   };
   const providerAudio = new ProviderAudioHost({
@@ -406,11 +438,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         isForeground: () => windowFocused,
       })
     : null;
-  const sessionCatalog = new ProjectSessionCatalog({
+  const catalogOptions = {
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
-  });
+  };
+  const sessionCatalog = new ProjectSessionCatalog(catalogOptions);
+  // Off unless the owner (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns Remote Control on for this computer.
+  const remoteControlOn = (): boolean => settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1');
   const launchCache = new SessionLaunchCache();
   // The one refresher of the Codex session. Engines get only access tokens.
   // The wall clock is checked every minute and on wake: a timer alone would
@@ -420,22 +455,51 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     onError: (message) => diagnostics.add('warn', 'host', message),
   });
   codexTokens.start();
+  app.on('browser-window-focus', () => bridge?.refreshProviderCatalog('foreground'));
+  app.on('browser-window-blur', () => {
+    setImmediate(() => {
+      if (!BrowserWindow.getFocusedWindow()) bridge?.refreshProviderCatalog('background');
+    });
+  });
+  let catalogOnline = net.isOnline();
+  const catalogConnectivity = setInterval(() => {
+    const online = net.isOnline();
+    if (online !== catalogOnline) {
+      catalogOnline = online;
+      bridge?.refreshProviderCatalog(online ? 'network_restored' : 'network_lost');
+    }
+  }, 5_000);
+  catalogConnectivity.unref();
+  app.once('before-quit', () => clearInterval(catalogConnectivity));
   powerMonitor.on('resume', () => {
     codexTokens.check();
+    bridge?.refreshProviderCatalog('foreground');
     remoteControl?.reconnect();
+    // Timers stand still while the Mac sleeps: the routines that came due and the
+    // tasks whose deadline has passed are looked for by the clock.
+    scheduled?.wake();
+    botTasks?.checkDeadlines();
   });
   /**
    * The one place an OS notification is raised. Shared by the scheduled-task
-   * service and `HostNotifier` so both get the same click behaviour: restore
+   * service and `HostNotifier` so both get the same click behaviour: show
    * the session the notification came from, then raise the window.
    */
   const showNotification = (title: string, body: string, ref?: SessionRef): void => {
     if (!Notification.isSupported()) return;
-    const notification = new Notification(notificationPresentation(title, body, ref));
+    // A Bot's workspace is a folder nobody named; the notification names the Bot.
+    const notification = new Notification(notificationPresentation(title, body, ref, process.platform, ref ? bots?.nameFor(ref.projectPath) : undefined));
     notification.on('click', () => {
-      if (ref) void host?.restoreProjectSession(ref.projectPath, ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error)));
+      const shown = ref ? host?.showNotifiedSession(ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error))) : undefined;
       const window = getMainWindow();
-      window?.show(); window?.focus();
+      if (window) { window.show(); window.focus(); return; }
+      // Opened at login, the app has no window: the click makes one, once the session is
+      // chosen, so that the window opens on it.
+      void Promise.resolve(shown).then(() => {
+        if (!host) return;
+        const created = getMainWindow() ?? createWindow();
+        created.show(); created.focus();
+      });
     });
     notification.show();
   };
@@ -445,18 +509,23 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // Remote Control is built after the notifier; both are looked up when used.
     remote: (kind, sessionId) => remotePush?.notify(kind, sessionId),
     systemIdleSeconds: () => powerMonitor.getSystemIdleTime(),
+    // The tasks between Bots are made after the notifier too.
+    delegation: (sessionKey) => botTasks?.doing(sessionKey),
   });
   notifier.setPreferences(settings.getPublic().notifications);
   bridge = new SessionRuntimeManager({
     getTelemetryConfig: () => settings.getTelemetryConfig(),
-    workspaceSettings: (projectPath) => sessionCatalog.workspaceSettings(projectPath),
+    // A Bot's working directory is not a project: it has its own configuration home and grants.
+    workspaceSettings: (projectPath, ref) => bots?.ownsWorkspace(projectPath)
+      ? bots.launchSettings(projectPath, ref.sessionId) : sessionCatalog.workspaceSettings(projectPath),
     appVersion: app.getVersion(),
-    getSavedPermissionMode: () => settings.getLastPermissionMode(),
-    onPermissionModeSelected: (mode) => settings.setLastPermissionMode(mode),
-    getSavedSessionMode: () => settings.getLastSessionMode(),
-    onSessionModeSelected: (mode) => settings.setLastSessionMode(mode),
-    getSavedFastMode: () => settings.getLastFastMode(),
-    onFastModeSelected: (enabled) => settings.setLastFastMode(enabled),
+    ...ownerPreferenceHooks(settings, (ref) => bots?.ownsWorkspace(ref.projectPath) === true),
+    getSavedSessionMode: (ref) => bots?.ownsWorkspace(ref.projectPath) ? 'code' : settings.getLastSessionMode(),
+    onSessionModeSelected: (mode, ref) => {
+      if (bots?.ownsWorkspace(ref.projectPath)) return false;
+      settings.setLastSessionMode(mode);
+      return true;
+    },
     notifier,
     onCronRunRequested: (runtime, event) => scheduled ? scheduled.run(runtime, event.run_id, event.task) : Promise.reject(new Error('Scheduled task service unavailable')),
     isPackaged: app.isPackaged,
@@ -478,17 +547,20 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         // Adding a Project is the Desktop trust decision. Repository edits must
         // not silently revoke a live session or reintroduce the removed setup
         // prompt; removal from the Project list revokes access instead.
-        return { workspace: ref.projectPath, trusted: settings.isTrustedWorkspace(ref.projectPath) };
+        return { workspace: ref.projectPath, trusted: settings.isTrustedWorkspace(ref.projectPath) || bots?.ownsWorkspace(ref.projectPath) === true };
       } catch {
         return { workspace: ref.projectPath, trusted: false };
       }
     },
-    onModelSelected: (ref, model) => settings.setSessionModel(ref, model),
-    getSavedModel: (ref) => settings.getSessionModel(ref),
+    // A Bot's model is its own; choosing one in a Bot's session must not become the default of the owner's sessions.
+    onModelSelected: (ref, model) => { if (!bots?.ownsWorkspace(ref.projectPath)) settings.setSessionModel(ref, model); },
+    getSavedModel: (ref) => bots?.ownsWorkspace(ref.projectPath) ? undefined : settings.getSessionModel(ref),
     resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
     codexTokens,
     invalidateLaunchConfigCache: () => launchCache.invalidate(),
     onFirstPromptSent: (ref) => {
+      // A Bot's session is not one of the owner's: it is neither the one to restore at startup nor one to share.
+      if (bots?.ownsWorkspace(ref.projectPath)) return;
       settings.setActiveSession(ref);
       // `remoteControlAtStartup`: a new chat starts shared with the user's other devices.
       try { remotePolicy?.sessionCreated(ref); } catch (error) { diagnostics.add('warn', 'host', `remote control: ${sanitizeDiagnostic(error)}`); }
@@ -519,7 +591,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     launchConfig: async (ref: SessionRef, resumeModel?: string) => {
       const workspace = ref.projectPath;
       const configured = settings.getPublic();
-      const model = settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
+      const botWorkspace = bots?.ownsWorkspace(workspace) === true;
+      const model = botWorkspace
+        ? resumeModel ?? bots?.modelFor(workspace) ?? configured.model
+        : settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
       const startedAt = Date.now();
       // A chat opens even when its credentials cannot be read. The engine
       // starts without them, and the first prompt that needs one loads it
@@ -570,12 +645,16 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           LINGXI_DESKTOP_BROWSER_DESCRIPTOR: browserDescriptor,
         },
         sessionId: ref.sessionId,
-        trusted: settings.isTrustedWorkspace(workspace),
+        // Making a Bot is the owner's decision to trust its folders; they are not in the project list.
+        trusted: settings.isTrustedWorkspace(workspace) || botWorkspace,
         telemetry: settings.getTelemetryConfig(),
         allowInsights: settings.getInsightsAllowed(),
         allowTeamOnboarding: settings.getTeamOnboardingAllowed(),
-        remoteControlEnabled: (settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1'))
-          && (remotePolicy?.allows() ?? true),
+        // A Bot's sessions are launched for remote devices when the Bot's own switch is on as well; its owner may be away for a day.
+        remoteControlEnabled: botWorkspace
+          ? remotePolicy?.botReachable(workspace) === true
+          : remoteControlOn() && (remotePolicy?.allows() ?? true),
+        ...(botWorkspace ? { permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS } : {}),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
         ...(openaiOAuth ? { openaiOAuth } : {}),
@@ -596,15 +675,28 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     nativeAudio ?? undefined,
   );
   host.attachComputerSettings(computerSettings);
+  // Whether the Mac may sleep while Bots work is the owner's to say; the switch is in the Bots page.
+  const keepAwake = new KeepAwake({
+    start: () => powerSaveBlocker.start('prevent-app-suspension'),
+    stop: (id) => powerSaveBlocker.stop(id),
+    enabled: settings.getPublic().botsKeepAwake === true,
+  });
+  host.attachKeepAwake(keepAwake);
+  // Opened at login, the app waits in the background: the Bots work without a window.
+  const loginItem = new LoginItem({ app, openExternal: (url) => shell.openExternal(url) });
   scheduled = new ScheduledTaskService(settings, bridge, sessionCatalog, (title, body, ref) => {
     // Propagate the refusal: `scheduledRun` returns false when the kind is off
     // or the notifier is disposed, and the caller keeps its dedupe key.
     return notifier?.scheduledRun(title, body, ref) ?? false;
-  }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
+  }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)), { keepAwake });
   const account = new AccountService(firebaseConfig, credentialBroker
     ? brokerAccountSessionStore(credentialBroker)
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
   host.attachAccount(account);
+  const teamsService = new TeamsService(account, firebaseConfig);
+  const teamRemoteEnabled = (botId: string): boolean => { try { return bots?.get(botId).remote === true; } catch { return false; } };
+  teamApprovalBroker = new TeamOwnerApprovalBroker({ botRemoteEnabled: teamRemoteEnabled });
+  stopTeams = installTeamsIpc(teamsService, () => [...mainWindows]);
   // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
   const remoteDiagnostics = (level: 'info' | 'warn' | 'error', message: string): void => {
     diagnostics.add(level, 'host', `remote control: ${message}`);
@@ -612,6 +704,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const policy = new RemotePolicy({
     settings,
     managedDirectory: managedSettingsDirectory(process.env, process.platform),
+    computerEnabled: remoteControlOn,
+    bots: () => bots,
   });
   remotePolicy = policy;
   const runtimes = bridge;
@@ -619,6 +713,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     files: new RemoteFileStore(join(userData, 'remote-files')),
     runtimes,
     policy,
+    bots: () => bots,
     commands: new RemoteCommands({
       allowAlwaysAllow: () => policy.allowAlwaysAllow(),
       echo: (echo) => remoteUi?.echo(echo),
@@ -631,10 +726,43 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     diagnostics: remoteDiagnostics,
   });
   remoteGateway = gateway;
+  let remoteAccessGeneration = 0;
+  const remoteOwnerGenerations = new Map<string, number>();
+  const remoteOwnerKey = (owner: { accountUid: string; deviceId: string; hostId: string }) => JSON.stringify([owner.accountUid, owner.deviceId, owner.hostId]);
+  const revokeRemoteAppAccess = (): void => {
+    remoteAccessGeneration++;
+    remoteOwnerGenerations.clear();
+    localApps?.remoteRevokeAll();
+  };
+  let remoteAccountUid = account.snapshot().user?.uid;
+  account.onChanged(() => {
+    const uid = account.snapshot().user?.uid;
+    if (uid !== remoteAccountUid) { remoteAccountUid = uid; revokeRemoteAppAccess(); }
+  });
+  const appsGateway = new LocalAppsGateway(gateway, createRemoteLocalAppsDelegate({
+    host: () => localApps,
+    accountUid: () => account.snapshot().user?.uid,
+    hostId: () => remoteControl?.status().host_id,
+    active: () => remoteControl?.status().state === 'online' && policy.allows(),
+    generation: viewer => `${remoteAccessGeneration}:${remoteOwnerGenerations.get(remoteOwnerKey({ accountUid: viewer.account_uid!, deviceId: viewer.device_id, hostId: viewer.host_id })) ?? 0}`,
+    approvedDevice: deviceId => remoteControl?.listDevices().some(device => device.device_id === deviceId) ?? false,
+  }));
+  teamApprovalGateway = new TeamApprovalsGateway(appsGateway, teamApprovalBroker, {
+    ownerContext: () => teamsService.hostContext(),
+    hostId: () => remoteControl?.status().host_id,
+    active: () => remoteControl?.status().state === 'online' && policy.allows(),
+    approvedViewer: viewer => remoteControl?.status().connections.some(connection => connection.conn_id === viewer.conn_id
+      && connection.device_id === viewer.device_id && connection.approved === true) === true
+      && remoteControl.listDevices().some(device => device.device_id === viewer.device_id),
+    generation: viewer => `${remoteAccessGeneration}:${remoteOwnerGenerations.get(remoteOwnerKey({ accountUid: viewer.account_uid!, deviceId: viewer.device_id, hostId: viewer.host_id })) ?? 0}`,
+    remoteEnabled: target => teamRemoteEnabled(target.botId),
+  });
   remoteControl = createRemoteControl({
     account,
     settings,
-    gateway,
+    gateway: teamApprovalGateway,
+    deviceRevoked: owner => { const key = remoteOwnerKey(owner); remoteOwnerGenerations.set(key, (remoteOwnerGenerations.get(key) ?? 0) + 1); localApps?.remoteRevokeOwner(owner); },
+    accessStopped: revokeRemoteAppAccess,
     policyAllows: () => policy.allows(),
     credentialBroker,
     userData,
@@ -663,7 +791,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     gateway,
     runtimeRef: (sessionId) => {
       const runtime = bridge?.get(sessionId);
-      return runtime ? { projectPath: runtime.projectPath, sessionId } : undefined;
+      // A Bot's chats stay on this computer: `/remote-control` in one finds no session to share.
+      return runtime && !bots?.ownsWorkspace(runtime.projectPath) ? { projectPath: runtime.projectPath, sessionId } : undefined;
     },
     signedIn: () => account.snapshot().user !== null,
     onAccountChanged: (callback) => account.onChanged(() => callback()),
@@ -678,7 +807,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     hadViewers = has;
   });
   // A change to the administrator's veto or to the shared sessions re-evaluates whether the service runs.
-  policy.onChange(() => service.refresh());
+  policy.onChange(() => { if (!policy.allows()) revokeRemoteAppAccess(); service.refresh(); });
   remotePolicyTimer = setInterval(() => { policy.recheck(); }, REMOTE_POLICY_RECHECK_MS);
   remotePolicyTimer.unref();
   void remoteControl.start();
@@ -705,9 +834,58 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     return undefined;
   });
   if (productPaths) {
-    const agentRoot = join(productPaths.configHome, 'local-apps', 'v2');
+    let teamBotStore: BotStore | undefined;
+    // The Bots live beside the app's other data and keep clear of the default configuration home.
+    try {
+      const botStore = new BotStore({ userData, home: app.getPath('home'), defaultConfigHome: productPaths.brandHome });
+      teamBotStore = botStore;
+      const manager = bridge;
+      const botWarn = (message: string): void => { diagnostics.add('warn', 'host', `bots: ${message}`); };
+      // Tasks between Bots, and the endpoint they are handed through. The router listens
+      // before any session of a Bot is launched, which asks it for an address and a token.
+      const taskChanges = new TaskChangeAnnouncer((botIds) => host?.sendToWindows(CH_BOTS_TASKS_CHANGED, { botIds } satisfies BotTasksChangedUi));
+      const tasks = new BotTasks({
+        store: botStore,
+        runtimes: { withSession: (ref, empty, model, operation) => manager.withBackgroundSession(ref, empty, model, operation) },
+        available: () => bots?.availability().available === true,
+        isDeleting: (botId) => bots?.isDeleting(botId) === true,
+        warn: botWarn,
+        keepAwake,
+        changed: (botIds) => taskChanges.changed(botIds),
+        // The engine's events carry no user prompts: the window shows the one the task began with.
+        promptSent: (sessionId, text) => host?.sendToWindows(CH_BOTS_PROMPT_SENT, { sessionId, text } satisfies BotPromptSentUi),
+      });
+      botTasks = tasks;
+      tasks.load();
+      const router = new BotRouter({ backend: tasks, warn: botWarn });
+      botRouter = router;
+      router.start().catch((error: unknown) => botWarn(`the router cannot listen: ${sanitizeDiagnostic(error)}`));
+      router.watchRuntimes(manager);
+      bots = new BotService({
+        store: botStore,
+        runtimes: bridge,
+        router,
+        delegation: tasks,
+        // Remote devices reach a Bot's chats by session id, and its switch decides whether they may.
+        openProject: (sessionId) => manager.get(sessionId)?.projectPath,
+        changed: () => { remotePolicy?.notifySessionsChanged(); teamConnector?.localChanged(); },
+        teamRevoking: () => teamConnector?.localChanged(),
+        catalogFor: (configHome) => new ProjectSessionCatalog({ ...catalogOptions, configHome }),
+        // The scheduler was made first; it learns of the Bots below, and is asked for these only when used.
+        routines: {
+          isControllerSession: (workspace, sessionId) => scheduled?.isControllerSession(workspace, sessionId) === true,
+          releaseScope: (workspace) => scheduled?.releaseScope(workspace),
+        },
+        warn: botWarn,
+      });
+      scheduled?.attachBots(bots);
+      host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore), tasks, loginItem }));
+    } catch (error) {
+      diagnostics.add('warn', 'host', `bots unavailable: ${sanitizeDiagnostic(error)}`);
+    }
+    const agentRoot = join(productPaths.brandHome, 'local-apps', 'v2');
     const agentExecutor = new LocalAppAgentExecutor({
-      configHome: productPaths.configHome,
+      configHome: productPaths.brandHome,
       root: agentRoot,
       isPackaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
@@ -730,11 +908,34 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       permission: (input, signal) => localApps!.promptAgentPermission(input, signal),
       question: (input, signal) => localApps!.promptAgentQuestion(input, signal),
     });
+    if (teamBotStore && process.platform === 'darwin') {
+      try {
+        teamConnector = new TeamConnector({
+          service: teamsService, store: teamBotStore, content: new BotContent(teamBotStore), privateStore: new TeamPrivateStore(userData),
+          binaries: () => resolveTeamBinaries({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }),
+          defaultModel: () => settings.getPublic().model,
+          modelRoute: selected => agentExecutor.teamModelRoute(selected),
+          modelCredential: credentialId => resolveProviderCredential(credentialId, { credentialBroker, environment: {} }),
+          permission: async (input, signal) => teamApprovalBroker!.request({ ...input, showLocal: async localSignal => {
+            localSignal.throwIfAborted();
+            const options = { type: 'question' as const, signal: localSignal, title: 'Team Bot permission',
+              message: 'Allow this Team Bot to run one sandboxed command?',
+              detail: `Team: ${input.target.teamId}\nBot: ${input.target.botId}\nConversation: ${input.target.conversationId}\n\n${JSON.stringify(input.input, null, 2).slice(0, 16000)}`,
+              buttons: ['Deny', 'Allow once'], defaultId: 0, cancelId: 0 };
+            const parent = [...mainWindows].find(window => !window.isDestroyed());
+            const result = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+            return !localSignal.aborted && result.response === 1;
+          } }, signal),
+        });
+        teamsService.attachHost(teamConnector);
+      } catch { diagnostics.add('warn', 'host', 'Team Bot host is unavailable'); }
+    }
     localApps = new LocalAppHost({
-      configHome: productPaths.configHome,
+      configHome: productPaths.brandHome,
+      onRemoteAccessEnded: quitIfNothingNeedsTheApp,
       accountToken: () => account.getIdToken(),
       accountId: () => account.snapshot().user?.uid ?? undefined,
-      core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.configHome, message => diagnostics.add('warn', 'host', message)),
+      core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.brandHome, message => diagnostics.add('warn', 'host', message)),
       resolveAuthoringBinding: async (_appId, session) => {
         const activeSession = settings.getPublic().activeSession ?? undefined;
         const liveDraft = bridge?.getActiveDraftSession(session, activeSession);
@@ -766,6 +967,27 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       diagnostics.add('error', 'host', 'Application Agent task storage is unavailable. Existing task records were preserved.');
     }
     await localApps.initialize();
+    if (localApps.remoteConfiguration().configured) {
+      try {
+        const ice = parseRtcIceServers(process.env.LINGXI_LOCAL_APP_ICE_SERVERS
+          ? JSON.parse(process.env.LINGXI_LOCAL_APP_ICE_SERVERS)
+          : [...DEFAULT_STUN_URLS]);
+        if (!ice) throw new Error('Invalid ICE configuration');
+        const appHost = localApps;
+        const peers = new PeerHost({
+          createWindow: () => createRtcWindow({ preload: join(moduleDirectory, '../preload/remoteRtc.cjs'), load: remoteRtcPage() }),
+          diagnostics: remoteDiagnostics,
+        });
+        appHost.setRemoteRtc(new LocalAppRtc({
+          peerHost: peers,
+          current: run => appHost.remoteCurrent(run),
+          resource: (run, request) => appHost.remoteResource(run, request),
+          iceServers: ice,
+        }));
+      } catch {
+        diagnostics.add('warn', 'host', 'Local App WebRTC configuration is unavailable; HTTPS access remains available.');
+      }
+    }
   }
   try {
     await installVisualizationSession(electronSession.fromPartition(VISUALIZATION_PARTITION), bridge.visualizations);
@@ -780,7 +1002,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     preferencePath: join(userData, 'desktop-update-reminder.json'),
     onError: error => diagnostics.add('warn', 'host', `Desktop update check failed: ${sanitizeDiagnostic(error)}`),
   });
-  createWindow();
+  // Read once, here: the system says "opened at login" only for the start that it did.
+  if (!loginItem.openedInBackground()) createWindow();
   if (app.isPackaged) {
     desktopUpdates.start();
     powerMonitor.on('resume', () => { void desktopUpdates?.check(); });
@@ -830,6 +1053,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
+  stopTeams?.(); stopTeams = undefined;
+  teamApprovalGateway?.close(); teamApprovalGateway = undefined;
+  teamApprovalBroker?.close(); teamApprovalBroker = undefined;
   desktopUpdates?.dispose();
   desktopUpdates = null;
   host?.dispose();
@@ -857,7 +1083,12 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   remotePush = null;
   remoteUi = null;
   remotePolicy = null;
+  bots = null;
+  botTasks = null;
+  const currentBotRouter = botRouter;
+  botRouter = null;
   const shutdownPhases: Array<[string, () => Promise<void>]> = [
+    ['bot_router', () => currentBotRouter?.dispose() ?? Promise.resolve()],
     ['browser', () => currentBrowser?.close() ?? Promise.resolve()],
     ['local_apps', () => currentLocalApps?.dispose() ?? Promise.resolve()],
     ['git', () => currentGit?.dispose() ?? Promise.resolve()],

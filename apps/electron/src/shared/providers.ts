@@ -1,3 +1,4 @@
+import type { ProviderModelCatalogEntryDto } from '@lingxi/bridge-client';
 export type ProviderAuthMethod = 'api_key' | 'token' | 'oauth' | 'device_code';
 
 export interface ProviderDefinition {
@@ -171,4 +172,27 @@ export const PROVIDER_IDS = PROVIDERS.map(({ id }) => id);
 
 export function providerById(id: string): ProviderDefinition | undefined {
   return PROVIDERS.find((provider) => provider.id === id);
+}
+
+/** Setup choices come from the shared official directory. Local definitions
+ * only supply host-owned credential flows and presentation copy. */
+export function providersFromCatalog(entries: readonly ProviderModelCatalogEntryDto[]): ProviderDefinition[] {
+  return entries.flatMap((entry) => {
+    const definition = entry.definition;
+    if (!definition) return [];
+    const local = providerById(entry.provider_id);
+    return [{
+      id: entry.provider_id, label: entry.provider_label,
+      description: definition.description,
+      popular: local?.popular ?? false,
+      authMethod: local?.authMethod ?? (definition.auth === 'bearer' ? 'token' : 'api_key'),
+      keyLabel: local?.keyLabel ?? `${entry.provider_label} API key`,
+      keyPlaceholder: local?.keyPlaceholder ?? '',
+      defaultApiBase: definition.base_url,
+      credentialManagementUrl: local?.credentialManagementUrl ?? '',
+      defaultModel: `${entry.provider_id}/${definition.default_model_id}`,
+      available: true,
+      transcriptionCapable: local?.transcriptionCapable ?? false,
+    }];
+  });
 }

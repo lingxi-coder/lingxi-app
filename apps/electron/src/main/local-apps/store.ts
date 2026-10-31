@@ -5,14 +5,26 @@ import { pipeline } from 'node:stream/promises';
 import type { DesktopLocalApp, DesktopAuthoringRef } from '../../shared/localApps.js';
 import { relativePath } from './manifest.js';
 
+/** Runtime-owned preparation artifact names. */
+export const PREPARATION_MARKER = '.lingxi-prepared.json';
+export const PREPARATION_DATA_DIRECTORY = '.lingxi-prepare-data';
+
 export function appId(value: unknown): string {
   if (typeof value !== 'string' || !/^a[a-f0-9]{32}$/.test(value)) throw new Error('Invalid desktop application id');
   return value;
 }
-export async function atomicJson(path: string, value: unknown): Promise<void> {
+export async function atomicJson(path: string, value: unknown, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   await fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomUUID()}.tmp`;
-  try { await fs.writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 }); await fs.rename(temp, path); }
+  try {
+    signal?.throwIfAborted();
+    await fs.writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
+    // Rename is the commit point; a revoked request must not publish its
+    // temporary file after waiting for filesystem I/O.
+    signal?.throwIfAborted();
+    await fs.rename(temp, path);
+  }
   finally { await fs.rm(temp, { force: true }); }
 }
 export async function containedFile(root: string, path: string): Promise<string> {
@@ -49,7 +61,7 @@ export async function copySource(source: string, destination: string): Promise<v
     const entries = await fs.readdir(fromDirectory, { withFileTypes: true });
     await checkDirectories(directories);
     for (const entry of entries) {
-      if (['.git', 'node_modules', '.venv', 'venv', '__pycache__', '.DS_Store', '.lingxi-prepared.json'].includes(entry.name)
+      if (['.git', 'node_modules', '.venv', 'venv', '__pycache__', '.DS_Store', PREPARATION_MARKER].includes(entry.name)
         || entry.name === '.env' || (entry.name.startsWith('.env.') && entry.name !== '.env.example')) continue;
       if (entry.isSymbolicLink()) throw new Error(`Application source contains a symlink: ${entry.name}`);
       const from = join(fromDirectory, entry.name), to = join(toDirectory, entry.name);

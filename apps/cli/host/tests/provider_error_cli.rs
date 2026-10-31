@@ -917,6 +917,80 @@ fn normalize_loopback_host(headers: &[u8], expected_host: Option<SocketAddr>) ->
     normalized
 }
 
+// These are the only platform-dependent header values in the frozen Mac/arm64
+// capture. Validate each before replacing its value; leave names, order,
+// separators and every other header byte intact.
+fn normalize_capture_platform_headers(headers: &[u8], arch: &str, os: &str) -> Vec<u8> {
+    let mut result = Vec::with_capacity(headers.len());
+    let mut counts = [0_u8; 2];
+    for line in headers.split_inclusive(|byte| *byte == b'\n') {
+        let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+            result.extend_from_slice(line);
+            continue;
+        };
+        let (index, expected, marker) = if line[..colon].eq_ignore_ascii_case(b"X-Stainless-Arch") {
+            (0, arch, b"<capture-arch>".as_slice())
+        } else if line[..colon].eq_ignore_ascii_case(b"X-Stainless-OS") {
+            (1, os, b"<capture-os>".as_slice())
+        } else {
+            result.extend_from_slice(line);
+            continue;
+        };
+        counts[index] += 1;
+        let value = line[colon + 1..]
+            .strip_prefix(b" ")
+            .and_then(|value| value.strip_suffix(b"\r\n"))
+            .expect("platform header must preserve separator and CRLF");
+        assert_eq!(
+            value,
+            expected.as_bytes(),
+            "unexpected platform header value"
+        );
+        result.extend_from_slice(&line[..colon + 2]);
+        result.extend_from_slice(marker);
+        result.extend_from_slice(b"\r\n");
+    }
+    assert_eq!(
+        counts,
+        [1, 1],
+        "capture must contain each platform header once"
+    );
+    result
+}
+
+#[test]
+fn platform_header_normalization_retains_order_and_other_bytes() {
+    let linux = b"X-Stainless-Arch: x64\r\nX-Stainless-OS: Linux\r\nExact: value\r\n\r\n";
+    let mac = b"X-Stainless-Arch: arm64\r\nX-Stainless-OS: MacOS\r\nExact: value\r\n\r\n";
+    let reordered = b"X-Stainless-OS: MacOS\r\nX-Stainless-Arch: arm64\r\nExact: value\r\n\r\n";
+    let normalized = normalize_capture_platform_headers(linux, "x64", "Linux");
+    assert_eq!(
+        normalized,
+        normalize_capture_platform_headers(mac, "arm64", "MacOS")
+    );
+    assert_ne!(
+        normalized,
+        normalize_capture_platform_headers(reordered, "arm64", "MacOS")
+    );
+    assert!(normalized.ends_with(b"Exact: value\r\n\r\n"));
+}
+
+#[test]
+fn platform_header_normalization_rejects_wrong_values_and_counts() {
+    for headers in [
+        b"X-Stainless-Arch: arm64\r\nX-Stainless-OS: Linux\r\n".as_slice(),
+        b"X-Stainless-Arch: x64\r\nX-Stainless-OS: MacOS\r\n",
+        b"X-Stainless-Arch: x64\r\n",
+        b"X-Stainless-Arch: x64\r\nX-Stainless-OS: Linux\r\nX-Stainless-OS: Linux\r\n",
+        b"X-Stainless-Arch:x64\r\nX-Stainless-OS: Linux\r\n",
+    ] {
+        assert!(std::panic::catch_unwind(|| {
+            normalize_capture_platform_headers(headers, "x64", "Linux")
+        })
+        .is_err());
+    }
+}
+
 fn count_raw_occurrences(raw: &[u8], needle: &[u8]) -> usize {
     assert!(!needle.is_empty(), "raw byte needle must not be empty");
     raw.windows(needle.len())
@@ -1898,10 +1972,29 @@ fn public_cli_print_text_matches_native_295_raw_http_layout() {
         native_body.len(),
         branding_delta,
     );
+    // SDK client metadata is selected from this host's target OS and arch;
+    // the frozen Native 2.1.295 capture was made on macOS/arm64.
+    let target_arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => panic!("unsupported capture architecture: {other}"),
+    };
+    let target_os = match std::env::consts::OS {
+        "linux" => "Linux",
+        "macos" => "MacOS",
+        "windows" => "Windows",
+        other => panic!("unsupported capture OS: {other}"),
+    };
     assert_eq!(
-        normalize_loopback_host(&adjusted_actual_headers, Some(address)),
-        normalize_loopback_host(&native_headers[native_line_end..], None),
-        "Product raw header order/bytes, allowing only loopback Host and registered Content-Length branding delta"
+        normalize_loopback_host(
+            &normalize_capture_platform_headers(&adjusted_actual_headers, target_arch, target_os),
+            Some(address),
+        ),
+        normalize_loopback_host(
+            &normalize_capture_platform_headers(&native_headers[native_line_end..], "arm64", "MacOS"),
+            None,
+        ),
+        "Product raw header order/bytes, allowing validated platform values, loopback Host and registered Content-Length branding delta"
     );
     let actual_json = request_body_json(actual_request);
     assert_eq!(

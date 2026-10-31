@@ -48,9 +48,9 @@ export interface RemoteRuntime {
   answerAskUserQuestion(requestId: number, answers: unknown): void;
   cancelAskUserQuestion(requestId: number): void;
   dispatchCommand(command: ClientCommand | unknown, source?: PromptSource): Promise<void>;
-  executeMedia(operation: MediaOperationDto, limits?: { timeout_budget_ms?: number; max_payload_bytes?: number }): Promise<{ operation_id: MediaOperationIdDto; result: MediaResultDto }>;
+  executeMedia(operation: MediaOperationDto, limits?: { timeout_budget_ms?: number; max_payload_bytes?: number }): Promise<{ operation_id: MediaOperationIdDto; incarnation: string; result: MediaResultDto }>;
   readMedia(mediaRef: string): Promise<MediaContentDto>;
-  cancelMedia(operationId: MediaOperationIdDto): Promise<void>;
+  cancelMedia(operationId: MediaOperationIdDto, incarnation: string): Promise<void>;
   registerMediaConnection(connectionId: string, label: string, supportedModes: readonly MediaSessionModeDto[], sourceKinds: readonly ('microphone' | 'camera' | 'screen')[]): Promise<void>;
   unregisterMediaConnection(connectionId: string): Promise<void>;
   onMediaConnectionRequest(listener: (request: MediaConnectionRequestDto) => void): () => void;

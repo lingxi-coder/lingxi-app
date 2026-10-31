@@ -1,5 +1,5 @@
 import { assertSessionRef, isSessionId } from './sessionIdentity.js';
-import type { ClientEvent } from '@lingxi/bridge-client';
+import type { ClientEvent, PermissionModeId } from '@lingxi/bridge-client';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -144,6 +144,10 @@ export class SessionRuntimeManager {
     },
     any: () => [...this.runtimes.values()].find((runtime) => runtime.visualizationReady),
   });
+
+  refreshProviderCatalog(trigger: string): void {
+    for (const runtime of this.runtimes.values()) runtime.refreshProviderCatalog(trigger);
+  }
 
   constructor(private readonly opts: SessionRuntimeManagerOptions) {
     const requestedLimit = opts.maxCachedRuntimes ?? DEFAULT_MAX_CACHED_RUNTIMES;
@@ -552,7 +556,7 @@ export class SessionRuntimeManager {
       }
     }
     if (!ref) throw new Error('could not allocate a new session id');
-    const mode = this.opts.getSavedSessionMode?.() ?? 'code';
+    const mode = this.opts.getSavedSessionMode?.(ref) ?? 'code';
     this.draftSessions.set(projectPath, { ...ref, mode, initialized: false });
     try {
       const runtime = await this.ensure(ref, true, model, undefined, mode);
@@ -829,7 +833,12 @@ export class SessionRuntimeManager {
       onModelChanged,
       onModelSelected,
       getSavedModel,
+      getSavedSessionMode: _getSavedSessionMode,
       onSessionModeSelected: _onSessionModeSelected,
+      getSavedPermissionMode,
+      onPermissionModeSelected,
+      getSavedFastMode,
+      onFastModeSelected,
       onFirstPromptSent,
       maxCachedRuntimes: _maxCachedRuntimes,
       workspaceSettings,
@@ -851,7 +860,7 @@ export class SessionRuntimeManager {
         const config = await launchConfig(ref, this.sessionModelHints.get(ref.sessionId));
         const initialProjectRoot = this.sessionProjectRoots.get(ref.sessionId) ?? config.initialProjectRoot ?? ref.projectPath;
         this.sessionProjectRoots.set(ref.sessionId, initialProjectRoot);
-        const settings = await workspaceSettings?.(ref.projectPath);
+        const settings = await workspaceSettings?.(ref.projectPath, ref);
         const environment = settings ? {
           ...this.sessionSettingsEnvironment.get(ref.sessionId),
           ...settings.environment,
@@ -862,11 +871,15 @@ export class SessionRuntimeManager {
         if (owner) this.sessionConfigOwners.set(ref.sessionId, owner);
         if (environment) this.sessionSettingsEnvironment.set(ref.sessionId, { ...environment });
         return { ...config, ...owner, settingsEnvironment: environment, initialProjectRoot,
-          additionalDirectories: this.sessionDirectoryGrants.get(ref.sessionId),
+          additionalDirectories: this.sessionDirectoryGrants.get(ref.sessionId) ?? settings?.additionalDirectories,
           promptDirectories: this.sessionPromptDirectories.get(ref.sessionId) };
       },
       ...(onModelSelected ? { onModelSelected: (model: string) => onModelSelected(ref, model) } : {}),
       ...(getSavedModel ? { getSavedModel: () => getSavedModel(ref) } : {}),
+      ...(getSavedPermissionMode ? { getSavedPermissionMode: () => getSavedPermissionMode(ref) } : {}),
+      ...(onPermissionModeSelected ? { onPermissionModeSelected: (mode: PermissionModeId) => onPermissionModeSelected(ref, mode) } : {}),
+      ...(getSavedFastMode ? { getSavedFastMode: () => getSavedFastMode(ref) } : {}),
+      ...(onFastModeSelected ? { onFastModeSelected: (enabled: boolean) => onFastModeSelected(ref, enabled) } : {}),
       ...(accessState ? { accessState: () => accessState(ref) } : {}),
       onModelChanged: (model: string) => {
         this.sessionModelHints.set(ref.sessionId, model);
@@ -909,8 +922,9 @@ export class SessionRuntimeManager {
       const draft = this.draftSessions.get(ref.projectPath);
       if (draft?.sessionId === ref.sessionId) draft.mode = mode;
       if (sequence > this.lastSavedModeSelectionSequence) {
-        this.opts.onSessionModeSelected?.(mode);
-        this.lastSavedModeSelectionSequence = sequence;
+        if (this.opts.onSessionModeSelected?.(mode, ref) !== false) {
+          this.lastSavedModeSelectionSequence = sequence;
+        }
       }
     };
   }

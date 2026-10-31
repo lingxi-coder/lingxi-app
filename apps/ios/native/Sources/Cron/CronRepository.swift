@@ -125,7 +125,7 @@ final class CronRepository {
     ///   scheduled task"). Part of the saved baseline, so an untouched form
     ///   does not ask to discard changes.
     func beginCreate(scopeID: String? = nil, prompt: String = "") {
-        let target = scopeID ?? state.activeScopeID
+        let target = scopeID ?? globalCronScopeID
         draft = .create(scopeID: target)
         draft.prompt = prompt
         draft.automation.model = defaultModel

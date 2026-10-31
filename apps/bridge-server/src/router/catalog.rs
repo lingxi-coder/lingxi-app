@@ -243,7 +243,9 @@ impl EngineCommandRouter {
                 let available = self.handle.list_available_models().await;
                 let listings = self.handle.list_model_listings().await;
                 let snapshot = self.handle.get_status_snapshot().await;
-                let provider_catalog = if self.provider_model_catalog_listings.is_empty() {
+                let provider_catalog = if let Some(source) = &self.official_catalog {
+                    harness_runtime::provider_directory::entries(&source.snapshot())
+                } else if self.provider_model_catalog_listings.is_empty() {
                     provider_model_catalog_from_listings(&listings)
                 } else {
                     provider_model_catalog_from_listings(&self.provider_model_catalog_listings)

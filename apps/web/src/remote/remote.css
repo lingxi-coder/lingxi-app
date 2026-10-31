@@ -16,6 +16,8 @@
 .rc-actions { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
 .rc-link { padding: 4px 2px; border: 0; background: none; color: var(--accent); font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline; }
 .rc-crumb { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--ink-2); }
+.rc-view-switch { display: flex; gap: 8px; }
+.rc-view-switch [aria-current="page"] { border-color: var(--accent); color: var(--accent); }
 
 .rc-pairing-code { margin: 8px 0 12px; font: 600 36px/1.1 var(--mono); letter-spacing: .12em; color: var(--ink); }
 .rc-code-label { margin-bottom: 0 !important; font-size: 12px !important; color: var(--ink-3) !important; }
@@ -34,6 +36,14 @@
 .rc-status { flex: none; padding: 2px 8px; border-radius: 99px; background: var(--surface-2); color: var(--ink-2); font-size: 11px; }
 .rc-status-running { background: var(--accent-soft); color: var(--accent); }
 .rc-status-requires_action, .rc-pending-tag { color: var(--warning); font-size: 12px; }
+
+/* Bots */
+.rc-bot-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.rc-bot-head > div { min-width: 0; }
+.rc-bot-head h2 { margin-bottom: 4px; }
+.rc-bot-head p { margin-bottom: 4px; }
+.rc-bot-description { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-bot-chats { margin-top: 14px; }
 
 .rc-badge { flex: none; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); font-size: 11px; color: var(--ink-3); }
 .rc-badge-direct { color: var(--accent); border-color: var(--accent); }

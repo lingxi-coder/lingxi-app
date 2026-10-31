@@ -41,6 +41,8 @@ export interface RemoteControlBindings {
   /** The window an approval sheet attaches to, when the app has one. */
   parentWindow: () => BrowserWindow | undefined;
   diagnostics: RemoteDiagnostics;
+  deviceRevoked?(owner: { accountUid: string; hostId: string; deviceId: string }): void;
+  accessStopped?(): void;
 }
 
 /** Build the service for this app. It does nothing until `start()` is called. */
@@ -94,5 +96,7 @@ export function createRemoteControl(bindings: RemoteControlBindings): RemoteCont
     peers,
     host: () => ({ name: hostDisplayName(hostname()), platform: process.platform, app_version: app.getVersion().slice(0, 64) }),
     diagnostics,
+    deviceRevoked: bindings.deviceRevoked,
+    accessStopped: bindings.accessStopped,
   });
 }

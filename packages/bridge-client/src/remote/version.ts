@@ -28,6 +28,13 @@ export const CLIENT_PROTOCOL_MAJOR: number = Number.parseInt(CLIENT_PROTOCOL_VER
 /** Label of the reliable, ordered DataChannel that carries RPC fragments. */
 export const DATA_CHANNEL_LABEL = 'lingxi-agent';
 
+/**
+ * `initialize.app.features` value of a viewer that understands Bots: the `bots.*`
+ * and `bot.*` methods and the `bot` prompt origin. The host adds none of them to
+ * what any other viewer sees.
+ */
+export const REMOTE_FEATURE_BOTS = 'bots';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Sizes
 // ─────────────────────────────────────────────────────────────────────────────

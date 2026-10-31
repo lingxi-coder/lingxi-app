@@ -8,12 +8,12 @@
 use clap::Args;
 use std::path::Path;
 
-/// The locked `claude stop --help` text from 2.1.252.  `kill` is a hidden
-/// spelling alias, so it intentionally renders the canonical `stop` usage.
-pub const STOP_HELP: &str = "Usage: claude stop <id>\n\n  Stop a background session. Its conversation is kept; resume it later with `claude attach <id>`.\n";
+/// The public `stop` help. `kill` is an alias, so it renders the canonical
+/// `stop` usage.
+pub const STOP_HELP: &str = "Usage: lingxi-cli stop <id>\n\n  Stop a background session. Its conversation is kept; resume it later with `lingxi-cli attach <id>`.\n";
 
 /// Bare usage emitted when `<id>` is omitted.
-pub const STOP_USAGE: &str = "Usage: claude stop <id>";
+pub const STOP_USAGE: &str = "Usage: lingxi-cli stop <id>";
 
 #[derive(Debug, Clone, Args)]
 #[command(disable_help_flag = true)]
@@ -106,9 +106,9 @@ mod tests {
     fn help_and_usage_are_byte_exact() {
         assert_eq!(
             STOP_HELP,
-            "Usage: claude stop <id>\n\n  Stop a background session. Its conversation is kept; resume it later with `claude attach <id>`.\n"
+            "Usage: lingxi-cli stop <id>\n\n  Stop a background session. Its conversation is kept; resume it later with `lingxi-cli attach <id>`.\n"
         );
-        assert_eq!(STOP_USAGE, "Usage: claude stop <id>");
+        assert_eq!(STOP_USAGE, "Usage: lingxi-cli stop <id>");
     }
 
     #[test]

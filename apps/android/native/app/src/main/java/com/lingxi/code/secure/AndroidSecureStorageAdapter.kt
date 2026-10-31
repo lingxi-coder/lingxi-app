@@ -16,7 +16,7 @@ import javax.crypto.spec.GCMParameterSpec
 
 /**
  * Android Keystore-backed [AndroidSecureStorage] — the production secure store the
- * app hands to `build_android_engine` (via `VoiceController.buildVoiceEngine`).
+ * app hands to `build_android_engine` (via `NativeEngineFactory`).
  *
  * The Rust seam (`apps/android-aar`) bridges this onto `traits::SecureStorage`
  * (`AndroidSecureStorageBridge`). The engine's serialized `SecureStorageData`

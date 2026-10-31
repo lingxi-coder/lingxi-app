@@ -66,7 +66,7 @@ async function cleanupHarness(
     },
   };
   const catalog = {
-    productPaths: options.productPaths ?? (async () => ({ configHome })),
+    productPaths: options.productPaths ?? (async () => ({ brandHome: configHome })),
   };
   const host = new HostController(
     settings,

@@ -5,7 +5,7 @@ import type {
   MediaOwnerDto,
 } from '@lingxi/bridge-client';
 import {
-  sameMediaOwner, validateMediaDeviceRequest, validateMediaDeviceResponse,
+  nativeMediaOwnerKey, validateMediaDeviceRequest, validateMediaDeviceResponse,
 } from '../../shared/nativeMedia.js';
 
 interface NativeMediaDeviceHost {
@@ -24,6 +24,10 @@ function failure(requestId: string, kind: 'invalid_request' | 'not_found' | 'can
   return { request_id: requestId, result: { type: 'error', error: { kind, message } } };
 }
 
+function rejectedOpen(requestId: string, kind: 'not_found' | 'busy' | 'cancelled', message: string): MediaDeviceResponseDto {
+  return { request_id: requestId, result: { type: 'open_failed_without_resource', error: { kind, message } } };
+}
+
 function leaseId(request: MediaDeviceRequestEnvelopeDto): string | undefined {
   switch (request.request.type) {
     case 'open': return undefined;
@@ -35,20 +39,28 @@ function leaseId(request: MediaDeviceRequestEnvelopeDto): string | undefined {
 /** One authenticated bridge's view of the app's native media device service. */
 export class NativeMediaDevices {
   private readonly leases = new Set<string>();
+  // A bounded response history must not forget an open whose native resource
+  // is still live or whose outcome is unknown.
+  private readonly openReservations = new Set<string>();
+  private readonly leaseOpenRequests = new Map<string, { requestId: string; onClose?: () => void }>();
   private readonly quarantined = new Set<string>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly completed = new Set<string>();
   private readonly reading = new Set<string>();
   private readonly sourceSequences = new Map<string, number>();
+  private readonly ownerKey: string;
   private closed = false;
   private disposing?: Promise<void>;
 
   constructor(private readonly options: {
     audio: NativeMediaDeviceHost;
     owner: MediaOwnerDto;
-  }) {}
+  }) {
+    // The caller supplies an already trusted binding. Requests never install it.
+    this.ownerKey = nativeMediaOwnerKey(options.owner);
+  }
 
-  request(value: unknown): Promise<MediaDeviceResponseDto> {
+  request(value: unknown, onLeaseClosed?: () => void): Promise<MediaDeviceResponseDto> {
     let request: MediaDeviceRequestEnvelopeDto;
     try { request = validateMediaDeviceRequest(value); }
     catch {
@@ -61,12 +73,14 @@ export class NativeMediaDevices {
     const existing = this.pending.get(request.request_id);
     if (existing) return existing.fingerprint === fingerprint ? existing.promise
       : Promise.resolve(failure(request.request_id, 'invalid_request', 'The media request identity was reused'));
-    if (this.completed.has(request.request_id)) {
+    if (this.completed.has(request.request_id) || this.openReservations.has(request.request_id)) {
       return Promise.resolve(failure(request.request_id, 'invalid_request', 'The media request already completed'));
     }
-    if (this.pending.size >= MAX_PENDING_REQUESTS) return Promise.resolve(failure(request.request_id, 'busy', 'The native media request queue is full'));
-    if (request.request.type === 'open' && !sameMediaOwner(request.request.request.owner, this.options.owner)) {
-      return Promise.resolve(failure(request.request_id, 'not_found', 'The native media owner is not attached'));
+    if (this.pending.size >= MAX_PENDING_REQUESTS) return Promise.resolve(request.request.type === 'open'
+      ? rejectedOpen(request.request_id, 'busy', 'The native media request queue is full')
+      : failure(request.request_id, 'busy', 'The native media request queue is full'));
+    if (request.request.type === 'open' && nativeMediaOwnerKey(request.request.request.owner) !== this.ownerKey) {
+      return Promise.resolve(rejectedOpen(request.request_id, 'not_found', 'The native media owner is not attached'));
     }
     const lease = leaseId(request);
     if (lease && !this.leases.has(lease)) return Promise.resolve(failure(request.request_id, 'not_found', 'The native media lease was not found'));
@@ -77,7 +91,8 @@ export class NativeMediaDevices {
       return Promise.resolve(failure(request.request_id, 'busy', 'A native media reader is already waiting'));
     }
     if (request.request.type === 'next_input' && lease) this.reading.add(lease);
-    const promise = this.dispatch(request).finally(() => {
+    if (request.request.type === 'open') this.openReservations.add(request.request_id);
+    const promise = this.dispatch(request, onLeaseClosed).finally(() => {
       this.pending.delete(request.request_id);
       if (request.request.type === 'next_input' && lease) this.reading.delete(lease);
       this.completed.add(request.request_id);
@@ -87,11 +102,16 @@ export class NativeMediaDevices {
     return promise;
   }
 
-  private async dispatch(request: MediaDeviceRequestEnvelopeDto): Promise<MediaDeviceResponseDto> {
+  private async dispatch(request: MediaDeviceRequestEnvelopeDto, onLeaseClosed?: () => void): Promise<MediaDeviceResponseDto> {
     try {
       const response = validateMediaDeviceResponse(await this.options.audio.executeMediaDevice(request));
       if (response.request_id !== request.request_id) throw new Error('Mismatched native media response');
       if (response.result.type === 'error') return response;
+      if (response.result.type === 'open_failed_without_resource') {
+        if (request.request.type !== 'open') throw new Error('Unexpected native media open failure receipt');
+        this.openReservations.delete(request.request_id);
+        return response;
+      }
       const expected = {
         open: 'opened', next_input: 'input', write_audio: 'audio_written', write_video: 'video_written',
         flush_audio: 'audio_flushed', interrupt_audio: 'audio_interrupted', update: 'updated', stop: 'stopped',
@@ -101,11 +121,12 @@ export class NativeMediaDevices {
         const id = response.result.lease.lease_id;
         if (this.leases.has(id)) throw new Error('Native media returned an existing lease');
         this.leases.add(id);
+        this.leaseOpenRequests.set(id, { requestId: request.request_id, onClose: onLeaseClosed });
         if (this.closed) {
           this.quarantined.add(id);
           await this.stopNativeLease(id);
           this.forgetLease(id);
-          return failure(request.request_id, 'cancelled', 'The native media connection closed during capture setup');
+          return rejectedOpen(request.request_id, 'cancelled', 'The native media connection closed during capture setup');
         }
       }
       if (this.closed && response.result.type !== 'opened' && response.result.type !== 'stopped') {
@@ -142,6 +163,12 @@ export class NativeMediaDevices {
   }
 
   private forgetLease(id: string): void {
+    const openRequest = this.leaseOpenRequests.get(id);
+    if (openRequest) {
+      this.openReservations.delete(openRequest.requestId);
+      openRequest.onClose?.();
+    }
+    this.leaseOpenRequests.delete(id);
     this.leases.delete(id);
     this.quarantined.delete(id);
     this.reading.delete(id);

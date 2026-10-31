@@ -16,6 +16,7 @@ declare -a scan_paths=(
   "${repo_root}/apps/ios/native"
   "${repo_root}/apps/android/ffi"
   "${repo_root}/apps/ios/ffi"
+  "${repo_root}/packages/mobile-ffi"
   "${runtime_root}/crates/platforms/android"
   "${runtime_root}/crates/platforms/ios"
 )

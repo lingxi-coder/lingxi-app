@@ -1,0 +1,60 @@
+{
+  "projectId": "demo-lingxi-teams-t0",
+  "runId": "mvuorlx2-70928",
+  "binaryMode": "signedpackage",
+  "binarySha256": {
+    "host": "e89cf546c2bfb53102df695b9f837a7c19b4cfc4612f8e6dfcecce51d9c8445a",
+    "worker": "d7ffc50e57eb98028f65fea69f1c749e4aeac9200be06a4415f487ea31d48b60"
+  },
+  "packagedApp": "/Users/luolingfeng/lingxi/.worktrees/teams/output/teams-t3-macos/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app",
+  "teamId": "t3runtime-mvuorlx2-70928",
+  "botKey": "bot:fixture-owner:s9CWtEsOKOtaAHYrki-uMA:JrGtTW45WlYhibyGny-k3Q",
+  "offlineBotKey": "bot:fixture-owner:oooooooooooooooooooooo:ffffffffffffffffffffff",
+  "baseURL": "http://127.0.0.1:18783",
+  "localMessagesURL": "http://127.0.0.1:18783/v1/teams/messages",
+  "output": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t3-runtime/mvuorlx2-70928",
+  "checks": {
+    "actualAccountService": true,
+    "realAuthFirestoreHttp": true,
+    "ownerApprovals": 1,
+    "nonOriginAnswer": 403,
+    "exactAnswerRetries": 2,
+    "modelTurns": 4,
+    "finalDesktopReplies": 1,
+    "finishAckLostAfterCommit": true,
+    "stableRestart": true,
+    "offlineQueuedOnce": true,
+    "noProcessArguments": true
+  },
+  "hostLaunches": [
+    {
+      "mode": "run",
+      "triggerId": "9d819dc78c59f0c4b055195bf2526aa6db36fdb9dc85fc8f893e8ae8d30d3484",
+      "args": []
+    },
+    {
+      "mode": "retry_result",
+      "triggerId": "9d819dc78c59f0c4b055195bf2526aa6db36fdb9dc85fc8f893e8ae8d30d3484",
+      "args": []
+    },
+    {
+      "mode": "run",
+      "triggerId": "ff4f93d8edff92bbbb6c6a606ee5f2c9547ade4dcab944c874741e6a0e586aae",
+      "args": []
+    }
+  ],
+  "hostOutcomes": [
+    {
+      "triggerId": "9d819dc78c59f0c4b055195bf2526aa6db36fdb9dc85fc8f893e8ae8d30d3484",
+      "code": "RESULT_PENDING"
+    },
+    {
+      "triggerId": "9d819dc78c59f0c4b055195bf2526aa6db36fdb9dc85fc8f893e8ae8d30d3484",
+      "status": "settled"
+    },
+    {
+      "triggerId": "ff4f93d8edff92bbbb6c6a606ee5f2c9547ade4dcab944c874741e6a0e586aae",
+      "status": "settled"
+    }
+  ]
+}

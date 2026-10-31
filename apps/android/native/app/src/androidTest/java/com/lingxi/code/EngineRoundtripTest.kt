@@ -8,7 +8,9 @@ import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
-import com.lingxi.code.voice.buildVoiceEngine
+import com.lingxi.code.runtimeintegration.NativeEngineCallbacks
+import com.lingxi.code.runtimeintegration.NativeEngineFactory
+import com.lingxi.code.runtimeintegration.NativeEngineScenario
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -37,7 +39,7 @@ import org.junit.runner.RunWith
  *
  * It runs — and MUST pass — KEYLESS. With no `ANTHROPIC_API_KEY`:
  *
- *   * `buildVoiceEngine(...)` (which calls `buildAndroidEngine(...)` with the
+ *   * `NativeEngineFactory.build(...)` (which calls `buildAndroidEngine(...)` with the
  *     seven device-capability adapters + permission sink) still succeeds — the
  *     engine host is constructed and the foreign listener is registered (the
  *     "handshake"). Construction does NOT touch the network and does NOT require
@@ -60,18 +62,18 @@ class EngineRoundtripTest {
 
     /**
      * Build the real engine over the seven device-capability adapters + permission
-     * sink via the same `buildVoiceEngine` the production chat source uses (which
+     * sink via the same `NativeEngineFactory.build` the production chat source uses (which
      * calls the generated `buildAndroidEngine(...)`), routing every inbound
      * `ClientEvent` to [onEvent]. On a device this returns a live handle; OFF a
      * device it returns null (`PlatformUnavailable`) — the caller asserts non-null,
      * so a host run fails loudly rather than silently passing.
      *
-     * Hermetic: `buildVoiceEngine` roots the engine's filesystem under the
+     * Hermetic: `NativeEngineFactory.build` roots the engine's filesystem under the
      * instrumentation TARGET context's private `filesDir` (the app under test, on
      * the device sandbox) — no shared global state, cleaned with the app data.
      *
      * KEYLESS: we read `ANTHROPIC_API_KEY` from the env (empty in CI) and never
-     * hardcode a secret. `buildVoiceEngine` builds regardless of key, mirroring
+     * hardcode a secret. `NativeEngineFactory.build` builds regardless of key, mirroring
      * the iOS test's keyless `buildIosEngine`.
      */
     private fun buildEngineKeyless(
@@ -80,13 +82,13 @@ class EngineRoundtripTest {
         onEvent: suspend (ClientEvent) -> Unit,
     ): MobileEngineHandle? {
         val targetContext = InstrumentationRegistry.getInstrumentation().targetContext
-        return buildVoiceEngine(
+        return NativeEngineFactory.build(
             context = targetContext,
             apiBase = System.getenv("ANTHROPIC_BASE_URL") ?: "https://api.anthropic.com",
             apiKey = System.getenv("ANTHROPIC_API_KEY") ?: "",
             model = model,
             routingJson = routingJson,
-            onEvent = onEvent,
+            scenario = NativeEngineScenario.Interactive(NativeEngineCallbacks(onEvent = onEvent)),
         )
     }
 
@@ -129,7 +131,7 @@ class EngineRoundtripTest {
             },
         )
         assertNotNull(
-            "buildVoiceEngine must return a live handle on-device (keyless handshake); " +
+            "NativeEngineFactory.build must return a live handle on-device (keyless handshake); " +
                 "null means PlatformUnavailable — run on a device/emulator, not the JVM host",
             handle,
         )
@@ -202,7 +204,7 @@ class EngineRoundtripTest {
             },
         )
         assertNotNull(
-            "buildVoiceEngine must return a live handle on-device (keyless); null means " +
+            "NativeEngineFactory.build must return a live handle on-device (keyless); null means " +
                 "PlatformUnavailable — run on a device/emulator, not the JVM host",
             handle,
         )

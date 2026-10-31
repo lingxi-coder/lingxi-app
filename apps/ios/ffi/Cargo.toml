@@ -42,6 +42,7 @@ uniffi = [
     "dep:orchestrator",
     "dep:remote-control-client",
     "dep:serde_json",
+    "dep:tracing",
     "harness-runtime/uniffi",
 ]
 [dependencies]
@@ -74,6 +75,7 @@ orchestrator = { workspace = true, optional = true }
 # Remote Control viewer client (`lingxi-rc/1`), exposed to the app by `src/remote.rs`.
 remote-control-client = { path = "../../../packages/remote-control-client", optional = true, features = ["native-media"] }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
+tracing = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 platform-ios = { workspace = true }

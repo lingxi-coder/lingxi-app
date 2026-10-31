@@ -1,0 +1,295 @@
+{
+  "status": "WEB_SOURCE_PUBLISHED_MAP_HTTP_AND_MEMBER_RELOAD_VERIFIED",
+  "verifiedAt": "2026-10-30T15:27:55.211Z",
+  "t3CompleteClaim": false,
+  "project": "lingxi-5e4b2",
+  "site": "lingxi-5e4b2",
+  "sourceBuild": {
+    "sourceHead": "ea59210a827015d0ac316aee393bcb08f22f40f1",
+    "trackedSourceFiles": 845,
+    "snapshotBytes": 12801133,
+    "snapshotManifestSha256": "89ec0f0bd4c701532cc1dbe1021f3cbd381cdc88b1b10427812de873f0c7c2a7",
+    "outputSnapshotOnly": true,
+    "otherCheckoutProductSourcesUsed": false,
+    "webLockSha256": "c2a7e5ce2463565fd92b65022e1ec5d4d70b171004ee8e64af66d1e0e36060ba",
+    "localDependenciesMatchedLock": true,
+    "dependencyVersions": {
+      "vite": "7.3.6",
+      "@vitejs/plugin-react": "5.2.0",
+      "rollup": "4.63.0",
+      "esbuild": "0.28.2",
+      "react": "18.3.1",
+      "react-dom": "18.3.1",
+      "firebase": "13.0.0",
+      "@noble/hashes": "1.8.0"
+    },
+    "npmInstallPerformed": false,
+    "command": "npm run build",
+    "exitCode": 0,
+    "webChange": "Generic unsupported-model message; provider execution acceptance is recorded separately."
+  },
+  "prePublicationAttempt": {
+    "outcome": "Stopped before clone because JSON object key insertion order differed.",
+    "getRequests": 22,
+    "mutationRequests": 0,
+    "mutationMarkerAbsentAtDiagnosis": true,
+    "clonePopulateReleaseArtifactsAbsent": true,
+    "baselineReleaseUnchangedAtDiagnosis": true,
+    "structureAndValuesEqual": true,
+    "arrayOrderEqual": true,
+    "objectKeyOrderDifferencePaths": [
+      "$.headers[6].headers",
+      "$.headers[7].headers",
+      "$.headers[8].headers"
+    ]
+  },
+  "r2Correction": {
+    "change": "Remove the redundant JSON.stringify object-key-order assertion; retain recursive canonical hashing and deep structural equality, including array order and values.",
+    "originalFreezeAndPlanInputsUnchanged": true,
+    "guardTestsPassed": 8,
+    "guardTestsFailed": 0,
+    "newRegressionChecks": [
+      "Object key reordering is accepted.",
+      "Header/rewrite array order changes and nested value changes are rejected."
+    ],
+    "dryRunGetRequests": 23,
+    "dryRunFilePages": 20,
+    "dryRunMutationRequests": 0,
+    "scopeFileMapSourceReleaseAndAmbiguousResponseGuardsRetained": true
+  },
+  "publication": {
+    "status": "LIVE_MAP_VERIFIED",
+    "release": "sites/lingxi-5e4b2/releases/1793374005303000",
+    "version": "sites/lingxi-5e4b2/versions/7ce55b5b99846325",
+    "baselineRelease": "sites/lingxi-5e4b2/releases/1793351712560000",
+    "baselineVersion": "sites/lingxi-5e4b2/versions/71b4954f989e8405",
+    "baselineFiles": 19277,
+    "finalFiles": 19284,
+    "newHashedAssets": 7,
+    "replacedPaths": [
+      "/teams/index.html"
+    ],
+    "reusedBuildFiles": 9,
+    "deletedPaths": 0,
+    "originalProtectedFilesUnchanged": 19265,
+    "baselinePathsExceptOwnedEntryUnchanged": 19276,
+    "allBaselineNonTeamsPathHashesUnchanged": true,
+    "olderTeamsAssetsRetained": true,
+    "configStructureValuesAndArrayOrderUnchanged": true,
+    "baselineAndCandidateConfigFileBytesIdentical": true,
+    "configCanonicalSha256": "00291004def62b35700e8d7c5b418c10bb413776053aff0031e50e2fbe003845",
+    "baselineFileMapCanonicalSha256": "a366991ed149d48fe569bd7a568f0f04001588aa483a5223db71902fa7805d1f",
+    "finalFileMapCanonicalSha256": "ed6c5d4ca31d7eb6ea0034b98c5ec33e04f99c86ce3a91d10ac81306be8decdc",
+    "planSha256": "da90f4055575e246d237ae4ff574c44a224c915bd25210746e7f70ccb91d5dfa",
+    "helperSha256": "3e15374f059a8f9f177fd1dd07dfb48a71462708e83150d0183e2af076c0063b",
+    "configPatchPerformed": false
+  },
+  "ownedEntry": {
+    "path": "/teams/index.html",
+    "previousHostingGzipSha256": "cba44c0635c5c93a5a4a20995fe3edee5724b3a7e1a0fc3eb0464d92232d568f",
+    "rawSha256": "fe7a166a895f446e460e515e4ce055aad53e3489c77e9708c4e0990a7df8550a",
+    "hostingGzipSha256": "72d2bee276c4384eec0c11777bdd655c3572afd00ae9607de4ce8d5241a6f469"
+  },
+  "addedAssets": [
+    {
+      "path": "/assets/AdminModelsPage-BtbS5_z_.js",
+      "bytes": 20043,
+      "rawSha256": "1c1c6af2ddaf27214275fbf7e61678716a0565f066fbda67c3f246b4f9fa8e16",
+      "hostingGzipSha256": "5f947a1448716898d8d0c2b6954eaa2a8c900e220301ce99a9107e037772a887"
+    },
+    {
+      "path": "/assets/DocsPage-BFzrdGv3.js",
+      "bytes": 786678,
+      "rawSha256": "3bb8e41a101a626e1e257596ff9e585a3c0aba49f744e21225d529e12706849c",
+      "hostingGzipSha256": "c38cc5e1ad0266caf4c61e73f2484cbee2d84b1e0158e6449fbd9df0fb9dff9e"
+    },
+    {
+      "path": "/assets/index-CYwLajKK.js",
+      "bytes": 232382,
+      "rawSha256": "eb04d9409c5b0782977e321a490d8d439443c32e9fee87ddb9b43cf0fa61096e",
+      "hostingGzipSha256": "c370e2d7eb5d58a425294b6d179b91b0a038fb32eeab41fa0b61ed46cf2fa8ea"
+    },
+    {
+      "path": "/assets/remote-Dzvepzo_.js",
+      "bytes": 14822,
+      "rawSha256": "7500fa2830bc5bc64d5c15af203d6039fb8153e55005bd07fcac47e944711651",
+      "hostingGzipSha256": "be8d484166e644b2ed77bdb46cad591c2094dab0622ecc5853a0bdbec026d89a"
+    },
+    {
+      "path": "/assets/RemotePage-C7WMLh72.js",
+      "bytes": 163148,
+      "rawSha256": "ac24c1c96fdd3cc078d88f8281a1518f6357e93d6701fb9cae32e0e94ffaa41d",
+      "hostingGzipSha256": "c84fe0a3f03e9186dd69367e56986d340892788f7fec9f2f3e1ec80b395c331f"
+    },
+    {
+      "path": "/assets/RemoteSignInPage-DeYjCnw8.js",
+      "bytes": 2390,
+      "rawSha256": "eded1aa9e74615647a229c08a654b472dd0fc244db840f0ff1f94129b47e529e",
+      "hostingGzipSha256": "50bb3c7d7a653f79e1ad355d0c486ed9e7cb1ec92c256005ad6af1f198947a63"
+    },
+    {
+      "path": "/assets/TeamsPage-EJOAXsfZ.js",
+      "bytes": 499997,
+      "rawSha256": "5fbbf69885ae8381c4cfa77870366d19aa560275181bdc36316bf79372e7cec9",
+      "hostingGzipSha256": "527726e81f9c748b1f47a8d6c4068ef72ead0c308b9a8e34465ce9851e58d937"
+    }
+  ],
+  "httpVerification": {
+    "status": "NEW_TEAM_ENTRY_AND_ASSETS_HTTP_VERIFIED",
+    "getRequests": 20,
+    "remoteWrites": false,
+    "newSourceServedClaim": true,
+    "originalRootBytesUnchanged": true,
+    "originalRootRawSha256": "1448d126aa9c24dd2b2357dcbd9dbdc4be9daae2b965de14e18649d62f2f2a4f",
+    "originalRootHostingGzipSha256": "a1fd13b08beef277d7c0bf7e8e445dfbba38980e0839a501537e0e4b94900c73",
+    "origins": [
+      {
+        "origin": "https://lingxi-5e4b2.web.app",
+        "getRequests": 10,
+        "originalRootExact": true,
+        "bothTeamsEntryRoutesExact": true,
+        "newAssetsExact": 7,
+        "teamsCacheControl": "no-store",
+        "teamsReferrerPolicy": "no-referrer",
+        "assetCacheControl": "public,max-age=31536000,immutable",
+        "rootCacheControl": "max-age=3600",
+        "rootReferrerPolicy": "strict-origin-when-cross-origin"
+      },
+      {
+        "origin": "https://lingxios.net",
+        "getRequests": 10,
+        "originalRootExact": true,
+        "bothTeamsEntryRoutesExact": true,
+        "newAssetsExact": 7,
+        "teamsCacheControl": "no-store",
+        "teamsReferrerPolicy": "no-referrer",
+        "assetCacheControl": "public,max-age=31536000,immutable",
+        "rootCacheControl": "max-age=3600",
+        "rootReferrerPolicy": "strict-origin-when-cross-origin"
+      }
+    ]
+  },
+  "memberReload": {
+    "summary": {
+      "file": "web-provider-refresh-summary.json",
+      "sha256": "68099ba2a7947f8a6ea5e7c7028367a0f649ed05742bf5aa6a562cc3291d02c0"
+    },
+    "reloadCount": 1,
+    "signedIn": true,
+    "connected": true,
+    "teamVisible": true,
+    "documentResponses200": 1,
+    "assetResponses200": 5,
+    "pageErrorCount": 0,
+    "consoleErrorCount": 0,
+    "groupExactFinalCount": 1,
+    "oldDmExactFinalCount": 1,
+    "oldDmSameFinalMessage": true,
+    "historyReadable": true,
+    "afterOwnerUnbind": true,
+    "currentRunRevoked": true,
+    "currentQuestionInactive": true,
+    "memberBotCardCount": 0,
+    "memberOwnerControlCount": 0,
+    "newTrigger": false,
+    "newAnswer": false,
+    "rebind": false,
+    "ownedBrowserClosed": true,
+    "preUnbindAnsweredAndCompletedEvidenceRecordedSeparately": true
+  },
+  "evidenceBoundary": "This records exact deployed Web source bytes and a normal signed-in member reload after owner unbind. It does not repeat the earlier full provider journey or establish total T3 completion.",
+  "publicLogs": [
+    {
+      "file": "../logs/web-provider-build.log.gz",
+      "bytes": 786,
+      "sha256": "0aa9a27d6efe7e90a2559f09a6835c477cee28b53ea14df96a4e922f40fe63e9",
+      "uncompressedBytes": 1721,
+      "uncompressedSha256": "7ced048a0f0b2809f87ff2a3eb327d7bfa177c2e1a6888be4213bbfba1238cd8"
+    },
+    {
+      "file": "../logs/web-provider-overlay-guards.log.gz",
+      "bytes": 552,
+      "sha256": "ae2c10f1fe6f6457e62c2d19c28019ed102e5c554fda1029bfd24f192b7314a4",
+      "uncompressedBytes": 924,
+      "uncompressedSha256": "e120a472a48210ed811add034b3207454cf9c995345c2bd22cd5ef91235ec88b"
+    }
+  ],
+  "privateEvidenceFingerprints": {
+    "sourceSnapshot": {
+      "file": "build-source-manifest.json",
+      "sha256": "89ec0f0bd4c701532cc1dbe1021f3cbd381cdc88b1b10427812de873f0c7c2a7"
+    },
+    "buildProof": {
+      "file": "build-proof.json",
+      "sha256": "559c15a737bf3002ce5a0c7378a0096e889fd2d76493a0de9e0ef2119f230c56"
+    },
+    "overlayPlan": {
+      "file": "plan.json",
+      "sha256": "da90f4055575e246d237ae4ff574c44a224c915bd25210746e7f70ccb91d5dfa"
+    },
+    "r1Helper": {
+      "file": "deploy-overlay.mjs",
+      "sha256": "c23f6f12c85196da1a9b8d1d9ec238865e1d3c0a5c6d8abf39ffc88748fc9be1"
+    },
+    "r1Seal": {
+      "file": "review-seal.json",
+      "sha256": "464b7069b631817a7c1c95ea311036855ad18b2225a67417f1a2ae57f8efef9f"
+    },
+    "r1Audit": {
+      "file": "audit.jsonl",
+      "sha256": "d28bc2bcd8d1621bdb2634ef18fc184b8037e36bea196692c422661fa3927bb0"
+    },
+    "r1Failure": {
+      "file": "failure.json",
+      "sha256": "60e380f920dc80c6a5226bb120ad28aab09a70c581bf8836ae3eb9719d75a0b3"
+    },
+    "r1Diagnosis": {
+      "file": "proof.json",
+      "sha256": "881fa17132402783f660b43ee9113f55ab6866635b05324b04a2964d56675be4"
+    },
+    "r2Helper": {
+      "file": "deploy-overlay-r2.mjs",
+      "sha256": "3e15374f059a8f9f177fd1dd07dfb48a71462708e83150d0183e2af076c0063b"
+    },
+    "r2Seal": {
+      "file": "review-seal-r2.json",
+      "sha256": "6be40b6d6bc3cd9bafc702cd473a18c97e1c344328c66554ad4c07f1ddadc0a5"
+    },
+    "r2Diff": {
+      "file": "deploy-overlay-r2.diff",
+      "sha256": "ff0d453181e14e4943a37f7f5f8a987fe8216a2e7e3175122e39e9636cb0883f"
+    },
+    "r2GuardTests": {
+      "file": "overlay-guards-r2.test.mjs",
+      "sha256": "5085ff129478827580e058dcf252ffd100561a2481049a5e233666844385b528"
+    },
+    "r2DryRun": {
+      "file": "result.json",
+      "sha256": "54dd51fae3c369689b3a78ffeccb2bf0745b5d8be3f0d799cd91820cdb1ef10d"
+    },
+    "r2DryRunAudit": {
+      "file": "audit.jsonl",
+      "sha256": "7797528907b06609c7ddf51f45c25038509f38877a2a07460d63eb124d090a11"
+    },
+    "deploymentResult": {
+      "file": "result.json",
+      "sha256": "8d4d3c73ca7bef2e012598dfed551f461abd700d680a47fa5c8a83baa30cf563"
+    },
+    "releaseResponse": {
+      "file": "release.json",
+      "sha256": "9a0ef83ca2764492787b26ebf3b092b9f01a30130eb3d7b953a724b4f0279261"
+    },
+    "finalLiveSnapshot": {
+      "file": "live-verified.json",
+      "sha256": "f230b202572d390bb9ef0a9db0c68dd7c7b206a8019dec08835198b335fdd23e"
+    },
+    "httpVerification": {
+      "file": "result.json",
+      "sha256": "6afbf49a3257f6b19088d1741f6ead5fcc44b26e652952fb69fcae0b98e4ab90"
+    },
+    "memberReloadSummary": {
+      "file": "web-provider-refresh-summary.json",
+      "sha256": "68099ba2a7947f8a6ea5e7c7028367a0f649ed05742bf5aa6a562cc3291d02c0"
+    }
+  }
+}

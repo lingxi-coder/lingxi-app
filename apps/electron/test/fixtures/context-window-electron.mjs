@@ -50,7 +50,7 @@ async function main() {
       const rect = tooltip.getBoundingClientRect();
       return { text: tooltip.textContent, top: rect.top, bottom: rect.bottom, height: window.innerHeight };
     })()`);
-    assert.match(details.text, /79k \/ 475k tokens used/, 'usage uses application input budget');
+    assert.match(details.text, /已使用 79k \/ 475k 个 tokens/, 'usage uses application input budget');
     assert.match(details.text, /模型最大上下文：1M/, 'model maximum remains a separate fact');
     assert.match(details.text, /475,000 tokens/, 'price boundary retains its exact value');
     assert.ok(details.top >= 0 && details.bottom <= details.height, 'expanded context details fit within the viewport');
@@ -89,16 +89,16 @@ async function main() {
 
     // Placeholders retain measured usage; successful compaction invalidates it.
     const tooltipText = () => evaluate(`document.querySelector('[role="tooltip"]')?.textContent ?? ''`);
-    assert.match(await tooltipText(), /79k \/ 475k tokens used/, 'live snapshot shown');
+    assert.match(await tooltipText(), /已使用 79k \/ 475k 个 tokens/, 'live snapshot shown');
     assert.doesNotMatch(await tooltipText(), /≈/, 'token line is not prefixed as an estimate');
     await act(`window.sendUsageEvent({ type: 'usage_update', input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 })`);
-    assert.match(await tooltipText(), /79k \/ 475k tokens used/, 'a request placeholder keeps the last snapshot');
-    assert.doesNotMatch(await tooltipText(), /Usage unavailable/, 'no flash back to the unknown state');
+    assert.match(await tooltipText(), /已使用 79k \/ 475k 个 tokens/, 'a request placeholder keeps the last snapshot');
+    assert.doesNotMatch(await tooltipText(), /用量不可用/, 'no flash back to the unknown state');
     await act(`window.sendUsageEvent({ type: 'usage_update', input_tokens: 12000, output_tokens: 32000, cache_read_tokens: 0, cache_creation_tokens: 0 })`);
-    assert.match(await tooltipText(), /12k \/ 475k tokens used/, 'the next snapshot replaces the retained one');
+    assert.match(await tooltipText(), /已使用 12k \/ 475k 个 tokens/, 'the next snapshot replaces the retained one');
 
     await act(`window.sendUsageEvent({ type: 'compaction_status', phase: 'complete' })`);
-    assert.match(await tooltipText(), /Usage unavailable/, 'compaction clears the pre-compaction measurement');
+    assert.match(await tooltipText(), /用量不可用/, 'compaction clears the pre-compaction measurement');
     assert.doesNotMatch(await tooltipText(), /12k/, 'component cannot resurrect stale usage');
 
     const screenshot = process.env.LINGXI_CONTEXT_WINDOW_SCREENSHOT;

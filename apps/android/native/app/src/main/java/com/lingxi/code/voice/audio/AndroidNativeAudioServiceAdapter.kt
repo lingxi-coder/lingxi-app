@@ -11,7 +11,6 @@ import com.lingxi.code.bindings.client.AudioOperationReadinessDto
 import com.lingxi.code.bindings.client.AudioOperationRequestDto
 import com.lingxi.code.bindings.client.AudioOperationResultDto
 import com.lingxi.code.bindings.client.AudioOperationRoutePolicyDto
-import com.lingxi.code.bindings.client.AudioOwnerDto
 import com.lingxi.code.bindings.client.AudioReadinessStateDto
 import kotlinx.coroutines.CancellationException
 import java.util.UUID
@@ -26,7 +25,7 @@ internal class AndroidNativeAudioServiceAdapter(context: Context) : AndroidAudio
     override suspend fun execute(request: AudioOperationRequestDto): AudioOperationResultDto {
         val identity = request.identity.toIdentityOrNull()
             ?: return failed(AudioErrorKindDto.INVALID_REQUEST, "audio operation identity is invalid")
-        val owner = request.owner.toOwnerOrNull()
+        val owner = request.owner.toAudioOwnerKeyOrNull()
             ?: return failed(AudioErrorKindDto.INVALID_REQUEST, "audio owner is invalid")
         val maxPayloadBytes = request.maxPayloadBytes.toSafeLongOrNull()
             ?: return failed(AudioErrorKindDto.INVALID_REQUEST, "audio payload limit is invalid")
@@ -89,12 +88,6 @@ internal class AndroidNativeAudioServiceAdapter(context: Context) : AndroidAudio
         DeviceAudioReadiness.BUSY -> AudioReadinessStateDto.BUSY
         DeviceAudioReadiness.MISSING_MODEL -> AudioReadinessStateDto.MISSING_MODEL
         DeviceAudioReadiness.UNAVAILABLE -> AudioReadinessStateDto.UNAVAILABLE
-    }
-
-    private fun AudioOwnerDto.toOwnerOrNull(): AudioOwnerKey? = when (this) {
-        is AudioOwnerDto.Session -> AudioOwnerKey.session(sessionId).takeIf { sessionId.isNotBlank() }
-        is AudioOwnerDto.Ui -> instanceId.takeIf { it.isNotBlank() }?.let(AudioOwnerKey::ui)
-        is AudioOwnerDto.System -> instanceId.takeIf { it.isNotBlank() }?.let(AudioOwnerKey::system)
     }
 
     private fun AudioOperationDto.toDeviceOperation(): DeviceAudioOperation? = when (this) {

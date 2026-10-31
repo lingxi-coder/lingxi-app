@@ -1,0 +1,15 @@
+{
+  "pid": 86967,
+  "command": [
+    "bash",
+    "apps/android/native/scripts/build-jni.sh",
+    "--variant",
+    "play"
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app",
+  "floor_gib": 4,
+  "started_at": 1793244649.535756,
+  "exit_code": 0,
+  "stopped_for_disk": false,
+  "free_gib": 10.918
+}

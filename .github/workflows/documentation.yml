@@ -5,6 +5,7 @@ on:
       - 'apps/web/**'
       # The web build compiles the Remote Control core and the Electron reducer chain from source.
       - 'packages/bridge-client/src/**'
+      - 'packages/bridge-client/package*.json'
       - 'apps/electron/src/renderer/**'
       - 'apps/electron/src/shared/**'
       - 'docs/technical/**'
@@ -15,6 +16,7 @@ on:
       - 'apps/web/**'
       # The web build compiles the Remote Control core and the Electron reducer chain from source.
       - 'packages/bridge-client/src/**'
+      - 'packages/bridge-client/package*.json'
       - 'apps/electron/src/renderer/**'
       - 'apps/electron/src/shared/**'
       - 'docs/technical/**'
@@ -31,11 +33,17 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: apps/web/package-lock.json
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            packages/bridge-client/package-lock.json
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: npm ci
+      # Shared source imports resolve dependencies from their own package directory.
+      - name: Install shared Bridge client dependencies
+        working-directory: packages/bridge-client
+        run: npm ci
       - name: Check saved bilingual content and generated consumers
         run: npm run docs:check:content
       - run: npm run typecheck

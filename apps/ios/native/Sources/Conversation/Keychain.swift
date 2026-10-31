@@ -33,6 +33,11 @@ import Security
 /// All accessors are static + synchronous: Keychain calls are fast and the call
 /// sites (settings writes, engine config build) are already off the render path.
 enum Keychain {
+    enum ReadError: Error, Equatable {
+        case status(OSStatus)
+        case invalidData
+    }
+
     /// The stored slots. The account string is the Keychain item's
     /// `kSecAttrAccount`, stable across versions.
     enum Item: String {
@@ -55,18 +60,27 @@ enum Keychain {
     /// failed). An empty string is normalized to `nil` so a blanked field reads
     /// the same as "unset".
     static func get(_ item: Item) -> String? {
+        try? getOrThrow(item)
+    }
+
+    /// Use when an unavailable Keychain must not be treated as a deleted item.
+    static func getOrThrow(_ item: Item) throws -> String? {
         var query = baseQuery(item)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let value = String(data: data, encoding: .utf8),
-              !value.isEmpty
-        else { return nil }
-        return value
+        return try decodeRead(status: status, data: result as? Data)
+    }
+
+    static func decodeRead(status: OSStatus, data: Data?) throws -> String? {
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw ReadError.status(status) }
+        guard let data, let value = String(data: data, encoding: .utf8) else {
+            throw ReadError.invalidData
+        }
+        return value.isEmpty ? nil : value
     }
 
     /// Store (or replace) `item`'s value. A blank/whitespace-only value clears the

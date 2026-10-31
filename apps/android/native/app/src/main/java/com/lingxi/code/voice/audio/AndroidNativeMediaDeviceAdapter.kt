@@ -33,7 +33,6 @@ import com.lingxi.code.bindings.client.MediaErrorKindDto
 import com.lingxi.code.bindings.client.MediaFrameDto
 import com.lingxi.code.bindings.client.MediaFramePayloadDto
 import com.lingxi.code.bindings.client.MediaKindDto
-import com.lingxi.code.bindings.client.MediaOwnerDto
 import com.lingxi.code.bindings.client.MediaPcmFrameDto
 import com.lingxi.code.bindings.client.MediaRenderReceiptDto
 import com.lingxi.code.bindings.client.MediaSessionIntentDto
@@ -49,15 +48,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -81,8 +83,10 @@ internal class AndroidNativeMediaDeviceAdapter(context: Context) : AndroidMediaD
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val leases = ConcurrentHashMap<String, AndroidMediaLease>()
     private val openMutex = Mutex()
+    private val pendingOpenCleanup = AndroidMediaOpenCleanupRegistry()
     private val openLeasesByIdentity = mutableMapOf<MediaOpenKey, OpenLease>()
     private val openIdentitiesByLease = mutableMapOf<String, MediaOpenKey>()
+    private val confirmedClosedLeases = LinkedHashSet<String>()
     private var cameraLeaseID: String? = null
 
     override fun deviceCapabilities(): AndroidMediaDeviceCapabilities =
@@ -124,6 +128,14 @@ internal class AndroidNativeMediaDeviceAdapter(context: Context) : AndroidMediaD
             MediaDeviceResponseDto(request.requestId, result)
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (error: AndroidMediaOpenRejectedWithoutResource) {
+            val failure = error.failure
+            MediaDeviceResponseDto(
+                request.requestId,
+                MediaDeviceResultDto.OpenFailedWithoutResource(
+                    MediaErrorDto(failure.kind, truncateUtf8(failure.message ?: "Android media open rejected", MAX_ERROR_BYTES)),
+                ),
+            )
         } catch (error: AndroidMediaDeviceFailure) {
             failure(request.requestId, error.kind, error.message ?: "Android media operation failed")
         } catch (error: AudioOperationException) {
@@ -138,13 +150,12 @@ internal class AndroidNativeMediaDeviceAdapter(context: Context) : AndroidMediaD
     }
 
     private suspend fun open(request: MediaDeviceOpenRequestDto): MediaDeviceResultDto.Opened = openMutex.withLock {
+        // A failed partial open keeps the adapter-wide device lane reserved until
+        // its same cleanup handle receives a close acknowledgement.
+        pendingOpenCleanup.retryPending()
         val session = request.request
-        if (request.maxPayloadBytes == 0uL || request.maxPayloadBytes > Long.MAX_VALUE.toULong()) {
-            throw AndroidMediaDeviceFailure(MediaErrorKindDto.INVALID_REQUEST, "media payload limit is outside the supported range")
-        }
-        val maxPayloadBytes = request.maxPayloadBytes.toLong()
-        val owner = request.owner.toAudioOwnerOrNull()
-            ?: throw AndroidMediaDeviceFailure(MediaErrorKindDto.INVALID_REQUEST, "media owner is invalid")
+        val owner = request.owner.toAudioOwnerKeyOrNull()
+            ?: throw AndroidMediaOpenRejectedWithoutResource(AndroidMediaDeviceFailure(MediaErrorKindDto.INVALID_REQUEST, "media owner is invalid"))
         val key = MediaOpenKey(
             owner = owner,
             operationId = request.identity.id,
@@ -163,23 +174,33 @@ internal class AndroidNativeMediaDeviceAdapter(context: Context) : AndroidMediaD
             if (existing.signature != signature) {
                 throw AndroidMediaDeviceFailure(MediaErrorKindDto.INVALID_REQUEST, "media operation identity was reused with different settings")
             }
-            if (leases.containsKey(existing.leaseID)) {
+            val existingLease = leases[existing.leaseID]
+            if (existingLease != null) {
+                if (existingLease.stopState != AndroidMediaStopState.ACTIVE) {
+                    throw AndroidMediaDeviceFailure(MediaErrorKindDto.BUSY, "the previous Android media lease is still stopping")
+                }
                 return@withLock MediaDeviceResultDto.Opened(MediaDeviceLeaseDto(existing.leaseID))
             }
             openLeasesByIdentity.remove(key)
         }
+        if (request.maxPayloadBytes == 0uL || request.maxPayloadBytes > Long.MAX_VALUE.toULong()) {
+            throw AndroidMediaOpenRejectedWithoutResource(AndroidMediaDeviceFailure(MediaErrorKindDto.INVALID_REQUEST, "media payload limit is outside the supported range"))
+        }
+        val maxPayloadBytes = request.maxPayloadBytes.toLong()
         val wantsAudio = session.mode == MediaSessionModeDto.AUDIO || session.mode == MediaSessionModeDto.AUDIO_VIDEO
         val wantsVideo = session.mode == MediaSessionModeDto.VIDEO || session.mode == MediaSessionModeDto.AUDIO_VIDEO
         val wantsPlayback = androidMediaNeedsPlayback(session.mode, session.intent)
         if (wantsAudio && session.audioSource?.id != MICROPHONE_SOURCE_ID) {
-            throw AndroidMediaDeviceFailure(MediaErrorKindDto.UNSUPPORTED, "Android media supports the app's default microphone source")
+            throw AndroidMediaOpenRejectedWithoutResource(AndroidMediaDeviceFailure(MediaErrorKindDto.UNSUPPORTED, "Android media supports the app's default microphone source"))
         }
         if (wantsVideo && session.videoSource?.id != CAMERA_SOURCE_ID) {
-            throw AndroidMediaDeviceFailure(MediaErrorKindDto.UNSUPPORTED, "Android media supports the app's default camera source")
+            throw AndroidMediaOpenRejectedWithoutResource(AndroidMediaDeviceFailure(MediaErrorKindDto.UNSUPPORTED, "Android media supports the app's default camera source"))
         }
 
         var audio: AndroidMediaAudioPortSession? = null
         var video: AndroidCameraVideoInput? = null
+        var audioOpenDispatched = false
+        var cameraOpenDispatched = false
         val leaseID = UUID.randomUUID().toString()
         try {
             val permissions = buildSet {
@@ -209,6 +230,7 @@ internal class AndroidNativeMediaDeviceAdapter(context: Context) : AndroidMediaD
                 if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     throw AndroidMediaDeviceFailure(MediaErrorKindDto.PERMISSION_DENIED, "Android microphone permission is required for media capture")
                 }
+                audioOpenDispatched = true
                 audio = AndroidAudioServiceProvider.openMediaAudioPort(
                     appContext,
                     owner,
@@ -222,6 +244,7 @@ internal class AndroidNativeMediaDeviceAdapter(context: Context) : AndroidMediaD
                     throw AndroidMediaDeviceFailure(MediaErrorKindDto.BUSY, "another media session owns the Android camera")
                 }
                 cameraLeaseID = leaseID
+                cameraOpenDispatched = true
                 video = AndroidCameraVideoInput.open(appContext, maxPayloadBytes)
             }
             val lease = AndroidMediaLease(
@@ -239,15 +262,54 @@ internal class AndroidNativeMediaDeviceAdapter(context: Context) : AndroidMediaD
             openIdentitiesByLease[leaseID] = key
             return@withLock MediaDeviceResultDto.Opened(MediaDeviceLeaseDto(leaseID))
         } catch (error: Throwable) {
-            if (cameraLeaseID == leaseID) cameraLeaseID = null
-            withContext(NonCancellable) {
-                runCatching { audio?.stop() }
-                runCatching { video?.close() }
+            val cameraOpenFailure = error as? AndroidCameraOpenFailure
+            val cameraOpenClosed = error as? AndroidCameraOpenClosed
+            val audioOpenClosed = error as? AndroidMediaAudioOpenClosed
+            val openError = cameraOpenFailure?.original ?: cameraOpenClosed?.original ?: audioOpenClosed?.original ?: error
+            val unresolvedCameraClose = cameraOpenFailure?.cleanup
+            var partialCleanupConfirmed = false
+            if (audio != null || video != null || unresolvedCameraClose != null) {
+                val partialAudio = audio
+                val partialVideo = video
+                val cleanup = AndroidMediaOpenCleanup {
+                    var cleanupFailure: Throwable? = null
+                    try { partialAudio?.stop() }
+                    catch (closeError: Throwable) { cleanupFailure = closeError }
+                    try { partialVideo?.close() }
+                    catch (closeError: Throwable) { if (cleanupFailure == null) cleanupFailure = closeError }
+                    try { unresolvedCameraClose?.close() }
+                    catch (closeError: Throwable) { if (cleanupFailure == null) cleanupFailure = closeError }
+                    if (cleanupFailure == null && cameraLeaseID == leaseID) cameraLeaseID = null
+                    cleanupFailure?.let { throw it }
+                }
+                try {
+                    pendingOpenCleanup.retainAndRetry(cleanup)
+                    partialCleanupConfirmed = true
+                } catch (cleanupError: Throwable) {
+                    if (openError is CancellationException) {
+                        openError.addSuppressed(cleanupError)
+                        throw openError
+                    }
+                    throw AndroidMediaDeviceFailure(
+                        MediaErrorKindDto.NATIVE_FAILURE,
+                        "Android media open failed and partial resource cleanup is still unconfirmed",
+                    )
+                }
+            } else if (cameraLeaseID == leaseID && (!cameraOpenDispatched || cameraOpenClosed != null)) {
+                cameraLeaseID = null
             }
-            if (error is SecurityException) {
+            if (openError is CancellationException) throw openError
+            val audioClosed = !audioOpenDispatched || audioOpenClosed != null ||
+                (audio != null && partialCleanupConfirmed)
+            val cameraClosed = !cameraOpenDispatched || cameraOpenClosed != null ||
+                ((video != null || unresolvedCameraClose != null) && partialCleanupConfirmed)
+            if (audioClosed && cameraClosed) {
+                throw AndroidMediaOpenRejectedWithoutResource(openError.asMediaDeviceFailure())
+            }
+            if (openError is SecurityException) {
                 throw AndroidMediaDeviceFailure(MediaErrorKindDto.PERMISSION_DENIED, "Android media permission is required")
             }
-            throw error
+            throw openError
         }
     }
 
@@ -319,6 +381,9 @@ internal class AndroidNativeMediaDeviceAdapter(context: Context) : AndroidMediaD
     private suspend fun update(request: MediaDeviceUpdateRequestDto): MediaDeviceResultDto.Updated {
         val lease = requireLease(request.leaseId)
         return lease.controlMutex.withLock {
+            if (leases[request.leaseId] !== lease || lease.stopState != AndroidMediaStopState.ACTIVE) {
+                throw AndroidMediaDeviceFailure(MediaErrorKindDto.BUSY, "native media lease stopped before the update could be applied")
+            }
             when (val update = request.update) {
                 is MediaSessionUpdateDto.SetEnabled -> when (update.kind) {
                     MediaKindDto.AUDIO -> {
@@ -364,30 +429,41 @@ internal class AndroidNativeMediaDeviceAdapter(context: Context) : AndroidMediaD
     private suspend fun stop(leaseId: String): MediaDeviceResultDto.Stopped {
         return withContext(NonCancellable) {
             openMutex.withLock {
-                val lease = leases.remove(leaseId) ?: return@withLock MediaDeviceResultDto.Stopped
-                val openKey = openIdentitiesByLease.remove(leaseId)
-                if (openKey != null) openLeasesByIdentity.remove(openKey)
-                if (cameraLeaseID == leaseId) cameraLeaseID = null
-                lease.controlMutex.withLock { lease.stop() }
+                val lease = leases[leaseId] ?: run {
+                    if (leaseId in confirmedClosedLeases) return@withLock MediaDeviceResultDto.Stopped
+                    throw AndroidMediaDeviceFailure(MediaErrorKindDto.NOT_FOUND, "native media lease has no confirmed stop receipt")
+                }
+                lease.controlMutex.withLock {
+                    lease.stop {
+                        val openKey = openIdentitiesByLease.remove(leaseId)
+                        if (openKey != null) openLeasesByIdentity.remove(openKey)
+                        if (cameraLeaseID == leaseId) cameraLeaseID = null
+                        leases.remove(leaseId, lease)
+                    }
+                }
+                confirmedClosedLeases.add(leaseId)
+                if (confirmedClosedLeases.size > 512) {
+                    confirmedClosedLeases.remove(confirmedClosedLeases.first())
+                }
                 MediaDeviceResultDto.Stopped
             }
         }
     }
 
-    private fun requireLease(leaseId: String): AndroidMediaLease =
-        leases[leaseId] ?: throw AndroidMediaDeviceFailure(MediaErrorKindDto.NOT_FOUND, "native media lease is not active")
+    private fun requireLease(leaseId: String): AndroidMediaLease {
+        val lease = leases[leaseId]
+            ?: throw AndroidMediaDeviceFailure(MediaErrorKindDto.NOT_FOUND, "native media lease is not active")
+        if (lease.stopState != AndroidMediaStopState.ACTIVE) {
+            throw AndroidMediaDeviceFailure(MediaErrorKindDto.BUSY, "native media lease is still stopping")
+        }
+        return lease
+    }
 
     private fun failure(requestId: String, kind: MediaErrorKindDto, message: String) =
         MediaDeviceResponseDto(
             requestId,
             MediaDeviceResultDto.Error(MediaErrorDto(kind, truncateUtf8(message, MAX_ERROR_BYTES))),
         )
-
-    private fun MediaOwnerDto.toAudioOwnerOrNull(): AudioOwnerKey? = when (this) {
-        is MediaOwnerDto.Session -> sessionId.takeIf(String::isNotBlank)?.let(AudioOwnerKey::session)
-        is MediaOwnerDto.Ui -> instanceId.takeIf(String::isNotBlank)?.let(AudioOwnerKey::ui)
-        is MediaOwnerDto.System -> instanceId.takeIf(String::isNotBlank)?.let(AudioOwnerKey::system)
-    }
 
     private inner class AndroidMediaLease(
         val leaseId: String,
@@ -399,6 +475,8 @@ internal class AndroidNativeMediaDeviceAdapter(context: Context) : AndroidMediaD
     ) {
         val frames = Channel<AndroidMediaInput>(capacity = 8)
         val controlMutex = Mutex()
+        private val stopGate = AndroidMediaStopGate()
+        val stopState: AndroidMediaStopState get() = stopGate.state
         private val sequence = AtomicLong(0)
         @Volatile var audioEnabled = audio != null
             private set
@@ -491,22 +569,24 @@ internal class AndroidNativeMediaDeviceAdapter(context: Context) : AndroidMediaD
             }
         }
 
-        suspend fun stop() = withContext(NonCancellable) {
-            audioPump?.cancelAndJoin()
-            videoPump?.cancelAndJoin()
-            frames.close()
-            var failure: Throwable? = null
-            try {
-                audio?.stop()
-            } catch (error: Throwable) {
-                failure = error
-            }
-            try {
-                video?.close()
-            } catch (error: Throwable) {
-                if (failure == null) failure = error
-            }
-            failure?.let { throw it }
+        suspend fun stop(onStopped: () -> Unit = {}) = withContext(NonCancellable) {
+            stopGate.stop(close = {
+                audioPump?.cancelAndJoin()
+                videoPump?.cancelAndJoin()
+                frames.close()
+                var failure: Throwable? = null
+                try {
+                    audio?.stop()
+                } catch (error: Throwable) {
+                    failure = error
+                }
+                try {
+                    video?.close()
+                } catch (error: Throwable) {
+                    if (failure == null) failure = error
+                }
+                failure?.let { throw it }
+            }, onStopped = onStopped)
         }
     }
 
@@ -535,6 +615,9 @@ private fun truncateUtf8(value: String, maximumBytes: Int): String {
 }
 
 private class AndroidMediaDeviceFailure(val kind: MediaErrorKindDto, message: String) : RuntimeException(message)
+
+/** This Open has no native resource or has an exact close receipt for each. */
+private class AndroidMediaOpenRejectedWithoutResource(val failure: AndroidMediaDeviceFailure) : RuntimeException(failure)
 
 private fun Throwable.asMediaDeviceFailure(): AndroidMediaDeviceFailure = when (this) {
     is AndroidMediaDeviceFailure -> this
@@ -567,6 +650,67 @@ private sealed interface AndroidMediaInput {
     data class Failure(val failure: AndroidMediaDeviceFailure) : AndroidMediaInput
 }
 
+private class AndroidCameraOpenFailure(
+    val original: Throwable,
+    val cleanup: AndroidMediaOpenCleanup,
+    closeFailure: Throwable,
+) : RuntimeException("Android camera open failed and asynchronous close remains unconfirmed", original) {
+    init { addSuppressed(closeFailure) }
+}
+
+/** The exact camera open and its callback/close flight have settled. */
+private class AndroidCameraOpenClosed(val original: Throwable) : RuntimeException(original)
+
+/** Owns a camera close request and its callbacks across bounded caller waits. */
+private class AndroidCameraCloseRequest(
+    private val device: AtomicReference<CameraDevice?>,
+    private val session: AtomicReference<CameraCaptureSession?>,
+    private val reader: ImageReader,
+    private val thread: HandlerThread,
+    private val handler: AtomicReference<Handler?>,
+    private val openCallbackFinished: CompletableDeferred<Unit>,
+    private val sessionCallbackFinished: CompletableDeferred<Unit>,
+    private val deviceClosed: CompletableDeferred<Unit>,
+    private val sessionClosed: CompletableDeferred<Unit>,
+) : AndroidMediaOpenCleanup {
+    private val flight = AndroidMediaCloseFlight(
+        closeTimeoutMs = CAMERA_CLOSE_WAIT_MS,
+        canRetryAfterFailure = {
+            // CameraDevice.close() is asynchronous. Only retry cleanup after the old request is
+            // terminal according to Camera2 callbacks, so no second close flight can overlap it.
+            openCallbackFinished.isCompleted && deviceClosed.isCompleted &&
+                sessionCallbackFinished.isCompleted &&
+                (session.get() == null || sessionClosed.isCompleted)
+        },
+        closeResource = ::closeAndAwaitCallbacks,
+    )
+
+    fun startClose() = flight.start()
+
+    override suspend fun close() = flight.awaitClosed()
+
+    private suspend fun closeAndAwaitCallbacks() {
+        openCallbackFinished.await()
+        val openedDevice = device.get()
+        if (openedDevice != null && !deviceClosed.isCompleted) {
+            val accepted = handler.get()?.post { runCatching { openedDevice.close() } } == true
+            if (!accepted) runCatching { openedDevice.close() }
+        }
+        sessionCallbackFinished.await()
+        deviceClosed.await()
+        if (session.get() != null) sessionClosed.await()
+        reader.close()
+        if (thread.state != Thread.State.NEW) {
+            thread.quitSafely()
+            withContext(Dispatchers.IO) { thread.join() }
+        }
+    }
+
+    private companion object {
+        const val CAMERA_CLOSE_WAIT_MS = 5_000L
+    }
+}
+
 private class AndroidCameraVideoInput private constructor(
     private val device: CameraDevice,
     private val session: CameraCaptureSession,
@@ -574,10 +718,12 @@ private class AndroidCameraVideoInput private constructor(
     private val thread: HandlerThread,
     private val handler: Handler,
     private val source: MediaSourceRefDto,
+    private val closeRequest: AndroidCameraCloseRequest,
 ) {
     private val frames = Channel<MediaFrameDto>(capacity = 2)
     private val sequence = AtomicLong(0L)
-    private val stopped = AtomicLong(0L)
+    private val stopRequested = AtomicLong(0L)
+    private val stopGate = AndroidMediaStopGate()
     private val timestampOffsetMs = System.currentTimeMillis() - SystemClock.elapsedRealtime()
 
     suspend fun nextFrame(): MediaFrameDto? {
@@ -587,12 +733,12 @@ private class AndroidCameraVideoInput private constructor(
     }
 
     suspend fun setEnabled(enabled: Boolean) = suspendCancellableCoroutine<Unit> { continuation ->
-        if (stopped.get() != 0L) {
+        if (stopRequested.get() != 0L) {
             continuation.resumeWithException(CancellationException("Android camera lease has ended"))
             return@suspendCancellableCoroutine
         }
         val accepted = handler.post {
-            if (!continuation.isActive || stopped.get() != 0L) return@post
+            if (!continuation.isActive || stopRequested.get() != 0L) return@post
             try {
                 if (enabled) {
                     while (frames.tryReceive().isSuccess) Unit
@@ -614,40 +760,20 @@ private class AndroidCameraVideoInput private constructor(
     }
 
     suspend fun close() = withContext(NonCancellable) {
-        if (stopped.getAndSet(1L) != 0L) return@withContext
+        stopRequested.set(1L)
         frames.close()
-        suspendCancellableCoroutine<Unit> { continuation ->
-            val accepted = handler.post {
-                runCatching { session.stopRepeating() }
-                runCatching { session.close() }
-                runCatching { device.close() }
-                runCatching { reader.close() }
-                thread.quitSafely()
-                if (continuation.isActive) continuation.resume(Unit)
-            }
-            if (!accepted) {
-                runCatching { session.close() }
-                runCatching { device.close() }
-                runCatching { reader.close() }
-                thread.quitSafely()
-                if (continuation.isActive) continuation.resume(Unit)
-            }
-        }
+        stopGate.stop(close = { closeRequest.close() })
     }
 
     fun fail(error: AndroidMediaDeviceFailure) {
-        if (stopped.getAndSet(1L) != 0L) return
+        if (stopRequested.getAndSet(1L) != 0L) return
         frames.close(error)
-        runCatching { session.stopRepeating() }
-        runCatching { session.close() }
-        runCatching { device.close() }
-        runCatching { reader.close() }
-        thread.quitSafely()
+        closeRequest.startClose()
     }
 
     private fun onImage(image: Image) {
         try {
-            if (stopped.get() != 0L) return
+            if (stopRequested.get() != 0L) return
             val width = image.width
             val height = image.height
             val y = copyPlane(image.planes[0], width, height)
@@ -749,65 +875,113 @@ private class AndroidCameraVideoInput private constructor(
             val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
             val source = MediaSourceRefDto("media-runtime:camera")
             val thread = HandlerThread("LingxiMediaCamera")
-            var device: CameraDevice? = null
-            var captureSession: CameraCaptureSession? = null
-            val portRef = java.util.concurrent.atomic.AtomicReference<AndroidCameraVideoInput?>()
-            val pendingDeviceFailure = java.util.concurrent.atomic.AtomicReference<AndroidMediaDeviceFailure?>()
+            val deviceRef = AtomicReference<CameraDevice?>()
+            val sessionRef = AtomicReference<CameraCaptureSession?>()
+            val handlerRef = AtomicReference<Handler?>()
+            val openCallbackFinished = CompletableDeferred<Unit>()
+            val sessionCallbackFinished = CompletableDeferred<Unit>()
+            val deviceClosed = CompletableDeferred<Unit>()
+            val sessionClosed = CompletableDeferred<Unit>()
+            val openCallStarted = AtomicLong(0L)
+            val sessionCallStarted = AtomicLong(0L)
+            val portRef = AtomicReference<AndroidCameraVideoInput?>()
+            val pendingDeviceFailure = AtomicReference<AndroidMediaDeviceFailure?>()
+            val closeRequest = AndroidCameraCloseRequest(
+                device = deviceRef,
+                session = sessionRef,
+                reader = reader,
+                thread = thread,
+                handler = handlerRef,
+                openCallbackFinished = openCallbackFinished,
+                sessionCallbackFinished = sessionCallbackFinished,
+                deviceClosed = deviceClosed,
+                sessionClosed = sessionClosed,
+            )
             try {
                 thread.start()
                 val handler = Handler(thread.looper)
+                handlerRef.set(handler)
                 val openedDevice = suspendCancellableCoroutine<CameraDevice> { continuation ->
+                    openCallStarted.set(1L)
+                    continuation.invokeOnCancellation { closeRequest.startClose() }
                     try {
                         manager.openCamera(cameraID, object : CameraDevice.StateCallback() {
                             override fun onOpened(camera: CameraDevice) {
-                                continuation.resumeResource(camera) { opened ->
-                                    runCatching { opened.close() }
-                                }
+                                deviceRef.set(camera)
+                                openCallbackFinished.complete(Unit)
+                                if (continuation.isActive) continuation.resume(camera)
+                                else closeRequest.startClose()
                             }
                             override fun onDisconnected(camera: CameraDevice) {
-                                camera.close()
+                                deviceRef.set(camera)
+                                openCallbackFinished.complete(Unit)
+                                sessionCallbackFinished.complete(Unit)
                                 val failure = AndroidMediaDeviceFailure(MediaErrorKindDto.UNAVAILABLE, "Android camera disconnected")
                                 pendingDeviceFailure.set(failure)
                                 portRef.get()?.fail(failure)
                                 if (continuation.isActive) continuation.resumeWithException(failure)
                             }
                             override fun onError(camera: CameraDevice, error: Int) {
-                                camera.close()
+                                deviceRef.set(camera)
+                                openCallbackFinished.complete(Unit)
+                                sessionCallbackFinished.complete(Unit)
                                 val failure = AndroidMediaDeviceFailure(MediaErrorKindDto.NATIVE_FAILURE, "Android camera failed ($error)")
                                 pendingDeviceFailure.set(failure)
                                 portRef.get()?.fail(failure)
                                 if (continuation.isActive) continuation.resumeWithException(failure)
                             }
+
+                            override fun onClosed(camera: CameraDevice) {
+                                deviceClosed.complete(Unit)
+                                openCallbackFinished.complete(Unit)
+                                if (sessionCallStarted.get() == 0L) {
+                                    sessionCallbackFinished.complete(Unit)
+                                    sessionClosed.complete(Unit)
+                                }
+                                if (continuation.isActive) {
+                                    continuation.resumeWithException(
+                                        AndroidMediaDeviceFailure(MediaErrorKindDto.UNAVAILABLE, "Android camera closed while opening"),
+                                    )
+                                }
+                            }
                         }, handler)
                     } catch (error: SecurityException) {
                         continuation.resumeWithException(AndroidMediaDeviceFailure(MediaErrorKindDto.PERMISSION_DENIED, "Android camera permission is required for media capture"))
                     } catch (error: Throwable) {
                         continuation.resumeWithException(error)
                     }
-                    continuation.invokeOnCancellation {
-                        reader.close()
-                        thread.quitSafely()
-                    }
                 }
-                device = openedDevice
+                deviceRef.set(openedDevice)
                 val session = suspendCancellableCoroutine<CameraCaptureSession> { continuation ->
+                    sessionCallStarted.set(1L)
+                    continuation.invokeOnCancellation { closeRequest.startClose() }
                     try {
                         openedDevice.createCaptureSession(listOf(reader.surface), object : CameraCaptureSession.StateCallback() {
                             override fun onConfigured(session: CameraCaptureSession) {
+                                sessionRef.set(session)
+                                sessionCallbackFinished.complete(Unit)
                                 try {
                                     val request = openedDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                                         addTarget(reader.surface)
                                     }.build()
                                     session.setRepeatingRequest(request, null, handler)
-                                    if (continuation.isActive) continuation.resume(session) else session.close()
+                                    if (continuation.isActive) continuation.resume(session)
+                                    else closeRequest.startClose()
                                 } catch (error: Throwable) {
-                                    session.close()
+                                    closeRequest.startClose()
                                     if (continuation.isActive) continuation.resumeWithException(error)
                                 }
                             }
                             override fun onConfigureFailed(session: CameraCaptureSession) {
-                                session.close()
+                                sessionRef.set(session)
+                                sessionCallbackFinished.complete(Unit)
                                 if (continuation.isActive) continuation.resumeWithException(AndroidMediaDeviceFailure(MediaErrorKindDto.UNAVAILABLE, "Android camera stream could not be configured"))
+                            }
+
+                            override fun onClosed(session: CameraCaptureSession) {
+                                sessionRef.compareAndSet(null, session)
+                                sessionClosed.complete(Unit)
+                                sessionCallbackFinished.complete(Unit)
                             }
                         }, handler)
                     } catch (error: SecurityException) {
@@ -816,8 +990,8 @@ private class AndroidCameraVideoInput private constructor(
                         continuation.resumeWithException(error)
                     }
                 }
-                captureSession = session
-                val port = AndroidCameraVideoInput(openedDevice, session, reader, thread, handler, source)
+                sessionRef.set(session)
+                val port = AndroidCameraVideoInput(openedDevice, session, reader, thread, handler, source, closeRequest)
                 portRef.set(port)
                 pendingDeviceFailure.get()?.let { port.fail(it) }
                 reader.setOnImageAvailableListener({ sourceReader ->
@@ -830,15 +1004,23 @@ private class AndroidCameraVideoInput private constructor(
                 return port
             } catch (error: Throwable) {
                 withContext(NonCancellable) {
-                    runCatching { captureSession?.close() }
-                    runCatching { device?.close() }
-                    runCatching { reader.close() }
-                    thread.quitSafely()
+                    if (openCallStarted.get() == 0L) {
+                        openCallbackFinished.complete(Unit)
+                        deviceClosed.complete(Unit)
+                    }
+                    if (sessionCallStarted.get() == 0L) {
+                        sessionCallbackFinished.complete(Unit)
+                        sessionClosed.complete(Unit)
+                    }
+                    try {
+                        closeRequest.close()
+                    } catch (closeFailure: Throwable) {
+                        throw AndroidCameraOpenFailure(error, closeRequest, closeFailure)
+                    }
                 }
-                if (error is SecurityException) {
-                    throw AndroidMediaDeviceFailure(MediaErrorKindDto.PERMISSION_DENIED, "Android camera permission is required for media capture")
-                }
-                throw error
+                if (error is AndroidCameraOpenFailure) throw error
+                if (error is CancellationException) throw error
+                throw AndroidCameraOpenClosed(error)
             }
         }
 

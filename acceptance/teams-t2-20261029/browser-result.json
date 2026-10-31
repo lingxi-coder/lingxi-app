@@ -1,0 +1,49 @@
+{
+  "environment": "demo-lingxi-teams-t0 / dev Web / isolated synthetic accounts",
+  "offlineStartedUnixMs": 1793274200473,
+  "offlineDurationMs": 633482,
+  "reconnect": {
+    "messageCount": 9,
+    "uniqueIds": 9,
+    "seqs": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "oldEditApplied": true,
+    "oldRecallApplied": true,
+    "oldRecalledPlaintextAbsent": true,
+    "pendingIntentsFlushed": 2
+  },
+  "reload": {
+    "messageCount": 9,
+    "unread": 0
+  },
+  "sameAccountTabs": {
+    "newMessageCopies": 1,
+    "messageCount": 10,
+    "readPropagated": true
+  },
+  "removal": {
+    "clearedBothMemberViews": true,
+    "oldTabDidNotReattach": true
+  },
+  "rejoin": {
+    "generation": 2,
+    "oldNamespaceEmpty": true,
+    "newCursor": 13,
+    "privateMessageCount": 11,
+    "pending": 0
+  },
+  "groupSend": true,
+  "channelSend": true,
+  "viewportWidth": 390,
+  "horizontalOverflow": false,
+  "sourceMode": "Development server; HMR occurred during manual acceptance; current-source reload checked."
+}

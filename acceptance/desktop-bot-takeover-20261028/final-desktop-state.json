@@ -1,0 +1,21 @@
+{
+  "observedAt": "2026-10-29T08:33:37.469Z",
+  "accountSignedIn": true,
+  "accountError": null,
+  "remoteState": "online",
+  "connections": [
+    {
+      "device": "iPhone",
+      "platform": "ios",
+      "approved": true,
+      "transport": "webrtc",
+      "candidateType": "host"
+    }
+  ],
+  "bot": {
+    "id": "EUBRZpYAmFWbeIY_voKKPw",
+    "remote": true,
+    "model": "openai-chatgpt/gpt-6-luna",
+    "permissionMode": "default"
+  }
+}

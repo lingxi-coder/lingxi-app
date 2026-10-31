@@ -236,14 +236,14 @@ export class BridgeClient extends EventEmitter {
   async executeMedia(
     operation: MediaOperationDto,
     limits: { timeout_budget_ms?: number; max_payload_bytes?: number } = {},
-  ): Promise<{ operation_id: MediaOperationIdDto; result: MediaResultDto }> {
+  ): Promise<{ operation_id: MediaOperationIdDto; incarnation: string; result: MediaResultDto }> {
     const action: MediaServiceActionDto = { type: 'execute', operation, ...limits };
     const budget = limits.timeout_budget_ms ?? (operation.type === 'wait' ? operation.timeout_ms : 30_000);
     const timeoutMs = Math.min(budget + 5_000, 3_605_000);
     const response = await this.requestMediaService(action, timeoutMs);
     const result = response.result;
     if (result?.type !== 'operation') throw new Error('bridge media service returned the wrong result type');
-    return { operation_id: result.operation_id, result: result.result };
+    return { operation_id: result.operation_id, incarnation: result.incarnation, result: result.result };
   }
 
   /** Read a host-owned media asset after the bound session owner is checked. */
@@ -255,8 +255,8 @@ export class BridgeClient extends EventEmitter {
   }
 
   /** Cancel one owner-checked media operation. */
-  async cancelMedia(operationId: MediaOperationIdDto): Promise<void> {
-    const response = await this.requestMediaService({ type: 'cancel', operation_id: operationId }, 30_000);
+  async cancelMedia(operationId: MediaOperationIdDto, incarnation: string): Promise<void> {
+    const response = await this.requestMediaService({ type: 'cancel', operation_id: operationId, incarnation }, 30_000);
     if (response.result?.type !== 'cancelled') throw new Error('bridge media service did not confirm cancellation');
   }
 

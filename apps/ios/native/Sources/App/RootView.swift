@@ -409,14 +409,6 @@ struct RootView: View {
         )
         appSandboxRoot = root
         scopedPreferences = preferences
-        #if canImport(harness_runtimeFFI)
-        Task {
-            await LocalApps.library.configureMediaHost(
-                mediaHostComposition,
-                initializationError: mediaHostInitializationError
-            )
-        }
-        #endif
     }
 
     private var session: SessionRef {
@@ -904,6 +896,7 @@ struct RootView: View {
             appLibrary: LocalApps.library,
             appInfo: LocalApps.info,
             openApps: { navigation.openApps() },
+            openTeams: { navigation.openTeams() },
             openApp: { navigation.runApp($0) }
         )
         .id(sourceGeneration)
@@ -1208,16 +1201,18 @@ struct RootView: View {
                 markCronResultsSeen()
             }
             .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
+        case .teams(let invite):
+            TeamsPage(initialInvite: invite, onOpenAccount: { navigation.showSettings(.account) })
         case .apps:
             AppsPage(library: LocalApps.library, market: LocalApps.market,
-                onOpenApp: { navigation.runApp($0) }, onShowDetails: { navigation.openLocalApp($0) }, onShowMarketDetails: { navigation.openMarketApp($0) },
+                onOpenApp: { navigation.runApp($0) }, onShowDetails: { navigation.openLocalApp($0) },
                 onDevelop: beginLocalAppDevelopment)
         case .localApp(let appID):
             LocalAppDetailPage(library: LocalApps.library, market: LocalApps.market, appId: appID,
                 onOpenApp: { navigation.runApp($0) }, onDevelop: continueLocalAppDevelopment)
         case .marketApp(let appID):
-            MarketAppDetailPage(market: LocalApps.market, appId: appID,
-                onOpenApp: { navigation.runApp($0) }, onDevelop: beginLocalAppDevelopment)
+            MarketInstallPage(library: LocalApps.library, market: LocalApps.market, appId: appID,
+                onOpenApp: { navigation.openLocalApp($0) })
         case .projects:
             ProjectsPage(
                 projectStore: projectStore,
@@ -1413,7 +1408,8 @@ struct RootView: View {
     private func makeSource(
         scope: ConversationScope,
         snapshot: ProviderLaunchSnapshot,
-        mode: SessionMode
+        mode: SessionMode,
+        sessionID: String? = nil
     ) throws -> any ConversationSource {
         let projectCwd: String?
         let project: ProjectSnapshot?
@@ -1434,7 +1430,7 @@ struct RootView: View {
             projectCwd = project?.workspace.hostURL.path
         case .scheduled:
             project = nil
-            projectCwd = MobileUserStorage.directories().scheduledCwd
+            projectCwd = try MobileUserStorage.scheduledWorkspace(sessionID: sessionID)
         }
         let runtime: TerminalRuntimeConfig? = TerminalRuntimeDescriptor.make(
             appSandboxRoot: appSandboxRoot,
@@ -1469,7 +1465,7 @@ struct RootView: View {
         persistConversationScope()
         let old = source
         try requireSourceReplacementAllowed(old)
-        let replacement = try makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode)
+        let replacement = try makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode, sessionID: activeSession)
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: replacement)
         #endif
@@ -1626,6 +1622,7 @@ struct RootView: View {
         let reusesSource = reusesConversationSource(currentScope: activeScope, targetScope: scope,
                                                     currentMode: activeMode, targetMode: targetMode,
                                                     startsNew: startNew, resumesSession: resumeSessionID != nil)
+            && !(scope == .scheduled && resumeSessionID != nil && resumeSessionID != activeSession)
         if !reusesSource {
             guard !source.hasLiveSideChats else {
                 projectStore.errorMessage = String(localized: "side_chat_end_before_restart")
@@ -1701,7 +1698,8 @@ struct RootView: View {
                 let replacement = try makeSource(
                     scope: scope,
                     snapshot: providerRepository.makeLaunchSnapshot(),
-                    mode: targetMode
+                    mode: targetMode,
+                    sessionID: startNew ? nil : resumeSessionID ?? restoredSessionID(scope: scope, mode: targetMode)
                 )
                 #if canImport(harness_runtimeFFI)
                     installExternalEventHandler(on: replacement)
@@ -2198,7 +2196,7 @@ struct RootView: View {
     private func applyAppAction(_ action: LingxiAppAction, approvedDraftChange: Bool = false) -> Bool {
         // A remote overlay preserves the local source and draft. It also works
         // when the local engine has not booted or is waiting for an answer.
-        if case let .canonical(target) = action, target.parts.first == "remote" {
+        if case let .canonical(target) = action, ["remote", "team"].contains(target.parts.first ?? "") {
             guard app.setupDone else { return false }
             return applyCanonicalLink(target)
         }
@@ -2339,6 +2337,8 @@ struct RootView: View {
             else { navigation.openCron(scopeID: target.params["scope"] ?? activeScope.projectID ?? globalCronScopeID, taskID: id) }
         case "terminal":
             navigation.openTerminal(sessionID: id, initialCommand: target.payload["command"] as? String, projectID: activeScope.projectID)
+        case "team":
+            navigation.openTeams(invite: target.params["code"])
         case "apps":
             let requestID = externalAsyncRouteID
             Task { @MainActor in
@@ -2558,7 +2558,13 @@ struct RootView: View {
                       !hasUnsavedConversationMedia else {
                     throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
                 }
-                draft = "Use the local-app skill to develop \(request.name) in \(request.sourceDirectory). Use the schema 2 standalone LocalApp service. This ordinary authoring session is \(sessionID). Existing app ID: \(request.appId ?? "new app"). Publish locally only; publishing to the market is a separate user action.\n\n\(request.prompt)"
+                draft = """
+                Use the local-app skill to develop \(request.name) in \(request.sourceDirectory). Use the schema 2 standalone LocalApp service. This ordinary authoring session is \(sessionID). Existing app ID: \(request.appId ?? "new app"). Publish locally only; publishing to the market is a separate user action.
+
+                If the app uses an Agent, persist recoverable app state and the pending runId and threadId before submission. On reopen, read host task status and event or chat history, and reconnect to the same run and thread read-only. Do not automatically submit, resend or replay tools after an uncertain request or interruption. Show running only when the host confirms it, and show interrupted or unknown state and the action needed from the user; after the user reviews any side effects, a new attempt requires an explicit user action and a new runId. Only show completion when supported by the host's terminal result. iOS may suspend or terminate background work; do not promise indefinite execution.
+
+                \(request.prompt)
+                """
                 navigation.path.removeAll(); navigation.focusDetail()
                 #else
                 throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")

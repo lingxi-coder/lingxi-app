@@ -8,12 +8,17 @@
  * the engine validates its settings against a closed schema, the host must
  * decide before any engine runs, and a session list must be answerable while
  * every runtime is asleep.
+ *
+ * A Bot's chats are not in that list: they are reachable exactly when the
+ * administrator allows Remote Control, it is on for this computer, and the
+ * Bot's own switch is on (`botChat`).
  */
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { SessionRef } from '../bridgeTypes.js';
+import type { RemoteBotDirectory } from './remoteBots.js';
 
 /** The slice of `SettingsStore` the policy uses. */
 export interface RemotePolicySettings {
@@ -32,6 +37,10 @@ export interface RemotePolicyOptions {
   /** For tests. */
   readFile?: (path: string) => string;
   now?: () => number;
+  /** Whether Remote Control is on for this computer; taken as on when absent. */
+  computerEnabled?: () => boolean;
+  /** The Bots, asked each time: they are made after the policy, and only where Bots can run. */
+  bots?: () => Pick<RemoteBotDirectory, 'chat' | 'remoteEnabled'> | null | undefined;
 }
 
 /** How long a read of the managed file is trusted. */
@@ -120,6 +129,25 @@ export class RemotePolicy {
 
   isEnabled(sessionId: string): boolean {
     return this.find(sessionId) !== undefined;
+  }
+
+  /**
+   * The chat of a Bot with this id, if there is one, and whether viewers may
+   * reach it now. Such a chat is nobody's `find`: its switch is the Bot's.
+   */
+  botChat(sessionId: string): { ref: SessionRef; reachable: boolean } | undefined {
+    const chat = this.options.bots?.()?.chat(sessionId);
+    return chat === undefined ? undefined : { ref: chat.ref, reachable: chat.remote && this.botsReachable() };
+  }
+
+  /** Whether viewers may reach the chats of the Bot that works in this folder; what its sessions are launched for. */
+  botReachable(workspace: string): boolean {
+    return this.botsReachable() && this.options.bots?.()?.remoteEnabled(workspace) === true;
+  }
+
+  /** The two things that hold for every Bot at once: the administrator allows Remote Control and it is on for this computer. */
+  private botsReachable(): boolean {
+    return this.allows() && (this.options.computerEnabled?.() ?? true);
   }
 
   /** Whether Remote Control was on for this session at some point since the app started (the difference between "unknown" and "switched off"). */

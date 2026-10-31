@@ -3,6 +3,15 @@ import AVFoundation
 protocol VoiceAudioSessionDriving: Sendable {
     func activate(_ purpose: VoiceAudioSessionCoordinator.Purpose) throws
     func deactivate()
+    /// True only when this driver can confirm deactivation completed.
+    func deactivateWithReceipt() -> Bool
+}
+
+extension VoiceAudioSessionDriving {
+    func deactivateWithReceipt() -> Bool {
+        deactivate()
+        return false
+    }
 }
 
 struct AVAudioSessionDriver: VoiceAudioSessionDriving {
@@ -26,7 +35,16 @@ struct AVAudioSessionDriver: VoiceAudioSessionDriving {
     }
 
     func deactivate() {
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        _ = deactivateWithReceipt()
+    }
+
+    func deactivateWithReceipt() -> Bool {
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            return true
+        } catch {
+            return false
+        }
     }
 }
 
@@ -45,6 +63,12 @@ actor VoiceAudioSessionCoordinator {
     struct Lease: Equatable, Sendable {
         fileprivate let id: UUID
         let purpose: Purpose
+    }
+
+    enum MediaLeaseAdmission: Sendable {
+        case acquired(Lease)
+        case notAdmitted(Purpose)
+        case activationFailed(Lease, any Error)
     }
 
     enum InvalidationReason: Sendable {
@@ -121,10 +145,34 @@ actor VoiceAudioSessionCoordinator {
         return lease
     }
 
+    /// Reserve before native activation so a partial activation failure keeps
+    /// an exact lease that can be deactivated and confirmed later.
+    func acquireForMedia(_ requested: Purpose) -> MediaLeaseAdmission {
+        if let currentLease { return .notAdmitted(currentLease.purpose) }
+        let lease = Lease(id: UUID(), purpose: requested)
+        state = .active(lease)
+        do {
+            try sessionDriver.activate(requested)
+            return .acquired(lease)
+        } catch {
+            return .activationFailed(lease, error)
+        }
+    }
+
     func release(_ lease: Lease) {
         guard currentLease == lease else { return }
         if case .active = state { sessionDriver.deactivate() }
         state = .idle
+    }
+
+    /// Release only after this exact lease's driver confirms deactivation.
+    /// Failure retains the lease so a later Stop can retry without admitting a
+    /// replacement owner.
+    func releaseWithReceipt(_ lease: Lease) -> Bool {
+        guard currentLease == lease else { return false }
+        guard sessionDriver.deactivateWithReceipt() else { return false }
+        state = .idle
+        return true
     }
 
     func suspendForBackground() {

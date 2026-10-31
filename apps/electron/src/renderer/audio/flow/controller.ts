@@ -114,11 +114,11 @@ interface InterruptContext {
 }
 
 function errorDetail(result: AudioOperationResultDto): string | null {
-  return result.type === 'failed' ? `${result.error.kind}: ${result.error.message}` : null;
+  return result.type === 'failed' || result.type === 'failed_without_resource' ? `${result.error.kind}: ${result.error.message}` : null;
 }
 
 function requiresConfiguration(result: AudioOperationResultDto): boolean {
-  if (result.type !== 'failed') return false;
+  if (result.type !== 'failed' && result.type !== 'failed_without_resource') return false;
   return ['permission_denied', 'model_missing', 'voice_missing', 'unavailable', 'unsupported', 'invalid_request'].includes(result.error.kind);
 }
 
@@ -379,7 +379,7 @@ export class VoiceFlowController {
       if (detail) {
         this.speechInFlight = false;
         this.currentSpeechSegment = null;
-        if (this.interruptContext && result.type === 'failed' && result.error.kind === 'cancelled') return;
+        if (this.interruptContext && (result.type === 'failed' || result.type === 'failed_without_resource') && result.error.kind === 'cancelled') return;
         this.handleFailure(result, detail);
         return;
       }

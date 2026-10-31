@@ -103,6 +103,20 @@ export const strings = {
   failProtocol: text('电脑返回了无法理解的数据，已中止连接。', 'The computer sent something that could not be understood, so the connection was stopped.'),
 
   // sessions
+  remoteViews: text('远程内容', 'Remote content'),
+  apps: text('应用', 'Apps'),
+  appsPlacement: text('这些应用在已连接的桌面电脑上运行，并在此浏览器中打开。', 'These apps run on the connected desktop and open in this browser.'),
+  appsLongRunning: text('对于长时间运行的任务，建议使用桌面电脑。移动设备也支持本地部署。', 'For long-running tasks, a desktop is recommended. Local deployment is also supported on mobile.'),
+  appsRunsOnDesktop: text('运行位置：桌面电脑', 'Runs on: desktop'),
+  appsRefresh: text('刷新应用列表', 'Refresh apps'),
+  appsOpen: text('打开', 'Open'),
+  appsOpening: text('正在打开…', 'Opening…'),
+  noApps: text('没有可远程访问的应用', 'No remotely available apps'),
+  noAppsHelp: text('在桌面版中为应用开启远程访问后，它会显示在这里。', 'Enable remote access for an app on the desktop and it will appear here.'),
+  appsListFailed: text('无法读取应用列表，请重试。', 'Could not load apps. Try again.'),
+  appsOpenFailed: text('无法打开应用，请检查电脑连接后重试。', 'Could not open the app. Check the computer connection and try again.'),
+  appsPopupBlocked: text('浏览器拦截了新窗口，请允许弹出窗口后重试。', 'The browser blocked the new window. Allow pop-ups and try again.'),
+  appsInvalidUrl: text('电脑返回了无效或过期的应用链接，请刷新应用列表后重试。', 'The computer returned an invalid or expired app link. Refresh the app list and try again.'),
   sessions: text('会话', 'Sessions'),
   noSessions: text('没有已共享的会话', 'No shared sessions'),
   noSessionsHelp: text('在电脑上的灵犀里打开一个会话，并开启它的远程访问后，会显示在这里。', 'Open a session in LingXi on the computer and allow remote access for it; it will show up here.'),
@@ -114,6 +128,18 @@ export const strings = {
   needsQuestion: text('等待回答', 'Waiting for an answer'),
   needsComputerAccess: text('等待电脑上的授权', 'Waiting on the computer'),
   untitled: text('未命名会话', 'Untitled session'),
+
+  // bots
+  bots: text('Bot', 'Bots'),
+  botNewChat: text('新对话', 'New chat'),
+  botNoChats: text('还没有对话', 'No chats yet'),
+  botGone: text(
+    '这个 Bot 现在无法远程访问。可能是电脑上关掉了它的远程开关，或者它已被删除。',
+    'This Bot can’t be reached now. Its Remote Control switch may be off on the computer, or it was deleted.',
+  ),
+  botWaiting: text('{n} 个对话等你回复', '{n} waiting for you'),
+  backToBot: text('返回 {name}', 'Back to {name}'),
+  backToComputer: text('返回 {name}', 'Back to {name}'),
 
   // session
   sessionLoading: text('正在加载会话…', 'Loading the session…'),
@@ -130,6 +156,8 @@ export const strings = {
   fromDevice: text('来自 {name}', 'From {name}'),
   fromThisDevice: text('来自此浏览器', 'From this browser'),
   fromScheduled: text('定时任务', 'Scheduled task'),
+  fromBot: text('来自 Bot「{name}」', 'From Bot {name}'),
+  fromAnotherBot: text('来自另一个 Bot', 'From another Bot'),
   omittedNote: text('此处有一条内容过大，未同步到远程。', 'An item here was too large to send.'),
   omittedKind: text('此处的“{kind}”内容过大，未同步到远程。', 'A “{kind}” item here was too large to send.'),
   computerAccessNote: text('电脑正在请求访问：{apps}。请在电脑上处理。', 'The computer is asking for access to: {apps}. Handle it on the computer.'),

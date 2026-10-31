@@ -872,7 +872,7 @@ async fn run_agents_connect_flow(cli: &Cli) -> Result<(), String> {
     };
     let availability = build.runtime.provider_availability.clone();
     let catalog_registry = build.runtime.catalog_registry.clone();
-    let key_store = build.runtime.provider_key_store.clone();
+    let key_store = build.runtime.credentials.clone();
     let oauth = build.runtime.oauth_connect_driver.clone();
     let copilot = build.runtime.connect_copilot.clone();
     drop(build);

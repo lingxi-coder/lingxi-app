@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron';
+import { configureFixtureWindow } from './electron-test-environment.mjs';
 const url = process.argv.find((argument) => argument.startsWith('http://'));
 if (!url || !process.env.LINGXI_TEST_USER_DATA) throw new Error('fixture URL and isolated user data required');
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
@@ -8,6 +9,7 @@ async function main() {
   const window = new BrowserWindow({ show: false, width: 1100, height: 800, webPreferences: { sandbox: true } });
   try {
     await window.loadURL(url);
+    await configureFixtureWindow(window);
     const run = (script) => window.webContents.executeJavaScript(script);
     const wait = async (expression) => {
       const deadline = Date.now() + 6000;

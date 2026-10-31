@@ -7,14 +7,52 @@ import type { ScheduledScope } from '../shared/scheduled.js';
 import type { SettingsStore } from './settings.js';
 import type { SessionRuntime } from './bridge.js';
 import { isSessionId } from './sessionIdentity.js';
+import { createScheduledRunWorkspace, scheduledWorkspaceInstructions } from './scheduled-workspaces.js';
 import { scheduledRunIdentity } from './scheduled-run-identity.js';
 import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
-import type { ProjectSessionCatalog } from './session-catalog.js';
+import type { KeepAwake } from './bots/keepAwake.js';
+import type { ProjectSessionCatalog, ProjectSessionCatalogRow } from './session-catalog.js';
 import type { SessionRef } from '../shared/settings.js';
 
 type ScheduledRunResult = { sessionId: string; summary: string };
 
+/** What of a session catalog the scheduler reads: the owner's, or the one a Bot keeps in its own home. */
+export interface RoutineCatalog {
+  list(projectPath: string): Promise<{ sessions: ProjectSessionCatalogRow[] }>;
+  find(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogRow | undefined>;
+}
+
+/** What the scheduler needs of one Bot to run its routines. */
+export interface RoutineBot {
+  botId: string;
+  name: string;
+  /** The Bot's working directory: the scope its routines live in. */
+  workspace: string;
+  /** The Bot's own model, if it has one. */
+  model?: string;
+  /** The catalog of the Bot's home, where its chats are; they are not in the owner's. */
+  catalog(): RoutineCatalog;
+}
+
+/** What the scheduler asks of the Bots. */
+export interface RoutineBots {
+  /** The Bots whose routines run now: none where Bots cannot run, and not one that is being deleted. */
+  routineBots(): RoutineBot[];
+  /** The Bot whose workspace a working directory is, while its routines can run. */
+  routineBotFor(workspace: string): RoutineBot | undefined;
+  /** Whether a working directory is shaped like a Bot's workspace, even if the Bot is gone or being deleted. */
+  isBotWorkspace(workspace: string): boolean;
+}
+
 const MAX_RECENT_SCHEDULED_RUNS = 500;
+/** How long before a Bot's routine is due the computer starts being kept awake, so that it does not drift into sleep just before the routine runs. */
+export const DUE_SOON_MS = 10 * 60_000;
+
+export interface ScheduledTaskServiceOptions {
+  /** Kept awake while a Bot's routine runs, and for a while before one is due. */
+  keepAwake?: KeepAwake;
+  now?: () => number;
+}
 
 /** Catalog file the Rust scheduler writes for one scope's workspace. */
 const catalogPath = (workspace: string): string => join(workspace, '.lingxi', 'scheduled_tasks.json');
@@ -33,6 +71,10 @@ export class ScheduledTaskService {
   private retention?: Promise<void>;
   private readonly scopeCache = new Map<string, { label: string; jobs: CronJobDto[] }>();
   private cacheWrites: Promise<void> = Promise.resolve();
+  private bots?: RoutineBots;
+  /** Held while a routine of a Bot is due within `DUE_SOON_MS`. */
+  private releaseDue?: () => void;
+  private readonly now: () => number;
 
   constructor(
     private readonly settings: SettingsStore,
@@ -42,7 +84,9 @@ export class ScheduledTaskService {
      * releases the durable dedupe key so the run can be announced later. */
     private readonly notify: (title: string, body: string, ref?: SessionRef) => boolean,
     private readonly report: (error: unknown) => void,
+    private readonly options: ScheduledTaskServiceOptions = {},
   ) {
+    this.now = options.now ?? Date.now;
     if (typeof settings.settingsPath === 'string') {
       try {
         const rows: unknown = JSON.parse(readFileSync(join(dirname(settings.settingsPath), 'scheduled-scopes.json'), 'utf8'));
@@ -53,20 +97,41 @@ export class ScheduledTaskService {
     }
   }
 
+  /** Bots are known once the app has made them; until then only the owner's projects have routines. */
+  attachBots(bots: RoutineBots): void {
+    this.bots = bots;
+  }
+
   scopes(): ScheduledScope[] {
-    return [{ id: 'global', label: 'No project' }, ...this.settings.getPublic().projects.map((path) => ({ id: path, projectPath: path, label: basename(path) })), ...[...this.scopeCache].filter(([path, value]) => path !== this.settings.scheduledWorkspace && !this.settings.hasProject(path) && value.jobs.length > 0).map(([path, value]) => ({ id: path, projectPath: path, label: `${value.label} (unavailable)`, unavailable: true }))];
+    // A Bot's workspace is a scope of its own, named for the Bot. It is not a project, so it has no `projectPath`.
+    const bots = (this.bots?.routineBots() ?? []).map((bot): ScheduledScope => ({ id: bot.workspace, label: bot.name, botId: bot.botId }));
+    return [{ id: 'global', label: 'No project' }, ...this.settings.getPublic().projects.map((path) => ({ id: path, projectPath: path, label: basename(path) })), ...bots, ...[...this.scopeCache].filter(([path, value]) => path !== this.settings.scheduledWorkspace && !this.settings.hasProject(path) && !this.bots?.isBotWorkspace(path) && value.jobs.length > 0).map(([path, value]) => ({ id: path, projectPath: path, label: `${value.label} (unavailable)`, unavailable: true }))];
   }
 
   resolveScope(id: string): string {
     if (id === 'global') return this.settings.scheduledWorkspace;
-    if (!this.settings.hasProject(id)) throw new Error('Project is unavailable. Select an existing project.');
-    return id;
+    if (this.settings.hasProject(id)) return id;
+    const bot = this.bots?.routineBotFor(id);
+    if (bot) return bot.workspace;
+    throw new Error(this.bots?.isBotWorkspace(id) ? 'This Bot is unavailable.' : 'Project is unavailable. Select an existing project.');
+  }
+
+  resolveSession(scopeId: string, sessionId: string): SessionRef {
+    const path = this.resolveScope(scopeId);
+    const managed = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionWorkspace(sessionId) : undefined;
+    return { projectPath: managed?.projectPath ?? path, sessionId };
   }
 
   start(): void {
     void this.sync().catch(this.report);
     this.timer = setInterval(() => void this.sync().catch(this.report), 30_000);
     this.timer.unref();
+  }
+
+  /** The computer woke up, and the tick stood still while it slept: look after the routines now, not at the next tick. Nothing happens before `start`. */
+  wake(): void {
+    if (this.timer === undefined || this.disposed) return;
+    void this.sync().catch(this.report);
   }
 
   private controllerRef(path: string): SessionRef {
@@ -80,6 +145,9 @@ export class ScheduledTaskService {
 
   private async controller(path: string): Promise<SessionRuntime> {
     if (this.disposed) throw new Error('Scheduled task service is closed');
+    const bot = this.bots?.routineBotFor(path);
+    // No lease for a Bot that is going away: it would outlive the Bot's folder.
+    if (!bot && this.bots?.isBotWorkspace(path)) throw new Error('This Bot is unavailable.');
     if (path === this.settings.scheduledWorkspace) {
       await mkdir(path, { recursive: true, mode: 0o700 });
       if ((await lstat(path)).isSymbolicLink()) throw new Error('Managed scheduled workspace must not be a symlink.');
@@ -87,7 +155,8 @@ export class ScheduledTaskService {
     const ref = this.controllers.get(path)?.ref ?? this.controllerRef(path);
     let entry = this.controllers.get(path);
     if (!entry) { entry = { ref, release: this.bridge.retainBackgroundSession(ref) }; this.controllers.set(path, entry); }
-    try { return await this.bridge.ensure(ref, true, this.settings.getPublic().model); }
+    // A Bot's controller starts on the Bot's model; the owner's would win over it.
+    try { return await this.bridge.ensure(ref, true, bot ? bot.model : this.settings.getPublic().model); }
     catch (error) {
       // Release the lease THIS call created, and only while it is still the
       // registered one. Two `controller()` calls can be in flight (the 30s
@@ -109,30 +178,75 @@ export class ScheduledTaskService {
       for (const [path, controller] of this.controllers) {
         if (!paths.has(path)) { controller.release(); this.controllers.delete(path); }
       }
+      // When the active routines of the Bots run next.
+      const botRuns: number[] = [];
       await Promise.allSettled([...paths].map(async (path) => {
         try {
           const document = JSON.parse(await readFile(catalogPath(path), 'utf8')) as { tasks?: { automation?: { status?: string } }[] };
-          if (document.tasks?.some((task) => !task.automation || task.automation.status === 'active')) { const runtime = await this.controller(path); await this.cacheJobs(path, await runtime.manageCron({ action: 'list' })); }
+          if (document.tasks?.some((task) => !task.automation || task.automation.status === 'active')) {
+            const runtime = await this.controller(path);
+            const jobs = await runtime.manageCron({ action: 'list' });
+            await this.cacheJobs(path, jobs);
+            if (this.bots?.routineBotFor(path)) botRuns.push(...jobs.flatMap((job) => job.next_run_at !== undefined && (!job.automation || job.automation.status === 'active') ? [job.next_run_at] : []));
+          }
           else { this.controllers.get(path)?.release(); this.controllers.delete(path); }
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.report(error);
         }
       }));
+      this.keepAwakeForDue(botRuns);
       await this.enforceHistoryLimit();
     };
     this.syncing = work().finally(() => { this.syncing = undefined; });
     return this.syncing;
   }
 
+  /**
+   * The computer is kept awake while a routine of a Bot is due within
+   * `DUE_SOON_MS`; from the moment it runs, the run itself holds it. One that is
+   * overdue counts too: it is about to be claimed.
+   */
+  private keepAwakeForDue(runs: readonly number[]): void {
+    const due = !this.disposed && runs.some((at) => at <= this.now() + DUE_SOON_MS);
+    if (due && this.releaseDue === undefined) this.releaseDue = this.options.keepAwake?.hold();
+    else if (!due && this.releaseDue !== undefined) {
+      this.releaseDue();
+      this.releaseDue = undefined;
+    }
+  }
+
+  /** The chats of a scope are in the Bot's home for a Bot's workspace, and in the owner's otherwise. */
+  private catalogFor(path: string): RoutineCatalog {
+    return this.bots?.routineBotFor(path)?.catalog() ?? this.catalog;
+  }
+
   async context(scopeId: string) {
     const path = this.resolveScope(scopeId);
     const runtime = await this.controller(path);
-    const [models, catalog] = await Promise.all([runtime.scheduledModelCatalog(), this.catalog.list(path)]);
-    return { models: models.details ?? [], currentModel: models.current, sessions: catalog.sessions.filter((session) => !this.isControllerSession(path, session.uuid) && !this.settings.isSessionArchived({ projectPath: path, sessionId: session.uuid })).map((session) => ({ uuid: session.uuid, title: session.title })) };
+    const refs = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionRefs().slice(-200).reverse() : [];
+    // Generated workspaces are separate engine catalogs. Bound both the picker
+    // size and child-process concurrency; exact target validation stays unbounded.
+    const loadManaged = async () => {
+      const rows = [];
+      for (let offset = 0; offset < refs.length; offset += 8) {
+        const batch = await Promise.all(refs.slice(offset, offset + 8).map(async ref => {
+          if (this.settings.isSessionArchived(ref)) return undefined;
+          try { return await this.catalog.find(ref.projectPath, ref.sessionId); }
+          catch (error) { this.report(error); return undefined; }
+        }));
+        rows.push(...batch.filter((row): row is NonNullable<typeof row> => Boolean(row)));
+      }
+      return rows;
+    };
+    const [models, catalog, managed] = await Promise.all([runtime.scheduledModelCatalog(), this.catalogFor(path).list(path), loadManaged()]);
+    const sessions = [...catalog.sessions, ...managed];
+    return { models: models.details ?? [], currentModel: models.current, sessions: sessions.filter((session) => !this.isControllerSession(path, session.uuid) && !this.settings.isSessionArchived({ projectPath: path, sessionId: session.uuid })).map((session) => ({ uuid: session.uuid, title: session.title })) };
   }
 
   async manage(scopeId: string, request: CronRequestDto): Promise<CronJobDto[]> {
-    if (scopeId !== 'global' && !this.settings.hasProject(scopeId)) {
+    if (scopeId !== 'global' && !this.settings.hasProject(scopeId) && !this.bots?.routineBotFor(scopeId)) {
+      // A Bot that is gone took its routines with it; nothing is kept to show.
+      if (this.bots?.isBotWorkspace(scopeId)) throw new Error('This Bot is unavailable.');
       const cached = this.scopeCache.get(scopeId);
       if (cached && (request.action === 'list' || request.action === 'history')) return cached.jobs.map((job) => ({ ...job, ...(job.automation && job.automation.status !== 'completed' ? { automation: { ...job.automation, status: 'paused' as const, statusReason: 'Project is unavailable. Add it again to manage this task.' } } : {}) }));
       throw new Error('Project is unavailable. Add it again to manage this task.');
@@ -176,7 +290,26 @@ export class ScheduledTaskService {
   }
 
   private cacheJobs(path: string, jobs: CronJobDto[]): Promise<void> {
+    // The cache keeps the tasks of projects that were removed. A Bot's tasks
+    // are not kept: they go with the Bot, and a run still finishing after the
+    // Bot was deleted must not bring them back as an unavailable project.
+    if (this.bots?.isBotWorkspace(path)) return Promise.resolve();
     this.scopeCache.set(path, { label: basename(path), jobs });
+    return this.persistCache();
+  }
+
+  /**
+   * Stop looking after a scope: let go of its controller and forget the tasks
+   * cached for it. A Bot's scope goes this way before the Bot is deleted, so
+   * that no lease keeps an engine on the folder that is about to move.
+   */
+  releaseScope(path: string): void {
+    const controller = this.controllers.get(path);
+    if (controller) { controller.release(); this.controllers.delete(path); }
+    if (this.scopeCache.delete(path)) void this.persistCache();
+  }
+
+  private persistCache(): Promise<void> {
     if (typeof this.settings.settingsPath !== 'string') return Promise.resolve();
     const operation = this.cacheWrites.then(async () => {
       const file = join(dirname(this.settings.settingsPath), 'scheduled-scopes.json');
@@ -217,8 +350,9 @@ export class ScheduledTaskService {
 
   private async validateTarget(path: string, sessionId?: string): Promise<void> {
     if (!isSessionId(sessionId)) throw new Error('paused: Select a valid target chat.');
+    path = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionWorkspace(sessionId)?.projectPath ?? path : path;
     if (this.settings.isSessionArchived({ projectPath: path, sessionId })) throw new Error('paused: The target chat was archived. Select another chat.');
-    if (!(await this.catalog.find(path, sessionId))) throw new Error('paused: The target chat is unavailable. Select another chat.');
+    if (!(await this.catalogFor(path).find(path, sessionId))) throw new Error('paused: The target chat is unavailable. Select another chat.');
   }
 
   private async notifyOnce(key: string, title: string, body: string, ref?: SessionRef): Promise<void> {
@@ -274,12 +408,18 @@ export class ScheduledTaskService {
     if (this.disposed) throw new Error('cancelled: Scheduled task service is closed.');
   }
 
+  /** A task runs in one of the owner's projects, in the scheduled workspace, or in the workspace of a Bot that is not being deleted. */
+  private assertTrusted(path: string): void {
+    if (this.settings.isTrustedWorkspace(path) || this.bots?.routineBotFor(path)) return;
+    throw new Error(this.bots?.isBotWorkspace(path) ? 'paused: The Bot is unavailable.' : 'paused: The project is unavailable.');
+  }
+
   private async runOnce(source: SessionRuntime, runId: string, task: CronJobDto, occurrenceId: string, hostAdmitted: boolean): Promise<ScheduledRunResult> {
     try {
       this.assertRunAllowed();
       if (hostAdmitted) throw new Error('interrupted: This scheduled run was already started, but its completion is unavailable. Retry the task to start a new run.');
-      const result = await this.execute(source, runId, task);
-      if (task.automation?.notificationPolicy === 'all') await this.notifyOnce(`${source.projectPath}:${occurrenceId}`, task.prompt.split('\n')[0].replace(/^# /, ''), result.summary.slice(0, 240) || 'Scheduled task completed.', { projectPath: source.projectPath, sessionId: result.sessionId });
+      const result = await this.keepingAwake(source.projectPath, () => this.execute(source, runId, task));
+      if (task.automation?.notificationPolicy === 'all') await this.notifyOnce(`${source.projectPath}:${occurrenceId}`, task.prompt.split('\n')[0].replace(/^# /, ''), result.summary.slice(0, 240) || 'Scheduled task completed.', source.projectPath === this.settings.scheduledWorkspace ? this.resolveSession('global', result.sessionId) : { projectPath: source.projectPath, sessionId: result.sessionId });
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -288,25 +428,51 @@ export class ScheduledTaskService {
     }
   }
 
+  /** A routine of a Bot keeps the computer awake while it runs. The owner's own routines do not. */
+  private async keepingAwake<T>(path: string, run: () => Promise<T>): Promise<T> {
+    const release = this.bots?.routineBotFor(path) ? this.options.keepAwake?.hold() : undefined;
+    try {
+      return await run();
+    } finally {
+      release?.();
+    }
+  }
+
   private async execute(source: SessionRuntime, runId: string, task: CronJobDto): Promise<ScheduledRunResult> {
     const config = task.automation;
     if (!config) throw new Error('paused: Scheduled task configuration is missing.');
     const path = source.projectPath;
-    if (!this.settings.isTrustedWorkspace(path)) throw new Error('paused: The project is unavailable.');
+    this.assertTrusted(path);
     const existing = config.runMode === 'selected_session' ? config.targetSessionId : config.runMode === 'task_session' ? config.ownedSessionId : undefined;
     if (existing) await this.validateTarget(path, existing);
     else if (config.runMode === 'selected_session') throw new Error('paused: Select a target chat.');
-    const ref = { projectPath: path, sessionId: existing ?? randomUUID() };
+    const sessionId = existing ?? randomUUID();
+    const managed = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionWorkspace(sessionId) : undefined;
+    const ref = { projectPath: managed?.projectPath ?? path, sessionId };
     const previous = this.sessionQueues.get(ref.sessionId) ?? Promise.resolve();
     const operation = previous.catch(() => undefined).then(async () => {
       // Revalidate after waiting: the service, projects and targets may disappear while queued.
       this.assertRunAllowed();
-      if (!this.settings.isTrustedWorkspace(path)) throw new Error('paused: The project is unavailable.');
+      this.assertTrusted(path);
       if (existing) await this.validateTarget(path, existing);
+      this.assertRunAllowed();
+      let executionTask = task;
+      if (path === this.settings.scheduledWorkspace && !existing) {
+        const { brandHome } = await this.catalog.productPaths();
+        this.assertRunAllowed();
+        const workspace = await createScheduledRunWorkspace(brandHome, task.id, ref.sessionId, config.name ?? task.prompt.split('\n')[0].replace(/^# /, ''));
+        ref.projectPath = workspace.directory;
+        this.settings.registerScheduledSession(ref, task.id, workspace.memory);
+        this.bridge.setSessionDirectoryGrants(ref.sessionId, [dirname(workspace.memory)]);
+        executionTask = { ...task, prompt: `${task.prompt}\n\n${scheduledWorkspaceInstructions(workspace)}` };
+      } else if (managed) {
+        if (managed.taskId === task.id) this.bridge.setSessionDirectoryGrants(ref.sessionId, [dirname(managed.memory)]);
+        executionTask = { ...task, prompt: `${task.prompt}\n\n${scheduledWorkspaceInstructions({ directory: ref.projectPath, work: join(ref.projectPath, 'work'), outputs: join(ref.projectPath, 'outputs'), memory: managed.taskId === task.id ? managed.memory : undefined })}` };
+      }
       this.assertRunAllowed();
       return this.bridge.withBackgroundSession(ref, !existing, config.model, async (runtime) => {
         this.assertRunAllowed();
-        const summary = await runtime.runScheduledTurn(runId, task, () => {
+        const summary = await runtime.runScheduledTurn(runId, executionTask, () => {
           this.assertRunAllowed();
           return source.markCronRunStarted(runId, ref.sessionId);
         });
@@ -326,6 +492,8 @@ export class ScheduledTaskService {
 
   dispose(): void {
     this.disposed = true;
+    this.releaseDue?.();
+    this.releaseDue = undefined;
     if (this.timer) clearInterval(this.timer);
     for (const controller of this.controllers.values()) controller.release();
     this.controllers.clear();

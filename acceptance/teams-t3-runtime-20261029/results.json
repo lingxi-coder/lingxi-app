@@ -1,0 +1,118 @@
+{
+  "date": "2026-10-29",
+  "recordedAtUtc": "2026-10-29T14:37:15.437612+00:00",
+  "status": "runtime_output_quota_validated_T3_incomplete",
+  "harness": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+    "branch": "codex/teams-runtime",
+    "base": "eed08ca06c35371c1eb7ea5b02ebc10bcae63a12",
+    "head": "6ac2f6f4e617a21a71b57e479bf2b7e195adcaea",
+    "sourceSha256": {
+      "crates/llm-runtime/src/lib.rs": "44ad4d8fced0a612d8e5f9a16939a053f77b9e4da6edc5c6f11d34d753248a26",
+      "crates/llm-runtime/src/scope_output_quota.rs": "e860b802540a584307ab9cff73e73e1d3838d2c3916c523cdf00a5b195c04a1a",
+      "crates/llm-runtime/src/service.rs": "62a315893f366acaf41bbf97e24cc50404b6d5a032edb296c93d989dd62567d3",
+      "crates/llm-runtime/src/service_native_thinking_dispatch_test.rs": "6b5a9723b4177a31dffb00e4098fb28257d1025e2522a524b3bc2e4b6e61bef2",
+      "crates/llm-runtime/src/service_test.rs": "a5a7e35b0c0d38fc83a5ff1c6bc440c42a7b5f1875f215cc25da92c4f5229074",
+      "crates/runtime/src/desktop/assembly.rs": "768afaf6299cbc9a8d7bf2dd58350d16ac65c9aa120a76a83ff196637b6bffdf",
+      "crates/runtime/src/desktop/configuration.rs": "f16ef689b7eaaf3f689d2878ab582250714629152d938fb58f85278a7f10b9ab",
+      "crates/runtime/src/desktop/credentials.rs": "def3ce23093a24bfa87aac3b99f9b08c748fdecff42fc3e2a6c6b8d1c09a5869",
+      "docs/SCOPE_OUTPUT_QUOTA.md": "1b8c94205f74bf9a6ce6cef2765a84a2aba529b1523508223e2055e2f3874989",
+      "Cargo.lock": "e4bc620607b8adcbee4034be6197d21d7c35bbe3d87ebdf6f45208e6de30797e"
+    }
+  },
+  "product": {
+    "branch": "claude/teams",
+    "baseline": "c8cf764a0",
+    "harnessPin": "eed08ca06c35371c1eb7ea5b02ebc10bcae63a12",
+    "pinUpdated": false,
+    "sourceSha256": {
+      "Cargo.toml": "f7a9d070257946646f18242796940eaade23377a0f9a0668c7a9bf06f7166ab6",
+      "docs/TEAMS.md": "ec93fba22682fa2047bc9e69cde34c298ccf39ce4b7c0f93a2f6dc7df4e505e7"
+    }
+  },
+  "sdkRevision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8",
+  "validation": {
+    "llmRuntimeLibrary": {
+      "passed": 1440,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0
+    },
+    "scopeFilter": {
+      "passed": 30,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 1410
+    },
+    "newQuotaCases": [
+      "scope_output_quota::tests::explicit_values_cannot_raise_the_ceiling",
+      "scope_output_quota::tests::admission_checks_do_not_spend_and_uncommitted_reservations_roll_back",
+      "scope_output_quota::tests::concurrent_services_share_one_finite_counter",
+      "service::service_test::tests::scope_quota_checks_final_codec_fields_and_rejects_generation_multipliers",
+      "service::service_native_thinking_dispatch_test::scope_quota_failed_prepare_does_not_charge",
+      "service::service_native_thinking_dispatch_test::scope_quota_revocation_at_late_admission_stops_transport_without_charge",
+      "service::service_test::tests::scope_quota_never_drops_the_limit_for_unsupported_subscription_routes",
+      "service::service_test::tests::scope_quota_validates_real_sdk_wire_limits_for_supported_protocols",
+      "service::service_test::tests::scope_quota_covers_responses_websocket_and_disables_prewarm",
+      "service::service_native_thinking_dispatch_test::scope_quota_preserves_the_separate_operation_budget_and_rolls_back",
+      "service::service_test::tests::scope_quota_rechecks_revocation_after_awaited_host_admission",
+      "service::service_native_thinking_dispatch_test::scope_quota_stream_retry_cannot_reset_the_counter",
+      "service::service_native_thinking_dispatch_test::scope_quota_counts_retry_dispatches_and_clamps_explicit_output",
+      "service::service_native_thinking_dispatch_test::scope_quota_is_shared_by_main_auxiliary_and_forked_services"
+    ],
+    "runtimeLibraryCheck": "pass",
+    "rustfmtChangedSources": "pass",
+    "gitDiffCheck": "pass",
+    "independentStaticReview": {
+      "recommendation": "APPROVE",
+      "rustSources": 8,
+      "testsRunByReviewer": false
+    }
+  },
+  "logs": {
+    "scope-focused.log.gz": {
+      "sha256": "15cab148282c9a57f4be0d89db1decc905753756f463a936f6b3b18e28186db4",
+      "uncompressedBytes": 3494
+    },
+    "llm-runtime-regression.log.gz": {
+      "sha256": "d70f4615a811420d90d0375e7ec0041f8ca872335deef62230fae70c6b462825",
+      "uncompressedBytes": 139845
+    },
+    "runtime-check.log.gz": {
+      "sha256": "89bc63e3473d35306c6b1fb711b9d879bff05034535f976b11cef5882859e666",
+      "uncompressedBytes": 17079
+    },
+    "runtime-check-final.log.gz": {
+      "sha256": "f72725dd757b851143a7cb261d2088d44351a437bb06cf98e6136afb3d359ba4",
+      "uncompressedBytes": 72
+    }
+  },
+  "limits": {
+    "bound": "supported provider generation output <= physical dispatch allowance * per-request output cap, assuming provider adherence",
+    "notBounded": [
+      "input tokens",
+      "total input plus output tokens",
+      "monetary spend",
+      "tool operations",
+      "already admitted process lifetime"
+    ],
+    "realProviderCapAcceptance": false,
+    "teamExecutorEnabled": false,
+    "fourClientT3UIImplemented": false,
+    "productPackagesBuiltForT3": false,
+    "realAccountsUsed": false,
+    "savedSessionsAccessed": false,
+    "pushed": false,
+    "merged": false,
+    "deployed": false,
+    "iamChanged": false
+  },
+  "workspace": {
+    "newHarnessCheckout": true,
+    "canonicalSourcesEdited": false,
+    "cacheDeletedThisContinuation": false,
+    "borrowedCache": "APFS copy-on-write clone; independent target writes only",
+    "freeBytesFinal": 31047680000,
+    "stopFloorBytes": 2147483648
+  }
+}

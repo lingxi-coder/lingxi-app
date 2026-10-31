@@ -1,0 +1,52 @@
+name: TeamsFirestoreProbe
+options:
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    GENERATE_INFOPLIST_FILE: YES
+    CODE_SIGNING_ALLOWED: NO
+    TARGETED_DEVICE_FAMILY: "1,2"
+packages:
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk.git
+    exactVersion: 12.19.2
+targetTemplates:
+  Probe:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    dependencies:
+      - package: Firebase
+        product: FirebaseAuth
+      - package: Firebase
+        product: FirebaseMessaging
+      - package: Firebase
+        product: FirebaseInstallations
+      - package: Firebase
+        product: FirebaseCrashlytics
+targets:
+  Baseline:
+    templates: [Probe]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.teamsspike.baseline
+  WithFirestore:
+    templates: [Probe]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.teamsspike.firestore
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: TEAM_FIRESTORE_PROBE
+    dependencies:
+      - package: Firebase
+        product: FirebaseFirestore
+schemes:
+  Baseline:
+    build:
+      targets:
+        Baseline: all
+  WithFirestore:
+    build:
+      targets:
+        WithFirestore: all

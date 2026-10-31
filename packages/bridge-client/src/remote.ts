@@ -17,10 +17,12 @@ export {
   REMOTE_PROTOCOL,
   /** Major sent as `initialize.protocol`; a different major is refused. */
   REMOTE_PROTOCOL_MAJOR,
-  /** Major of the `client-protocol` contract (29), derived from `CLIENT_PROTOCOL_VERSION`. */
+  /** Major of the `client-protocol` contract (30), derived from `CLIENT_PROTOCOL_VERSION`. */
   CLIENT_PROTOCOL_MAJOR,
   /** Label of the DataChannel that carries RPC fragments, `'lingxi-agent'`. */
   DATA_CHANNEL_LABEL,
+  /** `initialize.app.features` value of a viewer that understands Bots, `'bots'`. */
+  REMOTE_FEATURE_BOTS,
   /** Largest fragment, kind byte included (16384). */
   FRAGMENT_MAX_BYTES,
   /** Fragment size that packs three to a tunnel frame (16374). */
@@ -438,3 +440,5 @@ export type * from './remote/messages.js';
 
 // Independent binary file channel; never wrap this in MessageTransport.
 export * from './remote/files.js';
+
+export * from './remote/localApps.js';

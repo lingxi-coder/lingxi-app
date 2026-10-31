@@ -330,6 +330,34 @@ export const desktopCatalog: Record<string, Record<string, string>> = {
     "ja": "閉じた後も実行を継続",
     "ko": "닫은 후에도 계속 실행"
   },
+  "desktop_apps_remote_access": {
+    "zh-Hans": "允许已配对设备访问",
+    "zh-Hant": "允許已配對裝置存取",
+    "en": "Allow access from paired devices",
+    "ja": "ペアリング済みデバイスからのアクセスを許可",
+    "ko": "페어링된 기기의 접근 허용"
+  },
+  "desktop_apps_remote_shared": {
+    "zh-Hans": "运行在此电脑 · 已向配对设备开放",
+    "zh-Hant": "在此電腦執行 · 已向配對裝置開放",
+    "en": "Runs on this computer · Available to paired devices",
+    "ja": "このコンピューターで実行 · ペアリング済みデバイスで利用可能",
+    "ko": "이 컴퓨터에서 실행 · 페어링된 기기에서 사용 가능"
+  },
+  "desktop_apps_deployment_hint": {
+    "zh-Hans": "手机和电脑均可部署应用。长时间任务推荐运行在电脑上，手机可连接使用。",
+    "zh-Hant": "手機與電腦皆可部署應用程式。長時間工作建議在電腦執行，手機可連線使用。",
+    "en": "Apps can run on a phone or computer. A computer is recommended for long tasks, with access from your phone.",
+    "ja": "アプリはスマートフォンでもコンピューターでも実行できます。長時間のタスクにはコンピューターを推奨し、スマートフォンから接続できます。",
+    "ko": "앱은 휴대폰이나 컴퓨터에서 실행할 수 있습니다. 긴 작업은 컴퓨터에서 실행하고 휴대폰으로 접속하는 것을 권장합니다."
+  },
+  "desktop_apps_remote_unconfigured": {
+    "zh-Hans": "此电脑尚未配置远程应用访问。配置完成后，可逐个应用向已配对设备开放。",
+    "zh-Hant": "此電腦尚未設定遠端應用程式存取。設定後，可逐一向已配對裝置開放。",
+    "en": "Remote app access is not configured on this computer. Once configured, choose which apps paired devices may open.",
+    "ja": "このコンピューターではリモートアクセスが未設定です。設定後、ペアリング済みデバイスに公開するアプリを選べます。",
+    "ko": "이 컴퓨터에 원격 앱 접근이 설정되지 않았습니다. 설정 후 페어링된 기기에 공개할 앱을 선택할 수 있습니다."
+  },
   "desktop_apps_revoke": {
     "zh-Hans": "撤销权限",
     "zh-Hant": "撤銷權限",

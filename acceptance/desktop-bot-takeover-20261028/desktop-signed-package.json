@@ -1,0 +1,26 @@
+{
+  "signed_team": "AZ4AX7J833",
+  "wrapper": "npm run package:mac:flare",
+  "output": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/desktop-package/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app",
+  "zip": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/desktop-package/LingXi-Code-0.1.0-mac-arm64.zip",
+    "bytes": 299364253,
+    "sha256": "5dead773b7384823a13786ad0b2aac6200c505cd21226167c6ae0d7c7dcf6ce3"
+  },
+  "bridge_sha256": "9182ec373aaf9b17ac23499b4f175e74cf2620a84184c8cbe7b5331e1f8c5dc7",
+  "app_asar_sha256": "b4be26b53783178ef4c59bb64d14f5d8ec9848bd560fa8674bffa937337a1363",
+  "wrapper_exit_code": 0,
+  "static_verification": "pass",
+  "runtime_smoke": "pass",
+  "original_development_broker_restored": "restored original service; original plist and program hashes unchanged",
+  "log": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/desktop-flare-account-login-fix.log",
+  "source_head": "82e718fbf",
+  "manual_only": [
+    "Gatekeeper transfer prompt on another Mac",
+    "Developer ID notarization/stapling"
+  ],
+  "free_gib_after_build": 6.168,
+  "previous_permission_fix_zip_sha256": "898c053c1e40cc2a99ee5f8a9d3648d489a169e39a2877dbb3c6ab2161392a1d",
+  "tested_source_fix_commit": "82e718fbf",
+  "source_note": "Package built and verified before committing the identical login source changes."
+}

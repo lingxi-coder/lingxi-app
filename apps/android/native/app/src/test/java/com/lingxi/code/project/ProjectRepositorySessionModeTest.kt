@@ -13,6 +13,7 @@ import java.io.File
 class ProjectRepositorySessionModeTest {
 
     private val guestHome = "/home/test_user"
+    private val testConfigDirectory = ".config"
     private val projectsGuestRoot = "$guestHome/lingxi/projects"
 
     @get:Rule
@@ -197,7 +198,7 @@ class ProjectRepositorySessionModeTest {
         val linked = File(root, "linked").apply { mkdirs() }
         val linkedGuest = "$projectsGuestRoot/linked"
         repository.recordStartedSession(first.record.id, "session-one", "Shared session", SessionMode.Code)
-        repository.recordWorkspace(first.record.id, SessionWorkspaceState("session-one", linkedGuest, first.record.directory, listOf(linkedGuest), "$guestHome/.lingxi/projects/b/session-one.jsonl"))
+        repository.recordWorkspace(first.record.id, SessionWorkspaceState("session-one", linkedGuest, first.record.directory, listOf(linkedGuest), "$guestHome/$testConfigDirectory/projects/b/session-one.jsonl"))
         val reloaded = ProjectRepository(projectsRoot = root, userHome = user, projectsGuestRoot = projectsGuestRoot, userHomeGuestPath = guestHome).project(first.record.id)
         assertEquals(linked.canonicalPath, reloaded.workspace.hostPath)
         assertEquals(first.sourceWorkspace, reloaded.sourceWorkspace)
@@ -260,11 +261,12 @@ class ProjectRepositorySessionModeTest {
     fun `registering an application source preserves its owned directory and reuses the project`() {
         val home = temp.newFolder("linux-home")
         val projects = File(home, "lingxi/projects")
-        val source = File(home, ".lingxi/.apps/counter").apply { mkdirs() }
+        val source = File(home, "$testConfigDirectory/.apps/counter").apply { mkdirs() }
+        val guestSource = "$guestHome/$testConfigDirectory/.apps/counter"
         File(source, "index.html").writeText("unchanged")
         val repo = ProjectRepository(projects, userHome = home, projectsGuestRoot = "$guestHome/lingxi/projects", userHomeGuestPath = guestHome)
-        val first = repo.registerAuthoringWorkspace("Counter", "$guestHome/.lingxi/.apps/counter")
-        val second = repo.registerAuthoringWorkspace("Counter", "$guestHome/.lingxi/.apps/counter")
+        val first = repo.registerAuthoringWorkspace("Counter", guestSource)
+        val second = repo.registerAuthoringWorkspace("Counter", guestSource)
         assertEquals(first.record.id, second.record.id)
         assertEquals(source.canonicalPath, first.workspace.hostPath)
         assertEquals("unchanged", File(source, "index.html").readText())

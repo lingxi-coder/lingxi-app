@@ -1772,7 +1772,7 @@ mod tests {
         invocation.session = Some(Arc::new(tokio::sync::Mutex::new(
             lingxi_core::SessionState::empty(session_id, "test-model".into()),
         )));
-        invocation.assistant_message_id = Some(assistant_message_id.clone());
+        invocation.assistant_message_id = Some(assistant_message_id);
         invocation.tool_use_id = Some(tool_use_id.clone());
         invocation.assistant_message = Some(ConversationMessage::Assistant {
             id: assistant_message_id,
@@ -1795,6 +1795,7 @@ mod tests {
                 &invocation,
                 &tool_api::MediaAgentCapabilityContext {
                     session_id: session_key,
+                    attachment_id: None,
                     model: "test-model".into(),
                     profile_name: Some("test-profile".into()),
                     account_scope: Some("profile:test-profile".into()),

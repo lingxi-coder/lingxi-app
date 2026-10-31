@@ -61,8 +61,9 @@ final class LocalAppMarketTests: XCTestCase {
         XCTAssertEqual(LocalAppAgentModelHost.usesMobileLinuxRuntime, hasMobileLinuxTarget)
     }
     func testMobileAuthoringReferenceAndTaskWireShape() throws {
+        let configDirectory = MobileUserStorage.directories().configDirName
         let authoring = LocalAppAuthoring(
-            sourceDirectory: "/home/user/.lingxi/.apps/app-source",
+            sourceDirectory: "/home/user/\(configDirectory)/.apps/app-source",
             workspaceId: "12345678-1234-4abc-8def-1234567890ab",
             projectRef: .mobileProject("12345678-1234-4abc-8def-1234567890ab"),
             authoringSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -73,13 +74,15 @@ final class LocalAppMarketTests: XCTestCase {
         let project = try XCTUnwrap(object["projectRef"] as? [String: Any])
         XCTAssertEqual(project["kind"] as? String, "mobileProject")
         XCTAssertEqual(project["projectId"] as? String, "12345678-1234-4abc-8def-1234567890ab")
-        let incomplete = try JSONDecoder().decode(LocalAppAuthoring.self, from: Data(#"{"sourceDirectory":"/home/user/.lingxi/.apps/legacy"}"#.utf8))
+        let incomplete = try JSONDecoder().decode(LocalAppAuthoring.self, from: Data(#"{"sourceDirectory":"/home/user/\#(configDirectory)/.apps/legacy"}"#.utf8))
         XCTAssertNil(incomplete.workspaceId)
         XCTAssertNil(incomplete.projectRef)
 
         let response = try JSONDecoder().decode(LocalAppAgentTaskListResponse.self, from: Data(#"{"appId":"a12345678901234567890123456789012","revision":7,"tasks":[{"runId":"run-1","requestId":"opaque request","state":"running","sequence":3,"createdAt":1000,"updatedAt":1200,"model":{"providerId":"p","modelId":"m"},"limits":{"maxTurns":20,"timeoutMs":600000},"progress":{"completedModelTurns":2,"turnLimit":20}}]}"#.utf8))
         XCTAssertEqual(response.revision, 7)
+        XCTAssertEqual(response.tasks.first?.runId, "run-1")
         XCTAssertEqual(response.tasks.first?.requestId, "opaque request")
+        XCTAssertNotEqual(response.tasks.first?.runId, response.tasks.first?.requestId)
         XCTAssertEqual(response.tasks.first?.progress?.completedModelTurns, 2)
         XCTAssertEqual(response.tasks.first?.limits.timeoutMs, 600_000)
     }
@@ -95,9 +98,9 @@ final class LocalAppMarketTests: XCTestCase {
         let request = try LocalAppAuthoringHostRequest.registerPending(authoring)
         XCTAssertEqual(request["op"], .string("registerAuthoring"))
         let requestBytes = try JSONEncoder().encode(request)
-        XCTAssertFalse(LocalAppAgentHostPolicy.requiresModelHost(String(decoding: requestBytes, as: UTF8.self)))
-        XCTAssertTrue(LocalAppAgentHostPolicy.requiresModelHost(#"{"op":"startNative"}"#))
-        XCTAssertTrue(LocalAppAgentHostPolicy.requiresModelHost("invalid JSON"))
+        XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: String(decoding: requestBytes, as: UTF8.self)), .none)
+        XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"startNative"}"#), .currentConfiguration)
+        XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: "invalid JSON"), .currentConfiguration)
         guard case .object(let fields)? = request["authoring"] else {
             return XCTFail("The trusted host request must carry the complete AuthoringRef.")
         }
@@ -221,6 +224,26 @@ final class LocalAppMarketTests: XCTestCase {
         XCTAssertNil(request.value(forHTTPHeaderField:"Authorization"))
         XCTAssertThrowsError(try MarketAPI(baseURL:URL(string:"http://fixture.test/api/v2")!))
     }
+    func testBrowserMarketURLIsScopedToIOS() throws {
+        let api = try MarketAPI(baseURL: URL(string: "https://fixture.test/api/v2")!)
+        XCTAssertEqual(api.browseURL?.absoluteString, "https://fixture.test/?platform=ios")
+    }
+    func testDistributionRefusesOtherPlatformsAndChannels() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [LocalAppMarketProtocol.self]
+        let api = try MarketAPI(baseURL: URL(string: "https://fixture.test/api/v2")!, configuration: config)
+        let incompatible = ["android", "macos", "windows", "linux"].map {
+            manifest.replacingOccurrences(of: "\"platform\":\"ios\"", with: "\"platform\":\"\($0)\"")
+        } + [manifest.replacingOccurrences(of: "\"environment\":\"web\"", with: "\"environment\":\"web\",\"channels\":[\"other\"]")]
+        for value in incompatible {
+            LocalAppMarketProtocol.response = "{\"data\":{\"schema\":2,\"appId\":\"a\",\"versionId\":\"v1\",\"sequence\":1,\"releaseDigest\":\"digest\",\"manifest\":\(value),\"files\":[],\"dependencies\":[],\"artifact\":{\"format\":\"zip\",\"filename\":\"source.zip\",\"sizeBytes\":2,\"sha256\":\"digest\",\"downloadUrl\":\"https://fixture.test/source.zip\"},\"executionConsentRequired\":false}}"
+            do {
+                _ = try await api.distribution("a", target: .init(platform: "ios", environment: "web", channels: ["full"]))
+                XCTFail("A release for another platform or channel must not be installed")
+            } catch let error as MarketFailure { XCTAssertEqual(error.code, "NO_COMPATIBLE_RELEASE") }
+        }
+    }
+
 }
 private final class LocalAppMarketProtocol: URLProtocol, @unchecked Sendable {
     static var response = "{}"

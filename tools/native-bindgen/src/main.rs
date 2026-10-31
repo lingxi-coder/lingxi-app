@@ -109,34 +109,6 @@ mod cli {
         result
     }
 
-    #[cfg(test)]
-    mod tests {
-        #[test]
-        fn audio_callback_repair_preserves_buffer_fields_and_other_results() {
-            let audio = "UniffiForeignFutureResultRustBuffer.UniffiByValue(\n                    FfiConverterTypeAudioOperationResultDto.lower(returnValue),";
-            let other = "UniffiForeignFutureResultRustBuffer.UniffiByValue(\n                    FfiConverterTypeOtherResultDto.lower(returnValue),";
-            let repaired = super::repair_callback_buffer(format!("{audio}\n{other}"));
-            assert!(repaired.ends_with(other));
-            assert_eq!(repaired.matches("RustBuffer.ByValue().apply").count(), 1);
-            for field in ["capacity", "len", "data"] {
-                assert!(repaired.contains(&format!("{field} = buffer.{field}")));
-            }
-            assert_eq!(super::repair_callback_buffer(repaired.clone()), repaired);
-        }
-
-        #[test]
-        fn error_message_repair_preserves_records_and_raw_field() {
-            let record =
-                "        val `message`: kotlin.String\n        ) : ClientEvent() {\n    }\n";
-            let error = "        val `message`: kotlin.String\n        ) : ClientException() {\n        override val message\n            get() = \"message=${ `message` }\"\n    }\n";
-            let repaired = super::repair_message_properties(&format!("{record}{error}"));
-            assert!(repaired.starts_with(record));
-            assert_eq!(repaired.matches("override val `message`").count(), 1);
-            assert!(!repaired.contains("get() ="));
-            assert_eq!(super::repair_message_properties(&repaired), repaired);
-        }
-    }
-
     fn parse_args() -> Result<Args> {
         let mut raw = std::env::args().skip(1);
 
@@ -202,5 +174,33 @@ mod cli {
             language,
             config_path,
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn audio_callback_repair_preserves_buffer_fields_and_other_results() {
+            let audio = "UniffiForeignFutureResultRustBuffer.UniffiByValue(\n                    FfiConverterTypeAudioOperationResultDto.lower(returnValue),";
+            let other = "UniffiForeignFutureResultRustBuffer.UniffiByValue(\n                    FfiConverterTypeOtherResultDto.lower(returnValue),";
+            let repaired = super::repair_callback_buffer(format!("{audio}\n{other}"));
+            assert!(repaired.ends_with(other));
+            assert_eq!(repaired.matches("RustBuffer.ByValue().apply").count(), 1);
+            for field in ["capacity", "len", "data"] {
+                assert!(repaired.contains(&format!("{field} = buffer.{field}")));
+            }
+            assert_eq!(super::repair_callback_buffer(repaired.clone()), repaired);
+        }
+
+        #[test]
+        fn error_message_repair_preserves_records_and_raw_field() {
+            let record =
+                "        val `message`: kotlin.String\n        ) : ClientEvent() {\n    }\n";
+            let error = "        val `message`: kotlin.String\n        ) : ClientException() {\n        override val message\n            get() = \"message=${ `message` }\"\n    }\n";
+            let repaired = super::repair_message_properties(&format!("{record}{error}"));
+            assert!(repaired.starts_with(record));
+            assert_eq!(repaired.matches("override val `message`").count(), 1);
+            assert!(!repaired.contains("get() ="));
+            assert_eq!(super::repair_message_properties(&repaired), repaired);
+        }
     }
 }

@@ -7,6 +7,8 @@ import com.lingxi.code.bindings.android.buildAndroidLocalAppService
 import com.lingxi.code.bindings.android.buildAndroidMobileLinuxRuntimeHandle
 import com.lingxi.code.bindings.runtime.MobileLocalAppServiceHandle
 import com.lingxi.code.project.MobileUserStorage
+import com.lingxi.code.runtimeintegration.NativeEngineFactory
+import com.lingxi.code.runtimeintegration.NativeEngineScenario
 import com.lingxi.code.settings.LinuxRuntimeBridge
 import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
@@ -49,10 +51,10 @@ class UnifiedLocalApps private constructor(private val context: Context) {
             if (agentModelHost != null && agentConfiguration == identity) return@withLock
             withContext(Dispatchers.IO) {
                 val mediaHost = AndroidNativeMediaHostProvider.get(context)
-                agentModelHost = com.lingxi.code.voice.buildVoiceEngine(
+                agentModelHost = NativeEngineFactory.build(
                     context = context, model = configured.defaultModel,
                     providerProfilesJson = configured.providerProfilesJson, routingJson = configured.routingJson,
-                    appAgentHost = true, mediaHost = mediaHost, onEvent = {}, onPermission = {},
+                    scenario = NativeEngineScenario.LocalAppAgent, mediaHost = mediaHost,
                 ) ?: error("无法初始化应用的模型服务，请检查模型配置。")
                 agentConfiguration = identity
             }
@@ -319,9 +321,6 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     }
     fun markOpened(id: String) { opened.edit().putLong(id, System.currentTimeMillis()).apply(); mutableState.value = mutableState.value.copy(openedRevision = mutableState.value.openedRevision + 1) }
     fun drawerApps(records: List<AppRecord>) = records.map { MyApp(it.id, it.name, "", opened.getLong(it.id, 0).takeIf { time -> time > 0 }) }
-    internal fun legacyMarketRoot(): File = File(context.filesDir, "local-app-market")
-    internal fun newLegacyImportGuestPath(): String =
-        MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/import-${java.util.UUID.randomUUID()}"
     fun hostFile(guestPath: String): File {
         val dirs = MobileUserStorage.directories(context)
         require(guestPath.startsWith(dirs.guestHome + "/") && guestPath.split('/').none { it == "." || it == ".." }) { "Invalid Linux user directory" }
@@ -341,5 +340,5 @@ class UnifiedLocalApps private constructor(private val context: Context) {
 internal fun appTarget(environment: String): JSONObject = JSONObject().put("platform", "android").put("environment", environment)
     .put("architecture", canonicalAppArchitecture(Build.SUPPORTED_ABIS.firstOrNull()))
     .put("runtimeVersion", BuildConfig.MOBILE_LINUX_SDK_VERSION)
-    .put("channels", JSONArray(listOf(BuildConfig.FLAVOR)))
+    .put("channels", JSONArray(listOf(BuildConfig.DISTRIBUTION_CHANNEL)))
     .put("capabilities", JSONArray((setOf("camera", "photos", "files", "microphone", "clipboard", "share", "network", "agent") + if (BuildConfig.MOBILE_LINUX_FULL) setOf("process", "background") else emptySet()).toList()))

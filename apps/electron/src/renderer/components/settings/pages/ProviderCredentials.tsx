@@ -5,7 +5,7 @@ import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import { Icon } from '../../Icon';
 import type { PageContentProps } from '../SettingsScreen';
-import { PROVIDERS, providerById } from '../../../../shared/providers';
+import { PROVIDERS, providerById, providersFromCatalog } from '../../../../shared/providers';
 import type { ProviderCredentialMetadata } from '../../../bridge/lingxi';
 import type { ProviderConnectionTestResult } from '../../../bridge/lingxi';
 import { isCurrentCredentialTransaction, persistProviderCredentialAndApplyModel } from '../../../bridge/providerCredentials';
@@ -106,7 +106,8 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const [connectionTestResult, setConnectionTestResult] = useState<ProviderConnectionTestResult | null>(null);
   const [connectionTestError, setConnectionTestError] = useState<string | null>(null);
 
-  const selectedProvider = providerById(selectedProviderId ?? '') ?? PROVIDERS[0];
+  const officialProviders = providersFromCatalog(bridge.desktop.providerModelCatalog ?? []);
+  const selectedProvider = officialProviders.find((p) => p.id === selectedProviderId) ?? providerById(selectedProviderId ?? '') ?? officialProviders[0] ?? PROVIDERS[0];
   const selectedMetadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === selectedProvider.id);
   const statusKind = credentialStatusKind(selectedMetadata);
   // Key the OAuth branches on the capability, not on one provider id: this is a
@@ -124,6 +125,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     visibility,
   );
 
+  useEffect(() => { void bridge.refreshModelPicker().catch(() => undefined); }, [bridge.refreshModelPicker]);
   const mountedRef = useRef(true);
   const transactionGenerationRef = useRef(0);
   const applyGenerationRef = useRef(0);
@@ -375,9 +377,9 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       {selectedProviderId === null ? (
         <Card title={tr('model_detail_provider')}>
           <Row title={tr('desktop_settings_295f21535b')} desc={tr('desktop_settings_c9b4966c44')} align="center">
-            <span />
+            <button type="button" style={ghostButtonStyle(t)} aria-label={tr('desktop_shell_refresh_catalog')} onClick={() => void bridge.refreshModelPicker('manual')}>{'↻'}</button>
           </Row>
-          {PROVIDERS.map((provider) => {
+          {officialProviders.map((provider) => {
             const metadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === provider.id);
             const status = providerCredentialStatus(metadata, provider.available);
             const configured = status.kind === 'configured' || status.kind === 'runtime';

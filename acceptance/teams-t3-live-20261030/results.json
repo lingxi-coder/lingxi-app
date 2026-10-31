@@ -1,0 +1,65 @@
+{
+  "date": "2026-10-30",
+  "t3Complete": false,
+  "authorizedPublicationComplete": true,
+  "mainMerge": false,
+  "source": {
+    "productFeature": "cc818ea041aae1dc8739e91213de640dba8919c6",
+    "productPriorEvidence": "6ae5b376b84a7c05396746661c7bf8b701580933",
+    "runtime": "2580fbcd1e6c5671bb25241cf5ccc465b30c3456",
+    "runtimeImplementationChangedDuringPublication": false
+  },
+  "passed": {
+    "fullSignedDesktopSmoke": {
+      "exit": 0,
+      "seconds": 57.2,
+      "originalAppBrokerHandlerRestored": true
+    },
+    "productionApiSdk": {
+      "checkpoints": 18,
+      "aclDenials": 14,
+      "apiOnlyTerminal": "cancelled"
+    },
+    "freshProductionEvents": {
+      "finished": 3,
+      "expected": 3,
+      "oldEventsRequeued": false
+    },
+    "hosting": {
+      "release": "1793351712560000",
+      "version": "71b4954f989e8405",
+      "preservedOldFiles": 19265,
+      "activeFiles": 19277
+    },
+    "webBrowser": {
+      "origin": "https://lingxios.net",
+      "restoredExistingOwnerAndMemberSessions": true,
+      "ownerUnbindControl": true,
+      "memberUnbindControl": false,
+      "privacyDisclosure": true,
+      "ownerWidth": 390,
+      "ownerScrollWidth": 390,
+      "horizontalOverflow": false,
+      "browserSentMessages": 1,
+      "serverMessageCopies": 1,
+      "ownerLivePageCopies": 1,
+      "botTriggerCountBefore": 1,
+      "botTriggerCountAfter": 1,
+      "realModelExecution": false,
+      "consoleObservation": "One expected 404 for botState on SDK mention metadata without a trusted trigger; no failed send or visible error banner claimed"
+    },
+    "publicationRegressionTests": 13,
+    "actualSdkWrapperShapes": 5
+  },
+  "historicalFailuresRetained": [
+    "Eventarc service-agent initial permission propagation delay",
+    "Four early test events ACKed under legacy event signature; no receipts",
+    "Hosting finalized-version fileCount initially absent; stopped before release",
+    "First signature-update local verifier overstrictly compared generated build/source IDs; reconciled byte-identical source archives"
+  ],
+  "remaining": [
+    "Native static Anthropic configuration and real provider/tool behavior",
+    "Safe signed Desktop test-account UI session path and acceptance",
+    "Matching full-product mobile dependencies, sufficient disk, package/device acceptance"
+  ]
+}

@@ -21,6 +21,12 @@ export interface ProjectSessionCatalogOptions {
   timeoutMs?: number;
   /** Keep project metadata warm while session/runtime work is in flight. */
   cacheTtlMs?: number;
+  /**
+   * Read this configuration home instead of the default one. The catalog modes
+   * of the bridge server take the home from `LINGXI_CONFIG_DIR` only (they
+   * ignore `--session-config-home`), so this sets that variable for the child.
+   */
+  configHome?: string;
   spawnProcess?: typeof spawn;
 }
 
@@ -29,7 +35,7 @@ export interface ProjectSessionCatalogResult {
 }
 
 export interface ProductPaths {
-  configHome: string;
+  brandHome: string;
   appProjectsRoot: string;
 }
 
@@ -129,11 +135,11 @@ export class ProjectSessionCatalog {
     catch { throw new Error('invalid product paths response'); }
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid product paths response');
     const input = value as Record<string, unknown>;
-    if (input['version'] !== 1 || [input['config_home'], input['app_projects_root']].some(path =>
+    if (input['version'] !== 1 || [input['brand_home'], input['app_projects_root']].some(path =>
       typeof path !== 'string' || !isAbsolute(path) || path.includes('\0') || path.length > 32_768)) {
       throw new Error('invalid product paths response');
     }
-    return { configHome: input['config_home'] as string, appProjectsRoot: input['app_projects_root'] as string };
+    return { brandHome: input['brand_home'] as string, appProjectsRoot: input['app_projects_root'] as string };
   }
 
   /** Read settings with the engine's merge rules before starting its process. */
@@ -270,7 +276,7 @@ export class ProjectSessionCatalog {
     return new Promise<string>((resolve, reject) => {
       const child = (this.options.spawnProcess ?? spawn)(bin, args, {
         cwd: canonical,
-        env: buildBridgeEnvironment(process.env),
+        env: { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });

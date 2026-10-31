@@ -24,7 +24,7 @@ test('Electron 43 serializes browser File as an official inline AG-UI DataSource
         read: async () => '', write: async () => {}, list: async () => [] },
     agent: { tasks: { start: async input => ipcRenderer.invoke('agent-start', input), get: async () => ({}), list: async () => ({ tasks: [] }),
         events: async () => ({ events: [], sequence: 0 }), cancel: async () => {} },
-        chats: { create: async () => ({}), open: async () => ({}), get: async () => ({}), list: async () => [], archive: async () => {},
+        chats: { create: async () => ({}), open: async () => ({}), list: async () => [], archive: async () => {},
           delete: async () => {}, history: async () => ({ messages: [] }), send: async () => ({}), cancel: async () => {} } }
     });
   `);

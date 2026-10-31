@@ -22,7 +22,7 @@ final class LocalAppDistributionChannelTests: XCTestCase {
         guard Bundle.main.bundleIdentifier != "com.lingxi.code.full" else {
             throw XCTSkip("Requires the actual StoreDebug product, not a simulated channel flag")
         }
-        let source = try UnifiedLocalApps.hostSourceDirectory("/home/lingxi/.lingxi/.apps/channel-" + UUID().uuidString)
+        let source = try UnifiedLocalApps.hostSourceDirectory(MobileUserStorage.directories().appsGuestPath + "/channel-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: source) }
         let manifest = #"{"schema":2,"name":"Channel refusal fixture","entry":{"type":"server","process":"api"},"targets":[{"platform":"ios","environment":"mobile-linux","channels":["full"],"capabilities":["process"]}],"capabilities":["process"],"processes":[{"name":"api","command":"python3 server.py","ready":{"path":"/","timeoutMs":1000}}]}"#

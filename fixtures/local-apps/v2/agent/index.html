@@ -4,6 +4,39 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent device acceptance</title>
+  <script>
+    (() => {
+      const queueKey = '__lingxiAgentAcceptanceHandoffQueue';
+      const consumerKey = '__lingxiAgentAcceptanceHandoffConsumer';
+      const queue = [];
+      window[queueKey] = queue;
+
+      function safeRunId(value) {
+        return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : null;
+      }
+      function safeCode(value) {
+        return typeof value === 'string' && /^[A-Za-z0-9._-]{1,80}$/.test(value) ? value : 'unknown';
+      }
+      function capture(type, event) {
+        const detail = event?.detail;
+        const record = {
+          type,
+          runId: safeRunId(detail?.runId),
+          ...(type === 'error' ? {code: safeCode(detail?.code)} : {}),
+        };
+        const consumer = window[consumerKey];
+        if (typeof consumer === 'function') {
+          consumer(record);
+          return;
+        }
+        queue.push(record);
+        if (queue.length > 12) queue.shift();
+      }
+
+      window.addEventListener('localApp:agent-handoff-ready', event => capture('ready', event));
+      window.addEventListener('localApp:agent-handoff-error', event => capture('error', event));
+    })();
+  </script>
   <style>
     :root { color-scheme: light dark; font: 16px/1.45 system-ui, sans-serif; }
     body { max-width: 900px; margin: 0 auto; padding: 1rem; }
@@ -12,13 +45,14 @@
     p { margin: .4rem 0 .8rem; }
     section { border: 1px solid color-mix(in srgb, currentColor 24%, transparent); border-radius: .7rem; padding: .85rem; margin: .8rem 0; }
     .row { display: flex; flex-wrap: wrap; gap: .55rem; align-items: center; }
-    button, textarea { font: inherit; }
+    button, textarea, input { font: inherit; }
     button { min-height: 2.65rem; padding: .45rem .75rem; border-radius: .5rem; }
     button:disabled { opacity: .55; }
     textarea { width: 100%; min-height: 5rem; box-sizing: border-box; padding: .55rem; margin: .35rem 0; }
     output, .note { display: block; overflow-wrap: anywhere; }
     #status { padding: .55rem .7rem; border-radius: .45rem; background: color-mix(in srgb, currentColor 8%, transparent); }
     #error { color: #d64242; white-space: pre-wrap; }
+    #recovery-error { color: #d64242; white-space: pre-wrap; }
     pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; padding: .65rem; border-radius: .45rem; background: color-mix(in srgb, currentColor 7%, transparent); }
     .muted { opacity: .76; font-size: .9rem; }
     @media (max-width: 520px) { body { padding: .75rem; } button { flex: 1 1 100%; } }
@@ -29,12 +63,15 @@
   <p class="muted">Runs use the model and permissions selected in the trusted LingXi Apps settings. This page does not configure providers or grants.</p>
   <output id="status" role="status" aria-live="polite">Loading the host Agent…</output>
   <output id="error" role="alert" hidden></output>
+  <output id="handoff-status" class="muted" role="status" aria-live="polite">No SDK handoff event observed.</output>
+  <output id="recovery-error" role="alert" hidden></output>
   <p id="recovery" class="muted">No model request is started automatically when this page opens.</p>
 
   <section aria-labelledby="single-title">
     <h2 id="single-title">Single runs</h2>
     <div class="row">
       <button id="run-image" type="button" data-testid="run-image" disabled>Run public image</button>
+      <button id="retry-image" type="button" data-testid="retry-image" hidden>Retry public image load</button>
       <button id="run-text-file" type="button" data-testid="run-text-file" disabled>Run text file</button>
       <button id="retry-pending" type="button" data-testid="retry-pending" hidden>Retry the same pending request</button>
       <button id="cancel-run" type="button" data-testid="cancel-run" disabled>Cancel active run</button>
@@ -46,9 +83,20 @@
     <h2 id="chat-title">Persistent Chat</h2>
     <div class="row">
       <button id="create-chat" type="button" data-testid="create-chat" disabled>Create Chat</button>
-      <button id="open-chat" type="button" data-testid="open-chat" disabled>Open saved or discovered Chat</button>
+      <button id="check-chat-create" type="button" data-testid="check-chat-create" hidden>Check saved Chat creation</button>
+      <button id="retry-chat-create" type="button" data-testid="retry-chat-create" hidden>Retry the same Chat creation</button>
+      <button id="open-created-chat" type="button" data-testid="open-created-chat" hidden>Open recovered Chat</button>
+      <button id="open-chat" type="button" data-testid="open-chat" disabled>Open saved Chat</button>
       <button id="refresh-history" type="button" data-testid="refresh-history" disabled>Refresh Chat history</button>
     </div>
+    <output id="chat-create-status" class="muted" aria-live="polite">No Chat creation is awaiting recovery.</output>
+    <label for="chat-create-recover-id">Saved Chat creation request ID</label>
+    <div class="row">
+      <input id="chat-create-recover-id" data-testid="chat-create-recover-id" autocomplete="off" placeholder="Exact request ID">
+      <button id="list-chat-creations" type="button" data-testid="list-chat-creations" disabled>List saved creation IDs</button>
+      <button id="recover-chat-creation" type="button" data-testid="recover-chat-creation" disabled>Recover this exact ID</button>
+    </div>
+    <output id="chat-create-receipts" class="muted" aria-live="polite">No saved creation IDs listed.</output>
     <p id="chat-handle" class="muted">No Chat opened.</p>
     <label for="chat-prompt">Message to send in this Chat</label>
     <textarea id="chat-prompt" data-testid="chat-prompt" placeholder="Send a first turn, then ask a follow-up to verify persistent context."></textarea>
@@ -59,6 +107,9 @@
     </div>
     <h3>Canonical Chat history</h3>
     <pre id="chat-history" aria-label="Canonical Chat history">No history loaded.</pre>
+    <h3>Chat lookup failure diagnostics</h3>
+    <p class="muted">Current-page calls have a source, start sequence and page-local request reference. References match only within this page; saved failures are unbound after reopening. Only allowlisted transport metadata is saved.</p>
+    <pre id="chat-lookup-diagnostics" aria-label="Chat lookup failure diagnostics">No Chat lookup failure recorded.</pre>
   </section>
 
   <section aria-labelledby="evidence-title">
@@ -70,13 +121,30 @@
     <h3>Standard BaseEvents</h3>
     <pre id="events">No run events yet.</pre>
   </section>
+  <details>
+    <summary>Safe diagnostics</summary>
+    <pre id="diagnostics" aria-label="Safe fixture diagnostics">Collecting app-scoped metadata…</pre>
+  </details>
 
   <script type="module">
     const $ = (id) => document.getElementById(id);
-    const STORAGE_KEY = 'lingxi.localApp.agent-device-acceptance.v1';
-    const EXTENSION_KEY = 'com.lingxi.localApp';
+    const STORAGE_PREFIX = 'lingxi.localApp.agent-device-acceptance.v1';
+    const RUN_HEAD_KEY = `${STORAGE_PREFIX}.selectedRun`;
+    const RUN_ENTRY_PREFIX = `${STORAGE_PREFIX}.run.`;
+    const RUN_FINISHED_PREFIX = `${STORAGE_PREFIX}.finished.`;
+    const CHAT_SELECTION_KEY = `${STORAGE_PREFIX}.selectedChat`;
+    const CHAT_CREATION_HEAD_KEY = `${STORAGE_PREFIX}.selectedChatCreation`;
+    const CHAT_CREATION_ENTRY_PREFIX = `${STORAGE_PREFIX}.chatCreation.`;
+    const CHAT_CREATION_FINISHED_PREFIX = `${STORAGE_PREFIX}.chatCreationFinished.`;
+    const CHAT_LOOKUP_FAILURE_PREFIX = `${STORAGE_PREFIX}.chatLookupFailure.`;
     const MAX_PAGES = 128;
     const MAX_EVENTS = 20000;
+    const IMAGE_PRELOAD_TIMEOUT_MS = 10000;
+    const DIAGNOSTIC_TIMEOUT_MS = 1000;
+    const RECOVERY_TASK_LOOKUP_ATTEMPTS = 8;
+    const RECOVERY_TASK_LOOKUP_DELAY_MS = 250;
+    const HANDOFF_QUEUE_KEY = '__lingxiAgentAcceptanceHandoffQueue';
+    const HANDOFF_CONSUMER_KEY = '__lingxiAgentAcceptanceHandoffConsumer';
     const imageSchema = {
       type: 'object', additionalProperties: false, required: ['food', 'description', 'visibleCount'],
       properties: {
@@ -89,19 +157,32 @@
       type: 'object', additionalProperties: false, required: ['item', 'count'],
       properties: {item: {type: 'string', minLength: 1}, count: {type: 'integer', minimum: 0}},
     };
-    const chatSchema = {
-      type: 'object', additionalProperties: false, required: ['answer'],
-      properties: {answer: {type: 'string', minLength: 1}},
-    };
-
     let agent;
+    let sdkInfo = null;
     let chat;
+    let chatCreation = null;
     let publicImageFile = null;
+    let imageLoading = false;
+    let imageLoadInFlight = null;
     let busy = false;
     let activeRunId = null;
     let activeTask = false;
     let storageReady = true;
     let storageFailure = '';
+    let latestHandoff = {type: 'none', runId: null, code: null};
+    let latestHandoffErrorCode = null;
+    let diagnosticsGeneration = 0;
+    const chatLookupFailures = {create: null, creationStatus: null, history: null};
+    const chatDiagnosticReferences = new Map();
+    let chatDiagnosticSequence = 0;
+    // This random scope and its numeric references contain no host or user identifiers.
+    const chatDiagnosticPageId = (() => { try { return newId(); } catch { return null; } })();
+    let bootstrapReady = false;
+    const queuedRecoveryRunIds = new Set();
+    const startedRecoveryRunIds = new Set();
+    const recoveryFlights = new Map();
+    let resolvingRecovery = false;
+    const recoveryErrors = new Map();
     let state = {version: 1, chatId: null, pending: null, lastRun: null};
 
     function setStatus(message) { $('status').textContent = message; }
@@ -112,38 +193,420 @@
     function isRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
     function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
     function newId() { return crypto.randomUUID(); }
-
-    function loadState() {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw === null) return;
-        const parsed = JSON.parse(raw);
-        if (!isRecord(parsed) || parsed.version !== 1
-            || (parsed.chatId !== null && typeof parsed.chatId !== 'string')
-            || (parsed.pending !== null && !isRecord(parsed.pending))
-            || (parsed.lastRun !== null && !isRecord(parsed.lastRun))) {
-          throw new Error('Saved acceptance state has an unsupported shape.');
+    function safeRunId(value) {
+      return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : null;
+    }
+    function safeCode(value) {
+      return typeof value === 'string' && /^[A-Za-z0-9._-]{1,80}$/.test(value) ? value : 'unknown';
+    }
+    function safeChatStatusCode(failure) {
+      let code;
+      try { code = failure?.code; } catch { return 'unavailable'; }
+      return ['host_unavailable', 'invalid_host_response', 'invalid_chat', 'chat_create_conflict',
+        'chat_create_deleted', 'chat_storage_uncertain', 'storage_unavailable',
+        'chat_creation_identity_mismatch'].includes(code) ? code : 'unavailable';
+    }
+    function readDiagnosticField(value, key) {
+      try { return isRecord(value) ? value[key] : undefined; } catch { return undefined; }
+    }
+    function sanitizedTransport(transport) {
+      const phase = readDiagnosticField(transport, 'phase');
+      const reason = readDiagnosticField(transport, 'reason');
+      const httpStatus = readDiagnosticField(transport, 'httpStatus');
+      const elapsedMs = readDiagnosticField(transport, 'elapsedMs');
+      const visibility = readDiagnosticField(transport, 'visibility');
+      return {
+        phase: ['request', 'http_response', 'response_body', 'host_response'].includes(phase) ? phase : 'unavailable',
+        reason: ['timeout', 'fetch_failed', 'http_error', 'invalid_json', 'body_failed', 'host_error',
+          'wait_cancelled'].includes(reason) ? reason : 'unavailable',
+        httpStatus: Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? httpStatus : 'unavailable',
+        elapsedMs: Number.isInteger(elapsedMs) && elapsedMs >= 0 && elapsedMs <= 120000 ? elapsedMs : 'unavailable',
+        visibility: ['visible', 'hidden', 'unknown'].includes(visibility) ? visibility : 'unavailable',
+      };
+    }
+    function chatDiagnosticReference(id) {
+      if (!safeRunId(id)) return null;
+      if (!chatDiagnosticReferences.has(id)) {
+        if (chatDiagnosticReferences.size >= 1000) return null;
+        chatDiagnosticReferences.set(id, chatDiagnosticReferences.size + 1);
+      }
+      return chatDiagnosticReferences.get(id);
+    }
+    function chatDiagnosticSelection(key) {
+      try { return chatDiagnosticReference(localStorage.getItem(key)); }
+      catch { return 'unavailable'; }
+    }
+    function showChatLookupFailures() {
+      $('chat-lookup-diagnostics').textContent = JSON.stringify({
+        version: 2,
+        pageId: chatDiagnosticPageId,
+        selectedCreationRef: chatDiagnosticSelection(CHAT_CREATION_HEAD_KEY),
+        selectedChatRef: chatDiagnosticSelection(CHAT_SELECTION_KEY),
+        ...chatLookupFailures,
+      }, null, 2);
+    }
+    function unboundChatLookupFailure(storage, transport) {
+      return {attribution: 'saved-unbound', storage, source: 'unavailable', sequence: null,
+        requestRef: null, state: 'failed', transport: sanitizedTransport(transport)};
+    }
+    function loadChatLookupFailures() {
+      for (const stage of ['create', 'creationStatus', 'history']) {
+        // Another page's storage event cannot replace this page's call evidence.
+        if (chatLookupFailures[stage]?.attribution === 'current-page') continue;
+        try {
+          const raw = localStorage.getItem(CHAT_LOOKUP_FAILURE_PREFIX + stage);
+          if (raw === null) {
+            chatLookupFailures[stage] = null;
+            continue;
+          }
+          const saved = JSON.parse(raw);
+          if (!isRecord(saved) || ![1, 2].includes(saved.version) || !isRecord(saved.transport)) throw new Error('invalid diagnostic');
+          // Persisted context cannot prove a binding in this document, even if it
+          // claims the same page ID, source, sequence or request reference.
+          chatLookupFailures[stage] = unboundChatLookupFailure('saved', saved.transport);
+        } catch {
+          chatLookupFailures[stage] = unboundChatLookupFailure('unavailable', null);
         }
-        state = {version: 1, chatId: parsed.chatId ?? null, pending: parsed.pending ?? null, lastRun: parsed.lastRun ?? null};
+      }
+      showChatLookupFailures();
+    }
+    async function observeChatCall(stage, source, id, invoke) {
+      const call = {
+        attribution: 'current-page', storage: 'not-saved',
+        source: ['bootstrap', 'create-button', 'status-button', 'retry-button', 'open-created-button',
+          'recover-id-button', 'open-chat-button', 'refresh-history-button', 'run-completion',
+          'automatic-recovery', 'reconnect-button'].includes(source) ? source : 'unavailable',
+        sequence: ++chatDiagnosticSequence,
+        requestRef: chatDiagnosticReference(id),
+        state: 'pending',
+      };
+      chatLookupFailures[stage] = call;
+      showChatLookupFailures();
+      try {
+        const result = await invoke();
+        if (chatLookupFailures[stage] === call) {
+          call.state = 'returned';
+          showChatLookupFailures();
+        }
+        return result;
       } catch (failure) {
+        // A late older response must not overwrite a newer invocation's evidence.
+        if (chatLookupFailures[stage] === call) {
+          call.state = 'failed';
+          call.transport = sanitizedTransport(readDiagnosticField(failure, 'transport'));
+          try {
+            localStorage.setItem(CHAT_LOOKUP_FAILURE_PREFIX + stage, JSON.stringify({
+              version: 2, pageId: chatDiagnosticPageId, source: call.source,
+              sequence: call.sequence, requestRef: call.requestRef, transport: call.transport,
+            }));
+            call.storage = 'saved';
+          } catch { call.storage = 'unavailable'; }
+          showChatLookupFailures();
+        }
+        throw failure;
+      }
+    }
+    function validChatCreationInput(input) {
+      return isRecord(input) && Object.keys(input).every(key => ['requestId', 'title'].includes(key))
+        && typeof input.requestId === 'string'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(input.requestId)
+        && (!Object.prototype.hasOwnProperty.call(input, 'title') || (typeof input.title === 'string'
+          && new TextEncoder().encode(input.title).byteLength <= 512 && !/[\u0000-\u001f\u007f-\u009f]/u.test(input.title)));
+    }
+
+    function sameChatCreationInput(left, right) {
+      return validChatCreationInput(left) && validChatCreationInput(right)
+        && left.requestId === right.requestId
+        && Object.prototype.hasOwnProperty.call(left, 'title') === Object.prototype.hasOwnProperty.call(right, 'title')
+        && left.title === right.title;
+    }
+
+    function readChatCreation(id) {
+      if (!validChatCreationInput({requestId: id})) throw new Error('The saved Chat creation ID is invalid.');
+      const raw = localStorage.getItem(CHAT_CREATION_ENTRY_PREFIX + id);
+      if (raw === null) throw new Error('The saved Chat creation input is missing.');
+      const entry = JSON.parse(raw);
+      if (!isRecord(entry) || entry.version !== 1 || !validChatCreationInput(entry.input)
+          || entry.input.requestId !== id) throw new Error('The saved Chat creation identity is inconsistent.');
+      const marker = localStorage.getItem(CHAT_CREATION_FINISHED_PREFIX + id);
+      if (marker !== null && !['1', 'rejected:chat_create_conflict', 'rejected:chat_create_deleted',
+        'rejected:sdk_rejected'].includes(marker)) {
+        throw new Error('The saved Chat creation completion marker is invalid.');
+      }
+      return {input: entry.input, marker};
+    }
+
+    function loadChatCreation() {
+      try {
+        const id = localStorage.getItem(CHAT_CREATION_HEAD_KEY);
+        chatCreation = id === null ? null : readChatCreation(id);
+      } catch (failure) {
+        chatCreation = null;
         storageReady = false;
         storageFailure = failure.message || 'Browser storage is unavailable.';
       }
     }
 
-    function saveState() {
+    function saveNewChatCreation(input) {
+      if (!storageReady) throw new Error('Cannot safely persist this Chat creation: ' + storageFailure);
+      try {
+        if (!validChatCreationInput(input)) throw new Error('Chat creation input is invalid.');
+        const currentId = localStorage.getItem(CHAT_CREATION_HEAD_KEY);
+        if (currentId !== null && readChatCreation(currentId).marker === null) {
+          throw recoveryFailure('chat_creation_pending', 'A saved Chat creation is still unresolved; check it or retry the same request.');
+        }
+        const key = CHAT_CREATION_ENTRY_PREFIX + input.requestId;
+        if (localStorage.getItem(key) !== null) throw new Error('This Chat creation ID is already in use.');
+        localStorage.setItem(key, JSON.stringify({version: 1, input}));
+        localStorage.setItem(CHAT_CREATION_HEAD_KEY, input.requestId);
+        if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) !== input.requestId
+            || !sameChatCreationInput(readChatCreation(input.requestId).input, input)) {
+          throw new Error('Chat creation selection changed before submission.');
+        }
+        chatCreation = readChatCreation(input.requestId);
+      } catch (failure) {
+        if (failure?.code !== 'chat_creation_pending') {
+          storageReady = false;
+          storageFailure = failure.message || 'Browser storage is unavailable.';
+        }
+        throw new Error('Cannot safely persist this Chat creation: ' + failure.message);
+      }
+    }
+
+    function showChatCreation() {
+      if (!chatCreation) {
+        $('chat-create-status').textContent = 'No Chat creation is awaiting recovery.';
+      } else if (chatCreation.marker === '1') {
+        $('chat-create-status').textContent = `Chat creation ${chatCreation.input.requestId} is confirmed.`;
+      } else if (chatCreation.marker?.startsWith('rejected:')) {
+        $('chat-create-status').textContent = `Chat creation ${chatCreation.input.requestId} was rejected (${chatCreation.marker.slice(9)}). Start another only by explicit action.`;
+      } else {
+        $('chat-create-status').textContent = `Chat creation ${chatCreation.input.requestId} is pending; its outcome is unknown. No automatic retry was sent.`;
+      }
+    }
+    function safeFailureText(failure) {
+      const message = failure?.message || String(failure);
+      return message
+        .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, '[URL redacted]')
+        .slice(0, 240);
+    }
+    function withDiagnosticTimeout(promise) {
+      return new Promise(resolve => {
+        let settled = false;
+        const finish = value => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        };
+        const timer = setTimeout(() => finish(null), DIAGNOSTIC_TIMEOUT_MS);
+        Promise.resolve(promise).then(finish, () => finish(null));
+      });
+    }
+    function showRecoveryErrors(errors) {
+      const unique = [...new Set([...recoveryErrors.values(), ...errors])];
+      $('recovery-error').textContent = unique.join('\n');
+      $('recovery-error').hidden = unique.length === 0;
+    }
+
+    function addRecoveryError(runId, code, message) {
+      const safeRun = safeRunId(runId) || 'unknown';
+      const safeCodeValue = safeCode(code);
+      const safeMessage = safeFailureText({message: message || 'The saved run could not be restored.'});
+      recoveryErrors.set(`${safeRun}:${safeCodeValue}`, `Read-only recovery · ${safeCodeValue} · run ${safeRun}: ${safeMessage}`);
+      showRecoveryErrors([]);
+      setStatus(`Read-only recovery stopped · code ${safeCodeValue}. No new request was sent.`);
+    }
+
+    function clearRecoveryErrors(runId, preservePendingRequestMissing = false) {
+      const prefix = `${safeRunId(runId) || 'unknown'}:`;
+      for (const key of recoveryErrors.keys()) {
+        if (!key.startsWith(prefix)) continue;
+        if (preservePendingRequestMissing && key.slice(prefix.length) === 'pending_request_missing') continue;
+        recoveryErrors.delete(key);
+      }
+      showRecoveryErrors([]);
+    }
+
+    function recoveryReferenceFor(runId) {
+      const safeRun = safeRunId(runId);
+      if (!safeRun) return null;
+      const entry = readRunEntry(safeRun);
+      if (!entry) return null;
+      const pending = entry.pending;
+      if (pending?.input?.runId === safeRun) {
+        const input = pending.input;
+        if (!safeRunId(input.threadId) || !['image', 'document', 'chat'].includes(pending.kind)
+            || !Array.isArray(input.messages)
+            || (pending.kind === 'chat' && pending.chatId !== input.threadId)) {
+          throw recoveryFailure('task_identity_mismatch', 'Saved run and Chat identity is inconsistent.');
+        }
+        if (entry.lastRun.threadId !== input.threadId || entry.lastRun.kind !== pending.kind
+            || (entry.lastRun.chatId ?? null) !== (pending.chatId ?? null)) {
+          throw recoveryFailure('task_identity_mismatch', 'Saved pending and run metadata do not agree.');
+        }
+        return {runId: safeRun, threadId: input.threadId, kind: pending.kind, input,
+          ...(pending.chatId ? {chatId: pending.chatId} : {})};
+      }
+      const saved = entry.lastRun;
+      if (saved?.runId !== safeRun || !safeRunId(saved.threadId)
+          || !['image', 'document', 'chat'].includes(saved.kind)) return null;
+      const chatId = saved.chatId;
+      if (saved.kind === 'chat' && (!chatId || chatId !== saved.threadId)) return null;
+      return {runId: safeRun, threadId: saved.threadId, kind: saved.kind, ...(chatId ? {chatId} : {})};
+    }
+
+    function recoveryFailure(code, message, terminalObserved = false, terminal = null) {
+      const failure = new Error(message || 'The saved Agent run could not be restored.');
+      failure.code = safeCode(code);
+      failure.terminalObserved = terminalObserved;
+      failure.terminal = terminal;
+      return failure;
+    }
+
+    function readRunEntry(runId) {
+      const id = safeRunId(runId);
+      if (!id) return null;
+      const raw = localStorage.getItem(RUN_ENTRY_PREFIX + id);
+      if (raw === null) return null;
+      const entry = JSON.parse(raw);
+      if (!isRecord(entry) || entry.version !== 1 || !isRecord(entry.lastRun)
+          || entry.lastRun.runId !== id || (entry.pending !== null && !isRecord(entry.pending))
+          || (entry.pending && entry.pending.input?.runId !== id)) {
+        throw new Error('Saved run recovery metadata has an unsupported shape.');
+      }
+      return entry;
+    }
+
+    function selectedRunId() {
+      const selected = localStorage.getItem(RUN_HEAD_KEY);
+      if (selected !== null) {
+        const id = safeRunId(selected);
+        if (!id) throw new Error('Saved run selection is invalid.');
+        return id;
+      }
+      return null;
+    }
+
+    function saveNewRun(input, kind, chatId) {
       if (!storageReady) throw new Error('Cannot safely persist this request: ' + storageFailure);
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({
-          version: 1,
-          chatId: state.chatId,
-          pending: state.pending,
-          lastRun: state.lastRun,
-        }));
+        const id = safeRunId(input?.runId);
+        if (!id || !safeRunId(input.threadId)
+            || !['image', 'document', 'chat'].includes(kind)
+            || (kind === 'chat' && (!chatId || chatId !== input.threadId))) {
+          throw new Error('Run recovery metadata is invalid.');
+        }
+        if (localStorage.getItem(RUN_FINISHED_PREFIX + id) !== null) {
+          throw new Error('This run is already terminal; reconnect instead of sending it again.');
+        }
+        const pending = {input, kind, ...(chatId ? {chatId} : {})};
+        const lastRun = {runId: id, threadId: input.threadId, kind, ...(chatId ? {chatId} : {})};
+        const existing = readRunEntry(id);
+        if (existing && JSON.stringify(existing.pending) !== JSON.stringify(pending)) {
+          throw new Error('This run ID is already bound to different saved input.');
+        }
+        localStorage.setItem(RUN_ENTRY_PREFIX + id, JSON.stringify({version: 1, pending, lastRun}));
+        // Only an explicit submission changes the selected run. Passive recovery never does.
+        localStorage.setItem(RUN_HEAD_KEY, id);
+        state.pending = pending;
+        state.lastRun = lastRun;
       } catch (failure) {
         storageReady = false;
         storageFailure = failure.message || 'Browser storage is unavailable.';
         throw new Error('Cannot safely persist this request: ' + storageFailure);
+      }
+    }
+
+    function saveSelectedChat(chatId) {
+      if (!storageReady) throw new Error('Cannot safely persist this Chat: ' + storageFailure);
+      try {
+        if (!safeRunId(chatId)) throw new Error('The Chat ID is invalid.');
+        localStorage.setItem(CHAT_SELECTION_KEY, chatId);
+        state.chatId = chatId;
+      } catch (failure) {
+        storageReady = false;
+        storageFailure = failure.message || 'Browser storage is unavailable.';
+        throw new Error('Cannot safely persist this Chat: ' + storageFailure);
+      }
+    }
+
+    function clearPendingForRun(runId) {
+      const id = safeRunId(runId);
+      if (!id || !storageReady) return;
+      try {
+        const entry = readRunEntry(id);
+        if (!entry?.pending) return;
+        // The marker is monotonic and run-specific, even if another tab is writing a new run.
+        localStorage.setItem(RUN_FINISHED_PREFIX + id, '1');
+        localStorage.setItem(RUN_ENTRY_PREFIX + id, JSON.stringify({...entry, pending: null}));
+        if (state.pending?.input?.runId === id) state.pending = null;
+      } catch (failure) {
+        storageReady = false;
+        storageFailure = failure.message || 'Browser storage is unavailable.';
+        throw new Error('Cannot safely persist this request: ' + storageFailure);
+      }
+    }
+
+    function scheduleQueuedRecovery() {
+      if (!bootstrapReady || document.visibilityState === 'hidden' || busy || resolvingRecovery) return;
+      for (const runId of queuedRecoveryRunIds) {
+        if (startedRecoveryRunIds.has(runId) || recoveryFlights.has(runId)) continue;
+        const selectedAtQueue = localStorage.getItem(RUN_HEAD_KEY);
+        startedRecoveryRunIds.add(runId);
+        resolvingRecovery = true;
+        void (async () => {
+          try {
+            const saved = recoveryReferenceFor(runId);
+            // An old tab's saved run must not replace a newer explicit selection.
+            // A missing fixture record may still be resolved by the exact SDK receipt.
+            if (saved && selectedAtQueue && selectedAtQueue !== runId) return;
+            const reference = saved || await acceptedSdkReference(runId);
+            if (!reference) {
+              addRecoveryError(runId, 'pending_request_missing',
+                'No matching saved run or accepted SDK receipt could be verified. No request was started.');
+              return;
+            }
+            const currentSelection = localStorage.getItem(RUN_HEAD_KEY);
+            if (currentSelection !== selectedAtQueue && currentSelection !== runId) return;
+            if (busy || recoveryFlights.size > 0) {
+              startedRecoveryRunIds.delete(runId);
+              return;
+            }
+            await beginReadOnlyRecovery(reference, true);
+          } catch (failure) {
+            addRecoveryError(runId, failure?.code || 'pending_request_missing', failure?.message
+              || 'The accepted run could not be verified. No request was started.');
+          } finally {
+            resolvingRecovery = false;
+            scheduleQueuedRecovery();
+          }
+        })();
+        return;
+      }
+    }
+
+    function loadState() {
+      try {
+        const next = {version: 1, chatId: null, pending: null, lastRun: null};
+        const selected = localStorage.getItem(RUN_HEAD_KEY);
+        if (selected !== null) {
+          const entry = readRunEntry(selected);
+          if (!entry) throw new Error('The selected run recovery record is missing.');
+          next.lastRun = entry.lastRun;
+          next.pending = entry.pending;
+        }
+        const pendingId = safeRunId(next.pending?.input?.runId);
+        if (pendingId && localStorage.getItem(RUN_FINISHED_PREFIX + pendingId) !== null) next.pending = null;
+        const selectedChat = localStorage.getItem(CHAT_SELECTION_KEY);
+        if (selectedChat !== null) {
+          if (!safeRunId(selectedChat)) throw new Error('The saved Chat ID is invalid.');
+          next.chatId = selectedChat;
+        }
+        state = next;
+      } catch (failure) {
+        storageReady = false;
+        storageFailure = failure.message || 'Browser storage is unavailable.';
       }
     }
 
@@ -182,37 +645,206 @@
         : 'No standard BaseEvents were returned.';
     }
 
+    function fixtureStorageMetadata() {
+      try {
+        const selected = localStorage.getItem(RUN_HEAD_KEY);
+        const current = selected ? localStorage.getItem(RUN_ENTRY_PREFIX + selected) : null;
+        const selectedChat = localStorage.getItem(CHAT_SELECTION_KEY);
+        const visible = [selected, current, selectedChat].filter(value => value !== null);
+        return {exists: visible.length > 0, bytes: visible.reduce((sum, value) => sum + new TextEncoder().encode(value).length, 0)};
+      } catch {
+        return {exists: 'unknown', bytes: null};
+      }
+    }
+
+    async function readSdkInfoForDiagnostics() {
+      if (typeof window.localApp?.info !== 'function') return;
+      const info = await withDiagnosticTimeout(Promise.resolve().then(() => window.localApp.info()));
+      if (isRecord(info) && typeof info.id === 'string'
+          && /^[A-Za-z0-9._-]{1,128}$/.test(info.id) && Number.isSafeInteger(info.revision)) {
+        sdkInfo = {id: info.id, revision: info.revision};
+      }
+      void refreshDiagnostics();
+    }
+
+    async function acceptedSdkReference(runId) {
+      if (!safeRunId(runId) || !window.indexedDB || typeof window.localApp?.info !== 'function') return null;
+      const info = await withDiagnosticTimeout(Promise.resolve().then(() => window.localApp.info()));
+      if (!isRecord(info) || typeof info.id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(info.id)
+          || !Number.isSafeInteger(info.revision) || info.revision <= 0) return null;
+      const key = `${info.id}:${info.revision}:${runId}`;
+      const receipt = await withDiagnosticTimeout(new Promise((resolve, reject) => {
+        let opening;
+        try { opening = window.indexedDB.open(`lingxi-local-app-agui-${info.id}`); }
+        catch (failure) { reject(failure); return; }
+        opening.onupgradeneeded = () => { opening.transaction.abort(); };
+        opening.onerror = () => reject(opening.error || new Error('SDK recovery storage is unavailable.'));
+        opening.onblocked = () => reject(new Error('SDK recovery storage is busy.'));
+        opening.onsuccess = () => {
+          const db = opening.result;
+          try {
+            if (!db.objectStoreNames.contains('pending')) { db.close(); resolve(null); return; }
+            const tx = db.transaction('pending', 'readonly');
+            const request = tx.objectStore('pending').get(key);
+            let result = null;
+            request.onsuccess = () => { result = request.result ?? null; };
+            tx.oncomplete = () => { db.close(); resolve(result); };
+            tx.onerror = () => { db.close(); reject(tx.error || new Error('SDK recovery storage could not be read.')); };
+            tx.onabort = () => { db.close(); reject(tx.error || new Error('SDK recovery storage could not be read.')); };
+          } catch (failure) { db.close(); reject(failure); }
+        };
+      }));
+      if (!isRecord(receipt) || receipt.key !== key || receipt.appId !== info.id
+          || receipt.revision !== info.revision || receipt.runId !== runId
+          || receipt.state !== 'accepted' || !['agent.chats.send', 'agent.tasks.start'].includes(receipt.method)
+          || !safeRunId(receipt.threadId) || typeof receipt.fingerprint !== 'string'
+          || !/^[0-9a-f]{64}$/.test(receipt.fingerprint)
+          || !Number.isFinite(receipt.acceptedAt) || receipt.acceptedAt > Date.now() + 300000
+          || Date.now() - receipt.acceptedAt >= 7 * 24 * 60 * 60 * 1000) return null;
+      // A Chat receipt binds threadId to chatId. The host independently verifies run and thread.
+      await readTaskWithBoundedRetry(runId, receipt.threadId);
+      return receipt.method === 'agent.chats.send'
+        ? {runId, threadId: receipt.threadId, kind: 'chat', chatId: receipt.threadId, fromSdkReceipt: true}
+        : {runId, threadId: receipt.threadId, kind: 'sdk-task', fromSdkReceipt: true};
+    }
+
+    async function sdkPendingDatabaseMetadata() {
+      if (!sdkInfo || typeof window.indexedDB?.databases !== 'function') return {status: 'unavailable'};
+      const databases = await withDiagnosticTimeout(Promise.resolve().then(() => window.indexedDB.databases()));
+      if (!Array.isArray(databases)) return {status: 'unavailable'};
+      const expectedName = `lingxi-local-app-agui-${sdkInfo.id}`;
+      const match = databases.find(database => database?.name === expectedName);
+      return match
+        ? {status: 'present', version: Number.isSafeInteger(match.version) ? match.version : null}
+        : {status: 'absent', version: null};
+    }
+
+    async function refreshDiagnostics() {
+      const generation = ++diagnosticsGeneration;
+      let readyMarkerPresent = false;
+      try { readyMarkerPresent = new URL(location.href).searchParams.has('__lingxi_ready'); }
+      catch { /* Keep the diagnostic boolean false when the address cannot be parsed. */ }
+      const localStorageRecord = fixtureStorageMetadata();
+      const pendingRunId = safeRunId(state.pending?.input?.runId);
+      const lastRunId = safeRunId(state.lastRun?.runId);
+      const sdkDatabase = await sdkPendingDatabaseMetadata();
+      if (generation !== diagnosticsGeneration) return;
+      $('diagnostics').textContent = JSON.stringify({
+        readyMarkerPresent,
+        fixtureStorageRecordExists: localStorageRecord.exists,
+        fixtureStorageBytes: localStorageRecord.bytes,
+        localPending: Boolean(state.pending),
+        pendingRunId,
+        lastRunId,
+        sdkPendingDatabase: sdkDatabase,
+        localAppInfo: sdkInfo,
+        sdkHandoff: latestHandoff,
+        sdkHandoffErrorCode: latestHandoffErrorCode,
+      }, null, 2);
+    }
+
+    function handleHandoffRecord(record) {
+      if (!isRecord(record) || !['ready', 'error'].includes(record.type)) return;
+      const eventRunId = safeRunId(record.runId);
+      const pendingRunId = safeRunId(state.pending?.input?.runId);
+      const savedRunId = safeRunId(state.lastRun?.runId);
+      const runId = eventRunId || (record.type === 'error' ? pendingRunId || savedRunId : null);
+      const code = record.type === 'error' ? safeCode(record.code) : null;
+      latestHandoff = {type: record.type, runId: eventRunId, code};
+      if (record.type === 'error') latestHandoffErrorCode = code;
+      let matchesSavedRun = false;
+      try { matchesSavedRun = Boolean(runId && recoveryReferenceFor(runId)); }
+      catch (failure) {
+        addRecoveryError(runId, failure?.code || 'task_identity_mismatch', failure?.message);
+        return;
+      }
+      const matchesPending = Boolean(pendingRunId && (eventRunId === pendingRunId || !eventRunId));
+      $('handoff-status').textContent = record.type === 'ready'
+        ? `SDK handoff accepted · run ${runId || 'unknown'}${matchesSavedRun ? ' · waiting for read-only recovery' : ''}. No new request was sent by this notice.`
+        : matchesPending
+          ? `SDK handoff failed · run ${runId} · code ${code}. Pending input is retained; this notice does not retry it.`
+          : `SDK handoff failed · run ${runId || 'unknown'} · code ${code}. No request was retried by this notice.`;
+      if (record.type === 'ready') {
+        if (!runId) {
+          addRecoveryError(runId, 'pending_request_missing', 'The SDK handoff did not identify a run. No request was started.');
+        } else {
+          queuedRecoveryRunIds.add(runId);
+          if (!startedRecoveryRunIds.has(runId)) {
+            setStatus(`The SDK accepted run ${runId}; verifying its read-only recovery identity.`);
+          }
+          scheduleQueuedRecovery();
+        }
+      } else if (code === 'pending_request_missing') {
+        addRecoveryError(runId, code,
+          'The browser SDK could not find the saved pending request for this handoff. No request was retried.');
+      } else if (matchesSavedRun) {
+        addRecoveryError(runId, code, 'The SDK handoff did not complete. The saved request remains unchanged; no request was retried.');
+      } else {
+        addRecoveryError(runId, code, 'The SDK handoff failed and does not match a saved run. No request was retried.');
+      }
+      if (record.type === 'error' && matchesPending) {
+        setStatus(record.type === 'ready'
+          ? 'The SDK accepted the pending request; waiting for its RunAgentResult.'
+          : 'SDK handoff failed; the pending request remains available for an explicit same-ID retry.');
+      }
+      void refreshDiagnostics();
+    }
+
+    function activateHandoffCapture() {
+      const queue = window[HANDOFF_QUEUE_KEY];
+      const queued = Array.isArray(queue) ? queue.splice(0) : [];
+      window[HANDOFF_CONSUMER_KEY] = handleHandoffRecord;
+      queued.forEach(handleHandoffRecord);
+    }
+
     function updateControls() {
       const usable = Boolean(agent && storageReady && !busy);
       const canStart = usable && !state.pending;
+      const pendingCreation = Boolean(chatCreation && chatCreation.marker === null);
+      showChatCreation();
       $('run-image').disabled = !canStart || !publicImageFile;
+      $('retry-image').hidden = Boolean(publicImageFile) || imageLoading;
+      $('retry-image').disabled = imageLoading;
       $('run-text-file').disabled = !canStart;
-      $('create-chat').disabled = !canStart;
+      $('create-chat').disabled = !canStart || pendingCreation;
+      $('check-chat-create').hidden = !pendingCreation;
+      $('check-chat-create').disabled = !usable || !pendingCreation;
+      $('retry-chat-create').hidden = !pendingCreation;
+      $('retry-chat-create').disabled = !canStart || !pendingCreation;
+      $('open-created-chat').hidden = chatCreation?.marker !== '1';
+      $('open-created-chat').disabled = !usable || chatCreation?.marker !== '1';
+      $('list-chat-creations').disabled = !usable;
+      $('recover-chat-creation').disabled = !usable;
       $('open-chat').disabled = !usable || !state.chatId;
       $('refresh-history').disabled = !agent || !chat || busy;
       $('send-chat').disabled = !canStart || !chat || !$('chat-prompt').value.trim();
       $('retry-pending').hidden = !state.pending;
       $('retry-pending').disabled = !usable || !state.pending;
-      $('reconnect-last').disabled = !agent || !state.lastRun || busy;
+      let reconnectReference = null;
+      try { reconnectReference = recoveryReferenceFor(state.pending?.input?.runId || state.lastRun?.runId); }
+      catch (failure) { addRecoveryError(state.pending?.input?.runId || state.lastRun?.runId, failure?.code || 'task_identity_mismatch', failure?.message); }
+      $('reconnect-last').disabled = !agent || !reconnectReference || busy;
       $('cancel-run').disabled = !agent || !activeRunId || !activeTask;
       if (!storageReady) $('recovery').textContent = `Browser-origin storage is unavailable: ${storageFailure}`;
     }
 
     function makeInput(threadId, messages, outputSchema) {
-      const input = {
-        protocolVersion: '1.0',
-        threadId,
-        runId: newId(),
-        messages,
-        forwardedProps: {
-          [EXTENSION_KEY]: {
-            version: 1,
-            tools: [],
-            skills: [],
-            outputSchema,
-            maxTurns: 8,
-            timeoutMs: 180000,
-          },
+      const input = {protocolVersion: '1.0', threadId, runId: newId(), messages};
+      // The official SDK supplies its host extension when normalizing a request.
+      const normalize = window.LingxiLocalAppAGUI?.validateLocalAppRunInput;
+      if (typeof normalize !== 'function') throw new Error('The Local App Agent SDK is unavailable.');
+      const entries = Object.entries(normalize(input).forwardedProps ?? {});
+      if (entries.length !== 1 || entries[0][1]?.version !== 1) {
+        throw new Error('The Local App Agent extension is unavailable.');
+      }
+      input.forwardedProps = {
+        [entries[0][0]]: {
+          version: 1,
+          tools: [],
+          skills: [],
+          ...(outputSchema === undefined ? {} : {outputSchema}),
+          maxTurns: 8,
+          timeoutMs: 180000,
         },
       };
       const validate = window.LingxiLocalAppAGUI?.validateRunAgentInput;
@@ -226,7 +858,7 @@
     }
 
     function validateStructuredOutput(kind, value) {
-      const schema = {image: imageSchema, document: documentSchema, chat: chatSchema}[kind];
+      const schema = {image: imageSchema, document: documentSchema}[kind];
       const fail = () => { throw new Error(`${kind} result did not match its declared outputSchema.`); };
       if (!schema || schema.type !== 'object' || !isRecord(value)) fail();
 
@@ -250,24 +882,99 @@
     }
 
     function validateResult(kind, runResult) {
-      if (!isRecord(runResult) || !Array.isArray(runResult.newMessages) || !isRecord(runResult.result)) {
-        throw new Error('The official RunAgentResult did not contain the expected structured object and messages.');
+      if (!isRecord(runResult) || !Array.isArray(runResult.newMessages)) {
+        throw new Error('The official RunAgentResult did not contain its newMessages.');
       }
       if (typeof window.LingxiLocalAppAGUI?.validateMessage === 'function') {
         runResult.newMessages.forEach(message => window.LingxiLocalAppAGUI.validateMessage(message));
       }
-      validateStructuredOutput(kind, runResult.result);
+      if (kind === 'chat') {
+        if (runResult.newMessages.length !== 1) {
+          throw recoveryFailure('chat_reply_missing', 'The plain-text Chat did not return exactly one assistant reply.');
+        }
+        const message = runResult.newMessages[0];
+        if (!isRecord(message) || message.role !== 'assistant' || typeof message.id !== 'string'
+            || !message.id || typeof message.content !== 'string' || !message.content.trim() || message.toolCalls?.length) {
+          throw recoveryFailure('chat_reply_invalid', 'The plain-text Chat did not return a valid assistant text message.');
+        }
+        return;
+      }
+      if (!isRecord(runResult.result)) throw new Error('The file result did not contain its structured object.');
+      // Accepted task receipts no longer contain the original output schema.
+      if (kind !== 'sdk-task') validateStructuredOutput(kind, runResult.result);
+    }
+
+    function plainMessageText(message) {
+      if (typeof message?.content === 'string') return message.content;
+      if (!Array.isArray(message?.content) || !message.content.length
+          || message.content.some(part => !isRecord(part) || part.type !== 'text' || typeof part.text !== 'string')) return null;
+      return message.content.map(part => part.text).join('');
+    }
+
+    function verifyChatMessages(messages, expectedMessages) {
+      for (const expected of expectedMessages) {
+        const matches = messages.filter(message => message?.id === expected.id);
+        if (matches.length !== 1 || matches[0].role !== expected.role
+            || plainMessageText(expected) === null || plainMessageText(matches[0]) !== plainMessageText(expected)) {
+          throw recoveryFailure('chat_history_mismatch', 'Canonical Chat history did not preserve the exact message IDs, roles and text.');
+        }
+      }
+    }
+
+    function verifyChatReplyEvents(events, runResult) {
+      const reply = runResult.newMessages[0];
+      const fail = () => { throw recoveryFailure('chat_reply_event_mismatch', 'The Chat assistant reply did not match a complete standard text-message event sequence.'); };
+      let started = false;
+      let ended = false;
+      let contentEvents = 0;
+      let text = '';
+      for (const event of events) {
+        if (event.type === 'TEXT_MESSAGE_START') {
+          if (started || ended || event.messageId !== reply.id || event.role !== 'assistant') fail();
+          started = true;
+        } else if (event.type === 'TEXT_MESSAGE_CONTENT') {
+          if (!started || ended || event.messageId !== reply.id || typeof event.delta !== 'string') fail();
+          contentEvents += 1;
+          text += event.delta;
+        } else if (event.type === 'TEXT_MESSAGE_END') {
+          if (!started || ended || event.messageId !== reply.id) fail();
+          ended = true;
+        }
+      }
+      if (!started || !ended || !contentEvents || text !== plainMessageText(reply)) fail();
     }
 
     async function readTask(runId, threadId) {
       const task = await agent.tasks.get(runId);
       if (!isRecord(task) || task.runId !== runId || task.threadId !== threadId) {
-        throw new Error('Host task identity did not match the public AG-UI run and thread IDs.');
+        throw recoveryFailure('task_identity_mismatch', 'Host task identity did not match the saved run and thread IDs.');
       }
       return task;
     }
 
-    async function drainTaskEvents(runId) {
+    async function readTaskWithBoundedRetry(runId, threadId) {
+      let lastFailure;
+      for (let attempt = 0; attempt < RECOVERY_TASK_LOOKUP_ATTEMPTS; attempt += 1) {
+        try {
+          return await readTask(runId, threadId);
+        } catch (failure) {
+          lastFailure = failure;
+          if (failure?.code !== 'task_not_found' || attempt + 1 >= RECOVERY_TASK_LOOKUP_ATTEMPTS) throw failure;
+          await delay(RECOVERY_TASK_LOOKUP_DELAY_MS);
+        }
+      }
+      throw lastFailure || recoveryFailure('task_not_found', 'The saved Agent task was not found.');
+    }
+
+    function validateEventIdentity(event, runId, threadId) {
+      if (['RUN_STARTED', 'RUN_FINISHED'].includes(event?.type)
+          && (event.runId !== runId || event.threadId !== threadId)) {
+        throw recoveryFailure('task_identity_mismatch', 'AG-UI event identity did not match the saved run and thread.');
+      }
+      return event;
+    }
+
+    async function drainTaskEvents(runId, threadId) {
       const all = [];
       let afterSequence = 0;
       for (let pageNumber = 0; pageNumber < MAX_PAGES; pageNumber += 1) {
@@ -277,7 +984,7 @@
         const events = typeof window.LingxiLocalAppAGUI?.validateEvent === 'function'
           ? page.events.map(event => window.LingxiLocalAppAGUI.validateEvent(event))
           : page.events;
-        all.push(...events);
+        all.push(...events.map(event => validateEventIdentity(event, runId, threadId)));
         if (all.length > MAX_EVENTS) throw new Error('Task event history exceeded the acceptance display limit.');
         if (page.sequence === afterSequence) {
           if (page.events.length) throw new Error('Task event pagination returned events without advancing its sequence.');
@@ -288,29 +995,97 @@
       throw new Error(`Task events were not fully drained after ${MAX_PAGES} pages.`);
     }
 
-    function terminalEvent(events, task) {
-      const terminals = events.filter(event => event?.type === 'RUN_FINISHED' || event?.type === 'RUN_ERROR');
-      if (terminals.length !== 1 || events.at(-1) !== terminals[0]) {
-        throw new Error(`Expected exactly one final RUN_FINISHED or RUN_ERROR; received ${terminals.length}.`);
+    async function readTerminalTaskEvents(runId, threadId) {
+      try {
+        return {events: await drainTaskEvents(runId, threadId), unavailable: false};
+      } catch (failure) {
+        if (failure?.code === 'host_unavailable') return {events: [], unavailable: true};
+        if (failure?.code === 'task_identity_mismatch') throw failure;
+        throw recoveryFailure(failure?.code || 'invalid_task_events',
+          'Saved task event storage is unavailable or invalid; the interruption cause is unknown. No automatic retry was sent. Check the task before starting a new run manually.');
       }
-      const terminal = terminals[0];
+    }
+
+    function terminalStatus(events, task) {
+      const terminals = events.filter(event => event?.type === 'RUN_FINISHED' || event?.type === 'RUN_ERROR');
+      if (terminals.length > 1) {
+        return {state: 'failed', terminal: terminals.at(-1), code: 'duplicate_terminal_event',
+          message: `Received ${terminals.length} terminal AG-UI events; exactly one is required.`, terminalObserved: true};
+      }
+      if (terminals.length === 1 && events.at(-1) !== terminals[0]) {
+        return {state: 'failed', terminal: terminals[0], code: 'terminal_event_not_final',
+          message: 'The terminal AG-UI event was not the final event in the saved run.', terminalObserved: true};
+      }
+      const terminal = terminals[0] || null;
+      if (task?.state === 'interrupted') {
+        // The authenticated, run-scoped task row is authoritative. An AG-UI
+        // callback by itself cannot establish why an interruption occurred.
+        const cause = safeCode(task.error?.code);
+        const conflictingEvent = terminal && (terminal.type !== 'RUN_ERROR'
+          || (terminal.code !== undefined && terminal.code !== cause));
+        const expired = cause === 'ios_background_expired' && !conflictingEvent;
+        return {state: 'interrupted', terminal, terminalObserved: true,
+          code: expired ? 'ios_background_expired' : 'interruption_cause_unknown',
+          message: expired
+            ? 'iOS ended background execution for this run. No automatic retry was sent. To try again, start a new run manually.'
+            : 'The run was interrupted, but its cause is unknown. No automatic retry was sent. To try again, start a new run manually.'};
+      }
+      if (safeCode(task?.error?.code) === 'ios_background_expired'
+          || safeCode(terminal?.code) === 'ios_background_expired') {
+        return {state: 'unknown', terminal, code: 'interruption_cause_unknown',
+          message: 'The host task does not confirm why the run stopped; its cause is unknown. No automatic retry was sent. Check the task before starting a new run manually.',
+          terminalObserved: !['queued', 'running'].includes(task?.state)};
+      }
+      if (terminals.length === 0) {
+        if (['failed', 'cancelled'].includes(task?.state)) {
+          return {
+            state: task.state,
+            terminal: null,
+            code: safeCode(task.error?.code || (task.state === 'cancelled' ? 'cancelled' : 'missing_terminal_event')),
+            message: task.error?.message || 'The host recorded a terminal task state without a final AG-UI event.',
+            terminalObserved: true,
+          };
+        }
+        if (task?.state === 'succeeded') {
+          return {state: 'failed', terminal: null, code: 'missing_terminal_event',
+            message: 'The host marked this task complete without a final AG-UI event.', terminalObserved: true};
+        }
+        return {state: 'active', terminal: null, code: 'terminal_event_pending',
+          message: 'The saved run has no terminal AG-UI event yet.', terminalObserved: false};
+      }
+      if (terminal.type === 'RUN_ERROR') {
+        return {
+          state: 'failed', terminal,
+          code: safeCode(terminal.code || task.error?.code || 'agent_failed'),
+          message: terminal.message || task.error?.message || 'The Agent run returned RUN_ERROR.',
+          terminalObserved: true,
+        };
+      }
+      if (terminal.outcome?.type === 'cancelled' || task.state === 'cancelled') {
+        return {state: 'cancelled', terminal, code: safeCode(terminal.code || task.error?.code || 'cancelled'),
+          message: terminal.message || task.error?.message || 'The saved Agent run was cancelled.', terminalObserved: true};
+      }
       const unsuccessfulOutcome = terminal.outcome !== undefined
         && (!isRecord(terminal.outcome) || terminal.outcome.type !== 'success');
-      if (task.state !== 'succeeded' || terminal.type !== 'RUN_FINISHED' || unsuccessfulOutcome) {
-        const reason = terminal.type === 'RUN_ERROR' ? (terminal.message || terminal.code || 'RUN_ERROR')
-          : `task=${task.state}, outcome=${terminal.outcome?.type ?? 'missing'}`;
-        const failure = new Error(`Run did not finish successfully: ${reason}`);
-        failure.terminal = true;
-        throw failure;
+      if (task.state === 'succeeded' && terminal.type === 'RUN_FINISHED' && !unsuccessfulOutcome) {
+        return {state: 'succeeded', terminal, code: null, message: '', terminalObserved: true};
       }
-      return terminal;
+      const code = safeCode(task.error?.code || terminal.code || 'run_not_successful');
+      return {state: task.state || 'failed', terminal, code,
+        message: terminal.message || task.error?.message || `Run ended with task state ${task.state || 'unknown'}.`,
+        terminalObserved: true};
     }
 
     async function taskEvidence(runId, threadId) {
-      const task = await readTask(runId, threadId);
-      const events = await drainTaskEvents(runId);
-      terminalEvent(events, task);
+      const task = await readTaskWithBoundedRetry(runId, threadId);
+      const events = await drainTaskEvents(runId, threadId);
       return {task, events};
+    }
+
+    function terminalEvent(events, task) {
+      const status = terminalStatus(events, task);
+      if (status.state === 'succeeded') return status.terminal;
+      throw recoveryFailure(status.code, status.message, status.terminalObserved, status.terminal);
     }
 
     async function allChatMessages(handle) {
@@ -335,160 +1110,180 @@
       throw new Error(`Chat history was not fully read after ${MAX_PAGES} pages.`);
     }
 
-    async function refreshChatHistory() {
+    async function refreshChatHistory(source, expectedMessages = []) {
       if (!chat) return;
-      const messages = await allChatMessages(chat);
+      let messages;
+      try { messages = await observeChatCall('history', source, readDiagnosticField(chat, 'id'), () => allChatMessages(chat)); }
+      catch (failure) {
+        throw recoveryFailure('chat_history_unavailable', 'Canonical Chat history could not be read; see Chat lookup diagnostics.');
+      }
+      verifyChatMessages(messages, expectedMessages);
       $('chat-history').textContent = JSON.stringify(redactProtocol(messages), null, 2);
       $('chat-handle').textContent = `Open host Chat · threadId ${chat.id} · ${messages.length} canonical Messages`;
+      return {threadId: chat.id, messages};
     }
 
-    async function preloadPublicImage() {
+    function preloadPublicImage() {
+      if (imageLoadInFlight) return imageLoadInFlight;
+      imageLoading = true;
       publicImageFile = null;
-      $('image-status').textContent = 'Loading the public image fixture…';
+      $('image-status').textContent = `Loading the public image fixture… (timeout ${IMAGE_PRELOAD_TIMEOUT_MS / 1000}s)`;
       updateControls();
-      try {
-        const response = await fetch(new URL('./public-apple.jpg', location.href), {cache: 'no-store'});
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const blob = await response.blob();
-        if (blob.size === 0) throw new Error('the image file was empty');
-        publicImageFile = new File([blob], 'public-apple.jpg', {type: blob.type || 'image/jpeg'});
-        $('image-status').textContent = `Public image fixture ready · ${publicImageFile.type} · ${publicImageFile.size} bytes.`;
-      } catch (failure) {
-        publicImageFile = null;
-        const reason = failure?.message || String(failure);
-        $('image-status').textContent = `Public image fixture unavailable (${reason}); only the image run is disabled.`;
-      } finally {
-        updateControls();
-      }
-    }
-
-    async function latestFromHost(listPage) {
-      const all = [];
-      const seenCursors = new Set();
-      let cursor;
-      for (let pageNumber = 0; pageNumber < MAX_PAGES; pageNumber += 1) {
-        const page = await listPage(cursor);
-        if (!isRecord(page) || !Array.isArray(page.items)
-            || (page.nextCursor !== undefined && typeof page.nextCursor !== 'string')) {
-          throw new Error('Host inventory returned an invalid page.');
+      const controller = new AbortController();
+      let timeoutId;
+      const timeout = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          controller.abort();
+          reject(new Error(`Timed out after ${IMAGE_PRELOAD_TIMEOUT_MS / 1000}s.`));
+        }, IMAGE_PRELOAD_TIMEOUT_MS);
+      });
+      imageLoadInFlight = (async () => {
+        try {
+          const file = await Promise.race([
+            (async () => {
+              const response = await fetch(new URL('./public-apple.jpg', location.href), {
+                cache: 'no-store', signal: controller.signal,
+              });
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              const blob = await response.blob();
+              if (blob.size === 0) throw new Error('the image file was empty');
+              return new File([blob], 'public-apple.jpg', {type: blob.type || 'image/jpeg'});
+            })(),
+            timeout,
+          ]);
+          publicImageFile = file;
+          $('image-status').textContent = `Public image fixture ready · ${publicImageFile.type} · ${publicImageFile.size} bytes.`;
+        } catch (failure) {
+          publicImageFile = null;
+          $('image-status').textContent = `Public image fixture unavailable (${safeFailureText(failure)}); only the image run is disabled. Use Retry public image load to retry the public file only.`;
+        } finally {
+          clearTimeout(timeoutId);
+          imageLoading = false;
+          imageLoadInFlight = null;
+          updateControls();
+          void refreshDiagnostics();
         }
-        all.push(...page.items);
-        if (page.nextCursor === undefined) return all;
-        if (!page.nextCursor || seenCursors.has(page.nextCursor)) throw new Error('Host inventory cursor repeated.');
-        seenCursors.add(page.nextCursor);
-        cursor = page.nextCursor;
-      }
-      throw new Error(`Host inventory was not fully read after ${MAX_PAGES} pages.`);
+      })();
+      return imageLoadInFlight;
     }
 
-    async function latestTaskInventory() {
-      const tasks = await latestFromHost(cursor => agent.tasks.list({limit: 50, ...(cursor === undefined ? {} : {cursor})})
-        .then(page => ({items: page.tasks, nextCursor: page.nextCursor})));
-      return tasks.filter(task => typeof task?.runId === 'string' && typeof task?.threadId === 'string')
-        .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0] ?? null;
-    }
-
-    async function latestChatInventory() {
-      const chats = await latestFromHost(cursor => agent.chats.list({limit: 50, ...(cursor === undefined ? {} : {cursor})})
-        .then(page => ({items: page.chats, nextCursor: page.nextCursor})));
-      return chats.filter(item => typeof item?.chatId === 'string')
-        .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0] ?? null;
-    }
-
-    async function showTaskSnapshot(reference, recoveryLabel) {
+    async function showTaskSnapshot(reference, recoveryLabel, recoveryErrors) {
       if (!reference) return null;
       try {
-        const task = await readTask(reference.runId, reference.threadId);
+        const task = await readTaskWithBoundedRetry(reference.runId, reference.threadId);
+        if (selectedRunId() !== reference.runId) return null;
         state.lastRun = {runId: task.runId, threadId: task.threadId, kind: reference.kind ?? 'recovered', ...(reference.chatId ? {chatId: reference.chatId} : {})};
+        clearRecoveryErrors(reference.runId, true);
         showTask(task);
         $('recovery').textContent = recoveryLabel;
-        if (storageReady) saveState();
         return task;
       } catch (failure) {
-        if (!state.pending && state.lastRun?.runId === reference.runId) state.lastRun = null;
-        $('recovery').textContent = `${recoveryLabel} · task lookup: ${failure.message}`;
+        addRecoveryError(reference.runId, failure?.code || 'unknown', failure?.message || 'The saved task could not be read.');
+        $('recovery').textContent = `${recoveryLabel} · task lookup failed.`;
         return null;
       }
     }
 
     async function restoreReadOnly() {
-      let taskReference = state.lastRun;
-      let taskSource = taskReference ? 'Saved run ID restored from this browser origin; host task lookup was read-only.' : '';
-      let task = taskReference ? await showTaskSnapshot(taskReference, taskSource) : null;
-      if (!task && !state.pending) {
-        try {
-          const inventoryTask = await latestTaskInventory();
-          taskReference = inventoryTask ? {runId: inventoryTask.runId, threadId: inventoryTask.threadId, kind: 'host-inventory', ...(inventoryTask.chatId ? {chatId: inventoryTask.chatId} : {})} : null;
-          if (taskReference) {
-            taskSource = 'Recovered the latest App-scoped task from host tasks.list; no model call was made.';
-            task = await showTaskSnapshot(taskReference, taskSource);
+      const recoveryErrors = [];
+      let taskReference = null;
+      let taskSource = '';
+      let task = null;
+      if (state.pending) {
+        const pendingRunId = state.pending.input?.runId;
+        taskReference = recoveryReferenceFor(pendingRunId);
+        if (taskReference) {
+          taskSource = 'Pending RunAgentInput restored from this browser origin; startup checks its task read-only before any recovery.';
+          state.lastRun = {runId: taskReference.runId, threadId: taskReference.threadId, kind: taskReference.kind,
+            ...(taskReference.chatId ? {chatId: taskReference.chatId} : {})};
+          $('task-state').textContent = `pending · thread ${taskReference.threadId} · run ${taskReference.runId}`;
+          showInput(state.pending.input);
+          try {
+            task = await readTaskWithBoundedRetry(taskReference.runId, taskReference.threadId);
+            if (selectedRunId() !== taskReference.runId) {
+              loadState();
+              updateControls();
+              return;
+            }
+            showTask(task);
+            queuedRecoveryRunIds.add(taskReference.runId);
+            taskSource = 'A matching durable host task exists; startup queued a read-only reconnect with the saved IDs.';
+          } catch (failure) {
+            if (failure?.code === 'task_not_found') {
+              taskSource = 'The saved request remains pending; the host task is not visible yet. Startup made no request and is waiting for SDK acceptance.';
+              $('task-state').textContent = `pending · waiting for host acceptance · run ${taskReference.runId}`;
+            } else {
+              addRecoveryError(taskReference.runId, failure?.code || 'unknown', failure?.message || 'The saved task could not be checked.');
+              recoveryErrors.push(`Read-only task check · code ${safeCode(failure?.code)}: ${safeFailureText(failure)}`);
+            }
           }
-        } catch (failure) {
-          taskSource = `Host tasks.list recovery unavailable: ${failure.message}`;
+        } else {
+          addRecoveryError(pendingRunId, 'pending_request_missing',
+            'The saved pending record has no valid run, thread, or supported result kind. No request was started.');
+          recoveryErrors.push('Pending request metadata is incomplete; no model request was started.');
         }
-      } else if (!task && state.pending) {
-        taskReference = {runId: state.pending.input.runId, threadId: state.pending.input.threadId,
-          kind: state.pending.kind, ...(state.pending.chatId ? {chatId: state.pending.chatId} : {})};
-        state.lastRun = taskReference;
-        taskSource = 'Pending RunAgentInput restored from this browser origin; host task lookup was read-only and no run was started.';
-        $('task-state').textContent = `pending · thread ${taskReference.threadId} · run ${taskReference.runId}`;
+      } else if (state.lastRun) {
+        taskReference = state.lastRun;
+        taskSource = 'Saved run metadata restored from this browser origin; the task lookup is read-only.';
+        task = await showTaskSnapshot(taskReference, taskSource, recoveryErrors);
       }
-
       let chatSource = state.chatId ? 'Saved Chat handle restored from this browser origin; history read was read-only.' : '';
       if (state.chatId) {
         try {
           chat = await agent.chats.open(state.chatId);
-          await refreshChatHistory();
+          await refreshChatHistory('bootstrap');
         } catch (failure) {
-          $('chat-history').textContent = `Saved Chat could not be opened: ${failure.message}`;
+          $('chat-history').textContent = 'Saved Chat could not be opened; see recovery diagnostics.';
+          recoveryErrors.push('Saved Chat could not be opened or its history could not be read.');
           chat = null;
           chatSource = '';
         }
       }
-      if (!chat) {
-        try {
-          const inventoryChat = await latestChatInventory();
-          if (inventoryChat) {
-            chat = await agent.chats.open(inventoryChat.chatId);
-            state.chatId = chat.id;
-            await refreshChatHistory();
-            if (storageReady) saveState();
-            chatSource = 'Recovered the latest App-scoped Chat from host chats.list; history read was read-only.';
-          }
-        } catch (failure) {
-          chatSource = `Host chats.list recovery unavailable: ${failure.message}`;
-        }
-      }
       if (!state.lastRun && !taskReference && !chat) {
-        $('recovery').textContent = 'No saved or host-listed task or Chat was found. Page startup made no model call.';
+        $('recovery').textContent = recoveryErrors.length
+          ? 'No task or Chat was restored; one or more read-only recovery checks failed. See recovery diagnostics.'
+          : 'No saved task or Chat was found. Page startup made no model call.';
       } else {
         const sources = [taskSource, chatSource].filter(Boolean);
         if (sources.length) $('recovery').textContent = sources.join(' ');
       }
+      showRecoveryErrors(recoveryErrors);
       if (state.pending) showInput(state.pending.input);
       updateControls();
+      void refreshDiagnostics();
     }
 
     async function observeAfterFailure(input) {
       try {
         const task = await readTask(input.runId, input.threadId);
-        const events = await drainTaskEvents(input.runId);
-        showTask(task);
-        showEvents(events);
-        const terminal = events.find(event => event?.type === 'RUN_FINISHED' || event?.type === 'RUN_ERROR');
-        if (terminal) {
-          state.pending = null;
-          saveState();
+        let evidence;
+        try { evidence = await readTerminalTaskEvents(input.runId, input.threadId); }
+        catch (failure) {
+          const message = failure?.code === 'task_identity_mismatch'
+            ? 'The task event identity did not match this run; the interruption cause is unknown. No automatic retry was sent.'
+            : failure.message;
+          if (selectedRunId() === input.runId) addRecoveryError(input.runId, failure?.code, message);
+          return {state: 'unknown', code: 'interruption_cause_unknown', message};
         }
-        return true;
-      } catch { return false; }
+        const {events, unavailable} = evidence;
+        if (selectedRunId() === input.runId) {
+          showTask(task);
+          if (unavailable) $('events').textContent = 'Task event history is unavailable; status is from the saved host task.';
+          else showEvents(events);
+        }
+        const terminal = terminalStatus(events, task);
+        if (terminal.terminalObserved) {
+          startedRecoveryRunIds.add(input.runId);
+          clearPendingForRun(input.runId);
+          if (terminal.state !== 'succeeded') addRecoveryError(input.runId, terminal.code, terminal.message);
+        }
+        return terminal;
+      } catch { return null; }
     }
 
     async function submitInput(input, kind, chatId = null) {
       if (busy) return;
-      state.pending = {input, kind, ...(chatId ? {chatId} : {})};
-      state.lastRun = {runId: input.runId, threadId: input.threadId, kind, ...(chatId ? {chatId} : {})};
-      saveState();
+      saveNewRun(input, kind, chatId);
       showInput(input);
       showTask(null);
       showEvents([]);
@@ -508,23 +1303,50 @@
           : await agent.run(input);
         validateResult(kind, runResult);
         const {task, events} = await taskEvidence(input.runId, input.threadId);
-        state.pending = null;
-        saveState();
+        terminalEvent(events, task);
+        let canonicalChat;
+        if (kind === 'chat') {
+          verifyChatReplyEvents(events, runResult);
+          chat = await agent.chats.open(chatId);
+          canonicalChat = await refreshChatHistory('run-completion', [...input.messages, ...runResult.newMessages]);
+          canonicalChat.inputMessagesVerified = true;
+        }
+        startedRecoveryRunIds.add(input.runId);
+        clearPendingForRun(input.runId);
+        clearRecoveryErrors(input.runId);
+        if (selectedRunId() !== input.runId) {
+          loadState();
+          setStatus('A previous run completed; the newer saved run was preserved.');
+          return;
+        }
         showTask(task);
         showEvents(events);
         $('result').textContent = JSON.stringify({
           RunAgentInput: redactProtocol(input),
           RunAgentResult: redactProtocol(runResult),
+          ...(canonicalChat ? {canonicalChat: redactProtocol(canonicalChat)} : {}),
         }, null, 2);
         setStatus(`${kind} run succeeded · thread ${input.threadId} · run ${input.runId}`);
-        if (kind === 'chat') {
-          chat = await agent.chats.open(chatId);
-          await refreshChatHistory();
-        }
       } catch (failure) {
-        await observeAfterFailure(input);
-        setError(failure?.message || String(failure));
-        setStatus(`Run failed or was interrupted · thread ${input.threadId} · run ${input.runId}. A pending request, if shown, can only be retried with the same AG-UI IDs.`);
+        const terminal = await observeAfterFailure(input);
+        if (selectedRunId() !== input.runId) {
+          loadState();
+          setStatus('A previous run stopped; the newer saved run was preserved.');
+          return;
+        }
+        if (terminal?.state === 'interrupted' || terminal?.code === 'interruption_cause_unknown') {
+          setError(terminal.message);
+          setStatus(`Run ${terminal.state} · thread ${input.threadId} · run ${input.runId}. No automatic retry was sent.`);
+        } else if (!terminal && ['ios_background_expired', 'run_cancelled', 'agent_storage_unavailable'].includes(failure?.code)) {
+          setError((failure?.code === 'agent_storage_unavailable'
+            ? 'Host task storage is unavailable; the run status and interruption cause are unknown.'
+            : 'The host task status and interruption cause are unknown.')
+            + ' No automatic retry was sent. Check the task before starting a new run manually.');
+          setStatus(`Run status unknown · thread ${input.threadId} · run ${input.runId}.`);
+        } else {
+          setError(failure?.message || String(failure));
+          setStatus(`Run failed or was interrupted · thread ${input.threadId} · run ${input.runId}. A pending request, if shown, can only be retried with the same AG-UI IDs.`);
+        }
       } finally {
         monitor = false;
         await monitorPromise;
@@ -532,6 +1354,8 @@
         activeTask = false;
         busy = false;
         updateControls();
+        scheduleQueuedRecovery();
+        void refreshDiagnostics();
       }
     }
 
@@ -541,7 +1365,7 @@
         if (!shouldContinue()) return;
         try {
           const task = await readTask(input.runId, input.threadId);
-          if (!shouldContinue()) return;
+          if (!shouldContinue() || selectedRunId() !== input.runId) return;
           showTask(task);
           activeTask = task.state === 'queued' || task.state === 'running';
           updateControls();
@@ -590,17 +1414,210 @@
       } catch (failure) { setError(failure?.message || String(failure)); }
     }
 
-    async function createChat() {
-      setError('');
+    async function performChatCreation(input, action, source) {
+      const id = input.requestId;
+      const selectedChatBefore = localStorage.getItem(CHAT_SELECTION_KEY);
       try {
-        chat = await agent.chats.create({title: 'Agent device acceptance'});
-        state.chatId = chat.id;
-        saveState();
-        await refreshChatHistory();
-        $('recovery').textContent = `Created host-owned persistent Chat; threadId is ${chat.id}.`;
-        setStatus('Chat created. Send a first turn, then a follow-up to verify persistent context.');
+        let handle;
+        if (action === 'create') {
+          handle = await observeChatCall('create', source, id, () => agent.chats.create(input));
+        } else {
+          handle = await observeChatCall('creationStatus', source, id, () => agent.chats.creationStatus(input));
+          if (handle === null && action === 'retry') {
+            const saved = readChatCreation(id);
+            if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) !== id
+                || localStorage.getItem(CHAT_SELECTION_KEY) !== selectedChatBefore
+                || saved.marker !== null || !sameChatCreationInput(saved.input, input)) {
+              return false;
+            }
+            handle = await observeChatCall('create', source, id, () => agent.chats.create(input));
+          }
+        }
+        if (handle === null && action !== 'create') {
+          if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) === id) {
+            setStatus('The saved Chat creation is not currently visible. Its outcome is unknown; no automatic retry was sent.');
+          }
+          return false;
+        }
+        if (!isRecord(handle) || handle.id !== id || typeof handle.history !== 'function') {
+          throw recoveryFailure('chat_creation_identity_mismatch', 'The host returned a Chat with a different identity.');
+        }
+        const saved = readChatCreation(id);
+        if (!sameChatCreationInput(saved.input, input) || (saved.marker !== null && saved.marker !== '1')) {
+          throw recoveryFailure('chat_creation_identity_mismatch', 'The saved Chat creation input changed.');
+        }
+        const sameSelection = localStorage.getItem(CHAT_CREATION_HEAD_KEY) === id;
+        const sameChatSelection = localStorage.getItem(CHAT_SELECTION_KEY) === selectedChatBefore;
+        if (sameSelection && sameChatSelection && action !== 'status') saveSelectedChat(id);
+        localStorage.setItem(CHAT_CREATION_FINISHED_PREFIX + id, '1');
+        if (!sameSelection || !sameChatSelection) return true;
+        if (action === 'status') {
+          setStatus('Saved Chat creation confirmed by a read-only lookup. Open the recovered Chat explicitly.');
+          return true;
+        }
+        chat = handle;
+        setStatus(action === 'create'
+          ? 'Chat created. Send a first turn, then a follow-up to verify persistent context.'
+          : 'Saved Chat creation confirmed by a read-only lookup. No creation was sent.');
+        $('recovery').textContent = `Host-owned persistent Chat opened; threadId is ${id}.`;
+        try { await refreshChatHistory(source); }
+        catch { setError('The Chat was confirmed, but its history could not be read.'); }
+        return true;
+      } catch (failure) {
+        const code = safeChatStatusCode(failure);
+        if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) === id) {
+          if (['chat_create_conflict', 'chat_create_deleted'].includes(code)) {
+            try {
+              const saved = readChatCreation(id);
+              if ((saved.marker === null || saved.marker === '1') && sameChatCreationInput(saved.input, input)) {
+                localStorage.setItem(CHAT_CREATION_FINISHED_PREFIX + id, 'rejected:' + code);
+              }
+            } catch (storageError) {
+              storageReady = false;
+              storageFailure = storageError.message || 'Browser storage is unavailable.';
+            }
+          }
+          setError(`Chat creation · ${code}: ${['chat_create_conflict', 'chat_create_deleted'].includes(code)
+            ? 'This saved creation cannot be reused. A different creation requires a new explicit action.'
+            : 'The outcome is unknown or could not be verified. No automatic retry was sent.'}`);
+          setStatus('Chat creation was not confirmed; no replacement request was sent automatically.');
+        }
+        return false;
+      }
+    }
+
+    function finishChatCreationOperation() {
+      busy = false;
+      loadState();
+      loadChatCreation();
+      if (chat && chat.id !== state.chatId) chat = null;
+      updateControls();
+      showChatLookupFailures();
+      scheduleQueuedRecovery();
+      void refreshDiagnostics();
+    }
+
+    async function createChat() {
+      if (!agent || busy || !storageReady || state.pending) return;
+      setError('');
+      busy = true;
+      updateControls();
+      try {
+        const input = {requestId: newId(), title: 'Agent device acceptance'};
+        saveNewChatCreation(input);
+        await performChatCreation(input, 'create', 'create-button');
+      } catch (failure) {
+        setError(safeFailureText(failure));
+      } finally {
+        finishChatCreationOperation();
+      }
+    }
+
+    async function checkChatCreation(action = 'status', source = {
+      status: 'status-button', retry: 'retry-button', open: 'open-created-button',
+    }[action]) {
+      if (!agent || busy || !storageReady) return;
+      try {
+        const id = localStorage.getItem(CHAT_CREATION_HEAD_KEY);
+        if (id === null) return;
+        const saved = readChatCreation(id);
+        if ((action === 'open' && saved.marker !== '1') || (action !== 'open' && saved.marker !== null)
+            || (action === 'retry' && state.pending)) return;
+        setError('');
+        busy = true;
         updateControls();
-      } catch (failure) { setError(failure?.message || String(failure)); }
+        await performChatCreation(saved.input, action, source);
+      } catch (failure) {
+        setError(safeFailureText(failure));
+      } finally {
+        if (busy) finishChatCreationOperation();
+      }
+    }
+
+    function parseSdkChatCreations(records) {
+      if (!Array.isArray(records) || records.length > 1000) {
+        throw recoveryFailure('invalid_chat_creation_receipts', 'The SDK returned invalid Chat creation receipts.');
+      }
+      const seen = new Set();
+      return records.map(record => {
+        if (!isRecord(record) || Object.keys(record).some(key => !['requestId', 'title', 'state'].includes(key))
+            || !['pending', 'accepted', 'deleted', 'rejected'].includes(record.state)) {
+          throw recoveryFailure('invalid_chat_creation_receipts', 'The SDK returned an unsupported Chat creation receipt.');
+        }
+        const input = {requestId: record.requestId,
+          ...(Object.prototype.hasOwnProperty.call(record, 'title') ? {title: record.title} : {})};
+        if (!validChatCreationInput(input) || seen.has(input.requestId)) {
+          throw recoveryFailure('invalid_chat_creation_receipts', 'The SDK returned an invalid or duplicate Chat creation ID.');
+        }
+        seen.add(input.requestId);
+        return {input, state: record.state};
+      });
+    }
+
+    async function listChatCreations() {
+      if (!agent || busy || !storageReady) return;
+      setError('');
+      busy = true;
+      updateControls();
+      try {
+        const records = parseSdkChatCreations(await agent.chats.pendingCreations());
+        $('chat-create-receipts').textContent = records.length
+          ? records.map(record => `${record.input.requestId} · ${record.state}`).join('\n')
+          : 'No saved Chat creation IDs were found.';
+      } catch (failure) {
+        setError(`Chat creation receipts · ${safeCode(failure?.code)}: Could not safely read saved creation IDs.`);
+      } finally {
+        finishChatCreationOperation();
+      }
+    }
+
+    async function recoverChatCreationById() {
+      if (!agent || busy || !storageReady) return;
+      const id = $('chat-create-recover-id').value.trim();
+      if (!validChatCreationInput({requestId: id})) {
+        setError('Enter the exact lowercase UUIDv4 Chat creation request ID.');
+        return;
+      }
+      const selectedBefore = localStorage.getItem(CHAT_CREATION_HEAD_KEY);
+      const chatBefore = localStorage.getItem(CHAT_SELECTION_KEY);
+      setError('');
+      busy = true;
+      updateControls();
+      try {
+        const records = parseSdkChatCreations(await agent.chats.pendingCreations());
+        const match = records.find(record => record.input.requestId === id);
+        if (!match) throw recoveryFailure('chat_creation_receipt_missing', 'No SDK receipt matched that exact request ID.');
+        if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) !== selectedBefore
+            || localStorage.getItem(CHAT_SELECTION_KEY) !== chatBefore) {
+          setStatus('A newer selection was preserved; no Chat creation was sent.');
+          return;
+        }
+        const key = CHAT_CREATION_ENTRY_PREFIX + id;
+        if (localStorage.getItem(key) === null) {
+          localStorage.setItem(key, JSON.stringify({version: 1, input: match.input}));
+        } else if (!sameChatCreationInput(readChatCreation(id).input, match.input)) {
+          throw recoveryFailure('chat_creation_identity_mismatch', 'The saved input does not match the SDK receipt.');
+        }
+        if (match.state === 'deleted' || match.state === 'rejected') {
+          localStorage.setItem(CHAT_CREATION_FINISHED_PREFIX + id,
+            match.state === 'deleted' ? 'rejected:chat_create_deleted' : 'rejected:sdk_rejected');
+        }
+        localStorage.setItem(CHAT_CREATION_HEAD_KEY, id);
+        const saved = readChatCreation(id);
+        if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) !== id || !sameChatCreationInput(saved.input, match.input)) {
+          throw recoveryFailure('chat_creation_identity_mismatch', 'The Chat creation selection changed before recovery.');
+        }
+        chatCreation = saved;
+        if (match.state === 'deleted' || match.state === 'rejected') {
+          setStatus(`The selected SDK receipt is ${match.state}; no Chat creation was sent.`);
+          return;
+        }
+        await performChatCreation(saved.input, 'open', 'recover-id-button');
+      } catch (failure) {
+        setError(`Chat creation recovery · ${safeCode(failure?.code)}: Could not safely recover that exact ID. No creation was sent.`);
+      } finally {
+        finishChatCreationOperation();
+      }
     }
 
     async function openChat() {
@@ -608,11 +1625,11 @@
       try {
         if (!state.chatId) throw new Error('No saved Chat ID is available.');
         chat = await agent.chats.open(state.chatId);
-        await refreshChatHistory();
+        await refreshChatHistory('open-chat-button');
         $('recovery').textContent = `Opened host Chat ${chat.id}; only canonical history was read.`;
         setStatus('Saved persistent Chat opened.');
         updateControls();
-      } catch (failure) { setError(failure?.message || String(failure)); }
+      } catch { setError('The saved Chat could not be opened or its history could not be read.'); }
     }
 
     async function sendChatTurn() {
@@ -622,50 +1639,215 @@
         const text = $('chat-prompt').value.trim();
         if (!text) throw new Error('Enter a Chat message first.');
         const input = makeInput(chat.id,
-          [{id: newId(), role: 'user', content: [{type: 'text', text}]}], chatSchema);
+          [{id: newId(), role: 'user', content: [{type: 'text', text}]}]);
         await submitInput(input, 'chat', chat.id);
         $('chat-prompt').value = '';
       } catch (failure) { setError(failure?.message || String(failure)); }
     }
 
-    async function reconnectLastRun() {
-      setError('');
-      if (!state.lastRun) return;
+    function beginReadOnlyRecovery(reference, automatic = false) {
+      const runId = reference.runId;
+      const existing = recoveryFlights.get(runId);
+      if (existing) return existing;
+      if (busy || recoveryFlights.size > 0) return Promise.resolve(false);
+      startedRecoveryRunIds.add(runId);
+      const operation = Promise.resolve().then(() => performReadOnlyRecovery(reference, automatic));
+      recoveryFlights.set(runId, operation);
+      void operation.then(() => {
+        if (recoveryFlights.get(runId) === operation) recoveryFlights.delete(runId);
+        scheduleQueuedRecovery();
+      }, failure => {
+        if (recoveryFlights.get(runId) === operation) recoveryFlights.delete(runId);
+        addRecoveryError(runId, failure?.code, failure?.message);
+        scheduleQueuedRecovery();
+      });
+      return operation;
+    }
+
+    async function performReadOnlyRecovery(reference, automatic) {
+      const runId = reference.runId;
+      const selectedAtStart = selectedRunId();
+      const superseded = () => {
+        const selected = selectedRunId();
+        return selected && selected !== selectedAtStart && selected !== runId;
+      };
       busy = true;
+      activeRunId = runId;
+      activeTask = false;
+      setError('');
+      clearRecoveryErrors(runId, true);
+      if (state.pending?.input?.runId === runId) showInput(state.pending.input);
+      setStatus(automatic
+        ? `Read-only recovery for accepted run ${runId}; no request will be submitted.`
+        : `Read-only reconnect to saved run ${runId}; no request will be submitted.`);
+      $('recovery').textContent = `Reconnecting to saved run ${runId} with the existing thread and run IDs.`;
       updateControls();
-      setStatus(`Read-only reconnect to ${state.lastRun.runId}; this does not submit a new model request.`);
       try {
-        const reference = state.lastRun;
+        const initialTask = await readTaskWithBoundedRetry(runId, reference.threadId);
+        if (superseded()) return false;
+        showTask(initialTask);
+        activeTask = ['queued', 'running'].includes(initialTask.state);
+        updateControls();
+
+        if (['failed', 'cancelled', 'interrupted'].includes(initialTask.state)) {
+          const {events, unavailable} = await readTerminalTaskEvents(runId, reference.threadId);
+          if (superseded()) {
+            clearPendingForRun(runId);
+            return false;
+          }
+          showTask(initialTask);
+          if (unavailable) $('events').textContent = 'Task event history is unavailable; status is from the saved host task.';
+          else showEvents(events);
+          const terminal = terminalStatus(events, initialTask);
+          clearPendingForRun(runId);
+          addRecoveryError(runId, terminal.code, terminal.message);
+          $('recovery').textContent = `Saved run ${runId} is terminal (${terminal.state}); no new request was sent.`;
+          return false;
+        }
+
+        if (reference.kind === 'chat' && reference.chatId && chat?.id !== reference.chatId) {
+          chat = await agent.chats.open(reference.chatId);
+        }
         const client = agent.createClient({threadId: reference.threadId});
         const callbackEvents = [];
-        const runResult = await client.connectAgent({runId: reference.runId}, {
-          onEvent: ({event}) => callbackEvents.push(
-            typeof window.LingxiLocalAppAGUI?.validateEvent === 'function'
-              ? window.LingxiLocalAppAGUI.validateEvent(event) : event,
-          ),
-        });
-        const {task, events} = await taskEvidence(reference.runId, reference.threadId);
-        const terminal = terminalEvent(callbackEvents, task);
-        if (terminal.type !== 'RUN_FINISHED'
-            || (terminal.outcome !== undefined && terminal.outcome?.type !== 'success')) {
-          throw new Error('Read-only reconnect did not receive a successful standard terminal event.');
+        let runResult = null;
+        let connectFailure = null;
+        try {
+          runResult = await client.connectAgent({runId}, {
+            onEvent: ({event}) => {
+              const validated = typeof window.LingxiLocalAppAGUI?.validateEvent === 'function'
+                ? window.LingxiLocalAppAGUI.validateEvent(event) : event;
+              callbackEvents.push(validateEventIdentity(validated, runId, reference.threadId));
+            },
+          });
+        } catch (failure) {
+          connectFailure = failure;
         }
-        validateResult(reference.kind, runResult);
+
+        let task;
+        let events;
+        try {
+          ({task, events} = await taskEvidence(runId, reference.threadId));
+        } catch (failure) {
+          if (failure?.code === 'task_identity_mismatch' || connectFailure?.code === 'task_identity_mismatch') {
+            const mismatch = failure?.code === 'task_identity_mismatch' ? failure : connectFailure;
+            addRecoveryError(runId, mismatch.code, mismatch.message);
+            return false;
+          }
+          const callbackTerminal = terminalStatus(callbackEvents, initialTask);
+          if (callbackTerminal.code === 'interruption_cause_unknown') {
+            addRecoveryError(runId, callbackTerminal.code, callbackTerminal.message);
+            return false;
+          }
+          if (callbackTerminal.terminalObserved && callbackTerminal.state !== 'succeeded') {
+            clearPendingForRun(runId);
+            addRecoveryError(runId, callbackTerminal.code, callbackTerminal.message);
+            return false;
+          }
+          addRecoveryError(runId, failure?.code || 'task_evidence_unavailable', failure?.message
+            || 'The host accepted the reconnect but did not return durable task evidence.');
+          return false;
+        }
+        if (superseded()) {
+          if (terminalStatus(events, task).terminalObserved) clearPendingForRun(runId);
+          return false;
+        }
         showTask(task);
         showEvents(events);
+        const durableTerminal = terminalStatus(events, task);
+        if (durableTerminal.state !== 'succeeded') {
+          if (durableTerminal.terminalObserved) {
+            clearPendingForRun(runId);
+            addRecoveryError(runId, durableTerminal.code, durableTerminal.message);
+            $('recovery').textContent = `Saved run ${runId} is terminal (${durableTerminal.state}); no replacement request was sent.`;
+          } else {
+            const failure = connectFailure || recoveryFailure(durableTerminal.code, durableTerminal.message);
+            addRecoveryError(runId, failure.code, failure.message);
+          }
+          return false;
+        }
+
+        if (connectFailure) {
+          clearPendingForRun(runId);
+          addRecoveryError(runId, connectFailure.code || 'result_unavailable',
+            `The host reports a successful terminal run, but RunAgentResult could not be restored: ${connectFailure.message || 'unknown host error'}`);
+          return false;
+        }
+
+        const callbackTerminal = terminalStatus(callbackEvents, task);
+        if (callbackTerminal.state !== 'succeeded') {
+          clearPendingForRun(runId);
+          addRecoveryError(runId, callbackTerminal.code || 'callback_terminal_missing', callbackTerminal.message
+            || 'The durable task completed, but reconnect did not receive its successful terminal callback.');
+          return false;
+        }
+
+        let canonicalChat;
+        try {
+          validateResult(reference.kind, runResult);
+          if (reference.kind === 'chat' && reference.chatId) {
+            verifyChatReplyEvents(events, runResult);
+            verifyChatReplyEvents(callbackEvents, runResult);
+            chat = await agent.chats.open(reference.chatId);
+            const originalMessages = reference.input?.messages;
+            canonicalChat = await refreshChatHistory(automatic ? 'automatic-recovery' : 'reconnect-button',
+              [...(originalMessages ?? []), ...runResult.newMessages]);
+            canonicalChat.inputMessagesVerified = Array.isArray(originalMessages);
+          }
+        } catch (failure) {
+          if (reference.kind !== 'chat') clearPendingForRun(runId);
+          addRecoveryError(runId, failure?.code || 'output_schema_invalid', failure?.message
+            || 'The recovered RunAgentResult did not match the saved output schema.');
+          return false;
+        }
+
+        clearPendingForRun(runId);
+        clearRecoveryErrors(runId);
         $('result').textContent = JSON.stringify({
-          reconnect: {mode: 'read-only', threadId: reference.threadId, runId: reference.runId},
+          reconnect: {mode: 'read-only', threadId: reference.threadId, runId},
+          ...(reference.kind === 'sdk-task' ? {outputSchemaVerified: false} : {}),
           RunAgentResult: redactProtocol(runResult),
+          ...(canonicalChat ? {canonicalChat: redactProtocol(canonicalChat)} : {}),
           callbackEventTypes: callbackEvents.map(event => event.type),
         }, null, 2);
-        setStatus(`Read-only reconnect succeeded · ${callbackEvents.length} callback events · no new run started.`);
+        if (reference.kind === 'sdk-task') {
+          setStatus(`Read-only reconnect completed · ${callbackEvents.length} callback events · original output schema unavailable.`);
+          $('recovery').textContent = 'The exact SDK receipt and host task matched. The original output schema could not be verified; no new run was started.';
+        } else {
+          setStatus(`Read-only reconnect succeeded · ${callbackEvents.length} callback events · no new run started.`);
+          $('recovery').textContent = canonicalChat?.inputMessagesVerified === false
+            ? `Recovered the exact accepted Chat run and thread; the original fixture input was unavailable.${selectedAtStart && selectedAtStart !== runId ? ' The other selected run remains unchanged.' : ''}`
+            : `Recovered the existing ${reference.kind} RunAgentResult; the saved input and IDs were unchanged.`;
+        }
+        return true;
       } catch (failure) {
-        setError(failure?.message || String(failure));
-        setStatus('Read-only reconnect failed; no replacement run was started.');
+        if (superseded()) return false;
+        addRecoveryError(runId, failure?.code || 'unknown', failure?.message || 'The saved run could not be restored.');
+        $('recovery').textContent = `Read-only recovery stopped for ${runId}; no replacement request was sent.`;
+        return false;
       } finally {
+        activeRunId = null;
+        activeTask = false;
         busy = false;
+        if (superseded() || localStorage.getItem(RUN_HEAD_KEY) === runId) {
+          loadState();
+          if (chat && state.chatId && chat.id !== state.chatId) chat = null;
+        }
         updateControls();
+        void refreshDiagnostics();
       }
+    }
+
+    async function reconnectLastRun() {
+      setError('');
+      const runId = state.pending?.input?.runId || state.lastRun?.runId;
+      const reference = recoveryReferenceFor(runId);
+      if (!reference) {
+        addRecoveryError(runId, 'pending_request_missing',
+          'No saved RunAgentInput or known result kind exists for this run. No request was started.');
+        return false;
+      }
+      return beginReadOnlyRecovery(reference, false);
     }
 
     async function retryPending() {
@@ -675,11 +1857,17 @@
     }
 
     $('run-image').addEventListener('click', runImage);
+    $('retry-image').addEventListener('click', () => { void preloadPublicImage(); });
     $('run-text-file').addEventListener('click', runTextFile);
     $('create-chat').addEventListener('click', createChat);
+    $('check-chat-create').addEventListener('click', () => checkChatCreation('status'));
+    $('retry-chat-create').addEventListener('click', () => checkChatCreation('retry'));
+    $('open-created-chat').addEventListener('click', () => checkChatCreation('open'));
+    $('list-chat-creations').addEventListener('click', listChatCreations);
+    $('recover-chat-creation').addEventListener('click', recoverChatCreationById);
     $('open-chat').addEventListener('click', openChat);
     $('refresh-history').addEventListener('click', async () => {
-      try { await refreshChatHistory(); } catch (failure) { setError(failure?.message || String(failure)); }
+      try { await refreshChatHistory('refresh-history-button'); } catch (failure) { setError(failure?.message || String(failure)); }
     });
     $('send-chat').addEventListener('click', sendChatTurn);
     $('chat-prompt').addEventListener('input', updateControls);
@@ -687,9 +1875,35 @@
     $('retry-pending').addEventListener('click', retryPending);
     $('cancel-run').addEventListener('click', cancelActiveRun);
     $('host-open').addEventListener('click', () => window.localApp?.host?.open?.());
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') scheduleQueuedRecovery();
+    });
+    window.addEventListener('storage', event => {
+      if (event.key?.startsWith(CHAT_LOOKUP_FAILURE_PREFIX)) {
+        loadChatLookupFailures();
+        return;
+      }
+      if (!event.key || (!event.key.startsWith(RUN_ENTRY_PREFIX)
+          && !event.key.startsWith(RUN_FINISHED_PREFIX)
+          && !event.key.startsWith(CHAT_CREATION_ENTRY_PREFIX)
+          && !event.key.startsWith(CHAT_CREATION_FINISHED_PREFIX)
+          && event.key !== CHAT_CREATION_HEAD_KEY
+          && event.key !== RUN_HEAD_KEY && event.key !== CHAT_SELECTION_KEY)) return;
+      showChatLookupFailures();
+      if (!busy) {
+        loadState();
+        loadChatCreation();
+        if (chat && chat.id !== state.chatId) chat = null;
+        updateControls();
+        void refreshDiagnostics();
+      }
+    });
 
     async function bootstrap() {
       loadState();
+      loadChatCreation();
+      loadChatLookupFailures();
+      activateHandoffCapture();
       try {
         if (!globalThis.localApp) await import('/__local_app_sdk.js');
         const deadline = Date.now() + 15000;
@@ -697,17 +1911,26 @@
         if (!window.localApp?.agent) throw new Error('The host did not provide localApp.agent.');
         agent = window.localApp.agent;
         if (typeof window.localApp.host?.open === 'function') $('host-open').hidden = false;
-        setStatus('Host Agent ready. Model selection and approvals remain in trusted native settings.');
+        if ($('recovery-error').hidden) {
+          setStatus('Host Agent ready. Model selection and approvals remain in trusted native settings.');
+        }
+        void readSdkInfoForDiagnostics();
         void preloadPublicImage();
         if (!storageReady) setError(`Saved acceptance state was not changed: ${storageFailure}`);
         await restoreReadOnly();
+        if (storageReady && chatCreation?.marker === null) await checkChatCreation('status', 'bootstrap');
+        bootstrapReady = true;
+        scheduleQueuedRecovery();
       } catch (failure) {
         if (!agent) {
           $('image-status').textContent = 'Public image fixture unavailable because the host Agent did not become ready; only the image run is disabled.';
         }
         setStatus('Host Agent unavailable. Reopen this page from the native Apps library.');
         setError(failure?.message || String(failure));
-      } finally { updateControls(); }
+      } finally {
+        updateControls();
+        void refreshDiagnostics();
+      }
     }
 
     void bootstrap();

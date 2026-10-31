@@ -311,10 +311,10 @@ def _run_pkg_config(
         check=True,
     )
     version = version_result.stdout.strip()
-    parsed = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    parsed = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?", version)
     if not parsed:
         raise SetupError(f"GStreamer SDK reported an invalid version: {version!r}")
-    version_tuple = tuple(map(int, parsed.groups()))
+    version_tuple = tuple(map(int, parsed.group(1, 2, 3)))
     if expected_version is not None and version != expected_version:
         raise SetupError(f"GStreamer SDK version {version} does not match pinned {expected_version}")
     if minimum_version is not None:
@@ -387,7 +387,9 @@ def install_windows(lock: dict, root: pathlib.Path) -> None:
         raise SetupError(f"GStreamer development installer did not provide pkg-config.exe: {pkg_config}")
     plugin_dir = _run_pkg_config(
         str(pkg_config), pkg_config_path, expected_plugins=plugin_files,
-        expected_version=lock["version"],
+        # The pinned MSVC installer adds its packaging revision to pkg-config's
+        # version. Keep that fourth component exact as well as the release.
+        expected_version=f"{lock['version']}.1",
     )
     marker.write_text(lock["version"] + "\n", encoding="ascii")
     export_environment(

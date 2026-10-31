@@ -1,0 +1,33 @@
+{
+  "status": "ROOT_CAUSE_CONFIRMED",
+  "buildMetadataSha256": "bbb31e8ae1d1d8b959adf024959154d143094bc259f1b1b143f9ee296eda921f",
+  "buildSignatureFindings": [
+    {
+      "location": "$.steps[1].env[13]",
+      "value": "GOOGLE_FUNCTION_TARGET=onTeamMessage"
+    },
+    {
+      "location": "$.steps[1].env[14]",
+      "value": "GOOGLE_FUNCTION_SIGNATURE_TYPE=event"
+    },
+    {
+      "location": "$.substitutions._GOOGLE_FUNCTION_TARGET",
+      "value": "onTeamMessage"
+    },
+    {
+      "location": "$.substitutions._GOOGLE_FUNCTION_SIGNATURE_TYPE",
+      "value": "event"
+    }
+  ],
+  "firebaseCliRequires": "FUNCTION_SIGNATURE_TYPE=cloudevent",
+  "localWrapperProof": "wrapper-shapes.json",
+  "legacyInputProduces": {
+    "params": [],
+    "snapshot": false,
+    "dbReads": 0,
+    "outcome": "early-return-at-team-message-push.mjs:11"
+  },
+  "cloudEventJsonAndProtobuf": "params-and-Timestamp-valid; DB guard reached",
+  "sourceEditsPerformed": false,
+  "productionWritesPerformed": false
+}

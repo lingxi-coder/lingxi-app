@@ -356,10 +356,10 @@ class SettingsStore(
                     LlmProviderCatalogEntry(
                         profileId = entry.providerId,
                         displayName = entry.providerLabel,
-                        baseUrl = prior?.baseUrl ?: preset?.defaultUrl.orEmpty(),
-                        protocol = prior?.protocol ?: preset?.sub.orEmpty(),
-                        auth = prior?.auth.orEmpty(),
-                        credentialEnv = prior?.credentialEnv,
+                        baseUrl = entry.definition?.baseUrl ?: prior?.baseUrl ?: preset?.defaultUrl.orEmpty(),
+                        protocol = entry.definition?.protocol ?: prior?.protocol ?: preset?.sub.orEmpty(),
+                        auth = entry.definition?.auth ?: prior?.auth.orEmpty(),
+                        credentialEnv = entry.definition?.credentialEnv ?: prior?.credentialEnv,
                         modelIds = entry.models.map { it.modelId },
                         modelDetails = entry.models.map(CatalogModelDetails::fromDto),
                     )

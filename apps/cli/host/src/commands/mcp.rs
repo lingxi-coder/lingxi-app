@@ -944,7 +944,7 @@ async fn call_tool_response(
     let tool_use_id = lingxi_core::types::ToolUseId::new();
     output.register_progress(&tool_use_id, progress_token).await;
     let result = orchestrator
-        .call_tool_from_host(tool_use_id.clone(), name.clone(), arguments, Some(cancel))
+        .call_tool_from_host_request(tool_use_id.clone(), name.clone(), arguments, cancel)
         .await;
     output.unregister_progress(&tool_use_id).await;
 

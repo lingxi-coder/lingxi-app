@@ -107,6 +107,7 @@ fun ProviderListPage(
     store: SettingsStore,
     onEdit: (id: String) -> Unit,
     onAdd: () -> Unit,
+    onRefreshCatalog: () -> Unit = {},
     onReconnectEngine: () -> Unit = {},
     onNavigate: (route: String) -> Unit = {},
 ) {
@@ -116,6 +117,9 @@ fun ProviderListPage(
 
     Column(Modifier.fillMaxWidth()) {
         if (kind != ProviderKind.Llm) Blurb(kind.blurb())
+        else androidx.compose.material3.TextButton(onClick = onRefreshCatalog) {
+            Text(stringResource(R.string.settings_parity_refresh_catalog))
+        }
 
         SettingsSection(label = stringResource(R.string.settings_provider_added_count_fmt, arr.size)) {
             if (arr.isEmpty()) {
@@ -320,18 +324,18 @@ fun ProviderPickerPage(
             kind.presets
         } else {
             val fallback = kind.presets.associateBy { it.id }
-            val catalog = state.llmCatalogEntries.mapNotNull { entry ->
+            val catalog = state.llmCatalogEntries.map { entry ->
                 val id = if (entry.profileId == "gemini") "google" else entry.profileId
-                val base = fallback[id] ?: return@mapNotNull null
+                val base = fallback[id]
                 ProviderPreset(
                     id = id,
                     name = entry.displayName,
-                    sub = base.sub,
-                    color = base.color,
+                    sub = base?.sub ?: entry.protocol,
+                    color = base?.color ?: Color(0xFF64748B),
                     defaultUrl = entry.baseUrl,
-                    keyPrefix = base.keyPrefix,
+                    keyPrefix = base?.keyPrefix.orEmpty(),
                     models = entry.modelIds,
-                    needsCx = base.needsCx,
+                    needsCx = base?.needsCx ?: false,
                 )
             }
             (catalog + kind.presets.filter { it.id == "custom" }).distinctBy { it.id }

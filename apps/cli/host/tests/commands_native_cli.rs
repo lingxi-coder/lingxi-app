@@ -481,31 +481,33 @@ fn parse_runtime_command_preview(list: &str) -> (Vec<String>, Option<usize>) {
 }
 
 fn assert_runtime_command_preview(actual: &str, native: &str) {
-    const PRODUCT_ONLY_SKILLS: &[&str] = &["create-local-app"];
-
     let (actual_names, actual_remainder) = parse_runtime_command_preview(actual);
-    let (native_names, native_remainder) = parse_runtime_command_preview(native);
-    let expected_product_names = native_names;
-    let comparable_actual_names = actual_names
-        .iter()
-        .filter(|name| !PRODUCT_ONLY_SKILLS.contains(&name.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    let product_only_names = actual_names
-        .iter()
-        .filter(|name| !expected_product_names.contains(name))
-        .map(String::as_str)
-        .collect::<Vec<_>>();
+    let (mut expected_product_names, native_remainder) = parse_runtime_command_preview(native);
 
-    assert!(
-        product_only_names
-            .iter()
-            .all(|name| PRODUCT_ONLY_SKILLS.contains(name)),
-        "unexpected extra prompt commands: {product_only_names:?}"
-    );
+    // The desktop catalog replaces Native's API guide with LingXi's guide in
+    // the same position and registers the product document skill immediately
+    // after plugin-authoring. Keep every other captured name and its order.
+    let guide_positions = expected_product_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| (name == "claude-api").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(guide_positions.len(), 1, "Native capture has one API guide");
+    expected_product_names[guide_positions[0]] = "lingxi-api".into();
+    let plugin_positions = expected_product_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| (name == "plugin-authoring").then_some(index))
+        .collect::<Vec<_>>();
     assert_eq!(
-        comparable_actual_names, expected_product_names,
-        "the headless preview keeps Native command filtering and relative source order, with only the named product variants omitted"
+        plugin_positions.len(),
+        1,
+        "Native capture has one plugin guide"
+    );
+    expected_product_names.insert(plugin_positions[0] + 1, "docs".into());
+    assert_eq!(
+        actual_names, expected_product_names,
+        "the headless preview keeps Native filtering and order with the two documented product changes"
     );
     assert_eq!(
         actual_remainder, native_remainder,
@@ -1528,7 +1530,7 @@ fn public_cli_sigint_during_stream_open_matches_native_2_1_295() {
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_API_KEY", KEY)
         .env("ANTHROPIC_MAX_RETRIES", "0")
-        .env("LINGXI_SIMPLE", "1")
+        .env(branding::SIMPLE_ENV, "1")
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         .env("DISABLE_TELEMETRY", "1")
         .env("DO_NOT_TRACK", "1")

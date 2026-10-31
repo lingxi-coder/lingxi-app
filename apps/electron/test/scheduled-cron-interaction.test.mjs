@@ -91,11 +91,13 @@ test('scheduled tasks create, edit, retain failed edits, delete, and refresh thr
     assert.equal(result.picker.narrowFits, true);
     assert.equal(result.picker.enterCloses, true);
     assert.equal(result.created.jobs[0].durable, true);
-    assert.match(result.created.jobs[0].prompt, /Weekly review/);
+    assert.match(result.created.jobs[0].prompt, /Weekly finances update/);
     assert.equal(result.configured.jobs[0].expires_at, result.picker.expectedExpiry, 'editing other fields must preserve the selected expiry instant');
     assert.equal(result.configured.jobs[0].automation.targetSessionId, 'fixture-session');
     assert.deepEqual(result.configured.jobs[0].automation.reasoning, {type:'level',id:'high'});
     assert.equal(result.configured.jobs[0].automation.notificationPolicy, 'failed');
+    assert.deepEqual(result.emptyActive, {activeHidden: true, pausedVisible: true, suggestions: 6});
+    assert.equal(result.menuPaused, true);
     assert.equal(result.activeCount, 0);
     assert.equal(result.pausedCount, 1);
     assert.equal(result.reopenedTitle, 'Edited weekly review');

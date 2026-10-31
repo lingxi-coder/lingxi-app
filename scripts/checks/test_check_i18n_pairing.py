@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Focused checks for generated Android resources recognized by i18n pairing."""
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -139,6 +141,49 @@ class IntentionalIdenticalTranslationTests(unittest.TestCase):
                 "en", "drawer_tab_chats", "对话", "对话"
             )
         )
+
+
+class AndroidHandwrittenResourceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp_dir.name)
+        self.res = self.repo / check_i18n_pairing.ANDROID_RES_ROOT
+        for locale_dir in check_i18n_pairing.ANDROID_LOCALE_DIR.values():
+            directory = self.res / locale_dir
+            directory.mkdir(parents=True)
+            for index, basename in enumerate(check_i18n_pairing.ANDROID_COMPANION_STRINGS_BASENAMES):
+                (directory / basename).write_text(
+                    '<resources><!-- <string name="comment_only">x</string> -->'
+                    f'<string name="item_{index}">text</string></resources>',
+                    encoding="utf-8",
+                )
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_all_handwritten_files_are_recognized_without_comment_false_positives(self):
+        self.assertEqual(
+            check_i18n_pairing._android_companion_names(self.repo),
+            {f"item_{i}" for i in range(len(check_i18n_pairing.ANDROID_COMPANION_STRINGS_BASENAMES))},
+        )
+        self.assertEqual(check_i18n_pairing._android_companion_locale_gaps(self.repo), {})
+
+    def test_missing_locale_file_or_key_is_reported(self):
+        (self.res / "values-ja" / "local_apps_v2.xml").unlink()
+        (self.res / "values-ko" / "files.xml").write_text("<resources/>", encoding="utf-8")
+        self.assertEqual(
+            check_i18n_pairing._android_companion_locale_gaps(self.repo),
+            {"ja": ["item_1"], "ko": ["item_0"]},
+        )
+
+    def test_malformed_resources_do_not_count_as_definitions(self):
+        (self.res / "values" / "files.xml").write_text(
+            '<resources><string name="item_0">', encoding="utf-8"
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), self.assertRaises(SystemExit):
+            check_i18n_pairing._android_companion_names(self.repo)
+        self.assertIn("invalid Android resources file", output.getvalue())
 
 
 class SwiftUILocalizedStringReferenceTests(unittest.TestCase):

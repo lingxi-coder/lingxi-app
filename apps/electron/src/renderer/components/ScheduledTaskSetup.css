@@ -4,11 +4,11 @@
 .scheduled-status { text-transform: capitalize; font-size: 13px; color: var(--scheduled-accent); }
 .scheduled-status-paused, .scheduled-status-completed { color: var(--scheduled-secondary); }
 .scheduled-setup-back { border: 0; background: transparent; color: var(--scheduled-secondary); font: inherit; font-size: 22px; cursor: pointer; }
-.scheduled-setup-title-label { display: block; color: var(--scheduled-secondary); font-size: 12px; margin: 16px 0 8px; }
+.scheduled-setup-title-label { display: block; color: var(--scheduled-secondary); font-size: 11px; margin: 10px 0 8px; }
 .scheduled-setup textarea, .scheduled-setup input, .scheduled-setup select { box-sizing: border-box; font: inherit; color: var(--scheduled-text); background: var(--scheduled-bg); border: 1px solid var(--scheduled-border); border-radius: 12px; }
 .scheduled-setup textarea { width: 100%; padding: 15px 17px; line-height: 1.7; resize: vertical; min-height: 110px; }
 .scheduled-setup input, .scheduled-setup select { padding: 9px 11px; min-width: 0; }
-.scheduled-setup-title { width: 100%; font-size: 18px !important; }
+.scheduled-setup .scheduled-setup-title { width: 100%; font-size: 18px; border-color: transparent; padding-inline: 0; }
 .scheduled-setup h3 { color: var(--scheduled-secondary); font-size: 13px; font-weight: 400; margin: 28px 4px 10px; }
 .scheduled-setup-group { border: 1px solid var(--scheduled-border); border-radius: 17px; padding: 0 18px; }
 .scheduled-setup-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 56px; padding: 5px 0; box-sizing: border-box; }
@@ -21,6 +21,4 @@
 .scheduled-setup-primary:disabled { opacity: .4; cursor: default; }
 .scheduled-setup-submit { width: 100%; }
 .scheduled-setup button:focus-visible, .scheduled-setup input:focus-visible, .scheduled-setup textarea:focus-visible, .scheduled-setup select:focus-visible { outline: 2px solid var(--scheduled-accent); outline-offset: 3px; }
-.scheduled-setup-title-label { margin-top: 10px; font-size: 11px; }
-.scheduled-setup-title { border-color: transparent !important; padding-inline: 0 !important; }
-.scheduled-setup-title:focus { border-color: var(--scheduled-border) !important; }
+.scheduled-setup .scheduled-setup-title:focus { border-color: var(--scheduled-border); }

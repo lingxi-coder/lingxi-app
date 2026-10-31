@@ -1,0 +1,16 @@
+{
+  "time_utc": "2026-10-29T04:12:36.748728+00:00",
+  "source": "/Users/luolingfeng/lingxi/acceptance/mobile-app-agent-20261023/sdk778-link-diagnostic-20261027/official-unstripped-sdk/GStreamer.xcframework",
+  "destination": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/gstreamer-sdk/ios-device/GStreamer.xcframework",
+  "pinned_official_archive_sha256": "d34ae6bd55b6cb9959734299536003d315deea1ab46f84182113692528d04fb5",
+  "archive_member_proof": "/Users/luolingfeng/lingxi/acceptance/mobile-app-agent-20261023/sdk-provenance-20261027/final-result.json",
+  "library_sha256": "e26d425b4e7c31626bf4f2a36ebb5e561a2822279439c4afea1c1f66a8225200",
+  "info_plist_sha256": "e4ec4076646266bce44cf490278a88db35f3afa99008b34ebe8df7e13346795f",
+  "header_manifest_sha256": "206dbfce282729d55ce1a7eb09f0cf86d1692ef4b0e177754b336b9a3f900be6",
+  "header_files_reverified": 2096,
+  "binary_modification": "none; APFS clone of unmodified official archive member",
+  "available_libraries": [
+    "ios-arm64"
+  ],
+  "partial_download_retained": true
+}

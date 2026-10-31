@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { after, before } from 'node:test';
 import { validateCustomProvider } from '../src/renderer/components/settings/pages/customProviderImport';
+import { installTestLocale } from './test-locale';
+
+let restoreLocale: () => void;
+before(() => { restoreLocale = installTestLocale('zh-Hans'); });
+after(() => restoreLocale());
 
 const flat = {
   type: 'openai',

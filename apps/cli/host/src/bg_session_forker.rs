@@ -116,6 +116,24 @@ async fn write_background_snapshot(
         .map_err(|e| BgForkError::Snapshot(e.to_string()))
 }
 
+fn pin_resume_source(
+    config_home: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+    context: &mut crate::background_dispatch::ForkLaunchContext,
+) -> Result<(), BgForkError> {
+    uuid::Uuid::parse_str(session_id)
+        .map_err(|error| BgForkError::Dispatch(format!("invalid session id: {error}")))?;
+    let source = crate::background_dispatch::locate_session_transcript(
+        config_home,
+        &cwd.display().to_string(),
+        session_id,
+    )
+    .map_err(|error| BgForkError::Dispatch(error.to_string()))?;
+    context.transcript_path = Some(source.to_string_lossy().into_owned());
+    Ok(())
+}
+
 impl CliBgSessionForker {
     /// Construct a forker over the resolved config-home + daemon runtime dir.
     #[must_use]
@@ -151,10 +169,16 @@ impl CliBgSessionForker {
             let mode = runtime.permission_mode().ok_or_else(|| {
                 BgForkError::Dispatch("foreground permission mode is unavailable".into())
             })?;
-            Ok((
-                cwd.cwd(),
-                permission::permission_mode_from_cli_string(&mode),
-            ))
+            let mode = match mode.as_str() {
+                "default" | "manual" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk"
+                | "auto" => permission::permission_mode_from_cli_string(&mode),
+                _ => {
+                    return Err(BgForkError::Dispatch(
+                        "foreground permission mode is not recognized".into(),
+                    ))
+                }
+            };
+            Ok((cwd.cwd(), mode))
         }));
     }
 
@@ -271,7 +295,7 @@ impl CliBgSessionForker {
         let cwd = cwd_pb.display().to_string();
         let session_path = session::jsonl::path::session_path(&config_home, &cwd, &session_id);
         let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd_pb.clone()));
-        let writer = session::jsonl::writer::JsonlWriter::new(session_path, fs);
+        let writer = session::jsonl::writer::JsonlWriter::new(session_path.clone(), fs);
         if let Err(error) =
             write_background_snapshot(&writer, &conversation, &session_id, &cwd, &version, &model)
                 .await
@@ -282,6 +306,9 @@ impl CliBgSessionForker {
             }
             return Err(error);
         }
+        // The copied transcript must remain the worker's source even if it is
+        // removed before dispatch; never fall back to another project's UUID.
+        launch_context.transcript_path = Some(session_path.to_string_lossy().into_owned());
         launch_context.model = Some(model);
         launch_context.handoff = handoff;
         if let Some(recovery) = &recovery {
@@ -358,7 +385,7 @@ impl CliBgSessionForker {
                 Err(error) => {
                     // Dropping the ticket does not clear it; shutdown retries
                     // using the same registry and recorded transaction state.
-                    return BgForkError::Dispatch(format!(
+                    return BgForkError::OwnershipUncertain(format!(
                         "{original}; shell handoff recovery pending: {error}"
                     ));
                 }
@@ -413,7 +440,10 @@ impl BgSessionForker for CliBgSessionForker {
         // path — there is NO snapshot to write: dispatch a detached daemon that
         // resumes `session_id` directly via the same `Launch::Resume` machinery.
         let claim = self.lifecycle.claim()?;
-        let (cwd_pb, launch_context) = self.admitted_launch_identity()?;
+        let (cwd_pb, mut launch_context) = self.admitted_launch_identity()?;
+        // Pin the selected catalog path before publishing a job. If the file
+        // disappears, dispatch must not select the UUID in another project.
+        pin_resume_source(&self.config_home, &cwd_pb, session_id, &mut launch_context)?;
         let config_home = self.config_home.clone();
         let runtime_dir = self.runtime_dir.clone();
         let session_id = session_id.to_string();
@@ -513,6 +543,107 @@ mod tests {
             .await
             .unconfirmed_recoveries
             .is_empty());
+    }
+
+    #[test]
+    fn pinned_resume_path_cannot_fall_back_to_another_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("config");
+        let cwd = dir.path().join("workspace-a");
+        let other = dir.path().join("workspace-b");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let source =
+            session::jsonl::path::session_path(&home, &cwd.display().to_string(), &session_id);
+        let replacement =
+            session::jsonl::path::session_path(&home, &other.display().to_string(), &session_id);
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(replacement.parent().unwrap()).unwrap();
+        std::fs::write(&source, "original").unwrap();
+        let mut context = crate::background_dispatch::ForkLaunchContext::default();
+        pin_resume_source(&home, &cwd, &session_id, &mut context).unwrap();
+        assert_eq!(
+            std::path::PathBuf::from(context.transcript_path.as_ref().unwrap()),
+            source.canonicalize().unwrap()
+        );
+        std::fs::rename(&source, source.with_extension("moved")).unwrap();
+        std::fs::write(replacement, "different source").unwrap();
+        assert!(
+            crate::background_dispatch::dispatch_resumed_session_with_context(
+                &home,
+                &dir.path().join("runtime"),
+                &cwd.display().to_string(),
+                &session_id,
+                &context,
+            )
+            .is_err()
+        );
+        assert!(
+            crate::background_dispatch::dispatch_forked_session_with_context(
+                &home,
+                &dir.path().join("runtime"),
+                &cwd.display().to_string(),
+                &session_id,
+                &"".into(),
+                &context,
+                None,
+            )
+            .is_err()
+        );
+        assert!(!home.join("jobs").exists());
+        assert!(pin_resume_source(&home, &cwd, "../other", &mut context).is_err());
+    }
+
+    #[tokio::test]
+    async fn closed_foreground_rejects_all_launches_before_filesystem_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_home = directory.path().join("uncreated-config");
+        let runtime_dir = directory.path().join("uncreated-runtime");
+        let forker = CliBgSessionForker::new(
+            config_home.clone(),
+            runtime_dir.clone(),
+            crate::background_launch::BackgroundLaunchOptions::default(),
+            permission::PermissionMode::AcceptEdits,
+        );
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        *forker.live_context.write().unwrap() = Some(Arc::new({
+            let reads = reads.clone();
+            let cwd = directory.path().to_path_buf();
+            move || {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((cwd.clone(), permission::PermissionMode::Plan))
+            }
+        }));
+        assert!(forker.launch_identity().is_ok());
+        assert!(forker
+            .lifecycle()
+            .close_and_drain()
+            .await
+            .unconfirmed_recoveries
+            .is_empty());
+        let conversation = BgSessionSnapshot::default();
+        let prompt = "".into();
+        assert!(forker
+            .fork_to_background(&conversation, None, &prompt, "model")
+            .await
+            .is_err());
+        assert!(forker
+            .background_conversation(&conversation, None, &prompt, "model", &Default::default())
+            .await
+            .is_err());
+        assert!(forker
+            .resume_to_background(&uuid::Uuid::nil().to_string())
+            .await
+            .is_err());
+        assert!(forker.launch_identity().is_err());
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            !config_home.exists(),
+            "a rejected copy must not write a transcript or job"
+        );
+        assert!(
+            !runtime_dir.exists(),
+            "a rejected launch must not start daemon discovery"
+        );
     }
 
     #[test]

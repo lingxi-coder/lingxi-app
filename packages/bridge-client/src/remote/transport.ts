@@ -4,7 +4,8 @@
  * turns them into whole JSON messages and back.
  */
 
-import { encodeMessage, Reassembler } from './framing.js';
+import { encodeMessage, FRAGMENT_KIND, Reassembler } from './framing.js';
+import { MESSAGE_MAX_BYTES } from './version.js';
 
 /** An ordered, reliable stream of fragments (see `framing.ts`). */
 export interface FragmentLink {
@@ -63,7 +64,9 @@ export class MessageTransport implements RemoteTransport {
   private tail: Promise<void> = Promise.resolve();
   private closedReason: string | undefined;
 
-  constructor(private readonly link: FragmentLink) {
+  constructor(private readonly link: FragmentLink, private readonly options: { maxInboundMessageBytes?: number } = {}) {
+    const limit = options.maxInboundMessageBytes;
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > MESSAGE_MAX_BYTES)) throw new RangeError('invalid inbound message limit');
     link.onFragment((fragment) => this.receive(fragment));
     link.onClose((reason) => this.ended(reason));
   }
@@ -112,6 +115,10 @@ export class MessageTransport implements RemoteTransport {
     this.activityHandler?.();
     let message: string | null;
     try {
+      // A continuation without payload never advances the byte budget while
+      // Reassembler retains another chunk. Keep bounded consumers bounded.
+      if (this.options.maxInboundMessageBytes !== undefined && fragment.byteLength === 1 && fragment[0] !== FRAGMENT_KIND.whole) throw new RangeError('empty continuation');
+      if (this.reassembler.pendingBytes + Math.max(0, fragment.byteLength - 1) > (this.options.maxInboundMessageBytes ?? MESSAGE_MAX_BYTES)) throw new RangeError('inbound message exceeds the size limit');
       message = this.reassembler.push(fragment);
     } catch {
       this.close('protocol_error');

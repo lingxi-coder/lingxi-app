@@ -109,9 +109,13 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     if let Some(crate::commands::Commands::Open(open)) = parsed.command.clone() {
         if open.cli {
             use std::io::IsTerminal;
-            if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() { eprintln!("--cli requires an interactive terminal; use the default desktop handoff otherwise"); return 1; }
+            if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                eprintln!("--cli requires an interactive terminal; use the default desktop handoff otherwise");
+                return 1;
+            }
             if let Err(error) = crate::commands::deep_links::prepare_cli(&open, &mut parsed) {
-                eprintln!("{error}"); return 1;
+                eprintln!("{error}");
+                return 1;
             }
         }
     }
@@ -148,12 +152,14 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     let managed_otel_overrides =
         harness_runtime::desktop::managed_otel_env_overrides(&managed_settings_config).await;
     let _telemetry_guard = match crate::telemetry_host::resolve_config(&managed_otel_overrides) {
-        cfg if cfg.enabled => telemetry::otel::install_process_with_config_async(
-            "lingxi-cli",
-            telemetry_records_session,
-            cfg,
-        )
-        .await,
+        cfg if cfg.enabled => {
+            telemetry::otel::install_process_with_config_async(
+                "lingxi-cli",
+                telemetry_records_session,
+                cfg,
+            )
+            .await
+        }
         _ => telemetry::otel::TelemetryGuard::disabled(),
     };
     tracing::debug!(?parsed, "argv parsed");

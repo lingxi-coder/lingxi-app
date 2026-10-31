@@ -1,8 +1,8 @@
 //! Desktop [`AudioService`] proxy over the authenticated bridge connection.
 //!
-//! One request identity owns one pending request. Dropping a caller removes
-//! that request and sends a targeted `AudioCancel`; late replies cannot resolve
-//! another operation. Capability snapshots are shared with the service and
+//! One request identity owns one pending request. Dropping a caller requests a
+//! targeted `AudioCancel`; the ID remains fenced until a terminal receipt or
+//! an explicit Unknown. Capability snapshots are shared with the service and
 //! advance at hello/update boundaries.
 
 use std::collections::{HashMap, HashSet};
@@ -19,6 +19,7 @@ use client::protocol::audio::{
     MAX_AUDIO_PAYLOAD_BYTES, MAX_AUDIO_SAMPLE_RATE_HZ,
 };
 use client::protocol::events::ClientEvent;
+use client::protocol::media::MediaOwnerKindDto;
 use lingxi_core::host::audio::{
     AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioInitiator, AudioOperation,
     AudioOperationContext, AudioOperationId, AudioOperationKind, AudioOperationReadiness,
@@ -26,7 +27,9 @@ use lingxi_core::host::audio::{
 };
 use lingxi_core::host::{SttTranscript, TtsAudio, VoiceRecording};
 use tokio::runtime::Handle;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
+
+const MAX_PENDING_AUDIO_REQUESTS: usize = 512;
 
 /// Transport-supplied destination for audio requests and targeted cancels.
 #[async_trait]
@@ -37,7 +40,13 @@ pub trait AudioRequestSink: Send + Sync {
 
 struct PendingEntry {
     identity: AudioOperationIdDto,
-    response: oneshot::Sender<AudioOperationResultDto>,
+    owner: AudioOwner,
+    incarnation: media_api::MediaOperationIncarnation,
+    response: Option<oneshot::Sender<AudioOperationResultDto>>,
+    response_received: bool,
+    completion: watch::Sender<Option<Result<(), AudioError>>>,
+    cancel_requested: bool,
+    cancel_error: Option<AudioError>,
 }
 
 type Pending = Arc<Mutex<HashMap<String, PendingEntry>>>;
@@ -85,18 +94,42 @@ impl AudioResponder {
         {
             return false;
         }
-        let Some(entry) = pending.get(&identity.id) else {
+        let Some(entry) = pending.get_mut(&identity.id) else {
             return false;
         };
         if entry.identity != identity {
             return false;
         }
-        let Some(entry) = pending.remove(&identity.id) else {
-            return false;
+        if entry.response_received {
+            // A logical failure can precede native cleanup. Keep its identity
+            // fenced, but accept a later definitive receipt for that same
+            // request without delivering a second caller response.
+            if !matches!(
+                &result,
+                AudioOperationResultDto::FailedWithoutResource { .. }
+            ) || matches!(&*entry.completion.borrow(), Some(Ok(())))
+            {
+                return false;
+            }
+            entry.completion.send_replace(Some(Ok(())));
+            entry.cancel_error = None;
+            pending.remove(&identity.id);
+            return true;
+        }
+        entry.response_received = true;
+        let receipt = match &result {
+            AudioOperationResultDto::FailedWithoutResource { .. } => Some(Ok(())),
+            AudioOperationResultDto::RecordingStarted { .. } => None,
+            _ => Some(Err(AudioError::new(
+                AudioErrorKind::Unavailable,
+                "audio operation completed without a cancellation receipt",
+            ))),
         };
+        entry.completion.send_replace(receipt);
+        let sender = entry.response.take();
         drop(capabilities);
         drop(pending);
-        entry.response.send(result).is_ok()
+        sender.is_some_and(|sender| sender.send(result).is_ok())
     }
 
     /// Apply the latest observed capability snapshot. Epochs are random
@@ -140,14 +173,32 @@ impl AudioResponder {
     pub async fn drain(&self) -> usize {
         self.update_capabilities(None);
         let mut pending = self.pending.lock().await;
-        let count = pending.len();
-        pending.clear();
+        let count = pending
+            .values()
+            .filter(|entry| entry.response.is_some())
+            .count();
+        for entry in pending.values_mut() {
+            let error = AudioError::new(
+                AudioErrorKind::Unavailable,
+                "desktop audio connection ended before cancellation could be confirmed",
+            );
+            entry.cancel_error = Some(error.clone());
+            entry.completion.send_replace(Some(Err(error)));
+            entry.response.take();
+            entry.response_received = true;
+        }
         count
     }
 
-    /// Number of currently parked operations, for tests and diagnostics.
+    /// Number of caller response waiters. Unconfirmed cleanup entries remain
+    /// fenced after their waiter has completed or been cancelled.
     pub async fn pending_count(&self) -> usize {
-        self.pending.lock().await.len()
+        self.pending
+            .lock()
+            .await
+            .values()
+            .filter(|entry| entry.response.is_some() && !entry.cancel_requested)
+            .count()
     }
 }
 
@@ -199,9 +250,10 @@ impl AudioBridge {
             .min(snapshot.max_payload_bytes)
             .min(MAX_AUDIO_PAYLOAD_BYTES as u64);
         let identity = identity_to_dto(&context.identity);
+        let operation_context = context.clone();
         let request = AudioOperationRequestDto {
             identity: identity.clone(),
-            owner: owner_to_dto(&context.owner),
+            owner: owner_to_dto(&context.owner)?,
             initiator: context.initiator.as_ref().map(initiator_to_dto),
             timeout_budget_ms: context.timeout_budget_ms,
             route_policy,
@@ -209,8 +261,15 @@ impl AudioBridge {
             operation: operation_to_dto(operation),
         };
         let (response_tx, response_rx) = oneshot::channel();
+        let (completion, _) = watch::channel(None);
         {
             let mut pending = self.pending.lock().await;
+            if pending.len() >= MAX_PENDING_AUDIO_REQUESTS {
+                return Err(AudioError::new(
+                    AudioErrorKind::Busy,
+                    "unresolved desktop audio operation history is full",
+                ));
+            }
             if pending.contains_key(&identity.id) {
                 return Err(AudioError::new(
                     AudioErrorKind::InvalidRequest,
@@ -221,14 +280,20 @@ impl AudioBridge {
                 identity.id.clone(),
                 PendingEntry {
                     identity: identity.clone(),
-                    response: response_tx,
+                    owner: context.owner.clone(),
+                    incarnation: context.operation_incarnation(),
+                    response: Some(response_tx),
+                    response_received: false,
+                    completion,
+                    cancel_requested: false,
+                    cancel_error: None,
                 },
             );
         }
         let mut cancel_on_drop = PendingCancelOnDrop {
             pending: self.pending.clone(),
             sink: self.sink.clone(),
-            identity: identity.clone(),
+            context: operation_context.clone(),
             armed: true,
         };
 
@@ -265,9 +330,17 @@ impl AudioBridge {
             }
         };
 
-        if let AudioOperationResultDto::Failed { error } = &result {
-            cancel_on_drop.armed = false;
-            return Err(error_from_dto(error.clone()));
+        match &result {
+            AudioOperationResultDto::FailedWithoutResource { error } => {
+                cancel_on_drop.armed = false;
+                remove_pending_exact(&self.pending, &operation_context).await;
+                return Err(error_from_dto(error.clone()));
+            }
+            AudioOperationResultDto::Failed { error } => {
+                cancel_on_drop.armed = false;
+                return Err(error_from_dto(error.clone()));
+            }
+            _ => {}
         }
         if !result_matches(expected, &result) {
             return Err(AudioError::new(
@@ -278,6 +351,15 @@ impl AudioBridge {
         let converted = result_from_dto(result, request_payload_limit);
         if converted.is_ok() {
             cancel_on_drop.armed = false;
+            // RecordingStarted transfers a live native resource to its origin.
+            // Preserve that origin until its exact close receipt arrives, so a
+            // later cancel cannot turn a still-running capture into a no-op.
+            if !matches!(
+                &converted,
+                Ok(AudioOperationSuccess::RecordingStarted { .. })
+            ) {
+                remove_pending_exact(&self.pending, &operation_context).await;
+            }
         }
         converted
     }
@@ -323,35 +405,96 @@ impl AudioService for AudioBridge {
         .await
     }
 
-    async fn cancel(&self, identity: AudioOperationId) -> Result<(), AudioError> {
-        let identity = identity_to_dto(&identity);
-        let mut pending = self.pending.lock().await;
-        if pending
-            .get(&identity.id)
-            .is_some_and(|entry| entry.identity == identity)
-        {
-            pending.remove(&identity.id);
+    async fn cancel(&self, context: AudioOperationContext) -> Result<(), AudioError> {
+        let result = request_audio_cancel(&self.pending, &self.sink, context.clone()).await;
+        if result.is_ok() {
+            remove_pending_exact(&self.pending, &context).await;
         }
-        drop(pending);
-        if self
-            .sink
-            .emit_request(ClientEvent::AudioCancel { identity })
+        result
+    }
+}
+
+async fn request_audio_cancel(
+    pending: &Pending,
+    sink: &Arc<dyn AudioRequestSink>,
+    context: AudioOperationContext,
+) -> Result<(), AudioError> {
+    let identity = identity_to_dto(&context.identity);
+    let (mut completion, dispatch) = {
+        let mut entries = pending.lock().await;
+        let Some(entry) = entries.get_mut(&identity.id) else {
+            // This exact incarnation is no longer waiting on the connection.
+            return Ok(());
+        };
+        if entry.identity != identity
+            || entry.incarnation != context.operation_incarnation()
+            || entry.owner != context.owner
+        {
+            // A public ID can be reused after a terminal operation. Never let
+            // an old context cancel the newer incarnation in the same slot.
+            return Ok(());
+        }
+        if let Some(error) = &entry.cancel_error {
+            return Err(error.clone());
+        }
+        let dispatch = !entry.cancel_requested;
+        entry.cancel_requested = true;
+        (entry.completion.subscribe(), dispatch)
+    };
+
+    if dispatch
+        && !sink
+            .emit_request(ClientEvent::AudioCancel {
+                identity: identity.clone(),
+            })
             .await
-        {
-            Ok(())
-        } else {
-            Err(AudioError::new(
-                AudioErrorKind::Unavailable,
-                "no desktop client is connected to cancel the audio operation",
-            ))
+    {
+        let error = AudioError::new(
+            AudioErrorKind::Unavailable,
+            "no desktop client accepted the targeted audio cancellation",
+        );
+        let mut entries = pending.lock().await;
+        if let Some(entry) = entries.get_mut(&identity.id) {
+            if entry.identity == identity
+                && entry.incarnation == context.operation_incarnation()
+                && entry.owner == context.owner
+            {
+                entry.cancel_error = Some(error.clone());
+                entry.completion.send_replace(Some(Err(error.clone())));
+            }
         }
+        return Err(error);
+    }
+
+    loop {
+        if let Some(result) = completion.borrow().clone() {
+            return result;
+        }
+        if completion.changed().await.is_err() {
+            return Err(AudioError::new(
+                AudioErrorKind::Unavailable,
+                "audio cancellation completion channel closed without a receipt",
+            ));
+        }
+    }
+}
+
+async fn remove_pending_exact(pending: &Pending, context: &AudioOperationContext) {
+    let identity = identity_to_dto(&context.identity);
+    let mut entries = pending.lock().await;
+    if entries.get(&identity.id).is_some_and(|entry| {
+        entry.identity == identity
+            && entry.incarnation == context.operation_incarnation()
+            && entry.owner == context.owner
+    }) {
+        entries.remove(&identity.id);
     }
 }
 
 struct PendingCancelOnDrop {
     pending: Pending,
     sink: Arc<dyn AudioRequestSink>,
-    identity: AudioOperationIdDto,
+    context: AudioOperationContext,
     armed: bool,
 }
 
@@ -362,20 +505,13 @@ impl Drop for PendingCancelOnDrop {
         }
         let pending = self.pending.clone();
         let sink = self.sink.clone();
-        let identity = self.identity.clone();
+        let context = self.context.clone();
         if let Ok(runtime) = Handle::try_current() {
             runtime.spawn(async move {
-                let mut pending = pending.lock().await;
-                if pending
-                    .get(&identity.id)
-                    .is_some_and(|entry| entry.identity == identity)
-                {
-                    pending.remove(&identity.id);
+                let result = request_audio_cancel(&pending, &sink, context.clone()).await;
+                if result.is_ok() {
+                    remove_pending_exact(&pending, &context).await;
                 }
-                drop(pending);
-                let _ = sink
-                    .emit_request(ClientEvent::AudioCancel { identity })
-                    .await;
             });
         }
     }
@@ -477,8 +613,8 @@ fn identity_to_dto(identity: &AudioOperationId) -> AudioOperationIdDto {
     }
 }
 
-fn owner_to_dto(owner: &AudioOwner) -> AudioOwnerDto {
-    match owner {
+fn owner_to_dto(owner: &AudioOwner) -> Result<AudioOwnerDto, AudioError> {
+    Ok(match owner {
         AudioOwner::Session { session_id } => AudioOwnerDto::Session {
             session_id: session_id.clone(),
         },
@@ -488,7 +624,33 @@ fn owner_to_dto(owner: &AudioOwner) -> AudioOwnerDto {
         AudioOwner::System { instance_id } => AudioOwnerDto::System {
             instance_id: instance_id.clone(),
         },
-    }
+        AudioOwner::Attachment {
+            attachment_id,
+            owner,
+        } => {
+            let (logical_kind, logical_owner_id) = match owner.as_ref() {
+                AudioOwner::Session { session_id } => {
+                    (MediaOwnerKindDto::Session, session_id.clone())
+                }
+                AudioOwner::Ui { instance_id } => (MediaOwnerKindDto::Ui, instance_id.clone()),
+                AudioOwner::System { instance_id } => {
+                    (MediaOwnerKindDto::System, instance_id.clone())
+                }
+                AudioOwner::Attachment { .. } => {
+                    return Err(AudioError::new(
+                        AudioErrorKind::InvalidRequest,
+                        "nested audio attachment owner is not supported",
+                    ))
+                }
+            };
+            AudioOwnerDto::Attached {
+                attachment_host_id: attachment_id.host_id(),
+                attachment_generation: attachment_id.generation(),
+                logical_kind,
+                logical_owner_id,
+            }
+        }
+    })
 }
 
 fn initiator_to_dto(initiator: &AudioInitiator) -> AudioInitiatorDto {
@@ -726,7 +888,8 @@ fn result_from_dto(
             },
         }),
         AudioOperationResultDto::OwnerEnded => Ok(AudioOperationSuccess::OwnerEnded),
-        AudioOperationResultDto::Failed { error } => Err(error_from_dto(error)),
+        AudioOperationResultDto::Failed { error }
+        | AudioOperationResultDto::FailedWithoutResource { error } => Err(error_from_dto(error)),
         _ => Err(AudioError::new(
             AudioErrorKind::NativeFailure,
             "desktop client returned an unknown audio result",
@@ -831,23 +994,23 @@ mod tests {
     }
 
     fn context(kind: &str) -> AudioOperationContext {
-        AudioOperationContext {
-            identity: AudioOperationId {
+        AudioOperationContext::new(
+            AudioOperationId {
                 id: format!("op-{kind}"),
                 generation: 2,
                 service_epoch: 7,
             },
-            owner: AudioOwner::Session {
+            AudioOwner::Session {
                 session_id: "session-a".into(),
             },
-            initiator: Some(AudioInitiator {
-                agent_id: Some("agent-a".into()),
-                tool_use_id: Some("tool-9".into()),
-                request_id: None,
-            }),
-            timeout_budget_ms: Some(1_000),
-            max_payload_bytes: 1024,
-        }
+        )
+        .with_initiator(AudioInitiator {
+            agent_id: Some("agent-a".into()),
+            tool_use_id: Some("tool-9".into()),
+            request_id: None,
+        })
+        .with_timeout_budget_ms(1_000)
+        .with_max_payload_bytes(1024)
     }
 
     async fn next_event(rx: &mut mpsc::UnboundedReceiver<ClientEvent>) -> ClientEvent {
@@ -883,6 +1046,84 @@ mod tests {
             .expect_err("unsupported playback must not be sent to the client");
         assert_eq!(error.kind, AudioErrorKind::Unsupported);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn attachment_bound_audio_owner_preserves_the_host_issued_scope() {
+        let (bridge, responder, mut rx) = service();
+        let mut context = context("attachment-owner");
+        let attachment = media_api::MediaAttachmentIssuer::new()
+            .issue()
+            .expect("host issuer has a generation");
+        context.owner = context.owner.clone().in_attachment(attachment.clone());
+        let request_context = context.clone();
+        let task = tokio::spawn(async move {
+            bridge
+                .execute(
+                    request_context,
+                    AudioOperation::Speak {
+                        text: "hello".into(),
+                        language: None,
+                        rate: None,
+                        voice: None,
+                    },
+                )
+                .await
+        });
+        let request = match next_event(&mut rx).await {
+            ClientEvent::AudioRequest { request } => request,
+            other => panic!("expected audio request, got {other:?}"),
+        };
+        assert_eq!(
+            request.owner,
+            AudioOwnerDto::Attached {
+                attachment_host_id: attachment.host_id(),
+                attachment_generation: attachment.generation(),
+                logical_kind: MediaOwnerKindDto::Session,
+                logical_owner_id: "session-a".into(),
+            }
+        );
+        responder
+            .resolve(
+                request.identity,
+                AudioOperationResultDto::PlaybackCompleted { duration_ms: 1 },
+            )
+            .await;
+        assert!(matches!(
+            task.await.unwrap(),
+            Ok(AudioOperationSuccess::PlaybackCompleted { duration_ms: 1 })
+        ));
+    }
+
+    #[test]
+    fn distinct_attachments_with_the_same_session_keep_distinct_wire_owners() {
+        let issuer = media_api::MediaAttachmentIssuer::new();
+        let first = issuer.issue().unwrap();
+        let second = issuer.issue().unwrap();
+        let logical = AudioOwner::Session {
+            session_id: "same-session".into(),
+        };
+        let a = owner_to_dto(&logical.clone().in_attachment(first.clone())).unwrap();
+        let b = owner_to_dto(&logical.in_attachment(second.clone())).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(
+            a,
+            AudioOwnerDto::Attached {
+                attachment_host_id: first.host_id(),
+                attachment_generation: first.generation(),
+                logical_kind: MediaOwnerKindDto::Session,
+                logical_owner_id: "same-session".into()
+            }
+        );
+        assert_eq!(
+            b,
+            AudioOwnerDto::Attached {
+                attachment_host_id: second.host_id(),
+                attachment_generation: second.generation(),
+                logical_kind: MediaOwnerKindDto::Session,
+                logical_owner_id: "same-session".into()
+            }
+        );
     }
 
     #[tokio::test]
@@ -993,6 +1234,330 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audio_cancel_waits_for_terminal_cancel_receipt_and_deduplicates_retries() {
+        let (bridge, responder, mut rx) = service();
+        let context = context("cancel-receipt");
+        let request_context = context.clone();
+        let operation = tokio::spawn({
+            let bridge = bridge.clone();
+            async move {
+                bridge
+                    .execute(request_context, AudioOperation::Listen { language: None })
+                    .await
+            }
+        });
+        let request = match next_event(&mut rx).await {
+            ClientEvent::AudioRequest { request } => request,
+            other => panic!("expected audio request, got {other:?}"),
+        };
+
+        let first = tokio::spawn({
+            let bridge = bridge.clone();
+            let context = context.clone();
+            async move { bridge.cancel(context).await }
+        });
+        match next_event(&mut rx).await {
+            ClientEvent::AudioCancel { identity } => assert_eq!(identity, request.identity),
+            other => panic!("expected targeted audio cancel, got {other:?}"),
+        }
+        let retry = tokio::spawn({
+            let bridge = bridge.clone();
+            let context = context.clone();
+            async move { bridge.cancel(context).await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), rx.recv())
+                .await
+                .is_err(),
+            "joining the same cancellation flight must not emit a second cancel"
+        );
+        assert!(
+            !first.is_finished(),
+            "queue acceptance alone is not a cancellation receipt"
+        );
+
+        assert!(
+            responder
+                .resolve(
+                    request.identity,
+                    AudioOperationResultDto::FailedWithoutResource {
+                        error: AudioErrorDto {
+                            kind: AudioErrorKindDto::Cancelled,
+                            message: "cancelled by owner".into(),
+                        },
+                    },
+                )
+                .await
+        );
+        assert!(first.await.unwrap().is_ok());
+        assert!(retry.await.unwrap().is_ok());
+        assert_eq!(
+            operation.await.unwrap().unwrap_err().kind,
+            AudioErrorKind::Cancelled
+        );
+        assert_eq!(responder.pending_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn logical_cancel_does_not_confirm_cleanup_but_an_exact_late_receipt_can() {
+        let (bridge, responder, mut rx) = service();
+        let context = context("logical-cancel");
+        let operation = tokio::spawn({
+            let bridge = bridge.clone();
+            let context = context.clone();
+            async move {
+                bridge
+                    .execute(context, AudioOperation::Listen { language: None })
+                    .await
+            }
+        });
+        let request = match next_event(&mut rx).await {
+            ClientEvent::AudioRequest { request } => request,
+            other => panic!("expected audio request, got {other:?}"),
+        };
+        let cancel = tokio::spawn({
+            let bridge = bridge.clone();
+            let context = context.clone();
+            async move { bridge.cancel(context).await }
+        });
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ClientEvent::AudioCancel { identity } if identity == request.identity
+        ));
+        assert!(
+            responder
+                .resolve(
+                    request.identity.clone(),
+                    AudioOperationResultDto::Failed {
+                        error: AudioErrorDto {
+                            kind: AudioErrorKindDto::Cancelled,
+                            message: "caller cancelled; native cleanup is not confirmed".into(),
+                        },
+                    },
+                )
+                .await
+        );
+        assert_eq!(
+            cancel.await.unwrap().unwrap_err().kind,
+            AudioErrorKind::Unavailable
+        );
+        assert_eq!(
+            operation.await.unwrap().unwrap_err().kind,
+            AudioErrorKind::Cancelled
+        );
+        assert_eq!(responder.pending.lock().await.len(), 1);
+
+        let mut wrong_identity = request.identity.clone();
+        wrong_identity.generation += 1;
+        let settled = || AudioOperationResultDto::FailedWithoutResource {
+            error: AudioErrorDto {
+                kind: AudioErrorKindDto::Cancelled,
+                message: "the original native request and its callbacks have stopped".into(),
+            },
+        };
+        assert!(!responder.resolve(wrong_identity, settled()).await);
+        assert_eq!(responder.pending.lock().await.len(), 1);
+        assert!(responder.resolve(request.identity, settled()).await);
+        assert!(responder.pending.lock().await.is_empty());
+        bridge.cancel(context).await.unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_returned_recording_origin_waits_for_its_exact_close_receipt() {
+        let (bridge, responder, mut rx) = service();
+        let context = context("live-recording-origin");
+        let operation = tokio::spawn({
+            let bridge = bridge.clone();
+            let context = context.clone();
+            async move {
+                bridge
+                    .execute(
+                        context,
+                        AudioOperation::StartRecording {
+                            sample_rate_hz: 16_000,
+                            format: "wav".into(),
+                        },
+                    )
+                    .await
+            }
+        });
+        let request = match next_event(&mut rx).await {
+            ClientEvent::AudioRequest { request } => request,
+            other => panic!("expected audio request, got {other:?}"),
+        };
+        assert!(
+            responder
+                .resolve(
+                    request.identity.clone(),
+                    AudioOperationResultDto::RecordingStarted {
+                        handle: "live-native-recording".into(),
+                    },
+                )
+                .await
+        );
+        assert!(matches!(
+            operation.await.unwrap(),
+            Ok(AudioOperationSuccess::RecordingStarted { .. })
+        ));
+        assert_eq!(responder.pending_count().await, 0);
+        assert_eq!(responder.pending.lock().await.len(), 1);
+
+        let cancel = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.cancel(context).await }
+        });
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ClientEvent::AudioCancel { identity } if identity == request.identity
+        ));
+        assert!(!cancel.is_finished());
+        assert!(
+            responder
+                .resolve(
+                    request.identity,
+                    AudioOperationResultDto::FailedWithoutResource {
+                        error: AudioErrorDto {
+                            kind: AudioErrorKindDto::Cancelled,
+                            message: "the exact recording origin and its callbacks have stopped"
+                                .into(),
+                        },
+                    },
+                )
+                .await
+        );
+        cancel.await.unwrap().unwrap();
+        assert!(responder.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn confirmed_failures_do_not_exhaust_pending_audio_capacity() {
+        let (bridge, responder, mut rx) = service();
+        for index in 0..=MAX_PENDING_AUDIO_REQUESTS {
+            let operation = tokio::spawn({
+                let bridge = bridge.clone();
+                async move {
+                    bridge
+                        .execute(
+                            context(&format!("not-admitted-{index}")),
+                            AudioOperation::Listen { language: None },
+                        )
+                        .await
+                }
+            });
+            let request = match next_event(&mut rx).await {
+                ClientEvent::AudioRequest { request } => request,
+                other => panic!("expected audio request, got {other:?}"),
+            };
+            assert!(
+                responder
+                    .resolve(
+                        request.identity,
+                        AudioOperationResultDto::FailedWithoutResource {
+                            error: AudioErrorDto {
+                                kind: AudioErrorKindDto::PermissionDenied,
+                                message: "native admission was denied before any resource opened"
+                                    .into(),
+                            },
+                        },
+                    )
+                    .await
+            );
+            assert_eq!(
+                operation.await.unwrap().unwrap_err().kind,
+                AudioErrorKind::PermissionDenied
+            );
+            assert!(responder.pending.lock().await.is_empty());
+        }
+
+        let operation = tokio::spawn({
+            let bridge = bridge.clone();
+            async move {
+                bridge
+                    .execute(
+                        context("after-confirmed-failures"),
+                        AudioOperation::Status { handle: None },
+                    )
+                    .await
+            }
+        });
+        let request = match next_event(&mut rx).await {
+            ClientEvent::AudioRequest { request } => request,
+            other => panic!("expected audio request, got {other:?}"),
+        };
+        assert!(
+            responder
+                .resolve(
+                    request.identity,
+                    AudioOperationResultDto::Status {
+                        status: client::protocol::audio::AudioStatusDto {
+                            recording: false,
+                            playing: false,
+                        },
+                    },
+                )
+                .await
+        );
+        assert!(matches!(
+            operation.await.unwrap(),
+            Ok(AudioOperationSuccess::Status { .. })
+        ));
+        assert!(responder.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_incarnation_cancel_does_not_target_a_pending_reused_public_id() {
+        let (bridge, responder, mut rx) = service();
+        let old_context = context("reused-cancel");
+        let request_context = old_context.clone();
+        let operation = tokio::spawn({
+            let bridge = bridge.clone();
+            async move {
+                bridge
+                    .execute(request_context, AudioOperation::Listen { language: None })
+                    .await
+            }
+        });
+        let request = match next_event(&mut rx).await {
+            ClientEvent::AudioRequest { request } => request,
+            other => panic!("expected audio request, got {other:?}"),
+        };
+
+        let replacement_context =
+            AudioOperationContext::new(old_context.identity.clone(), old_context.owner.clone());
+        bridge
+            .cancel(replacement_context)
+            .await
+            .expect("a stale context is an exact-incarnation no-op");
+        assert!(
+            rx.try_recv().is_err(),
+            "the stale handle must send no cancel"
+        );
+
+        let cancel = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.cancel(old_context).await }
+        });
+        match next_event(&mut rx).await {
+            ClientEvent::AudioCancel { identity } => assert_eq!(identity, request.identity),
+            other => panic!("expected targeted old-incarnation cancel, got {other:?}"),
+        }
+        responder
+            .resolve(
+                request.identity,
+                AudioOperationResultDto::FailedWithoutResource {
+                    error: AudioErrorDto {
+                        kind: AudioErrorKindDto::Cancelled,
+                        message: "cancelled by owner".into(),
+                    },
+                },
+            )
+            .await;
+        cancel.await.unwrap().unwrap();
+        let _ = operation.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn old_service_epoch_response_is_rejected_after_capabilities_advance() {
         let (bridge, responder, mut rx) = service();
         let task = tokio::spawn({
@@ -1035,7 +1600,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_request_clears_pending_and_sends_its_targeted_cancel() {
+    async fn dropped_request_releases_its_waiter_but_retains_unconfirmed_cleanup() {
         let (bridge, responder, mut rx) = service();
         let task = tokio::spawn({
             let bridge = bridge.clone();
@@ -1065,6 +1630,7 @@ mod tests {
             other => panic!("expected targeted audio cancel, got {other:?}"),
         }
         assert_eq!(responder.pending_count().await, 0);
+        assert_eq!(responder.pending.lock().await.len(), 1);
     }
 
     #[tokio::test]

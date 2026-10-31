@@ -144,9 +144,12 @@ async fn main() -> anyhow::Result<()> {
     {
         telemetry_config.service_name = "lingxi-bridge".into();
     }
-    let _telemetry_guard =
-        telemetry::otel::install_process_with_config_async("bridge-server", false, telemetry_config)
-            .await;
+    let _telemetry_guard = telemetry::otel::install_process_with_config_async(
+        "bridge-server",
+        false,
+        telemetry_config,
+    )
+    .await;
     // Every HTTP and WebSocket client assembly builds trusts the OS store;
     // read it once, off this thread, while config and credentials resolve.
     platform_posix::http::prewarm_native_roots();
@@ -211,7 +214,7 @@ async fn main() -> anyhow::Result<()> {
     let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let bridge_dir = match &args.bridge_dir {
         Some(path) => path.clone(),
-        None => match boot::lingxi_config_home() {
+        None => match boot::brand_home() {
             Some(home) => home.join("bridge"),
             None => {
                 endpoint.shutdown().await;

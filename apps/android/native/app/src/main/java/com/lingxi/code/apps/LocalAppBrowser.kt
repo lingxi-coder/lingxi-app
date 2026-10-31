@@ -13,12 +13,15 @@ internal object LocalAppBrowser {
         .addCategory(Intent.CATEGORY_BROWSABLE)
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
+    internal fun chooserIntent(url: String): Intent = Intent.createChooser(intent(url), null)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
     fun isAvailable(context: Context, url: String): Boolean = handlers(context, intent(url)).isNotEmpty()
 
     internal fun installedHandlerPackages(context: Context, url: String): Set<String> =
         handlers(context, intent(url)).mapNotNull { it.activityInfo?.packageName }.toSet()
 
-    fun open(context: Context, url: String) {
+    fun open(context: Context, url: String, chooseHandler: Boolean = false) {
         val request = intent(url)
         check(handlers(context, request).isNotEmpty()) {
             "No installed browser can open this application page. Install or enable a browser, then try again."
@@ -26,7 +29,7 @@ internal object LocalAppBrowser {
         try {
             // Keep the intent implicit so Android honors the user's default browser
             // and shows its resolver when the user has not chosen one.
-            context.startActivity(request)
+            context.startActivity(if (chooseHandler) chooserIntent(url) else request)
         } catch (_: ActivityNotFoundException) {
             throw IllegalStateException("No installed browser can open this application page. Install or enable a browser, then try again.")
         }

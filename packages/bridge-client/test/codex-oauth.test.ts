@@ -15,6 +15,9 @@ test('OAuth updates reach host listeners without remaining in async event queue'
 
 test('OAuth validation normalizes nullable optional fields and rejects malformed sessions', () => {
   const session = { access_token: 'private-access', expires_at: 123, fedramp: false };
-  assert.deepEqual(validateClientEvent({ type: 'openai_oauth_updated', session: { ...session, refresh_token: null, account_id: null } }), { type: 'openai_oauth_updated', session });
+  assert.deepEqual(validateClientEvent({ type: 'openai_oauth_updated', session: { ...session, refresh_token: null, account_id: null, email: null } }), { type: 'openai_oauth_updated', session });
+  const withEmail = { ...session, email: 'user@example.com' };
+  assert.deepEqual(validateClientEvent({ type: 'openai_oauth_updated', session: withEmail }), { type: 'openai_oauth_updated', session: withEmail });
+  assert.throws(() => validateClientEvent({ type: 'openai_oauth_updated', session: { ...session, email: 42 } }), /email/);
   assert.throws(() => validateClientEvent({ type: 'openai_oauth_updated', session: { ...session, expires_at: 'invalid' } }), /invalid OAuth/);
 });

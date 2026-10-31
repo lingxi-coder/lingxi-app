@@ -12,9 +12,9 @@ LingXi 的产品仓库，包含命令行与 TUI、Electron 桌面端、iOS、And
 
 | 目录 | 职责 |
 |---|---|
-| [`Cargo.toml`](Cargo.toml) | 根 Rust 产品 workspace，统一锁定 9 个成员与上游 SDK 来源 |
+| [`Cargo.toml`](Cargo.toml) | 根 Rust 产品 workspace，管理产品包并统一锁定上游 SDK 来源 |
 | [`apps/`](apps/README.md) | 按产品入口组织 Electron、iOS、Android、CLI/TUI、Bridge 和 Web |
-| [`packages/`](packages/) | 产品共享包：TypeScript Bridge 客户端与 Rust 配置要求 |
+| [`packages/`](packages/) | 产品共享协议、宿主身份、配置与移动 FFI 实现 |
 | [`tools/ios-use/`](tools/ios-use/) | 产品使用的 iOS 控制工具 |
 | [`resources/`](resources/) | 跨平台语音配置、模型目录与翻译源 |
 | [`build-support/`](build-support/) | Rust 产品入口共用的构建辅助代码 |
@@ -48,6 +48,8 @@ Gradle 增量构建。目录统一不改变包名、协议、FFI 标识或 SDK �
 
 运行时源码不在本仓库内维护。产品与运行时的边界、固定来源解析和资源归属见
 [运行时迁移说明](docs/architecture/harness-runtime-extraction.md)。
+平台适配、共享移动绑定和协议生成的职责见
+[平台适配边界](docs/architecture/platform-adapters.md)。
 
 ## 构建 CLI
 

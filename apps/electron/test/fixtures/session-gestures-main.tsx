@@ -5,6 +5,9 @@ import type { UseBridge } from '../../src/renderer/bridge/bridgeTypes.js';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
+import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
+
+setLanguagePreference('en');
 
 const sessions = ['alpha', 'beta', 'gamma'].map((uuid, index) => ({ uuid, title: uuid, modified_rfc3339: `2026-09-${22 - index}T00:00:00Z`, message_count: 1 }));
 const events = { opened: [] as string[], preferences: [] as unknown[], touched: [] as string[], sessions };

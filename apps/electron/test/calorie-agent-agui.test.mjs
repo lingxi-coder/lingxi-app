@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { validateLocalAppRunInput } from '../vendor/local-app-agui/dist/client.bundle.js';
 import { MealAgentTask, revisionStorage } from '../../../fixtures/local-apps/v2/calorie-agent/agui-task.mjs';
 import { nutritionSchema, recognitionPrompt } from '../../../fixtures/local-apps/v2/calorie-agent/nutrition.mjs';
+
+globalThis.LingxiLocalAppAGUI = { validateLocalAppRunInput };
 
 const fixtureRoot = new URL('../../../fixtures/local-apps/v2/calorie-agent/', import.meta.url);
 
@@ -50,18 +53,6 @@ function makeAgent({ start, get, connect } = {}) {
     },
   };
   return agent;
-}
-
-function enumerableStorage(seed = {}) {
-  const values = new Map(Object.entries(seed));
-  return {
-    values,
-    get length() { return values.size; },
-    key: index => [...values.keys()][index] ?? null,
-    getItem: key => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, String(value)),
-    removeItem: key => values.delete(key),
-  };
 }
 
 async function resumeWithEvents(connect) {
@@ -117,56 +108,6 @@ test('submission admits one official task and returns the SDK-assembled RunAgent
   assert.equal(client.pendingInput, null);
   assert.deepEqual(client.savedRun, { runId: input.runId, threadId: input.threadId });
   assert.equal([...rawStorage.values.keys()].some(key => key.includes('meal-notes.agent.')), false);
-});
-
-test('startup deletes only known obsolete Agent keys without decoding and preserves business and AG-UI data', () => {
-  const newPending = {
-    threadId: 'new-thread', runId: 'new-run',
-    messages: [{ id: 'new-message', role: 'user', content: [] }],
-  };
-  const newRun = { runId: 'new-run', threadId: 'new-thread' };
-  const rawStorage = enumerableStorage({
-    'meal-notes.agent.pending': 'old photo payload that must not be decoded',
-    'meal-notes.agent.run': 'old run id',
-    'revision-2:meal-notes.agent.pending': 'old revision photo payload',
-    'revision-5:meal-notes.agent.run': 'old revision run id',
-    'revision-7:meal-notes.agent.pending': '{not valid JSON',
-    'revision-7:meal-notes.agent.run': 'old current-revision run id',
-    'revision-7:meal-notes.agui-v1.pending': JSON.stringify(newPending),
-    'revision-7:meal-notes.agui-v1.run': JSON.stringify(newRun),
-    'meal-notes.records.v1': '[{"name":"Apple","grams":120}]',
-    'revision-7:meal-notes.records.v1': '[{"name":"Pear","grams":90}]',
-    'revision-4:meal-notes.agent.archive': 'not a known obsolete key',
-  });
-  const client = new MealAgentTask(makeAgent(), revisionStorage(rawStorage, 7));
-
-  assert.deepEqual(client.pendingInput, newPending);
-  assert.deepEqual(client.savedRun, newRun);
-  for (const key of [
-    'meal-notes.agent.pending', 'meal-notes.agent.run',
-    'revision-2:meal-notes.agent.pending', 'revision-5:meal-notes.agent.run',
-    'revision-7:meal-notes.agent.pending', 'revision-7:meal-notes.agent.run',
-  ]) assert.equal(rawStorage.getItem(key), null, `${key} should be removed`);
-  assert.equal(rawStorage.getItem('revision-7:meal-notes.agui-v1.pending'), JSON.stringify(newPending));
-  assert.equal(rawStorage.getItem('revision-7:meal-notes.agui-v1.run'), JSON.stringify(newRun));
-  assert.equal(rawStorage.getItem('meal-notes.records.v1'), '[{"name":"Apple","grams":120}]');
-  assert.equal(rawStorage.getItem('revision-7:meal-notes.records.v1'), '[{"name":"Pear","grams":90}]');
-  assert.equal(rawStorage.getItem('revision-4:meal-notes.agent.archive'), 'not a known obsolete key');
-});
-
-test('obsolete-key cleanup works with a generic StorageLike mock without key or length', () => {
-  const rawStorage = memoryStorage();
-  rawStorage.values.set('meal-notes.agent.pending', 'invalid legacy data');
-  rawStorage.values.set('revision-4:meal-notes.agent.run', 'old run');
-  rawStorage.values.set('meal-notes.records.v1', '[{"name":"Peach"}]');
-  const storage = revisionStorage(rawStorage, 4);
-
-  assert.equal('length' in rawStorage, false);
-  assert.equal(typeof rawStorage.key, 'undefined');
-  assert.doesNotThrow(() => new MealAgentTask(makeAgent(), storage));
-  assert.equal(rawStorage.getItem('meal-notes.agent.pending'), null);
-  assert.equal(rawStorage.getItem('revision-4:meal-notes.agent.run'), null);
-  assert.equal(rawStorage.getItem('meal-notes.records.v1'), '[{"name":"Peach"}]');
 });
 
 test('read-only reconnect rejects RUN_ERROR with its standard message and code', async () => {

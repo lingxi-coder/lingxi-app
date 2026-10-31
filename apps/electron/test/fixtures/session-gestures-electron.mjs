@@ -221,6 +221,7 @@ async function main() {
     assert.equal(preferences.chatSort, 'manual', 'drag automatically selects manual sorting');
     assert.deepEqual(preferences.manualSessionOrder['/fixture'], ['gamma', 'alpha', 'beta']);
     assert.deepEqual(await run(`[...document.querySelectorAll('[data-session-project-path="/fixture"]')].map(button => button.dataset.sessionId)`), ['gamma', 'alpha', 'beta'], 'DOM follows saved order');
+    await wait(`window.sessionGesturesFixture.sessions.find(session => session.uuid === 'gamma')?.modified_rfc3339 === '2026-09-23T00:00:00Z'`);
     assert.equal(await run(`window.sessionGesturesFixture.sessions.find(session => session.uuid === 'gamma').modified_rfc3339`), '2026-09-23T00:00:00Z', 'drag updates session timestamp');
     assert.deepEqual(await opened(), ['alpha'], 'drag does not open a session');
     await click('gamma');

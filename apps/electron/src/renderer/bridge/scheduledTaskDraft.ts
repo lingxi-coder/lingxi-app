@@ -47,11 +47,6 @@ export function scheduledTaskCron(draft: ScheduledTaskDraft): string {
   return `${minute} ${hour} * * ${draft.frequency === 'Weekly' ? day : draft.frequency === 'Weekdays' ? '1-5' : '*'}`;
 }
 
-export function formatScheduledTaskSchedule(draft: ScheduledTaskDraft): string {
-  return draft.frequency === 'Custom' ? `${draft.cron} (${draft.timezone})`
-    : `${draft.frequency}${draft.frequency === 'Weekly' ? ` on ${draft.day}` : ''} at ${draft.time} (${draft.timezone})`;
-}
-
 export function scheduledTaskInput(draft: ScheduledTaskDraft) {
   if (!draft.title.trim() || !draft.instructions.trim()) throw new Error('Task name and instructions are required.');
   if (draft.timezone !== localScheduledTimezone()) throw new Error('Cron runs in this computer’s time zone. Reopen the task after changing the system time zone.');

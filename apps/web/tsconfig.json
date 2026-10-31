@@ -2,7 +2,11 @@
   "compilerOptions": {
     "target": "ES2020",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2020",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
@@ -16,15 +20,44 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["vite/client", "node"],
+    "types": [
+      "vite/client",
+      "node"
+    ],
     "baseUrl": ".",
     "paths": {
-      "@lingxi/bridge-client/remote": ["../../packages/bridge-client/src/remote.ts"],
-      "@lingxi/bridge-client/toolview": ["../../packages/bridge-client/src/toolview.ts"],
-      "@lingxi/bridge-client/protocol": ["../../packages/bridge-client/src/protocol.ts"],
-      "@lingxi/bridge-client": ["../../packages/bridge-client/src/protocol.ts"],
-      "@lingxi/electron/*": ["../electron/src/*"]
+      "@lingxi/bridge-client/remote": [
+        "../../packages/bridge-client/src/remote.ts"
+      ],
+      "@lingxi/bridge-client/toolview": [
+        "../../packages/bridge-client/src/toolview.ts"
+      ],
+      "@lingxi/bridge-client/protocol": [
+        "../../packages/bridge-client/src/protocol.ts"
+      ],
+      "@lingxi/bridge-client": [
+        "../../packages/bridge-client/src/protocol.ts"
+      ],
+      "@lingxi/electron/*": [
+        "../electron/src/*"
+      ],
+      "react": [
+        "./node_modules/@types/react"
+      ],
+      "react/jsx-runtime": [
+        "./node_modules/@types/react/jsx-runtime"
+      ],
+      "react/jsx-dev-runtime": [
+        "./node_modules/@types/react/jsx-dev-runtime"
+      ],
+      "firebase/*": [
+        "./node_modules/firebase/*"
+      ]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "test/**/*.ts"
+  ]
 }

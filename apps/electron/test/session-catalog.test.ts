@@ -24,23 +24,23 @@ function fakeChild(stdoutBody: string) {
 }
 
 test('product paths use native product discovery without merging workspace settings', async () => {
-  const configHome = join(tmpdir(), '.another-product');
+  const brandHome = join(tmpdir(), '.another-product');
   let flags: readonly string[] | undefined;
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
     spawnProcess: ((_bin: string, args: readonly string[]) => {
       flags = args;
-      return fakeChild(JSON.stringify({ version: 1, config_home: configHome, app_projects_root: join(configHome, '.apps') }));
+      return fakeChild(JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') }));
     }) as any });
-  assert.deepEqual(await catalog.productPaths(), { configHome, appProjectsRoot: join(configHome, '.apps') });
+  assert.deepEqual(await catalog.productPaths(), { brandHome, appProjectsRoot: join(brandHome, '.apps') });
   assert.deepEqual(flags, ['--product-paths-json']);
 });
 
 test('product directory discovery rejects malformed and nonabsolute native paths', async () => {
-  const configHome = join(tmpdir(), '.another-product');
-  const valid = { version: 1, config_home: configHome, app_projects_root: join(configHome, '.apps') };
+  const brandHome = join(tmpdir(), '.another-product');
+  const valid = { version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') };
   for (const response of ['{', JSON.stringify({ ...valid, version: 2 }),
-    JSON.stringify({ ...valid, config_home: 'relative' }), JSON.stringify({ ...valid, app_projects_root: 'relative' }),
-    JSON.stringify({ ...valid, config_home: configHome + '\0' })]) {
+    JSON.stringify({ ...valid, brand_home: 'relative' }), JSON.stringify({ ...valid, app_projects_root: 'relative' }),
+    JSON.stringify({ ...valid, brand_home: brandHome + '\0' })]) {
     const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
       spawnProcess: (() => fakeChild(response)) as any });
     await assert.rejects(catalog.productPaths(), /invalid product paths response/);
@@ -319,4 +319,36 @@ test('catalog retains a bounded UTF-8 stderr tail with the final diagnostic', as
       return true;
     });
   } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('a catalog of another configuration home reads that home in every mode, and the default one reads the environment\'s', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-config-home-'));
+  const environments: Array<NodeJS.ProcessEnv | undefined> = [];
+  const spawnProcess = ((_bin: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
+    environments.push(options.env);
+    const configHome = options.env?.['LINGXI_CONFIG_DIR'] ?? '/owner/.lingxi';
+    return fakeChild(args.includes('--product-paths-json')
+      ? JSON.stringify({ version: 1, brand_home: configHome, app_projects_root: join(configHome, '.apps') })
+      : args.includes('--workspace-environment-json')
+        ? JSON.stringify({ version: 1, environment: {}, config_home: configHome, global_config_path: join(configHome, '.lingxi.json') })
+        : JSON.stringify({ version: 1, sessions: [] }));
+  }) as any;
+  const previous = process.env['LINGXI_CONFIG_DIR'];
+  process.env['LINGXI_CONFIG_DIR'] = '/owner/.lingxi';
+  try {
+    const botHome = join(project, 'bot-home');
+    const bot = new ProjectSessionCatalog({ serverBin: '/bridge-server', configHome: botHome, spawnProcess });
+    const owner = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess });
+    assert.equal((await bot.productPaths()).brandHome, botHome);
+    assert.equal((await bot.workspaceSettings(project)).configHome, botHome);
+    await bot.list(project);
+    assert.deepEqual(environments.map((env) => env?.['LINGXI_CONFIG_DIR']), [botHome, botHome, botHome]);
+    environments.length = 0;
+    assert.equal((await owner.productPaths()).brandHome, '/owner/.lingxi');
+    await owner.list(project);
+    assert.deepEqual(environments.map((env) => env?.['LINGXI_CONFIG_DIR']), ['/owner/.lingxi', '/owner/.lingxi']);
+  } finally {
+    if (previous === undefined) delete process.env['LINGXI_CONFIG_DIR']; else process.env['LINGXI_CONFIG_DIR'] = previous;
+    rmSync(project, { recursive: true, force: true });
+  }
 });

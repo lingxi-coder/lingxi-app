@@ -160,15 +160,33 @@ internal class AndroidAudioDeviceDriverImpl(
         format: RealtimePcmFormat,
         onChunk: suspend (RealtimePcmCaptureFrame) -> Unit,
         onReady: () -> Unit,
+    ) = streamCaptureWithReceipt(lease, format, onChunk, onReady, null)
+
+    override suspend fun streamMediaCapture(
+        lease: AudioLease,
+        format: RealtimePcmFormat,
+        onChunk: suspend (RealtimePcmCaptureFrame) -> Unit,
+        onReady: () -> Unit,
+        closeReceipt: AndroidMediaNativeCloseReceipt,
+    ) = streamCaptureWithReceipt(lease, format, onChunk, onReady, closeReceipt)
+
+    private suspend fun streamCaptureWithReceipt(
+        lease: AudioLease,
+        format: RealtimePcmFormat,
+        onChunk: suspend (RealtimePcmCaptureFrame) -> Unit,
+        onReady: () -> Unit,
+        closeReceipt: AndroidMediaNativeCloseReceipt?,
     ) {
+        check(closeReceipt == null || closeReceipt.lease == lease)
         val capture = AndroidRealtimePcmCapture()
         streamCaptures[lease.leaseId] = capture
         capture.paused.set(streamCapturePause[lease.leaseId] ?: false)
         try {
-            capture.runTimestamped(format, onChunk, onReady)
+            capture.runTimestamped(format, onChunk, onReady, closeReceipt)
         } finally {
             streamCaptures.remove(lease.leaseId, capture)
             streamCapturePause.remove(lease.leaseId)
+            if (!capture.nativeAllocationAttempted.get()) closeReceipt?.confirmNoResource()
         }
     }
 
@@ -189,11 +207,31 @@ internal class AndroidAudioDeviceDriverImpl(
         format: RealtimePcmFormat,
         chunks: kotlinx.coroutines.channels.ReceiveChannel<RealtimePcmWrite>,
         onReady: () -> Unit,
+    ) = streamPlaybackWithReceipt(lease, format, chunks, onReady, null)
+
+    override suspend fun streamMediaPlayback(
+        lease: AudioLease,
+        format: RealtimePcmFormat,
+        chunks: kotlinx.coroutines.channels.ReceiveChannel<RealtimePcmWrite>,
+        onReady: () -> Unit,
+        closeReceipt: AndroidMediaNativeCloseReceipt,
+    ) = streamPlaybackWithReceipt(lease, format, chunks, onReady, closeReceipt)
+
+    private suspend fun streamPlaybackWithReceipt(
+        lease: AudioLease,
+        format: RealtimePcmFormat,
+        chunks: kotlinx.coroutines.channels.ReceiveChannel<RealtimePcmWrite>,
+        onReady: () -> Unit,
+        closeReceipt: AndroidMediaNativeCloseReceipt?,
     ) {
+        check(closeReceipt == null || closeReceipt.lease == lease)
         val playback = AndroidRealtimePcmPlayback(appContext)
         acknowledgedStreamPlayback[lease.leaseId] = playback
-        try { playback.runAcknowledged(format, chunks, onReady) }
-        finally { acknowledgedStreamPlayback.remove(lease.leaseId, playback) }
+        try { playback.runAcknowledged(format, chunks, onReady, closeReceipt) }
+        finally {
+            acknowledgedStreamPlayback.remove(lease.leaseId, playback)
+            if (!playback.nativeAllocationAttempted.get()) closeReceipt?.confirmNoResource()
+        }
     }
 
     override fun setStreamPlaybackGain(lease: AudioLease, gain: Float) {

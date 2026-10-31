@@ -107,8 +107,8 @@ pub fn rebuild_from_jsonl(messages: &[session::jsonl::JsonlMessage]) -> Vec<Rend
     rebuild_from_jsonl_impl(messages, false)
 }
 
-/// Seed fullscreen selection with the persisted transcript UUID of ordinary
-/// user and assistant text rows. Tool rows use their tool-use ID instead.
+/// Attach persisted transcript UUIDs to replayed rows for deep-link navigation.
+/// Fullscreen selection still uses tool-use IDs for tool rows.
 #[must_use]
 pub fn rebuild_from_jsonl_with_request_ids(
     messages: &[session::jsonl::JsonlMessage],
@@ -746,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn jsonl_selection_uses_top_level_uuid_only_for_prose_rows() {
+    fn jsonl_prose_rows_retain_top_level_uuid() {
         let user = jsonl("user", &serde_json::json!("hello"));
         let user_uuid = user.uuid.clone();
         let assistant = jsonl("assistant", &serde_json::json!("answer"));
@@ -895,11 +895,15 @@ mod tests {
         ));
         assert!(matches!(
             &identified[1],
-            RenderedMessage::AssistantToolUse { .. }
+            RenderedMessage::IdentifiedTranscriptRow { message, request_id }
+                if request_id == &msgs[0].uuid
+                    && matches!(message.as_ref(), RenderedMessage::AssistantToolUse { id: tool_id, .. } if tool_id == &id)
         ));
         assert!(matches!(
             &identified[2],
-            RenderedMessage::UserToolResult { .. }
+            RenderedMessage::IdentifiedTranscriptRow { message, request_id }
+                if request_id == &msgs[1].uuid
+                    && matches!(message.as_ref(), RenderedMessage::UserToolResult { id: tool_id, .. } if tool_id == &id)
         ));
         let out = rebuild_from_jsonl(&msgs);
         assert_eq!(out.len(), 3);

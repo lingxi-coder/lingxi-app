@@ -5,6 +5,9 @@ import '../../src/renderer/global.css';
 import { SettingsScreen } from '../../src/renderer/components/settings/SettingsScreen';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
+import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
+
+setLanguagePreference('en');
 
 // Task 20: this fixture used to mount `BetaSettings` directly. That
 // component (and the modal it lived in) is gone — `ProviderCredentials.tsx`
@@ -58,6 +61,7 @@ const bridge = {
     return new Promise<unknown>((resolve) => { resolvePersistence = resolve; });
   },
   restartBridge: async () => { restartCalls += 1; },
+  refreshModelPicker: async () => undefined,
   setModel: async () => undefined,
   clearProviderCredential: async () => ({ providerId: 'anthropic', configured: false, encryptionAvailable: true }),
   testProviderConnection: async () => {
@@ -81,7 +85,7 @@ function Fixture() {
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
         setter?.call(input, 'sk-pending-save');
         input?.dispatchEvent(new Event('input', { bubbles: true }));
-        const save = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '保存');
+        const save = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Save');
         save?.click();
       },
       resolvePersistence: () => {
@@ -113,7 +117,7 @@ function Fixture() {
       },
       connectionTestCalls: () => connectionTestCalls,
       clearStoredCredential: () => {
-        const remove = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '删除 API Key');
+        const remove = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Delete API key');
         remove?.click();
       },
       connectionTestErrorVisible: () => document.body.innerText.includes('test credential rejected'),

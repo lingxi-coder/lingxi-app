@@ -11,7 +11,10 @@ tracked = subprocess.run(
     ["git", "ls-files", "-z", "--", "apps/ios/native", "apps/android/native"],
     cwd=ROOT, check=True, capture_output=True, text=True,
 ).stdout.split("\0")
-NATIVE_SOURCES = [ROOT / name for name in sorted(tracked) if name.endswith((".swift", ".kt"))]
+NATIVE_SOURCES = [
+    ROOT / name for name in sorted(tracked)
+    if name.endswith((".swift", ".kt")) and (ROOT / name).is_file()
+]
 FORBIDDEN = ("RuntimeProfileSelection", "runtimeProfileSelection", "app_runtime_profile_selection_requested")
 if not NATIVE_SOURCES:
     raise SystemExit("CLIENT-PROTOCOL FAIL: no native client sources found to scan")
@@ -29,6 +32,7 @@ import json
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from runtime_source import resolve_runtime
+from bridge_protocol_generator import check_or_write
 
 runtime_root = Path(resolve_runtime()["root"])
 mirrors = json.loads((Path(__file__).resolve().parent / "../lib/runtime-fixture-mirrors.json").read_text())
@@ -42,3 +46,6 @@ for mirror in mirrors:
             f"CLIENT-PROTOCOL FAIL: {mirror['host']} differs from pinned {mirror['upstream']}"
         )
 print(f"CLIENT-PROTOCOL OK: {len(mirrors)} host fixture mirrors match the pinned runtime")
+
+# Verify the generated wire roots against the same resolved Cargo source.
+check_or_write(runtime_root, check=True)

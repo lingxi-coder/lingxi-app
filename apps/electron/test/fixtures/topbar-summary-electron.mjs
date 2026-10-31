@@ -185,7 +185,7 @@ async function main() {
     await js(`Promise.all(document.querySelector('.runtime-inspector').getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {})))`);
     await capture('details-light');
     const heights = await js(`({ chat: document.querySelector('.desktop-topbar').getBoundingClientRect().height, detail: document.querySelector('.runtime-inspector-header').getBoundingClientRect().height, panel: document.querySelector('.runtime-inspector').getBoundingClientRect().width })`);
-    assert.deepEqual(heights, { chat: 44, detail: 44, panel: 390 });
+    assert.deepEqual(heights, { chat: 40, detail: 40, panel: 390 });
     checks.push('independent panels tabs and plan todos separation');
 
     await click('[aria-label="Hide right panel"]');

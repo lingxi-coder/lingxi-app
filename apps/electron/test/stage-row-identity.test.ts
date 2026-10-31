@@ -26,7 +26,7 @@ test('DOM transcript rows retain UUIDs and highlights on spacing wrappers withou
   const items: RunItem[] = [
     { type: 'narration', id: 'user', role: 'user', text: 'Build an app' },
     { type: 'narration', id: 'assistant', role: 'assistant', text: 'Building it' },
-    { ...tool, id: 'publish', tool: 'LocalApp', nativeOutput: { action: 'publish', id: 'a12345678901234567890', name: 'Garden', revision: 1 } },
+    { ...tool, id: 'publish', tool: 'LocalApp', nativeOutput: { action: 'publish', id: 'a12345678901234567890123456789012', name: 'Garden', revision: 1 } },
     { type: 'mod-log', id: 'log', plugin: 'test', text: 'Ready' },
     { type: 'command', id: 'command', name: '/status', output: 'Ready', isError: false },
     { type: 'visualization', id: 'visual', status: 'pending' },

@@ -31,13 +31,14 @@ use media_api::{
     MediaEventBatch, MediaEventCursor, MediaEventKind, MediaFrame, MediaFramePayload, MediaKind,
     MediaOperation, MediaOperationContext, MediaOperationId, MediaOperationKind, MediaOwner,
     MediaPcmFrame, MediaRenderReceipt, MediaResourceRef, MediaResourceState, MediaResourceStore,
-    MediaService, MediaSession, MediaSessionId, MediaSessionIntent, MediaSessionMode,
+    MediaResult, MediaService, MediaSession, MediaSessionId, MediaSessionIntent, MediaSessionMode,
     MediaSessionRef, MediaSessionRequest, MediaSessionState, MediaSessionStatus,
     MediaSessionUpdate, MediaSource, MediaSourceKind, MediaSourceRef, MediaSourceUsage,
     MediaVideoFrame,
 };
+use media_runtime::MediaAttachmentHandle;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, Notify, RwLock};
@@ -54,6 +55,9 @@ const AUDIO_TICK: Duration = Duration::from_millis(5);
 const AUDIO_CAPTURE_CHUNK: usize = 256;
 const AUDIO_RTP_SAMPLES: u64 = 960;
 const VIDEO_OBSERVATION_INTERVAL: Duration = Duration::from_secs(1);
+const SERVICE_STOP_IDLE: u8 = 0;
+const SERVICE_STOP_UNKNOWN: u8 = 1;
+const SERVICE_STOP_CONFIRMED: u8 = 2;
 
 /// Product-owned provider for Desktop's per-session ICE policy.
 #[async_trait]
@@ -89,6 +93,7 @@ struct Route {
     supported_modes: Vec<MediaSessionMode>,
     source_kinds: Vec<RemoteMediaSourceKind>,
     channel: Arc<dyn RemoteMediaHostControlChannel>,
+    media_service: Option<std::sync::Weak<dyn MediaService>>,
     closed: AtomicBool,
     unregistering: AtomicBool,
     sessions: Mutex<HashMap<String, Arc<RemoteHostMediaSession>>>,
@@ -139,7 +144,69 @@ impl RemoteMediaConnector {
         source_kinds: Vec<MediaSourceKindDto>,
         channel: Arc<dyn RemoteMediaHostControlChannel>,
     ) -> Result<(), MediaError> {
-        if !matches!(owner, MediaOwner::Session { .. })
+        if owner.attachment_id().is_some() {
+            return Err(invalid(
+                "attachment-scoped routes require their matching scoped media service",
+            ));
+        }
+        self.register_route_inner(
+            owner,
+            connection_id,
+            label,
+            supported_modes,
+            source_kinds,
+            channel,
+            None,
+        )
+        .await
+    }
+
+    /// Register an attachment-scoped route with the exact service wrapper that
+    /// minted its owner namespace. Session Stop calls then pass through the
+    /// same attachment admission/drain fence as media operations.
+    pub async fn register_attachment_route(
+        &self,
+        owner: MediaOwner,
+        connection_id: String,
+        label: String,
+        supported_modes: Vec<MediaSessionMode>,
+        source_kinds: Vec<MediaSourceKindDto>,
+        channel: Arc<dyn RemoteMediaHostControlChannel>,
+        service: Arc<dyn MediaService>,
+    ) -> Result<(), MediaError> {
+        let Some(owner_attachment) = owner.attachment_id() else {
+            return Err(invalid(
+                "attachment-scoped route registration requires an attached owner",
+            ));
+        };
+        if service.attachment_id().as_ref() != Some(owner_attachment) {
+            return Err(invalid(
+                "route owner and media service belong to different attachments",
+            ));
+        }
+        self.register_route_inner(
+            owner,
+            connection_id,
+            label,
+            supported_modes,
+            source_kinds,
+            channel,
+            Some(Arc::downgrade(&service)),
+        )
+        .await
+    }
+
+    async fn register_route_inner(
+        &self,
+        owner: MediaOwner,
+        connection_id: String,
+        label: String,
+        supported_modes: Vec<MediaSessionMode>,
+        source_kinds: Vec<MediaSourceKindDto>,
+        channel: Arc<dyn RemoteMediaHostControlChannel>,
+        media_service: Option<std::sync::Weak<dyn MediaService>>,
+    ) -> Result<(), MediaError> {
+        if logical_session_id(&owner).is_none()
             || !valid_route_uuid(&connection_id)
             || label.trim().is_empty()
             || label.len() > 256
@@ -191,6 +258,7 @@ impl RemoteMediaConnector {
                 supported_modes,
                 source_kinds,
                 channel,
+                media_service,
                 closed: AtomicBool::new(false),
                 unregistering: AtomicBool::new(false),
                 sessions: Mutex::new(HashMap::new()),
@@ -204,6 +272,36 @@ impl RemoteMediaConnector {
         &self,
         owner: &MediaOwner,
         connection_id: &str,
+    ) -> Result<(), MediaError> {
+        self.unregister_route_inner(owner, connection_id, false)
+            .await
+    }
+
+    /// Remove a route only after the matching attachment's media drain confirms.
+    /// The host cleanup fence keeps the attachment Revoking until peer cleanup
+    /// also confirms. The media drain has stopped all service-owned resources;
+    /// this path closes only the peer transport and never resends MediaService
+    /// Stop against a possibly unknown prior Stop result.
+    pub async fn unregister_route_after_media_drain(
+        &self,
+        owner: &MediaOwner,
+        connection_id: &str,
+        attachment: &MediaAttachmentHandle,
+    ) -> Result<(), MediaError> {
+        if owner.attachment_id() != Some(attachment.id()) || !attachment.media_drain_confirmed() {
+            return Err(invalid(
+                "route cleanup requires confirmation for its exact media attachment",
+            ));
+        }
+        self.unregister_route_inner(owner, connection_id, true)
+            .await
+    }
+
+    async fn unregister_route_inner(
+        &self,
+        owner: &MediaOwner,
+        connection_id: &str,
+        attachment_media_drained: bool,
     ) -> Result<(), MediaError> {
         let route = self
             .routes
@@ -224,7 +322,12 @@ impl RemoteMediaConnector {
             .cloned()
             .collect::<Vec<_>>();
         for session in sessions {
-            if let Err(error) = session.stop_from_service().await {
+            let stopped = if attachment_media_drained {
+                session.stop_after_media_drain().await
+            } else {
+                session.stop_from_service().await
+            };
+            if let Err(error) = stopped {
                 return Err(error);
             }
         }
@@ -366,14 +469,11 @@ impl MediaConnector for RemoteMediaConnector {
         context: MediaOperationContext,
         request: MediaSessionRequest,
     ) -> Result<Box<dyn MediaSession>, MediaError> {
-        let owner_session_id = match &context.owner {
-            MediaOwner::Session { session_id } => session_id.clone(),
-            _ => {
-                return Err(MediaError::new(
-                    MediaErrorKind::InvalidRequest,
-                    "Remote Control media requires a session owner",
-                ));
-            }
+        let Some(owner_session_id) = logical_session_id(&context.owner).map(str::to_owned) else {
+            return Err(MediaError::new(
+                MediaErrorKind::InvalidRequest,
+                "Remote Control media requires a session owner",
+            ));
         };
         validate_selected_sources(&request)?;
         let route = self.route_for_sources(&context.owner, &request).await?;
@@ -516,10 +616,12 @@ impl MediaConnector for RemoteMediaConnector {
             route.clone(),
             generation,
             self.resources.clone(),
-            self.media_service
-                .read()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
+            route.media_service.clone().or_else(|| {
+                self.media_service
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone()
+            }),
         );
         let route_full = {
             let mut sessions = route
@@ -614,7 +716,7 @@ struct RemoteHostMediaSession {
     close_acknowledged: AtomicBool,
     stop_gate: AsyncMutex<()>,
     service_registered: AtomicBool,
-    service_stop_scheduled: AtomicBool,
+    service_stop_state: Arc<AtomicU8>,
     next_service_stop_generation: AtomicU64,
 }
 
@@ -680,20 +782,11 @@ fn rtp_sample_frames_to_source_frames(
     .min(accepted_source_sample_frames)
 }
 
+#[derive(Default)]
 struct AudioEncoderState {
     processor: Option<(u32, AudioProcessor)>,
     pending_sample_frames: u64,
     sequence: u64,
-}
-
-impl Default for AudioEncoderState {
-    fn default() -> Self {
-        Self {
-            processor: None,
-            pending_sample_frames: 0,
-            sequence: 0,
-        }
-    }
 }
 
 #[async_trait]
@@ -827,7 +920,7 @@ impl RemoteHostMediaSession {
             close_acknowledged: AtomicBool::new(false),
             stop_gate: AsyncMutex::new(()),
             service_registered: AtomicBool::new(false),
-            service_stop_scheduled: AtomicBool::new(false),
+            service_stop_state: Arc::new(AtomicU8::new(SERVICE_STOP_IDLE)),
             next_service_stop_generation: AtomicU64::new(next_service_stop_generation),
         })
     }
@@ -1080,10 +1173,44 @@ impl RemoteHostMediaSession {
         else {
             return self.stop_internal().await;
         };
-        let owner = self.context.owner.clone();
+        // Route cleanup must use the same logical owner through this route's
+        // exact attachment-scoped service wrapper. The wrapper mints the
+        // attachment namespace and tracks the Stop against its revoke fence.
+        let owner = self.context.owner.logical_owner().clone();
         let capabilities = service.capabilities_for(&owner);
         if !capabilities.supports(MediaOperationKind::Stop) {
             return self.stop_internal().await;
+        }
+        match self.service_stop_state.load(Ordering::Acquire) {
+            SERVICE_STOP_CONFIRMED => return self.stop_internal().await,
+            SERVICE_STOP_UNKNOWN => {
+                return Err(MediaError::new(
+                    MediaErrorKind::Unavailable,
+                    "remote media service Stop has an unconfirmed result; only attachment revoke can recover it",
+                ));
+            }
+            SERVICE_STOP_IDLE => {}
+            _ => {
+                return Err(MediaError::new(
+                    MediaErrorKind::NativeFailure,
+                    "remote media service Stop state is invalid",
+                ));
+            }
+        }
+        if self
+            .service_stop_state
+            .compare_exchange(
+                SERVICE_STOP_IDLE,
+                SERVICE_STOP_UNKNOWN,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return Err(MediaError::new(
+                MediaErrorKind::Unavailable,
+                "another remote media service Stop has an unconfirmed result",
+            ));
         }
         let generation = self
             .next_service_stop_generation
@@ -1108,10 +1235,32 @@ impl RemoteHostMediaSession {
             )
             .await
         {
-            Ok(_) => Ok(()),
-            Err(error) if error.kind == MediaErrorKind::NotFound => self.stop_internal().await,
+            Ok(MediaResult::Stopped { resource })
+                if resource == MediaResourceRef::Session(self.reference.clone()) =>
+            {
+                self.service_stop_state
+                    .store(SERVICE_STOP_CONFIRMED, Ordering::Release);
+                self.stop_internal().await
+            }
+            Err(error) if error.kind == MediaErrorKind::NotFound => {
+                self.service_stop_state
+                    .store(SERVICE_STOP_CONFIRMED, Ordering::Release);
+                self.stop_internal().await
+            }
+            Ok(_) => Err(MediaError::new(
+                MediaErrorKind::NativeFailure,
+                "media service did not confirm stopping the expected remote session",
+            )),
             Err(error) => Err(error),
         }
+    }
+
+    async fn stop_after_media_drain(&self) -> Result<(), MediaError> {
+        // The attachment's media drain receipt is the service cleanup evidence.
+        // Do not schedule another MediaService Stop after its admission closed;
+        // only retry the route's independently acknowledged peer close.
+        self.service_registered.store(false, Ordering::Release);
+        self.stop_internal().await
     }
 
     async fn stop_internal(&self) -> Result<(), MediaError> {
@@ -1196,10 +1345,20 @@ impl RemoteHostMediaSession {
         else {
             return;
         };
-        if self.service_stop_scheduled.swap(true, Ordering::AcqRel) {
+        if self
+            .service_stop_state
+            .compare_exchange(
+                SERVICE_STOP_IDLE,
+                SERVICE_STOP_UNKNOWN,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
             return;
         }
-        let owner = self.context.owner.clone();
+        let stop_state = self.service_stop_state.clone();
+        let owner = self.context.owner.logical_owner().clone();
         let session = self.reference.clone();
         let max_payload_bytes = self.context.max_payload_bytes;
         let base_generation = self
@@ -1207,47 +1366,39 @@ impl RemoteHostMediaSession {
             .fetch_add(4, Ordering::Relaxed)
             .max(1);
         tokio::spawn(async move {
-            for attempt in 0..4u32 {
-                let capabilities = service.capabilities_for(&owner);
-                if !capabilities.supports(MediaOperationKind::Stop) {
-                    tracing::warn!("media service cannot deregister a terminal remote session");
-                    return;
-                }
-                let context = MediaOperationContext::new(
-                    MediaOperationId::new(
-                        base_generation.saturating_add(u64::from(attempt)).max(1),
-                        capabilities.service_epoch,
-                    ),
-                    owner.clone(),
+            let capabilities = service.capabilities_for(&owner);
+            if !capabilities.supports(MediaOperationKind::Stop) {
+                tracing::warn!("media service cannot deregister a terminal remote session");
+                return;
+            }
+            let context = MediaOperationContext::new(
+                MediaOperationId::new(base_generation, capabilities.service_epoch),
+                owner.clone(),
+            )
+            .with_timeout_budget_ms(5_000)
+            .with_max_payload_bytes(max_payload_bytes.min(capabilities.max_payload_bytes));
+            match service
+                .execute(
+                    context,
+                    MediaOperation::Stop {
+                        target: MediaResourceRef::Session(session.clone()),
+                    },
                 )
-                .with_timeout_budget_ms(5_000)
-                .with_max_payload_bytes(max_payload_bytes.min(capabilities.max_payload_bytes));
-                match service
-                    .execute(
-                        context,
-                        MediaOperation::Stop {
-                            target: MediaResourceRef::Session(session.clone()),
-                        },
-                    )
-                    .await
+                .await
+            {
+                Ok(MediaResult::Stopped { resource })
+                    if resource == MediaResourceRef::Session(session) =>
                 {
-                    Ok(_) => return,
-                    Err(error) if error.kind == MediaErrorKind::NotFound => return,
-                    Err(error) if attempt < 3 => {
-                        tracing::debug!(
-                            kind = error.kind.to_string(),
-                            attempt = attempt + 1,
-                            "retrying remote media session deregistration"
-                        );
-                        tokio::time::sleep(Duration::from_millis(50u64 << attempt)).await;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            kind = error.kind.to_string(),
-                            "remote media session deregistration exhausted retries"
-                        );
-                    }
+                    stop_state.store(SERVICE_STOP_CONFIRMED, Ordering::Release);
                 }
+                Err(error) if error.kind == MediaErrorKind::NotFound => {
+                    stop_state.store(SERVICE_STOP_CONFIRMED, Ordering::Release);
+                }
+                Ok(_) => tracing::warn!("media service returned an unexpected Stop result"),
+                Err(error) => tracing::warn!(
+                    kind = error.kind.to_string(),
+                    "remote media session deregistration remains Unknown"
+                ),
             }
         });
     }
@@ -2053,13 +2204,23 @@ fn dto_operation_id(identity: &MediaOperationId) -> client::protocol::media::Med
 }
 
 fn dto_owner(owner: &MediaOwner) -> Result<client::protocol::media::MediaOwnerDto, MediaError> {
-    match owner {
-        MediaOwner::Session { session_id } => Ok(client::protocol::media::MediaOwnerDto::Session {
-            session_id: session_id.clone(),
-        }),
-        _ => Err(invalid(
-            "remote media sessions require a conversation owner",
-        )),
+    logical_session_id(owner)
+        .map(
+            |session_id| client::protocol::media::MediaOwnerDto::Session {
+                session_id: session_id.to_owned(),
+            },
+        )
+        .ok_or_else(|| invalid("remote media sessions require a conversation owner"))
+}
+
+/// Remote routes are keyed by the complete trusted owner, including an
+/// attachment ID when present. Only the wire protocol's session field is
+/// flattened to the logical session ID; route lookup, mode inventory, and
+/// teardown continue to use the original `MediaOwner` value.
+fn logical_session_id(owner: &MediaOwner) -> Option<&str> {
+    match owner.logical_owner() {
+        MediaOwner::Session { session_id } => Some(session_id),
+        MediaOwner::Ui { .. } | MediaOwner::System { .. } | MediaOwner::Attachment { .. } => None,
     }
 }
 
@@ -2152,6 +2313,8 @@ mod tests {
     #[derive(Default)]
     struct TestMediaService {
         sessions: Mutex<HashMap<MediaSessionRef, (MediaOwner, Arc<dyn MediaSession>)>>,
+        stop_calls: std::sync::atomic::AtomicUsize,
+        fail_stop: AtomicBool,
     }
 
     impl TestMediaService {
@@ -2169,7 +2332,7 @@ mod tests {
             media_api::MediaCapabilities {
                 service_epoch: 1,
                 support_revision: 1,
-                supported_operations: vec![MediaOperationKind::Stop],
+                supported_operations: vec![MediaOperationKind::Status, MediaOperationKind::Stop],
                 supported_media_kinds: Vec::new(),
                 readiness: Vec::new(),
                 max_payload_bytes: 1024,
@@ -2182,9 +2345,36 @@ mod tests {
             operation: MediaOperation,
         ) -> Result<media_api::MediaResult, MediaError> {
             match operation {
+                MediaOperation::Status { .. } => {
+                    let sessions = self
+                        .sessions
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    let resources = sessions
+                        .iter()
+                        .filter(|(_, (owner, session))| {
+                            owner == &context.owner
+                                && session.status().state != MediaSessionState::Ended
+                        })
+                        .map(|(reference, _)| media_api::MediaResourceStatus {
+                            resource: MediaResourceRef::Session(reference.clone()),
+                            state: MediaResourceState::Active,
+                            started_at_unix_ms: None,
+                            updated_at_unix_ms: None,
+                        })
+                        .collect();
+                    Ok(media_api::MediaResult::Status { resources })
+                }
                 MediaOperation::Stop {
                     target: MediaResourceRef::Session(reference),
                 } => {
+                    self.stop_calls.fetch_add(1, Ordering::Relaxed);
+                    if self.fail_stop.load(Ordering::Acquire) {
+                        return Err(MediaError::new(
+                            MediaErrorKind::NativeFailure,
+                            "test Stop failed with unknown side effects",
+                        ));
+                    }
                     let session = self
                         .sessions
                         .lock()
@@ -2258,7 +2448,7 @@ mod tests {
             ))
         }
 
-        async fn cancel(&self, _identity: MediaOperationId) -> Result<(), MediaError> {
+        async fn cancel(&self, _context: MediaOperationContext) -> Result<(), MediaError> {
             Ok(())
         }
     }
@@ -2454,6 +2644,30 @@ mod tests {
             .unwrap();
     }
 
+    async fn register_av_with_service(
+        connector: &RemoteMediaConnector,
+        owner: MediaOwner,
+        route: &str,
+        service: Arc<dyn MediaService>,
+    ) {
+        connector
+            .register_attachment_route(
+                owner,
+                route.to_owned(),
+                "Viewer phone".to_owned(),
+                vec![
+                    MediaSessionMode::Audio,
+                    MediaSessionMode::Video,
+                    MediaSessionMode::AudioVideo,
+                ],
+                vec![MediaSourceKindDto::Microphone, MediaSourceKindDto::Camera],
+                Arc::new(TestChannel),
+                service,
+            )
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn source_catalog_is_owner_scoped_and_matches_declared_kinds() {
         let connector = connector();
@@ -2506,6 +2720,307 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(missing_owner.kind, MediaErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn attachment_owner_is_preserved_for_route_keys_modes_and_unregistration() {
+        let connector = connector();
+        let host = media_runtime::MediaAttachmentHost::new();
+        let attachment_a = host
+            .attach(Arc::new(TestMediaService::default()))
+            .expect("first attachment handle");
+        let attachment_b = host
+            .attach(Arc::new(TestMediaService::default()))
+            .expect("second attachment handle");
+        let owner_a = owner("same-session").in_attachment(attachment_a.id().clone());
+        let owner_b = owner("same-session").in_attachment(attachment_b.id().clone());
+
+        register_av_with_service(&connector, owner_a.clone(), ROUTE_A, attachment_a.service())
+            .await;
+        register_av_with_service(&connector, owner_b.clone(), ROUTE_A, attachment_b.service())
+            .await;
+        let route = connector
+            .routes
+            .read()
+            .await
+            .get(&owner_a)
+            .and_then(|routes| routes.get(ROUTE_A))
+            .expect("route is stored under the full attachment owner")
+            .clone();
+        let replacement_route = connector
+            .routes
+            .read()
+            .await
+            .get(&owner_b)
+            .and_then(|routes| routes.get(ROUTE_A))
+            .expect("same route ID is independently stored under the new attachment")
+            .clone();
+        assert_eq!(
+            route
+                .media_service
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .and_then(|service| service.attachment_id()),
+            owner_a.attachment_id().cloned(),
+            "route Stop must use the exact service attachment"
+        );
+        assert_eq!(
+            replacement_route
+                .media_service
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .and_then(|service| service.attachment_id()),
+            owner_b.attachment_id().cloned(),
+            "replacement route Stop must not retain the old attachment service"
+        );
+        assert!(matches!(
+            dto_owner(&owner_a),
+            Ok(client::protocol::media::MediaOwnerDto::Session { ref session_id })
+                if session_id == "same-session"
+        ));
+        assert_eq!(
+            connector.supported_modes(&owner_a).await,
+            vec![
+                MediaSessionMode::Audio,
+                MediaSessionMode::Video,
+                MediaSessionMode::AudioVideo,
+            ]
+        );
+        assert_eq!(connector.supported_modes(&owner_b).await.len(), 3);
+        assert!(connector
+            .route_for_sources(&owner_b, &audio_video_request(ROUTE_A, ROUTE_A))
+            .await
+            .is_ok());
+
+        assert_eq!(
+            attachment_a.revoke(Duration::from_millis(250)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+        assert_eq!(
+            attachment_b.revoke(Duration::from_millis(250)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+        let wrong_attachment = connector
+            .unregister_route_after_media_drain(&owner_a, ROUTE_A, &attachment_b)
+            .await
+            .expect_err("a different revoked attachment cannot clean this route");
+        assert_eq!(wrong_attachment.kind, MediaErrorKind::InvalidRequest);
+        assert_eq!(connector.supported_modes(&owner_a).await.len(), 3);
+        assert_eq!(connector.supported_modes(&owner_b).await.len(), 3);
+
+        connector
+            .unregister_route_after_media_drain(&owner_a, ROUTE_A, &attachment_a)
+            .await
+            .expect("the matching confirmed attachment owns route cleanup");
+        assert!(connector.supported_modes(&owner_a).await.is_empty());
+        assert_eq!(
+            connector.supported_modes(&owner_b).await.len(),
+            3,
+            "removing the old attachment route must preserve the same-ID replacement route"
+        );
+        connector
+            .unregister_route_after_media_drain(&owner_b, ROUTE_A, &attachment_b)
+            .await
+            .expect("the replacement attachment owns its separate route");
+        assert!(connector.supported_modes(&owner_b).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn nested_or_non_session_attachment_owners_cannot_register_remote_routes() {
+        let connector = connector();
+        let host = media_runtime::MediaAttachmentHost::new();
+        let attachment = host
+            .attach(Arc::new(TestMediaService::default()))
+            .expect("test attachment");
+        let other_attachment = host
+            .attach(Arc::new(TestMediaService::default()))
+            .expect("second test attachment");
+        let inner = owner("same-session").in_attachment(attachment.id().clone());
+        let nested = MediaOwner::Attachment {
+            attachment_id: attachment.id().clone(),
+            owner: Box::new(inner),
+        };
+        let error = connector
+            .register_attachment_route(
+                nested,
+                ROUTE_A.to_owned(),
+                "Viewer phone".to_owned(),
+                vec![MediaSessionMode::Audio],
+                vec![MediaSourceKindDto::Microphone],
+                Arc::new(TestChannel),
+                attachment.service(),
+            )
+            .await
+            .expect_err("nested attachment owners are not logical session owners");
+        assert_eq!(error.kind, MediaErrorKind::InvalidRequest);
+
+        let wrong_service_owner = owner("same-session").in_attachment(attachment.id().clone());
+        let error = connector
+            .register_attachment_route(
+                wrong_service_owner,
+                ROUTE_A.to_owned(),
+                "Viewer phone".to_owned(),
+                vec![MediaSessionMode::Audio],
+                vec![MediaSourceKindDto::Microphone],
+                Arc::new(TestChannel),
+                other_attachment.service(),
+            )
+            .await
+            .expect_err("the route owner and service must share the exact attachment");
+        assert_eq!(error.kind, MediaErrorKind::InvalidRequest);
+
+        let attached_ui = MediaOwner::Ui {
+            instance_id: "ui-instance".into(),
+        }
+        .in_attachment(attachment.id().clone());
+        let error = connector
+            .register_attachment_route(
+                attached_ui,
+                ROUTE_A.to_owned(),
+                "Viewer phone".to_owned(),
+                vec![MediaSessionMode::Audio],
+                vec![MediaSourceKindDto::Microphone],
+                Arc::new(TestChannel),
+                attachment.service(),
+            )
+            .await
+            .expect_err("remote routes require a logical session owner");
+        assert_eq!(error.kind, MediaErrorKind::InvalidRequest);
+
+        assert_eq!(
+            attachment.revoke(Duration::from_millis(250)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+        assert_eq!(
+            other_attachment.revoke(Duration::from_millis(250)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_service_stop_is_not_redispatched_by_route_cleanup() {
+        let connector = connector();
+        let service = Arc::new(TestMediaService::default());
+        service.fail_stop.store(true, Ordering::Release);
+        let service_trait: Arc<dyn MediaService> = service.clone();
+        let owner = owner("session-a");
+        register_av(&connector, owner.clone(), ROUTE_A).await;
+        let route = connector
+            .routes
+            .read()
+            .await
+            .get(&owner)
+            .and_then(|routes| routes.get(ROUTE_A))
+            .expect("route was registered")
+            .clone();
+        let session = RemoteHostMediaSession::new(
+            MediaSessionRef(MediaSessionId::from("media_unknown_stop")),
+            context(owner),
+            MediaSessionRequest {
+                intent: MediaSessionIntent::Conversation,
+                mode: MediaSessionMode::Audio,
+                audio_source: Some(MediaSourceRef(
+                    remote_media_source_ref(ROUTE_A, RemoteMediaSourceKind::Microphone)
+                        .unwrap()
+                        .into(),
+                )),
+                video_source: None,
+            },
+            route,
+            1,
+            connector.resources.clone(),
+            Some(Arc::downgrade(&service_trait)),
+        );
+
+        let first = session
+            .stop_from_service()
+            .await
+            .expect_err("the fake service reports an unknown Stop result");
+        assert_eq!(first.kind, MediaErrorKind::NativeFailure);
+        let retry = session
+            .stop_from_service()
+            .await
+            .expect_err("an unknown Stop remains fenced without redispatch");
+        assert_eq!(retry.kind, MediaErrorKind::Unavailable);
+        assert_eq!(service.stop_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn attachment_revoke_drains_service_session_before_peer_route_removal() {
+        let connector = connector();
+        let host = media_runtime::MediaAttachmentHost::new();
+        let service = Arc::new(TestMediaService::default());
+        let attachment = host.attach(service.clone()).expect("test attachment");
+        let logical_owner = owner("same-session");
+        let attached_owner = logical_owner.clone().in_attachment(attachment.id().clone());
+        register_av_with_service(
+            &connector,
+            attached_owner.clone(),
+            ROUTE_A,
+            attachment.service(),
+        )
+        .await;
+        let route = connector
+            .routes
+            .read()
+            .await
+            .get(&attached_owner)
+            .and_then(|routes| routes.get(ROUTE_A))
+            .expect("attachment route is registered")
+            .clone();
+        let reference = MediaSessionRef(MediaSessionId::from("media_attachment_session"));
+        let request = MediaSessionRequest {
+            intent: MediaSessionIntent::Conversation,
+            mode: MediaSessionMode::Audio,
+            audio_source: Some(MediaSourceRef(
+                remote_media_source_ref(ROUTE_A, RemoteMediaSourceKind::Microphone)
+                    .unwrap()
+                    .into(),
+            )),
+            video_source: None,
+        };
+        let route_service = route
+            .media_service
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .expect("route retains the exact attachment-scoped service");
+        let session = RemoteHostMediaSession::new(
+            reference.clone(),
+            MediaOperationContext::new(MediaOperationId::new(1, 1), attached_owner.clone()),
+            request,
+            route.clone(),
+            1,
+            connector.resources.clone(),
+            Some(Arc::downgrade(&route_service)),
+        );
+        route
+            .sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(reference.0 .0.clone(), session.clone());
+        attachment
+            .service()
+            .attach_session(
+                MediaOperationContext::new(MediaOperationId::new(2, 1), logical_owner),
+                Box::new(RemoteHostMediaSessionHandle(session.clone())),
+            )
+            .await
+            .expect("service session should be admitted through the attachment");
+
+        assert_eq!(service.session_count(), 1);
+        assert_eq!(
+            attachment.revoke(Duration::from_millis(500)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+        assert_eq!(service.session_count(), 0);
+        assert_eq!(session.status().state, MediaSessionState::Ended);
+        assert!(connector.supported_modes(&attached_owner).await.len() == 3);
+
+        connector
+            .unregister_route_after_media_drain(&attached_owner, ROUTE_A, &attachment)
+            .await
+            .expect("peer route closes only after its attachment is confirmed revoked");
+        assert!(connector.supported_modes(&attached_owner).await.is_empty());
     }
 
     #[tokio::test]
@@ -2872,6 +3387,7 @@ mod tests {
             channel: Arc::new(PendingBarrierChannel {
                 requests: control_tx,
             }),
+            media_service: None,
             closed: AtomicBool::new(false),
             unregistering: AtomicBool::new(false),
             sessions: Mutex::new(HashMap::new()),

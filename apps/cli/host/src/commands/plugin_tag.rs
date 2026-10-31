@@ -129,9 +129,10 @@ fn run_tag_from_cwd(
     let mut lines: Vec<String> = Vec::new();
     if !is_kebab_case(name) {
         lines.push(format!(
-            "⚠ {rel_json}: Plugin name \"{name}\" is not kebab-case. Claude Code accepts it, but \
+            "⚠ {rel_json}: Plugin name \"{name}\" is not kebab-case. {} accepts it, but \
              the Claude.ai marketplace sync requires kebab-case (lowercase letters, digits, and \
-             hyphens only, e.g., \"my-plugin\")."
+             hyphens only, e.g., \"my-plugin\").",
+            branding::PRODUCT_NAME
         ));
     }
     let version_field = value.get("version").and_then(Value::as_str);
@@ -680,6 +681,25 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&ty.stdout).trim(), "tag");
+    }
+
+    #[test]
+    fn non_kebab_name_warning_identifies_the_accepting_product() {
+        let r = repo_with(
+            r#"{ "name":"MyPlugin","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
+        );
+        let out = run_tag_from_cwd(&r.root, None, true, false, None, false, "origin").unwrap();
+        assert!(
+            out.contains(&format!(
+                "Plugin name \"MyPlugin\" is not kebab-case. {} accepts it",
+                branding::PRODUCT_NAME
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("the Claude.ai marketplace sync requires kebab-case"),
+            "{out}"
+        );
     }
 
     #[test]

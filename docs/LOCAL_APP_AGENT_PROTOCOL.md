@@ -1,10 +1,8 @@
 # Local App Agent protocol standardization
 
-Status: AG-UI migration in progress, 2026-10-24. The previous
-`agent.run/tasks/chats` functional prototype passed its recorded builds and smoke
-tests; those results do not establish AG-UI conformance. The shared adapter,
-Desktop, Mobile, generator and example migration requires fresh validation.
-See the acceptance report for actual completed checks and device evidence.
+The supported public contract is AG-UI 1.0. Desktop, Mobile, generation
+guidance and examples use the official Schema and SDK. See the acceptance
+report for source checks, signed-package validation and device evidence.
 
 ## Main protocol
 
@@ -105,6 +103,9 @@ The public `runId` is supplied by the standard client and remains unchanged in
 run events and resource operations. It also keys idempotency: an identical retry
 returns the same admission, and changed input with the same ID is rejected.
 Private execution/storage IDs may differ only behind a scoped, tested mapping.
+At the trusted host boundary, AG-UI `runId` maps to `Task.request_id`; `Task.run_id` is a distinct host UUID. Native
+cancellation selects a public run with `requestId`, while native task UI may target an inventory item by internal
+`runId`. This mapping stays inside the host and adds no Local App API or permission.
 
 The host owns durable run records, event replay, request deduplication and
 conversation storage. Task listing, conversation creation/archive/deletion,
@@ -112,10 +113,13 @@ Project/Session authoring bindings and OS background leases are host resources;
 AG-UI does not standardize their complete CRUD or storage policy. Keep those
 resource interfaces separate from the standard Agent message/event contract.
 
-Reconnection observes recorded state without starting another model request.
-A stream ending without a terminal event is truncated; it must not be presented
-as successful or synthesized into a clean cancellation. Explicit host
-cancellation stops execution and produces the standard cancelled outcome.
+Reconnection observes recorded state without starting another model request. Recover the same public `runId` with
+read-only `tasks.get`, `connectAgent` and `tasks.events` until a standard terminal event arrives; do not repeat `run`,
+`send` or `tasks.start`. An immediate `task_not_found` may be a lookup miss, not model failure; retry only with bounded
+read-only lookups. `pending_request_missing` means this browser context has no saved request: return to the original
+shared-storage context or explicitly ask for a new request. Never auto-resend or infer private browsing or browser
+brand. A stream ending without a terminal event is truncated; it must not be presented as successful or synthesized into
+a clean cancellation. Explicit host cancellation stops execution and produces the standard cancelled outcome.
 Native interruption/approval and protocol resume must retain their different
 authority: a page cannot approve a host tool request through a forged resume.
 
@@ -143,12 +147,13 @@ standard does not make an OS lease indefinite or guarantee background wakeup.
 
 First implement one shared protocol adapter and schema contract, then use it in
 Desktop and the Mobile browser/host bridge. Update the application generator and
-examples in the same change. This first-release API does not need obsolete
-aliases, fallback decoders or migration branches that preserve the prototype's
-custom message format. Initialize a fresh Agent persistence version and remove
-known obsolete task/chat/pending data in the host-owned Agent scope. Do not
-convert legacy messages. Application business data, source Projects, immutable
-releases and protocol-independent authoring bindings are outside that cleanup.
+examples in the same change. This first-release API accepts only the current
+official contract and Agent persistence format. Remove obsolete API aliases,
+fallback decoders, old-format cleanup hooks and data conversion. Do not load,
+convert or replay prototype task/chat/pending records. Keep application business
+data, source Projects, immutable releases and protocol-independent authoring
+bindings separate from Agent persistence. Local App source import and publication
+accept schema 2 only; there is no old-package archive or import interface.
 
 Add protocol conformance cases for official schema validation, event ordering,
 terminal success/error/cancel/interrupt semantics, reconnect without replay,

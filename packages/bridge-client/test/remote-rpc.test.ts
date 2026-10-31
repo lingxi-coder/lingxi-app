@@ -123,6 +123,23 @@ test('messages round-trip through fragments: empty, unicode, and larger than one
   assert.ok(la.sent.every((fragment) => fragment.length <= FRAGMENT_MAX_BYTES));
 });
 
+test('bounded transport rejects empty continuations but accepts whole empty messages', async () => {
+  for (const fragment of [new Uint8Array([1]), new Uint8Array([2])]) {
+    const [sender, receiver] = linkPair();
+    const transport = new MessageTransport(receiver, { maxInboundMessageBytes: 64 });
+    const received: string[] = []; transport.onMessage(text => received.push(text));
+    sender.sendFragment(new Uint8Array([0])); await settle();
+    assert.deepEqual(received, ['']);
+    sender.sendFragment(fragment); await settle();
+    assert.equal(receiver.closedWith, 'protocol_error');
+  }
+  const [sender, receiver] = linkPair();
+  const transport = new MessageTransport(receiver, { maxInboundMessageBytes: 64 });
+  const received: string[] = []; transport.onMessage(text => received.push(text));
+  sender.sendFragment(new Uint8Array([1, 97])); sender.sendFragment(new Uint8Array([2, 98]));
+  await settle(); assert.deepEqual(received, ['ab']); assert.equal(receiver.closedWith, undefined);
+});
+
 test('a link\'s maxFragmentBytes sets the fragment size', async () => {
   const { ta, tb, la } = transports();
   la.maxFragmentBytes = TUNNEL_FRAGMENT_MAX_BYTES;

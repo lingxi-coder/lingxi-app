@@ -891,7 +891,11 @@ fn ios_host_environment_maps_stable_native_facts_without_model_state() {
 #[test]
 fn ios_provider_only_app_agent_uses_native_brand_config_without_mobile_linux_setup() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let managed = temp.path().join("runtime");
+    let managed = temp
+        .path()
+        .canonicalize()
+        .expect("canonical tempdir")
+        .join("runtime");
     let paths =
         harness_runtime::mobile::mobile_user_directories(managed.display().to_string()).unwrap();
     let config = super::IosEngineLaunchConfigFfi {

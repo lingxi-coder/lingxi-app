@@ -1,0 +1,162 @@
+{
+  "logs/android-full-direct-ffi.log.gz": {
+    "sha256": "b9d2b664ebd12dd05dd65c74da8f6a4a762bdb96c038cc7ae5cc14733eb1beac",
+    "bytes": 5724
+  },
+  "logs/android-full-product-build.log.gz": {
+    "sha256": "5651937b3d7a2536e396c5125c4bf34c0670d29cd6b04392d00b0b732d6842d4",
+    "bytes": 7900
+  },
+  "logs/ios-full-product-build.log.gz": {
+    "sha256": "4c563a168b9089721437361ee3cbefa91e3c2c6fec37ad72816f08043f1213e1",
+    "bytes": 199921
+  },
+  "logs/ios-full-product-ffi.log.gz": {
+    "sha256": "f80799d67d4eca2e9b464fbcfd2531d213f9481aec0fbd401fd4539a617a516a",
+    "bytes": 8403
+  },
+  "logs/native-bridge-provider-r1.log.gz": {
+    "sha256": "6adcddc51bf44bb24f2cc4d4d9148c776565160a619a3f8ee7da0f49b89ef8a5",
+    "bytes": 1504
+  },
+  "logs/native-package-full-smoke-r1.log.gz": {
+    "sha256": "247f0a4c7637d567036cae71553d9df8a24a998c9a6d281b0e277468b47de64a",
+    "bytes": 2483
+  },
+  "logs/native-package-provider-r2.log.gz": {
+    "sha256": "c55c61ad6f08d58700d06072dca451f32a6cff9ec874731f6e1013c178bc410b",
+    "bytes": 23751
+  },
+  "logs/provider-compile-r2-cleanup.log.gz": {
+    "sha256": "e9267e3ebcb550b43c9e1232a5b82ef404400eab8989681990f11cc72e35b267",
+    "bytes": 8932
+  },
+  "logs/provider-postcleanup-connector-r2.log.gz": {
+    "sha256": "638d62bfa99c496ffb77025764d11428827123535c80ff7638cf96a5d9b59924",
+    "bytes": 705
+  },
+  "logs/provider-postcleanup-interactions-r2.log.gz": {
+    "sha256": "7d763d684c244df7b13427ba058f33f009f5efd87988d470d1257ce92af70fe3",
+    "bytes": 521
+  },
+  "logs/provider-postcleanup-process-r2.log.gz": {
+    "sha256": "21b10b797ac73763cca2d94f22233cb0bdd3b0c50b64fe34ab4ac8ec2243e41b",
+    "bytes": 647
+  },
+  "logs/provider-postcleanup-profile-r2.log.gz": {
+    "sha256": "bfea2c95a38f2b3c958ee0df89c60a8a390e02c0f2e730a90e12b286799976c2",
+    "bytes": 587
+  },
+  "logs/provider-postcleanup-sandbox-r2.log.gz": {
+    "sha256": "11760a53b59502be224245f5da3b605fae6ba0f7791cae08adcf7c75c1db6e2a",
+    "bytes": 159
+  },
+  "logs/provider-postcleanup-unit-r2.log.gz": {
+    "sha256": "f95ea7b84051f21ddad9d8c3a2d0f5dc4348f064d0e4c905befcd031faa84189",
+    "bytes": 447
+  },
+  "logs/provider-standalone-r2-cleanup.log.gz": {
+    "sha256": "3831dc354ef5f34d0724687c0749184d65f9e740c29217e151203cc2c62e2957",
+    "bytes": 8706
+  },
+  "logs/teams-provider-node-r2.log.gz": {
+    "sha256": "08a61d303e6c342734febe4fe24b5edf093ae1912aec501718e18210b2198aae",
+    "bytes": 2603
+  },
+  "logs/teams-provider-node-tsc-r2.log.gz": {
+    "sha256": "d0ff6fcdf44cb596d95764f8d1117e6b4de9914affc8eb7a1a05cdee1a55b9f0",
+    "bytes": 105
+  },
+  "logs/teams-provider-renderer-tsc-r2.log.gz": {
+    "sha256": "b515abfa99429770826e21be27f31b2cddac0a32553045747ada1614c200eac5",
+    "bytes": 106
+  },
+  "logs/teams-provider-shared-ui-r2.log.gz": {
+    "sha256": "0c46afb523a413ddee9cfbb433ec7e5b16ae80b9f458a0f2a2d76a804a94eee8",
+    "bytes": 1309
+  },
+  "logs/teams-provider-web-tsc-r2.log.gz": {
+    "sha256": "ea7f32347e541726ebb38cd408fe63249ff34dd00405ea4593b5a721499e757c",
+    "bytes": 92
+  },
+  "logs/web-provider-build.log.gz": {
+    "sha256": "0aa9a27d6efe7e90a2559f09a6835c477cee28b53ea14df96a4e922f40fe63e9",
+    "bytes": 786
+  },
+  "logs/web-provider-overlay-guards.log.gz": {
+    "sha256": "ae2c10f1fe6f6457e62c2d19c28019ed102e5c554fda1029bfd24f192b7314a4",
+    "bytes": 552
+  },
+  "metadata/android-full-product.json": {
+    "sha256": "8bef80200880565a5e9f39f01ea1c7df37c2d6e5a89a12a22e67aadff24aa6e7",
+    "bytes": 7155
+  },
+  "metadata/delivery-boundary.json": {
+    "sha256": "d7978eabbed31f9dc6a84c6e419bf750a3bca6d93e5ac9fb257f8922bfecfc4b",
+    "bytes": 1514
+  },
+  "metadata/final-live-refresh.json": {
+    "sha256": "8b72193567b93edcdd5dfc41417c61c767aa493ff68caf659c2c898615080491",
+    "bytes": 1033
+  },
+  "metadata/ios-full-product.json": {
+    "sha256": "f56158fbaac5f82df1a86a1979eb40c3e3d48fcee1521925acda18a117becc16",
+    "bytes": 6220
+  },
+  "metadata/log-artifacts.json": {
+    "sha256": "c85d0bcd4e1c23b9499d880f234dfc829148ac86adba8993be53165bc3f1ce9e",
+    "bytes": 5695
+  },
+  "metadata/native-full-catalog.json": {
+    "sha256": "dd5cbb19034a5390a217250e34d84139fd9c7672cc0759852e8899c23546a592",
+    "bytes": 635
+  },
+  "metadata/native-session-safety.json": {
+    "sha256": "99612e019ad8ecbe09517b54a0291cd2c653fb224e550a50d67248935f276bd8",
+    "bytes": 3623
+  },
+  "metadata/package-attempt1.json": {
+    "sha256": "5643da73e9afa9d68b6694ca5adb4178c6e4b54a1fe194c6c0898d349e2ce4d7",
+    "bytes": 470
+  },
+  "metadata/product-source-hashes.json": {
+    "sha256": "ec6d02da176325da6ec90bda40bd92a93d6fc578172aee9e2699d25bccdc4e29",
+    "bytes": 1285
+  },
+  "metadata/real-provider-journey.json": {
+    "sha256": "05afbda4b105be9bae56f297fc20daebaf0c00eebe0bff4385dbbfc4d8f181d5",
+    "bytes": 5052
+  },
+  "metadata/runtime-tested-source.json": {
+    "sha256": "0416ef008b0114171066228d0392efb66d2322b4815ef1f1dbc05c801f0ef1a7",
+    "bytes": 1975
+  },
+  "metadata/runtime-verification.json": {
+    "sha256": "6c2783446d56c866e3bfae1c87045fa99d368eb8b2b4c8d8192b3d0e644d578c",
+    "bytes": 6971
+  },
+  "metadata/signed-package.json": {
+    "sha256": "f485a0226a163c1501545a544b11e0a4c2036e13f241ef404be49a3ab501fdf7",
+    "bytes": 1136
+  },
+  "metadata/web-publication.json": {
+    "sha256": "f827be0c6868d1e2c66223305da1d9b41670440a6f635a03ba35ee227d4220cc",
+    "bytes": 11634
+  },
+  "report.md": {
+    "sha256": "247596ac160fff502c69a56d825fc8acf89bdf6daf28522496f116c0db1ed9b2",
+    "bytes": 9942
+  },
+  "results.json": {
+    "sha256": "456911395c8164d07d93d94d88fb1562940a038d8feee2c93138524457964167",
+    "bytes": 2304
+  },
+  "screenshots/android-real-provider-history.png": {
+    "sha256": "196acf7519d921573cdc887256b5ec5467f6d66cfd3067cc053c220113a80a04",
+    "bytes": 252711
+  },
+  "screenshots/ios-real-provider-completed.png": {
+    "sha256": "c0811109c7a619904e7e10ffd132db10bd22bace316309cfbfb4e00905e03209",
+    "bytes": 557445
+  }
+}

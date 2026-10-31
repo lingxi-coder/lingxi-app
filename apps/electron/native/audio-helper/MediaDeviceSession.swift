@@ -121,10 +121,12 @@ func parseHelperMediaDeviceRequest(_ raw: Any?) throws -> HelperMediaDeviceReque
         let ownerType = rawOwner["type"] as? String ?? ""
         if ownerType == "session" {
             try exactKeys(rawOwner, ["type", "session_id"], label: "media session owner")
+        } else if ownerType == "attached" {
+            try exactKeys(rawOwner, ["type", "attachment_host_id", "attachment_generation", "logical_kind", "logical_owner_id"], label: "media attached owner")
         } else {
             try exactKeys(rawOwner, ["type", "instance_id"], label: "media app owner")
         }
-        guard let owner = parseHelperAudioOwner(rawOwner) else {
+        guard let owner = parseHelperAudioOwner(rawOwner, allowAttachment: true) else {
             throw HelperError.invalidRequest("media open requires a valid owner")
         }
         if let initiator = open["initiator"], !(initiator is NSNull) {
@@ -307,6 +309,19 @@ struct HelperMediaRenderReceiptDto: Encodable, Sendable {
     }
 }
 
+struct HelperMediaCloseReceipt: Encodable, Sendable {
+    let leaseID: String
+    let openRequestID: String
+    let owner: HelperAudioOwner
+    let identity: HelperAudioOperationIdentity
+
+    enum CodingKeys: String, CodingKey {
+        case leaseID = "lease_id"
+        case openRequestID = "open_request_id"
+        case owner, identity
+    }
+}
+
 enum HelperMediaDeviceResultDto: Encodable, Sendable {
     case opened(String)
     case input(HelperMediaFrameDto?)
@@ -315,7 +330,8 @@ enum HelperMediaDeviceResultDto: Encodable, Sendable {
     case audioInterrupted(HelperMediaRenderReceiptDto)
     case videoWritten
     case updated(HelperMediaStatusDto)
-    case stopped
+    case stopped(HelperMediaCloseReceipt)
+    case openFailedWithoutResource(HelperMediaErrorDto)
     case error(HelperMediaErrorDto)
 
     func encode(to encoder: Encoder) throws {
@@ -343,6 +359,9 @@ enum HelperMediaDeviceResultDto: Encodable, Sendable {
             try container.encode(status, forKey: .status)
         case .stopped:
             try container.encode("stopped", forKey: .type)
+        case let .openFailedWithoutResource(error):
+            try container.encode("open_failed_without_resource", forKey: .type)
+            try container.encode(error, forKey: .error)
         case let .error(error):
             try container.encode("error", forKey: .type)
             try container.encode(error, forKey: .error)
@@ -364,6 +383,20 @@ struct HelperMediaOutputEnvelope: Encodable, Sendable {
     let id: String
     let type = "media_response"
     let response: HelperMediaDeviceResponseDto
+    var closeReceipt: HelperMediaCloseReceipt? {
+        guard case let .stopped(receipt) = response.result else { return nil }
+        return receipt
+    }
+
+    enum CodingKeys: String, CodingKey { case id, type, response, closeReceipt = "close_receipt" }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(type, forKey: .type)
+        try container.encode(response, forKey: .response)
+        try container.encodeIfPresent(closeReceipt, forKey: .closeReceipt)
+    }
 }
 
 func helperMediaErrorDto(_ error: Error) -> HelperMediaErrorDto {
@@ -505,6 +538,57 @@ struct HelperMediaPlaybackReceiptLedger {
     }
 }
 
+/// Counts native callbacks and their actor hops. Closing admission prevents a
+/// late callback from touching a retired session; a receipt waits for every
+/// callback that was already admitted. Overflow remains unknown, never clean.
+final class HelperMediaCallbackFence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var closed = false
+    private var overflowed = false
+    private var active = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func admit() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return false }
+        guard active < 1_024 else { overflowed = true; return false }
+        active += 1
+        return true
+    }
+
+    func finish() {
+        lock.lock()
+        precondition(active > 0)
+        active -= 1
+        let ready = closed && active == 0 && !overflowed ? waiters : []
+        if !ready.isEmpty { waiters.removeAll() }
+        lock.unlock()
+        ready.forEach { $0.resume() }
+    }
+
+    func close() {
+        lock.lock()
+        closed = true
+        let ready = active == 0 && !overflowed ? waiters : []
+        if !ready.isEmpty { waiters.removeAll() }
+        lock.unlock()
+        ready.forEach { $0.resume() }
+    }
+
+    func waitForDrain() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if closed && active == 0 && !overflowed {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+}
+
 @MainActor
 final class HelperMediaDeviceSession {
     nonisolated static let supportedMediaSessionModes: [String] = ["audio"]
@@ -520,6 +604,8 @@ final class HelperMediaDeviceSession {
     private let outputFormat: AVAudioFormat
     private let inputFormat: AVAudioFormat
     private let captureEpochOffset: Double
+    private let callbackFence = HelperMediaCallbackFence()
+    private var teardownStarted = false
     private var inputTapInstalled = false
     private var isOpen = false
     private var audioEnabled = true
@@ -546,7 +632,7 @@ final class HelperMediaDeviceSession {
 
     init(request: HelperMediaOpenRequest) throws {
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
-            throw HelperError.permission("microphone access is required")
+            throw HelperMediaOpenFailedWithoutResource(cause: HelperError.permission("microphone access is required"))
         }
         let engine = AVAudioEngine()
         let inputFormat = engine.inputNode.outputFormat(forBus: 0)
@@ -589,10 +675,6 @@ final class HelperMediaDeviceSession {
             player.play()
             isOpen = true
         } catch {
-            engine.inputNode.removeTap(onBus: 0)
-            inputTapInstalled = false
-            engine.stop()
-            engine.detach(player)
             throw HelperError.native("native duplex audio could not start: \(error.localizedDescription)")
         }
     }
@@ -645,6 +727,8 @@ final class HelperMediaDeviceSession {
             }
         }
 
+        let fence = callbackFence
+        guard fence.admit() else { throw HelperError.native("native playback callback tracking overflowed") }
         if playerSampleTimeBase == nil {
             playerSampleTimeBase = currentPlayerSampleTime()
         }
@@ -663,10 +747,11 @@ final class HelperMediaDeviceSession {
         pendingChunks.append(chunk)
         engine.mainMixerNode.outputVolume = playbackGain
         let generation = playbackGeneration
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self, fence] _ in
             // AVAudioPlayerNode calls from its render callback; serialize lease
             // counters on MainActor before any callback result is observed.
             Task { @MainActor [weak self] in
+                defer { fence.finish() }
                 self?.confirmPlayed(chunkID: chunk.id, generation: generation)
             }
         }
@@ -762,23 +847,27 @@ final class HelperMediaDeviceSession {
     func hasPendingPlayback() -> Bool { !pendingChunks.isEmpty }
 
     func stop() async {
-        guard isOpen else { return }
-        isOpen = false
-        audioEnabled = false
-        inputQueue.finish()
-        if inputTapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-            inputTapInstalled = false
+        if !teardownStarted {
+            teardownStarted = true
+            isOpen = false
+            audioEnabled = false
+            callbackFence.close()
+            inputQueue.finish()
+            if inputTapInstalled {
+                engine.inputNode.removeTap(onBus: 0)
+                inputTapInstalled = false
+            }
+            let generation = playbackGeneration
+            let estimated = max(totalPlayedInputFrames, estimatedPlayedInputFrames())
+            let partialFrames = estimated - totalPlayedInputFrames
+            totalPlayedInputFrames = estimated
+            receiptLedger.recordPlayed(partialFrames, generation: generation, renderedAtUnixMs: nil)
+            _ = takeBarrierReceipt(generation: generation)
+            cutPlayback()
+            engine.stop()
+            engine.detach(player)
         }
-        let generation = playbackGeneration
-        let estimated = max(totalPlayedInputFrames, estimatedPlayedInputFrames())
-        let partialFrames = estimated - totalPlayedInputFrames
-        totalPlayedInputFrames = estimated
-        receiptLedger.recordPlayed(partialFrames, generation: generation, renderedAtUnixMs: nil)
-        _ = takeBarrierReceipt(generation: generation)
-        cutPlayback()
-        engine.stop()
-        engine.detach(player)
+        await callbackFence.waitForDrain()
     }
 
     private func installInputTap() throws {
@@ -787,7 +876,10 @@ final class HelperMediaDeviceSession {
         let epochOffset = captureEpochOffset
         let frameByteLimit = min(maximumPayloadBytes, helperMediaMaximumCaptureFrameBytes)
         let format = inputFormat
-        engine.inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, time in
+        let fence = callbackFence
+        engine.inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { [fence] buffer, time in
+            guard fence.admit() else { return }
+            defer { fence.finish() }
             guard let inputChannels = buffer.floatChannelData,
                   buffer.frameLength > 0,
                   buffer.format.sampleRate > 0 else {

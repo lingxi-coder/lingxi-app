@@ -26,8 +26,8 @@ use super::linux_runtime::prepared_android_mobile_linux_runtime;
 use client::protocol::text::ClientTextDto;
 #[cfg(feature = "uniffi")]
 use harness_runtime::mobile::{
-    ClientEventListener, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
-    PermissionRequestSink,
+    ClientEventListener, MediaAttachmentHandle, MediaAttachmentHost, MediaAttachmentRevocation,
+    MobileCronStoreHandle, MobileEngineError, MobileEngineHandle, PermissionRequestSink,
 };
 #[cfg(all(feature = "uniffi", target_os = "android"))]
 use harness_runtime::mobile::{MobileConfig, MobileSessionMode, SessionModeDto};
@@ -54,6 +54,8 @@ use media_api::{MediaDevicePorts, MediaResourceStore, MediaSessionMode};
 #[cfg(feature = "uniffi")]
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct MediaAudioSessionBindingFfi {
+    pub attachment_host_id: String,
+    pub attachment_generation: u64,
     pub session_id: String,
     pub generation: u64,
 }
@@ -68,7 +70,10 @@ pub struct AndroidNativeMediaHost {
     audio: Arc<dyn AudioService>,
     camera: Arc<dyn CameraControl>,
     media_audio_configuration_json: Arc<RwLock<String>>,
-    conversation_attachment: Arc<AppMediaConversationAttachment>,
+    media_attachment_host: MediaAttachmentHost,
+    /// Strong app-host retention keeps provider routes alive while an engine
+    /// attachment is Revoking or Unknown. Confirmed drains remove one exact key.
+    attachment_routes: Arc<Mutex<HashMap<(String, u64), Arc<AndroidEngineMediaBinding>>>>,
     engine_bindings: Arc<Mutex<HashMap<usize, Weak<AndroidEngineMediaBinding>>>>,
 }
 
@@ -78,6 +83,7 @@ pub struct AndroidNativeMediaHost {
 #[cfg(feature = "uniffi")]
 pub(super) struct AndroidEngineMediaBinding {
     registry: Arc<AudioProviderCloudRegistry>,
+    attachment: MediaAttachmentHandle,
     engine_bindings: Weak<Mutex<HashMap<usize, Weak<AndroidEngineMediaBinding>>>>,
     engine_key: AtomicUsize,
     update_gate: tokio::sync::Mutex<()>,
@@ -88,15 +94,22 @@ pub(super) struct AndroidEngineMediaBinding {
 impl AndroidEngineMediaBinding {
     fn new(
         registry: Arc<AudioProviderCloudRegistry>,
+        attachment: MediaAttachmentHandle,
         engine_bindings: Weak<Mutex<HashMap<usize, Weak<AndroidEngineMediaBinding>>>>,
     ) -> Self {
         Self {
             registry,
+            attachment,
             engine_bindings,
             engine_key: AtomicUsize::new(0),
             update_gate: tokio::sync::Mutex::new(()),
             current: Mutex::new(None),
         }
+    }
+
+    fn matches_attachment(&self, binding: &MediaAudioSessionBindingFfi) -> bool {
+        binding.attachment_host_id == self.attachment.id().host_id()
+            && binding.attachment_generation == self.attachment.id().generation()
     }
 
     async fn bind_current_context(
@@ -105,6 +118,15 @@ impl AndroidEngineMediaBinding {
     ) -> Result<MediaAudioSessionBindingFfi, MobileEngineError> {
         let _update_guard = self.update_gate.lock().await;
         let context = engine.current_media_context().await?;
+        let owner = media_api::MediaOwner::Session {
+            session_id: context.session_id.clone(),
+        };
+        // Keep route registration under the attachment admission fence. If
+        // teardown has started, a stale engine cannot reinstall its provider.
+        let permit = self
+            .attachment
+            .authorize_owner(&owner)
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
         let (services, credential_ids, _) = engine.audio_provider_services();
         let provider = Arc::new(AudioProviderHost::from_provider_services(
             services,
@@ -112,7 +134,7 @@ impl AndroidEngineMediaBinding {
         ));
         for profile_name in credential_ids.keys() {
             self.registry
-                .register_profile(profile_name.clone(), provider.clone())
+                .register_attached_profile(&permit, profile_name.clone(), provider.clone())
                 .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
         }
 
@@ -122,36 +144,84 @@ impl AndroidEngineMediaBinding {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let generation = self
             .registry
-            .register_session(
-                context.session_id.clone(),
-                context.profile_id,
-                context.account_scope,
-                provider,
-            )
+            .register_attached_session(&permit, context.profile_id, context.account_scope, provider)
             .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
         let next = MediaAudioSessionBindingFfi {
+            attachment_host_id: self.attachment.id().host_id(),
+            attachment_generation: self.attachment.id().generation(),
             session_id: context.session_id,
             generation,
         };
         if let Some(previous) = current.replace(next.clone()) {
-            self.registry
-                .unregister_session_if_generation(&previous.session_id, previous.generation);
+            self.registry.unregister_attached_session_if_generation(
+                self.attachment.id(),
+                &previous.session_id,
+                previous.generation,
+            );
         }
         Ok(next)
+    }
+
+    fn remove_session_context(&self, binding: &MediaAudioSessionBindingFfi) -> bool {
+        if !self.matches_attachment(binding) {
+            return false;
+        }
+        let owner = media_api::MediaOwner::Session {
+            session_id: binding.session_id.clone(),
+        };
+        // While revocation is in flight (or Unknown), retain the exact route.
+        // A confirmed drain's host callback removes this attachment's routes.
+        let Ok(_permit) = self.attachment.authorize_owner(&owner) else {
+            return false;
+        };
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.as_ref() != Some(binding) {
+            return false;
+        }
+        let removed = self.registry.unregister_attached_session_if_generation(
+            self.attachment.id(),
+            &binding.session_id,
+            binding.generation,
+        );
+        if removed {
+            *current = None;
+        }
+        removed
     }
 }
 
 #[cfg(feature = "uniffi")]
 impl Drop for AndroidEngineMediaBinding {
     fn drop(&mut self) {
-        let current = self
-            .current
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(binding) = current {
-            self.registry
-                .unregister_session_if_generation(&binding.session_id, binding.generation);
+        match self.attachment.phase() {
+            harness_runtime::mobile::MediaAttachmentPhase::Revoked => {
+                self.registry.unregister_attachment(self.attachment.id());
+                self.current
+                    .get_mut()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+            }
+            harness_runtime::mobile::MediaAttachmentPhase::Active => {
+                let current = self
+                    .current
+                    .get_mut()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(binding) = current {
+                    self.registry.unregister_attached_session_if_generation(
+                        self.attachment.id(),
+                        &binding.session_id,
+                        binding.generation,
+                    );
+                }
+            }
+            harness_runtime::mobile::MediaAttachmentPhase::Revoking
+            | harness_runtime::mobile::MediaAttachmentPhase::Unknown => {
+                // Keep provider routes host-owned while drain completion is not confirmed.
+            }
         }
         let key = self.engine_key.load(Ordering::Acquire);
         if key != 0 {
@@ -222,24 +292,13 @@ impl AndroidNativeMediaHost {
             .update_audio_routing_v4(&media_audio_configuration_json)
             .map_err(MobileEngineError::Internal)?;
         let media_audio_configuration_json = Arc::new(RwLock::new(media_audio_configuration_json));
-        let configuration_for_attachment = media_audio_configuration_json.clone();
-        let configuration_snapshot: AudioConfigurationSnapshot = Arc::new(move || {
-            Ok(configuration_for_attachment
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone())
-        });
-        let conversation_attachment = AppMediaConversationAttachment::new(
-            inner.cloud_audio_registry(),
-            inner.media_service(),
-            configuration_snapshot,
-        );
         Ok(Arc::new(Self {
             inner,
             audio,
             camera,
             media_audio_configuration_json,
-            conversation_attachment,
+            media_attachment_host: MediaAttachmentHost::new(),
+            attachment_routes: Arc::new(Mutex::new(HashMap::new())),
             engine_bindings: Arc::new(Mutex::new(HashMap::new())),
         }))
     }
@@ -276,16 +335,138 @@ impl AndroidNativeMediaHost {
         binding.bind_current_context(&engine).await
     }
 
-    /// Remove provider routing state for one engine session during teardown.
-    pub fn remove_audio_session_context(&self, session_id: String, generation: u64) {
-        self.inner
-            .cloud_audio_registry()
-            .unregister_session_if_generation(&session_id, generation);
+    /// Remove one exact engine attachment/session route. The attachment ID
+    /// prevents a stale engine's cleanup from touching a route in another
+    /// engine's attachment-scoped routes in the shared registry.
+    pub fn remove_audio_session_context(&self, binding: MediaAudioSessionBindingFfi) {
+        let key = (
+            binding.attachment_host_id.clone(),
+            binding.attachment_generation,
+        );
+        let route = self
+            .attachment_routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        if let Some(route) = route {
+            route.remove_session_context(&binding);
+        }
     }
 }
 
 #[cfg(feature = "uniffi")]
 impl AndroidNativeMediaHost {
+    fn create_engine_media_scope(
+        &self,
+    ) -> Result<
+        (
+            MediaAttachmentHandle,
+            Arc<dyn orchestrator::MediaConversationAttachment>,
+            Arc<AndroidEngineMediaBinding>,
+        ),
+        MobileEngineError,
+    > {
+        let (attachment, registry) = self
+            .inner
+            .create_mobile_media_attachment(&self.media_attachment_host)
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+        let binding = Arc::new(AndroidEngineMediaBinding::new(
+            registry.clone(),
+            attachment.clone(),
+            Arc::downgrade(&self.engine_bindings),
+        ));
+        let key = (attachment.id().host_id(), attachment.id().generation());
+        let inserted = {
+            let mut routes = self
+                .attachment_routes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match routes.entry(key) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(binding.clone());
+                    true
+                }
+                std::collections::hash_map::Entry::Occupied(_) => false,
+            }
+        };
+        if !inserted {
+            return Err(MobileEngineError::Internal(
+                "Android media attachment identity was already registered".into(),
+            ));
+        }
+
+        let configuration = self.media_audio_configuration_json.clone();
+        let configuration_snapshot: AudioConfigurationSnapshot = Arc::new(move || {
+            Ok(configuration
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone())
+        });
+        let conversation_attachment = AppMediaConversationAttachment::new(
+            registry,
+            attachment.clone(),
+            configuration_snapshot,
+        );
+        Ok((attachment, conversation_attachment, binding))
+    }
+
+    fn attachment_confirmed_callback(
+        &self,
+        attachment: &MediaAttachmentHandle,
+    ) -> Arc<dyn Fn() + Send + Sync> {
+        let routes = Arc::downgrade(&self.attachment_routes);
+        let key = (attachment.id().host_id(), attachment.id().generation());
+        let attachment = attachment.clone();
+        let registry = self.inner.cloud_audio_registry();
+        Arc::new(move || {
+            if attachment.phase() != harness_runtime::mobile::MediaAttachmentPhase::Revoked {
+                return;
+            }
+            registry.unregister_attachment(attachment.id());
+            if let Some(routes) = routes.upgrade() {
+                routes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&key);
+            }
+        })
+    }
+
+    fn revoke_unbuilt_attachment(&self, binding: Arc<AndroidEngineMediaBinding>) {
+        // A failed engine build must not leave an active, unowned attachment.
+        binding.attachment.begin_revoke();
+        let attachment = binding.attachment.clone();
+        let on_confirmed = self.attachment_confirmed_callback(&attachment);
+        if let Err(error) = harness_runtime::mobile::spawn_mobile_lifecycle_task(async move {
+            match attachment.revoke(std::time::Duration::from_secs(5)).await {
+                MediaAttachmentRevocation::Confirmed => on_confirmed(),
+                MediaAttachmentRevocation::Unknown { reason }
+                    if attachment.phase()
+                        == harness_runtime::mobile::MediaAttachmentPhase::Revoking =>
+                {
+                    // Timeout only ends this observation. Watch the same drain
+                    // flight without polling or destroying its executor.
+                    tracing::warn!(%reason, "unbuilt Android media drain is still running");
+                    if attachment.wait_for_drain_completion().await
+                        == harness_runtime::mobile::MediaAttachmentPhase::Revoked
+                        && matches!(
+                            attachment.revoke(std::time::Duration::from_secs(5)).await,
+                            MediaAttachmentRevocation::Confirmed
+                        )
+                    {
+                        on_confirmed();
+                    }
+                }
+                MediaAttachmentRevocation::Unknown { reason } => {
+                    tracing::warn!(%reason, "unbuilt Android media attachment remains retained");
+                }
+            }
+        }) {
+            tracing::warn!(%error, "could not schedule unbuilt Android media attachment cleanup; admission remains closed");
+        }
+    }
+
     fn engine_key(engine: &Arc<MobileEngineHandle>) -> usize {
         Arc::as_ptr(engine) as usize
     }
@@ -340,12 +521,6 @@ impl AndroidNativeMediaHost {
 
     pub(crate) fn resource_store(&self) -> Arc<dyn MediaResourceStore> {
         self.inner.resource_store()
-    }
-
-    pub(crate) fn conversation_attachment(
-        &self,
-    ) -> Arc<dyn orchestrator::MediaConversationAttachment> {
-        self.conversation_attachment.clone()
     }
 
     pub(crate) fn cloud_audio_registry(&self) -> Arc<AudioProviderCloudRegistry> {
@@ -650,14 +825,6 @@ pub fn build_android_engine(
         physical_memory_bytes,
         host_environment,
     } = config;
-    let media_binding = Arc::new(AndroidEngineMediaBinding::new(
-        media_host.cloud_audio_registry(),
-        Arc::downgrade(&media_host.engine_bindings),
-    ));
-    let listener: Arc<dyn ClientEventListener> = Arc::new(AndroidListenerBridge {
-        inner: listener,
-        _media_binding: Some(media_binding.clone()),
-    });
     #[cfg(target_os = "android")]
     let device_control = device_control.map(|inner| Arc::new(AndroidDeviceControlBridge { inner }));
     // Everything after this point that only the `cfg(android)` arm consumes has
@@ -678,6 +845,8 @@ pub fn build_android_engine(
     #[cfg(target_os = "android")]
     {
         use platform_android::{AndroidPlatform, AndroidPlatformInputs};
+        harness_runtime::mobile::initialize_mobile_lifecycle_runtime()
+            .map_err(MobileEngineError::Internal)?;
         let audio = media_host.audio_service();
         let camera = media_host.camera_control();
         let device_status = device_control
@@ -764,8 +933,8 @@ pub fn build_android_engine(
             inline_visualization: true,
             // The Apps page and the card under the tool call open local apps.
             local_apps: true,
-            media_service: Some(media_host.media_service()),
-            media_conversation_attachment: Some(media_host.conversation_attachment()),
+            media_service: None,
+            media_conversation_attachment: None,
             ..MobileConfig::default()
         };
         if !api_base.is_empty() {
@@ -902,14 +1071,48 @@ pub fn build_android_engine(
         let platform: Arc<dyn Platform> = Arc::new(android_platform);
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(AndroidPermissionSinkBridge { inner: permissions });
-        let engine =
-            harness_runtime::mobile::build_mobile_engine(cfg, platform, listener, permission_sink)?;
-        media_host.register_engine_binding(&engine, &media_binding);
-        // Initial provider context is present for cron / Local App engines too;
-        // later session transitions refresh it through the same owner guard.
-        let _ = engine
-            .runtime()
-            .block_on(media_host.update_audio_session_context(engine.clone()));
+        // Local App Agent engines deliberately have no media capability. Every
+        // interactive/headless engine receives one app-host-issued attachment,
+        // and both its tool service and Conversation adapter use that same ID.
+        let media_scope = if app_agent_host {
+            None
+        } else {
+            Some(media_host.create_engine_media_scope()?)
+        };
+        if let Some((attachment, conversation_attachment, _)) = media_scope.as_ref() {
+            cfg.media_service = Some(attachment.service());
+            cfg.media_attachment_handle = Some(attachment.clone());
+            cfg.media_attachment_confirmed_callback =
+                Some(media_host.attachment_confirmed_callback(attachment));
+            cfg.media_conversation_attachment = Some(conversation_attachment.clone());
+        }
+        let media_binding = media_scope.as_ref().map(|(_, _, binding)| binding.clone());
+        let listener: Arc<dyn ClientEventListener> = Arc::new(AndroidListenerBridge {
+            inner: listener,
+            _media_binding: media_binding.clone(),
+        });
+        let engine = match harness_runtime::mobile::build_mobile_engine(
+            cfg,
+            platform,
+            listener,
+            permission_sink,
+        ) {
+            Ok(engine) => engine,
+            Err(error) => {
+                if let Some(binding) = media_binding {
+                    media_host.revoke_unbuilt_attachment(binding);
+                }
+                return Err(error);
+            }
+        };
+        if let Some(media_binding) = media_binding {
+            media_host.register_engine_binding(&engine, &media_binding);
+            // Interactive and scheduled engines establish their trusted route
+            // under this attachment before a Conversation handoff can open.
+            let _ = engine
+                .runtime()
+                .block_on(media_host.update_audio_session_context(engine.clone()));
+        }
         Ok(engine)
     }
     #[cfg(not(target_os = "android"))]
@@ -936,5 +1139,199 @@ pub fn build_android_engine(
             secure_storage,
         );
         Err(MobileEngineError::PlatformUnavailable)
+    }
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod mobile_media_scope_tests {
+    use super::super::callbacks::{
+        AndroidAudioFfiError, AndroidMediaDeviceCapabilities, AndroidMediaDeviceResponse,
+        CameraFfiError, CapturedImageFfi,
+    };
+    use super::*;
+    use client::protocol::{audio as audio_dto, media as media_dto};
+    use media_api::{
+        MediaOperation, MediaOperationContext, MediaOperationId, MediaOperationKind, MediaOwner,
+        MediaResult,
+    };
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    struct Audio;
+    #[async_trait::async_trait]
+    impl AndroidAudioService for Audio {
+        fn capabilities(&self) -> audio_dto::AudioCapabilitySnapshotDto {
+            audio_dto::AudioCapabilitySnapshotDto {
+                service_epoch: 1,
+                support_revision: 1,
+                supported_operations: Vec::new(),
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+        async fn execute(
+            &self,
+            request: audio_dto::AudioOperationRequestDto,
+        ) -> audio_dto::AudioOperationResultDto {
+            match request.operation {
+                audio_dto::AudioOperationDto::Status { handle: None } => {
+                    audio_dto::AudioOperationResultDto::Status {
+                        status: audio_dto::AudioStatusDto {
+                            recording: false,
+                            playing: false,
+                        },
+                    }
+                }
+                _ => panic!("unexpected audio operation in idle media fixture"),
+            }
+        }
+        async fn cancel(
+            &self,
+            _: audio_dto::AudioOperationIdDto,
+        ) -> Result<(), AndroidAudioFfiError> {
+            Ok(())
+        }
+    }
+    struct Camera;
+    #[async_trait::async_trait]
+    impl AndroidCamera for Camera {
+        async fn capture_photo(
+            &self,
+            _: bool,
+            _: bool,
+        ) -> Result<CapturedImageFfi, CameraFfiError> {
+            Err(CameraFfiError::DeviceUnavailable)
+        }
+        async fn pick_from_library(&self) -> Result<CapturedImageFfi, CameraFfiError> {
+            Err(CameraFfiError::DeviceUnavailable)
+        }
+    }
+    struct Devices;
+    #[async_trait::async_trait]
+    impl AndroidMediaDevicePorts for Devices {
+        fn device_capabilities(&self) -> AndroidMediaDeviceCapabilities {
+            AndroidMediaDeviceCapabilities {
+                session_modes: Vec::new(),
+            }
+        }
+        async fn request(
+            &self,
+            _: media_dto::MediaDeviceRequestEnvelopeDto,
+        ) -> AndroidMediaDeviceResponse {
+            panic!("this fixture does not open devices")
+        }
+    }
+
+    #[tokio::test]
+    async fn native_host_engine_scopes_share_service_without_sharing_owner_routes() {
+        let config = r#"{"schemaVersion":4,"recognition":{"source":"automatic","cloud":{"binding":"follow_session"}},"speech":{"source":"automatic","cloud":{"binding":"follow_session"}},"language":"auto","rate":1.0}"#;
+        let host = AndroidNativeMediaHost::new(
+            Box::new(Audio),
+            Box::new(Camera),
+            Box::new(Devices),
+            config.into(),
+        )
+        .unwrap();
+        let (first, _, first_binding) = host.create_engine_media_scope().unwrap();
+        let (second, _, second_binding) = host.create_engine_media_scope().unwrap();
+        assert_ne!(first.id(), second.id());
+        assert!(Arc::ptr_eq(
+            &first_binding.registry,
+            &second_binding.registry
+        ));
+        assert!(Arc::ptr_eq(
+            &first_binding.registry,
+            &host.inner.cloud_audio_registry()
+        ));
+        let owner = MediaOwner::Session {
+            session_id: "same-session".into(),
+        };
+        for (generation, attachment) in [(1, &first), (2, &second)] {
+            // Harness mobile assembly binds the platform audio service to the
+            // same attachment, even if the engine never uses direct audio.
+            let _audio = attachment.audio_service(host.audio_service()).unwrap();
+            let service = attachment.service();
+            let capabilities = service.capabilities_for(&owner);
+            assert!(capabilities.supports(MediaOperationKind::Sources));
+            let context = MediaOperationContext::new(
+                MediaOperationId::new(generation, capabilities.service_epoch),
+                owner.clone(),
+            );
+            assert!(matches!(
+                service
+                    .execute(
+                        context,
+                        MediaOperation::Sources {
+                            kind: None,
+                            usage: None
+                        }
+                    )
+                    .await,
+                Ok(MediaResult::Sources { .. })
+            ));
+        }
+        let provider = || {
+            Arc::new(AudioProviderHost::new("{}", "international", None, BTreeMap::new()).unwrap())
+        };
+        let first_provider = provider();
+        let second_provider = provider();
+        let registry = first_binding.registry.clone();
+        for (attachment, provider) in [(&first, &first_provider), (&second, &second_provider)] {
+            let permit = attachment.authorize_owner(&owner).unwrap();
+            registry
+                .register_attached_profile(&permit, "openai", provider.clone())
+                .unwrap();
+            registry
+                .bind_attached_session_to_profile(&permit, "openai", "profile:openai")
+                .unwrap();
+        }
+        let callback = host.attachment_confirmed_callback(&first);
+        callback();
+        assert!(registry
+            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .is_ok());
+        let (idle, _, _) = host.create_engine_media_scope().unwrap();
+        let _idle_audio = idle.audio_service(host.audio_service()).unwrap();
+        let idle_key = (idle.id().host_id(), idle.id().generation());
+        let idle_callback = host.attachment_confirmed_callback(&idle);
+        assert_eq!(
+            idle.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        idle_callback();
+        assert!(!host
+            .attachment_routes
+            .lock()
+            .unwrap()
+            .contains_key(&idle_key));
+        first.begin_revoke();
+        callback();
+        assert!(registry
+            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .is_ok());
+        assert_eq!(
+            first.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        callback();
+        assert!(registry
+            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .is_err());
+        assert!(Arc::ptr_eq(
+            &registry
+                .provider_for_attached_session(
+                    second.id(),
+                    "same-session",
+                    "openai",
+                    "profile:openai"
+                )
+                .unwrap(),
+            &second_provider
+        ));
+        assert_eq!(
+            second.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        host.attachment_confirmed_callback(&second)();
     }
 }

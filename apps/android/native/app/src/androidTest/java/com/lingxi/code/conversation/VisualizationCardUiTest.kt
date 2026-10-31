@@ -27,7 +27,9 @@ import com.lingxi.code.bindings.runtime.VisualizationResponseDto
 import com.lingxi.code.bindings.runtime.VisualizationThemeDto
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.components.UiTags
-import com.lingxi.code.voice.buildVoiceEngine
+import com.lingxi.code.runtimeintegration.NativeEngineCallbacks
+import com.lingxi.code.runtimeintegration.NativeEngineFactory
+import com.lingxi.code.runtimeintegration.NativeEngineScenario
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -198,7 +200,7 @@ class VisualizationCardUiTest {
         File(store, "index.json").writeText(
             """{"schema":1,"totalBytes":${fragment.toByteArray().size},"items":{"chart":{"revisions":[{"rev":1,"title":"Native chart","bytes":${fragment.toByteArray().size},"createdAtMs":${System.currentTimeMillis()}}]}}}""",
         )
-        val engine = requireNotNull(buildVoiceEngine(
+        val engine = requireNotNull(NativeEngineFactory.build(
             context = context,
             apiBase = "https://invalid.example",
             apiKey = "",
@@ -206,7 +208,9 @@ class VisualizationCardUiTest {
             providerProfilesJson = "{}",
             routingJson = """{"mobileEnabledProfiles":[]}""",
             visionDelegationEnabled = false,
-            onPermission = { error("No permission expected") },
+            scenario = NativeEngineScenario.Interactive(NativeEngineCallbacks(
+                onPermission = { error("No permission expected") },
+            )),
         ))
         try {
             val host = requireNotNull(engine.visualizationHost(VISUALIZATION_ORIGIN))

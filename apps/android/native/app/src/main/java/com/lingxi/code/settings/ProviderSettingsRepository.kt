@@ -559,6 +559,8 @@ class ProviderSettingsRepository(
                 model = seededModel,
                 status = ConnStatus.Idle,
                 enabled = true,
+                catalogBaseUrl = catalogEntries.firstOrNull { it.profileId == (if (preset.id == "google") "gemini" else preset.id) }?.baseUrl,
+                catalogProtocol = catalogEntries.firstOrNull { it.profileId == (if (preset.id == "google") "gemini" else preset.id) }?.protocol,
             )
         }
 
@@ -568,23 +570,19 @@ class ProviderSettingsRepository(
             // as a built-in would drop it from the emitted providers map and
             // the connections would vanish with no error on any surface.
             if (provider.connections.isNotEmpty()) return false
-            val preset = ProviderKind.Llm.presets.firstOrNull { it.id == provider.preset }
-            val defaultUrl = preset?.defaultUrl ?: mapOf(
-                "openai-chatgpt" to "https://chatgpt.com/backend-api/codex",
-                "github-copilot" to "https://api.githubcopilot.com",
-                "zai" to "https://api.z.ai/api/paas/v4",
-                "glm-coding" to "https://open.bigmodel.cn/api/anthropic",
-            )[provider.preset] ?: return false
-            if (provider.preset !in setOf(
-                    "anthropic", "openai", "openai-chatgpt", "google", "deepseek", "kimi",
-                    "kimi-code", "github-copilot", "zai", "glm-coding", "openrouter",
-                )) {
-                return false
-            }
+            val defaultUrl = provider.catalogBaseUrl ?: return false
             return provider.url.isBlank() || provider.url.trimEnd('/') == defaultUrl.trimEnd('/')
         }
 
-        private fun providerType(provider: GenericProvider): String? = when (provider.preset) {
+        private fun providerType(provider: GenericProvider): String? = when (provider.catalogProtocol) {
+            "anthropic_messages" -> "anthropic"
+            "gemini_generate_content" -> "gemini"
+            "open_ai_responses" -> "openai-responses"
+            "open_ai_chat" -> "openai"
+            else -> providerPresetType(provider)
+        }
+
+        private fun providerPresetType(provider: GenericProvider): String? = when (provider.preset) {
             "anthropic" -> "anthropic"
             "glm-coding" -> "anthropic"
             "google" -> "gemini"
@@ -596,13 +594,7 @@ class ProviderSettingsRepository(
             val type = providerType(provider) ?: return null
             val baseUrl = provider.url.trim()
             if (baseUrl.isEmpty()) return null
-            val presetModels = ProviderKind.Llm.presets
-                .firstOrNull { it.id == provider.preset }
-                ?.models
-                .orEmpty()
-            val models = (listOf(provider.model.trim()) + presetModels)
-                .filter { it.isNotBlank() }
-                .distinct()
+            val models = listOf(provider.model.trim()).filter { it.isNotBlank() }
             if (models.isEmpty()) return null
             return JSONObject().apply {
                 put("type", type)
@@ -666,6 +658,8 @@ class ProviderSettingsRepository(
             GenericProvider(
                 id = obj.getString("id"),
                 preset = obj.getString("preset"),
+                catalogBaseUrl = obj.optString("catalogBaseUrl").takeIf { it.isNotEmpty() },
+                catalogProtocol = obj.optString("catalogProtocol").takeIf { it.isNotEmpty() },
                 name = obj.getString("name"),
                 url = obj.getString("url"),
                 key = "",
@@ -712,6 +706,8 @@ class ProviderSettingsRepository(
             JSONObject().apply {
                 put("id", provider.id)
                 put("preset", provider.preset)
+                provider.catalogBaseUrl?.let { put("catalogBaseUrl", it) }
+                provider.catalogProtocol?.let { put("catalogProtocol", it) }
                 put("name", provider.name)
                 put("url", provider.url)
                 put("model", provider.model)

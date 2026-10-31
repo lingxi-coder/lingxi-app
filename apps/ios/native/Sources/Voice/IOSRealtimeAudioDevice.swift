@@ -53,6 +53,58 @@ struct IOSRealtimeAudioInputFrame: Sendable {
     let capturedAtUnixMs: UInt64
 }
 
+/// The coordinator rejected this attempt before invoking native activation.
+struct IOSRealtimeAudioNotAdmitted: LocalizedError {
+    let purpose: VoiceAudioSessionCoordinator.Purpose
+    var errorDescription: String? {
+        VoiceAudioSessionCoordinator.CoordinationError.busy(purpose).errorDescription
+    }
+}
+
+/// Tracks native tap callbacks that have already entered when Stop begins.
+final class IOSRealtimeAudioCallbackFence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var closing = false
+    private var active = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func enter() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closing else { return false }
+        active += 1
+        return true
+    }
+
+    func leave() {
+        lock.lock()
+        active -= 1
+        let ready = closing && active == 0 ? waiters : []
+        if !ready.isEmpty { waiters.removeAll() }
+        lock.unlock()
+        ready.forEach { $0.resume() }
+    }
+
+    func close() {
+        lock.lock()
+        closing = true
+        lock.unlock()
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if active == 0 {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+}
+
 /// A single voice-processing engine owns microphone and speaker under the
 /// same device lease. Its bounded input stream fails on overflow rather than
 /// silently losing audio that the provider could turn into another transcript.
@@ -69,6 +121,12 @@ final class IOSRealtimeAudioDevice {
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
     private var lease: VoiceAudioSessionCoordinator.Lease?
+    private var inputFence: IOSRealtimeAudioCallbackFence?
+    private var starting = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var stopRequested = false
+    private var stopConfirmed = false
+    private var stopTask: Task<Bool, Never>?
     private var inputContinuation: AsyncThrowingStream<IOSRealtimeAudioInputFrame, Error>.Continuation?
     private var queuedOutputBytes = 0
     private var scheduledOutputMs: UInt64 = 0
@@ -137,17 +195,35 @@ final class IOSRealtimeAudioDevice {
             throw AudioServiceFailure.unsupported
         }
         let playbackEnabled = audioSessionPurpose == .flowDuplex
-        guard engine == nil, lease == nil else { throw AudioServiceFailure.busy }
+        guard engine == nil, lease == nil, !starting else { throw AudioServiceFailure.busy }
         guard [16_000, 24_000, 48_000].contains(inputSampleRateHz),
               !playbackEnabled || [16_000, 24_000, 48_000].contains(outputSampleRateHz) else {
             throw AudioServiceFailure.unsupported
         }
+        if stopRequested {
+            guard stopConfirmed else { throw AudioServiceFailure.busy }
+            stopRequested = false
+            stopConfirmed = false
+            stopTask = nil
+        }
+        starting = true
+        defer { finishStarting() }
         guard await AVAudioApplication.requestRecordPermission() else { throw AudioServiceFailure.permissionDenied }
         try Task.checkCancellation()
-        let acquired = try await coordinator.acquire(audioSessionPurpose)
-        lease = acquired
+        guard !stopRequested else { throw AudioServiceFailure.cancelled }
+        switch await coordinator.acquireForMedia(audioSessionPurpose) {
+        case let .acquired(acquired):
+            lease = acquired
+        case let .notAdmitted(purpose):
+            throw IOSRealtimeAudioNotAdmitted(purpose: purpose)
+        case let .activationFailed(attempted, error):
+            lease = attempted
+            _ = await stopResources()
+            throw error
+        }
         do {
             try Task.checkCancellation()
+            guard !stopRequested else { throw AudioServiceFailure.cancelled }
             let audio = AVAudioEngine()
             let input = audio.inputNode
             if playbackEnabled { try input.setVoiceProcessingEnabled(true) }
@@ -172,7 +248,11 @@ final class IOSRealtimeAudioDevice {
             let continuation = pair.continuation
             inputContinuation = continuation
             let unixEpochAtHostClockZero = Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
+            let callbackFence = IOSRealtimeAudioCallbackFence()
+            inputFence = callbackFence
             input.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { buffer, when in
+                guard callbackFence.enter() else { return }
+                defer { callbackFence.leave() }
                 // AVAudioEngine serializes this node's tap. The converter is
                 // confined to that callback; only immutable Data crosses out.
                 let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * target.sampleRate / inputFormat.sampleRate) + 32)
@@ -223,7 +303,7 @@ final class IOSRealtimeAudioDevice {
             speaker?.play()
             return pair.stream
         } catch {
-            await stop()
+            _ = await stopResources()
             throw error
         }
     }
@@ -448,7 +528,34 @@ final class IOSRealtimeAudioDevice {
         return position
     }
 
-    func stop() async {
+    @discardableResult
+    func stop() async -> Bool {
+        stopRequested = true
+        if let stopTask { return await stopTask.value }
+        let task = Task { @MainActor [self] in
+            await waitForStart()
+            return await stopResources()
+        }
+        stopTask = task
+        let confirmed = await task.value
+        stopConfirmed = confirmed
+        if !confirmed { stopTask = nil }
+        return confirmed
+    }
+
+    private func finishStarting() {
+        starting = false
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func waitForStart() async {
+        guard starting else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    private func stopResources() async -> Bool {
         if mediaWrites.isEmpty {
             _ = takeMediaReceipt(generation: playbackGeneration)
         } else {
@@ -457,6 +564,8 @@ final class IOSRealtimeAudioDevice {
         playbackGeneration &+= 1
         inputContinuation?.finish()
         inputContinuation = nil
+        let callbackFence = inputFence
+        callbackFence?.close()
         engine?.inputNode.removeTap(onBus: 0)
         player?.stop()
         engine?.stop()
@@ -467,8 +576,13 @@ final class IOSRealtimeAudioDevice {
         outputItems.removeAll()
         itemStartPositionMs.removeAll()
         scheduledMediaOutputFrames = 0
-        if let lease { await coordinator.release(lease) }
-        lease = nil
+        if let callbackFence { await callbackFence.wait() }
+        inputFence = nil
+        if let lease {
+            guard await coordinator.releaseWithReceipt(lease) else { return false }
+            self.lease = nil
+        }
+        return true
     }
 
     private var currentOutputSampleFrame: UInt64 {

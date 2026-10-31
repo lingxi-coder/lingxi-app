@@ -27,9 +27,18 @@ export interface DesktopAudioService {
   getMediaSessionModes?(): MediaSessionModeDto[];
   initializeCapabilities(): Promise<void>;
   executeAudioRequest(request: AudioOperationRequestDto): Promise<AudioOperationResultDto>;
+  /** Callback is bound to this exact helper/resource/owner flight. */
+  executeAudioRequestWithCloseReceipt?(request: AudioOperationRequestDto, onExactClose: () => void, admissionToken?: object): Promise<AudioOperationResultDto>;
+  reserveAudioAdmission?(request: AudioOperationRequestDto): object | undefined;
+  cancelReservedAudioAdmission?(identity: AudioOperationIdDto, token: object): boolean;
+  /** Fence and prove this identity has not been dispatched to native audio. */
+  rejectAudioRequestBeforeDispatch?(identity: AudioOperationIdDto): boolean;
   /** Native media lease callback shares the same helper's physical-device coordinator. */
   executeMediaDevice?(request: MediaDeviceRequestEnvelopeDto): Promise<MediaDeviceResponseDto>;
-  cancelAudioRequest(identity: AudioOperationIdDto): Promise<void>;
+  hasMediaRequestId?(requestId: string): boolean;
+  /** Resolve only after every prior native open flight has a confirmed terminal cleanup receipt. */
+  drainMediaOpenFlights?(signal?: AbortSignal): Promise<void>;
+  cancelAudioRequest(identity: AudioOperationIdDto, admissionToken?: object): Promise<void | 'verified'>;
   endAudioOwner(owner: AudioOwnerDto): Promise<void>;
   onEvent(callback: (event: { type: string; snapshot?: { capabilities?: AudioCapabilitySnapshotDto; mediaSessionModes?: MediaSessionModeDto[] } }) => void): () => void;
 }
@@ -73,6 +82,8 @@ export interface BridgeLaunchConfig {
   allowTeamOnboarding?: boolean;
   scheduledController?: boolean;
   remoteControlEnabled?: boolean;
+  /** How long the engine waits for a permission answer from a remote device; its remote default (30 minutes) when absent. */
+  permissionTimeoutSecs?: number;
   model?: string;
   apiBaseUrl?: string;
 }
@@ -184,6 +195,8 @@ export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEvent
 export interface SessionRuntimeSummary {
   projectPath: string;
   sessionId: string;
+  /** Set when the session is a Bot's. It is not a project's session and is listed with its Bot, not with the projects. */
+  botId?: string;
   connection: ConnectionState;
   turnActive: boolean;
   pendingInteractions: number;
@@ -191,13 +204,22 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'onSessionModeSelectionStarted' | 'onDraftModeSnapshot' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
-  workspaceSettings?: (projectPath: string) => Promise<WorkspaceLaunchSettings>;
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'getSavedSessionMode' | 'onSessionModeSelected' | 'onFirstPromptSent' | 'onActivityChanged' | 'onSessionModeSelectionStarted' | 'onDraftModeSnapshot' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
+  /** What a session of a working directory is launched with; it is told which session, for settings that belong to the one. */
+  workspaceSettings?: (projectPath: string, ref: SessionRef) => Promise<WorkspaceLaunchSettings>;
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
   onModelSelected?: (ref: SessionRef, model: string) => void;
   getSavedModel?: (ref: SessionRef) => string | undefined;
+  // The owner's last permission mode and Fast mode are preferences of the owner's sessions; asking per session lets a Bot's sessions keep clear of them.
+  getSavedPermissionMode?: (ref: SessionRef) => PermissionModeId | undefined;
+  onPermissionModeSelected?: (ref: SessionRef, mode: PermissionModeId) => void;
+  getSavedFastMode?: (ref: SessionRef) => boolean | undefined;
+  onFastModeSelected?: (ref: SessionRef, enabled: boolean) => void;
+  getSavedSessionMode?: (ref: SessionRef) => RuntimeSessionMode | undefined;
+  /** Return false when the selection does not belong to the user's default preference. */
+  onSessionModeSelected?: (mode: RuntimeSessionMode, ref: SessionRef) => boolean | void;
   onFirstPromptSent?: (ref: SessionRef) => boolean | void;
   /** Maximum retained runtimes when enough idle sessions are evictable. */
   maxCachedRuntimes?: number;
@@ -214,6 +236,32 @@ export interface PromptSource {
   origin: RemotePromptOrigin;
   /** The sending device when `origin` is `device`. */
   deviceName?: string;
+  /** The sending Bot when `origin` is `bot`. */
+  fromBotName?: string;
+}
+
+/** How {@link SessionRuntime.runHostTurn} is asked to run a turn. */
+export interface HostTurnOptions {
+  /** Who the prompt shows as coming from; the host's own by default. */
+  source?: PromptSource;
+  /** Aborting it cancels the turn, which then ends as `cancelled`. */
+  signal?: AbortSignal;
+  /** How long a cancelled turn is given to end before it is let go as `cancelled` all the same; ten seconds by default. */
+  cancelGraceMs?: number;
+  /** Called once the engine has been handed the prompt, and not at all when it was not. */
+  onSent?: () => void;
+}
+
+/** How a turn that {@link SessionRuntime.runHostTurn} ran ended. */
+export interface HostTurnResult {
+  /** `failed`: the engine reported an error, or the reply was cut short. */
+  status: 'completed' | 'failed' | 'cancelled';
+  /** The last thing the assistant said in the turn. */
+  text: string;
+  /** What went wrong, when `status` is `failed`. */
+  error?: string;
+  /** What the turn cost, in US dollars, when the engine said. */
+  costUsd?: number;
 }
 
 /**
@@ -227,6 +275,7 @@ export interface PromptJournalEntry {
   text: string;
   origin: RemotePromptOrigin;
   deviceName?: string;
+  fromBotName?: string;
   /** The bytes are kept for the latest entries that have images; an older entry keeps only the media type. */
   images: ReadonlyArray<{ media_type: string; base64?: string }>;
 }
@@ -287,4 +336,6 @@ export interface WorkspaceLaunchSettings {
   environment: Record<string, string>;
   configHome: string;
   globalConfigPath?: string;
+  /** Directories granted to every session of this workspace unless the session carries grants of its own. */
+  additionalDirectories?: readonly string[];
 }

@@ -1,0 +1,13 @@
+{
+  "pid": 57512,
+  "command": [
+    "python3",
+    "../build/prepare-android-rootfs.py"
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app",
+  "floor_gib": 4,
+  "started_at": 1793245725.1178901,
+  "exit_code": 0,
+  "stopped_for_disk": false,
+  "free_gib": 10.834
+}

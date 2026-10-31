@@ -17,6 +17,7 @@ import { parseVoicePreferences } from '../shared/voicePreferences.js';
 import type { VoicePreferences } from '../shared/voicePreferences.js';
 import { parseNotificationPreferences } from '../shared/notificationPreferences.js';
 import type { NotificationPreferences } from '../shared/notificationPreferences.js';
+import { isPermissionModeId } from '../shared/permission.js';
 import type { SessionCatalogScope } from '../shared/sessionWorkspace.js';
 
 export { SETTINGS_VERSION } from '../shared/settings.js';
@@ -30,6 +31,7 @@ export type { VoicePreferences } from '../shared/voicePreferences.js';
 export { parseVoicePreferences } from '../shared/voicePreferences.js';
 export type { NotificationPreferences } from '../shared/notificationPreferences.js';
 export { parseNotificationPreferences } from '../shared/notificationPreferences.js';
+export { isPermissionModeId } from '../shared/permission.js';
 
 export const MAX_PROJECTS = 50;
 export const MAX_PINNED_SESSIONS = 100;
@@ -99,6 +101,8 @@ export interface PersistedSettings {
   /** Local host policy for the local `/team-onboarding` prompt. */
   allowTeamOnboarding?: boolean;
   collapseThoughtsByDefault?: boolean;
+  /** Keep the computer awake while Bots work; see `PublicSettings`. */
+  botsKeepAwake?: boolean;
   model?: string;
   /** Explicit model selections are scoped to their owning session. */
   sessionModels?: Array<SessionRef & { model: string }>;
@@ -186,11 +190,6 @@ function boundedStringArray(value: unknown, maxItems: number): string[] {
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function isPermissionModeId(value: unknown): value is PermissionModeId {
-  return value === 'default' || value === 'acceptEdits' || value === 'plan'
-    || value === 'auto' || value === 'dontAsk' || value === 'bypassPermissions';
-}
-
 export function parseSettings(value: unknown): PersistedSettings {
   if (!isPlainObject(value) || value['version'] !== SETTINGS_VERSION) {
     return defaultSettings();
@@ -214,6 +213,9 @@ export function parseSettings(value: unknown): PersistedSettings {
   }
   if (typeof value['collapseThoughtsByDefault'] === 'boolean') {
     settings.collapseThoughtsByDefault = value['collapseThoughtsByDefault'];
+  }
+  if (typeof value['botsKeepAwake'] === 'boolean') {
+    settings.botsKeepAwake = value['botsKeepAwake'];
   }
   settings.model = boundedString(value['model'], 256);
   if (Array.isArray(value['sessionModels'])) {
@@ -356,7 +358,7 @@ export function parseSettings(value: unknown): PersistedSettings {
 export function publicSettings(settings: PersistedSettings): PublicSettings {
   const {
     version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions, telemetryEnabled,
-    bypassPermissionsModeAccepted, voice, notifications, modelPickerVisibility, sidebar, collapseThoughtsByDefault,
+    bypassPermissionsModeAccepted, voice, notifications, modelPickerVisibility, sidebar, collapseThoughtsByDefault, botsKeepAwake,
   } = settings;
   return {
     version,
@@ -370,6 +372,7 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
     ...(typeof telemetryEnabled === 'boolean' ? { telemetryEnabled } : {}),
     ...(typeof collapseThoughtsByDefault === 'boolean' ? { collapseThoughtsByDefault } : {}),
+    ...(typeof botsKeepAwake === 'boolean' ? { botsKeepAwake } : {}),
     ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
     ...(voice ? { voice: parseVoicePreferences(voice) } : {}),
     ...(notifications ? { notifications: { ...notifications } } : {}),
@@ -706,6 +709,11 @@ export function resolveModBunExecutable(options: {
   return configured && configured.length > 0 && !configured.includes('\0') ? configured : undefined;
 }
 
+/** How long the engine waits for a remote device to answer a permission prompt, in seconds. */
+export const REMOTE_PERMISSION_TIMEOUT_SECS = 1800;
+/** The same for a Bot, whose owner may be away for a day; the most bridge-server accepts. */
+export const BOT_PERMISSION_TIMEOUT_SECS = 86_400;
+
 export function buildBridgeArguments(config: {
   appVersion?: string;
   workspace: string;
@@ -733,6 +741,8 @@ export function buildBridgeArguments(config: {
   packagedCredentialBoundary?: boolean;
   scheduledController?: boolean;
   remoteControlEnabled?: boolean;
+  /** How long a remote device has to answer a permission prompt; {@link REMOTE_PERMISSION_TIMEOUT_SECS} when absent. */
+  permissionTimeoutSecs?: number;
 }): string[] {
   if (config.listSessionsJson) {
     return ['--cwd', config.workspace, '--list-sessions-json',
@@ -760,7 +770,9 @@ export function buildBridgeArguments(config: {
   if (typeof config.allowTeamOnboarding === 'boolean') {
     args.push('--host-team-onboarding-policy-gate', String(config.allowTeamOnboarding));
   }
-  if (config.remoteControlEnabled) args.push('--permission-timeout-secs', '1800', '--ask-user-question-timeout', 'never');
+  if (config.remoteControlEnabled) {
+    args.push('--permission-timeout-secs', String(config.permissionTimeoutSecs ?? REMOTE_PERMISSION_TIMEOUT_SECS), '--ask-user-question-timeout', 'never');
+  }
   if (config.scheduledController) args.push('--scheduled-controller');
   if (config.packagedCredentialBoundary) args.push('--packaged-credential-stdin-only');
   return args;

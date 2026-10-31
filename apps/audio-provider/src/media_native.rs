@@ -57,10 +57,23 @@ pub fn schedule_native_media_stop(
     lease_id: String,
     permit: OwnedSemaphorePermit,
 ) {
+    schedule_native_media_stop_with_work(callback, lease_id, permit, None);
+}
+
+fn schedule_native_media_stop_with_work(
+    callback: Arc<dyn NativeMediaDeviceCallback>,
+    lease_id: String,
+    permit: OwnedSemaphorePermit,
+    work: Option<Box<dyn media_api::MediaNativeWork>>,
+) {
     let Some(executor) = native_media_executor() else {
         permit.forget();
         tracing::error!("native media cleanup executor is unavailable");
         return;
+    };
+    let mut pending = PendingNativeOpen {
+        permit: Some(permit),
+        work,
     };
     executor.runtime.spawn(async move {
         for attempt in 0..NATIVE_MEDIA_STOP_ATTEMPTS {
@@ -77,15 +90,10 @@ pub fn schedule_native_media_stop(
                 result,
                 Ok(dto::MediaDeviceResponseDto {
                     request_id: ref response_id,
-                    result: dto::MediaDeviceResultDto::Stopped
-                        | dto::MediaDeviceResultDto::Error {
-                            error: dto::MediaErrorDto {
-                                kind: dto::MediaErrorKindDto::NotFound,
-                                ..
-                            }
-                        },
+                    result: dto::MediaDeviceResultDto::Stopped,
                 }) if response_id == &request_id
             ) {
+                pending.confirm_no_resource();
                 return;
             }
             if attempt + 1 < NATIVE_MEDIA_STOP_ATTEMPTS {
@@ -94,7 +102,6 @@ pub fn schedule_native_media_stop(
         }
         // Do not admit another lease into a slot whose native cleanup has not
         // been acknowledged. The process-scoped permit stays quarantined.
-        permit.forget();
         tracing::error!("abandoned native media lease cleanup was not acknowledged");
     });
 }
@@ -129,16 +136,51 @@ impl CallbackMediaDevicePorts {
         Self { callback }
     }
 
-    async fn call(
-        &self,
-        request: dto::MediaDeviceRequestDto,
-        max_payload_bytes: u64,
-    ) -> Result<dto::MediaDeviceResultDto, MediaError> {
+    fn prepare_open(
+        context: &MediaOperationContext,
+        request: &MediaSessionRequest,
+    ) -> Result<dto::MediaDeviceRequestEnvelopeDto, MediaError> {
         let envelope = dto::MediaDeviceRequestEnvelopeDto {
             request_id: uuid::Uuid::new_v4().to_string(),
-            request,
+            request: dto::MediaDeviceRequestDto::Open {
+                request: dto::MediaDeviceOpenRequestDto {
+                    identity: operation_id_to_dto(context.identity.clone()),
+                    owner: owner_to_dto(context.owner.clone())?,
+                    initiator: context.initiator.clone().map(initiator_to_dto),
+                    timeout_budget_ms: context.timeout_budget_ms,
+                    max_payload_bytes: context.max_payload_bytes,
+                    request: session_request_to_dto(request),
+                },
+            },
         };
         envelope.validate().map_err(invalid_callback)?;
+        Ok(envelope)
+    }
+
+    #[cfg(test)]
+    async fn open_owned(
+        &self,
+        context: MediaOperationContext,
+        request: MediaSessionRequest,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<Arc<dyn MediaDeviceSession>, MediaError> {
+        let envelope = Self::prepare_open(&context, &request)?;
+        let work = context.begin_native_work()?;
+        let pending = PendingNativeOpen {
+            permit: Some(permit),
+            work,
+        };
+        self.open_prepared(context, request, pending, envelope)
+            .await
+    }
+
+    async fn open_prepared(
+        &self,
+        context: MediaOperationContext,
+        request: MediaSessionRequest,
+        mut pending: PendingNativeOpen,
+        envelope: dto::MediaDeviceRequestEnvelopeDto,
+    ) -> Result<Arc<dyn MediaDeviceSession>, MediaError> {
         let request_id = envelope.request_id.clone();
         let response = self.callback.request(envelope).await;
         response.validate().map_err(invalid_callback)?;
@@ -148,42 +190,16 @@ impl CallbackMediaDevicePorts {
                 "native media callback returned a mismatched request identity",
             ));
         }
-        if let dto::MediaDeviceResultDto::Input { frame: Some(frame) } = &response.result {
-            frame.validate().map_err(invalid_callback)?;
-            if dto_frame_payload_bytes(frame) as u64 > max_payload_bytes {
-                return Err(MediaError::new(
-                    MediaErrorKind::MediaTooLarge,
-                    "native media callback returned a frame over the operation payload limit",
-                ));
+        let result = match response.result {
+            dto::MediaDeviceResultDto::Error { error } => {
+                return Err(error_from_dto(error));
             }
-        }
-        match response.result {
-            dto::MediaDeviceResultDto::Error { error } => Err(error_from_dto(error)),
-            result => Ok(result),
-        }
-    }
-
-    async fn open_owned(
-        &self,
-        context: MediaOperationContext,
-        request: MediaSessionRequest,
-        permit: OwnedSemaphorePermit,
-    ) -> Result<Arc<dyn MediaDeviceSession>, MediaError> {
-        let result = self
-            .call(
-                dto::MediaDeviceRequestDto::Open {
-                    request: dto::MediaDeviceOpenRequestDto {
-                        identity: operation_id_to_dto(context.identity.clone()),
-                        owner: owner_to_dto(context.owner.clone()),
-                        initiator: context.initiator.clone().map(initiator_to_dto),
-                        timeout_budget_ms: context.timeout_budget_ms,
-                        max_payload_bytes: context.max_payload_bytes,
-                        request: session_request_to_dto(&request),
-                    },
-                },
-                context.max_payload_bytes,
-            )
-            .await?;
+            dto::MediaDeviceResultDto::OpenFailedWithoutResource { error } => {
+                pending.confirm_no_resource();
+                return Err(error_from_dto(error));
+            }
+            result => result,
+        };
         let dto::MediaDeviceResultDto::Opened { lease } = result else {
             return Err(unexpected_result("open", &result));
         };
@@ -196,7 +212,8 @@ impl CallbackMediaDevicePorts {
             video_source: request.video_source,
             stopped: AtomicBool::new(false),
             stop_gate: tokio::sync::Mutex::new(()),
-            permit: StdMutex::new(Some(permit)),
+            permit: StdMutex::new(pending.permit.take()),
+            work: StdMutex::new(pending.work.take()),
         });
         if !valid_lease_id {
             return Err(MediaError::new(
@@ -224,14 +241,22 @@ impl MediaDevicePorts for CallbackMediaDevicePorts {
         let permit = executor.leases.clone().try_acquire_owned().map_err(|_| {
             MediaError::new(MediaErrorKind::Busy, "native media lease capacity is full")
         })?;
+        let envelope = Self::prepare_open(&context, &request)?;
         let callback = self
             .callback
             .bind_for_open()
             .unwrap_or_else(|| self.callback.clone());
         let ports = Self::new(callback);
         let (sender, receiver) = oneshot::channel();
+        let work = context.begin_native_work()?;
+        let pending = PendingNativeOpen {
+            permit: Some(permit),
+            work,
+        };
         executor.runtime.spawn(async move {
-            let result = ports.open_owned(context, request, permit).await;
+            let result = ports
+                .open_prepared(context, request, pending, envelope)
+                .await;
             // If the receiver was dropped either before or after send, the
             // returned session's Drop still releases the unclaimed lease.
             let _ = sender.send(result);
@@ -245,6 +270,30 @@ impl MediaDevicePorts for CallbackMediaDevicePorts {
     }
 }
 
+struct PendingNativeOpen {
+    permit: Option<OwnedSemaphorePermit>,
+    work: Option<Box<dyn media_api::MediaNativeWork>>,
+}
+
+impl PendingNativeOpen {
+    fn confirm_no_resource(&mut self) {
+        if let Some(work) = self.work.take() {
+            work.confirm();
+        }
+        drop(self.permit.take());
+    }
+}
+
+impl Drop for PendingNativeOpen {
+    fn drop(&mut self) {
+        // Without a correlated no-resource receipt, an open failure may have
+        // left a device behind. Retain the capacity and mark its witness unknown.
+        if let Some(permit) = self.permit.take() {
+            permit.forget();
+        }
+    }
+}
+
 struct CallbackMediaDeviceSession {
     callback: Arc<dyn NativeMediaDeviceCallback>,
     lease_id: String,
@@ -254,13 +303,20 @@ struct CallbackMediaDeviceSession {
     stopped: AtomicBool,
     stop_gate: tokio::sync::Mutex<()>,
     permit: StdMutex<Option<OwnedSemaphorePermit>>,
+    work: StdMutex<Option<Box<dyn media_api::MediaNativeWork>>>,
 }
 
 impl Drop for CallbackMediaDeviceSession {
     fn drop(&mut self) {
         if !self.stopped.load(Ordering::Acquire) {
             if let Some(permit) = self.permit.get_mut().unwrap().take() {
-                schedule_native_media_stop(self.callback.clone(), self.lease_id.clone(), permit);
+                let work = self.work.get_mut().unwrap().take();
+                schedule_native_media_stop_with_work(
+                    self.callback.clone(),
+                    self.lease_id.clone(),
+                    permit,
+                    work,
+                );
             } else {
                 tracing::error!("native media lease lost its cleanup reservation");
             }
@@ -474,12 +530,11 @@ impl MediaDeviceSession for CallbackMediaDeviceSession {
             })
             .await
         {
-            Ok(dto::MediaDeviceResultDto::Stopped)
-            | Err(MediaError {
-                kind: MediaErrorKind::NotFound,
-                ..
-            }) => {
+            Ok(dto::MediaDeviceResultDto::Stopped) => {
                 self.stopped.store(true, Ordering::Release);
+                if let Some(work) = self.work.lock().unwrap().take() {
+                    work.confirm();
+                }
                 drop(self.permit.lock().unwrap().take());
                 Ok(())
             }
@@ -497,11 +552,33 @@ fn operation_id_to_dto(value: MediaOperationId) -> dto::MediaOperationIdDto {
     }
 }
 
-fn owner_to_dto(value: MediaOwner) -> dto::MediaOwnerDto {
+fn owner_to_dto(value: MediaOwner) -> Result<dto::MediaOwnerDto, MediaError> {
     match value {
-        MediaOwner::Session { session_id } => dto::MediaOwnerDto::Session { session_id },
-        MediaOwner::Ui { instance_id } => dto::MediaOwnerDto::Ui { instance_id },
-        MediaOwner::System { instance_id } => dto::MediaOwnerDto::System { instance_id },
+        MediaOwner::Session { session_id } => Ok(dto::MediaOwnerDto::Session { session_id }),
+        MediaOwner::Ui { instance_id } => Ok(dto::MediaOwnerDto::Ui { instance_id }),
+        MediaOwner::System { instance_id } => Ok(dto::MediaOwnerDto::System { instance_id }),
+        MediaOwner::Attachment {
+            attachment_id,
+            owner,
+        } => {
+            let (logical_kind, logical_owner_id) = match *owner {
+                MediaOwner::Session { session_id } => (dto::MediaOwnerKindDto::Session, session_id),
+                MediaOwner::Ui { instance_id } => (dto::MediaOwnerKindDto::Ui, instance_id),
+                MediaOwner::System { instance_id } => (dto::MediaOwnerKindDto::System, instance_id),
+                MediaOwner::Attachment { .. } => {
+                    return Err(MediaError::new(
+                        MediaErrorKind::InvalidRequest,
+                        "nested media attachment owner cannot cross the native DTO boundary",
+                    ));
+                }
+            };
+            Ok(dto::MediaOwnerDto::Attached {
+                attachment_host_id: attachment_id.host_id(),
+                attachment_generation: attachment_id.generation(),
+                logical_kind,
+                logical_owner_id,
+            })
+        }
     }
 }
 
@@ -730,11 +807,76 @@ mod tests {
     use std::sync::mpsc;
     use tokio::sync::Notify;
 
+    #[test]
+    fn owner_dto_preserves_attachment_and_logical_owner_kinds() {
+        let attachment = media_api::MediaAttachmentIssuer::new()
+            .issue()
+            .expect("fresh issuer should issue an attachment");
+        let host_id = attachment.host_id();
+        let generation = attachment.generation();
+        let cases = [
+            (
+                MediaOwner::Session {
+                    session_id: "session-a".into(),
+                },
+                dto::MediaOwnerKindDto::Session,
+                "session-a",
+            ),
+            (
+                MediaOwner::Ui {
+                    instance_id: "ui-a".into(),
+                },
+                dto::MediaOwnerKindDto::Ui,
+                "ui-a",
+            ),
+            (
+                MediaOwner::System {
+                    instance_id: "system-a".into(),
+                },
+                dto::MediaOwnerKindDto::System,
+                "system-a",
+            ),
+        ];
+
+        for (owner, logical_kind, logical_owner_id) in cases {
+            let converted = owner_to_dto(owner.in_attachment(attachment.clone())).unwrap();
+            assert_eq!(
+                converted,
+                dto::MediaOwnerDto::Attached {
+                    attachment_host_id: host_id.clone(),
+                    attachment_generation: generation,
+                    logical_kind,
+                    logical_owner_id: logical_owner_id.into(),
+                },
+            );
+            converted.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn owner_dto_rejects_nested_attachment_scopes() {
+        let first = media_api::MediaAttachmentIssuer::new()
+            .issue()
+            .expect("fresh issuer should issue an attachment");
+        let second = media_api::MediaAttachmentIssuer::new()
+            .issue()
+            .expect("fresh issuer should issue an attachment");
+        let nested = MediaOwner::System {
+            instance_id: "system-a".into(),
+        }
+        .in_attachment(first)
+        .in_attachment(second);
+
+        let error = owner_to_dto(nested).unwrap_err();
+        assert_eq!(error.kind, MediaErrorKind::InvalidRequest);
+    }
+
     struct OpeningCallback {
         opened: Notify,
         release: Semaphore,
         stopped: mpsc::Sender<String>,
         fail_open: AtomicBool,
+        open_failure_confirmed: AtomicBool,
         fail_stops: AtomicUsize,
         stop_not_found: AtomicBool,
         hold_failed_stop: AtomicBool,
@@ -750,6 +892,7 @@ mod tests {
                     release: Semaphore::new(0),
                     stopped,
                     fail_open: AtomicBool::new(false),
+                    open_failure_confirmed: AtomicBool::new(false),
                     fail_stops: AtomicUsize::new(0),
                     stop_not_found: AtomicBool::new(false),
                     hold_failed_stop: AtomicBool::new(false),
@@ -769,14 +912,18 @@ mod tests {
             let result = match envelope.request {
                 dto::MediaDeviceRequestDto::Open { .. } => {
                     if self.fail_open.load(Ordering::Acquire) {
+                        let error = dto::MediaErrorDto {
+                            kind: dto::MediaErrorKindDto::NativeFailure,
+                            message: "open failed".into(),
+                        };
+                        let result = if self.open_failure_confirmed.load(Ordering::Acquire) {
+                            dto::MediaDeviceResultDto::OpenFailedWithoutResource { error }
+                        } else {
+                            dto::MediaDeviceResultDto::Error { error }
+                        };
                         return dto::MediaDeviceResponseDto {
                             request_id: envelope.request_id,
-                            result: dto::MediaDeviceResultDto::Error {
-                                error: dto::MediaErrorDto {
-                                    kind: dto::MediaErrorKindDto::NativeFailure,
-                                    message: "open failed".into(),
-                                },
-                            },
+                            result,
                         };
                     }
                     // The native lease exists before the response is released.
@@ -923,12 +1070,27 @@ mod tests {
     async fn failed_open_releases_its_capacity() {
         let (callback, _) = OpeningCallback::new();
         callback.fail_open.store(true, Ordering::Release);
+        callback
+            .open_failure_confirmed
+            .store(true, Ordering::Release);
         let ports = CallbackMediaDevicePorts::new(callback);
         let capacity = Arc::new(Semaphore::new(1));
         let permit = capacity.clone().try_acquire_owned().unwrap();
         let (context, request) = open_args();
         assert!(ports.open_owned(context, request, permit).await.is_err());
         assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn open_error_without_no_resource_receipt_quarantines_capacity() {
+        let (callback, _) = OpeningCallback::new();
+        callback.fail_open.store(true, Ordering::Release);
+        let ports = CallbackMediaDevicePorts::new(callback);
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.clone().try_acquire_owned().unwrap();
+        let (context, request) = open_args();
+        assert!(ports.open_owned(context, request, permit).await.is_err());
+        assert_eq!(capacity.available_permits(), 0);
     }
 
     #[tokio::test]
@@ -954,18 +1116,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_stop_accepts_an_already_absent_lease() {
+    async fn not_found_is_not_an_explicit_stop_receipt() {
         let (callback, stopped) = OpeningCallback::new();
         callback.release.add_permits(1);
         callback.stop_not_found.store(true, Ordering::Release);
-        let ports = CallbackMediaDevicePorts::new(callback);
+        let ports = CallbackMediaDevicePorts::new(callback.clone());
         let capacity = Arc::new(Semaphore::new(1));
         let permit = capacity.clone().try_acquire_owned().unwrap();
         let (context, request) = open_args();
         let session = ports.open_owned(context, request, permit).await.unwrap();
+        assert_eq!(
+            session.stop().await.unwrap_err().kind,
+            MediaErrorKind::NotFound
+        );
+        assert_eq!(capacity.available_permits(), 0);
+        callback.stop_not_found.store(false, Ordering::Release);
         session.stop().await.unwrap();
         assert_eq!(capacity.available_permits(), 1);
         drop(session);
+        assert_eq!(
+            stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "test-native-lease"
+        );
         assert_stopped_once(&stopped);
     }
 
@@ -1030,7 +1202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abandoned_lease_accepts_a_correlated_already_absent_response() {
+    async fn abandoned_lease_does_not_accept_not_found_as_stop_receipt() {
         let (callback, stopped) = OpeningCallback::new();
         callback.release.add_permits(1);
         callback.stop_not_found.store(true, Ordering::Release);
@@ -1040,15 +1212,13 @@ mod tests {
         let (context, request) = open_args();
         let session = ports.open_owned(context, request, permit).await.unwrap();
         drop(session);
-        assert_eq!(
-            stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
-            "test-native-lease"
-        );
-        let permit = tokio::time::timeout(Duration::from_secs(2), capacity.acquire())
-            .await
-            .unwrap()
-            .unwrap();
-        drop(permit);
+        for _ in 0..NATIVE_MEDIA_STOP_ATTEMPTS {
+            assert_eq!(
+                stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
+                "test-native-lease"
+            );
+        }
+        assert_eq!(capacity.available_permits(), 0);
         assert!(stopped.recv_timeout(Duration::from_millis(100)).is_err());
     }
 

@@ -97,6 +97,14 @@ export interface LocalAppAgentChatSummary {
 export interface LocalAppAgentChatHistory { messages: Message[]; nextCursor?: string }
 export interface LocalAppAgentChatHistoryOptions { cursor?: string; limit?: number }
 export interface LocalAppAgentChatListOptions extends LocalAppAgentTaskListOptions { includeArchived?: boolean }
+export interface LocalAppAgentChatListPage {
+  chats: LocalAppAgentChatSummary[];
+  /** Unavailable IDs in this page; their original Chat data is preserved. */
+  unavailableChats?: Array<{ chatId: string; code: 'chat_storage_uncertain' }>;
+  /** Signals that at least one Chat across all pages needs recovery. */
+  hasUncertainChats?: boolean;
+  nextCursor?: string;
+}
 export interface LocalAppAgentChatHandle {
   /** Host-owned chat ID; also the stable AG-UI threadId. */
   id: string;
@@ -106,9 +114,12 @@ export interface LocalAppAgentChatHandle {
   cancel(): Promise<void>;
 }
 export interface LocalAppAgentChatsApi {
-  create(input?: { title?: string }): Promise<LocalAppAgentChatHandle>;
+  create(input: { requestId: string; title?: string }): Promise<LocalAppAgentChatHandle>;
+  creationStatus(input: { requestId: string; title?: string }): Promise<LocalAppAgentChatHandle | null>;
+  pendingCreations(): Promise<Array<{ requestId: string; title?: string; state: 'pending' | 'accepted' | 'deleted' | 'rejected' }>>;
+  forgetCreation(requestId: string): Promise<void>;
   open(chatId: string): Promise<LocalAppAgentChatHandle>;
-  list(options?: LocalAppAgentChatListOptions): Promise<{ chats: LocalAppAgentChatSummary[]; nextCursor?: string }>;
+  list(options?: LocalAppAgentChatListOptions): Promise<LocalAppAgentChatListPage>;
   archive(chatId: string): Promise<void>;
   delete(chatId: string): Promise<void>;
 }

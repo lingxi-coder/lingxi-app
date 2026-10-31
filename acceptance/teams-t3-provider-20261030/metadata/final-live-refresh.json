@@ -1,0 +1,24 @@
+{
+  "status": "READ_ONLY_LIVE_REFRESH_PASS",
+  "at": "2026-10-30T16:00:54.695Z",
+  "project": "lingxi-5e4b2",
+  "site": "sites/lingxi-5e4b2",
+  "release": "sites/lingxi-5e4b2/releases/1793374005303000",
+  "version": "sites/lingxi-5e4b2/versions/7ce55b5b99846325",
+  "fileCount": 19284,
+  "pages": 20,
+  "fileHash": "ed6c5d4ca31d7eb6ea0034b98c5ec33e04f99c86ce3a91d10ac81306be8decdc",
+  "configHash": "00291004def62b35700e8d7c5b418c10bb413776053aff0031e50e2fbe003845",
+  "rootIndexHash": "a1fd13b08beef277d7c0bf7e8e445dfbba38980e0839a501537e0e4b94900c73",
+  "teamsIndexHash": "72d2bee276c4384eec0c11777bdd655c3572afd00ae9607de4ce8d5241a6f469",
+  "remoteWrites": false,
+  "checkKind": "Final read-only release-bracketed complete LIVE map and configuration refresh",
+  "requests": 23,
+  "methods": {
+    "GET": 23
+  },
+  "privateEvidenceFingerprints": {
+    "result.json": "2509a38c5328f80ea6fe62db2effef4d4b9e9df8a2db03f26920c5ed685a7d2c",
+    "read-audit.json": "decc46eaef541ec7109e3772d1cb50d2131d80cdb88ac39b22cdd8059982626b"
+  }
+}

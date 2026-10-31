@@ -200,11 +200,12 @@ export function buildPushMessage(device, input, now = Date.now()) {
 }
 
 // One FCM message per device, built by `build(device)`.
-async function deliver(store, messaging, devices, build, clock) {
+async function deliver(store, messaging, devices, build, clock, allowed = async () => true) {
   let sent = 0, failed = 0, invalidated = 0;
   for (const device of devices) {
     // Re-read immediately before sending; registration/logout may have changed
     // while a previous device was being sent to.
+    if (!await allowed(device)) continue;
     const current = (await store.device(device.id).get()).data();
     if (current?.uid !== device.uid || current?.revision !== device.revision || millis(current.expiresAt) <= clock()) continue;
     try {
@@ -285,4 +286,13 @@ export function createPushHandler({ store, messaging, verifyToken, origins = [] 
       return reply({ error: { code: 'SERVICE_UNAVAILABLE' } }, 503);
     }
   };
+}
+
+// Internal Team trigger only. Push contains no message body or invite/session token.
+export async function sendTeamPush(store, messaging, input, allowed, clock = Date.now) {
+  const devices = await store.active(input.uid);
+  return deliver(store, messaging, devices, device => buildPushMessage(device, {
+    title: input.title, body: /^zh(?:[-_]|$)/i.test(device.locale ?? '') ? '团队有新消息' : 'New message in your team',
+    ttlSeconds: 3600, route: 'team/inbox', collapseKey: input.collapseKey, data: { notificationId: input.notificationId, kind: 'team_message' },
+  }, clock()), clock, allowed);
 }

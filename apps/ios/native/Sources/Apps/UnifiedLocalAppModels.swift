@@ -96,7 +96,9 @@ struct LocalAppAgentTaskProgress: Decodable, Equatable, Sendable {
     let turnLimit: UInt64
 }
 struct LocalAppAgentTaskSummary: Decodable, Identifiable, Equatable, Sendable {
+    /// Host task identity used for task operations such as cancellation.
     let runId: String
+    /// Public AG-UI request/run identifier supplied by the browser.
     let requestId: String
     let state: String
     let sequence: UInt64
@@ -134,6 +136,8 @@ struct LocalAppWakeReservation: Decodable, Sendable {
     let revision: UInt64
     let runId: String
     let expiresAtMs: UInt64
+    let created: Bool
+    let reservationId: String
 }
 struct LocalAppMarketOrigin: Codable, Equatable, Sendable {
     let appId: String
@@ -218,7 +222,6 @@ struct LocalAppAuthoringResolution: Decodable, Sendable {
     let authoring: LocalAppAuthoring?
     let authoringSessionId: String?
 }
-struct LocalAppLegacyArchive: Decodable, Identifiable, Sendable { var id: String { path }; let path: String; let kind: String; let status: String }
 struct LocalAppLayout: Decodable, Sendable { let sourcePath: String; let dataPath: String; let releasesPath: String; let runsPath: String }
 struct LocalAppServiceFailure: Error, LocalizedError, Codable, Sendable {
     let code: String
@@ -244,5 +247,3 @@ struct LocalAppServiceEnvelope<T: Decodable>: Decodable {
         return value
     }
 }
-
-struct LocalAppLegacyEntry: Decodable, Identifiable, Sendable { var id: String { legacyId }; let legacyId: String; let name: String; let summary: String; let revision: UInt64; let sourcePath: String; let status: String }

@@ -71,6 +71,16 @@ pub mod methods {
     pub const CONTROLS_SET_PERMISSION_MODE: &str = "controls.set_permission_mode";
     /// Viewer request: list models.
     pub const MODELS_LIST: &str = "models.list";
+    /// Viewer request (Bot-aware viewers only): the Bots with Remote Control on.
+    pub const BOTS_LIST: &str = "bots.list";
+    /// Viewer request (Bot-aware viewers only): the list, then `bots.changed` updates.
+    pub const BOTS_WATCH: &str = "bots.watch";
+    /// Host notification (Bot-aware viewers only): the full Bot list changed.
+    pub const BOTS_CHANGED: &str = "bots.changed";
+    /// Viewer request (Bot-aware viewers only): the chats of one Bot.
+    pub const BOT_THREADS_LIST: &str = "bot.threads.list";
+    /// Viewer request (Bot-aware viewers only): start a new chat of a Bot.
+    pub const BOT_THREAD_CREATE: &str = "bot.thread.create";
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +98,11 @@ pub struct RemoteAppInfo {
     /// this viewer build. Approval and platform alone never imply support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_capabilities: Option<RemoteMediaCapabilities>,
+    /// Protocol extensions this viewer understands, such as
+    /// [`REMOTE_FEATURE_BOTS`](crate::version::REMOTE_FEATURE_BOTS). The host
+    /// sends nothing an extension adds to a viewer that did not declare it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Vec<String>>,
 }
 
 /// The desktop, as described to an approved viewer.
@@ -197,6 +212,9 @@ pub struct RemoteSessionSummary {
     /// Number of viewers attached right now.
     #[serde(default)]
     pub viewers: u32,
+    /// The Bot this chat belongs to; set only in `bot.threads.list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
 }
 
 /// `sessions.list` / `sessions.watch` result.
@@ -247,6 +265,10 @@ pub enum RemotePromptOrigin {
     Device,
     /// A scheduled run.
     Scheduled,
+    /// A task another Bot handed over. The host sends it only to a viewer that
+    /// declared [`REMOTE_FEATURE_BOTS`](crate::version::REMOTE_FEATURE_BOTS);
+    /// any other viewer is sent `scheduled`.
+    Bot,
 }
 
 /// One entry of a session's record stream. Prompts are records of their own
@@ -272,6 +294,8 @@ pub enum RemoteRecord {
         origin: RemotePromptOrigin,
         /// Name of the sending device when `origin` is `device`.
         device_name: Option<String>,
+        /// Name of the sending Bot when `origin` is `bot`.
+        from_bot_name: Option<String>,
     },
     /// A permission request.
     PermissionRequest {
@@ -340,6 +364,7 @@ impl<'de> Deserialize<'de> for RemoteRecord {
                 images: optional(take("images"))?.unwrap_or_default(),
                 origin: field(take("origin"), "origin")?,
                 device_name: optional(take("device_name"))?,
+                from_bot_name: optional(take("from_bot_name"))?,
             },
             "permission_request" => Self::PermissionRequest {
                 request: field(take("request"), "request")?,
@@ -375,6 +400,7 @@ impl Serialize for RemoteRecord {
                 images,
                 origin,
                 device_name,
+                from_bot_name,
             } => {
                 let mut map = serializer.serialize_map(None)?;
                 map.serialize_entry("type", "prompt")?;
@@ -386,6 +412,9 @@ impl Serialize for RemoteRecord {
                 map.serialize_entry("origin", origin)?;
                 if let Some(name) = device_name {
                     map.serialize_entry("device_name", name)?;
+                }
+                if let Some(name) = from_bot_name {
+                    map.serialize_entry("from_bot_name", name)?;
                 }
                 map.end()
             }
@@ -855,4 +884,100 @@ pub struct ModelsListResult {
     /// Details, when the host sends them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Vec<ModelDetailsDto>>,
+}
+
+// ---------------------------------------------------------------------------
+// Bots
+// ---------------------------------------------------------------------------
+//
+// Only a viewer that declared `REMOTE_FEATURE_BOTS` in `initialize.app.features`
+// may call these; any other gets the unknown-method error. A Bot's chats are
+// ordinary sessions, reached through `bot.threads.list` and then used with the
+// `session.*` and command methods unchanged. They never appear in
+// `sessions.list`.
+
+/// Where a Bot stands, derived from its chats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteBotStatus {
+    /// No chat is running or waiting.
+    Idle,
+    /// A chat is running a turn.
+    Running,
+    /// A chat is waiting for an answer.
+    RequiresAction,
+}
+
+/// One Bot whose Remote Control switch is on, in `bots.list` / `bots.changed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteBotSummary {
+    /// Bot id.
+    pub bot_id: String,
+    /// Display name.
+    pub name: String,
+    /// What the Bot is for.
+    pub description: String,
+    /// Status.
+    pub status: RemoteBotStatus,
+    /// Chats waiting for an answer right now. Missing, or anything but a count, reads as none.
+    #[serde(default, deserialize_with = "count_or_zero")]
+    pub waiting_threads: u32,
+    /// Epoch milliseconds of the Bot's latest chat activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<u64>,
+}
+
+/// A count, and zero for anything else: the Bot stays in the list with a bad number.
+fn count_or_zero<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(value
+        .as_u64()
+        .and_then(|count| u32::try_from(count).ok())
+        .unwrap_or(0))
+}
+
+/// `bots.list` / `bots.watch` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotsListResult {
+    /// The Bots.
+    pub bots: Vec<RemoteBotSummary>,
+}
+
+/// `bots.changed` (host to viewer): always the full list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotsChangedParams {
+    /// The Bots.
+    pub bots: Vec<RemoteBotSummary>,
+}
+
+/// `bot.threads.list` (request): the Bot's chats, newest first, at most 50.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotThreadsListParams {
+    /// Bot id.
+    pub bot_id: String,
+}
+
+/// `bot.threads.list` result. `project_label` is the Bot's name and `bot_id` is
+/// set on every entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotThreadsListResult {
+    /// The chats.
+    pub sessions: Vec<RemoteSessionSummary>,
+}
+
+/// `bot.thread.create` (request): start a new chat of the Bot. A retry with the
+/// same `client_request_id` returns the same chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotThreadCreateParams {
+    /// Bot id.
+    pub bot_id: String,
+    /// Chosen by the viewer; makes a retry after a reconnect recognizable.
+    pub client_request_id: String,
+}
+
+/// `bot.thread.create` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotThreadCreateResult {
+    /// The new chat's session id.
+    pub session_id: String,
 }

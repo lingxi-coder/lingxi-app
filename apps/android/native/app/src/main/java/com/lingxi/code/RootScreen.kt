@@ -1,6 +1,7 @@
 package com.lingxi.code
 
 import com.lingxi.code.conversation.blocksEngineReconnect
+import com.lingxi.code.apps.LocalAppAuthoringPrompt
 
 import android.content.pm.PackageManager
 import android.util.Base64
@@ -296,6 +297,7 @@ fun RootScreen(
     onOpenTerminal: (sessionId: String, initCommand: String?) -> Unit = { _, _ -> },
     /** Open the Remote Control screens, which the host draws above this one. */
     onOpenRemoteControl: () -> Unit = {},
+    onOpenTeams: () -> Unit = {},
     modelSetupRequired: Boolean = false,
     // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and
     // passed down so the voice-orb overlay can label itself + gate its text input.
@@ -431,10 +433,12 @@ fun RootScreen(
     LaunchedEffect(chatViewModel) {
         chatViewModel.engineSource.collect { onConversationSourceChanged(it) }
     }
+    val catalogLifecycleScope = androidx.compose.runtime.rememberCoroutineScope()
     DisposableEffect(chatViewModel, lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 chatViewModel.refreshExecutionStatus()
+                catalogLifecycleScope.launch { runCatching { chatViewModel.engineSource.value.submitClientCommand(ClientCommand.RefreshProviderCatalog("foreground")) } }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -516,12 +520,10 @@ fun RootScreen(
         return scope.takeIf { it !is ConversationScope.Project || projectSnapshotForScope(it) != null }
     }
 
-    fun workspaceForScope(scope: ConversationScope) = when (scope) {
+    fun workspaceForScope(scope: ConversationScope, sessionId: String? = null) = when (scope) {
         ConversationScope.Global -> null
-        ConversationScope.Scheduled -> com.lingxi.code.project.ProjectWorkspace(
+        ConversationScope.Scheduled -> com.lingxi.code.project.MobileUserStorage.scheduledWorkspace(appContext, sessionId).copy(
             projectId = "b51bca68-b85f-4caa-8881-07dd33eba24d",
-            hostPath = com.lingxi.code.cron.CronScope.global(appContext).workspacePath,
-            guestPath = com.lingxi.code.project.MobileUserStorage.directories(appContext).scheduledGuestCwd,
         )
         is ConversationScope.Project -> projectSnapshotForScope(scope)?.workspace
     }
@@ -684,6 +686,7 @@ fun RootScreen(
                 Lifecycle.Event.ON_STOP -> {
                     chatViewModel.sideChats.cancelCurrentTurns()
                     appInForeground = false
+                    catalogLifecycleScope.launch { runCatching { chatViewModel.engineSource.value.submitClientCommand(ClientCommand.RefreshProviderCatalog("background")) } }
                     flowVoiceController.pause()
                     cancelActiveHeldVoiceSession()
                     scope.launch { runCatching { AndroidAudioServiceProvider.invalidate(context) } }
@@ -986,6 +989,7 @@ fun RootScreen(
     var dismissedWhileOffline by remember { mutableStateOf(false) }
     LaunchedEffect(isOnline) {
         if (isOnline) dismissedWhileOffline = false
+        runCatching { chatViewModel.engineSource.value.submitClientCommand(ClientCommand.RefreshProviderCatalog(if (isOnline) "network_restored" else "network_lost")) }
     }
 
     fun closeDrawer() = scope.launch { drawerState.close() }
@@ -1034,7 +1038,7 @@ fun RootScreen(
                     context = appContext,
                     projectWorkspace = when (engineScope) {
                         ConversationScope.Global -> null
-                        ConversationScope.Scheduled -> workspaceForScope(engineScope)
+                        ConversationScope.Scheduled -> workspaceForScope(engineScope, destination.id.takeUnless { it == "new" })
                         is ConversationScope.Project -> project?.workspace
                     },
                     workspaceKey = engineScope.persistenceKey(),
@@ -1245,7 +1249,7 @@ fun RootScreen(
         pendingForkRequest = request
         val forkSource = EngineConversationSource.createInBackground(
             context = appContext,
-            projectWorkspace = workspaceForScope(sessionScope),
+            projectWorkspace = workspaceForScope(sessionScope, row.uuid),
             workspaceKey = sessionScope.persistenceKey(),
             sessionMode = row.mode,
             linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
@@ -1659,7 +1663,8 @@ fun RootScreen(
     var projectPageId by rememberSaveable { mutableStateOf<String?>(null) }
     // 应用: the page, one app's page and the running app, each drawn over the last.
     var appsPageOpen by rememberSaveable { mutableStateOf(false) }
-    var marketAppId by rememberSaveable { mutableStateOf<String?>(null) }
+    var marketInstallId by rememberSaveable { mutableStateOf<String?>(null) }
+    var localAppDetailsId by rememberSaveable { mutableStateOf<String?>(null) }
     var runtimeAppId by rememberSaveable { mutableStateOf<String?>(null) }
     val localApps = remember(appContext) { UnifiedLocalApps.get(appContext) }
     val appLibrary by localApps.state.collectAsState()
@@ -1735,7 +1740,7 @@ fun RootScreen(
                 }
                 try {
                     if (parts.first() !in setOf("project", "apps", "market")) {
-                        projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketAppId = null; sessionPanelOpen = false
+                        projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; sessionPanelOpen = false
                     }
                     if (parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal", "runtime", "import") && link.params["workspace"] != null) {
                         val targetScope = resolveLinkedScope(link.params["workspace"])
@@ -1797,7 +1802,10 @@ fun RootScreen(
                                 ?: error(resources.getString(R.string.deep_link_workspace_missing))
                             projectPageId = project
                         }
-                        "market" -> { appsPageOpen = true; marketAppId = id }
+                        "market" -> {
+                            projectsPageOpen = false; projectPageId = null; sessionPanelOpen = false
+                            appsPageOpen = true; runtimeAppId = null; localAppDetailsId = null; marketInstallId = id
+                        }
                         "apps" -> {
                             // Initial library refresh can still be in flight
                             // when a cold-start link reaches this route.
@@ -2111,11 +2119,24 @@ fun RootScreen(
                     canonicalSessionId(chatViewModel.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) {
                     "开发目录已变化，没有插入草稿。"
                 }
-                if (appId == null) {
-                    val prompt = "请在这个源码项目中创建应用：$name。使用 local-app skill 和 LocalApp schema 2，完成后发布到本机应用库。"
-                    replaceOwnedDraft(authoringScope, confirmed.sessionId, prompt)
+                chatViewModel.awaitConversationDraftWrites()
+                val storedDraft = scopeStore.readConversationDraft(
+                    authoringScope.persistenceKey(), confirmed.sessionId, mode,
+                ).orEmpty()
+                check(chatViewModel.engineSource.value === authoringSource &&
+                    chatViewModel.sourceScope.value == authoringScope &&
+                    authoringSource.workspaceState.value == confirmed &&
+                    canonicalSessionId(chatViewModel.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) {
+                    "开发目录已变化，没有插入草稿。"
                 }
-                appsPageOpen = false; marketAppId = null; runtimeAppId = null
+                // If the owner is already visible, keep edits made while the
+                // persisted draft was being read; otherwise use that owner's saved draft.
+                val existingDraft = if (draftLoaded && sameDraftOwner(
+                        draftOwnerScope, draftOwnerSessionId, authoringScope, confirmed.sessionId,
+                    )) draft else storedDraft
+                val prompt = LocalAppAuthoringPrompt.compose(name, appId, existingDraft)
+                replaceOwnedDraft(authoringScope, confirmed.sessionId, prompt)
+                appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; runtimeAppId = null
                 closeDrawer(); closeProjectPages()
             } catch (error: Exception) { chatViewModel.reportHostError(error.message ?: "无法打开应用源码会话。") }
         }
@@ -2257,6 +2278,7 @@ fun RootScreen(
                             closeDrawer()
                             onOpenRemoteControl()
                         },
+                        onOpenTeams = { closeDrawer(); onOpenTeams() },
                     )
                 }
             },
@@ -2554,26 +2576,35 @@ fun RootScreen(
             UnifiedAppsPage(
                 apps = localApps,
                 onBack = { appsPageOpen = false },
+                onRemoteApps = { appsPageOpen = false; onOpenRemoteControl() },
                 onOpen = { runtimeAppId = it },
-                onDetails = { marketAppId = it },
+                onDetails = { localAppDetailsId = it },
                 onAuthoring = ::openAppAuthoring,
             )
         }
+        marketInstallId?.let { remoteId ->
+            BackHandler { marketInstallId = null }
+            com.lingxi.code.apps.UnifiedMarketInstallPage(
+                apps = localApps, marketId = remoteId,
+                onBack = { marketInstallId = null },
+                onInstalled = { localId -> marketInstallId = null; localAppDetailsId = localId },
+            )
+        }
         // Like the project page, these keep their last app while sliding out.
-        var lastMarketAppId by remember { mutableStateOf<String?>(null) }
-        LaunchedEffect(marketAppId) { if (marketAppId != null) lastMarketAppId = marketAppId }
+        var lastLocalAppDetailsId by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(localAppDetailsId) { if (localAppDetailsId != null) lastLocalAppDetailsId = localAppDetailsId }
         AnimatedVisibility(
-            visible = marketAppId != null,
+            visible = localAppDetailsId != null,
             enter = slideInHorizontally(initialOffsetX = { it }),
             exit = slideOutHorizontally(targetOffsetX = { it }),
         ) {
-            val shownId = marketAppId ?: lastMarketAppId
+            val shownId = localAppDetailsId ?: lastLocalAppDetailsId
             if (shownId != null) {
-                BackHandler { marketAppId = null }
+                BackHandler { localAppDetailsId = null }
                 UnifiedAppDetailsPage(
                     apps = localApps,
                     appId = shownId,
-                    onBack = { marketAppId = null },
+                    onBack = { localAppDetailsId = null },
                     onOpen = { runtimeAppId = it },
                     onAuthoring = ::openAppAuthoring,
                 )
@@ -2595,7 +2626,7 @@ fun RootScreen(
                     onClose = { runtimeAppId = null },
                     onShowDetails = { appId ->
                         runtimeAppId = null
-                        marketAppId = appId
+                        localAppDetailsId = appId
                     },
                 )
             }

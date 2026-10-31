@@ -11,6 +11,7 @@ import type {
 } from '@lingxi/bridge-client';
 import type { MicrophonePermissionStatus } from './microphoneAccess.js';
 import { normalizeAudioConfiguration } from './generatedAudioConfiguration.js';
+import { nativeMediaOwnerKey } from './nativeMedia.js';
 import type { AudioConfigurationV4, AudioProviderContext, AudioProviderCapability } from './generatedAudioConfiguration.js';
 import {
   isSendableAudioBase64,
@@ -53,6 +54,13 @@ export type NativeAudioErrorCode =
   | 'unavailable'
   | 'busy'
   | 'cancelled'
+  | 'timeout'
+  | 'no-speech'
+  | 'not-recording'
+  | 'unsupported'
+  | 'voice-missing'
+  | 'synthesis-failed'
+  | 'media-too-large'
   | 'model-missing'
   | 'download'
   | 'checksum'
@@ -146,6 +154,7 @@ export interface NativeAudioSnapshot {
   helper: {
     state: 'stopped' | 'starting' | 'running' | 'failed';
     message?: string;
+    instanceId?: string;
   };
   permissions: {
     microphone: MicrophonePermissionStatus;
@@ -190,7 +199,7 @@ export type NativeAudioEvent =
 
 export type NativeAudioCommand =
   | { type: 'get_snapshot'; configuration?: AudioConfigurationV4 }
-  | { type: 'cancel_operation'; identity: AudioOperationIdDto }
+  | { type: 'cancel_operation' | 'ack_close_receipt'; identity: AudioOperationIdDto; owner: AudioOwnerDto; closeContext: NativeAudioCloseContext }
   | { type: 'request_authorization'; permissions: Array<'microphone' | 'speech'> }
   | { type: 'list_models' }
   | { type: 'install_model'; modelId: string }
@@ -207,15 +216,32 @@ export type NativeAudioResponse =
   | { type: 'snapshot'; snapshot: NativeAudioSnapshot }
   | { type: 'authorization'; snapshot: NativeAudioSnapshot }
   | { type: 'listening_finished'; snapshot: NativeAudioSnapshot; transcript?: { text: string; language?: string; confidence?: number }; recording?: { audioBase64: string; mimeType: string } }
-  | { type: 'cancelled'; snapshot: NativeAudioSnapshot }
+  | { type: 'close_receipt'; snapshot: NativeAudioSnapshot; closeReceipt: NativeAudioCloseReceipt }
+  | { type: 'close_ack'; snapshot: NativeAudioSnapshot }
   | { type: 'models'; snapshot: NativeAudioSnapshot; models: NativeAudioModelSnapshot[] }
   | { type: 'model_operation'; snapshot: NativeAudioSnapshot; model: NativeAudioModelSnapshot }
   | { type: 'error'; snapshot: NativeAudioSnapshot; error: NativeAudioError };
+
+export interface NativeAudioCloseContext {
+  helper_instance: string;
+  connection_id: string;
+  resource_incarnation: string;
+  flight_id: string;
+}
+
+export interface NativeAudioCloseReceipt {
+  disposition: 'closed' | 'not_admitted' | 'unknown';
+  context: NativeAudioCloseContext;
+  identity: AudioOperationIdDto;
+  owner: AudioOwnerDto;
+  handle?: string;
+}
 
 export interface NativeAudioEngineResponse {
   type: 'engine_result';
   snapshot: NativeAudioSnapshot;
   result: AudioOperationResultDto;
+  closeReceipt?: NativeAudioCloseReceipt;
 }
 
 export interface NativeAudioOperationResponse {
@@ -234,6 +260,7 @@ export type NativeAudioHelperCommandEnvelope =
       configuration: AudioConfigurationV4;
       configurationRevision: number;
       streamPcm?: boolean;
+      closeContext?: NativeAudioCloseContext;
     };
 
 export type NativeAudioHelperEnvelope =
@@ -301,6 +328,13 @@ function validateError(value: unknown): NativeAudioError {
     && code !== 'unavailable'
     && code !== 'busy'
     && code !== 'cancelled'
+    && code !== 'timeout'
+    && code !== 'no-speech'
+    && code !== 'not-recording'
+    && code !== 'unsupported'
+    && code !== 'voice-missing'
+    && code !== 'synthesis-failed'
+    && code !== 'media-too-large'
     && code !== 'model-missing'
     && code !== 'download'
     && code !== 'checksum'
@@ -460,7 +494,7 @@ export function validateNativeAudioSnapshot(value: unknown): NativeAudioSnapshot
     'audio snapshot',
   );
   const helper = object(input['helper'], 'audio helper');
-  exactKeys(helper, ['state', 'message'], 'audio helper');
+  exactKeys(helper, ['state', 'message', 'instanceId'], 'audio helper');
   const helperState = boundedString(helper['state'], 'audio helper state', 16);
   if (helperState !== 'stopped' && helperState !== 'starting' && helperState !== 'running' && helperState !== 'failed') {
     throw new Error('invalid audio helper state');
@@ -483,6 +517,7 @@ export function validateNativeAudioSnapshot(value: unknown): NativeAudioSnapshot
     helper: {
       state: helperState,
       ...(helper['message'] === undefined ? {} : { message: boundedString(helper['message'], 'audio helper message', 2_048) }),
+      ...(helper['instanceId'] === undefined ? {} : { instanceId: audioCloseUuid(helper['instanceId'], 'audio helper instance') }),
     },
     permissions: { microphone, speech },
     owner: input['owner'] === null || input['owner'] === undefined ? null : validateOwner(input['owner']),
@@ -558,8 +593,9 @@ export function validateNativeAudioCommand(value: unknown): NativeAudioCommand {
       exactKeys(input, ['type'], 'audio command');
       return { type };
     case 'cancel_operation':
-      exactKeys(input, ['type', 'identity'], 'audio command');
-      return { type, identity: validateNativeAudioOperationIdentity(input['identity']) };
+    case 'ack_close_receipt':
+      exactKeys(input, ['type', 'identity', 'owner', 'closeContext'], 'audio command');
+      return { type, identity: validateNativeAudioOperationIdentity(input['identity']), owner: validateAudioOwnerDto(input['owner']), closeContext: validateCloseContext(input['closeContext']) };
     case 'request_authorization': {
       exactKeys(input, ['type', 'permissions'], 'audio command');
       const permissions = input['permissions'];
@@ -585,14 +621,16 @@ export function validateNativeAudioCommand(value: unknown): NativeAudioCommand {
 
 export function validateNativeAudioResponse(value: unknown): NativeAudioResponse {
   const input = object(value, 'audio response');
-  exactKeys(input, ['type', 'snapshot', 'transcript', 'recording', 'models', 'model', 'error'], 'audio response');
+  exactKeys(input, ['type', 'snapshot', 'transcript', 'recording', 'models', 'model', 'error', 'closeReceipt'], 'audio response');
   const type = boundedString(input['type'], 'audio response type', 32);
   const snapshot = validateNativeAudioSnapshot(input['snapshot']);
   switch (type) {
     case 'snapshot':
     case 'authorization':
-    case 'cancelled':
+    case 'close_ack':
       return { type, snapshot };
+    case 'close_receipt':
+      return { type, snapshot, closeReceipt: validateAudioCloseReceipt(input['closeReceipt']) };
     case 'listening_finished':
       return {
         type,
@@ -648,6 +686,9 @@ function validateAudioOwnerDto(value: unknown): AudioOwnerDto {
   const input = object(value, 'audio operation owner');
   const type = boundedString(input['type'], 'audio owner type', 16);
   switch (type) {
+    case 'attached':
+      nativeMediaOwnerKey(input);
+      return input as unknown as AudioOwnerDto;
     case 'session':
       exactKeys(input, ['type', 'session_id'], 'audio operation owner');
       return { type, session_id: boundedString(input['session_id'], 'audio session id', 128) };
@@ -823,7 +864,8 @@ export function validateNativeAudioOperationResult(value: unknown): AudioOperati
     case 'owner_ended':
       exactKeys(input, ['type'], 'audio operation result');
       return { type };
-    case 'failed': {
+    case 'failed':
+    case 'failed_without_resource': {
       exactKeys(input, ['type', 'error'], 'audio operation result');
       const error = object(input['error'], 'audio error');
       exactKeys(error, ['kind', 'message'], 'audio error');
@@ -835,14 +877,41 @@ export function validateNativeAudioOperationResult(value: unknown): AudioOperati
   }
 }
 
+function audioCloseUuid(value: unknown, label: string): string {
+  const id = boundedString(value, label, 36);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new Error(`invalid ${label}`);
+  return id.toLowerCase();
+}
+
+function validateCloseContext(value: unknown): NativeAudioCloseContext {
+  const context = object(value, 'audio close context');
+  exactKeys(context, ['helper_instance', 'connection_id', 'resource_incarnation', 'flight_id'], 'audio close context');
+  return { helper_instance: audioCloseUuid(context['helper_instance'], 'audio helper instance'),
+    connection_id: audioCloseUuid(context['connection_id'], 'audio helper connection'),
+    resource_incarnation: audioCloseUuid(context['resource_incarnation'], 'audio resource incarnation'),
+    flight_id: audioCloseUuid(context['flight_id'], 'audio cleanup flight') };
+}
+
+function validateAudioCloseReceipt(value: unknown): NativeAudioCloseReceipt {
+  const receipt = object(value, 'audio close receipt');
+  exactKeys(receipt, ['disposition', 'context', 'identity', 'owner', 'handle'], 'audio close receipt');
+  const disposition = receipt['disposition'];
+  if (disposition !== 'closed' && disposition !== 'not_admitted' && disposition !== 'unknown') throw new Error('invalid audio close disposition');
+  return { disposition, context: validateCloseContext(receipt['context']),
+    identity: validateNativeAudioOperationIdentity(receipt['identity']), owner: validateAudioOwnerDto(receipt['owner']),
+    ...(receipt['handle'] === undefined ? {} : { handle: boundedString(receipt['handle'], 'audio recording handle', 128) }) };
+}
+
 export function validateNativeAudioEngineResponse(value: unknown): NativeAudioEngineResponse {
   const input = object(value, 'audio engine response');
-  exactKeys(input, ['type', 'snapshot', 'result'], 'audio engine response');
+  exactKeys(input, ['type', 'snapshot', 'result', 'closeReceipt'], 'audio engine response');
   if (input['type'] !== 'engine_result') throw new Error('invalid audio engine response type');
+  const closeReceipt = input['closeReceipt'] === undefined ? undefined : validateAudioCloseReceipt(input['closeReceipt']);
   return {
     type: 'engine_result',
     snapshot: validateNativeAudioSnapshot(input['snapshot']),
     result: validateNativeAudioOperationResult(input['result']),
+    ...(closeReceipt === undefined ? {} : { closeReceipt }),
   };
 }
 

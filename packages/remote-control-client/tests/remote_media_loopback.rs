@@ -1,3 +1,4 @@
+//! Real local transport and media-provider loopback integration tests.
 #![cfg(feature = "native-media")]
 
 use async_trait::async_trait;
@@ -373,7 +374,7 @@ impl media_api::MediaService for LoopbackMediaService {
         ))
     }
 
-    async fn cancel(&self, _identity: MediaOperationId) -> Result<(), MediaError> {
+    async fn cancel(&self, _context: MediaOperationContext) -> Result<(), MediaError> {
         Ok(())
     }
 }
@@ -781,7 +782,7 @@ async fn closing_connection_during_delayed_open_stops_the_late_native_lease() {
 
 struct LoopbackResourceStore {
     next_id: AtomicUsize,
-    payloads: Mutex<HashMap<String, (String, media_api::MediaPayload)>>,
+    payloads: Mutex<HashMap<String, (MediaOwner, media_api::MediaPayload)>>,
 }
 
 impl LoopbackResourceStore {
@@ -805,7 +806,6 @@ impl MediaResourceStore for LoopbackResourceStore {
             "loopback-media-{}",
             self.next_id.fetch_add(1, Ordering::AcqRel)
         );
-        let owner = owner_id(&context.owner);
         let asset = media_api::MediaAsset {
             reference: MediaRef::from(id.clone()),
             metadata: payload.metadata.clone(),
@@ -813,7 +813,7 @@ impl MediaResourceStore for LoopbackResourceStore {
         self.payloads
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(id, (owner, payload));
+            .insert(id, (context.owner.clone(), payload));
         Ok(asset)
     }
 
@@ -833,7 +833,7 @@ impl MediaResourceStore for LoopbackResourceStore {
                 "loopback media reference is missing",
             )
         })?;
-        if owner != &owner_id(&context.owner) {
+        if owner != &context.owner {
             return Err(MediaError::new(
                 MediaErrorKind::NotFound,
                 "loopback media reference belongs to another owner",
@@ -858,7 +858,7 @@ impl MediaResourceStore for LoopbackResourceStore {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         match payloads.get(&media.0) {
-            Some((owner, _)) if owner == &owner_id(&context.owner) => {
+            Some((owner, _)) if owner == &context.owner => {
                 payloads.remove(&media.0);
                 Ok(())
             }
@@ -870,11 +870,81 @@ impl MediaResourceStore for LoopbackResourceStore {
     }
 }
 
-fn owner_id(owner: &MediaOwner) -> String {
-    match owner {
-        MediaOwner::Session { session_id } => session_id.clone(),
-        MediaOwner::Ui { instance_id } | MediaOwner::System { instance_id } => instance_id.clone(),
+#[tokio::test]
+async fn loopback_resource_store_requires_exact_typed_owner() {
+    let issuer = media_api::MediaAttachmentIssuer::new();
+    let attachment = issuer.issue().expect("first attachment");
+    let next_generation = issuer.issue().expect("second attachment");
+    let other_host = media_api::MediaAttachmentIssuer::new()
+        .issue()
+        .expect("other host attachment");
+    assert_eq!(attachment.generation(), other_host.generation());
+    assert_ne!(attachment.host_id(), other_host.host_id());
+
+    let logical_owner = MediaOwner::Session {
+        session_id: "shared-id".to_owned(),
+    };
+    let owner = logical_owner.clone().in_attachment(attachment.clone());
+    let context = MediaOperationContext::new(MediaOperationId::new(1, 1), owner.clone());
+    let store = LoopbackResourceStore::new();
+    let payload = media_api::MediaPayload {
+        metadata: media_api::MediaMetadata {
+            kind: MediaKind::Image,
+            mime_type: "image/jpeg".to_owned(),
+            byte_len: 3,
+            captured_at_unix_ms: None,
+            duration_ms: None,
+            width_px: None,
+            height_px: None,
+            sample_rate_hz: None,
+            channels: None,
+        },
+        bytes: vec![1, 2, 3],
+    };
+    let asset = store.put(&context, payload.clone()).await.unwrap();
+
+    let other_owners = [
+        logical_owner.clone(),
+        logical_owner.clone().in_attachment(next_generation),
+        logical_owner.clone().in_attachment(other_host),
+        MediaOwner::Session {
+            session_id: "other-id".to_owned(),
+        }
+        .in_attachment(attachment.clone()),
+        MediaOwner::Ui {
+            instance_id: "shared-id".to_owned(),
+        }
+        .in_attachment(attachment.clone()),
+        MediaOwner::System {
+            instance_id: "shared-id".to_owned(),
+        }
+        .in_attachment(attachment.clone()),
+        owner.in_attachment(attachment),
+    ];
+    for other_owner in other_owners {
+        let other_context = MediaOperationContext::new(MediaOperationId::new(1, 1), other_owner);
+        assert_eq!(
+            store
+                .get(&other_context, &asset.reference, 3)
+                .await
+                .unwrap_err()
+                .kind,
+            MediaErrorKind::NotFound
+        );
+        assert_eq!(
+            store
+                .delete(&other_context, &asset.reference)
+                .await
+                .unwrap_err()
+                .kind,
+            MediaErrorKind::NotFound
+        );
     }
+    assert_eq!(
+        store.get(&context, &asset.reference, 3).await.unwrap(),
+        payload
+    );
+    store.delete(&context, &asset.reference).await.unwrap();
 }
 
 fn microphone_pcm(sequence: u64) -> Vec<u8> {

@@ -62,6 +62,7 @@ private = { ignore = true }
 unknown-registry = "warn"
 unknown-git = "warn"
 allow-git = [
+    "https://github.com/askama-rs/askama",
     "https://github.com/lingxi-coder/llm-client",
     "https://github.com/lingxi-coder/harness-runtime",
     "https://github.com/lingxi-coder/mobile-linux-runtime",

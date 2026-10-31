@@ -46,6 +46,12 @@ struct IOSAudioRecording: Sendable {
     let mimeType: String
 }
 
+/// A recording could not be finalized after its exact native close was
+/// confirmed. Ordinary errors must not be treated as evidence of closure.
+struct AudioRecordingClosedError: Error {
+    let underlying: any Error
+}
+
 protocol AudioRecordingDriving: AnyObject, Sendable {
     func installActivityChangeHandler(_ handler: (@Sendable () -> Void)?)
     func startRecordingOwned(
@@ -59,6 +65,13 @@ protocol AudioRecordingDriving: AnyObject, Sendable {
     func recordingLevel(handle: String, ownerID: String) -> Float?
     func isRecordingOwned(handle: String?, ownerID: String) -> Bool
     func cancel(startOperationID: String) async
+    /// True only after the exact start has settled and its recorder and audio
+    /// session have both closed. Absence of a recorder pointer is not proof.
+    func cancelWithReceipt(startOperationID: String) async -> Bool
+    /// The service has consumed the exact close receipt and no longer needs
+    /// the driver to retain it for a cancellation retry.
+    func retireCloseReceipt(startOperationID: String)
+    func ownsRecordingLease(_ lease: VoiceAudioSessionCoordinator.Lease, startOperationID: String) -> Bool
     func end(ownerID: String) async
     func stopAll() async
 }
@@ -66,6 +79,12 @@ protocol AudioRecordingDriving: AnyObject, Sendable {
 extension AudioRecordingDriving {
     func recordingLevel(handle: String, ownerID: String) -> Float? { nil }
     func installActivityChangeHandler(_: (@Sendable () -> Void)?) {}
+    func cancelWithReceipt(startOperationID: String) async -> Bool {
+        await cancel(startOperationID: startOperationID)
+        return false
+    }
+    func ownsRecordingLease(_: VoiceAudioSessionCoordinator.Lease, startOperationID _: String) -> Bool { false }
+    func retireCloseReceipt(startOperationID _: String) {}
 }
 
 enum SpeechRecognitionError: Error {

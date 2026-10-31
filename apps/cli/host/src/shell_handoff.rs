@@ -112,7 +112,9 @@ impl SourceHandoffRecovery {
     /// Fence the destination before reclaiming anything. Even a failed atomic
     /// write can have renamed its file, so verify the durable result explicitly.
     fn fence(&self, short: &str, reason: &str) -> Result<(), String> {
-        let valid = |ack: &ShellHandoffAck| ack.task_ids.is_empty() && ack.error.is_some();
+        let valid = |ack: &ShellHandoffAck| {
+            ack.task_ids.is_empty() && ack.error.is_some() && ack.source.is_none()
+        };
         match background_launch::read_shell_handoff_ack(&self.home, short, "abort") {
             Ok(Some(existing)) if valid(&existing) => return Ok(()),
             Ok(Some(_)) => return Err("invalid shell handoff abort acknowledgement".into()),
@@ -170,7 +172,7 @@ impl SourceHandoffRecovery {
             }
         };
         let expected: Vec<_> = exported.iter().map(|task| task.task_id.clone()).collect();
-        if ready.task_ids != expected {
+        if ready.source.is_some() || ready.task_ids != expected {
             let error = "destination shell preparation acknowledged a different roster".to_string();
             self.abort_source(&short, &exported, &error).await?;
             return Err(error);
@@ -196,7 +198,9 @@ impl SourceHandoffRecovery {
         ) {
             match background_launch::read_shell_handoff_ack(&self.home, &short, "commit") {
                 Ok(Some(committed))
-                    if committed.task_ids == accepted && committed.error.is_none() => {}
+                    if committed.task_ids == accepted
+                        && committed.error.is_none()
+                        && committed.source.is_none() => {}
                 Ok(None) => {
                     self.abort_source(&short, &exported, &error.to_string())
                         .await?;
@@ -227,7 +231,7 @@ impl SourceHandoffRecovery {
             self.abort_source(&short, &transferred, &error).await?;
             return Err(error);
         }
-        if adopted.task_ids != accepted {
+        if adopted.source.is_some() || adopted.task_ids != accepted {
             return Err("destination shell adoption acknowledged a different roster".into());
         }
         Ok(())
@@ -774,6 +778,25 @@ mod tests {
             assert_eq!(received.is_ok(), !fail_adopt);
             assert_eq!(*ownership.lock().unwrap(), (fail_adopt, !fail_adopt));
             if fail_adopt {
+                let failure = sent.unwrap_err();
+                // The failed adoption was fenced and restored to the source,
+                // so a retry confirms that this error has settled ownership.
+                recovery.recover_source().await.unwrap();
+                let lifecycle = std::sync::Arc::new(
+                    lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchLifecycle::default(),
+                );
+                let error = lingxi_core::host::bg_session_forker::BgForkError::Dispatch(failure);
+                assert!(lifecycle
+                    .claim()
+                    .unwrap()
+                    .run_owned(async move { Err::<(), _>(error) })
+                    .await
+                    .is_err());
+                assert!(lifecycle
+                    .close_and_drain()
+                    .await
+                    .unconfirmed_recoveries
+                    .is_empty());
                 assert!(background_launch::read_shell_handoff_ack(
                     home.path(),
                     "feed1234",
@@ -854,7 +877,7 @@ mod tests {
             owner_gate.notified().await;
             assert!(owner_recovery.recover_source().await.is_err());
             drop(ticket);
-            Err::<(), _>(BgForkError::Dispatch(
+            Err::<(), _>(BgForkError::OwnershipUncertain(
                 "publication failed and rollback remains pending".into(),
             ))
         }));
@@ -976,6 +999,44 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_adoption_ack_remains_unconfirmed_until_corrected() {
+        let home = tempfile::tempdir().unwrap();
+        let registry = retry_registry(0);
+        let recovery = published_recovery(home.path(), registry.clone());
+        background_launch::write_shell_handoff_ack(
+            home.path(),
+            "feed1234",
+            "ready",
+            &ack(vec!["bshell001".into()], None),
+        )
+        .unwrap();
+        let mut malformed = ack(vec!["bshell001".into()], None);
+        malformed.source = Some(background_launch::ShellHandoffSource {
+            pid: 42,
+            process_start: "unexpected".into(),
+        });
+        background_launch::write_shell_handoff_ack(home.path(), "feed1234", "adopted", &malformed)
+            .unwrap();
+        assert!(recovery.finish_source().await.is_err());
+        assert!(recovery.recover_source().await.is_err());
+        assert_eq!(*registry.ownership.lock().unwrap(), (false, false));
+        assert_eq!(
+            registry
+                .rollback_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        background_launch::write_shell_handoff_ack(
+            home.path(),
+            "feed1234",
+            "adopted",
+            &ack(vec!["bshell001".into()], None),
+        )
+        .unwrap();
+        recovery.recover_source().await.unwrap();
     }
 
     #[tokio::test]

@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
+import { desktopHost } from '../bridge/bridgeConnection';
 import type { DesktopLocalApp, LocalAppAgentQuestion } from '../../shared/localApps';
 import { LOCAL_APP_AGENT_DEFAULT_MAX_TURNS, LOCAL_APP_AGENT_DEFAULT_TIMEOUT_MS, LOCAL_APP_AGENT_MAX_TIMEOUT_MS, LOCAL_APP_AGENT_MAX_TURNS, type LocalAppAgentCatalog, type LocalAppAgentSettings, type LocalAppAgentToolGrant } from '../../shared/localAppAgent';
 import { AskUserQuestionPrompt } from './AskUserQuestionPrompt';
 import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
 
-function api() { const value = window.lingxi?.localApps; if (!value) throw new Error('Desktop application host is unavailable'); return value; }
+function api() { const value = desktopHost()?.localApps; if (!value) throw new Error('Desktop application host is unavailable'); return value; }
 function sameTool(a: LocalAppAgentToolGrant, b: LocalAppAgentToolGrant): boolean {
   if (a.id !== b.id || a.kind !== b.kind) return false;
   return a.kind === 'builtin' && b.kind === 'builtin' ? a.name === b.name : a.kind === 'mcp' && b.kind === 'mcp'
@@ -72,7 +73,7 @@ export function LocalAppAgentQuestions() {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   useEffect(() => {
-    if (!window.lingxi?.localApps) return;
+    if (!desktopHost()?.localApps) return;
     let active = true, generation = 0;
     const refresh = async () => {
       const request = ++generation;

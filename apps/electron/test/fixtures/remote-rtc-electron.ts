@@ -87,7 +87,36 @@ async function main(): Promise<void> {
     createWindow: () => createRtcWindow({
       preload: join(root, 'remoteRtc.cjs'),
       load: (window) => window.loadFile(join(root, 'page.html')),
-      created: (window) => { rtcWindow = window; },
+      created: (window) => {
+        rtcWindow = window;
+        const session = window.webContents.session;
+        const setCheck = session.setPermissionCheckHandler.bind(session);
+        const setRequest = session.setPermissionRequestHandler.bind(session);
+        // Keep the production handlers and report what Electron actually asks
+        // when a capture assertion fails or device enumeration stalls.
+        session.setPermissionCheckHandler = (handler) => {
+          if (!handler) return setCheck(handler);
+          setCheck((contents, permission, origin, details) => {
+            const allowed = handler(contents, permission, origin, details);
+            if (permission === 'media') {
+              trace(`permission check ${JSON.stringify({ sameContents: contents === window.webContents, origin, details, allowed })}`);
+            }
+            return allowed;
+          });
+        };
+        session.setPermissionRequestHandler = (handler) => {
+          if (!handler) return setRequest(handler);
+          setRequest((contents, permission, callback, details) => {
+            if (permission === 'media') {
+              trace(`media request ${JSON.stringify({ sameContents: contents === window.webContents, details })}`);
+            }
+            handler(contents, permission, (allowed) => {
+              if (permission === 'media') trace(`media request decision ${JSON.stringify({ allowed })}`);
+              callback(allowed);
+            }, details);
+          });
+        };
+      },
     }),
     diagnostics: (level, message) => trace(`${level}: ${message}`),
   });
@@ -182,6 +211,7 @@ async function main(): Promise<void> {
   assert.ok(rtcWindow && !rtcWindow.isDestroyed());
   const pageUrl = rtcWindow.webContents.getURL();
   assert.ok(pageUrl.endsWith('/page.html'), pageUrl);
+  trace('starting lockdown capture checks');
   const lockdown = await rtcWindow.webContents.executeJavaScript(`(async () => ({
     require: typeof require,
     process: typeof process,
@@ -192,6 +222,7 @@ async function main(): Promise<void> {
     camera: !navigator.mediaDevices ? 'unavailable' : await Promise.race([navigator.mediaDevices.getUserMedia({ video: true }).then(() => 'allowed', (error) => error.name), new Promise((resolve) => setTimeout(() => resolve('never granted'), 3000))]),
     popup: window.open('about:blank') === null,
   }))()`) as { require: string; process: string; exposed: string[]; csp: string; fetch: string; media: string; camera: string; popup: boolean };
+  trace(`lockdown capture results ${JSON.stringify({ audio: lockdown.media, video: lockdown.camera })}`);
   assert.equal(lockdown.require, 'undefined');
   assert.equal(lockdown.process, 'undefined');
   assert.deepEqual(lockdown.exposed, []);

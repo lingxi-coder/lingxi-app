@@ -15,6 +15,30 @@ final class IOSAudioServiceTests: XCTestCase {
         )
     }
 
+    func testAttachmentDrainWaitsForUIInterruptedPlaybackStopReceipt() async {
+        let identity = IOSAudioOperationIdentity(id: "playback-stop-receipt", generation: 1, serviceEpoch: 93)
+        let receipts = IOSAudioPlaybackStopReceipts()
+        let service = IOSAudioService(serviceEpoch: 93, onInvalidation: { _ in })
+        let gate = PlaybackStopTestGate()
+        let stopTask = receipts.begin(for: identity) { await gate.stop() }
+        for _ in 0 ..< 100 where !gate.entered { await Task.yield() }
+        XCTAssertTrue(gate.entered)
+        XCTAssertTrue(receipts.contains(identity))
+
+        let drainWaiter = Task { @MainActor in
+            await service.waitForTaskCompletion(stopTask, timeout: .seconds(1))
+        }
+        await Task.yield()
+        XCTAssertFalse(gate.released)
+        XCTAssertTrue(receipts.contains(identity))
+
+        gate.release()
+        let confirmed = await drainWaiter.value
+        XCTAssertTrue(confirmed)
+        XCTAssertTrue(gate.released)
+        XCTAssertFalse(receipts.contains(identity))
+    }
+
     func testCompletedOperationIdentityHistoryIsBounded() async {
         let service = IOSAudioService(serviceEpoch: 91, onInvalidation: { _ in })
         let owner = IOSAudioOwner.session(sessionID: "identity-history")
@@ -104,6 +128,7 @@ final class IOSAudioServiceTests: XCTestCase {
         let service = IOSAudioService(
             recorder: recorder,
             serviceEpoch: 52,
+            cancellationCompletionTimeout: .milliseconds(20),
             onInvalidation: { _ in }
         )
         let owner = IOSAudioOwner.system(instanceID: "demo")
@@ -121,24 +146,119 @@ final class IOSAudioServiceTests: XCTestCase {
         XCTAssertEqual(pendingDiagnostics.pendingOperations.count, 1)
         XCTAssertNil(pendingDiagnostics.activeLeasePurpose)
         XCTAssertFalse(pendingDiagnostics.leaseAwaitingOwnerCleanup)
-        await service.cancel(operationIdentity)
+        let cancellationFailure = await service.cancel(operationIdentity)
+        XCTAssertEqual(cancellationFailure?.kind, .nativeFailure)
+        let stillPendingRetry = await service.cancel(operationIdentity)
+        XCTAssertEqual(stillPendingRetry?.kind, .nativeFailure, "a still-running task must not receive a late success")
         await gate.resolve(true)
         let result = await operation.value
 
         guard case .failed(let error) = result else {
             return XCTFail("a cancelled pending start must not produce a recording handle")
         }
-        XCTAssertEqual(error.kind, .cancelled)
+        XCTAssertEqual(error.kind, .nativeFailure)
         XCTAssertFalse(recorder.isRecordingOwned(handle: nil, ownerID: owner.stableKey))
         let settledDiagnostics = await service.diagnostics()
         XCTAssertTrue(settledDiagnostics.pendingOperations.isEmpty)
-        XCTAssertEqual(settledDiagnostics.lastOperation?.phase, "cancelled")
+        XCTAssertEqual(settledDiagnostics.lastOperation?.phase, "nativeFailure")
+
+        let lateAcknowledgement = await service.cancel(operationIdentity)
+        XCTAssertNil(lateAcknowledgement, "a retry may confirm only after the delayed operation has completed")
+        let ownerReopened = await service.execute(request(
+            identity: identity(generation: 10, epoch: 52),
+            owner: owner,
+            operation: .status(handle: nil)
+        ))
+        guard case .status(recording: false, playing: false) = ownerReopened else {
+            return XCTFail("a confirmed retry should release the exact owner's cancellation quarantine")
+        }
+    }
+
+    func testGeneratedCancelCallbackReturnsUnknownAndAllowsLateConfirmedRetry() async {
+        let gate = DelayedMicrophonePermission()
+        let recorder = VoiceImpl(microphoneAuthorization: { await gate.requestPermission() })
+        let service = IOSAudioService(
+            recorder: recorder,
+            serviceEpoch: 92,
+            cancellationCompletionTimeout: .milliseconds(20),
+            onInvalidation: { _ in }
+        )
+        let callback = IOSAudioServiceCallbackAdapter(service: service)
+        let owner = IOSAudioOwner.system(instanceID: "ffi-cancel-retry")
+        let identity = self.identity(generation: 1, epoch: 92)
+        let operation = Task { @MainActor in
+            await service.execute(request(
+                identity: identity,
+                owner: owner,
+                operation: .startRecording(sampleRateHz: 16_000, format: "audio/m4a")
+            ))
+        }
+        await gate.waitUntilPermissionWasRequested()
+
+        do {
+            try await callback.cancel(identity: AudioOperationIdDto(
+                id: identity.id,
+                generation: identity.generation,
+                serviceEpoch: identity.serviceEpoch
+            ))
+            XCTFail("the callback must throw while the operation is still unconfirmed")
+        } catch let failure as AudioServiceFailure {
+            guard case let .nativeFailure(message) = failure else {
+                return XCTFail("an unconfirmed cancellation must be surfaced as native failure")
+            }
+            XCTAssertTrue(message.contains("did not finish"))
+        } catch {
+            XCTFail("unexpected cancellation callback error: \(error)")
+        }
+
+        do {
+            try await callback.cancel(identity: AudioOperationIdDto(
+                id: identity.id,
+                generation: identity.generation,
+                serviceEpoch: identity.serviceEpoch
+            ))
+            XCTFail("a retry while the permission task is still suspended must remain Unknown")
+        } catch let failure as AudioServiceFailure {
+            guard case .nativeFailure = failure else {
+                return XCTFail("pending retry should remain a native cancellation failure")
+            }
+        } catch {
+            XCTFail("unexpected retry callback error: \(error)")
+        }
+
+        await gate.resolve(true)
+        guard case .failed = await operation.value else {
+            return XCTFail("the cancelled permission-gated operation must not start recording")
+        }
+        do {
+            try await callback.cancel(identity: AudioOperationIdDto(
+                id: identity.id,
+                generation: identity.generation,
+                serviceEpoch: identity.serviceEpoch
+            ))
+        } catch {
+            return XCTFail("after the exact task finishes, a retry should receive confirmation: \(error)")
+        }
+
+        let reopened = await service.execute(request(
+            identity: self.identity(generation: 2, epoch: 92),
+            owner: owner,
+            operation: .status(handle: nil)
+        ))
+        guard case .status(recording: false, playing: false) = reopened else {
+            return XCTFail("confirmed late retry should release the owner's cancellation quarantine")
+        }
     }
 
     func testTimeoutDuringPermissionAdmissionSettlesWithoutWaitingForPrompt() async {
         let gate = DelayedMicrophonePermission()
         let recorder = VoiceImpl(microphoneAuthorization: { await gate.requestPermission() })
-        let service = IOSAudioService(recorder: recorder, serviceEpoch: 53, onInvalidation: { _ in })
+        let service = IOSAudioService(
+            recorder: recorder,
+            serviceEpoch: 53,
+            cancellationCompletionTimeout: .milliseconds(20),
+            onInvalidation: { _ in }
+        )
         let owner = IOSAudioOwner.ui(instanceID: "timeout-test")
         let task = Task { @MainActor in
             await service.execute(request(
@@ -154,7 +274,7 @@ final class IOSAudioServiceTests: XCTestCase {
         guard case .failed(let error) = result else {
             return XCTFail("permission admission timeout must be a terminal error")
         }
-        XCTAssertEqual(error.kind, .timeout)
+        XCTAssertEqual(error.kind, .nativeFailure)
 
         await gate.resolve(true)
         await Task.yield()
@@ -187,10 +307,15 @@ final class IOSAudioServiceTests: XCTestCase {
         XCTAssertFalse(permissionWasRequested)
     }
 
-    func testCancelListenDuringPermissionPromptReleasesServiceAdmission() async {
+    func testUnconfirmedListenCancelDuringPermissionPromptReturnsFailureAndQuarantinesOwner() async {
         let permission = DelayedSpeechAuthorization()
         let stt = SttImpl(speechAuthorization: { await permission.requestPermission() })
-        let service = IOSAudioService(stt: stt, serviceEpoch: 80, onInvalidation: { _ in })
+        let service = IOSAudioService(
+            stt: stt,
+            serviceEpoch: 80,
+            cancellationCompletionTimeout: .milliseconds(20),
+            onInvalidation: { _ in }
+        )
         let owner = IOSAudioOwner.ui(instanceID: "listen-permission-cancel")
         let route = systemPermissionRoute()
         let firstIdentity = identity(generation: 1, epoch: 80)
@@ -202,41 +327,38 @@ final class IOSAudioServiceTests: XCTestCase {
         }
 
         await permission.waitUntilRequestCount(1)
-        await service.cancel(firstIdentity)
+        let cancellationFailure = await service.cancel(firstIdentity)
+        XCTAssertEqual(cancellationFailure?.kind, .nativeFailure)
         guard case .failed(let cancelled) = await firstListen.value else {
-            return XCTFail("cancelling a pending permission prompt should settle without awaiting the system sheet")
+            return XCTFail("the execute result must report unconfirmed cancellation instead of success")
         }
-        XCTAssertEqual(cancelled.kind, .cancelled)
+        XCTAssertEqual(cancelled.kind, .nativeFailure)
 
         let secondIdentity = identity(generation: 2, epoch: 80)
-        let secondListen = Task { @MainActor in
-            await service.execute(
-                request(identity: secondIdentity, owner: owner, operation: .listen(language: nil)),
-                routeResolution: route
-            )
-        }
-        await permission.waitUntilRequestCount(2)
-
-        await permission.resolve(0, granted: true)
-        for _ in 0 ..< 10 { await Task.yield() }
-        let diagnostics = await service.diagnostics()
-        XCTAssertEqual(diagnostics.activeListenOwner, owner.stableKey)
-
-        let third = await service.execute(
-            request(identity: identity(generation: 3, epoch: 80), owner: owner, operation: .listen(language: nil)),
+        let secondListen = await service.execute(
+            request(identity: secondIdentity, owner: owner, operation: .listen(language: nil)),
             routeResolution: route
         )
-        guard case .failed(let busy) = third else {
-            return XCTFail("a late result from the cancelled listen must not clear the newer listen's admission")
+        guard case .failed(let blocked) = secondListen else {
+            return XCTFail("an owner with an unconfirmed cancellation must fail closed")
         }
-        XCTAssertEqual(busy.kind, .busy)
+        XCTAssertEqual(blocked.kind, .busy)
 
-        await service.cancel(secondIdentity)
-        await permission.resolve(1, granted: true)
-        guard case .failed(let secondCancelled) = await secondListen.value else {
-            return XCTFail("the replacement listen should also settle as cancelled")
+        await permission.resolve(0, granted: true)
+        for _ in 0 ..< 100 where stt.hasActiveNativeOperation { await Task.yield() }
+        XCTAssertFalse(stt.hasActiveNativeOperation)
+
+        let lateAcknowledgement = await service.cancel(firstIdentity)
+        XCTAssertNil(lateAcknowledgement, "the retry acknowledges only after the first listen task has stopped")
+
+        let reopened = await service.execute(request(
+            identity: identity(generation: 3, epoch: 80),
+            owner: owner,
+            operation: .status(handle: nil)
+        ))
+        guard case .status(recording: false, playing: false) = reopened else {
+            return XCTFail("a confirmed late retry should clear the owner's cancellation quarantine")
         }
-        XCTAssertEqual(secondCancelled.kind, .cancelled)
     }
 
     func testSttLatePermissionCallbackCannotClearReplacementAttempt() async {
@@ -325,13 +447,56 @@ final class IOSAudioServiceTests: XCTestCase {
         }
     }
 
+    func testCloudCancelFailureIsReturnedToTheCancellationCaller() async {
+        let host = FailingCancelCloudHost()
+        let service = IOSAudioService(
+            cancellationCompletionTimeout: .seconds(1),
+            onInvalidation: { _ in }
+        )
+        let operation = IOSAudioProviderService.PinnedOperation(
+            id: "cloud-op",
+            host: host,
+            requestJSON: "{}",
+            profileID: "profile-a",
+            modelID: nil
+        )
+
+        let error = await service.cancelCloudOperation(operation)
+
+        XCTAssertEqual(error?.kind, .nativeFailure)
+        XCTAssertTrue(error?.message.contains("provider cancel refused") == true)
+    }
+
+    func testCloudCancelTimeoutReturnsFailureUntilTheHostFinishes() async {
+        let host = DelayedCancelCloudHost()
+        let service = IOSAudioService(
+            cancellationCompletionTimeout: .milliseconds(20),
+            onInvalidation: { _ in }
+        )
+        let operation = IOSAudioProviderService.PinnedOperation(
+            id: "cloud-op",
+            host: host,
+            requestJSON: "{}",
+            profileID: "profile-a",
+            modelID: nil
+        )
+
+        let error = await service.cancelCloudOperation(operation)
+
+        XCTAssertEqual(error?.kind, .nativeFailure)
+        XCTAssertTrue(error?.message.contains("did not confirm cancellation") == true)
+        XCTAssertTrue(host.cancelRequested)
+        host.resolveCancellation()
+    }
+
     func testLateRecordingStartCleanupCannotClearFreshOwner() async {
         let oldIdentity = identity(generation: 12, epoch: 56)
-        let delayedStart = LateStartRecordingDriver(delayedIdentity: oldIdentity.id)
+        let delayedStart = LateStartRecordingDriver(delayedIdentity: oldIdentity.recordingDriverKey)
         let service = IOSAudioService(
             recorder: delayedStart,
             coordinator: VoiceAudioSessionCoordinator(sessionDriver: NoopAudioSessionDriver()),
             serviceEpoch: 56,
+            cancellationCompletionTimeout: .milliseconds(20),
             onInvalidation: { _ in }
         )
         let oldOwner = IOSAudioOwner.system(instanceID: "old-app")
@@ -345,11 +510,12 @@ final class IOSAudioServiceTests: XCTestCase {
         }
 
         await delayedStart.waitUntilDelayedStartIsPending()
-        await service.cancel(oldIdentity)
+        let cancellationFailure = await service.cancel(oldIdentity)
+        XCTAssertEqual(cancellationFailure?.kind, .nativeFailure)
         guard case .failed(let cancelled) = await oldStart.value else {
-            return XCTFail("the old start should settle as cancelled before its driver callback returns")
+            return XCTFail("the old start must report that cancellation was not confirmed")
         }
-        XCTAssertEqual(cancelled.kind, .cancelled)
+        XCTAssertEqual(cancelled.kind, .nativeFailure)
 
         let newIdentity = identity(generation: 1, epoch: 56)
         let newStart = await service.execute(request(
@@ -1072,6 +1238,11 @@ private final class LateStartRecordingDriver: AudioRecordingDriving, @unchecked 
         if startOperationID == delayedIdentity, cancelledAfterLateStart { await cleanupSignal.signal() }
     }
 
+    func cancelWithReceipt(startOperationID: String) async -> Bool {
+        await cancel(startOperationID: startOperationID)
+        return lock.withLock { !recordings.values.contains { $0.operationID == startOperationID } }
+    }
+
     func end(ownerID: String) async {
         lock.withLock { recordings = recordings.filter { $0.value.ownerID != ownerID } }
     }
@@ -1135,6 +1306,11 @@ private final class EndOwnerGateRecordingDriver: AudioRecordingDriving, @uncheck
         lock.withLock {
             recordings = recordings.filter { $0.value.operationID != startOperationID }
         }
+    }
+
+    func cancelWithReceipt(startOperationID: String) async -> Bool {
+        await cancel(startOperationID: startOperationID)
+        return lock.withLock { !recordings.values.contains { $0.operationID == startOperationID } }
     }
 
     func end(ownerID: String) async {
@@ -1212,7 +1388,9 @@ private final class AutoFinishingRecordingDriver: AudioRecordingDriving, @unchec
             failNextStop = false
             return shouldFail
         }
-        if shouldFail { throw AudioServiceFailure.nativeFailure("recording file could not be read") }
+        if shouldFail {
+            throw AudioRecordingClosedError(underlying: AudioServiceFailure.nativeFailure("recording file could not be read"))
+        }
         return IOSAudioRecording(audioBytes: Data([0x41, 0x42]), mimeType: "audio/m4a")
     }
 
@@ -1232,6 +1410,11 @@ private final class AutoFinishingRecordingDriver: AudioRecordingDriving, @unchec
             return entry.value.lease
         }
         if let acquiredLease { await coordinator.release(acquiredLease) }
+    }
+
+    func cancelWithReceipt(startOperationID: String) async -> Bool {
+        await cancel(startOperationID: startOperationID)
+        return lock.withLock { !recordings.values.contains { $0.operationID == startOperationID } }
     }
 
     func end(ownerID: String) async {
@@ -1266,4 +1449,136 @@ private final class AutoFinishingRecordingDriver: AudioRecordingDriving, @unchec
 private struct NoopAudioSessionDriver: VoiceAudioSessionDriving {
     func activate(_: VoiceAudioSessionCoordinator.Purpose) throws {}
     func deactivate() {}
+    func deactivateWithReceipt() -> Bool { true }
+}
+
+
+@MainActor
+private final class FailingCancelCloudHost: IOSAudioProviderHostDriving {
+    func capabilities(requestJson _: String) async throws -> String { "{}" }
+    func transcribe(requestJson _: String, audio _: Data, mimeType _: String) async throws -> String { "" }
+    func synthesize(requestJson _: String, text _: String) async throws -> String { "{}" }
+    func cancel(operationId _: String) async throws {
+        throw AudioServiceFailure.nativeFailure("provider cancel refused")
+    }
+}
+
+@MainActor
+private final class DelayedCancelCloudHost: IOSAudioProviderHostDriving {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var cancelRequested = false
+
+    func capabilities(requestJson _: String) async throws -> String { "{}" }
+    func transcribe(requestJson _: String, audio _: Data, mimeType _: String) async throws -> String { "" }
+    func synthesize(requestJson _: String, text _: String) async throws -> String { "{}" }
+
+    func cancel(operationId _: String) async throws {
+        cancelRequested = true
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func resolveCancellation() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+@MainActor
+private final class PlaybackStopTestGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var entered = false
+    private(set) var released = false
+
+    func stop() async {
+        entered = true
+        await withCheckedContinuation { continuation = $0 }
+        released = true
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private final class ReceiptRecordingDriver: AudioRecordingDriving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var operationID: String?
+    private var ownerID: String?
+    private var logicalRecording = false
+    private var releaseAllowed = false
+
+    func allowRelease() { lock.withLock { releaseAllowed = true } }
+    func startRecordingOwned(operationID: String, ownerID: String, sampleRateHz: UInt32, format: String, maximumBytes: UInt64) async throws -> String {
+        lock.withLock { self.operationID = operationID; self.ownerID = ownerID; logicalRecording = true }
+        return "receipt-recording"
+    }
+    func stopRecordingOwned(handle: String, ownerID: String, maximumBytes: UInt64) async throws -> IOSAudioRecording {
+        throw AudioServiceFailure.nativeFailure("unconfirmed")
+    }
+    func isRecordingOwned(handle: String?, ownerID: String) -> Bool {
+        lock.withLock { self.ownerID == ownerID && logicalRecording }
+    }
+    func cancel(startOperationID: String) async {
+        lock.withLock { if operationID == startOperationID { logicalRecording = false } }
+    }
+    func cancelWithReceipt(startOperationID: String) async -> Bool {
+        lock.withLock {
+            guard operationID == startOperationID, releaseAllowed else { return false }
+            operationID = nil
+            ownerID = nil
+            return true
+        }
+    }
+    func end(ownerID: String) async {}
+    func stopAll() async {}
+}
+
+extension IOSAudioServiceTests {
+    func testGeneratedCancelDoesNotTreatClearedRecorderAsCloseReceipt() async throws {
+        let recorder = ReceiptRecordingDriver()
+        let service = IOSAudioService(recorder: recorder, serviceEpoch: 94, cancellationCompletionTimeout: .milliseconds(20), onInvalidation: { _ in })
+        let callback = IOSAudioServiceCallbackAdapter(service: service)
+        let owner = IOSAudioOwner.system(instanceID: "recording-receipt")
+        let origin = identity(generation: 1, epoch: 94)
+        let started = await service.execute(request(identity: origin, owner: owner, operation: .startRecording(sampleRateHz: 16_000, format: "m4a")))
+        guard case .recordingStarted = started else { return XCTFail("recording should start") }
+        let dto = AudioOperationIdDto(id: origin.id, generation: origin.generation, serviceEpoch: origin.serviceEpoch)
+        do {
+            try await callback.cancel(identity: dto)
+            XCTFail("a cleared recorder pointer must not confirm its native close")
+        } catch {}
+        XCTAssertFalse(recorder.isRecordingOwned(handle: nil, ownerID: owner.stableKey))
+        let during = await service.execute(request(identity: identity(generation: 2, epoch: 94), owner: owner, operation: .status(handle: nil)))
+        guard case .failed(let failure) = during, failure.kind == .busy else {
+            return XCTFail("unconfirmed close must quarantine the owner")
+        }
+        recorder.allowRelease()
+        try await callback.cancel(identity: dto)
+        let after = await service.execute(request(identity: identity(generation: 3, epoch: 94), owner: owner, operation: .status(handle: nil)))
+        guard case .status(recording: false, playing: false) = after else {
+            return XCTFail("an exact confirmed retry should reopen the owner")
+        }
+    }
+}
+
+extension IOSAudioServiceTests {
+    func testCancelledIdentityCannotBeReadmittedWhileItsSuccessIsCached() async {
+        let service = IOSAudioService(serviceEpoch: 95, onInvalidation: { _ in })
+        let owner = IOSAudioOwner.system(instanceID: "cached-cancel")
+        let old = identity(generation: 1, epoch: 95)
+        let cancellation = await service.cancel(old)
+        XCTAssertNil(cancellation)
+        let retired = await service.execute(request(identity: old, owner: owner, operation: .status(handle: nil)))
+        guard case .failed = retired else { return XCTFail("retired request must not be admitted") }
+        for generation in 2 ... 4_099 {
+            _ = await service.execute(request(identity: identity(generation: UInt64(generation), epoch: 95), owner: owner, operation: .status(handle: nil)))
+        }
+        let replayed = await service.execute(request(identity: old, owner: owner, operation: .status(handle: nil)))
+        guard case .failed(let error) = replayed, error.kind == .invalidRequest else {
+            return XCTFail("an old cancellation result must not apply to a new admission")
+        }
+    }
 }

@@ -1,0 +1,87 @@
+{
+  "localOnly": true,
+  "networkCalls": 0,
+  "actualSdkWrapper": true,
+  "actualProductHandlerGuard": true,
+  "results": [
+    {
+      "name": "cloud-event-json",
+      "outcome": "ENTERED_DB_READ",
+      "dbReads": 1,
+      "paramsKeys": [
+        "teamId",
+        "conversationId",
+        "messageId"
+      ],
+      "idLengths": {
+        "teamId": 13,
+        "conversationId": 15,
+        "messageId": 16
+      },
+      "snapshotExists": true,
+      "originalKeys": [
+        "author",
+        "changeId",
+        "createdAt"
+      ],
+      "createdAtType": "Timestamp",
+      "createdAtHasToMillis": true
+    },
+    {
+      "name": "cloud-event-protobuf",
+      "outcome": "ENTERED_DB_READ",
+      "dbReads": 1,
+      "paramsKeys": [
+        "teamId",
+        "conversationId",
+        "messageId"
+      ],
+      "idLengths": {
+        "teamId": 13,
+        "conversationId": 15,
+        "messageId": 16
+      },
+      "snapshotExists": true,
+      "originalKeys": [
+        "author",
+        "changeId",
+        "createdAt"
+      ],
+      "createdAtType": "Timestamp",
+      "createdAtHasToMillis": true
+    },
+    {
+      "name": "legacy-event-data-only-protobuf",
+      "outcome": "RETURNED_WITHOUT_DB_READ",
+      "dbReads": 0,
+      "paramsKeys": [],
+      "idLengths": {},
+      "snapshotExists": false,
+      "originalKeys": [],
+      "createdAtType": null,
+      "createdAtHasToMillis": false
+    },
+    {
+      "name": "legacy-event-data-only-json",
+      "outcome": "RETURNED_WITHOUT_DB_READ",
+      "dbReads": 0,
+      "paramsKeys": [],
+      "idLengths": {},
+      "snapshotExists": false,
+      "originalKeys": [],
+      "createdAtType": null,
+      "createdAtHasToMillis": false
+    },
+    {
+      "name": "http-request-shape",
+      "outcome": "RETURNED_WITHOUT_DB_READ",
+      "dbReads": 0,
+      "paramsKeys": [],
+      "idLengths": {},
+      "snapshotExists": false,
+      "originalKeys": [],
+      "createdAtType": null,
+      "createdAtHasToMillis": false
+    }
+  ]
+}

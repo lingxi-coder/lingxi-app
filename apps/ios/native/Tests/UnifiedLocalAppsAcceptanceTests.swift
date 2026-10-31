@@ -155,9 +155,9 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
             }
             nativeConfig["archive_sha256"] = metadata.archiveSha256
             nativeConfig["authorization_file"] = LXISHRuntimeBundleResources.authorizationManifestURL()?.path
-            for (key, environmentKey) in [("rootfs_archive_path", "LINGXI_IOS_ISH_ROOTFS_ZIP"),
-                                           ("default_mount_path", "LINGXI_IOS_ISH_DEFAULT_MOUNT_DIR"),
-                                           ("rootfs_patch_path", "LINGXI_IOS_ISH_ROOTFS_PATCH_DIR")] {
+            for (key, environmentKey) in [("rootfs_archive_path", LXISHRuntimeResourceBootstrap.archiveEnvironmentKey),
+                                           ("default_mount_path", LXISHRuntimeResourceBootstrap.defaultMountEnvironmentKey),
+                                           ("rootfs_patch_path", LXISHRuntimeResourceBootstrap.rootfsPatchEnvironmentKey)] {
                 if let value = getenv(environmentKey) { nativeConfig[key] = String(cString: value) }
             }
             if let data = try? JSONSerialization.data(withJSONObject: nativeConfig),

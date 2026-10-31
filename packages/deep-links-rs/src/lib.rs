@@ -18,18 +18,23 @@ fn valid_route(route: &str) -> bool {
     }) {
         return false;
     }
-    match s.as_slice() {
-        ["new"] => true,
-        ["session" | "project" | "settings" | "provider" | "terminal" | "apps" | "market", _] => {
-            true
-        }
-        ["extensions", "mcp" | "skill" | "plugin", _] => true,
-        ["cron", "job" | "run", _] => true,
-        ["runtime", "agent" | "task" | "plan" | "review" | "activity", _] => true,
-        ["import", "mcp" | "plugin" | "skill" | "provider"] => true,
-        ["remote", _, _] => true,
-        _ => false,
-    }
+    matches!(
+        s.as_slice(),
+        ["new"]
+            | [
+                "session" | "project" | "settings" | "provider" | "terminal" | "apps" | "market",
+                _
+            ]
+            | ["extensions", "mcp" | "skill" | "plugin", _]
+            | ["cron", "job" | "run", _]
+            | [
+                "runtime",
+                "agent" | "task" | "plan" | "review" | "activity",
+                _
+            ]
+            | ["import", "mcp" | "plugin" | "skill" | "provider"]
+            | ["remote", _, _]
+    )
 }
 pub fn parse(raw: &str) -> Result<Target, &'static str> {
     if raw.len() > 32768 || raw.chars().any(|c| c.is_control() || c == ' ') {

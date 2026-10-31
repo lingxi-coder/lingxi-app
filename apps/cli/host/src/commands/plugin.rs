@@ -1850,11 +1850,15 @@ fn validate_plugin_manifest_fields(
         }
         let message = match field.as_str() {
             "source" | "strict" => format!(
-                "Field '{field}' belongs in the marketplace entry (marketplace.json), not plugin.json. It's harmless here but unused — Claude Code ignores it at load time."
+                "Field '{field}' belongs in the marketplace entry (marketplace.json), not plugin.json. It's harmless here but unused — {} ignores it at load time.",
+                branding::PRODUCT_NAME
             ),
             "capabilities" => "'capabilities' is no longer read: what a hooks module hooks and calls on $ is read from its source and listed under its hooks.json below. Delete the field.".to_string(),
             "experimental" => unreachable!("experimental is in KNOWN"),
-            _ => format!("Unknown field '{field}'. Claude Code ignores it at load time."),
+            _ => format!(
+                "Unknown field '{field}'. {} ignores it at load time.",
+                branding::PRODUCT_NAME
+            ),
         };
         warnings.push(message);
     }
@@ -3700,7 +3704,7 @@ async fn validate_component_file(
             return;
         }
     };
-    let parsed: serde_yaml::Value = match serde_yaml::from_str(yaml) {
+    let parsed: yaml_serde::Value = match yaml_serde::from_str(yaml) {
         Ok(parsed) => parsed,
         Err(error) => {
             push_issue(
@@ -3726,10 +3730,10 @@ async fn validate_component_file(
     };
 
     if matches!(kind, ComponentKind::Agent) {
-        let name_key = serde_yaml::Value::String("name".to_string());
+        let name_key = yaml_serde::Value::String("name".to_string());
         let has_name = map
             .get(&name_key)
-            .and_then(serde_yaml::Value::as_str)
+            .and_then(yaml_serde::Value::as_str)
             .is_some_and(|name| !name.is_empty());
         if !has_name {
             // Co-located markdown without a name is deliberately ignored by
@@ -3738,7 +3742,7 @@ async fn validate_component_file(
         }
     }
 
-    let description_key = serde_yaml::Value::String("description".to_string());
+    let description_key = yaml_serde::Value::String("description".to_string());
     if !map.contains_key(&description_key)
         && matches!(
             kind,
@@ -3773,7 +3777,7 @@ fn frontmatter_yaml(raw: &str) -> Option<Result<&str, ()>> {
     Some(Err(()))
 }
 
-fn yaml_error_summary(error: &serde_yaml::Error) -> String {
+fn yaml_error_summary(error: &yaml_serde::Error) -> String {
     let text = error.to_string();
     if text.to_ascii_lowercase().contains("unexpected end")
         || text.to_ascii_lowercase().contains("end of stream")
@@ -3784,36 +3788,36 @@ fn yaml_error_summary(error: &serde_yaml::Error) -> String {
     }
 }
 
-fn yaml_kind(value: &serde_yaml::Value) -> &'static str {
+fn yaml_kind(value: &yaml_serde::Value) -> &'static str {
     match value {
-        serde_yaml::Value::Null => "null",
-        serde_yaml::Value::Bool(_) => "boolean",
-        serde_yaml::Value::Number(_) => "number",
-        serde_yaml::Value::String(_) => "string",
-        serde_yaml::Value::Sequence(_) => "array",
-        serde_yaml::Value::Mapping(_) => "object",
-        serde_yaml::Value::Tagged(_) => "tagged value",
+        yaml_serde::Value::Null => "null",
+        yaml_serde::Value::Bool(_) => "boolean",
+        yaml_serde::Value::Number(_) => "number",
+        yaml_serde::Value::String(_) => "string",
+        yaml_serde::Value::Sequence(_) => "array",
+        yaml_serde::Value::Mapping(_) => "object",
+        yaml_serde::Value::Tagged(_) => "tagged value",
     }
 }
 
 fn validate_allowed_tools(
-    map: &serde_yaml::Mapping,
+    map: &yaml_serde::Mapping,
     issue_path: &str,
     prefix: &str,
     errors: &mut Vec<String>,
 ) {
-    let key = serde_yaml::Value::String("allowed-tools".to_string());
-    let alias = serde_yaml::Value::String("allowedTools".to_string());
+    let key = yaml_serde::Value::String("allowed-tools".to_string());
+    let alias = yaml_serde::Value::String("allowedTools".to_string());
     let Some(value) = map.get(&key).or_else(|| map.get(&alias)) else {
         return;
     };
     match value {
-        serde_yaml::Value::String(_) => {}
-        serde_yaml::Value::Sequence(values)
+        yaml_serde::Value::String(_) => {}
+        yaml_serde::Value::Sequence(values)
             if values
                 .iter()
-                .all(|value| matches!(value, serde_yaml::Value::String(_))) => {}
-        serde_yaml::Value::Sequence(_) => push_issue(
+                .all(|value| matches!(value, yaml_serde::Value::String(_))) => {}
+        yaml_serde::Value::Sequence(_) => push_issue(
             errors,
             prefix,
             &format!("{issue_path}: allowed-tools"),
@@ -3832,18 +3836,18 @@ fn validate_allowed_tools(
 }
 
 fn validate_shell(
-    map: &serde_yaml::Mapping,
+    map: &yaml_serde::Mapping,
     issue_path: &str,
     prefix: &str,
     errors: &mut Vec<String>,
 ) {
-    let key = serde_yaml::Value::String("shell".to_string());
+    let key = yaml_serde::Value::String("shell".to_string());
     let Some(value) = map.get(&key) else {
         return;
     };
     match value {
-        serde_yaml::Value::String(shell) if matches!(shell.as_str(), "bash" | "powershell") => {}
-        serde_yaml::Value::String(shell) => push_issue(
+        yaml_serde::Value::String(shell) if matches!(shell.as_str(), "bash" | "powershell") => {}
+        yaml_serde::Value::String(shell) => push_issue(
             errors,
             prefix,
             &format!("{issue_path}: shell"),
@@ -5311,6 +5315,33 @@ mod validate_tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn manifest_warnings_identify_the_product_ignoring_fields() {
+        let manifest = json!({
+            "name": "demo",
+            "version": "1.0.0",
+            "description": "demo",
+            "author": {"name": "author"},
+            "source": ".",
+            "unrecognized": true
+        });
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+        validate_plugin_manifest_fields(&manifest, &mut errors, &mut warnings);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(warnings.contains(&format!(
+            "Field 'source' belongs in the marketplace entry (marketplace.json), not plugin.json. It's harmless here but unused — {} ignores it at load time.",
+            branding::PRODUCT_NAME
+        )), "{warnings:?}");
+        assert!(
+            warnings.contains(&format!(
+                "Unknown field 'unrecognized'. {} ignores it at load time.",
+                branding::PRODUCT_NAME
+            )),
+            "{warnings:?}"
+        );
+    }
 
     #[tokio::test]
     async fn deep_validation_aggregates_paths_and_component_frontmatter() {

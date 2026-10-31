@@ -15,6 +15,8 @@ Each platform directory owns its interface and build entrypoints.
 | [`bridge-server/`](bridge-server/) | Local Rust service consumed by the Electron desktop client. |
 | [`web/`](web/) | Public website, SDK documentation and retained prototype screens. |
 | [`../packages/bridge-client/`](../packages/bridge-client/) | Private `@lingxi/bridge-client` package: protocol types and Node `BridgeClient`. |
+| [`../packages/mobile-ffi/`](../packages/mobile-ffi/) | Shared Rust source for mobile Remote, audio and common native callback conversion; compiled into each existing UniFFI component. |
+| [`../packages/host-identity/`](../packages/host-identity/) | Product identity and endpoint policy shared by CLI and Bridge. |
 | [`../resources/voice/`](../resources/voice/README.md) | Shared voice model and audio configuration sources and generators. |
 | [`../resources/translations/`](../resources/translations/README.md) | Canonical translations and generators for native localized resources. |
 

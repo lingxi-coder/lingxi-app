@@ -93,6 +93,9 @@ export interface LocalAppAgentQuestion {
 }
 export interface LocalAppsApi {
   list(): Promise<DesktopLocalApp[]>;
+  remoteSettings(): Promise<Record<string, boolean>>;
+  remoteConfiguration(): Promise<{ configured: boolean; originTemplate?: string; port?: number; error?: string }>;
+  setRemoteAccess(id: string, enabled: boolean): Promise<void>;
   open(id: string): Promise<void>;
   stop(id: string): Promise<void>;
   restart(id: string): Promise<void>;
@@ -108,12 +111,11 @@ export interface LocalAppsApi {
   bindAuthoring(id: string, session: { projectPath: string; sessionId: string }): Promise<DesktopAuthoringRef>;
   /** Persist a host-verified, ownerless source binding before a new app draft is shown. */
   prepareAuthoring(session: { projectPath: string; sessionId: string }): Promise<DesktopAuthoringRef>;
-  marketList(query?: string, owned?: boolean): Promise<LocalAppMarketRow[]>;
+  marketBrowse(): Promise<void>;
+  marketInstallLink(remoteId: string): Promise<DesktopLocalApp | null>;
   marketInstall(remoteId: string, id?: string, expectedRevision?: number): Promise<DesktopLocalApp>;
   marketPublish(id: string, metadata: LocalAppMarketPublication, expectedRevision: number): Promise<{ appId: string; versionId: string; status: string } | undefined>;
   marketManage(): Promise<void>;
-  legacyEntries(): Promise<LocalAppLegacyEntry[]>;
-  importLegacy(legacyId: string): Promise<void>;
   restoreSource(id: string): Promise<void>;
   remix(id: string): Promise<void>;
   agentCatalog(id: string): Promise<LocalAppAgentCatalog>;
@@ -125,6 +127,4 @@ export interface LocalAppsApi {
 
 export interface LocalAppVersion { revision: number; digest: string; createdAtMs: number; manifest: DesktopAppManifest }
 
-export interface LocalAppMarketRow { id: string; name: string; summary: string; currentVersion?: { id: string }; visibility?: string }
-export interface LocalAppLegacyEntry { legacyId: string; name: string; summary: string; status: string }
 export interface LocalAppMarketPublication { name: string; summary: string; description: string; category: string; notes: string }

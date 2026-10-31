@@ -31,6 +31,9 @@ import { tokens } from '@renderer/theme/tokens';
 import { audioConfigurationDefaults } from '../../src/shared/generatedAudioConfiguration';
 import { defaultNativeAudioSnapshot, type NativeAudioCommand, type NativeAudioResponse } from '../../src/shared/nativeAudio';
 import type { PageContentProps } from '@renderer/components/settings/SettingsScreen';
+import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
+
+setLanguagePreference('zh-Hans');
 
 declare global {
   interface Window {

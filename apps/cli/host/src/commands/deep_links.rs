@@ -85,10 +85,10 @@ pub fn open(args: &Open) -> i32 {
             return 1;
         }
     };
-    if let Some(config_dir) = std::env::var_os("LINGXI_CONFIG_DIR") {
+    if let Some(config_dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         let selected = std::path::PathBuf::from(config_dir);
-        let default =
-            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".lingxi");
+        let default = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+            .join(branding::DOT_DIR);
         let same_store = selected == default
             || selected
                 .canonicalize()
@@ -100,7 +100,10 @@ pub fn open(args: &Open) -> i32 {
                 || target.route.starts_with("project/")
                 || target.params.contains_key("workspace"))
         {
-            eprintln!("Desktop cannot verify this custom LINGXI_CONFIG_DIR; use --cli for this local destination");
+            eprintln!(
+                "Desktop cannot verify this custom {}; use --cli for this local destination",
+                branding::CONFIG_DIR_ENV
+            );
             return 1;
         }
     }
@@ -125,7 +128,10 @@ pub fn open(args: &Open) -> i32 {
     match result {
         Ok(status) if status.success() => 0,
         _ => {
-            eprintln!("Unable to open LingXi. Install the desktop application and register its URL protocol.");
+            eprintln!(
+                "Unable to open {}. Install the desktop application and register its URL protocol.",
+                branding::PRODUCT_NAME
+            );
             1
         }
     }
@@ -157,10 +163,11 @@ pub fn prepare_cli(args: &Open, parsed: &mut crate::argv::Argv) -> Result<(), St
     if !["session", "project", "new"].contains(&kind) {
         return Err("Use `lingxi open <url>` for this desktop destination".into());
     }
-    let home = std::env::var_os("LINGXI_CONFIG_DIR")
+    let home = std::env::var_os(branding::CONFIG_DIR_ENV)
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".lingxi")
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                .join(branding::DOT_DIR)
         });
     let current_cwd = std::env::current_dir()
         .ok()

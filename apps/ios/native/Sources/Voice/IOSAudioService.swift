@@ -24,6 +24,16 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         let startIdentity: IOSAudioOperationIdentity
     }
 
+    private struct CancellationFlight {
+        let token: UUID
+        let task: Task<IOSAudioError?, Never>
+    }
+
+    private struct CancellationOutcome {
+        let error: IOSAudioError?
+        let expiresAt: ContinuousClock.Instant
+    }
+
     private let configurationStore: AudioConfigurationStore
     private let stt: SttImpl
     private let tts: TtsImpl
@@ -33,6 +43,7 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     private let coordinator: VoiceAudioSessionCoordinator
     private let pcmPlayback: any IOSPcmPlaybackDriving
     private let providerService: IOSAudioProviderService
+    private let cancellationCompletionTimeout: Duration
     private var cloudCallbacks: [IOSAudioOperationIdentity: IOSAudioProviderService.PinnedOperation] = [:]
     private var activeCloudOperations: [IOSAudioOwner: IOSAudioProviderService.PinnedOperation] = [:]
     private var finishedCaptures: Set<IOSAudioOperationIdentity> = []
@@ -42,13 +53,28 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     private var scheduledCapabilityRefresh: Task<Void, Never>?
     private var capabilityObservers: [NSObjectProtocol] = []
     private var pending: [IOSAudioOperationIdentity: PendingOperation] = [:]
+    private var cancellationFlights: [IOSAudioOperationIdentity: CancellationFlight] = [:]
+    private var unconfirmedOperationTasks: [IOSAudioOperationIdentity: Task<Void, Never>] = [:]
+    private let playbackStopReceipts = IOSAudioPlaybackStopReceipts()
+    private var cancellationOutcomes: [IOSAudioOperationIdentity: CancellationOutcome] = [:]
+    private var cancellationOutcomeOrder: [IOSAudioOperationIdentity] = []
     private var seenIdentities: Set<IOSAudioOperationIdentity> = []
     private var seenIdentityOrder: [IOSAudioOperationIdentity] = []
     private var retiredIdentities: [IOSAudioOperationIdentity: ContinuousClock.Instant] = [:]
     private var retiredIdentityOrder: [IOSAudioOperationIdentity] = []
     private var endingOwners: Set<IOSAudioOwner> = []
+    private var cancellationUnconfirmedOwners: Set<IOSAudioOwner> = []
+    private var unconfirmedCancellationOwnersByIdentity: [IOSAudioOperationIdentity: IOSAudioOwner] = [:]
+    private var ownerEndQuarantines: Set<IOSAudioOwner> = []
+    private var cancellationQuarantineOverflow = false
     private var ownerEndWaiters: [IOSAudioOwner: [CheckedContinuation<Void, Never>]] = [:]
     private var recordings: [String: RecordingOwner] = [:]
+    /// Retained until this exact recorder incarnation produces a close
+    /// receipt, including failed starts and captures whose handle was retired.
+    private var recordingAttempts: [IOSAudioOperationIdentity: IOSAudioOwner] = [:]
+    private var recordingCancelTasks: [IOSAudioOperationIdentity: Task<Void, Never>] = [:]
+    private var recordingReceiptTasks: [IOSAudioOperationIdentity: Task<Bool, Never>] = [:]
+    private var recordingEndTasks: [IOSAudioOwner: Task<Void, Never>] = [:]
     private var activePlaybackIdentity: IOSAudioOperationIdentity?
     private var activePlaybackOwner: IOSAudioOwner?
     private var activeListenIdentity: IOSAudioOperationIdentity?
@@ -83,12 +109,14 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         providerService: IOSAudioProviderService? = nil,
         serviceEpoch: UInt64? = nil,
         maximumPayloadBytes: UInt64? = nil,
+        cancellationCompletionTimeout: Duration = .seconds(5),
         onInvalidation: (@MainActor (VoiceAudioSessionCoordinator.Invalidation) async -> Void)? = nil
     ) {
         let coordinator = coordinator ?? VoiceAudioSessionCoordinator.shared
         self.coordinator = coordinator
         self.pcmPlayback = pcmPlayback ?? IOSPcmPlayback(coordinator: coordinator)
         self.providerService = providerService ?? .shared
+        self.cancellationCompletionTimeout = cancellationCompletionTimeout
         self.configurationStore = configurationStore ?? .shared
         self.stt = stt ?? SttImpl(coordinator: coordinator)
         self.tts = tts ?? TtsImpl()
@@ -340,7 +368,9 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         if let timeout = request.timeoutBudgetMs, timeout == 0 {
             return .failed(.init(kind: .timeout, message: "The audio operation timed out before it started."))
         }
-        guard !endingOwners.contains(request.owner) else {
+        guard !endingOwners.contains(request.owner),
+              !cancellationUnconfirmedOwners.contains(request.owner),
+              !cancellationQuarantineOverflow else {
             return .failed(.init(kind: .busy, message: "The audio owner is being cleaned up."))
         }
 
@@ -403,65 +433,381 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         return result
     }
 
-    /// Cancellation is scoped to one UUID/generation/epoch. It retires
-    /// admission immediately, stops any matching native resource, and waits
-    /// only when an operation owns active native I/O (never for a permission
-    /// sheet that has not opened a resource).
+    /// Cancellation is scoped to one UUID/generation/epoch. A successful
+    /// result means the operation task, cloud cancellation, and owned native
+    /// resource have all stopped; unconfirmed cancellation is returned as an
+    /// error instead of being reported as success.
+    @discardableResult
     func cancel(
         _ identity: IOSAudioOperationIdentity,
         terminalError: IOSAudioError = .init(kind: .cancelled, message: "The audio operation was cancelled.")
-    ) async {
-        guard Self.isValidIdentity(identity), identity.serviceEpoch == serviceEpoch else { return }
-        retire(identity)
-        guard var operation = pending[identity], !operation.isTerminal else {
-            if let (handle, _) = recordings.first(where: { $0.value.startIdentity == identity }) {
-                await recorder.cancel(startOperationID: identity.id)
-                recordings.removeValue(forKey: handle)
-            }
-            return
+    ) async -> IOSAudioError? {
+        guard Self.isValidIdentity(identity), identity.serviceEpoch == serviceEpoch else {
+            return IOSAudioError(kind: .invalidRequest, message: "Invalid audio cancellation identity.")
         }
-        guard operation.terminalError == nil else { return }
-        let ownsNativeIO: Bool = switch operation.request.operation {
-        case .startRecording, .capture:
-            recorder.isRecordingOwned(handle: nil, ownerID: operation.request.ownerKey)
-        case .listen:
-            activeListenIdentity == identity && (stt.hasActiveNativeOperation || recorder.isRecordingOwned(handle: nil, ownerID: operation.request.ownerKey))
-        case .speak, .play:
-            activePlaybackIdentity == identity && (speechImplementation.hasActivePlayback || pcmPlayback.isPlaying)
-        case .synthesize:
-            activeSystemRenderIdentity == identity || modelRenderOwners.values.contains(identity)
-        case .transcribe, .stopRecording, .status, .endOwner:
-            false
+        let cachedOutcome = cachedCancellationOutcome(for: identity)
+        if cachedOutcome.found { return cachedOutcome.error }
+        if let flight = cancellationFlights[identity] { return await flight.task.value }
+
+        retire(identity)
+        let token = UUID()
+        let task = Task<IOSAudioError?, Never> { @MainActor [weak self] in
+            guard let self else {
+                return IOSAudioError(kind: .nativeFailure, message: "Audio cancellation service is unavailable.")
+            }
+            return await self.performCancellation(identity, terminalError: terminalError)
+        }
+        cancellationFlights[identity] = CancellationFlight(token: token, task: task)
+        let outcome = await task.value
+        if cancellationFlights[identity]?.token == token {
+            cancellationFlights.removeValue(forKey: identity)
+        }
+        if outcome == nil { confirmCancellation(identity) }
+        rememberCancellationOutcome(outcome, for: identity)
+        return outcome
+    }
+
+    private func performCancellation(
+        _ identity: IOSAudioOperationIdentity,
+        terminalError: IOSAudioError
+    ) async -> IOSAudioError? {
+        guard var operation = pending[identity], !operation.isTerminal else {
+            return await cancelOrphanedResources(identity)
+        }
+        guard operation.terminalError == nil else {
+            return IOSAudioError(
+                kind: .nativeFailure,
+                message: "A previous cancellation is still unconfirmed for this operation."
+            )
+        }
+        let owner = operation.request.owner
+        let insertedEndingOwner = endingOwners.insert(owner).inserted
+        defer {
+            if insertedEndingOwner {
+                endingOwners.remove(owner)
+                let waiters = ownerEndWaiters.removeValue(forKey: owner) ?? []
+                waiters.forEach { $0.resume() }
+            }
         }
         operation.terminalError = terminalError
         operation.diagnostics.phase = terminalError.kind.rawValue
         pending[identity] = operation
         lastOperationDiagnostics = operation.diagnostics
         operation.task.cancel()
-        if let cloud = cloudCallbacks[identity] { try? await cloud.host.cancel(operationId: cloud.id) }
+        let cloudCancellation = cloudCallbacks[identity].map { cloud in
+            Task { @MainActor in await cancelCloudOperation(cloud) }
+        }
+        var playbackStopUnconfirmed = false
+        var recorderCancellation: Task<Void, Never>?
 
         switch operation.request.operation {
         case .startRecording, .capture:
-            await recorder.cancel(startOperationID: identity.id)
+            recorderCancellation = requestRecordingCancellation(identity)
         case .listen:
             if activeListenIdentity == identity {
-                await recorder.cancel(startOperationID: identity.id)
+                recorderCancellation = requestRecordingCancellation(identity)
                 stt.cancelRecognition()
                 activeListenIdentity = nil
                 activeListenOwner = nil
             }
         case .speak, .play:
-            if activePlaybackIdentity == identity {
-                pcmPlayback.stop()
-                await speechImplementation.stopAndWait()
-                clearPlaybackIfCurrent(identity)
+            if activePlaybackIdentity == identity || playbackStopReceipts.contains(identity) {
+                let stopTask = requestPlaybackStop(identity)
+                playbackStopUnconfirmed = !(await waitForTaskCompletion(
+                    stopTask,
+                    timeout: cancellationCompletionTimeout
+                ))
             }
         case .transcribe, .stopRecording, .synthesize, .status, .endOwner:
             break
         }
 
-        if ownsNativeIO { _ = await operation.task.result }
-        settle(identity, result: .failed(terminalError))
+        var failures: [String] = []
+        let recorderCancelSettled: Bool
+        if let recorderCancellation {
+            recorderCancelSettled = await waitForTaskCompletion(recorderCancellation, timeout: cancellationCompletionTimeout)
+            if recorderCancelSettled { recordingCancelTasks.removeValue(forKey: identity) }
+            else { failures.append("The recording cancellation did not finish before the deadline.") }
+        } else {
+            recorderCancelSettled = true
+        }
+        if playbackStopUnconfirmed {
+            failures.append("Native playback teardown did not finish before the cancellation deadline.")
+        }
+        let taskSettled = await waitForTaskCompletion(operation.task, timeout: cancellationCompletionTimeout)
+        if !taskSettled {
+            unconfirmedOperationTasks[identity] = operation.task
+            failures.append("The audio operation did not finish before the cancellation deadline.")
+        } else {
+            unconfirmedOperationTasks.removeValue(forKey: identity)
+        }
+        if taskSettled, recorderCancelSettled, recordingAttempts[identity] != nil {
+            if await confirmRecordingClose(identity) {
+                recorder.retireCloseReceipt(startOperationID: identity.recordingDriverKey)
+                recordingAttempts.removeValue(forKey: identity)
+                recordings = recordings.filter { $0.value.startIdentity != identity }
+            } else {
+                failures.append("The exact recording close is not confirmed.")
+            }
+        }
+        if let cloudCancellation {
+            if let cloudError = await cloudCancellation.value {
+                failures.append(cloudError.message)
+            }
+        }
+        if nativeResourceIsActive(for: operation.request) {
+            failures.append("A native audio resource is still active after cancellation.")
+        }
+        let cancellationFailure = failures.isEmpty ? nil : IOSAudioError(
+            kind: .nativeFailure,
+            message: failures.joined(separator: " ")
+        )
+        if let cancellationFailure {
+            operation.diagnostics.phase = cancellationFailure.kind.rawValue
+            pending[identity] = operation
+            if lastOperationDiagnostics?.identity == identity {
+                lastOperationDiagnostics = operation.diagnostics
+            }
+            quarantineCancellationOwner(owner, identity: identity)
+        }
+        settle(identity, result: .failed(cancellationFailure ?? terminalError))
+        return cancellationFailure
+    }
+
+    func cancelCloudOperation(
+        _ cloud: IOSAudioProviderService.PinnedOperation
+    ) async -> IOSAudioError? {
+        let task = Task { @MainActor in
+            do {
+                try await cloud.host.cancel(operationId: cloud.id)
+                return nil
+            } catch {
+                return IOSAudioError(
+                    kind: .nativeFailure,
+                    message: "Cloud provider cancellation failed: \(Self.audioError(error).message)"
+                )
+            }
+        }
+        guard await waitForTaskCompletion(task, timeout: cancellationCompletionTimeout) else {
+            task.cancel()
+            return IOSAudioError(
+                kind: .nativeFailure,
+                message: "The cloud provider did not confirm cancellation before the deadline."
+            )
+        }
+        return await task.value
+    }
+
+    private func cancelOrphanedResources(_ identity: IOSAudioOperationIdentity) async -> IOSAudioError? {
+        var failures: [String] = []
+        var affectedOwners = Set<IOSAudioOwner>()
+        var taskSettled = true
+        if let operationTask = pending[identity]?.task ?? unconfirmedOperationTasks[identity] {
+            operationTask.cancel()
+            if !(await waitForTaskCompletion(operationTask, timeout: cancellationCompletionTimeout)) {
+                unconfirmedOperationTasks[identity] = operationTask
+                taskSettled = false
+                failures.append("The audio operation remains in flight after cancellation.")
+            } else {
+                unconfirmedOperationTasks.removeValue(forKey: identity)
+            }
+            if let owner = pending[identity]?.request.owner {
+                affectedOwners.insert(owner)
+            } else if let owner = unconfirmedCancellationOwnersByIdentity[identity] {
+                affectedOwners.insert(owner)
+            }
+        }
+        if let (_, recording) = recordings.first(where: { $0.value.startIdentity == identity }) {
+            affectedOwners.insert(recording.owner)
+        }
+        if let owner = recordingAttempts[identity] { affectedOwners.insert(owner) }
+        if recordingAttempts[identity] != nil || recordingCancelTasks[identity] != nil {
+            let cancellation = requestRecordingCancellation(identity)
+            let cancellationSettled = await waitForTaskCompletion(cancellation, timeout: cancellationCompletionTimeout)
+            if cancellationSettled { recordingCancelTasks.removeValue(forKey: identity) }
+            if !cancellationSettled {
+                failures.append("The recording cancellation remains in flight.")
+            } else if recordingAttempts[identity] == nil {
+                // The exact operation completed without admitting a recorder.
+            } else if taskSettled, await confirmRecordingClose(identity) {
+                recorder.retireCloseReceipt(startOperationID: identity.recordingDriverKey)
+                recordingAttempts.removeValue(forKey: identity)
+                recordings = recordings.filter { $0.value.startIdentity != identity }
+            } else {
+                failures.append("The exact recording close is not confirmed.")
+            }
+        }
+        if activeListenIdentity == identity {
+            if let activeListenOwner { affectedOwners.insert(activeListenOwner) }
+            let cancellation = requestRecordingCancellation(identity)
+            if await waitForTaskCompletion(cancellation, timeout: cancellationCompletionTimeout) {
+                recordingCancelTasks.removeValue(forKey: identity)
+            } else {
+                failures.append("The recording cancellation remains in flight.")
+            }
+            stt.cancelRecognition()
+            activeListenIdentity = nil
+            activeListenOwner = nil
+            if stt.hasActiveNativeOperation {
+                failures.append("The speech recognition resource is still active after cancellation.")
+            }
+        }
+        if activePlaybackIdentity == identity || playbackStopReceipts.contains(identity) {
+            if let activePlaybackOwner { affectedOwners.insert(activePlaybackOwner) }
+            let stopTask = requestPlaybackStop(identity)
+            if !(await waitForTaskCompletion(stopTask, timeout: cancellationCompletionTimeout)) {
+                failures.append("The playback resource did not finish stopping before the cancellation deadline.")
+            }
+        }
+        if activeSystemRenderIdentity == identity || modelRenderOwners.values.contains(identity) {
+            failures.append("The synthesis task has no completed cancellation record.")
+        }
+        if let cloud = cloudCallbacks[identity] {
+            if let owner = activeCloudOperations.first(where: { $0.value.id == cloud.id })?.key {
+                affectedOwners.insert(owner)
+            }
+            if let error = await cancelCloudOperation(cloud) {
+                failures.append(error.message)
+            }
+        }
+        guard !failures.isEmpty else { return nil }
+        affectedOwners.forEach { quarantineCancellationOwner($0, identity: identity) }
+        return IOSAudioError(kind: .nativeFailure, message: failures.joined(separator: " "))
+    }
+
+    private func confirmRecordingClose(_ identity: IOSAudioOperationIdentity) async -> Bool {
+        let task = recordingReceiptTasks[identity] ?? Task { [recorder] in
+            await recorder.cancelWithReceipt(startOperationID: identity.recordingDriverKey)
+        }
+        recordingReceiptTasks[identity] = task
+        guard await waitForTaskCompletion(task, timeout: cancellationCompletionTimeout) else { return false }
+        let result = await task.value
+        recordingReceiptTasks.removeValue(forKey: identity)
+        return result
+    }
+
+    private func requestRecordingCancellation(_ identity: IOSAudioOperationIdentity) -> Task<Void, Never> {
+        if let task = recordingCancelTasks[identity] { return task }
+        let task = Task { [recorder] in await recorder.cancel(startOperationID: identity.recordingDriverKey) }
+        recordingCancelTasks[identity] = task
+        return task
+    }
+
+    private func quarantineCancellationOwner(
+        _ owner: IOSAudioOwner,
+        identity: IOSAudioOperationIdentity? = nil,
+        ownerEnd: Bool = false
+    ) {
+        guard !cancellationQuarantineOverflow else { return }
+        if let identity {
+            if let existing = unconfirmedCancellationOwnersByIdentity[identity], existing != owner {
+                cancellationQuarantineOverflow = true
+                cancellationUnconfirmedOwners.removeAll()
+                unconfirmedCancellationOwnersByIdentity.removeAll()
+                ownerEndQuarantines.removeAll()
+                return
+            }
+            if unconfirmedCancellationOwnersByIdentity[identity] == nil {
+                guard unconfirmedCancellationOwnersByIdentity.count < 1_024 else {
+                    cancellationQuarantineOverflow = true
+                    cancellationUnconfirmedOwners.removeAll()
+                    unconfirmedCancellationOwnersByIdentity.removeAll()
+                    ownerEndQuarantines.removeAll()
+                    return
+                }
+                unconfirmedCancellationOwnersByIdentity[identity] = owner
+            }
+        }
+        if ownerEnd { ownerEndQuarantines.insert(owner) }
+        if cancellationUnconfirmedOwners.contains(owner) { return }
+        if cancellationUnconfirmedOwners.count >= 256 {
+            cancellationQuarantineOverflow = true
+            cancellationUnconfirmedOwners.removeAll()
+            unconfirmedCancellationOwnersByIdentity.removeAll()
+            ownerEndQuarantines.removeAll()
+            return
+        }
+        cancellationUnconfirmedOwners.insert(owner)
+    }
+
+    private func confirmCancellation(_ identity: IOSAudioOperationIdentity) {
+        guard let owner = unconfirmedCancellationOwnersByIdentity.removeValue(forKey: identity),
+              !ownerEndQuarantines.contains(owner),
+              !unconfirmedCancellationOwnersByIdentity.values.contains(owner) else { return }
+        cancellationUnconfirmedOwners.remove(owner)
+    }
+
+    private func nativeResourceIsActive(for request: IOSAudioOperationRequest) -> Bool {
+        switch request.operation {
+        case .startRecording, .capture:
+            recorder.isRecordingOwned(handle: nil, ownerID: request.ownerKey)
+        case .listen:
+            ((activeListenIdentity == nil || activeListenIdentity == request.identity)
+                && stt.hasActiveNativeOperation)
+                || recorder.isRecordingOwned(handle: nil, ownerID: request.ownerKey)
+        case .speak, .play:
+            playbackStopReceipts.contains(request.identity)
+                || (activePlaybackIdentity == request.identity
+                    && (speechImplementation.hasActivePlayback || pcmPlayback.isPlaying))
+        case .synthesize:
+            activeSystemRenderIdentity == request.identity || modelRenderOwners.values.contains(request.identity)
+        case .transcribe, .stopRecording, .status, .endOwner:
+            false
+        }
+    }
+
+    func waitForTaskCompletion<T: Sendable>(
+        _ task: Task<T, Never>,
+        timeout: Duration
+    ) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let waiter = CancellationCompletionWaiter(continuation)
+            let observer = Task { @MainActor in
+                _ = await task.value
+                waiter.resolve(true)
+            }
+            let timer = Task { @MainActor in
+                do { try await Task.sleep(for: timeout) } catch { return }
+                waiter.resolve(false)
+            }
+            waiter.install(observer: observer, timer: timer)
+        }
+    }
+
+    private func cachedCancellationOutcome(
+        for identity: IOSAudioOperationIdentity
+    ) -> (found: Bool, error: IOSAudioError?) {
+        pruneCancellationOutcomes()
+        guard let outcome = cancellationOutcomes[identity] else { return (false, nil) }
+        return (true, outcome.error)
+    }
+
+    private func rememberCancellationOutcome(
+        _ error: IOSAudioError?,
+        for identity: IOSAudioOperationIdentity
+    ) {
+        guard error == nil else { return }
+        pruneCancellationOutcomes()
+        cancellationOutcomes[identity] = CancellationOutcome(
+            error: error,
+            expiresAt: ContinuousClock.now.advanced(by: .seconds(120))
+        )
+        if !cancellationOutcomeOrder.contains(identity) {
+            cancellationOutcomeOrder.append(identity)
+        }
+        while cancellationOutcomeOrder.count > 1_024 {
+            let oldest = cancellationOutcomeOrder.removeFirst()
+            cancellationOutcomes.removeValue(forKey: oldest)
+        }
+    }
+
+    private func pruneCancellationOutcomes() {
+        let now = ContinuousClock.now
+        let expired = cancellationOutcomes.compactMap { identity, outcome in
+            outcome.expiresAt <= now ? identity : nil
+        }
+        for identity in expired { cancellationOutcomes.removeValue(forKey: identity) }
+        cancellationOutcomeOrder.removeAll { cancellationOutcomes[$0] == nil }
     }
 
     private func completeOperation(_ identity: IOSAudioOperationIdentity, result: IOSAudioOperationResult) async {
@@ -470,6 +816,7 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                 await cleanupLateResult(result, identity: identity)
                 clearRetired(identity)
             }
+            unconfirmedOperationTasks.removeValue(forKey: identity)
             return
         }
         if operation.terminalError != nil {
@@ -478,11 +825,13 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
             }
             await cleanupLateResult(result, identity: identity)
             clearRetired(identity)
+            unconfirmedOperationTasks.removeValue(forKey: identity)
             return
         }
         guard !operation.isTerminal else {
             await cleanupLateResult(result, identity: identity)
             clearRetired(identity)
+            unconfirmedOperationTasks.removeValue(forKey: identity)
             return
         }
         var completed = operation
@@ -502,12 +851,16 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         continuation?.resume(returning: result)
     }
 
-    func endOwner(_ owner: IOSAudioOwner, excluding excludedIdentity: IOSAudioOperationIdentity? = nil) async {
+    @discardableResult
+    func endOwner(
+        _ owner: IOSAudioOwner,
+        excluding excludedIdentity: IOSAudioOperationIdentity? = nil
+    ) async -> IOSAudioError? {
         guard !endingOwners.contains(owner) else {
             await withCheckedContinuation { continuation in
                 ownerEndWaiters[owner, default: []].append(continuation)
             }
-            return
+            return await endOwner(owner, excluding: excludedIdentity)
         }
         endingOwners.insert(owner)
         defer {
@@ -516,17 +869,33 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
             waiters.forEach { $0.resume() }
         }
 
-        let requests = pending.values
+        let requests = Set(pending.values
             .filter { $0.request.owner == owner && $0.request.identity != excludedIdentity }
-            .map(\.request.identity)
-        for identity in requests { await cancel(identity) }
-        await recorder.end(ownerID: owner.stableKey)
-        recordings = recordings.filter { $0.value.owner != owner }
+            .map(\.request.identity)).union(recordingAttempts.compactMap {
+                $0.value == owner && $0.key != excludedIdentity ? $0.key : nil
+            })
+        var failures: [String] = []
+        for identity in requests {
+            if let error = await cancel(identity) { failures.append(error.message) }
+        }
+        let recordingEnd = recordingEndTasks[owner] ?? Task { [recorder] in
+            await recorder.end(ownerID: owner.stableKey)
+        }
+        recordingEndTasks[owner] = recordingEnd
+        if await waitForTaskCompletion(recordingEnd, timeout: cancellationCompletionTimeout) {
+            recordingEndTasks.removeValue(forKey: owner)
+        } else {
+            failures.append("Recording owner cleanup did not finish before the deadline.")
+        }
         if activePlaybackOwner == owner {
-            pcmPlayback.stop()
-            await speechImplementation.stopAndWait()
-            activePlaybackIdentity = nil
-            activePlaybackOwner = nil
+            if let identity = activePlaybackIdentity {
+                let stopTask = requestPlaybackStop(identity)
+                await stopTask.value
+            } else {
+                pcmPlayback.stop()
+                await speechImplementation.stopAndWait()
+                activePlaybackOwner = nil
+            }
         }
         if activeListenOwner == owner {
             stt.cancelRecognition()
@@ -537,6 +906,24 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
             await bargeInImplementation.stopAll()
         }
         publishCapabilitySnapshot()
+        if recorder.isRecordingOwned(handle: nil, ownerID: owner.stableKey) {
+            failures.append("A recording resource is still active after owner cleanup.")
+        }
+        if activeListenOwner == owner && stt.hasActiveNativeOperation {
+            failures.append("Speech recognition is still active after owner cleanup.")
+        }
+        if activePlaybackOwner == owner && (speechImplementation.hasActivePlayback || pcmPlayback.isPlaying) {
+            failures.append("Playback is still active after owner cleanup.")
+        }
+        guard !failures.isEmpty else {
+            ownerEndQuarantines.remove(owner)
+            if !unconfirmedCancellationOwnersByIdentity.values.contains(owner) {
+                cancellationUnconfirmedOwners.remove(owner)
+            }
+            return nil
+        }
+        quarantineCancellationOwner(owner, ownerEnd: true)
+        return IOSAudioError(kind: .nativeFailure, message: failures.joined(separator: " "))
     }
 
     func status(owner: IOSAudioOwner, handle: String?) throws -> (recording: Bool, playing: Bool) {
@@ -710,10 +1097,12 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         for (owner, cloud) in activeCloudOperations where owner != .ui(instanceID: "voice-capture") {
             Task { @MainActor in try? await cloud.host.cancel(operationId: cloud.id) }
         }
-        pcmPlayback.stop()
-        speechImplementation.stop()
-        if let identity { clearPlaybackIfCurrent(identity) }
-        if let identity { finishStandaloneDiagnostic(identity, phase: "cancelled") }
+        if let identity {
+            _ = requestPlaybackStop(identity)
+        } else {
+            pcmPlayback.stop()
+            Task { @MainActor [speechImplementation] in await speechImplementation.stopAndWait() }
+        }
         publishCapabilitySnapshot()
     }
 
@@ -885,8 +1274,9 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
             }
             switch request.operation {
             case let .startRecording(sampleRateHz, format):
+                try registerRecordingAttempt(request)
                 let handle = try await recorder.startRecordingOwned(
-                    operationID: request.identity.id,
+                    operationID: request.identity.recordingDriverKey,
                     ownerID: request.ownerKey,
                     sampleRateHz: sampleRateHz,
                     format: format,
@@ -919,12 +1309,16 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                         ownerID: request.ownerKey,
                         maximumBytes: request.maxPayloadBytes
                     )
-                    recordings.removeValue(forKey: handle)
-                    return .recording(data: recording.audioBytes, mimeType: recording.mimeType)
-                } catch {
-                    if !recorder.isRecordingOwned(handle: handle, ownerID: request.ownerKey) {
-                        recordings.removeValue(forKey: handle)
+                    if let origin = recordings.removeValue(forKey: handle)?.startIdentity {
+                        recordingAttempts.removeValue(forKey: origin)
                     }
+                    return .recording(data: recording.audioBytes, mimeType: recording.mimeType)
+                } catch let closed as AudioRecordingClosedError {
+                    if let origin = recordings.removeValue(forKey: handle)?.startIdentity {
+                        recordingAttempts.removeValue(forKey: origin)
+                    }
+                    throw closed.underlying
+                } catch {
                     throw error
                 }
 
@@ -934,10 +1328,15 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                 guard snapshot.configuration.recognition.source == .provider else { throw AudioServiceFailure.unsupported }
                 if let language { var configuration = snapshot.configuration; configuration.language = language; snapshot = AudioConfigurationSnapshot(configuration: configuration, revision: snapshot.revision) }
                 let cloud = try await providerService.pin(kind: .recognition, snapshot: snapshot, owner: request.owner, operationID: request.identity.id, maximumBytes: request.maxPayloadBytes, timeoutBudgetMs: request.timeoutBudgetMs)
+                try Task.checkCancellation()
                 cloudCallbacks[request.identity] = cloud
                 recordCloudRoute(cloud, snapshot: snapshot, kind: .recognition, identity: request.identity)
                 defer { cloudCallbacks.removeValue(forKey: request.identity) }
-                let transcript = try await providerService.transcribe(cloud, recording: IOSAudioRecording(audioBytes: audio, mimeType: mimeType))
+                let transcript = try await providerService.transcribe(
+                    cloud,
+                    recording: IOSAudioRecording(audioBytes: audio, mimeType: mimeType),
+                    cancellationManagedExternally: true
+                )
                 return .transcript(text: transcript.text, language: transcript.language ?? language, confidence: transcript.confidence)
 
             case let .listen(language):
@@ -954,13 +1353,18 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                     if let language { configuration.language = language }
                     let cloudSnapshot = AudioConfigurationSnapshot(configuration: configuration, revision: snapshot.revision)
                     let cloud = try await providerService.pin(kind: .recognition, snapshot: cloudSnapshot, owner: request.owner, operationID: request.identity.id, maximumBytes: request.maxPayloadBytes, timeoutBudgetMs: request.timeoutBudgetMs)
+                    try Task.checkCancellation()
                     cloudCallbacks[request.identity] = cloud
                     recordCloudRoute(cloud, snapshot: cloudSnapshot, kind: .recognition, identity: request.identity)
                     let captureRequest = IOSAudioOperationRequest(identity: request.identity, owner: request.owner, initiator: request.initiator,
                         timeoutBudgetMs: request.timeoutBudgetMs.map { max(1, $0 / 2) }, maxPayloadBytes: request.maxPayloadBytes,
                         operation: .capture(sampleRateHz: 24_000, format: "m4a"))
                     let recording = try await captureOwned(captureRequest, sampleRateHz: 24_000, format: "m4a", automaticEndpointAfterSilence: automaticEndpointAfterSilence ?? .milliseconds(1_200))
-                    let transcript = try await providerService.transcribe(cloud, recording: recording)
+                    let transcript = try await providerService.transcribe(
+                        cloud,
+                        recording: recording,
+                        cancellationManagedExternally: true
+                    )
                     return .transcript(text: transcript.text, language: transcript.language ?? language, confidence: transcript.confidence)
                 }
                 let route = if let pinnedRoute {
@@ -1014,10 +1418,16 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                     let cloudSnapshot = AudioConfigurationSnapshot(configuration: configuration, revision: snapshot.revision)
                     let selectedVoice = voice.flatMap { $0 == "auto" || $0 == "default" ? nil : $0 } ?? configuration.speech.voice?.id
                     let cloud = try await providerService.pin(kind: .speech, snapshot: cloudSnapshot, voice: selectedVoice, owner: request.owner, operationID: request.identity.id, maximumBytes: request.maxPayloadBytes, timeoutBudgetMs: request.timeoutBudgetMs)
+                    try Task.checkCancellation()
                     cloudCallbacks[request.identity] = cloud
                     recordCloudRoute(cloud, snapshot: cloudSnapshot, kind: .speech, identity: request.identity)
                     defer { cloudCallbacks.removeValue(forKey: request.identity) }
-                    let output = try await providerService.synthesize(cloud, text: text, maximumBytes: request.maxPayloadBytes)
+                    let output = try await providerService.synthesize(
+                        cloud,
+                        text: text,
+                        maximumBytes: request.maxPayloadBytes,
+                        cancellationManagedExternally: true
+                    )
                     return .synthesized(pcm: output.pcm, sampleRateHz: output.sampleRateHz)
                 }
                 let route = await MainActor.run {
@@ -1090,9 +1500,15 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                     let cloudSnapshot = AudioConfigurationSnapshot(configuration: configuration, revision: snapshot.revision)
                     let selectedVoice = voice.flatMap { $0 == "auto" || $0 == "default" ? nil : $0 } ?? configuration.speech.voice?.id
                     let cloud = try await providerService.pin(kind: .speech, snapshot: cloudSnapshot, voice: selectedVoice, owner: request.owner, operationID: request.identity.id, maximumBytes: request.maxPayloadBytes, timeoutBudgetMs: request.timeoutBudgetMs)
+                    try Task.checkCancellation()
                     cloudCallbacks[request.identity] = cloud
                     recordCloudRoute(cloud, snapshot: cloudSnapshot, kind: .speech, identity: request.identity)
-                    let output = try await providerService.synthesize(cloud, text: text, maximumBytes: request.maxPayloadBytes)
+                    let output = try await providerService.synthesize(
+                        cloud,
+                        text: text,
+                        maximumBytes: request.maxPayloadBytes,
+                        cancellationManagedExternally: true
+                    )
                     try Task.checkCancellation()
                     let duration = try await pcmPlayback.play(pcm: output.pcm, sampleRateHz: output.sampleRateHz, maximumBytes: request.maxPayloadBytes)
                     return .playbackCompleted(durationMs: duration)
@@ -1142,10 +1558,15 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                 return .status(recording: current.recording, playing: current.playing)
 
             case .endOwner:
-                await endOwner(request.owner, excluding: request.identity)
+                if let error = await endOwner(request.owner, excluding: request.identity) {
+                    throw AudioServiceFailure.nativeFailure(error.message)
+                }
                 return .ownerEnded
             }
         } catch {
+            if recordingAttempts[request.identity] != nil {
+                quarantineCancellationOwner(request.owner, identity: request.identity)
+            }
             if activeListenIdentity == request.identity {
                 activeListenIdentity = nil
                 activeListenOwner = nil
@@ -1156,8 +1577,9 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     }
 
     private func captureOwned(_ request: IOSAudioOperationRequest, sampleRateHz: UInt32, format: String, automaticEndpointAfterSilence: Duration?) async throws -> IOSAudioRecording {
+                try registerRecordingAttempt(request)
                 let handle = try await recorder.startRecordingOwned(
-                    operationID: request.identity.id,
+                    operationID: request.identity.recordingDriverKey,
                     ownerID: request.ownerKey,
                     sampleRateHz: sampleRateHz,
                     format: format,
@@ -1189,12 +1611,23 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                     let recording = try await recorder.stopRecordingOwned(
                         handle: handle, ownerID: request.ownerKey, maximumBytes: request.maxPayloadBytes
                     )
+                    recordingAttempts.removeValue(forKey: request.identity)
                     return recording
+                } catch let closed as AudioRecordingClosedError {
+                    recordingAttempts.removeValue(forKey: request.identity)
+                    throw closed.underlying
                 } catch {
-                    await recorder.cancel(startOperationID: request.identity.id)
+                    await recorder.cancel(startOperationID: request.identity.recordingDriverKey)
                     throw error
                 }
 
+    }
+
+    private func registerRecordingAttempt(_ request: IOSAudioOperationRequest) throws {
+        guard recordingAttempts[request.identity] == nil, recordingAttempts.count < 1_024 else {
+            throw AudioServiceFailure.busy
+        }
+        recordingAttempts[request.identity] = request.owner
     }
 
     private func expire(_ identity: IOSAudioOperationIdentity) async {
@@ -1207,9 +1640,10 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
 
     private func cleanupLateResult(_ result: IOSAudioOperationResult, identity: IOSAudioOperationIdentity) async {
         switch result {
-        case let .recordingStarted(handle):
-            await recorder.cancel(startOperationID: identity.id)
-            recordings.removeValue(forKey: handle)
+        case .recordingStarted:
+            // The caller performing cancellation joins this operation task
+            // before it accepts the driver's receipt and retires the claim.
+            _ = await recorder.cancelWithReceipt(startOperationID: identity.recordingDriverKey)
         case .playbackCompleted:
             if activePlaybackIdentity == identity { await speechImplementation.stopAndWait() }
         default:
@@ -1219,10 +1653,17 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
 
     func handleInvalidation(_ event: VoiceAudioSessionCoordinator.Invalidation) async {
         guard await coordinator.owns(event.lease) else { return }
+        let recordingOrigins = Set(recordingAttempts.keys.filter {
+            recorder.ownsRecordingLease(event.lease, startOperationID: $0.recordingDriverKey)
+        })
         let affected = pending.values.compactMap { operation -> IOSAudioOperationIdentity? in
             switch (event.lease.purpose, operation.request.operation) {
-            case (.recording, .startRecording), (.recording, .stopRecording), (.recording, .capture),
-                 (.recognition, .listen), (.flowDuplex, .listen),
+            case (.recording, .startRecording), (.recording, .capture):
+                return recordingOrigins.contains(operation.request.identity) ? operation.request.identity : nil
+            case let (.recording, .stopRecording(handle)):
+                guard let origin = recordings[handle]?.startIdentity, recordingOrigins.contains(origin) else { return nil }
+                return operation.request.identity
+            case (.recognition, .listen), (.flowDuplex, .listen),
                  (.playback, .speak), (.playback, .play):
                 return operation.request.identity
             case (.playback, .synthesize):
@@ -1232,28 +1673,28 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                 return nil
             }
         }
-        let oldRecordings = recordings
         let oldListenIdentity = activeListenIdentity
         let oldPlaybackIdentity = activePlaybackIdentity
         let oldSystemRenderIdentity = activeSystemRenderIdentity
         for identity in affected { await cancel(identity) }
+        for identity in recordingOrigins where !affected.contains(identity) { await cancel(identity) }
         if await coordinator.owns(event.lease) {
             switch event.lease.purpose {
             case .recording:
-                await recorder.stopAll()
+                break // Only the operation identities bound to this lease may be retired.
             case .recognition:
                 stt.cancelRecognition()
             case .playback:
-                pcmPlayback.stop()
-                await speechImplementation.stopAndWait()
+                if let oldPlaybackIdentity {
+                    let stopTask = requestPlaybackStop(oldPlaybackIdentity)
+                    await stopTask.value
+                } else {
+                    pcmPlayback.stop()
+                    await speechImplementation.stopAndWait()
+                }
             case .flowDuplex:
                 stt.cancelRecognition()
                 await bargeInImplementation.stopAll()
-            }
-        }
-        if event.lease.purpose == .recording {
-            for (handle, recordedOwner) in oldRecordings where recordings[handle]?.startIdentity == recordedOwner.startIdentity {
-                recordings.removeValue(forKey: handle)
             }
         }
         if (event.lease.purpose == .recognition || event.lease.purpose == .flowDuplex),
@@ -1261,9 +1702,8 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
             activeListenIdentity = nil
             activeListenOwner = nil
         }
-        if event.lease.purpose == .playback, activePlaybackIdentity == oldPlaybackIdentity {
-            activePlaybackIdentity = nil
-            activePlaybackOwner = nil
+        if event.lease.purpose == .playback, let oldPlaybackIdentity {
+            clearPlaybackIfCurrent(oldPlaybackIdentity)
         }
         if activeSystemRenderIdentity == oldSystemRenderIdentity,
            event.lease.purpose == .playback {
@@ -1273,8 +1713,24 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         await onInvalidation?(event)
     }
 
-    private func clearPlaybackIfCurrent(_ identity: IOSAudioOperationIdentity) {
+    private func requestPlaybackStop(_ identity: IOSAudioOperationIdentity) -> Task<Void, Never> {
+        pcmPlayback.stop()
+        let implementation = speechImplementation
+        return playbackStopReceipts.begin(for: identity) { [weak self, implementation] in
+            await implementation.stopAndWait()
+            guard let self else { return }
+            self.clearPlaybackIfCurrent(identity, afterStopReceipt: true)
+            self.finishStandaloneDiagnostic(identity, phase: "cancelled")
+            self.publishCapabilitySnapshot()
+        }
+    }
+
+    private func clearPlaybackIfCurrent(
+        _ identity: IOSAudioOperationIdentity,
+        afterStopReceipt: Bool = false
+    ) {
         guard activePlaybackIdentity == identity else { return }
+        guard afterStopReceipt || !playbackStopReceipts.contains(identity) else { return }
         activePlaybackIdentity = nil
         activePlaybackOwner = nil
     }
@@ -1336,7 +1792,9 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     }
 
     private func rememberSeenIdentity(_ identity: IOSAudioOperationIdentity) -> Bool {
+        pruneCancellationOutcomes()
         guard !seenIdentities.contains(identity),
+              cancellationOutcomes[identity] == nil,
               pending[identity] == nil,
               !recordings.values.contains(where: { $0.startIdentity == identity })
         else { return false }
@@ -1548,6 +2006,39 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         let millisecondsFromSeconds = UInt64(seconds) &* 1_000
         let millisecondsFromAttoseconds = UInt64(max(0, components.attoseconds) / 1_000_000_000_000_000)
         return millisecondsFromSeconds &+ millisecondsFromAttoseconds
+    }
+}
+
+@MainActor
+private final class CancellationCompletionWaiter {
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var observer: Task<Void, Never>?
+    private var timer: Task<Void, Never>?
+    private var resolved = false
+
+    init(_ continuation: CheckedContinuation<Bool, Never>) {
+        self.continuation = continuation
+    }
+
+    func install(observer: Task<Void, Never>, timer: Task<Void, Never>) {
+        guard !resolved else {
+            observer.cancel()
+            timer.cancel()
+            return
+        }
+        self.observer = observer
+        self.timer = timer
+    }
+
+    func resolve(_ completed: Bool) {
+        guard !resolved, let continuation else { return }
+        resolved = true
+        self.continuation = nil
+        observer?.cancel()
+        timer?.cancel()
+        observer = nil
+        timer = nil
+        continuation.resume(returning: completed)
     }
 }
 

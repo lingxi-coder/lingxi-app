@@ -46,17 +46,19 @@ body {
 }
 
 /* Desktop shell --------------------------------------------------------- */
+.desktop-shell,
+.desktop-navigation {
+  --desktop-toolbar-height: 40px;
+}
 .desktop-shell {
-  --desktop-toolbar-height: 44px;
   isolation: isolate;
 }
 .desktop-main {
   overflow: hidden;
 }
 .desktop-navigation {
-  --desktop-toolbar-height: 44px;
-  --desktop-shell-gap: 8px;
-  --desktop-rail-width: 52px;
+  --desktop-shell-gap: 6px;
+  --desktop-rail-width: 44px;
   z-index: 2;
   position: relative;
   height: 100%;
@@ -95,7 +97,7 @@ body {
 }
 .desktop-nav-rail {
   width: var(--desktop-rail-width);
-  padding: var(--desktop-shell-gap) 6px 12px;
+  padding: var(--desktop-shell-gap) 4px 10px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -103,13 +105,13 @@ body {
   flex: 0 0 var(--desktop-rail-width);
 }
 .desktop-rail-button {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
   flex: 0 0 auto;
   border: 0;
-  border-radius: 13px;
+  border-radius: 10px;
   background: transparent;
   color: var(--text3);
   cursor: pointer;
@@ -250,19 +252,19 @@ body {
   align-items: center;
   flex: 1;
   min-width: 0;
-  height: var(--desktop-toolbar-height, 44px);
+  height: var(--desktop-toolbar-height, 40px);
   gap: 4px;
-  padding: 0 16px 0 22px;
+  padding: 0 10px 0 14px;
   background: var(--toolbar-material);
   backdrop-filter: blur(20px) saturate(1.15);
 }
 .desktop-topbar .mono {
   font-variant-numeric: tabular-nums;
 }
-.desktop-topbar-project { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.desktop-topbar-project { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .desktop-topbar-project-icon {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   display: grid;
   place-items: center;
   flex: 0 0 auto;
@@ -271,11 +273,11 @@ body {
   background: var(--topbar-project-surface);
 }
 .desktop-topbar-action {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   display: grid;
   place-items: center;
-  flex: 0 0 36px;
+  flex: 0 0 32px;
   padding: 0;
   border: 0;
   border-radius: 10px;

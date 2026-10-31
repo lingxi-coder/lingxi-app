@@ -13,6 +13,7 @@ export function audioOwnerKey(owner: AudioOwnerDto): string {
     case 'session': return `session:${owner.session_id}`;
     case 'ui': return `ui:${owner.instance_id}`;
     case 'system': return `system:${owner.instance_id}`;
+    case 'attached': return `attached:${JSON.stringify([owner.attachment_host_id, owner.attachment_generation, owner.logical_kind, owner.logical_owner_id])}`;
   }
 }
 

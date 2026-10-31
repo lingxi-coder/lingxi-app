@@ -3,6 +3,32 @@ import XCTest
 @testable import LingxiCode
 
 final class MobileUserStorageRecoveryTests: XCTestCase {
+    func testScheduledSessionResolvesOnlyAnOwnedWorkspaceManifest() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = MobileUserStorage.directories(managedRoot: root.path)
+        let brandHome = URL(fileURLWithPath: paths.configHome)
+        let relative = "workspaces/2026-10-30/task-run"
+        let workspace = brandHome.appendingPathComponent(relative)
+        let manifests = brandHome.appendingPathComponent("automations/sessions")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: manifests, withIntermediateDirectories: true)
+        let id = UUID().uuidString.lowercased()
+        let manifest = manifests.appendingPathComponent("\(id).json")
+        func write(_ value: String) throws {
+            try JSONSerialization.data(withJSONObject: ["version": 1, "workspace": value]).write(to: manifest)
+        }
+        XCTAssertEqual(try MobileUserStorage.scheduledWorkspace(sessionID: id, managedRoot: root.path), paths.scheduledCwd)
+        try write(relative)
+        XCTAssertEqual(try MobileUserStorage.scheduledWorkspace(sessionID: "sess:" + id, managedRoot: root.path), workspace.resolvingSymlinksInPath().path)
+        try write("workspaces/../outside")
+        XCTAssertThrowsError(try MobileUserStorage.scheduledWorkspace(sessionID: id, managedRoot: root.path))
+        try write(relative)
+        try FileManager.default.removeItem(at: workspace)
+        try FileManager.default.createSymbolicLink(at: workspace, withDestinationURL: root)
+        XCTAssertThrowsError(try MobileUserStorage.scheduledWorkspace(sessionID: id, managedRoot: root.path))
+    }
+
     func testRelocatedContainerRecognitionIsLimitedToTheManagedWorkspace() {
         let home = "/var/mobile/Containers/Data/Application/11111111-1111-4111-8111-111111111111"
         let previous = "/private/var/mobile/Containers/Data/Application/22222222-2222-4222-8222-222222222222"

@@ -76,13 +76,13 @@ def test_ios_catalog_shape(tmp_path):
     info = json.load(open(tmp_path / "InfoPlist.xcstrings"))
     assert "NSCameraUsageDescription" in info["strings"]
     en = cat["strings"]["app_name"]["localizations"]["en"]["stringUnit"]["value"]
-    assert en == "Lingxi"
+    assert en == "LingXi"
 
 def test_android_resources(tmp_path):
     rc = subprocess.run([sys.executable, "generate.py", "--ios-out", str(tmp_path / "ios"), "--android-out", str(tmp_path)], cwd=os.path.dirname(__file__)).returncode
     assert rc == 0
     xml = open(tmp_path / "values-en" / "strings.xml").read()
-    assert '<string name="app_name">Lingxi</string>' in xml
+    assert '<string name="app_name">LingXi</string>' in xml
 
 def test_android_escaping(tmp_path):
     locales = {

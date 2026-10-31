@@ -15,18 +15,11 @@ struct LocalAppMarketPublication: Identifiable, Sendable {
 @MainActor
 @Observable
 final class UnifiedAppMarket {
-    private(set) var apps: [MarketApp] = []
-    private(set) var error: String?
-    private(set) var loading = false
     private(set) var progress: Double?
-    private(set) var hasNextPage = false
     private(set) var publishStatus: String?
     private(set) var publishing = false
     private(set) var installCommitting = false
     @ObservationIgnored private var installTask: Task<UnifiedAppRecord, Error>?
-    private var cursor: String?
-    private var query = ""
-    private var generation = UUID()
     private let library: UnifiedLocalApps
     private let api: MarketAPI?
     init(library: UnifiedLocalApps, baseURL: URL? = nil) {
@@ -47,27 +40,7 @@ final class UnifiedAppMarket {
         parts.path = "/mine"; parts.query = nil; parts.fragment = nil
         return parts.url
     }
-    func search(_ value: String) async {
-        query = value.trimmingCharacters(in: .whitespacesAndNewlines); generation = UUID(); cursor = nil; apps = []; hasNextPage = false
-        let current = generation
-        loading = true; error = nil
-        defer { if current == generation { loading = false } }
-        do {
-            let api = try requireAPI(); try await api.capabilities()
-            let page = try await api.catalog(query:query)
-            guard current == generation else { return }; apps = page.data; cursor = page.pagination.nextCursor; hasNextPage = cursor != nil
-        } catch { if current == generation { self.error = error.localizedDescription } }
-    }
-    func nextPage() async {
-        guard !loading, let cursor else { return }; loading = true
-        let current = generation
-        defer { if current == generation { loading = false } }
-        do {
-            let page = try await requireAPI().catalog(query:query,cursor:cursor)
-            guard current == generation else { return }; var seen = Set(apps.map(\.id)); apps += page.data.filter { seen.insert($0.id).inserted }
-            self.cursor = page.pagination.nextCursor; hasNextPage = self.cursor != nil
-        } catch { self.error = error.localizedDescription }
-    }
+    var browseURL: URL? { api?.browseURL }
     static var targets: [UnifiedAppManifest.Target] {
         let supported = ["camera", "photos", "files", "microphone", "clipboard", "share", "network", "agent"]
         let runtimeVersion: String? = {

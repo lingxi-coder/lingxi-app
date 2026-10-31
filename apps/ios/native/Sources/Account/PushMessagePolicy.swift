@@ -14,11 +14,11 @@ struct PushInstallationIdentity: Codable, Equatable {
 }
 
 enum PushMessagePolicy {
-    /// Remote notifications may only open a validated Remote Control route.
+    /// Remote notifications open only validated RC or Teams inbox routes.
     static func remoteControlAction(_ info: [AnyHashable: Any], uid: String?, enabled: Bool, now: Date = Date()) -> LingxiAppAction? {
         guard accepts(info, uid: uid, enabled: enabled, now: now),
               let route = info["route"] as? String,
-              route.range(of: "^remote/[A-Za-z0-9_-]{22}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil,
+              (route == "team/inbox" || route.range(of: "^remote/[A-Za-z0-9_-]{22}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil),
               let target = CanonicalDeepLink.parse("lingxi://" + route) else { return nil }
         return .canonical(target)
     }

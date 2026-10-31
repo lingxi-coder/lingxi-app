@@ -200,8 +200,10 @@ test('the actual remote route remounts session state for a different session or 
   const substitute = (specifier: string): unknown => {
     if (specifier === '../remote/useRemote') return hooks;
     if (specifier === '../remote/SessionView') return { SessionView: statefulSession };
+    if (specifier === '../remote/Bots') return { BotList: () => null, BotPage: () => null };
     if (specifier === '../remote/ConnectionScreen') return { ConnectionScreen: () => null };
     if (specifier === '../remote/HostList') return { HostList: () => null };
+    if (specifier === '../remote/LocalApps') return { LocalApps: () => null };
     if (specifier === '../remote/SessionList') return { SessionList: () => null };
     if (specifier === '../remote/deviceKey') return { browserDeviceName: () => 'Test Browser' };
     if (specifier === '../remote/remote.css') return {};

@@ -464,11 +464,16 @@ test('a workspace remount cannot replace another project’s unsent draft', asyn
 test('last explicit device mode follows selection order across runtimes and ignores failed choices', async () => {
   let preference: Mode = 'code';
   const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
-    onSessionModeSelected: mode => { preference = mode; } });
+    onSessionModeSelected: (mode, ref) => {
+      if (ref.projectPath === '/bot') return false;
+      preference = mode;
+    } });
   const aRef = { projectPath: '/a', sessionId };
   const bRef = { projectPath: '/b', sessionId: '22222222-3333-4444-8555-666666666666' };
+  const botRef = { projectPath: '/bot', sessionId: '33333333-3333-4444-8555-666666666666' };
   const a = await manager.ensure(aRef, false);
   const b = await manager.ensure(bRef, false);
+  const bot = await manager.ensure(botRef, false);
   function connect(runtime: SessionRuntime) {
     const client = Object.assign(new EventEmitter(), { sendCommand: () => undefined, close: () => undefined });
     Object.assign(runtime, { activeWorkspace: runtime.projectPath, activeWorkspaceTrusted: true });
@@ -478,6 +483,7 @@ test('last explicit device mode follows selection order across runtimes and igno
   }
   const ac = connect(a);
   const bc = connect(b);
+  const botClient = connect(bot);
   const ack = (client: EventEmitter, ref: typeof aRef, mode: Mode, revision: number) =>
     client.emit('event', { type: 'session_mode_changed', session_id: ref.sessionId, mode, revision });
   try {
@@ -496,6 +502,14 @@ test('last explicit device mode follows selection order across runtimes and igno
     ack(ac, aRef, 'chat', 2);
     await earlierSuccess;
     assert.equal(preference, 'chat', 'a failed later intent does not suppress an earlier successful one');
+
+    const ownerSelection = a.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
+    const botSelection = bot.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
+    ack(botClient, botRef, 'chat', 1);
+    await botSelection;
+    ack(ac, aRef, 'code', 3);
+    await ownerSelection;
+    assert.equal(preference, 'code', 'a later Bot selection cannot suppress the owner’s successful selection');
   } finally { await manager.dispose(); }
 });
 

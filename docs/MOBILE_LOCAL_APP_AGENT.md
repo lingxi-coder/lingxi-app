@@ -5,6 +5,10 @@ progress. Desktop and Mobile share the [protocol contract](LOCAL_APP_AGENT_PROTO
 Existing prototype builds/tests do not establish current standard conformance;
 actual package and device results are recorded separately.
 
+Only the current AG-UI Agent API and persistence format are supported. Android
+and iOS source import require schema 2 packages. Old App archive import, old
+Agent-data decoders and automatic old-format cleanup are absent.
+
 This document describes the current Local App contract shared by Android, iOS, Desktop, the browser SDK, and Harness. It is a source/design contract, not evidence that a build or a device acceptance run passed. Physical Android and iOS verification remains a separate release gate; evidence and open cases are recorded in the task acceptance report at `acceptance/mobile-app-agent-20261023/report.html`.
 
 ## One-off tasks and persistent chats
@@ -52,6 +56,12 @@ Plain prompt and file understanding without requested tools or executable Skills
 
 The model route and limits come from native App settings and do not silently switch providers. Default execution limits are one active task per App, 20 model turns, and ten minutes; the host can configure limits and an App can request lower limits. `timeoutMs` bounds execution after admission. The browser's finite wake/receive window is separate from this execution timeout. No JS Promise or native background lease is indefinite.
 
+Browser task and Chat reads have a five-second transport deadline, including the response body. A read timeout does not cancel the Agent or submit another request. Submission and mutation calls retain their 120-second transport budget so files can finish uploading. An ambiguous submission failure preserves the saved input and run ID for explicit recovery. The recovery Service Worker also limits navigation to five seconds without response headers, then displays its safe recovery page; once headers arrive, it preserves the response stream and the original navigation's cancellation signal.
+
+Native status reads, cancellation, cleanup, and reopening the browser page reuse an already initialized model host. They do not refresh credentials or replace the executor while observing existing work. A temporary secure-storage read error during a required configuration check is reported as unavailable, rather than interpreted as a deleted credential. If model configuration changes while the iOS host is initialized, new work is blocked until existing tasks finish or are canceled and LingXi is quit and reopened. New work never silently uses the old model configuration.
+
+The isolated App Agent host does not inherit the ordinary conversation's native media service or realtime handoff. It can initialize without native camera/audio callbacks or a default audio-provider binding. Browser-selected image and file attachments still use the selected model's supported input capabilities. A host media initialization error must not prevent these requests from starting.
+
 Effective tool authority is the intersection of release-declared tools, native host grants, the request, platform capability, and enterprise policy. Native UI owns permission and question approval; those controls are never exposed to page JavaScript. MCP access is bound to the selected configuration ID and revision, raw tool name, and definition digest. The host checks it at discovery and execution, including after approval or reconnect, and revocation blocks later calls. Apps cannot provide MCP URLs or credentials.
 
 An immutable release may declare runtime Skills as `manifest.agent.skills: {id, path}[]`; each path is exactly `skills/<id>/SKILL.md` within that release. Native settings approve a subset of those IDs, and a request may use only the intersection. A Skill supplies instructions; it does not grant tools or permission to install dependencies or run scripts outside existing task permissions.
@@ -93,19 +103,45 @@ Mobile runtime paths come from the host's `BrandRuntimeProfile { brandId, linuxU
 
 The source-directory `uuid8` suffix is generated independently from the Project's `workspaceId`; the directory name is not an encoding of the workspace identity.
 
-The App library and agent data live below the config root under `local-apps/v2/apps/<appId>/{releases/<revision>/source,data,runs,agent/{chats/<chatId>,tasks/<runId>,assets}}`; immutable release source, user data, task records, Chat records, and attachments have separate directories. Linux user identity is a runtime profile and is independent of the Firebase account. No files or paths are migrated from `/root` or another brand profile.
+The App library lives below the config root at `local-apps/v2/apps/<appId>`.
+Immutable release source (`releases/<revision>/source`), application business
+data (`data`) and application process runs (`runs`) remain separate. The current
+Agent store is `agent/agui-v1`: private transcripts and checkpoints belong to
+`chats/<chatId>`, persistent Chat tool files to `workspaces/<chatId>`, and
+independent task files to `tasks/<runId>`. Attachments have their own managed
+asset directories. Tools never use the private transcript directory as their
+working directory. A selected Skill receives a fresh verified scope within its
+task or Chat workspace for each run; the host retains its handle until tool
+cleanup completes. Linux user identity is a runtime profile and is independent
+of the Firebase account. No files or paths are migrated from `/root` or another
+brand profile.
 
 ## External browser and process lifetime
 
-Android and iOS open the app page in the operating system's resolved external HTTP browser handler. The OS uses the user's actual default browser or presents its resolver when needed. This includes OEM and third-party browsers; product code must not pin a browser brand, package, or application ID. Mobile Local App content is not rendered in Android WebView or iOS WKWebView. Browser camera and file selection use standard browser flows; the browser returns selected content as `File` objects through the SDK.
+Android and iOS default to the operating system's resolved external HTTP browser handler. The OS uses the user's actual default browser or presents its resolver when needed. Users may also choose another supported opening method: Android exposes an explicit system chooser and iOS provides an optional `SFSafariViewController`. Product code must not pin an external browser brand, package, or application ID. Browser camera and file selection use standard browser flows; the browser returns selected content as `File` objects through the SDK. Opening method does not determine the execution host: Mobile hosting remains supported, while Desktop is recommended for sustained work. See [remote Local App access](LOCAL_APP_REMOTE_ACCESS.md).
+
+The current Mobile Agent SDK stages pending input in the originating browser's IndexedDB. iOS's in-app system browser has separate website data from the default external browser. A native wake therefore must not silently send that pending request into another browser. The native handoff screen explains the limitation and only continues the existing default-browser flow after the user explicitly identifies that origin; in-app Agent continuation still requires separate implementation and device acceptance. Desktop-hosted Agent execution does not use this Mobile runtime wake path.
+
+The mobile loopback gateway runs on the phone. A phone browser's `127.0.0.1` addresses that phone; a Mac request to the same address addresses the Mac and cannot test the phone's gateway. The host supplies the current scoped entry URL and binds the gateway to the phone's loopback interface.
 
 On Android, a user-started foreground service owns the Local App runtime before the app hands off to the browser. Its persistent notification provides stop and view actions. Task records can be inspected after process death, but work is not replayed. Stop and cancellation target the App or named run and wait for cleanup before releasing admission.
 
 On iOS 26, browser Agent work starts with an explicit native foreground handoff. The app requests an immediate `BGContinuedProcessingTask` and waits up to 12 seconds for the actual OS task to attach before opening the browser. If the lease does not attach in that window, native UI reports failure and does not send the user into a waiting browser page. After attachment, native reserves the exact `(appId, revision, runId)` with the host. The default receive lease is 60 seconds and the host caps it at 120 seconds; iOS requests 120 seconds. This window covers arrival and admission of that browser request only. The admitted task then has its own `timeoutMs`/turn limits and is monitored under the finite OS lease. Expiration or cancellation stops only the linked request, clears that reservation, and does not promise unattended or indefinite execution.
 
+Both continued-processing and iOS 27 Intent runs observe actual UTF-8 output bytes from validated AG-UI events and a trusted native model-stream counter. The native counter contains no text and is confined to the native host response; it is not an AG-UI field or a browser capability. It includes genuine received text and tool-input fragments, even when a tentative model attempt is later retracted. It measures observed bytes, not accepted answer length, model tokens, or completion percentage. Replayed pages do not add work twice; the host uses the maximum of the two overlapping counts, including native growth while the event cursor is unchanged. Aggregate-only SideQuery requests do not claim live streaming progress. The total remains indeterminate until success; neither the turn ceiling nor a timer becomes a percentage. Orchestrator terminal callbacks are not evidence of a completed model turn. Anonymous native diagnostics record observed counts and the first effective cancellation entry point, without prompts, output content, or credentials. A system expiration callback does not reveal whether resource pressure or cancellation through system UI caused it. Progress reporting follows [Apple's continued-processing contract](https://developer.apple.com/documentation/backgroundtasks/bgcontinuedprocessingtask) and does not guarantee that the OS will keep a task running.
+
+An ordinary user-invoked `openURL` has no `BGContinuedProcessingTask`; immediately before routing, the app requests a
+UIKit assertion scoped to `(appId, revision)`. Before ending the continued-processing task for a deliverable terminal
+result, it requests a delivery assertion in the same scope. An active assertion is reused without extending its deadline.
+Each assertion is capped locally at 15 seconds and may expire earlier at the OS's request. An accepted `openURL` is routing feedback, not acknowledgement that the browser
+loaded the page or saved the result. Cancellation, expiry, stop/revoke, and release replacement end matching assertions;
+no later reload or indefinite background delivery is promised.
+See Apple's [background-execution guidance](https://developer.apple.com/documentation/uikit/extending-your-app-s-background-execution-time) and
+[`UIApplication.beginBackgroundTask`](https://developer.apple.com/documentation/uikit/uiapplication/beginbackgroundtask%28withname%3Aexpirationhandler%3A%29).
+
 The browser wake link is narrowly scoped to `lingxi://apps/<appId>?review=agent&runId=<opaque>&revision=<revision>`. It carries no prompt, attachment, path, credential, or tool payload. Native validates the App, canonical positive revision, and opaque run ID (at most 128 UTF-8 bytes, no control characters); duplicate, unexpected, or malformed route/query values are rejected. The host allows one live pending or consumed reservation per App: the same tuple is idempotent, while a different request is busy. After the exact reservation is ready, the browser returns to the app page and the SDK submits the complete request and files together under the same run ID. `wake.clear` cancels only the run linked to that exact request. Retries with the same durable input can recover the admitted task. A request that misses the bounded receive deadline loses that reservation and must use a new foreground handoff; native does not hold a lease or UI waiting indefinitely.
 
-On iOS 27 and later, availability-guarded `LongRunningIntent`/`performBackgroundTask` support uses the same native broker for a user-invoked intent that already has its complete bounded input. The intent returns the actual terminal AG-UI event JSON after host validation; it does not invent a separate Agent reply envelope. It does not wait for a browser upload while the browser waits for intent completion, and it does not authorize arbitrary browser-triggered intent execution. iOS 26 remains the foreground browser-handoff path.
+On iOS 27 and later, availability-guarded `LongRunningIntent`/`performBackgroundTask` support uses the same native broker for a user-invoked intent that already has its complete bounded input. The intent returns the actual terminal AG-UI event JSON after host validation; it does not invent a separate Agent reply envelope. It does not wait for a browser upload while the browser waits for intent completion, and it does not authorize arbitrary browser-triggered intent execution. Its work remains bounded by configured task limits and the OS-managed Intent run; it is not an indefinite browser-delivery lease. iOS 26 remains the foreground browser-handoff path.
 
 ## Verification boundaries
 

@@ -17,16 +17,18 @@ const executionDefinition = z.object({
   source: z.string().min(1).max(2 * 1024 * 1024),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
+const requirements = z.array(identifier).max(100).refine((items) => new Set(items).size === items.length, 'Duplicate capability');
+const providerId = text(64).regex(/^[a-z0-9][a-z0-9._-]*$/);
 const provider = z.object({
-  id: identifier, name: text(160), description: z.string().max(4000),
+  id: providerId, name: text(160), description: z.string().max(4000),
   baseUrl: z.url().refine((s) => s.startsWith('https://'), 'HTTPS required'),
   protocol: text(100), enabled: z.boolean(), order: z.number().int().min(0).max(100000),
   regions: z.array(text(80)).max(20),
-  executionDefinition: executionDefinition.optional(),
+  executionDefinition, requiredCapabilities: requirements, defaultModelId: identifier,
 }).strict();
 const model = z.object({
-  providerId: identifier, id: identifier, name: text(240), description: z.string().max(8000),
-  enabled: z.boolean(), order: z.number().int().min(0).max(100000),
+  providerId, id: identifier, name: text(240), description: z.string().max(8000),
+  status: z.enum(['active', 'deprecated', 'disabled']), requiredCapabilities: requirements, order: z.number().int().min(0).max(100000),
   platforms: z.array(z.enum(platforms)).min(1).max(4),
   minAppVersion: version, maxAppVersion: version.nullable(),
   contextWindow: z.number().int().positive().max(100000000),
@@ -35,7 +37,7 @@ const model = z.object({
   inputModalities: z.array(text(40)).max(20), outputModalities: z.array(text(40)).max(20),
   pricing: price.nullable(),
 }).strict();
-export const catalogSchema = z.object({ schemaVersion: z.literal(1), providers: z.array(provider).max(100), models: z.array(model).max(5000) }).strict();
+export const catalogSchema = z.object({ schemaVersion: z.literal(2), providers: z.array(provider).max(100), models: z.array(model).max(5000) }).strict();
 export class ApiError extends Error {
   constructor(status, code, message = code) { super(message); this.status = status; this.code = code; }
 }
@@ -85,18 +87,26 @@ export function validateCatalog(value) {
     if (m.maxAppVersion && compareVersions(m.minAppVersion, m.maxAppVersion) > 0) throw new ApiError(400, 'INVALID_VERSION_RANGE');
     if (m.maxOutputTokens > m.contextWindow) throw new ApiError(400, 'OUTPUT_EXCEEDS_CONTEXT');
   }
+  for (const p of catalog.providers) {
+    const selected = catalog.models.find((m) => m.providerId === p.id && m.id === p.defaultModelId);
+    if (!selected || selected.status !== 'active') throw new ApiError(400, 'INVALID_DEFAULT_MODEL');
+    if (!p.requiredCapabilities.includes(`protocol.${p.protocol}`)) throw new ApiError(400, 'MISSING_PROTOCOL_CAPABILITY');
+  }
   return catalog;
 }
 
-export function selectCatalog(catalog, platform, appVersion) {
+export function selectCatalog(catalog, platform, appVersion, runtimeCapabilities) {
+  const available = new Set(requirements.parse(runtimeCapabilities));
+  const supports = (entry) => entry.requiredCapabilities.every((cap) => available.has(cap));
   z.enum(platforms).parse(platform); version.parse(appVersion);
   compareVersions(appVersion, appVersion);
-  const providers = catalog.providers.filter((p) => p.enabled).sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+  const providers = catalog.providers.filter((p) => supports(p)).sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
   const ids = new Set(providers.map((p) => p.id));
-  const models = catalog.models.filter((m) => m.enabled && ids.has(m.providerId) && m.platforms.includes(platform)
+  const models = catalog.models.filter((m) => supports(m) && ids.has(m.providerId) && m.platforms.includes(platform)
     && compareVersions(appVersion, m.minAppVersion) >= 0 && (!m.maxAppVersion || compareVersions(appVersion, m.maxAppVersion) <= 0))
-    .sort((a, b) => a.order - b.order || `${a.providerId}/${a.id}`.localeCompare(`${b.providerId}/${b.id}`));
-  return { schemaVersion: 1, providers, models };
+    .sort((a, b) => a.order - b.order || `${a.providerId}/${a.id}`.localeCompare(`${b.providerId}/${b.id}`))
+    .map((m) => providers.find((p) => p.id === m.providerId)?.enabled ? m : { ...m, status: 'disabled' });
+  return { schemaVersion: 2, providers, models };
 }
 
 export function createHandler(service, verifyToken, origins) {
@@ -112,14 +122,15 @@ export function createHandler(service, verifyToken, origins) {
         headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, If-None-Match');
         return new Response(null, { status: 204, headers });
       }
-      if (request.method === 'GET' && url.pathname === '/health') return reply({ status: 'ok', service: 'model-catalog', schemaVersion: 1 });
+      if (request.method === 'GET' && url.pathname === '/health') return reply({ status: 'ok', service: 'model-catalog', schemaVersion: 2 });
       if (request.method === 'GET' && url.pathname === '/v1/model-catalog') {
-        if (url.searchParams.get('schemaVersion') !== '1') throw new ApiError(400, 'UNSUPPORTED_SCHEMA');
+        if (url.searchParams.get('schemaVersion') !== '2') throw new ApiError(400, 'UNSUPPORTED_SCHEMA');
         const platform = url.searchParams.get('platform'), appVersion = url.searchParams.get('appVersion');
         z.enum(platforms).parse(platform); version.parse(appVersion);
+        const runtimeCapabilities = requirements.parse(url.searchParams.getAll('capability'));
         const current = await service.current();
         if (!current) throw new ApiError(404, 'CATALOG_NOT_PUBLISHED');
-        const data = { releaseId: current.id, publishedAt: current.createdAt, ...selectCatalog(current.catalog, platform, appVersion) };
+        const data = { releaseId: current.id, publishedAt: current.createdAt, ...selectCatalog(validateCatalog(current.catalog), platform, appVersion, runtimeCapabilities) };
         const etag = `"${createHash('sha256').update(JSON.stringify(data)).digest('hex')}"`;
         headers.set('ETag', etag); headers.set('Access-Control-Expose-Headers', 'ETag'); headers.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
         if (request.headers.get('If-None-Match') === etag) return reply(null, 304);
@@ -139,7 +150,7 @@ export function createHandler(service, verifyToken, origins) {
       let body;
       try { body = JSON.parse(raw); } catch { throw new ApiError(400, 'INVALID_JSON'); }
       const expected = z.number().int().nonnegative().parse(body.expectedRevision);
-      if (request.method === 'POST' && url.pathname === '/v1/admin/preview') return reply(selectCatalog(validateCatalog(body.catalog), body.platform, body.appVersion));
+      if (request.method === 'POST' && url.pathname === '/v1/admin/preview') return reply(selectCatalog(validateCatalog(body.catalog), body.platform, body.appVersion, body.runtimeCapabilities));
       if (request.method === 'PUT' && url.pathname === '/v1/admin/models') return reply(await service.save(validateCatalog(body.catalog), expected, user.uid));
       if (request.method === 'POST' && url.pathname === '/v1/admin/releases') return reply(await service.publish(expected, text(160).parse(body.label), user.uid), 201);
       const restore = /^\/v1\/admin\/releases\/([a-f0-9-]{36})\/restore$/.exec(url.pathname);

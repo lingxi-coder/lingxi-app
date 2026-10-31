@@ -132,12 +132,17 @@ async fn audio_context_probe_without_binding_keeps_text_session_usable() {
     let sink = CapturingSink::arc();
 
     router
-        .route(ClientCommand::GetAudioSessionContext, sink.clone())
+        .route(
+            ClientCommand::GetAudioSessionContext {
+                request_id: "context-1".into(),
+            },
+            sink.clone(),
+        )
         .await;
-    assert!(
-        sink.events().await.is_empty(),
-        "an optional audio probe must not publish a global text-session error"
-    );
+    assert!(sink.events().await.iter().any(|event| matches!(
+        event, ClientEvent::AudioSessionContext { request_id, profile_id: None, account_scope: None, media_owner: None, .. }
+            if request_id == "context-1"
+    )), "the correlated response must not require a provider binding");
 
     router.route(ClientCommand::ListModels, sink.clone()).await;
     let events = sink.events().await;

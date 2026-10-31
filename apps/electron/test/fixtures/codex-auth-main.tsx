@@ -4,6 +4,11 @@ import '../../src/renderer/global.css';
 import { ProviderCredentials } from '../../src/renderer/components/settings/pages/ProviderCredentials';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
+import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
+
+setLanguagePreference('zh-Hans');
+
+const refreshModelPicker = async () => {};
 
 function Fixture() {
   const [configured, setConfigured] = useState(false);
@@ -36,6 +41,7 @@ function Fixture() {
       calls.current.logout++; setConfigured(false); return credential(false);
     },
     setModel: async (model: string) => { calls.current.apply++; setCurrentModel(model); },
+    refreshModelPicker,
     setModelPickerVisibility: async () => {},
   };
   (window as any).__codexAuthTest = {

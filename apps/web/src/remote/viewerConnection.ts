@@ -8,6 +8,7 @@ import {
   ICE_GATHER_TIMEOUT_MS,
   MessageTransport,
   OFFER_ANSWER_TIMEOUT_MS,
+  REMOTE_FEATURE_BOTS,
   REMOTE_PROTOCOL_MAJOR,
   RemoteProtocolError,
   RemoteRpcError,
@@ -854,7 +855,7 @@ export class ViewerConnection {
     let init: ViewerRequests['initialize']['result'];
     try {
       init = await withClose(
-        rpc.request('initialize', { protocol: REMOTE_PROTOCOL_MAJOR, client_protocol_version: CLIENT_PROTOCOL_MAJOR, app: { version: displayText(this.appVersion, 64) || 'dev', platform: 'web' } }, { timeoutMs: HANDSHAKE_TIMEOUT_MS }),
+        rpc.request('initialize', { protocol: REMOTE_PROTOCOL_MAJOR, client_protocol_version: CLIENT_PROTOCOL_MAJOR, app: { version: displayText(this.appVersion, 64) || 'dev', platform: 'web', features: [REMOTE_FEATURE_BOTS] } }, { timeoutMs: HANDSHAKE_TIMEOUT_MS }),
       );
     } catch (error) {
       if (error instanceof Cancelled) throw error;

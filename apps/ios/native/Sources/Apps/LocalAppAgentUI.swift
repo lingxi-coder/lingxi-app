@@ -54,11 +54,25 @@ private struct AgentSettings: Codable, Sendable {
     }
 }
 
+struct LocalAppAgentConfigureResult: Decodable, Sendable {
+    let changed: Bool
+}
+
+@MainActor
+enum LocalAppAgentConfigurationCleanup {
+    static func perform(changed: Bool, cleanup: () async -> Void) async {
+        guard changed else { return }
+        await cleanup()
+    }
+}
+
 @MainActor
 struct LocalAppAgentSettingsView: View {
     let client: LocalAppServiceClient
     let appID: String
     let release: UnifiedAppRelease
+    let captureConfigurationScope: @MainActor () -> LocalAppAgentConfigurationScopeSnapshot
+    let onConfigurationChanged: @MainActor (LocalAppAgentConfigurationScopeSnapshot) async -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var catalog: AgentCatalog?
     @State private var model = ""
@@ -159,7 +173,9 @@ struct LocalAppAgentSettingsView: View {
     }
     private func connect(_ serverID: String) {
         Task { busy = true; defer { busy = false }; do {
+            let snapshot = captureConfigurationScope()
             catalog = try await call(["op": .string("connectMcp"), "serverId": .string(serverID)], as: AgentCatalog.self)
+            await onConfigurationChanged(snapshot)
         } catch { self.error = error.localizedDescription } }
     }
     private func save() {
@@ -170,13 +186,21 @@ struct LocalAppAgentSettingsView: View {
             skills: skills.filter { allowedSkills.contains($0) }.sorted(), background: false,
             maxTurns: turns, timeoutMs: minutes * 60_000)
         Task { busy = true; defer { busy = false }; do {
-            let _: LocalAppJSON = try await call(["op": .string("configure"), "appId": .string(appID), "settings": try .encode(settings)], as: LocalAppJSON.self)
+            let snapshot = captureConfigurationScope()
+            let result = try await call(["op": .string("configure"), "appId": .string(appID), "settings": try .encode(settings)], as: LocalAppAgentConfigureResult.self)
+            await LocalAppAgentConfigurationCleanup.perform(changed: result.changed) {
+                await onConfigurationChanged(snapshot)
+            }
             dismiss()
         } catch { self.error = error.localizedDescription } }
     }
     private func revoke() {
         Task { busy = true; defer { busy = false }; do {
-            let _: LocalAppJSON = try await call(["op": .string("configure"), "appId": .string(appID), "settings": .null], as: LocalAppJSON.self)
+            let snapshot = captureConfigurationScope()
+            let result = try await call(["op": .string("configure"), "appId": .string(appID), "settings": .null], as: LocalAppAgentConfigureResult.self)
+            await LocalAppAgentConfigurationCleanup.perform(changed: result.changed) {
+                await onConfigurationChanged(snapshot)
+            }
             dismiss()
         } catch { self.error = error.localizedDescription } }
     }
@@ -301,6 +325,23 @@ private struct LocalAppAgentInteractionSheet: View {
     }
 }
 
+enum LocalAppAgentTaskStatusText {
+    static func status(state: String, errorCode: String?) -> String {
+        if state == "interrupted" {
+            switch errorCode {
+            case "ios_background_expired":
+                return String(localized: "iOS 已结束后台执行，任务已中断。请检查已完成操作后，再决定是否手动开始新任务。")
+            case "host_restarted":
+                return String(localized: "宿主重新启动，任务已中断，原因未知。请检查已完成操作后，再决定是否手动开始新任务。")
+            default:
+                return String(localized: "已中断")
+            }
+        }
+        if state == "cancelled" { return String(localized: "已取消") }
+        return state
+    }
+}
+
 /// Active Local App tasks are shown from host-observed state; the view never
 /// invents percentage progress or maps cancellation to another app's task.
 @MainActor
@@ -313,30 +354,57 @@ struct LocalAppAgentTasks: View {
     @State private var cancelling = Set<String>()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if tasks.isEmpty {
+        VStack(alignment: .leading, spacing: 12) {
+            if tasks.isEmpty && error == nil {
                 Text("No Agent tasks for this app version.").font(.footnote).foregroundStyle(.secondary)
             }
             ForEach(tasks) { task in
-                HStack(alignment: .top, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(task.phase ?? task.state).font(.subheadline.weight(.medium))
-                        if let progress = task.progress, progress.turnLimit > 0 {
-                            Text("Completed \(progress.completedModelTurns) model turns; limit \(progress.turnLimit)")
-                                .font(.footnote).foregroundStyle(.secondary)
-                        }
-                        Text(task.runId).font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(String(localized: "session_details_status")): \(LocalAppAgentTaskStatusText.status(state: task.state, errorCode: task.error?.code))")
+                        .font(.subheadline.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let phase = task.phase {
+                        Text(phase)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    Spacer(minLength: 4)
+                    Text("\(String(localized: "cron_run_id_label")): \(task.requestId)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let progress = task.progress, progress.turnLimit > 0 {
+                        Text("Completed \(progress.completedModelTurns) model turns; limit \(progress.turnLimit)")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let taskError = task.error {
+                        Text(String(localized: "cron_error_section"))
+                            .font(.subheadline.weight(.medium))
+                        Text(taskError.code)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(taskError.message)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if !task.isTerminal {
                         Button("Stop", role: .destructive) { cancel(task) }
                             .disabled(cancelling.contains(task.runId))
                     }
                 }
-                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
             }
             if let error { Text(error).font(.footnote).foregroundStyle(.red) }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .task(id: "\(appID):\(revision)") {
             while !Task.isCancelled {
                 do {
@@ -351,7 +419,12 @@ struct LocalAppAgentTasks: View {
                     tasks = response.tasks.sorted { $0.sequence > $1.sequence }
                     error = nil
                 } catch is CancellationError { return }
-                catch { self.error = error.localizedDescription }
+                catch {
+                    // A failed lookup must not leave a stale running task on
+                    // screen or imply that the host has no saved tasks.
+                    tasks = []
+                    self.error = "\(String(localized: "无法确认任务状态，请重新打开灵犀后检查。")) \(error.localizedDescription)"
+                }
                 do { try await Task.sleep(for: .seconds(1)) } catch { return }
             }
         }

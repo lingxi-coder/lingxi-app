@@ -1,0 +1,54 @@
+{
+  "time_utc": "2026-10-29T03:29:42.647550+00:00",
+  "authorization": "User explicitly requested Rust compile cache and Android/iOS scratch cleanup; preserve source, real FFI bindings/library inputs, SDK, SwiftPM, acceptance",
+  "removed": [
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/deps",
+      "allocated_bytes_before": 6017441792
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/build",
+      "allocated_bytes_before": 221724672
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/.fingerprint",
+      "allocated_bytes_before": 16793600
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/kotlin",
+      "allocated_bytes_before": 21274624
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/intermediates",
+      "allocated_bytes_before": 92700672
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/tmp",
+      "allocated_bytes_before": 54988800
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/build/mobile-linux-cache",
+      "allocated_bytes_before": 281198592
+    }
+  ],
+  "total_allocated_bytes": 6706122752,
+  "preserved_input_sha256": {
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libios_framework.a": "25d10c37d36d9fe86e38fe61a7fbbbd3791a6869076fbe49ad136e552bc11ccf",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libandroid_aar.dylib": "62d0f499744c6c3529aeeaa897c201492a9ca2a526eb5af89252e2b11c28a552",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/uniffi-bindgen": "c8ee86306a67ea0bfa085246e2305ef65b15f26c0e508f3f3f94a6eae85652cc"
+  },
+  "preserved_paths": [
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libios_framework.a",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libandroid_aar.dylib",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/uniffi-bindgen",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Generated",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/bindings",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/gstreamer-sdk",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/acceptance/desktop-bot-takeover-20261028",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-packages",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/build/mobile-linux-sdk",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/build/linux-runtime"
+  ],
+  "disk_before": "Filesystem   1024-blocks      Used Available Capacity  iused    ifree %iused  Mounted on\n/dev/disk3s1   971350180 924000000   8480000   100% 11463266 84949280   12%   /System/Volumes/Data\n",
+  "disk_after": "Filesystem   1024-blocks      Used Available Capacity  iused     ifree %iused  Mounted on\n/dev/disk3s1   971350180 920000000  13960000    99% 11437027 139651000    8%   /System/Volumes/Data\n"
+}

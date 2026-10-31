@@ -1,0 +1,33 @@
+{
+  "addedProject": [
+    [
+      "roles/datastore.user",
+      "serviceAccount:push-api@lingxi-5e4b2.iam.gserviceaccount.com",
+      "{\"expression\": \"resource.name == 'projects/lingxi-5e4b2/databases/(default)'\", \"title\": \"teams-default-database-only\"}"
+    ],
+    [
+      "roles/eventarc.eventReceiver",
+      "serviceAccount:push-api@lingxi-5e4b2.iam.gserviceaccount.com",
+      "null"
+    ],
+    [
+      "roles/eventarc.serviceAgent",
+      "serviceAccount:service-55470483519@gcp-sa-eventarc.iam.gserviceaccount.com",
+      "null"
+    ],
+    [
+      "roles/pubsub.serviceAgent",
+      "serviceAccount:service-55470483519@gcp-sa-pubsub.iam.gserviceaccount.com",
+      "null"
+    ]
+  ],
+  "removedProject": [],
+  "addedService": [
+    [
+      "roles/iam.serviceAccountTokenCreator",
+      "serviceAccount:push-api@lingxi-5e4b2.iam.gserviceaccount.com",
+      "null"
+    ]
+  ],
+  "preservedExisting": true
+}

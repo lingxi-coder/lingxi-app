@@ -11,6 +11,10 @@
  *   its runtime open while anyone is attached and for two minutes after;
  * - what each viewer's requests are allowed to do (`remoteCommands.ts`).
  *
+ * A viewer that declared the `bots` feature also sees the Bots whose Remote
+ * Control switch is on and their chats (`remoteBots.ts`); to any other viewer
+ * those chats do not exist, and neither do the methods that reach them.
+ *
  * Errors are `RemoteRpcError`s: `invalid_params` for a request that is
  * malformed or that the session refused, `unknown_session` and
  * `not_remote_enabled` for a session the viewer may not use, `not_pending`
@@ -27,6 +31,7 @@ import {
   type FileOffer,
   type Clock,
   type RemotePendingAction,
+  type RemoteBotSummary,
   type RemoteSessionSummary,
   type SessionAttachParams,
 } from '@lingxi/bridge-client/remote';
@@ -44,6 +49,7 @@ import { describeError, type RemoteDiagnostics } from './diagnostics.js';
 import type { RemoteSessionGateway, RemoteViewer, RemoteViewerChannel } from './gateway.js';
 import type { RemotePolicy } from './policy.js';
 import type { PushPresence } from './pushRequests.js';
+import { RemoteBots, type RemoteBotDirectory } from './remoteBots.js';
 import type { RemoteCommands } from './remoteCommands.js';
 import type { RemoteRuntime, RemoteRuntimes, RuntimeLease } from './remoteRuntime.js';
 import { SessionAttachment } from './sessionAttachment.js';
@@ -62,7 +68,9 @@ const UNTITLED = 'Untitled session';
 
 export interface SessionGatewayDeps {
   runtimes: RemoteRuntimes;
-  policy: Pick<RemotePolicy, 'enabledSessions' | 'find' | 'wasEnabled' | 'onChange'>;
+  policy: Pick<RemotePolicy, 'enabledSessions' | 'find' | 'wasEnabled' | 'onChange' | 'botChat'>;
+  /** The Bots, asked each time: they are made after the gateway, and only where Bots can run. */
+  bots?: () => RemoteBotDirectory | null | undefined;
   commands: RemoteCommands;
   files?: RemoteFileStore;
   /** The session's title, from the persisted transcript. */
@@ -96,6 +104,9 @@ interface ViewerState {
   attaching: Map<string, symbol>;
   watching: boolean;
   lastList?: string;
+  /** `bots.watch` was called. */
+  watchingBots: boolean;
+  lastBots?: string;
   closed: boolean;
   files: Map<string, { offer: FileOffer; sink: FileSink }>;
   downloads: Map<string, { session: string; controller: AbortController; done: Promise<unknown> }>;
@@ -105,6 +116,10 @@ interface ViewerState {
 
 type Json = Record<string, unknown>;
 
+function unknownMethod(method: string): RemoteRpcError {
+  return new RemoteRpcError('invalid_params', `unknown method ${method.slice(0, 64)}`);
+}
+
 export class SessionGateway implements RemoteSessionGateway, PushPresence {
   private readonly mediaRoutes = new RemoteMediaRoutes();
   private readonly viewers = new Map<string, ViewerState>();
@@ -113,10 +128,21 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   private readonly watchers = new Set<() => void>();
   private readonly viewerListeners = new Set<() => void>();
   private readonly fileOperations = new Map<string, Promise<unknown>>();
+  /** The runtimes that are open now, for the Bots' status. */
+  private readonly open = new Map<string, RemoteRuntime>();
+  private readonly bots: RemoteBots;
   private listTimer: unknown;
+  private botsTimer: unknown;
   private disposed = false;
 
   constructor(private readonly deps: SessionGatewayDeps) {
+    this.bots = new RemoteBots({
+      directory: () => deps.bots?.(),
+      runtimes: () => this.open.values(),
+      summary: (ref, title) => this.summary(ref, title || UNTITLED),
+      clock: deps.clock,
+      diagnostics: deps.diagnostics,
+    });
     this.watchers.add(deps.policy.onChange(() => this.policyChanged()));
     this.watchers.add(deps.runtimes.onRuntimeCreated((runtime) => this.watchRuntime(runtime)));
   }
@@ -138,6 +164,22 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         state.lastList = JSON.stringify(sessions);
         return { sessions };
       }
+      case 'bots.list':
+        this.requireBotAware(viewer, method);
+        return { bots: await this.bots.list() };
+      case 'bots.watch': {
+        this.requireBotAware(viewer, method);
+        state.watchingBots = true;
+        const bots = await this.bots.list();
+        state.lastBots = JSON.stringify(bots);
+        return { bots };
+      }
+      case 'bot.threads.list':
+        this.requireBotAware(viewer, method);
+        return this.bots.threads(params);
+      case 'bot.thread.create':
+        this.requireBotAware(viewer, method);
+        return this.bots.create(viewer, params);
       case 'session.attach':
         return this.attach(state, params);
       case 'session.detach':
@@ -152,7 +194,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       case 'session.history':
         return this.deps.commands.history(this.attachedRuntime(state, params), params);
       case 'image.get':
-        return this.deps.commands.imageGet(this.imageRuntime(params), params);
+        return this.deps.commands.imageGet(this.imageRuntime(viewer, params), params);
       case 'file.offer':
       case 'file.commit':
       case 'file.cancel':
@@ -217,8 +259,13 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       case 'models.list':
         return this.deps.commands.modelsList(this.modelsRuntime(state, params));
       default:
-        throw new RemoteRpcError('invalid_params', `unknown method ${method.slice(0, 64)}`);
+        throw unknownMethod(method);
     }
+  }
+
+  /** A method only a viewer that understands Bots may call is, to any other, no method at all. */
+  private requireBotAware(viewer: RemoteViewer, method: string): void {
+    if (viewer.bot_aware !== true) throw unknownMethod(method);
   }
 
   private fileOwner(viewer: RemoteViewer): string {
@@ -340,6 +387,8 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     for (const stop of this.watchers) stop();
     this.watchers.clear();
     this.deps.clock.clearTimeout(this.listTimer);
+    this.deps.clock.clearTimeout(this.botsTimer);
+    this.open.clear();
     for (const state of [...this.viewers.values()]) {
       state.closed = true;
       state.attaching.clear();
@@ -355,7 +404,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   private stateOf(viewer: RemoteViewer, channel: RemoteViewerChannel): ViewerState {
     let state = this.viewers.get(viewer.conn_id);
     if (state === undefined) {
-      state = { viewer, channel, attached: new Map(), attaching: new Map(), watching: false, closed: false, files: new Map(), downloads: new Map(), mediaCleanup: new Map() };
+      state = { viewer, channel, attached: new Map(), attaching: new Map(), watching: false, watchingBots: false, closed: false, files: new Map(), downloads: new Map(), mediaCleanup: new Map() };
       this.viewers.set(viewer.conn_id, state);
     }
     return state;
@@ -371,10 +420,29 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     return sessionId;
   }
 
-  /** The reference of a session the viewer may use, or the error that says why not. */
-  private requireEnabled(sessionId: string): SessionRef {
+  /**
+   * The reference of a session this viewer may use, if there is one: a session
+   * with Remote Control on, or a chat of a Bot whose switch is on, which only a
+   * viewer that understands Bots may use.
+   */
+  private reachable(viewer: RemoteViewer, sessionId: string): SessionRef | undefined {
     const ref = this.deps.policy.find(sessionId);
     if (ref !== undefined) return ref;
+    if (viewer.bot_aware !== true) return undefined;
+    const chat = this.deps.policy.botChat(sessionId);
+    return chat?.reachable === true ? chat.ref : undefined;
+  }
+
+  /** The reference of a session the viewer may use, or the error that says why not. */
+  private requireEnabled(viewer: RemoteViewer, sessionId: string): SessionRef {
+    const ref = this.reachable(viewer, sessionId);
+    if (ref !== undefined) return ref;
+    if (this.deps.policy.botChat(sessionId) !== undefined) {
+      // To a viewer that does not understand Bots, a Bot's chat is a session that is not there.
+      throw viewer.bot_aware === true
+        ? new RemoteRpcError('not_remote_enabled', 'Remote Control is off for this Bot')
+        : new RemoteRpcError('unknown_session', 'no such session');
+    }
     throw this.deps.runtimes.get(sessionId) !== undefined || this.deps.policy.wasEnabled(sessionId)
       ? new RemoteRpcError('not_remote_enabled', 'Remote Control is off for this session')
       : new RemoteRpcError('unknown_session', 'no such session');
@@ -383,7 +451,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   /** The runtime of a session this viewer is attached to. */
   private attachedRuntime(state: ViewerState, params: unknown): RemoteRuntime {
     const sessionId = this.sessionIdOf(params);
-    this.requireEnabled(sessionId);
+    this.requireEnabled(state.viewer, sessionId);
     const attached = state.attached.get(sessionId);
     const runtime = attached === undefined ? undefined : this.deps.runtimes.get(sessionId);
     if (attached === undefined || runtime === undefined) throw new RemoteRpcError('invalid_params', 'attach to the session first');
@@ -391,11 +459,11 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   }
 
   /** The runtime a reference points into, if its session may be used. */
-  private imageRuntime(params: unknown): RemoteRuntime | undefined {
+  private imageRuntime(viewer: RemoteViewer, params: unknown): RemoteRuntime | undefined {
     const ref = (params as Json | null)?.['ref'];
     const parsed = typeof ref === 'string' ? parseImageRef(ref) : undefined;
     if (parsed === undefined) throw new RemoteRpcError('invalid_params', 'invalid ref');
-    this.requireEnabled(parsed.sessionId);
+    this.requireEnabled(viewer, parsed.sessionId);
     return this.deps.runtimes.get(parsed.sessionId);
   }
 
@@ -403,7 +471,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     const sessionId = (params as Json | null)?.['session_id'];
     if (sessionId !== undefined) {
       const id = this.sessionIdOf(params);
-      this.requireEnabled(id);
+      this.requireEnabled(state.viewer, id);
       const runtime = this.deps.runtimes.get(id);
       if (runtime === undefined) throw new RemoteRpcError('invalid_params', 'attach to the session first');
       return runtime;
@@ -426,7 +494,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   private async attach(state: ViewerState, rawParams: unknown): Promise<unknown> {
     const sessionId = this.sessionIdOf(rawParams);
     const resume = this.resumeOf(rawParams);
-    const ref = this.requireEnabled(sessionId);
+    const ref = this.requireEnabled(state.viewer, sessionId);
     const reserved = new Set([...state.attached.keys(), ...state.attaching.keys()]);
     if (!reserved.has(sessionId) && reserved.size >= MAX_ATTACHMENTS_PER_VIEWER) {
       throw new RemoteRpcError('capacity', 'this device is attached to too many sessions');
@@ -437,11 +505,11 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       const { entry, runtime } = await this.acquire(ref);
       // Detach, an unshare, or a newer attach may have superseded this request
       // while the runtime opened. A re-enabled session must not revive it.
-      if (state.closed || this.disposed || this.deps.policy.find(sessionId) === undefined
+      if (state.closed || this.disposed || this.reachable(state.viewer, sessionId) === undefined
         || state.attaching.get(sessionId) !== attempt) {
         this.release(entry);
         if (state.closed || this.disposed) throw new RemoteRpcError('internal', 'the connection closed');
-        if (this.deps.policy.find(sessionId) === undefined) throw this.requireEnabledError(sessionId);
+        if (this.reachable(state.viewer, sessionId) === undefined) throw this.requireEnabledError(state.viewer, sessionId);
         throw new RemoteRpcError('invalid_params', 'the session attachment was cancelled');
       }
       // Attaching again replaces the attachment; the session stays leased throughout.
@@ -452,20 +520,21 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       if (state.viewer.media_capabilities !== undefined && mediaRouteId === undefined) {
         mediaRouteId = await this.registerMediaRoute(state, sessionId, runtime);
       }
-      if (state.closed || this.disposed || this.deps.policy.find(sessionId) === undefined
+      if (state.closed || this.disposed || this.reachable(state.viewer, sessionId) === undefined
         || state.attaching.get(sessionId) !== attempt) {
         if (mediaRouteId !== undefined && !preserveMediaRoute) {
           this.removeMediaRoute(state, sessionId, runtime, mediaRouteId);
         }
         this.release(entry);
         if (state.closed || this.disposed) throw new RemoteRpcError('internal', 'the connection closed');
-        if (this.deps.policy.find(sessionId) === undefined) throw this.requireEnabledError(sessionId);
+        if (this.reachable(state.viewer, sessionId) === undefined) throw this.requireEnabledError(state.viewer, sessionId);
         throw new RemoteRpcError('invalid_params', 'the session attachment was cancelled');
       }
       const attachment: SessionAttachment = new SessionAttachment({
         runtime,
         channel: state.channel,
         clock: this.deps.clock,
+        botAware: state.viewer.bot_aware === true,
         onEnded: () => this.dropEnded(state, sessionId, attachment),
       });
       const attached: Attached = {
@@ -547,9 +616,9 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     }));
   }
 
-  private requireEnabledError(sessionId: string): RemoteRpcError {
+  private requireEnabledError(viewer: RemoteViewer, sessionId: string): RemoteRpcError {
     try {
-      this.requireEnabled(sessionId);
+      this.requireEnabled(viewer, sessionId);
     } catch (error) {
       if (error instanceof RemoteRpcError) return error;
     }
@@ -748,13 +817,13 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   }
 
   private policyChanged(): void {
-    // A session switched off: its viewers are told and let go at once.
+    // A session switched off, or a Bot: its viewers are told and let go at once.
     for (const state of this.viewers.values()) {
       for (const sessionId of state.attaching.keys()) {
-        if (this.deps.policy.find(sessionId) === undefined) state.attaching.delete(sessionId);
+        if (this.reachable(state.viewer, sessionId) === undefined) state.attaching.delete(sessionId);
       }
       for (const [sessionId, attached] of [...state.attached]) {
-        if (this.deps.policy.find(sessionId) !== undefined) continue;
+        if (this.reachable(state.viewer, sessionId) !== undefined) continue;
         state.attached.delete(sessionId);
         this.releaseAttachmentFiles(state, sessionId);
         attached.attachment.close('remote_disabled');
@@ -762,14 +831,18 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       }
     }
     this.viewersChanged();
+    // A Bot's switch, name or existence changed, or the whole of Remote Control did.
+    this.scheduleBots();
   }
 
   private watchRuntime(runtime: RemoteRuntime): void {
+    this.open.set(runtime.sessionId, runtime);
     const stop = runtime.observeRemote((observation) => {
       this.runtimeChanged(runtime, observation);
       if (observation.type === 'disposed') {
         stop();
         this.watchers.delete(stop);
+        if (this.open.get(runtime.sessionId) === runtime) this.open.delete(runtime.sessionId);
       }
     });
     this.watchers.add(stop);
@@ -780,12 +853,16 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       case 'event': {
         const type = observation.envelope.event.type;
         if (type === 'turn_started' || type === 'turn_ended' || type === 'model_changed'
-          || type === 'session_started' || type === 'session_resumed' || type === 'session_ended') this.scheduleList();
+          || type === 'session_started' || type === 'session_resumed' || type === 'session_ended') {
+          this.scheduleList();
+          this.scheduleBotsFor(runtime);
+        }
         return;
       }
       case 'pending':
       case 'state':
         this.scheduleList();
+        this.scheduleBotsFor(runtime);
         return;
       case 'disposed':
         // The runtime is gone whatever the lease says; the next attach opens it again.
@@ -793,6 +870,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
           if (sessionId === runtime.sessionId && entry.lease?.runtime === runtime) this.releaseNow(entry);
         }
         this.scheduleList();
+        this.scheduleBotsFor(runtime);
         return;
       default:
         return;
@@ -833,12 +911,45 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     }
   }
 
+  /** A change in the chats of a Bot is a change to the Bot's status. */
+  private scheduleBotsFor(runtime: RemoteRuntime): void {
+    if (this.bots.concerns(runtime)) this.scheduleBots();
+  }
+
+  private scheduleBots(): void {
+    if (this.botsTimer !== undefined || this.disposed) return;
+    if (![...this.viewers.values()].some((state) => state.watchingBots)) return;
+    this.botsTimer = this.deps.clock.setTimeout(() => {
+      this.botsTimer = undefined;
+      void this.publishBots();
+    }, LIST_DEBOUNCE_MS);
+  }
+
+  private async publishBots(): Promise<void> {
+    const watching = [...this.viewers.values()].filter((state) => state.watchingBots && !state.closed);
+    if (watching.length === 0) return;
+    let bots: RemoteBotSummary[];
+    try {
+      bots = await this.bots.list();
+    } catch (error) {
+      this.deps.diagnostics('warn', `could not build the Bot list (${describeError(error)})`);
+      return;
+    }
+    const serialized = JSON.stringify(bots);
+    for (const state of watching) {
+      if (state.closed || state.lastBots === serialized) continue;
+      state.lastBots = serialized;
+      state.channel.notify('bots.changed', { bots });
+    }
+  }
+
   // ───────────────────────────────────────────────────────────────────────────
   // PushPresence
   // ───────────────────────────────────────────────────────────────────────────
 
   isEnabled(sessionId: string): boolean {
-    return this.deps.policy.find(sessionId) !== undefined;
+    // A push cannot tell the account's devices apart by what they understand, so a Bot's chat counts.
+    return this.deps.policy.find(sessionId) !== undefined || this.deps.policy.botChat(sessionId)?.reachable === true;
   }
 
   foregroundViewers(sessionId: string): number {

@@ -12,6 +12,8 @@ export interface AccountState {
   busy: boolean;
   persistence: 'secure' | 'session';
   error: string | null;
+  /** A previously saved/signed-in session must be authenticated again. */
+  sessionExpired?: boolean;
 }
 export type AccountCommand =
   | { type: 'status' | 'signOut' | 'cancel' | 'verifyEmail' | 'reload' }

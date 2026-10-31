@@ -135,6 +135,8 @@ export interface UseBridge {
   readonly pluginCatalogEvent: PluginCatalogEvent | null;
   readonly configurationOperations: Readonly<Partial<Record<ConfigurationDomainDto, ConfigurationOperationEvent>>>;
   readonly activeSession: SessionRef | undefined;
+  /** The Bot whose chat is displayed. A Bot's folder is not a project, so project-only parts of the window leave such a chat alone. */
+  readonly activeBotId: string | undefined;
   readonly sessionLoading: boolean;
   readonly connection: ConnectionState;
   readonly connected: boolean;
@@ -215,6 +217,12 @@ export interface UseBridge {
   renameSession(projectPath: string, sessionId: string, title: string): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionRef | false>;
+  /** Show a chat of a Bot in the chat view; a new one when `sessionId` is absent. Rejects with the reason it could not start. */
+  openBotSession(botId: string, sessionId?: string): Promise<import('../../shared/bots').BotSessionRefUi>;
+  /** Follow the host, which made a chat of a Bot the displayed one on its own (the owner clicked a notification). */
+  showBotSession(session: import('../../shared/bots').BotSessionRefUi): Promise<void>;
+  deleteBot(botId: string): Promise<void>;
+  pickBotFolder(): Promise<import('../../shared/projectCreation').ProjectFolderSelection | null>;
   listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<(ProjectSessionCatalogState & { projectPath: string }) | undefined>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
   sessionRuntimeStatus(sessionId: string): SessionRuntimeStatus | undefined;
@@ -231,6 +239,8 @@ export interface UseBridge {
   cleanupPluginSecretsAfterUninstall?(pluginId: string, lastScopeRemoved: true): Promise<PluginSecretCleanupResult>;
   setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
   setCollapseThoughtsByDefault(collapseThoughtsByDefault: boolean): Promise<void>;
+  /** Keep this computer awake while Bots work; the host holds the preference and acts on it. */
+  setBotsKeepAwake(botsKeepAwake: boolean): Promise<void>;
   /**
    * Writes the WHOLE notification-preferences object at once, like
    * `setVoicePreferences`. The main process pushes the result straight at
@@ -302,6 +312,8 @@ export interface UseBridge {
   removeMcpServer(scope: WritableScopeDto, name: string): Promise<void>;
   /** Native Desktop skill administration. Write commands resolve only after the correlated terminal operation event. */
   scheduledScopes: ScheduledScope[];
+  /** Ask the host for the scopes again, as when a Bot was made, renamed or deleted. */
+  refreshScheduledScopes(): void;
   scheduledContext(scopeId: string): Promise<ScheduledContext>;
   manageScheduled(scopeId: string, request: CronRequestDto): Promise<CronJobDto[]>;
   readScheduledHistory(scopeId: string, jobId: string): Promise<CronRunDto[]>;

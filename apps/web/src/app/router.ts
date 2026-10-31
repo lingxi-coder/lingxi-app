@@ -18,12 +18,15 @@ export const appRoutes = [
   '/docs',
   '/remote',
   '/login/remote',
+  '/teams',
+  '/teams/join',
 ] as const;
 
 export type AppRoute =
   | (typeof appRoutes)[number]
   | `/open/${string}`
   | `/remote/${string}/${string}`
+  | `/remote/${string}/bots/${string}`
   | `/docs/${string}`;
 
 export function normalizePath(path: string): string {
@@ -58,7 +61,28 @@ export function remoteSessionRoute(hostId: string, sessionId: string): AppRoute 
   return `/remote/${encodeURIComponent(hostId)}/${encodeURIComponent(sessionId)}`;
 }
 
-/** Any Remote Control page (the computer list, or one session). */
+/**
+ * `/remote/<host_id>/bots/<bot_id>` names one Bot of one of the user's
+ * computers. Kept as written, like the session route, and told apart from it by
+ * its three segments: {@link parseRemoteRoute} does not match it.
+ */
+export function parseRemoteBotRoute(path: string): { hostId: string; botId: string } | null {
+  const pathname = path.split(/[?#]/u)[0] ?? '';
+  const match = /^\/remote\/([^/]+)\/bots\/([^/]+)\/?$/u.exec(pathname);
+  if (!match) return null;
+  try {
+    return { hostId: decodeURIComponent(match[1]!), botId: decodeURIComponent(match[2]!) };
+  } catch {
+    return null;
+  }
+}
+
+/** The route of one Bot; the inverse of {@link parseRemoteBotRoute}. */
+export function remoteBotRoute(hostId: string, botId: string): AppRoute {
+  return `/remote/${encodeURIComponent(hostId)}/bots/${encodeURIComponent(botId)}`;
+}
+
+/** Any Remote Control page (the computer list, one Bot, or one session). */
 export function isRemoteRoute(route: string): boolean {
   return route === '/remote' || route.startsWith('/remote/');
 }
@@ -70,16 +94,17 @@ export function isRemoteRoute(route: string): boolean {
  * `pushState` would keep the old document's policy, so {@link navigateTo} loads
  * the new page instead.
  */
-export type SecurityZone = 'remote' | 'sign-in' | 'site';
+export type SecurityZone = 'remote' | 'sign-in' | 'site' | 'teams';
 
 export function securityZone(route: string): SecurityZone {
+  if (route === '/teams' || route.startsWith('/teams/')) return 'teams';
   if (isRemoteRoute(route)) return 'remote';
   return route === '/login/remote' ? 'sign-in' : 'site';
 }
 
 export function resolveRoute(path: string): AppRoute {
   if (path.split(/[?#]/u)[0]?.startsWith("/open/")) return path.split(/[?#]/u)[0] as AppRoute;
-  if (parseRemoteRoute(path)) return path.split(/[?#]/u)[0]!.replace(/\/$/u, '') as AppRoute;
+  if (parseRemoteRoute(path) || parseRemoteBotRoute(path)) return path.split(/[?#]/u)[0]!.replace(/\/$/u, '') as AppRoute;
   const normalized = normalizePath(path);
   if ((appRoutes as readonly string[]).includes(normalized)) {
     return normalized as AppRoute;

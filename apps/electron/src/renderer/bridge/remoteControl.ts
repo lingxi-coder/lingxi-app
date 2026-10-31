@@ -34,6 +34,20 @@ export function remoteAvailability(status: RemoteControlUiStatus | null): Remote
   return { available: true };
 }
 
+/**
+ * The same for a Bot's switch, which adds one more condition: Remote Control
+ * must already be on for this computer, because the Bot's switch only decides
+ * which of the computer's sessions viewers may reach. It is not a way to turn
+ * Remote Control on, as the session toggle is.
+ */
+export function botRemoteAvailability(status: RemoteControlUiStatus | null): RemoteAvailability {
+  const general = remoteAvailability(status);
+  if (!general.available || !status) return general;
+  // A running service with the setting off is the development switch.
+  if (!status.enabled && status.state === 'off') return { available: false, reason: tr('bots_remote_computer_off') };
+  return { available: true };
+}
+
 export type RemoteStateTone = 'ok' | 'warn' | 'danger' | 'muted';
 
 /** The state line of the settings page. */

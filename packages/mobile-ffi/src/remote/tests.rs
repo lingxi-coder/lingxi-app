@@ -3,7 +3,9 @@
 
 use super::*;
 use remote_control_client::clock::ManualClock;
+use remote_control_client::rpc::RemoteErrorCode;
 use remote_control_client::rtdb::MemoryRtdb;
+use remote_control_client::session::SessionError;
 use remote_control_client::testing::FakePeerNetwork;
 use serde_json::{json, Value};
 use std::future::Future;
@@ -163,6 +165,45 @@ impl PlatformRemoteListener for Recorder {
             .lock()
             .unwrap()
             .push(Seen::Session(Box::new(update)));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum SeenBots {
+    Bots(String, RemoteBotsStateFfi),
+    Threads(String, String, RemoteBotThreadsStateFfi),
+}
+
+/// The app's Bots listener; clones share what was heard.
+#[derive(Default, Clone)]
+struct BotsRecorder {
+    seen: Arc<Mutex<Vec<SeenBots>>>,
+}
+
+impl BotsRecorder {
+    fn all(&self) -> Vec<SeenBots> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl PlatformRemoteBotsListener for BotsRecorder {
+    async fn on_bots(&self, host_id: String, state: RemoteBotsStateFfi) {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(SeenBots::Bots(host_id, state));
+    }
+    async fn on_bot_threads(
+        &self,
+        host_id: String,
+        bot_id: String,
+        state: RemoteBotThreadsStateFfi,
+    ) {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(SeenBots::Threads(host_id, bot_id, state));
     }
 }
 
@@ -415,6 +456,7 @@ fn session_summaries_map_status_and_pending_action() {
         pending_action: Some(RemotePendingAction::ComputerAccess),
         model: Some("m".into()),
         viewers: 2,
+        bot_id: None,
     };
     let ffi = session_summary_to_ffi(&summary);
     assert_eq!(ffi.status, RemoteSessionStatusFfi::RequiresAction);
@@ -423,6 +465,152 @@ fn session_summaries_map_status_and_pending_action() {
         Some(RemotePendingActionFfi::ComputerAccess)
     );
     assert_eq!((ffi.viewers, ffi.model.as_deref()), (2, Some("m")));
+}
+
+fn a_bot(id: &str, status: RemoteBotStatus) -> RemoteBotSummary {
+    RemoteBotSummary {
+        bot_id: id.into(),
+        name: format!("Bot {id}"),
+        description: format!("{id} helps"),
+        status,
+        waiting_threads: 2,
+        last_activity_at: Some(1_790_000_000_000),
+    }
+}
+
+#[test]
+fn bots_map_status_waiting_chats_and_activity() {
+    let bot = a_bot("b1", RemoteBotStatus::RequiresAction);
+    assert_eq!(
+        bot_summary_to_ffi(&bot),
+        RemoteBotSummaryFfi {
+            bot_id: "b1".into(),
+            name: "Bot b1".into(),
+            description: "b1 helps".into(),
+            status: RemoteBotStatusFfi::RequiresAction,
+            waiting_threads: 2,
+            last_activity_at_ms: Some(1_790_000_000_000),
+        }
+    );
+    for (status, expected) in [
+        (RemoteBotStatus::Idle, RemoteBotStatusFfi::Idle),
+        (RemoteBotStatus::Running, RemoteBotStatusFfi::Running),
+        (
+            RemoteBotStatus::RequiresAction,
+            RemoteBotStatusFfi::RequiresAction,
+        ),
+    ] {
+        let quiet = RemoteBotSummary {
+            last_activity_at: None,
+            ..a_bot("b1", status)
+        };
+        let ffi = bot_summary_to_ffi(&quiet);
+        assert_eq!((ffi.status, ffi.last_activity_at_ms), (expected, None));
+    }
+}
+
+#[test]
+fn the_bots_state_keeps_unknown_unsupported_and_no_bots_apart() {
+    assert_eq!(
+        bots_state_to_ffi(&BotsState::Unknown),
+        RemoteBotsStateFfi::Unknown
+    );
+    assert_eq!(
+        bots_state_to_ffi(&BotsState::Unsupported),
+        RemoteBotsStateFfi::Unsupported
+    );
+    assert_eq!(
+        bots_state_to_ffi(&BotsState::Bots(Vec::new())),
+        RemoteBotsStateFfi::Bots { bots: Vec::new() }
+    );
+    let state = BotsState::Bots(vec![
+        a_bot("b2", RemoteBotStatus::Running),
+        a_bot("b1", RemoteBotStatus::Idle),
+    ]);
+    match bots_state_to_ffi(&state) {
+        RemoteBotsStateFfi::Bots { bots } => assert_eq!(
+            bots.iter()
+                .map(|bot| (bot.bot_id.as_str(), bot.status))
+                .collect::<Vec<_>>(),
+            [
+                ("b2", RemoteBotStatusFfi::Running),
+                ("b1", RemoteBotStatusFfi::Idle)
+            ],
+            "in the computer's order"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_bots_chats_map_like_sessions_and_keep_why_a_listing_failed() {
+    let chat = RemoteSessionSummary {
+        session_id: "t1".into(),
+        title: "Reading list".into(),
+        project_label: "Researcher".into(),
+        status: RemoteSessionStatus::Idle,
+        pending_action: None,
+        model: None,
+        viewers: 0,
+        bot_id: Some("b1".into()),
+    };
+    assert_eq!(
+        bot_threads_state_to_ffi(&BotThreadsState {
+            threads: Some(vec![chat.clone()]),
+            error: None,
+        }),
+        RemoteBotThreadsStateFfi {
+            threads: Some(vec![session_summary_to_ffi(&chat)]),
+            error: None,
+        }
+    );
+    assert_eq!(
+        bot_threads_state_to_ffi(&BotThreadsState {
+            threads: None,
+            error: Some(SessionError {
+                code: "not_remote_enabled".into(),
+                message: "off".into(),
+            }),
+        }),
+        RemoteBotThreadsStateFfi {
+            threads: None,
+            error: Some(RemoteSessionErrorFfi {
+                code: "not_remote_enabled".into(),
+                message: "off".into(),
+            }),
+        }
+    );
+    assert_eq!(
+        bot_threads_state_to_ffi(&BotThreadsState::default()),
+        RemoteBotThreadsStateFfi::default()
+    );
+    assert_eq!(
+        RemoteBotThreadsStateFfi::default(),
+        RemoteBotThreadsStateFfi {
+            threads: None,
+            error: None
+        },
+        "nothing listed is not an empty list"
+    );
+}
+
+#[test]
+fn a_prompt_a_bot_handed_over_still_reads_as_scheduled_in_its_record() {
+    // The foreign enum cannot gain a variant: the Bot comes from `prompt_origin_bot_name`.
+    let record = record_json(json!({
+        "type": "prompt", "turn_id": 5, "text": "do it", "origin": "bot", "from_bot_name": "Researcher"
+    }));
+    match record_to_ffi(&record) {
+        RemoteRecordFfi::Prompt {
+            origin,
+            device_name,
+            ..
+        } => {
+            assert_eq!(origin, RemotePromptOriginFfi::Scheduled);
+            assert_eq!(device_name, None);
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
@@ -1434,6 +1622,292 @@ async fn an_approved_device_reconnects_without_pairing_and_forgetting_unpairs() 
 }
 
 #[tokio::test(start_paused = true)]
+async fn bots_calls_without_a_connection_say_so_and_empty_arguments_are_refused() {
+    let rig = rig();
+    let client = &rig.client;
+    assert_eq!(client.bots_state(), RemoteBotsStateFfi::Unknown);
+    assert_eq!(
+        client.bot_threads_state("b1".into()),
+        RemoteBotThreadsStateFfi::default()
+    );
+    assert_eq!(
+        client.activate_bot_threads("b1".into()).await,
+        Err(RemoteFfiError::NotConnected)
+    );
+    assert_eq!(
+        client.create_bot_thread("b1".into()).await,
+        Err(RemoteFfiError::NotConnected)
+    );
+    client.deactivate_bot_threads("b1".into());
+    assert_eq!(client.bot_of_thread("t1".into()), None);
+    assert_eq!(client.prompt_origin_bot_name("s1".into(), 1), None);
+    assert!(matches!(
+        client.activate_bot_threads(String::new()).await,
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
+    assert!(matches!(
+        client.create_bot_thread(String::new()).await,
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
+    // The listener may be set and cleared at any time.
+    client.set_bots_listener(Some(Box::new(BotsRecorder::default())));
+    client.set_bots_listener(None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn bots_their_chats_and_the_bot_of_a_prompt_over_the_tunnel() {
+    let rig = rig();
+    let client = &rig.client;
+    let heard = BotsRecorder::default();
+    rig.host.configure(|config| {
+        config.respond = Some(Arc::new(|method: &str, params: &Value| match method {
+            "sessions.watch" => Some(Ok(json!({ "sessions": [] }))),
+            "session.attach" => Some(Ok(json!({ "mode": "snapshot", "epoch": "e1" }))),
+            "bots.watch" => Some(Ok(json!({ "bots": [
+                { "bot_id": "b1", "name": "Researcher", "description": "Reads the web",
+                  "status": "idle", "waiting_threads": 0 },
+                { "bot_id": "b2", "name": "Writer", "description": "",
+                  "status": "requires_action", "waiting_threads": 1,
+                  "last_activity_at": 1_790_000_000_000_u64 },
+            ] }))),
+            "bot.threads.list" => Some(Ok(json!({ "sessions": [{
+                "session_id": "t1", "title": "Reading list", "project_label": "Researcher",
+                "status": "idle", "viewers": 0, "bot_id": params["bot_id"],
+            }] }))),
+            "bot.thread.create" => Some(Ok(json!({ "session_id": "t2" }))),
+            _ => None,
+        }));
+    });
+    client.set_bots_listener(Some(Box::new(heard.clone())));
+    rig.host.publish_presence().await;
+    let host_id = rig.host.host_id.clone();
+    client.connect(host_id.clone()).await.unwrap();
+    until("the pairing code", || {
+        rig.recorder
+            .states()
+            .iter()
+            .any(|s| s.phase == RemoteConnectionPhaseFfi::Pairing)
+    })
+    .await;
+    let conn_id = rig.host.conns()[0].conn_id.clone();
+    rig.host.approve(&conn_id).await;
+
+    // The Bots arrive by themselves once ready, and the desktop was told that this viewer knows them.
+    until("the Bots", || {
+        heard.all().iter().any(|seen| {
+            matches!(seen, SeenBots::Bots(h, RemoteBotsStateFfi::Bots { bots })
+                if *h == host_id && bots.len() == 2)
+        })
+    })
+    .await;
+    assert_eq!(
+        requests_of(&rig.host, "initialize")[0]["app"]["features"],
+        json!(["bots"])
+    );
+    let RemoteBotsStateFfi::Bots { bots: listed } = client.bots_state() else {
+        panic!("the Bots are not held");
+    };
+    assert_eq!(
+        listed
+            .iter()
+            .map(|bot| bot.bot_id.as_str())
+            .collect::<Vec<_>>(),
+        ["b1", "b2"]
+    );
+    assert_eq!(listed[0].last_activity_at_ms, None);
+    assert_eq!(listed[1].status, RemoteBotStatusFfi::RequiresAction);
+    assert_eq!(
+        (listed[1].waiting_threads, listed[1].last_activity_at_ms),
+        (1, Some(1_790_000_000_000))
+    );
+
+    // A Bot's chats are listed when a screen shows them.
+    assert!(requests_of(&rig.host, "bot.threads.list").is_empty());
+    assert_eq!(
+        client.bot_threads_state("b1".into()),
+        RemoteBotThreadsStateFfi::default()
+    );
+    client.activate_bot_threads("b1".into()).await.unwrap();
+    until("the chats of b1", || {
+        heard.all().iter().any(|seen| {
+            matches!(seen, SeenBots::Threads(h, bot, state)
+                if *h == host_id && bot == "b1" && state.threads.is_some())
+        })
+    })
+    .await;
+    assert_eq!(
+        requests_of(&rig.host, "bot.threads.list"),
+        [json!({ "bot_id": "b1" })]
+    );
+    let chats = client.bot_threads_state("b1".into()).threads.unwrap();
+    assert_eq!(
+        chats
+            .iter()
+            .map(|chat| (chat.session_id.as_str(), chat.title.as_str()))
+            .collect::<Vec<_>>(),
+        [("t1", "Reading list")]
+    );
+    assert_eq!(client.bot_of_thread("t1".into()).as_deref(), Some("b1"));
+    assert_eq!(client.bot_of_thread("t9".into()), None);
+
+    // A new chat is asked for with a fresh request id, and its Bot is remembered.
+    assert_eq!(client.create_bot_thread("b2".into()).await.unwrap(), "t2");
+    assert_eq!(client.bot_of_thread("t2".into()).as_deref(), Some("b2"));
+    let created = &requests_of(&rig.host, "bot.thread.create")[0];
+    assert_eq!(created["bot_id"], "b2");
+    assert!(!created["client_request_id"].as_str().unwrap().is_empty());
+
+    // The record of a Bot's prompt reads as scheduled; the lookup tells which Bot.
+    client.attach_session("t1".into()).await.unwrap();
+    until("the attach", || {
+        !requests_of(&rig.host, "session.attach").is_empty()
+    })
+    .await;
+    for part in [
+        json!({ "phase": "begin", "session_id": "t1", "epoch": "e1", "first_message_index": 0 }),
+        json!({ "phase": "records", "session_id": "t1", "records": [
+            { "seq": 1, "record": { "type": "prompt", "turn_id": 1, "text": "summarise",
+                "origin": "bot", "from_bot_name": "Re\u{202e}searcher" } },
+            { "seq": 2, "record": { "type": "prompt", "turn_id": 2, "text": "again",
+                "origin": "scheduled" } },
+        ] }),
+        json!({ "phase": "end", "session_id": "t1", "cursor": { "epoch": "e1", "seq": 2 },
+               "pending": {}, "turn": { "running": false } }),
+    ] {
+        rig.host.notify(&conn_id, "session.snapshot", part).await;
+    }
+    until("the live snapshot", || {
+        rig.recorder
+            .session_updates()
+            .iter()
+            .any(|u| u.phase == RemoteSessionPhaseFfi::Live && u.replace)
+    })
+    .await;
+    let snapshot = rig
+        .recorder
+        .session_updates()
+        .into_iter()
+        .find(|u| u.replace)
+        .unwrap();
+    assert_eq!(snapshot.records.len(), 2);
+    assert!(snapshot.records.iter().all(|item| matches!(
+        item.record,
+        RemoteRecordFfi::Prompt {
+            origin: RemotePromptOriginFfi::Scheduled,
+            ..
+        }
+    )));
+    assert_eq!(
+        client.prompt_origin_bot_name("t1".into(), 1).as_deref(),
+        Some("Researcher")
+    );
+    assert_eq!(client.prompt_origin_bot_name("t1".into(), 2), None);
+    assert_eq!(client.prompt_origin_bot_name("t1".into(), 99), None);
+    assert_eq!(client.prompt_origin_bot_name("t2".into(), 1), None);
+
+    // The Bot's activity changes while the screen shows its chats: they are listed again.
+    let changed = |activity: u64| {
+        json!({ "bots": [
+            { "bot_id": "b1", "name": "Researcher", "description": "Reads the web",
+              "status": "idle", "waiting_threads": 0, "last_activity_at": activity },
+            { "bot_id": "b2", "name": "Writer", "description": "",
+              "status": "requires_action", "waiting_threads": 1,
+              "last_activity_at": 1_790_000_000_000_u64 },
+        ] })
+    };
+    rig.host.notify(&conn_id, "bots.changed", changed(5)).await;
+    until("the second listing", || {
+        requests_of(&rig.host, "bot.threads.list").len() == 2
+    })
+    .await;
+    until("the changed Bots", || {
+        matches!(client.bots_state(), RemoteBotsStateFfi::Bots { bots }
+            if bots[0].last_activity_at_ms == Some(5))
+    })
+    .await;
+
+    // Once the screen leaves, the Bots are still reported but the chats are not listed again.
+    client.deactivate_bot_threads("b1".into());
+    rig.host.notify(&conn_id, "bots.changed", changed(6)).await;
+    until("the Bots heard", || {
+        heard.all().iter().any(|seen| {
+            matches!(seen, SeenBots::Bots(_, RemoteBotsStateFfi::Bots { bots })
+                if bots[0].last_activity_at_ms == Some(6))
+        })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(requests_of(&rig.host, "bot.threads.list").len(), 2);
+
+    // With no listener the state is still held, and nothing is called.
+    client.set_bots_listener(None);
+    let calls = heard.all().len();
+    rig.host.notify(&conn_id, "bots.changed", changed(7)).await;
+    until("the Bots held", || {
+        matches!(client.bots_state(), RemoteBotsStateFfi::Bots { bots }
+            if bots[0].last_activity_at_ms == Some(7))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(heard.all().len(), calls);
+
+    // Disconnecting ends it all.
+    client.disconnect().await;
+    assert_eq!(client.bots_state(), RemoteBotsStateFfi::Unknown);
+    assert_eq!(client.bot_of_thread("t1".into()), None);
+    assert_eq!(client.prompt_origin_bot_name("t1".into(), 1), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_computer_from_before_bots_reads_as_unsupported_and_is_asked_nothing_more() {
+    let rig = rig();
+    let client = &rig.client;
+    let heard = BotsRecorder::default();
+    rig.host.configure(|config| {
+        config.respond = Some(Arc::new(|method: &str, _params: &Value| match method {
+            "bots.watch" | "bot.threads.list" | "bot.thread.create" => Some(Err(RpcError::new(
+                RemoteErrorCode::InvalidParams,
+                format!("unknown method {method}"),
+            ))),
+            "sessions.watch" => Some(Ok(json!({ "sessions": [] }))),
+            _ => None,
+        }));
+    });
+    client.set_bots_listener(Some(Box::new(heard.clone())));
+    rig.host.publish_presence().await;
+    let host_id = rig.host.host_id.clone();
+    client.connect(host_id.clone()).await.unwrap();
+    until("the pairing code", || {
+        rig.recorder
+            .states()
+            .iter()
+            .any(|s| s.phase == RemoteConnectionPhaseFfi::Pairing)
+    })
+    .await;
+    let conn_id = rig.host.conns()[0].conn_id.clone();
+    rig.host.approve(&conn_id).await;
+    until("Unsupported", || {
+        heard.all().contains(&SeenBots::Bots(
+            host_id.clone(),
+            RemoteBotsStateFfi::Unsupported,
+        ))
+    })
+    .await;
+    assert_eq!(client.bots_state(), RemoteBotsStateFfi::Unsupported);
+
+    // A screen may still ask; nothing reaches the computer, and a new chat fails at once.
+    client.activate_bot_threads("b1".into()).await.unwrap();
+    match client.create_bot_thread("b1".into()).await {
+        Err(RemoteFfiError::Rpc { code, .. }) => assert_eq!(code, "unknown_session"),
+        other => panic!("{other:?}"),
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(requests_of(&rig.host, "bots.watch").len(), 1);
+    assert!(requests_of(&rig.host, "bot.threads.list").is_empty());
+    assert!(requests_of(&rig.host, "bot.thread.create").is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn invalid_arguments_are_refused_before_anything_is_sent() {
     let rig = rig();
     assert!(matches!(
@@ -1474,10 +1948,147 @@ async fn delivery_drops_previous_connections_and_detached_session_callbacks() {
     out.send(Out::Session(2, Arc::new(AtomicBool::new(true)), update()))
         .unwrap();
     drop(out);
-    deliver(queue, recorder.clone(), current).await;
+    deliver(queue, recorder.clone(), current, Arc::default()).await;
     let seen = recorder.all();
     assert_eq!(seen.len(), 1);
     assert!(matches!(seen[0], Seen::Session(_)));
+}
+
+#[tokio::test]
+async fn bots_calls_reach_the_listener_in_order_and_old_connections_are_dropped() {
+    let (out, queue) = mpsc::unbounded_channel();
+    let current = Arc::new(AtomicU64::new(2));
+    let recorder = Arc::new(Recorder::default());
+    let heard = BotsRecorder::default();
+    let slot = BotsListenerSlot::default();
+    *slot.lock().unwrap() = Some(Arc::new(heard.clone()));
+    let chats = RemoteBotThreadsStateFfi {
+        threads: Some(Vec::new()),
+        error: None,
+    };
+    out.send(Out::Bots(
+        1,
+        "old-host".into(),
+        RemoteBotsStateFfi::Unsupported,
+    ))
+    .unwrap();
+    out.send(Out::BotThreads(
+        1,
+        "old-host".into(),
+        "b1".into(),
+        chats.clone(),
+    ))
+    .unwrap();
+    out.send(Out::Bots(2, "host".into(), RemoteBotsStateFfi::Unsupported))
+        .unwrap();
+    out.send(Out::Sessions(2, "host".into(), vec![])).unwrap();
+    out.send(Out::BotThreads(
+        2,
+        "host".into(),
+        "b1".into(),
+        chats.clone(),
+    ))
+    .unwrap();
+    drop(out);
+    deliver(queue, recorder.clone(), current, slot).await;
+    assert_eq!(
+        heard.all(),
+        [
+            SeenBots::Bots("host".into(), RemoteBotsStateFfi::Unsupported),
+            SeenBots::Threads("host".into(), "b1".into(), chats)
+        ]
+    );
+    let seen = recorder.all();
+    assert_eq!(seen.len(), 1, "the session list is the other listener's");
+    assert!(matches!(seen[0], Seen::Sessions(..)));
+}
+
+#[tokio::test]
+async fn bots_calls_are_dropped_while_no_listener_is_set_and_follow_a_replaced_one() {
+    let (out, queue) = mpsc::unbounded_channel();
+    let current = Arc::new(AtomicU64::new(1));
+    let first = BotsRecorder::default();
+    let second = BotsRecorder::default();
+    let slot = BotsListenerSlot::default();
+    let deliver_task = tokio::spawn(deliver(
+        queue,
+        Arc::new(Recorder::default()),
+        current,
+        Arc::clone(&slot),
+    ));
+    let send = |state| out.send(Out::Bots(1, "host".into(), state)).unwrap();
+    let settle = || async {
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+    };
+
+    send(RemoteBotsStateFfi::Unknown);
+    settle().await;
+    *slot.lock().unwrap() = Some(Arc::new(first.clone()));
+    send(RemoteBotsStateFfi::Unsupported);
+    settle().await;
+    *slot.lock().unwrap() = Some(Arc::new(second.clone()));
+    send(RemoteBotsStateFfi::Bots { bots: Vec::new() });
+    settle().await;
+    *slot.lock().unwrap() = None;
+    send(RemoteBotsStateFfi::Unknown);
+    settle().await;
+
+    assert_eq!(
+        first.all(),
+        [SeenBots::Bots(
+            "host".into(),
+            RemoteBotsStateFfi::Unsupported
+        )]
+    );
+    assert_eq!(
+        second.all(),
+        [SeenBots::Bots(
+            "host".into(),
+            RemoteBotsStateFfi::Bots { bots: Vec::new() }
+        )]
+    );
+    drop(out);
+    deliver_task.await.unwrap();
+}
+
+#[test]
+fn the_relay_forwards_bots_and_their_chats_only_while_its_connection_is_current() {
+    let (out, mut queue) = mpsc::unbounded_channel();
+    let current = Arc::new(AtomicU64::new(3));
+    let relay = SessionsRelay {
+        out,
+        current: Arc::clone(&current),
+        generation: 3,
+        host_id: "host".into(),
+    };
+    relay.on_bots(&BotsState::Unsupported);
+    relay.on_bot_threads("b1", &BotThreadsState::default());
+    current.store(4, Ordering::SeqCst);
+    relay.on_bots(&BotsState::Unknown);
+    relay.on_bot_threads("b2", &BotThreadsState::default());
+
+    match queue.try_recv() {
+        Ok(Out::Bots(generation, host_id, state)) => {
+            assert_eq!(generation, 3);
+            assert_eq!(host_id, "host");
+            assert_eq!(state, RemoteBotsStateFfi::Unsupported);
+        }
+        _ => panic!("the Bots were not forwarded first"),
+    }
+    match queue.try_recv() {
+        Ok(Out::BotThreads(generation, host_id, bot_id, state)) => {
+            assert_eq!(generation, 3);
+            assert_eq!((host_id.as_str(), bot_id.as_str()), ("host", "b1"));
+            assert_eq!(state, RemoteBotThreadsStateFfi::default());
+        }
+        _ => panic!("the chats were not forwarded second"),
+    }
+    assert!(
+        queue.try_recv().is_err(),
+        "nothing after the connection was replaced"
+    );
 }
 
 // Block connection construction at its push-id read. On the broken code the

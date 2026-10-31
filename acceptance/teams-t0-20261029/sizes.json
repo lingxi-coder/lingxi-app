@@ -1,0 +1,48 @@
+{
+  "scope": "Minimal dependency probes; not full signed product or device acceptance",
+  "android": {
+    "firebaseBoM": "35.0.2",
+    "firestoreVersion": "27.0.1",
+    "build": "Debug, no shrinking",
+    "baseline": {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/acceptance/teams-t0-20261029/probes/android/build/outputs/apk/baseline/debug/TeamsFirestoreSizeProbe-baseline-debug.apk",
+      "bytes": 17733319,
+      "sha256": "50c38b19f8341ced5b291b2872f4bf238d516813ecc535259f5f499bd8a7b2e8",
+      "uncompressedBytes": 17579043,
+      "dexBytes": 12517972
+    },
+    "firestore": {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/acceptance/teams-t0-20261029/probes/android/build/outputs/apk/firestore/debug/TeamsFirestoreSizeProbe-firestore-debug.apk",
+      "bytes": 27485418,
+      "sha256": "676264b6e8fa4dddf7cec5dd9b35b1f711f3d9c540955732d7a3ec4e4fc50d9f",
+      "uncompressedBytes": 27776675,
+      "dexBytes": 22044396
+    },
+    "apkDeltaBytes": 9752099,
+    "uncompressedDeltaBytes": 10197632
+  },
+  "ios": {
+    "firebaseSDK": "12.19.2",
+    "build": "Release, iphoneos arm64, unsigned",
+    "Baseline": {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t0-ios/DerivedData/Build/Products/Release-iphoneos/Baseline.app",
+      "bundleBytes": 5708371,
+      "executable": {
+        "path": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t0-ios/DerivedData/Build/Products/Release-iphoneos/Baseline.app/Baseline",
+        "bytes": 5677536,
+        "sha256": "48bdcfe5bc120acfb818c5f9617b0ec982ca93e393cb86eb98754e1cb76d2036"
+      }
+    },
+    "WithFirestore": {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t0-ios/DerivedData/Build/Products/Release-iphoneos/WithFirestore.app",
+      "bundleBytes": 23426129,
+      "executable": {
+        "path": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t0-ios/DerivedData/Build/Products/Release-iphoneos/WithFirestore.app/WithFirestore",
+        "bytes": 23205896,
+        "sha256": "808759e59a7a1783ac5349decf8f203e6622ce13bba818f3e05f32b6e4dc895b"
+      }
+    },
+    "bundleDeltaBytes": 17717758,
+    "executableDeltaBytes": 17528360
+  }
+}

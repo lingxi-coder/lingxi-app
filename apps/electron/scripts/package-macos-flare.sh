@@ -414,12 +414,11 @@ if [[ -n "${LINGXI_BRIDGE_SERVER_BIN:-}" ]]; then
   # copying it. Do not compile a second binary that packaging will never use.
   log "using explicit release bridge-server: ${LINGXI_BRIDGE_SERVER_BIN}"
 else
-  log 'building portable release bridge-server'
-  (
-    cd "$ENGINE_DIR"
-    cargo build --locked --release -p bridge-server --bin bridge-server
-  )
+  log 'building portable release bridge-server and private Team executables'
 fi
+
+log 'building private Team host and worker from the authoritative Harness pin'
+node "${SCRIPT_DIR}/team-runtime.mjs"
 
 log 'packaging and signing the Electron app'
 (

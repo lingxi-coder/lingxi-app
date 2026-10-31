@@ -24,6 +24,7 @@ function describeExtra(locale: Locale, extra: ExtraRow): string {
 function originLabel(locale: Locale, meta: PromptMeta, thisDevice: string): string {
   if (meta.origin === 'desktop') return t(locale, 'fromDesktop');
   if (meta.origin === 'scheduled') return t(locale, 'fromScheduled');
+  if (meta.origin === 'bot') return meta.fromBotName ? t(locale, 'fromBot', { name: meta.fromBotName }) : t(locale, 'fromAnotherBot');
   if (meta.deviceName && meta.deviceName === thisDevice) return t(locale, 'fromThisDevice');
   return meta.deviceName ? t(locale, 'fromDevice', { name: meta.deviceName }) : t(locale, 'fromDevice', { name: '?' });
 }

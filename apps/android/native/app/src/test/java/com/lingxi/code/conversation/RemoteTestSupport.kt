@@ -58,6 +58,9 @@ internal class FakeRemoteSessionPort : RemoteSessionPort {
     val sentImages = mutableListOf<List<RemotePromptImageFfi>>()
     var fetchGate: CompletableDeferred<Unit>? = null
 
+    /** The Bot that handed over a turn's prompt, by turn id; a turn without an entry has none. */
+    val botNames = mutableMapOf<ULong, String>()
+
     override fun follow(): Flow<RemoteSessionUpdateFfi> = updates
     override suspend fun setForeground(foreground: Boolean) { calls += "foreground:$foreground" }
     override suspend fun loadOlder() { calls += "loadOlder" }
@@ -80,4 +83,5 @@ internal class FakeRemoteSessionPort : RemoteSessionPort {
     override suspend fun setReasoning(selection: ReasoningSelectionDto) { calls += "reasoning" }
     override suspend fun setPermissionMode(mode: RemotePermissionModeFfi) { calls += "mode:$mode" }
     override suspend fun listModels(): RemoteModelsFfi = RemoteModelsFfi(listOf("a"), "a", emptyList())
+    override fun promptOriginBotName(turnId: ULong): String? = botNames[turnId]
 }

@@ -2,6 +2,10 @@ import { tr } from './i18n/locale';
 import { useI18n } from './i18n/useI18n';
 import { LocalApps, LocalAppsTopBar } from './components/LocalApps';
 import './components/LocalApps.css';
+import { Bots } from './components/Bots';
+import './components/Bots.css';
+import { useBots } from './bridge/useBots';
+import { botScopesKey } from './bridge/botRoutines';
 import { localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
 import type { LocalAppEditRequest } from '../shared/localApps';
 import type { TerminalScope } from '../shared/terminal';
@@ -12,6 +16,8 @@ import { SideChatPanel } from './components/SideChatPanel';
 import { conversationPlans } from './bridge/planDocuments';
 import { selectedGitScope } from './bridge/gitScope';
 import {
+  lazy,
+  Suspense,
   useEffect,
   useCallback,
   useLayoutEffect,
@@ -52,6 +58,7 @@ import { restoreSessionPickerFocus, SessionPicker } from './components/SessionPi
 import './components/SessionPicker.css';
 import { SESSION_PICKER_EVENT } from '../shared/sessionWorkspace';
 import { CreateProjectDialog } from './components/CreateProjectDialog';
+import { AccountGate } from './components/AccountGate';
 
 interface SessionPickerRequest {
   id: number;
@@ -59,6 +66,8 @@ interface SessionPickerRequest {
   query: string;
   opener: HTMLElement | null;
 }
+
+const Teams = lazy(() => import('./components/Teams').then(module => ({ default: module.Teams })));
 
 export function App() {
   const { locale, preference } = useI18n();
@@ -74,7 +83,9 @@ export function App() {
   const [localAppNavigationError, setLocalAppNavigationError] = useState('');
   const localAppNavigation = useRef(0);
   const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
-  const [page, setPage] = useState<'chat' | 'scheduled' | 'apps' | 'changes'>('chat');
+  const [page, setPage] = useState<'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams'>('chat');
+  const [teamInvite, setTeamInvite] = useState<string>();
+  const handledTeamInvite = useCallback(() => setTeamInvite(undefined), []);
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const [sessionPicker, setSessionPicker] = useState<SessionPickerRequest | null>(null);
@@ -82,8 +93,19 @@ export function App() {
   const sessionPickerSequence = useRef(0);
   const palette = useMemo(() => tokens(theme === 'dark'), [theme, locale]);
   const bridge = useBridge();
+  const botsApi = window.lingxi?.bots;
+  const bots = useBots(botsApi);
   const localAppBridge = useRef(bridge);
   localAppBridge.current = bridge;
+  // The Scheduled page lists the workspace of every Bot as a scope; ask for the scopes again when Bots are made, renamed or deleted.
+  const botScopes = botScopesKey(bots.state.bots);
+  const seenBotScopes = useRef<string>();
+  const { refreshScheduledScopes } = bridge;
+  useEffect(() => {
+    const before = seenBotScopes.current;
+    seenBotScopes.current = botScopes;
+    if (before !== undefined && before !== botScopes) refreshScheduledScopes();
+  }, [botScopes, refreshScheduledScopes]);
   const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading || localAppBridge.current.projectCreationOpen, []);
   const openLocalAppChat = useCallback((app?: LocalAppEditRequest) => {
     if (sessionNavigationBlocked()) return;
@@ -126,7 +148,7 @@ export function App() {
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
   }, []);
-  const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps' | 'changes') => {
+  const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams') => {
     if (sessionNavigationBlocked()) return;
     cancelLocalAppNavigation();
     setPage(next);
@@ -162,8 +184,28 @@ export function App() {
     return () => window.removeEventListener('keydown', toggle);
   }, [settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked]);
   useEffect(() => window.lingxi?.onLocalAppEdit?.(openLocalAppChat), [openLocalAppChat]);
+  // The host made a chat of a Bot the displayed one on its own (a notification was clicked): bring the window to it.
+  useEffect(() => botsApi?.onSessionShown?.((session) => {
+    cancelLocalAppNavigation();
+    setSettingsRoute(null);
+    setPage('chat');
+    setActivityView(false);
+    void localAppBridge.current.showBotSession(session);
+  }), [botsApi, cancelLocalAppNavigation]);
+  const botRoutineRequests = useRef(0);
+  /** Send the owner to the Scheduled page, to what a Bot's routines panel pointed at. */
+  const openRoutine = useCallback((target: { kind: 'new'; scope: string } | { kind: 'job'; id: string; scope: string }) => {
+    if (sessionNavigationBlocked()) return;
+    cancelLocalAppNavigation();
+    setScheduledTarget({ requestId: `bot-routine:${++botRoutineRequests.current}`, ...target });
+    setPage('scheduled');
+  }, [cancelLocalAppNavigation, sessionNavigationBlocked]);
   const workspace = bridge.bootstrap?.workspace;
-  const sessionPickerProject = bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path ?? bridge.bootstrap?.settings.projects[0];
+  // A Bot's folder is not a project: with a Bot's chat on screen, project-bound parts of the window follow the selected project instead.
+  const activeBotId = bridge.activeBotId;
+  const botChat = activeBotId !== undefined;
+  const activeBot = botChat ? bots.state.bots.find((bot) => bot.botId === activeBotId) : undefined;
+  const sessionPickerProject = (botChat ? undefined : bridge.activeSession?.projectPath) ?? bridge.bootstrap?.settings.activeProject ?? (botChat ? undefined : workspace?.path) ?? bridge.bootstrap?.settings.projects[0];
   const closeSessionPicker = useCallback(() => {
     const request = sessionPickerRequest.current;
     sessionPickerRequest.current = null;
@@ -212,8 +254,8 @@ export function App() {
   // terminal opened in that window fail validation.
   const settledSession = bridge.activeSession?.sessionId?.startsWith('pending-new:') ? undefined : bridge.activeSession;
   const sideChats = useSideChats(settledSession?.sessionId);
-  const gitScope = selectedGitScope(bridge.bootstrap?.settings.activeProject, settledSession, workspace?.path);
-  const terminalProject = terminalLinkScope?.projectPath ?? bridge.activeSession?.projectPath ?? workspace?.path;
+  const gitScope = botChat ? null : selectedGitScope(bridge.bootstrap?.settings.activeProject, settledSession, workspace?.path);
+  const terminalProject = terminalLinkScope?.projectPath ?? (botChat ? undefined : bridge.activeSession?.projectPath ?? workspace?.path);
   const terminal = useTerminalPanel(terminalLinkScope ?? (terminalProject ? { projectPath: terminalProject, sessionId: settledSession?.sessionId ?? '__draft__' } : null), page === 'chat' && settingsRoute === null);
   useEffect(() => { if (!terminal.hasCommandReview) setTerminalLinkScope(null); }, [settledSession?.sessionId, terminal.hasCommandReview]);
   const providerConfigured = Boolean(bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured));
@@ -287,7 +329,8 @@ export function App() {
           if (!session) throw new Error(tr('desktop_link_open_project_config'));
           if (!await bridge.openSession(delivery.projectPath, session.uuid)) throw new Error(tr('desktop_link_project_conversation_error'));
         }
-        if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
+        if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); }
+        else if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
         else if (kind === 'settings') {
           if (!SETTINGS_NAV.some(page => page.id === id)) throw new Error(tr('desktop_link_settings_unavailable'));
           linkSurfacePending.current = true;
@@ -384,6 +427,7 @@ export function App() {
 
   return (
     <Theme.Provider value={palette}>
+      <AccountGate>
       <ModUiSurfaceClientIdProvider clientId={bridge.uiSurfaceClientId}>
       <GitWorkspaceProvider scope={gitScope} onOpen={() => openPage('changes')} onTerminal={() => { openPage('chat'); if (!terminal.open) terminal.toggle(); }}>
       <div
@@ -399,6 +443,11 @@ export function App() {
             apps={page === 'apps'}
             changes={page === 'changes'}
             onOpenApps={() => openPage('apps')}
+            teams={page === 'teams'}
+            onOpenTeams={() => openPage('teams')}
+            bots={page === 'bots'}
+            botsAvailable={bots.available}
+            onOpenBots={() => openPage('bots')}
             scheduled={page === 'scheduled'}
             onOpenScheduled={() => openPage('scheduled')}
             onOpenChat={() => openPage('chat')}
@@ -408,6 +457,7 @@ export function App() {
               <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
+                  bot={activeBotId !== undefined ? { name: activeBot?.name ?? '', onOpen: () => { bots.setView({ kind: 'detail', botId: activeBotId }); openPage('bots'); } } : undefined}
                   sideChatOpen={sideChats.open && Boolean(sideChats.selected)}
                   sideChatAvailable={sideChats.sides.length > 0}
                   onToggleSideChat={() => sideChats.setOpen(!sideChats.open)}
@@ -426,9 +476,17 @@ export function App() {
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
           {localAppNavigationError && <div role="alert" className="local-app-error">{localAppNavigationError}</div>}
+          {page === 'teams' && <Suspense fallback={<p role="status">{locale.startsWith('zh') ? '正在加载团队…' : 'Loading Teams…'}</p>}><Teams zh={locale.startsWith('zh')} initialInvite={teamInvite} onInviteHandled={handledTeamInvite} /></Suspense>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
+          {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
+            <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}
+              onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }}
+              onNewRoutine={(scope) => openRoutine({ kind: 'new', scope })}
+              onOpenRoutine={(scope, id) => openRoutine({ kind: 'job', id, scope })} />
+          </div>}
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
-          <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => openPage('chat')} />
+          {/* The run's chat is already open when this is called, as a Bot's chat is while it still reads as loading; the window must not wait for that to show it. */}
+          <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }} />
           </div>
           {page === 'changes' && <GitChangesPage />}
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
@@ -452,7 +510,7 @@ export function App() {
                   onOpenAgent={(agentId) => bridge.openRuntimeItem({ kind: 'agent', id: agentId })}
                   collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
                   emptyMessage={emptyMessage}
-                  welcomeProject={(bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path)?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
+                  welcomeProject={botChat ? activeBot?.name ?? '' : (bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path)?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
                   // Item ids restart at `i1` in every session; the Stage's
                   // collapse map is scoped by this and dropped when it changes.
                   sessionKey={bridge.conversation.sessionKey}
@@ -576,6 +634,7 @@ export function App() {
       </div>
       </GitWorkspaceProvider>
       </ModUiSurfaceClientIdProvider>
+      </AccountGate>
     </Theme.Provider>
   );
 }

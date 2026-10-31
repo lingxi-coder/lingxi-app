@@ -1,0 +1,497 @@
+[
+  {
+    "label": "compile-r7",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked",
+      "-p",
+      "harness-runtime",
+      "--features",
+      "desktop",
+      "--test",
+      "team_connector",
+      "--test",
+      "team_invocation_process",
+      "--test",
+      "team_invocation_profile",
+      "--test",
+      "team_process_interactions",
+      "--test",
+      "team_sandbox_process_boundary",
+      "--no-run"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+    "elapsedSeconds": 34.3,
+    "rawSha256": "17042a7a25d1d1e479308c186c555e324e9df7988358c32f8d8b376b6b217284",
+    "gzipSha256": "896e818e4b9e6f2a83bbd82fb1320372874783070393fdc20f3c93fc5851714b",
+    "rawBytes": 87325,
+    "gzipBytes": 8995,
+    "path": "logs/compile-r7.log.gz"
+  },
+  {
+    "label": "standalone-r3",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "cargo",
+      "build",
+      "--offline",
+      "--locked",
+      "-p",
+      "harness-runtime",
+      "--features",
+      "desktop",
+      "--bin",
+      "harness-team-host",
+      "--bin",
+      "harness-team-worker"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+    "elapsedSeconds": 20.1,
+    "rawSha256": "f6f55dd400cc12bf9652bfda49dcc84f833ef59aea72ca8149e1067d51e353c1",
+    "gzipSha256": "e8e56b56f9986d144a5e2f37993d0252159e1829148dda2cb2ac9d5b76d7909d",
+    "rawBytes": 86751,
+    "gzipBytes": 8824,
+    "path": "logs/standalone-r3.log.gz"
+  },
+  {
+    "label": "posix-process-r2",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked",
+      "-p",
+      "platform-posix",
+      "--lib",
+      "process::",
+      "--",
+      "--test-threads=1"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+    "elapsedSeconds": 38.2,
+    "rawSha256": "3b4e2b3fb62d77d7e0c97c0c42f2c63a8b822cee33de62cef40fc773abc77763",
+    "gzipSha256": "663955e5870529482c95e9ed7f294e66af6630c9431b0fe7ea5ac4c4eb35cb6a",
+    "rawBytes": 8608,
+    "gzipBytes": 1805,
+    "path": "logs/posix-process-r2.log.gz"
+  },
+  {
+    "label": "team_connector-r3",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_connector-86d980bd73d055e3",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+    "elapsedSeconds": 33.2,
+    "rawSha256": "be8c1f661b854b5f620d99274565dcf5e8e20585f764fb5fcdd354f05af62993",
+    "gzipSha256": "d73ffa62e1dcd1272197981792ff3fbcd5dfeb243d411239153e91150846f980",
+    "rawBytes": 1499,
+    "gzipBytes": 706,
+    "path": "logs/team_connector-r3.log.gz"
+  },
+  {
+    "label": "team_invocation_process-r3",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_invocation_process-b43d0d1a32934d27",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+    "elapsedSeconds": 44.3,
+    "rawSha256": "386b9c0e431b34e0743abf837d529dc64c3a52ac10d6d7fca3805c763ac70bdc",
+    "gzipSha256": "2bd70500dd881200f4f7f8b577b55d394de8af7fd949167e133c53a693dc4803",
+    "rawBytes": 1312,
+    "gzipBytes": 647,
+    "path": "logs/team_invocation_process-r3.log.gz"
+  },
+  {
+    "label": "team_invocation_profile-r3",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_invocation_profile-47afa89cde94e1ce",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+    "elapsedSeconds": 8.1,
+    "rawSha256": "29d175f528e89a0c1aa5d5c9002fbfaeca207100806b224da2b8574564ee0897",
+    "gzipSha256": "0e4735debf4b14594b067ab3a848d17787bd3afb0e65932bbb5e2437ea8c8718",
+    "rawBytes": 1159,
+    "gzipBytes": 585,
+    "path": "logs/team_invocation_profile-r3.log.gz"
+  },
+  {
+    "label": "team_process_interactions-r3",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_process_interactions-beb17a0499e59c71",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+    "elapsedSeconds": 51.3,
+    "rawSha256": "90e9a78ee22e7cbbc081cfe88f20860e0b0b6b9efcdb57d07a9f118b2cc06f4d",
+    "gzipSha256": "7b9b95e11894a2530baba4b4c30d8883da927765b7f121316591415e22971f24",
+    "rawBytes": 1066,
+    "gzipBytes": 483,
+    "path": "logs/team_process_interactions-r3.log.gz"
+  },
+  {
+    "label": "team_sandbox_process_boundary-r3",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_sandbox_process_boundary-6b013ba9e9ae0d21",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+    "elapsedSeconds": 2.0,
+    "rawSha256": "cfead86650ff275082bd94a2c0610132939262308c987034a382921ed6e75981",
+    "gzipSha256": "30b6ec2b0b4c0f3f9b185233297cec4fec7409509ba54cbcd900679993366dfc",
+    "rawBytes": 197,
+    "gzipBytes": 159,
+    "path": "logs/team_sandbox_process_boundary-r3.log.gz"
+  },
+  {
+    "label": "electron-final-r1",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "node",
+      "--import",
+      "../../packages/bridge-client/node_modules/tsx/dist/loader.mjs",
+      "--test",
+      "--test-concurrency=1",
+      "test/account.test.ts",
+      "test/teams-account.test.ts",
+      "test/account-host.test.ts",
+      "test/remote-team-approvals.test.ts",
+      "test/bot-content.test.ts",
+      "test/bot-store.test.ts",
+      "test/bot-service.test.ts",
+      "test/teams-host.test.ts"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/electron",
+    "elapsedSeconds": 4.0,
+    "rawSha256": "8e845a76fcdcd2fa9e92991c653050328f5df714173b0abaef05e7481106dbd1",
+    "gzipSha256": "bc5fa3ebe029ee95ae7d285716296755a4ec5aa02a62375bb7363795d2d03d3a",
+    "rawBytes": 13850,
+    "gzipBytes": 5295,
+    "path": "logs/electron-final-r1.log.gz"
+  },
+  {
+    "label": "electron-types-final-r1",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "npm",
+      "run",
+      "typecheck"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/electron",
+    "elapsedSeconds": 10.0,
+    "rawSha256": "b26f9497a4af270039e8e64b4a4b3ee40d6149fc22597b851dd565377409ddbe",
+    "gzipSha256": "04f1d96f62e62e4a94d952d01e482448a2e7df2bf662060dbd91aa17e053ded0",
+    "rawBytes": 288,
+    "gzipBytes": 144,
+    "path": "logs/electron-types-final-r1.log.gz"
+  },
+  {
+    "label": "web-final-r1",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "node",
+      "--import",
+      "../../packages/bridge-client/node_modules/tsx/dist/loader.mjs",
+      "--test",
+      "test/teams-api.test.ts",
+      "test/teams.test.ts",
+      "test/teams-messages.test.ts",
+      "test/teams-bots.test.ts",
+      "test/teams-bots-ui.test.ts"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/web",
+    "elapsedSeconds": 2.0,
+    "rawSha256": "83e689f2af4d13f6c3677278fbd47e4522223a645b4e1b5d9135b76d1f30a586",
+    "gzipSha256": "cba42f3aa81d59390e487f45478db186908aa7f0cc940e0eed5755b632a579ba",
+    "rawBytes": 3246,
+    "gzipBytes": 1467,
+    "path": "logs/web-final-r1.log.gz"
+  },
+  {
+    "label": "web-types-final-r1",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "npm",
+      "run",
+      "typecheck"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/web",
+    "elapsedSeconds": 4.0,
+    "rawSha256": "7348e6eabd717984da3717ddc0a4a0654b531d4a87e9792cf40e5807d3483ec7",
+    "gzipSha256": "2aea2fd5d000300bc3e8f1672f281ccb0c04ff3b66ec20d61287b8dcf8bc31bd",
+    "rawBytes": 101,
+    "gzipBytes": 92,
+    "path": "logs/web-types-final-r1.log.gz"
+  },
+  {
+    "label": "web-build-r1",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "npm",
+      "run",
+      "build"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/web",
+    "elapsedSeconds": 3.0,
+    "rawSha256": "7d3519a9b71c58fed051cc0b7685ed105b7715e4c3f754e78d112e9fe7eb583f",
+    "gzipSha256": "3a432972eba76af8b228d5dbfdbcc9572751fed6a8ba93c18bc5f56f3d9c19c0",
+    "rawBytes": 1721,
+    "gzipBytes": 786,
+    "path": "logs/web-build-r1.log.gz"
+  },
+  {
+    "label": "firebase-final-r1",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "node",
+      "apps/firebase/scripts/test-teams.mjs"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+    "elapsedSeconds": 43.2,
+    "rawSha256": "34fa4f8176eeecfc94c6ab766803de5cd3e69a35f48b70de76e5ce9204548ddc",
+    "gzipSha256": "f79bfc5e123d068ec98c09b283e23e9dc044874d8bef05b0327227c301015bfe",
+    "rawBytes": 23310,
+    "gzipBytes": 4346,
+    "path": "logs/firebase-final-r1.log.gz"
+  },
+  {
+    "label": "packaging-tests-final-r1",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "node",
+      "--test",
+      "test/packaging.test.mjs",
+      "test/desktop-packaging-targets.test.mjs"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/electron",
+    "elapsedSeconds": 1.0,
+    "rawSha256": "268cc888134b84df0848febb682390501af0036c26b285e3300bcc8c77f64df5",
+    "gzipSha256": "43eb0873bfacacf3b964841f1ff2860392c0239dc6d03da530d3f0e7d2aef672",
+    "rawBytes": 3706,
+    "gzipBytes": 1702,
+    "path": "logs/packaging-tests-final-r1.log.gz"
+  },
+  {
+    "label": "android-build-r3",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "./apps/android/native/gradlew",
+      "-p",
+      "acceptance/teams-t3-complete-20261029/probes/android",
+      "--project-cache-dir",
+      "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t3-android/gradle-project-cache",
+      "assembleDebug",
+      "assembleDebugAndroidTest",
+      "testDebugUnitTest",
+      "--offline",
+      "--no-daemon",
+      "--max-workers=1",
+      "--console=plain"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+    "elapsedSeconds": 16.1,
+    "rawSha256": "0e688822024c1fb9058564d248de063b116d45f2db4e945da0c824e034a8570d",
+    "gzipSha256": "c90c750f6b11848d4b652d208e9f0c4ae51ec0a22ce392798dd07fb77d98f316",
+    "rawBytes": 8618,
+    "gzipBytes": 2271,
+    "path": "logs/android-build-r3.log.gz"
+  },
+  {
+    "label": "android-test-build-r6",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "./apps/android/native/gradlew",
+      "-p",
+      "acceptance/teams-t3-complete-20261029/probes/android",
+      "--project-cache-dir",
+      "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t3-android/gradle-project-cache",
+      "assembleDebugAndroidTest",
+      "--offline",
+      "--no-daemon",
+      "--max-workers=1",
+      "--console=plain"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+    "elapsedSeconds": 11.0,
+    "rawSha256": "a49b68c9aae15f9bef7ac5341f850b59500fced4c28e123d73b17f42a4d878ed",
+    "gzipSha256": "d20bb0bcfa476efe9768b94baf90a824a363003017ca849da639b21be1b9a9a5",
+    "rawBytes": 7605,
+    "gzipBytes": 2116,
+    "path": "logs/android-test-build-r6.log.gz"
+  },
+  {
+    "label": "android-ui-r7",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "python3",
+      "/private/tmp/teams-t3-android-ui.py",
+      "r7"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+    "elapsedSeconds": 19.1,
+    "rawSha256": "f5959d2997544c0e344ad6c9a685e5ea4feb6f15781477c94d2bd1e566a80b4e",
+    "gzipSha256": "1882a4c6ce95ce810956b113dedee56e85754f3b191ed817f333c7bad9d8d658",
+    "rawBytes": 280,
+    "gzipBytes": 211,
+    "path": "logs/android-ui-r7.log.gz"
+  },
+  {
+    "label": "ios-unit-r3",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "xcodebuild",
+      "-project",
+      "output/teams-t3-ios/TeamsT3Probe.xcodeproj",
+      "-scheme",
+      "TeamsT3Probe",
+      "-configuration",
+      "Debug",
+      "-destination",
+      "platform=iOS Simulator,id=F4DCB5BA-D24B-4AE1-965E-4CA5DDD1CC1B",
+      "-derivedDataPath",
+      "output/teams-t3-ios/DerivedData",
+      "-clonedSourcePackagesDirPath",
+      "output/teams-t3-ios/SourcePackages",
+      "-skipPackageUpdates",
+      "-disableAutomaticPackageResolution",
+      "-parallel-testing-enabled",
+      "NO",
+      "-jobs",
+      "1",
+      "-only-testing:TeamsT3ProbeTests",
+      "-resultBundlePath",
+      "output/teams-t3-ios/UnitTests-r3.xcresult",
+      "test",
+      "CODE_SIGNING_ALLOWED=YES",
+      "CODE_SIGN_IDENTITY=-",
+      "DEVELOPMENT_TEAM=AZ4AX7J833"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+    "elapsedSeconds": 32.1,
+    "rawSha256": "6ecb5aa4d1b6ecb9efa747e8d7b994a8f69603c9b8389bb0eb283c61c3e96595",
+    "gzipSha256": "f28c8aed7aae1995edcda1f40427a47c677be84b409998cd96edae22029b5aff",
+    "rawBytes": 218484,
+    "gzipBytes": 12049,
+    "path": "logs/ios-unit-r3.log.gz"
+  },
+  {
+    "label": "ios-ui-matrix-r1",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "python3",
+      "/private/tmp/teams-t3-ios-matrix.py"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+    "elapsedSeconds": 163.6,
+    "rawSha256": "91940673314d39c56ced464a2b94dac33fc207acfffaca960546d28991c13677",
+    "gzipSha256": "4bd2f622cef4a35092043f70dbe83c6c3ce63ff7988e678773a66da8e065e326",
+    "rawBytes": 214173,
+    "gzipBytes": 18143,
+    "path": "logs/ios-ui-matrix-r1.log.gz"
+  },
+  {
+    "label": "web-ui-r4",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "node",
+      "acceptance/teams-t3-complete-20261029/probes/web/run-journey.mjs"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+    "elapsedSeconds": 25.1,
+    "rawSha256": "718f3e0c2de7522801484cbaf69625b55b7909280629ff804a878887e2f12453",
+    "gzipSha256": "6afc9130c966bc7a1f231243de6e54e8202c7c18d166ad151b35752899738397",
+    "rawBytes": 462,
+    "gzipBytes": 280,
+    "path": "logs/web-ui-r4.log.gz"
+  },
+  {
+    "label": "macos-package-r5",
+    "exit": 1,
+    "status": "signed_static_pass_full_smoke_blocked_existing_user_broker",
+    "command": [
+      "npm",
+      "run",
+      "package:mac:flare",
+      "--",
+      "--output-root",
+      "/Users/luolingfeng/lingxi/.worktrees/teams/output/teams-t3-macos"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/electron",
+    "elapsedSeconds": 1373.1,
+    "rawSha256": "01f8786fb0fb8b430498ba04b28e6cb0699de35ba9fa6cb8aad78c733ff68bcf",
+    "gzipSha256": "c5cfe91363ea96ec9a760f43a6f74666acc00e67a56b5fb981df05d6e101cc01",
+    "rawBytes": 2823444,
+    "gzipBytes": 102742,
+    "path": "logs/macos-package-r5.log.gz"
+  },
+  {
+    "label": "signed-host-runtime-e2e-r1",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "node",
+      "apps/firebase/scripts/test-teams.mjs"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+    "elapsedSeconds": 12.0,
+    "rawSha256": "22bde1855382f38e92e8424f66cdd3b6cd73c0f469229d2f97d81f123588bcb7",
+    "gzipSha256": "23540a3239783df976e1357fd2c22bb955390fc43c64051832c6144565801c5b",
+    "rawBytes": 16494,
+    "gzipBytes": 2010,
+    "path": "logs/signed-host-runtime-e2e-r1.log.gz"
+  },
+  {
+    "label": "publication-prepare-tests-final-r1",
+    "exit": 0,
+    "status": "pass",
+    "command": [
+      "node",
+      "--test",
+      "acceptance/teams-t3-complete-20261029/probes/publication/prepare-hosting.test.mjs"
+    ],
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+    "elapsedSeconds": 1.0,
+    "rawSha256": "d996a03180091d115b2171dd6cb28e6f4e1115e25df2d1768ffd210a24b081bb",
+    "gzipSha256": "79d93bddca51b76686ff752c1862677189a24c1dd2cd2a7d59d3f52249affa7b",
+    "rawBytes": 666,
+    "gzipBytes": 426,
+    "path": "logs/publication-prepare-tests-final-r1.log.gz"
+  }
+]

@@ -14,6 +14,9 @@ import type { HostNotifier } from './notifications.js';
 import type { GitService } from './git.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
 import type { RemoteControlUi } from './remoteControl/rendererIpc.js';
+import { CH_BOTS_DELETE, CH_BOTS_SESSION_OPEN, CH_BOTS_SESSION_SHOWN, type BotSessionRefUi } from '../shared/bots.js';
+import type { KeepAwake } from './bots/keepAwake.js';
+import type { BotsUi } from './bots/rendererIpc.js';
 import type { TerminalManager } from './terminal.js';
 import { TerminalDelivery } from './terminal-delivery.js';
 import {
@@ -501,6 +504,8 @@ export class HostController {
   private offGit?: () => void;
   private remoteControlUi?: RemoteControlUi;
   private remoteControlChannels: string[] = [];
+  private botsUi?: BotsUi;
+  private botsChannels: string[] = [];
   private readonly gitWatches = new Map<WebContents, Map<string, Promise<() => void>>>();
   private terminals?: TerminalManager;
   private offTerminals?: () => void;
@@ -531,6 +536,7 @@ export class HostController {
   private offNativeAudio?: () => void;
   private scheduled?: ScheduledTaskService;
   private notifier?: HostNotifier;
+  private keepAwake?: KeepAwake;
 
   constructor(
     private readonly settings: SettingsStore,
@@ -574,6 +580,12 @@ export class HostController {
     if (this.registered) this.registerRemoteControlIpc();
   }
 
+  /** The Bots page's handlers; registered with the rest by `registerIpc`. */
+  attachBots(ui: BotsUi): void {
+    this.botsUi = ui;
+    if (this.registered) this.registerBotsIpc();
+  }
+
   /** Send to every window of the app that is still alive. */
   sendToWindows(channel: string, payload: unknown): void {
     for (const target of this.targets.keys()) if (!target.isDestroyed()) target.send(channel, payload);
@@ -591,12 +603,62 @@ export class HostController {
     }
   }
 
+  private registerBotsIpc(): void {
+    const ui = this.botsUi;
+    if (!ui || this.botsChannels.length > 0) return;
+    for (const [channel, handler] of Object.entries(ui.handlers())) {
+      this.ipc.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+        this.assertSender(event);
+        // Opening a Bot's session and deleting a Bot change which session the window shows, so they take their turn with the other navigation.
+        if (channel === CH_BOTS_SESSION_OPEN) {
+          return this.enqueueNavigation(async () => this.showBotSession(await handler(...args) as BotSessionRefUi));
+        }
+        if (channel === CH_BOTS_DELETE) {
+          return this.enqueueNavigation(async () => {
+            const workspace = typeof args[0] === 'string' ? this.botsUi?.workspaceOf(args[0]) : undefined;
+            await handler(...args);
+            if (workspace !== undefined) this.settings.dropVolatileSessionIn(workspace);
+          });
+        }
+        return handler(...args);
+      });
+      this.botsChannels.push(channel);
+    }
+  }
+
+  /**
+   * The window now shows a session of a Bot. A Bot's folder is not a project,
+   * so the session is held in memory beside the settings, never in them.
+   */
+  private showBotSession(ref: BotSessionRefUi): BotSessionRefUi {
+    this.settings.setActiveBotSession({ projectPath: ref.projectPath, sessionId: ref.sessionId });
+    this.workspaceFiles.invalidate();
+    return ref;
+  }
+
+  /** Open a Bot's session (a new one without `sessionId`) and make it the one the window shows. */
+  private async openBotSession(botId: string, sessionId?: string): Promise<BotSessionRefUi> {
+    if (!this.botsUi) throw new Error('Bots are unavailable.');
+    return this.showBotSession(await this.botsUi.openSession(botId, sessionId));
+  }
+
+  private isBotWorkspace(projectPath: string): boolean {
+    return this.botsUi?.botIdFor(projectPath) !== undefined;
+  }
+
   /**
    * The notifier holds ARMED TIMERS, so it cannot poll the settings store —
    * a preference written while an idle timer is already counting down has to
    * be pushed at it. `CH_SETTINGS_UPDATE` above is the one writer.
    */
   attachNotifier(notifier: HostNotifier): void { this.notifier = notifier; }
+
+  /**
+   * Like the notifier, the blocker that keeps the computer awake has to be told
+   * when the owner turns the preference on or off, or it would hold on until
+   * the Bots' work was over, or never begin.
+   */
+  attachKeepAwake(keepAwake: KeepAwake): void { this.keepAwake = keepAwake; }
 
   attachGit(service: GitService): void {
     this.git = service;
@@ -710,6 +772,7 @@ export class HostController {
       return icon;
     });
     this.registerRemoteControlIpc();
+    this.registerBotsIpc();
     this.ipc.handle(CH_ACCOUNT, (event: IpcMainInvokeEvent, command: unknown) => {
       this.assertSender(event);
       if (!this.account) throw new Error('Account service is unavailable');
@@ -822,7 +885,7 @@ export class HostController {
       this.assertSender(event);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('invalid settings patch');
       const keys = Object.keys(patch);
-      if (keys.some((key) => key !== 'telemetryEnabled' && key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'voiceRevision' && key !== 'notifications' && key !== 'modelPickerVisibility' && key !== 'sidebar')) throw new Error('unsupported setting');
+      if (keys.some((key) => key !== 'telemetryEnabled' && key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'botsKeepAwake' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'voiceRevision' && key !== 'notifications' && key !== 'modelPickerVisibility' && key !== 'sidebar')) throw new Error('unsupported setting');
       const restartsBridge = 'apiBaseUrl' in patch || ('telemetryEnabled' in patch && patch.telemetryEnabled === true);
       if (restartsBridge) this.assertNoActiveTurn();
       // `model` is applied to a live session through `set_model`, then mirrored
@@ -837,6 +900,7 @@ export class HostController {
         telemetryEnabled?: boolean;
         theme?: 'dark' | 'light' | 'system';
         collapseThoughtsByDefault?: boolean;
+        botsKeepAwake?: boolean;
         model?: string | null;
         apiBaseUrl?: string | null;
         voice?: unknown;
@@ -865,6 +929,7 @@ export class HostController {
       }
       if ('telemetryEnabled' in patch && patch.telemetryEnabled === false) await this.bridge.disableTelemetry();
       if ('notifications' in patch) this.notifier?.setPreferences(result.notifications);
+      if ('botsKeepAwake' in patch) this.keepAwake?.setEnabled(result.botsKeepAwake === true);
       if (restartsBridge) await this.restartIfConfigured();
       return result;
     });
@@ -1046,6 +1111,8 @@ export class HostController {
       if (request['action'] === 'open') {
         if (!isSessionId(request['sessionId'])) throw new Error('Invalid scheduled session');
         const ref = this.scheduled.resolveSession(request['scopeId'], request['sessionId'] as string);
+        const botId = this.botsUi?.botIdFor(ref.projectPath);
+        if (botId !== undefined) return this.enqueueNavigation(() => this.openBotSession(botId, ref.sessionId));
         return this.enqueueNavigation(() => this.openSessionAndActivateInternal(ref));
       }
       throw new Error('Invalid scheduled action');
@@ -1488,7 +1555,8 @@ export class HostController {
     if (!workspace) return { trusted: false };
     try {
       const trust = this.settings.getTrust(workspace);
-      return { path: workspace, fingerprint: trust.fingerprint, trusted: this.settings.isTrustedWorkspace(workspace) };
+      // A Bot's folder is trusted without being a project.
+      return { path: workspace, fingerprint: trust.fingerprint, trusted: this.settings.isTrustedWorkspace(workspace) || this.isBotWorkspace(workspace) };
     } catch (error) {
       this.diagnostics.add('warn', 'host', error);
       return { path: workspace, trusted: false, recovery: workspaceRecovery(workspace, error) };
@@ -1608,10 +1676,16 @@ export class HostController {
   }
 
   private runtimeSummaries(): SessionRuntimeSummary[] {
-    return this.bridge.runtimeSummaries.map((summary) => ({
-      ...summary,
-      connection: { ...summary.connection },
-    }));
+    return this.bridge.runtimeSummaries.flatMap((summary) => {
+      const botId = this.botsUi?.botIdFor(summary.projectPath);
+      // The hidden session that watches a Bot's clock is no chat of the Bot's, and must not make the Bot look at work.
+      if (botId !== undefined && this.scheduled?.isControllerSession(summary.projectPath, summary.sessionId)) return [];
+      return [{
+        ...summary,
+        ...(botId !== undefined ? { botId } : {}),
+        connection: { ...summary.connection },
+      }];
+    });
   }
 
   private hasActiveWork(projectPath?: string): boolean {
@@ -1919,6 +1993,7 @@ export class HostController {
     if (this.closingProjects.has(workspace)) throw new Error('project is closing');
     this.workspaceFiles.invalidate();
     if (addProject) {
+      this.assertNotAppData(workspace);
       const wasEmpty = this.settings.getPublic().projects.length === 0;
       this.settings.addProject(workspace);
       // General project creation supplies the first draft. App creation only
@@ -1935,6 +2010,11 @@ export class HostController {
     try { fingerprint = this.settings.getTrust(workspace).fingerprint; }
     catch (error) { this.diagnostics.add('warn', 'host', error); }
     return { path: workspace, trusted: this.settings.isTrustedWorkspace(workspace), ...(fingerprint ? { fingerprint } : {}) };
+  }
+
+  /** The app's own data, the Bots among it, is not a place for a project. */
+  private assertNotAppData(canonical: string): void {
+    if (this.settings.isAppDataFolder(canonical)) throw new Error("This folder belongs to the app's own data and cannot be used as a project.");
   }
 
   private requireCodexTokens(): CodexTokenManager {
@@ -2085,6 +2165,7 @@ export class HostController {
   private async trustSessionSource(ref: SessionRef): Promise<void> {
     if (this.isProjectClosing(ref.projectPath)) throw new Error('project is closing');
     if (this.settings.isTrustedWorkspace(ref.projectPath)) return;
+    this.assertNotAppData(ref.projectPath);
     if (!await this.directoryDialogs.trustDirectory(ref.projectPath)) throw new Error('Opening this directory was cancelled.');
     if (this.isProjectClosing(ref.projectPath)) throw new Error('project is closing');
     if (canonicalWorkspace(ref.projectPath) !== ref.projectPath) throw new Error('The session directory changed. Refresh the session list and try again.');
@@ -2099,6 +2180,8 @@ export class HostController {
     return this.enqueueNavigation(async () => {
       const ref = this.settings.getPublic().activeSession;
       if (!ref || ref.sessionId !== sessionId) throw new Error('This chat is no longer active.');
+      // The folders a Bot may use are the ones in its settings, not whatever a chat asks for.
+      if (this.isBotWorkspace(ref.projectPath)) throw new Error("A Bot works in its own folder. Change the folders it may use in the Bot's settings.");
       const runtime = this.bridge.require(ref);
       const release = runtime.beginWorkspaceChange();
       let originalCwd: string | undefined;
@@ -2128,6 +2211,7 @@ export class HostController {
         // Every affirmative answer is pinned to the canonical path shown by
         // the engine. A symlink change must ask again for the new directory.
         while (result.status === 'needs_trust') {
+          this.assertNotAppData(result.directory);
           this.settings.assertSessionRelocationAllowed(result.directory);
           if (!await this.directoryDialogs.trustDirectory(result.directory)) return null;
           result = await runtime.setWorkingDirectory({ path, trust_accepted: true, trusted_directory: result.directory });
@@ -2137,6 +2221,7 @@ export class HostController {
         const after = await runtime.getWorkspaceState();
         const target = canonicalWorkspace(result.cwd);
         if (this.isProjectClosing(target)) throw new Error('project is closing');
+        this.assertNotAppData(target);
         this.settings.relocateSession(ref, target, after.has_conversation === false || !after.transcript_path ? null : {
           catalogProjectPath: target, scope: 'current', transcriptPath: after.transcript_path,
         });
@@ -2335,6 +2420,21 @@ export class HostController {
     return this.enqueueNavigation(() => this.restoreProjectSessionInternal(projectPath, activeSession));
   }
 
+  /**
+   * The owner clicked a notification: show the session it came from. A Bot's
+   * session is no project's, so it opens through the Bot, and the window is told
+   * which session it now shows, because it shows only what it has been given.
+   */
+  async showNotifiedSession(ref: SessionRef): Promise<void> {
+    const botId = this.botsUi?.botIdFor(ref.projectPath);
+    if (botId === undefined) {
+      await this.restoreProjectSession(ref.projectPath, ref);
+      return;
+    }
+    const shown = await this.enqueueNavigation(() => this.openBotSession(botId, ref.sessionId));
+    this.sendToWindows(CH_BOTS_SESSION_SHOWN, shown);
+  }
+
   private async restoreProjectSessionInternal(projectPath: string, activeSession?: SessionRef): Promise<SessionRef> {
     const project = this.requireProject(projectPath);
     if (activeSession?.projectPath === project) {
@@ -2439,8 +2539,11 @@ export class HostController {
     await this.terminals?.closeScope(active);
     await this.bridge.closeSession(active);
     const replacement = await this.bridge.newSession(active.projectPath);
-    this.settings.activateProject(active.projectPath);
-    this.settings.setActiveSessionDraft(replacement);
+    if (this.isBotWorkspace(active.projectPath)) this.settings.setActiveBotSession(replacement);
+    else {
+      this.settings.activateProject(active.projectPath);
+      this.settings.setActiveSessionDraft(replacement);
+    }
     this.workspaceFiles.invalidate();
   }
 
@@ -2457,6 +2560,9 @@ export class HostController {
     this.remoteControlChannels = [];
     this.remoteControlUi?.dispose();
     this.remoteControlUi = undefined;
+    for (const channel of this.botsChannels) this.ipc.removeHandler(channel);
+    this.botsChannels = [];
+    this.botsUi = undefined;
     this.codexLoginAbort?.abort();
     this.offTerminals?.();
     this.offGit?.();

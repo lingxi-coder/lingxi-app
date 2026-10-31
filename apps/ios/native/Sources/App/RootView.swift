@@ -883,6 +883,7 @@ struct RootView: View {
             appLibrary: LocalApps.library,
             appInfo: LocalApps.info,
             openApps: { navigation.openApps() },
+            openTeams: { navigation.openTeams() },
             openApp: { navigation.runApp($0) }
         )
         .id(sourceGeneration)
@@ -1161,6 +1162,8 @@ struct RootView: View {
                 markCronResultsSeen()
             }
             .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
+        case .teams(let invite):
+            TeamsPage(initialInvite: invite, onOpenAccount: { navigation.showSettings(.account) })
         case .apps:
             AppsPage(library: LocalApps.library, market: LocalApps.market,
                 onOpenApp: { navigation.runApp($0) }, onShowDetails: { navigation.openLocalApp($0) },
@@ -2096,7 +2099,7 @@ struct RootView: View {
     private func applyAppAction(_ action: LingxiAppAction, approvedDraftChange: Bool = false) -> Bool {
         // A remote overlay preserves the local source and draft. It also works
         // when the local engine has not booted or is waiting for an answer.
-        if case let .canonical(target) = action, target.parts.first == "remote" {
+        if case let .canonical(target) = action, ["remote", "team"].contains(target.parts.first ?? "") {
             guard app.setupDone else { return false }
             return applyCanonicalLink(target)
         }
@@ -2236,6 +2239,8 @@ struct RootView: View {
             else { navigation.openCron(scopeID: target.params["scope"] ?? activeScope.projectID ?? globalCronScopeID, taskID: id) }
         case "terminal":
             navigation.openTerminal(sessionID: id, initialCommand: target.payload["command"] as? String, projectID: activeScope.projectID)
+        case "team":
+            navigation.openTeams(invite: target.params["code"])
         case "apps":
             let requestID = externalAsyncRouteID
             Task { @MainActor in

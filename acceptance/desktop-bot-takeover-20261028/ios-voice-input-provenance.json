@@ -1,0 +1,111 @@
+[
+  {
+    "framework": "sherpa-onnx.xcframework",
+    "source": "/Users/luolingfeng/lingxi/lingxi-app/apps/ios/native/Frameworks/sherpa-onnx.xcframework",
+    "destination": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Frameworks/sherpa-onnx.xcframework",
+    "files": [
+      {
+        "file": "Info.plist",
+        "bytes": 1272,
+        "sha256": "dc018b29332fe211df5c75d4adc79ba9a426596ec0c0b27ed1f8e6d5e7d1ad39"
+      },
+      {
+        "file": "ios-arm64/Headers/sherpa-onnx/c-api/c-api.h",
+        "bytes": 160309,
+        "sha256": "437b1279047877167d8fadc74a60d47f3df514d703fdac1c1b6851da9bc2fdb4"
+      },
+      {
+        "file": "ios-arm64/Headers/sherpa-onnx/c-api/cxx-api.h",
+        "bytes": 55620,
+        "sha256": "431170d7c34bf154761f0d151984a3b8973342444d4f93c7037ea7405313aede"
+      },
+      {
+        "file": "ios-arm64/libsherpa-onnx.a",
+        "bytes": 18032472,
+        "sha256": "f2df1abb8df4954a4aa1cd6f22f77cbf66b9b2614f880a24372830003ac97d91"
+      },
+      {
+        "file": "ios-arm64_x86_64-simulator/Headers/sherpa-onnx/c-api/c-api.h",
+        "bytes": 160309,
+        "sha256": "437b1279047877167d8fadc74a60d47f3df514d703fdac1c1b6851da9bc2fdb4"
+      },
+      {
+        "file": "ios-arm64_x86_64-simulator/Headers/sherpa-onnx/c-api/cxx-api.h",
+        "bytes": 55620,
+        "sha256": "431170d7c34bf154761f0d151984a3b8973342444d4f93c7037ea7405313aede"
+      },
+      {
+        "file": "ios-arm64_x86_64-simulator/libsherpa-onnx.a",
+        "bytes": 35814096,
+        "sha256": "bd07f8fb446d21618051b242978c09f7b7422a76997fc096a1ac153f34b9cce1"
+      }
+    ]
+  },
+  {
+    "framework": "onnxruntime.xcframework",
+    "source": "/Users/luolingfeng/lingxi/lingxi-app/apps/ios/native/Frameworks/onnxruntime.xcframework",
+    "destination": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Frameworks/onnxruntime.xcframework",
+    "files": [
+      {
+        "file": "Headers/coreml_provider_factory.h",
+        "bytes": 1806,
+        "sha256": "8a99cf4474102c35c3180b30932479e37c5b8753164c3e64e84aebb0e8e1544a"
+      },
+      {
+        "file": "Headers/cpu_provider_factory.h",
+        "bytes": 397,
+        "sha256": "0de52d129c718c07ee71a16b4953d8d483df019746a11caad77a0650a2f4ed47"
+      },
+      {
+        "file": "Headers/onnxruntime_c_api.h",
+        "bytes": 206358,
+        "sha256": "7e47eb78563da119f740dc0ddfda96800e779e0bcbd169a9a49e9c10746c4cd5"
+      },
+      {
+        "file": "Headers/onnxruntime_cxx_api.h",
+        "bytes": 107925,
+        "sha256": "5cfb60c7222086b89724d3168267ab25af9951e15864bf54a8fdf7429b771021"
+      },
+      {
+        "file": "Headers/onnxruntime_cxx_inline.h",
+        "bytes": 76150,
+        "sha256": "d8b059c29ef378eee31c0b4d54347489a0e3abe1a4135c7a19c49b32661bfbc3"
+      },
+      {
+        "file": "Headers/onnxruntime_float16.h",
+        "bytes": 18154,
+        "sha256": "ecdcb4a53176c8b3bbcf674788fcf5ec923fb2b5c762c3f6cfb56fdb6c259aa1"
+      },
+      {
+        "file": "Headers/onnxruntime_run_options_config_keys.h",
+        "bytes": 1622,
+        "sha256": "25b0d8e767fc72d560532541537ac07d404a8bf94dffaf78f3069fc20240b76e"
+      },
+      {
+        "file": "Headers/onnxruntime_session_options_config_keys.h",
+        "bytes": 16702,
+        "sha256": "dacc5b8a417f9fe9dc9452255dabad408772e94d6d981d5fc463f90cf52f0438"
+      },
+      {
+        "file": "Info.plist",
+        "bytes": 1357,
+        "sha256": "a82ffd14b46e02a686b779966b03b25339c8c034e5840d3da1e3a7807b0fc7fe"
+      },
+      {
+        "file": "ios-arm64/onnxruntime.a",
+        "bytes": 64571656,
+        "sha256": "1a39b14823cccd95dc7a6abbe27266028c02a7385fd9c3042acbf2085cd313d2"
+      },
+      {
+        "file": "ios-arm64_x86_64-simulator/onnxruntime.a",
+        "bytes": 131911888,
+        "sha256": "9a81c91bcfd6a2e393eca83e262cc460c29ae8281ff2c18f9747112f79598ca1"
+      },
+      {
+        "file": "macos-arm64_x86_64/onnxruntime.a",
+        "bytes": 134483600,
+        "sha256": "871d48a0aaa10c8a52726f66bcc757d137f19784c4ba355b455b50e4e689779f"
+      }
+    ]
+  }
+]

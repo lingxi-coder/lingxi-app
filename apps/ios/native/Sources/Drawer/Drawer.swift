@@ -37,6 +37,7 @@ struct Drawer: View {
     /// The independent app library remains available without a chat engine.
     let appLibrary: UnifiedLocalApps?
     let openApps: () -> Void
+    let openTeams: () -> Void
     let openApp: (String) -> Void
 
     @ObservedObject private var convo: ConversationModel
@@ -69,6 +70,7 @@ struct Drawer: View {
         appLibrary: UnifiedLocalApps? = nil,
         appInfo: InstalledAppInfoStore,
         openApps: @escaping () -> Void = {},
+        openTeams: @escaping () -> Void = {},
         openApp: @escaping (String) -> Void = { _ in }
     ) {
         self.projectStore = projectStore
@@ -94,6 +96,7 @@ struct Drawer: View {
         self.appLibrary = appLibrary
         self.appInfo = appInfo
         self.openApps = openApps
+        self.openTeams = openTeams
         self.openApp = openApp
         convo = source.model
     }
@@ -363,6 +366,10 @@ struct Drawer: View {
 
     /// 应用, with the last apps opened one tap away.
     private var appsEntry: some View {
+        VStack(alignment: .leading, spacing: 4) {
+        Button(action: openTeams) {
+            Label("teams_title", systemImage: "person.2").font(.subheadline.weight(.medium)).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 11)
+        }.buttonStyle(.plain).accessibilityIdentifier("drawer.entry.teams")
         HStack(spacing: 8) {
             Button(action: openApps) {
                 HStack(spacing: 12) {
@@ -393,7 +400,7 @@ struct Drawer: View {
             .buttonStyle(.plain)
             .accessibilityHidden(true)
         }
-        .padding(.horizontal, 10)
+        }.padding(.horizontal, 10)
     }
 
     private func entryRow(

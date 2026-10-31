@@ -5,6 +5,7 @@ use remote_control_client::signaling::DevicePlatform;
 use std::{collections::HashMap, sync::Arc};
 use IosNativeMediaHost as NativeMediaHost;
 
+use IosRemoteBotsListener as PlatformRemoteBotsListener;
 use IosRemoteKeyStore as PlatformRemoteKeyStore;
 use IosRemoteListener as PlatformRemoteListener;
 use IosRemoteMediaConfigProvider as PlatformRemoteMediaConfigProvider;
@@ -74,6 +75,26 @@ pub trait IosRemoteListener: Send + Sync {
     async fn on_sessions(&self, host_id: String, sessions: Vec<RemoteSessionSummaryFfi>);
     /// An attached session changed.
     async fn on_session_update(&self, update: RemoteSessionUpdateFfi);
+}
+
+/// Hears about the computer's Bots and the chats of the Bots the app shows; set
+/// with `set_bots_listener`. A callback interface of its own, so that an app
+/// written before Bots keeps implementing [`IosRemoteListener`] as it is.
+/// Implementations enqueue onto the UI's state and return promptly; calls arrive
+/// one at a time, in the order things happened, in step with those of
+/// [`IosRemoteListener`].
+#[uniffi::export(callback_interface)]
+#[async_trait::async_trait]
+pub trait IosRemoteBotsListener: Send + Sync {
+    /// The current computer's Bots changed, or it turned out not to know Bots.
+    async fn on_bots(&self, host_id: String, state: RemoteBotsStateFfi);
+    /// The chats of a Bot that `activate_bot_threads` keeps current changed.
+    async fn on_bot_threads(
+        &self,
+        host_id: String,
+        bot_id: String,
+        state: RemoteBotThreadsStateFfi,
+    );
 }
 
 /// The Remote Control viewer: one instance per signed-in user, connected to one
@@ -382,5 +403,37 @@ impl IosRemoteControlClient {
     /// The models the desktop offers (asked once per connection).
     pub async fn list_models(&self) -> Result<RemoteModelsFfi, RemoteFfiError> {
         self.inner.list_models().await
+    }
+    /// Subscribe to the computer's Bots and their chats.
+    pub fn set_bots_listener(&self, listener: Option<Box<dyn IosRemoteBotsListener>>) {
+        self.inner.set_bots_listener(listener);
+    }
+    /// The current computer's Bot list.
+    pub fn bots_state(&self) -> RemoteBotsStateFfi {
+        self.inner.bots_state()
+    }
+    /// The cached chats of one Bot.
+    pub fn bot_threads_state(&self, bot_id: String) -> RemoteBotThreadsStateFfi {
+        self.inner.bot_threads_state(bot_id)
+    }
+    /// Keep a visible Bot's chats current.
+    pub async fn activate_bot_threads(&self, bot_id: String) -> Result<(), RemoteFfiError> {
+        self.inner.activate_bot_threads(bot_id).await
+    }
+    /// Stop following a Bot's chats.
+    pub fn deactivate_bot_threads(&self, bot_id: String) {
+        self.inner.deactivate_bot_threads(bot_id);
+    }
+    /// Start a Bot chat and return its session id.
+    pub async fn create_bot_thread(&self, bot_id: String) -> Result<String, RemoteFfiError> {
+        self.inner.create_bot_thread(bot_id).await
+    }
+    /// The Bot a known chat belongs to.
+    pub fn bot_of_thread(&self, session_id: String) -> Option<String> {
+        self.inner.bot_of_thread(session_id)
+    }
+    /// The sending Bot of a delegated prompt.
+    pub fn prompt_origin_bot_name(&self, session_id: String, turn_id: u64) -> Option<String> {
+        self.inner.prompt_origin_bot_name(session_id, turn_id)
     }
 }

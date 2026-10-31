@@ -29,8 +29,8 @@ import com.lingxi.code.connectivity.rememberOnlineState
 import com.lingxi.code.theme.LingXiTheme
 
 /**
- * Remote Control: the user's computers, one computer's sessions, one session. A
- * full-surface overlay in the manner of settings, with its own back stack.
+ * Remote Control: the user's computers, one computer's Bots and sessions, one Bot's chats, one
+ * session. A full-surface overlay in the manner of settings, with its own back stack.
  *
  * [requestedRoute] opens a destination directly (a notification or a link); it is
  * consumed once through [onRouteHandled]. Closing the overlay ends the connection.
@@ -70,10 +70,12 @@ fun RemoteOverlay(
         onDispose { if (activity?.isChangingConfigurations != true) manager.closeConnection() }
     }
     val sessions by manager.sessions.collectAsState()
+    val bots by manager.bots.collectAsState()
+    val botChats by manager.botChats.collectAsState()
 
     val current = stack.last()
     fun pop() {
-        if (stack.size > 1) stack = stack.dropLast(1) else onClose()
+        if (stack.size > 1) stack = RemoteRoute.afterBack(stack, manager::botOfThread) else onClose()
     }
     BackHandler(onBack = ::pop)
 
@@ -97,19 +99,36 @@ fun RemoteOverlay(
                         manager = manager,
                         hostId = current.hostId,
                         hostName = hostName(current.hostId),
+                        onOpenBot = { stack = stack + RemoteRoute.Bot(current.hostId, it) },
                         onOpenSession = { stack = stack + RemoteRoute.Session(current.hostId, it.sessionId) },
                         onLeave = ::pop,
                     )
                 }
-                current is RemoteRoute.Session -> RemoteSessionScreen(
-                    manager = manager,
-                    hostId = current.hostId,
-                    hostName = hostName(current.hostId),
-                    sessionId = current.sessionId,
-                    title = sessions.sessions?.firstOrNull { it.sessionId == current.sessionId }?.title,
-                    isDark = isDark,
-                    onBack = ::pop,
-                )
+                current is RemoteRoute.Bot -> key(current.hostId, current.botId) {
+                    RemoteBotScreen(
+                        manager = manager,
+                        hostId = current.hostId,
+                        botId = current.botId,
+                        onBack = ::pop,
+                        onOpenSession = { stack = stack + RemoteRoute.Session(current.hostId, it) },
+                    )
+                }
+                current is RemoteRoute.Session -> {
+                    // A Bot's chat is among its Bot's chats, not the sessions'; the connection knows which Bot once that list was shown.
+                    val botId = remember(current, botChats) { manager.botOfThread(current.hostId, current.sessionId) }
+                    RemoteSessionScreen(
+                        manager = manager,
+                        hostId = current.hostId,
+                        hostName = hostName(current.hostId),
+                        sessionId = current.sessionId,
+                        title = sessions.sessions?.firstOrNull { it.sessionId == current.sessionId }?.title
+                            ?: botChats.summaryOf(current.hostId, current.sessionId)?.title?.ifBlank { null }
+                            ?: botId?.let { stringResource(R.string.remote_untitled) },
+                        botName = botId?.let { bots.nameOf(current.hostId, it) },
+                        isDark = isDark,
+                        onBack = ::pop,
+                    )
+                }
             }
         }
     }

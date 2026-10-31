@@ -1421,6 +1421,29 @@ async fn execute_runtime(
     Ok(terminal)
 }
 
+// The native registry owns protocol defaults and exact credential slots. Keep
+// this private catalog projection free of keys, owner settings and route guesses.
+fn project_team_model_routes(
+    models: Vec<lingxi_core::host::ModelListing>,
+    mut routes: BTreeMap<(String, String), harness_runtime::desktop::team_process::TeamModelRoute>,
+) -> Result<Value, &'static str> {
+    models
+        .into_iter()
+        .map(|model| {
+            let route = routes.remove(&(model.provider_id.clone(), model.request_model.clone()));
+            let mut value =
+                serde_json::to_value(model).map_err(|_| "catalog_serialization_failed")?;
+            if let Some(route) = route {
+                route.validate().map_err(|_| "catalog_route_invalid")?;
+                value["team_route"] =
+                    serde_json::to_value(route).map_err(|_| "catalog_serialization_failed")?;
+            }
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Value::Array)
+}
+
 async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
     if request.protocol_version != PROTOCOL_VERSION {
         return Err("protocol_version");
@@ -1495,7 +1518,10 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
     ))
     .await
     .map_err(|_| "catalog_initialization_failed")?;
-    let models = runtime.orchestrator.list_model_listings().await;
+    let models = project_team_model_routes(
+        runtime.orchestrator.list_model_listings().await,
+        runtime.team_model_routes(),
+    )?;
     // Snapshot each descriptor and its exact source config under one lock.
     // The host must not reconstruct identities from model-facing aliases.
     let connections = runtime.mcp_registry.connections.read().await;
@@ -2430,5 +2456,59 @@ mod tests {
             PermissionDecision::Deny { .. }
         ));
         assert!(state.permissions.lock().await.is_empty());
+    }
+
+    #[test]
+    fn team_catalog_projection_keeps_effective_static_route_and_no_credential_material() {
+        use harness_runtime::desktop::team_process::TeamModelRoute;
+        let profile = json!({
+            "provider_id":"openai","profile_name":"openai-responses",
+            "base_url":"https://api.openai.com/v1","protocol":"open_ai_responses",
+            "auth":"api_key","credential":{"source":"host_managed","key":"team-selected-model"},
+            "models":[{"display_model":"GPT fixture","request_model":"gpt-fixture","billing_model":"gpt-fixture",
+                "capability_support":{"streaming":"supported","tools":"supported"}}],"extra":{}
+        });
+        let route = TeamModelRoute {
+            model_provider: "openai-responses".into(),
+            model_protocol: serde_json::from_value(json!("open_ai_responses")).unwrap(),
+            model_id: "gpt-fixture".into(),
+            model_endpoint: "https://api.openai.com/v1".into(),
+            credential_id: "openai".into(),
+            model_profile: serde_json::from_value(profile).unwrap(),
+        };
+        let models = vec![lingxi_core::host::ModelListing {
+            provider_id: "openai".into(),
+            request_model: "gpt-fixture".into(),
+            ..Default::default()
+        }];
+        let rows = project_team_model_routes(
+            models,
+            BTreeMap::from([(("openai".into(), "gpt-fixture".into()), route)]),
+        )
+        .unwrap();
+        assert_eq!(rows[0]["provider_id"], "openai");
+        assert_eq!(rows[0]["team_route"]["model_provider"], "openai-responses");
+        assert_eq!(rows[0]["team_route"]["credential_id"], "openai");
+        assert_eq!(
+            rows[0]["team_route"]["model_profile"]["models"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            rows[0]["team_route"]["model_profile"]["credential"]["source"],
+            "host_managed"
+        );
+        assert!(
+            rows[0]["team_route"]["model_profile"]["extra"]
+                .get("headers")
+                .is_none()
+        );
+        assert!(
+            rows[0]["team_route"]["model_profile"]["connection"]
+                .get("protocol_profiles")
+                .is_none()
+        );
     }
 }

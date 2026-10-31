@@ -1,0 +1,134 @@
+{
+  "logs/android-full-direct-ffi.log.gz": {
+    "sha256": "b9d2b664ebd12dd05dd65c74da8f6a4a762bdb96c038cc7ae5cc14733eb1beac",
+    "bytes": 5724,
+    "rawSha256": "d47f29b83fa1e9035322172d4abd90c871b28ef6f75a0a3a440ea06aae42db56",
+    "rawBytes": 41375
+  },
+  "logs/android-full-product-build.log.gz": {
+    "sha256": "5651937b3d7a2536e396c5125c4bf34c0670d29cd6b04392d00b0b732d6842d4",
+    "bytes": 7900,
+    "rawSha256": "74053a61f371eb607fb718e31d035b72e8e429e71e46c22195d928b965a96eb3",
+    "rawBytes": 77942
+  },
+  "logs/ios-full-product-build.log.gz": {
+    "sha256": "4c563a168b9089721437361ee3cbefa91e3c2c6fec37ad72816f08043f1213e1",
+    "bytes": 199921,
+    "rawSha256": "2f9b276b22916d124f0dfc69a95e5ec938e0b6a7257e9b35408d70f6129a3b31",
+    "rawBytes": 5619725
+  },
+  "logs/ios-full-product-ffi.log.gz": {
+    "sha256": "f80799d67d4eca2e9b464fbcfd2531d213f9481aec0fbd401fd4539a617a516a",
+    "bytes": 8403,
+    "rawSha256": "961930b88992902a5b22720b2c36598116b8b989b5fea1c6efe49c02b433094f",
+    "rawBytes": 87851
+  },
+  "logs/native-bridge-provider-r1.log.gz": {
+    "sha256": "6adcddc51bf44bb24f2cc4d4d9148c776565160a619a3f8ee7da0f49b89ef8a5",
+    "bytes": 1504,
+    "rawSha256": "9090821e5a6d4753328198184f958f115e64858aa0dc6453344fbbf73f912322",
+    "rawBytes": 13728
+  },
+  "logs/native-package-full-smoke-r1.log.gz": {
+    "sha256": "247f0a4c7637d567036cae71553d9df8a24a998c9a6d281b0e277468b47de64a",
+    "bytes": 2483,
+    "rawSha256": "e398a7ef4ac2a226254dfb9aef7a9045db90d35fcb7994a4a647744b4aa06b8c",
+    "rawBytes": 9999
+  },
+  "logs/native-package-provider-r2.log.gz": {
+    "sha256": "c55c61ad6f08d58700d06072dca451f32a6cff9ec874731f6e1013c178bc410b",
+    "bytes": 23751,
+    "rawSha256": "f524788abe295ada571aff4571822a08333249a6a28ce2cf1c43c001c777d9a9",
+    "rawBytes": 376198
+  },
+  "logs/provider-compile-r2-cleanup.log.gz": {
+    "sha256": "e9267e3ebcb550b43c9e1232a5b82ef404400eab8989681990f11cc72e35b267",
+    "bytes": 8932,
+    "rawSha256": "344a033386bc92fa156469b5d9ad4a624368119f7b77c4bb96c25b430d9a6e88",
+    "rawBytes": 87150
+  },
+  "logs/provider-postcleanup-connector-r2.log.gz": {
+    "sha256": "638d62bfa99c496ffb77025764d11428827123535c80ff7638cf96a5d9b59924",
+    "bytes": 705,
+    "rawSha256": "025e6d8f1ecbf0cb09c4c916202ccaeb719780573876ad6ff6f045c78ada1ab8",
+    "rawBytes": 1499
+  },
+  "logs/provider-postcleanup-interactions-r2.log.gz": {
+    "sha256": "7d763d684c244df7b13427ba058f33f009f5efd87988d470d1257ce92af70fe3",
+    "bytes": 521,
+    "rawSha256": "f7a871e87dd51cba9087801f61338b915b4b359c8ca481ba7e50ddf10b98073c",
+    "rawBytes": 1158
+  },
+  "logs/provider-postcleanup-process-r2.log.gz": {
+    "sha256": "21b10b797ac73763cca2d94f22233cb0bdd3b0c50b64fe34ab4ac8ec2243e41b",
+    "bytes": 647,
+    "rawSha256": "b345fdfbc4d6bf1f23027af010ec5f64d5dcf241f6ee54386b1aa2d2d35924f1",
+    "rawBytes": 1312
+  },
+  "logs/provider-postcleanup-profile-r2.log.gz": {
+    "sha256": "bfea2c95a38f2b3c958ee0df89c60a8a390e02c0f2e730a90e12b286799976c2",
+    "bytes": 587,
+    "rawSha256": "85a6a30223ee17c1cf32c71a959989e2f50ec4705b493f1c9d191841873854fe",
+    "rawBytes": 1159
+  },
+  "logs/provider-postcleanup-sandbox-r2.log.gz": {
+    "sha256": "11760a53b59502be224245f5da3b605fae6ba0f7791cae08adcf7c75c1db6e2a",
+    "bytes": 159,
+    "rawSha256": "a3721a97865adf3e08d16cdae51b23faed296ad2fa24f4d37a82bf7cf1a7bc1b",
+    "rawBytes": 197
+  },
+  "logs/provider-postcleanup-unit-r2.log.gz": {
+    "sha256": "f95ea7b84051f21ddad9d8c3a2d0f5dc4348f064d0e4c905befcd031faa84189",
+    "bytes": 447,
+    "rawSha256": "cc44f1f260d59856fcfad2dc0f04cb55704f2691ed193a34d95201d371339dfe",
+    "rawBytes": 1108
+  },
+  "logs/provider-standalone-r2-cleanup.log.gz": {
+    "sha256": "3831dc354ef5f34d0724687c0749184d65f9e740c29217e151203cc2c62e2957",
+    "bytes": 8706,
+    "rawSha256": "25ee935c69a0c8be8fbded86c5e27688f3908bd1c07b48d8cb40d0fdc512da44",
+    "rawBytes": 86417
+  },
+  "logs/teams-provider-node-r2.log.gz": {
+    "sha256": "08a61d303e6c342734febe4fe24b5edf093ae1912aec501718e18210b2198aae",
+    "bytes": 2603,
+    "rawSha256": "db0ee1e9b683ac2e7719bf960d8cc5f375967f6b6002b4b84894fd3a108947bf",
+    "rawBytes": 6004
+  },
+  "logs/teams-provider-node-tsc-r2.log.gz": {
+    "sha256": "d0ff6fcdf44cb596d95764f8d1117e6b4de9914affc8eb7a1a05cdee1a55b9f0",
+    "bytes": 105,
+    "rawSha256": "0de16c970bd230373a26ac84cbec70b4256dfb2284a0fee3361905265653c090",
+    "rawBytes": 100
+  },
+  "logs/teams-provider-renderer-tsc-r2.log.gz": {
+    "sha256": "b515abfa99429770826e21be27f31b2cddac0a32553045747ada1614c200eac5",
+    "bytes": 106,
+    "rawSha256": "a2c44a6c14a362eee283431ad30a4d407852b5404fc2c00826f1a30d1564d8f8",
+    "rawBytes": 98
+  },
+  "logs/teams-provider-shared-ui-r2.log.gz": {
+    "sha256": "0c46afb523a413ddee9cfbb433ec7e5b16ae80b9f458a0f2a2d76a804a94eee8",
+    "bytes": 1309,
+    "rawSha256": "fd6a47fb7e9b3ac8b4fb55d1fa9be31c01bc954e671131242accde7095678fcf",
+    "rawBytes": 2904
+  },
+  "logs/teams-provider-web-tsc-r2.log.gz": {
+    "sha256": "ea7f32347e541726ebb38cd408fe63249ff34dd00405ea4593b5a721499e757c",
+    "bytes": 92,
+    "rawSha256": "7348e6eabd717984da3717ddc0a4a0654b531d4a87e9792cf40e5807d3483ec7",
+    "rawBytes": 101
+  },
+  "logs/web-provider-build.log.gz": {
+    "sha256": "0aa9a27d6efe7e90a2559f09a6835c477cee28b53ea14df96a4e922f40fe63e9",
+    "bytes": 786,
+    "rawSha256": "7ced048a0f0b2809f87ff2a3eb327d7bfa177c2e1a6888be4213bbfba1238cd8",
+    "rawBytes": 1721
+  },
+  "logs/web-provider-overlay-guards.log.gz": {
+    "sha256": "ae2c10f1fe6f6457e62c2d19c28019ed102e5c554fda1029bfd24f192b7314a4",
+    "bytes": 552,
+    "rawSha256": "e120a472a48210ed811add034b3207454cf9c995345c2bd22cd5ef91235ec88b",
+    "rawBytes": 924
+  }
+}

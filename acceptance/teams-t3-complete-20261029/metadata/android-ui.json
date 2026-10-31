@@ -1,0 +1,12 @@
+{
+  "scope": "actual Teams Compose/Firebase feature harness; not full signed product",
+  "uid": "android-human",
+  "project": "demo-lingxi-teams-t0",
+  "authSdk": true,
+  "firestoreSdkServerRead": true,
+  "questionId": "152c8b0cafa31479bd2a92d190aef827d12c0d23e9070dac0e24416f3283e87a",
+  "botDmId": "0454b8f8-8a5e-4274-acb5-e20f6111453b",
+  "groupId": "10de71c7-ac59-47da-b528-abea04a5c798",
+  "plainMentionTargets": 0,
+  "explicitTargets": 1
+}

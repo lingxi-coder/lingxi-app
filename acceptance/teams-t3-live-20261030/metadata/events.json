@@ -1,0 +1,13 @@
+{
+  "status": "PASSED",
+  "at": "2026-10-30T09:24:00.928087+00:00",
+  "projectId": "lingxi-5e4b2",
+  "readOnlyAdminVerification": true,
+  "function": "onTeamMessage",
+  "verifiedHumanMessageEvents": 3,
+  "fcmDeviceDelivery": "NOT_CLAIMED_NO_DEVICE_TOKEN",
+  "freshOnly": true,
+  "oldEventsRequeued": false,
+  "historicalBeforeFix": "0/4 absent; retained privately",
+  "rawProofSha256": "6073b66ef64b1a15839fd1ac86cf85395776234d68192303f4acba6e0bea2e91"
+}

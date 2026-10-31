@@ -1,0 +1,17 @@
+{
+  "environment": "demo-lingxi-teams-t0 only; actual bundled Web app under React StrictMode",
+  "createInviteJoin": true,
+  "inviteSurvivesSignIn": true,
+  "joinRequiresConfirmation": true,
+  "remoteRemovalClearsView": true,
+  "freshRejoinGeneration": 2,
+  "roleChangeUpdatesLive": true,
+  "adminCreatesMemberInvite": true,
+  "deleteRequiresConfirmation": true,
+  "finalDeleteHasNoStaleError": true,
+  "width390HasHorizontalOverflow": false,
+  "evidence": [
+    "browser-member.png",
+    "browser-narrow.png"
+  ]
+}

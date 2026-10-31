@@ -320,3 +320,35 @@ test('catalog retains a bounded UTF-8 stderr tail with the final diagnostic', as
     });
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
+
+test('a catalog of another configuration home reads that home in every mode, and the default one reads the environment\'s', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-config-home-'));
+  const environments: Array<NodeJS.ProcessEnv | undefined> = [];
+  const spawnProcess = ((_bin: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
+    environments.push(options.env);
+    const configHome = options.env?.['LINGXI_CONFIG_DIR'] ?? '/owner/.lingxi';
+    return fakeChild(args.includes('--product-paths-json')
+      ? JSON.stringify({ version: 1, brand_home: configHome, app_projects_root: join(configHome, '.apps') })
+      : args.includes('--workspace-environment-json')
+        ? JSON.stringify({ version: 1, environment: {}, config_home: configHome, global_config_path: join(configHome, '.lingxi.json') })
+        : JSON.stringify({ version: 1, sessions: [] }));
+  }) as any;
+  const previous = process.env['LINGXI_CONFIG_DIR'];
+  process.env['LINGXI_CONFIG_DIR'] = '/owner/.lingxi';
+  try {
+    const botHome = join(project, 'bot-home');
+    const bot = new ProjectSessionCatalog({ serverBin: '/bridge-server', configHome: botHome, spawnProcess });
+    const owner = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess });
+    assert.equal((await bot.productPaths()).brandHome, botHome);
+    assert.equal((await bot.workspaceSettings(project)).configHome, botHome);
+    await bot.list(project);
+    assert.deepEqual(environments.map((env) => env?.['LINGXI_CONFIG_DIR']), [botHome, botHome, botHome]);
+    environments.length = 0;
+    assert.equal((await owner.productPaths()).brandHome, '/owner/.lingxi');
+    await owner.list(project);
+    assert.deepEqual(environments.map((env) => env?.['LINGXI_CONFIG_DIR']), ['/owner/.lingxi', '/owner/.lingxi']);
+  } finally {
+    if (previous === undefined) delete process.env['LINGXI_CONFIG_DIR']; else process.env['LINGXI_CONFIG_DIR'] = previous;
+    rmSync(project, { recursive: true, force: true });
+  }
+});

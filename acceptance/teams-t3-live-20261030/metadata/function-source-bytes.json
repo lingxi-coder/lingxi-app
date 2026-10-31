@@ -1,0 +1,68 @@
+{
+  "sameSourceBytes": true,
+  "trackedFiles": 25,
+  "snapshots": {
+    "before": {
+      "generation": "1793350965486067",
+      "zipSha256": "905cfa07056887affd0da87f7fd22f5806d61e6ef0f09df7ada0b14356e3e1f4",
+      "files": {
+        "package-lock.json": "9e6c3956c8489b3335707f16173cbf9926eb529c8c17289b220bea348f67ec9c",
+        "package.json": "3385f53c016398ce398d010545488dc3085a9cf45c1902c895c052424c5d3d49",
+        "scripts/teams-test-accounts.mjs": "cbcbcf7975771e8df93ca00d984cdd73ac243fd931a02a8ccf2f62d65303d071",
+        "scripts/verify-push-live.mjs": "95718d0920f76c1f7f825cf9554d6d3e14548c331006cead10e83b83d38cce2d",
+        "scripts/seed-emulator-user.mjs": "fc9ec9318883e07edbafd315a52897021e83021a5afebcea4837ea9151dcbc6e",
+        "scripts/teams-connector-runtime.mjs": "7ffbc92e2df1b832f3e1c2b4f81bab85a6d6f79e0ade37130af6c9e7421b30e0",
+        "scripts/dev-server.mjs": "768a961eb9f21eec20af5461ba390084b89637d6f3b0da66313883587f036633",
+        "scripts/generate-seed.py": "21f0a38f4ffa10045abfba4694b77b241937e785c0bba87a10e18a3a2ce1e97e",
+        "scripts/teams-members-runtime.mjs": "a69673140b2aac892ac29d766b622d8cb794498a145fa9e74cc3f24ef242224f",
+        "scripts/teams-runtime-spikes.mjs": "0b5e093ba2032fcb42a79a32140aef5f35af38f64838014fe12b03c492bb4986",
+        "scripts/setup-push.sh": "051ac425dc317d3e429ef47831558f3e7c8283b45469c3ebf5e69e973729e535",
+        "scripts/test-teams.mjs": "cc3d2ad007c8e2a803acba8682a1d76c97a34553065f557131bd38a2e595c326",
+        "scripts/verify-push-accounts.mjs": "b496ec738addfc7bbd7c4e77f1b139d4f6b315baa98cc57210df8c82812bfb7a",
+        "src/team-message-push.mjs": "670b7bcf761e4440e7baf94ce6e445163189d7199c13eaf9bc9acc9f5ea7b82a",
+        "src/team-messages.mjs": "4c5ed210b355ff33d58a7529b289c1d60c2d18497d0d91cf5898cd60b87ec051",
+        "src/push.mjs": "d45eef364e58788f257985f437d9c6aa52b5e7e2f1d2f11b4a51ce40666a0ca2",
+        "src/market-gateway.mjs": "6c98c6b933cfb34d69f8b55305d3a6f61dee86ac782c0061967082a957543f84",
+        "src/teams.mjs": "4e1cf2e68c6a49b92c064a2a94a7f7205ef582915fdce7192d3b06c28486f20b",
+        "src/seed-provenance.json": "cf4d84d7f802ded99bb366ed224689db9329fb32bc3139e01d76c4e921d39802",
+        "src/catalog.mjs": "35dffe3c89fe1cc1a5b914590f4a262b26432678c38c553a9a8fbe4dc9a6222a",
+        "src/team-bots.mjs": "b403dd29f289d8288cdc37bd11f01c2afbc1950dd0cfaee794d368c919fc6cc2",
+        "src/store.mjs": "da8f41db16c2685c0e08e39ad4078c0d1a1e42e0b3d636b2d70d7ede8d13540f",
+        "src/index.mjs": "848161cead03c0f7935c69c8043bde249e3310befcae6eeb8fbff8e7e074d405",
+        "src/team-conversations.mjs": "f2f443fcfb556ec876225adc8e3c9349fbcb52d44477704758544e9cd1c0e6c7",
+        "src/seed.json": "c6e5bad457bbace8b5c054d6340712d3b5502446b4ff317b3f0ecf98999fc024"
+      }
+    },
+    "after": {
+      "generation": "1793351994350691",
+      "zipSha256": "905cfa07056887affd0da87f7fd22f5806d61e6ef0f09df7ada0b14356e3e1f4",
+      "files": {
+        "package-lock.json": "9e6c3956c8489b3335707f16173cbf9926eb529c8c17289b220bea348f67ec9c",
+        "package.json": "3385f53c016398ce398d010545488dc3085a9cf45c1902c895c052424c5d3d49",
+        "scripts/teams-test-accounts.mjs": "cbcbcf7975771e8df93ca00d984cdd73ac243fd931a02a8ccf2f62d65303d071",
+        "scripts/verify-push-live.mjs": "95718d0920f76c1f7f825cf9554d6d3e14548c331006cead10e83b83d38cce2d",
+        "scripts/seed-emulator-user.mjs": "fc9ec9318883e07edbafd315a52897021e83021a5afebcea4837ea9151dcbc6e",
+        "scripts/teams-connector-runtime.mjs": "7ffbc92e2df1b832f3e1c2b4f81bab85a6d6f79e0ade37130af6c9e7421b30e0",
+        "scripts/dev-server.mjs": "768a961eb9f21eec20af5461ba390084b89637d6f3b0da66313883587f036633",
+        "scripts/generate-seed.py": "21f0a38f4ffa10045abfba4694b77b241937e785c0bba87a10e18a3a2ce1e97e",
+        "scripts/teams-members-runtime.mjs": "a69673140b2aac892ac29d766b622d8cb794498a145fa9e74cc3f24ef242224f",
+        "scripts/teams-runtime-spikes.mjs": "0b5e093ba2032fcb42a79a32140aef5f35af38f64838014fe12b03c492bb4986",
+        "scripts/setup-push.sh": "051ac425dc317d3e429ef47831558f3e7c8283b45469c3ebf5e69e973729e535",
+        "scripts/test-teams.mjs": "cc3d2ad007c8e2a803acba8682a1d76c97a34553065f557131bd38a2e595c326",
+        "scripts/verify-push-accounts.mjs": "b496ec738addfc7bbd7c4e77f1b139d4f6b315baa98cc57210df8c82812bfb7a",
+        "src/team-message-push.mjs": "670b7bcf761e4440e7baf94ce6e445163189d7199c13eaf9bc9acc9f5ea7b82a",
+        "src/team-messages.mjs": "4c5ed210b355ff33d58a7529b289c1d60c2d18497d0d91cf5898cd60b87ec051",
+        "src/push.mjs": "d45eef364e58788f257985f437d9c6aa52b5e7e2f1d2f11b4a51ce40666a0ca2",
+        "src/market-gateway.mjs": "6c98c6b933cfb34d69f8b55305d3a6f61dee86ac782c0061967082a957543f84",
+        "src/teams.mjs": "4e1cf2e68c6a49b92c064a2a94a7f7205ef582915fdce7192d3b06c28486f20b",
+        "src/seed-provenance.json": "cf4d84d7f802ded99bb366ed224689db9329fb32bc3139e01d76c4e921d39802",
+        "src/catalog.mjs": "35dffe3c89fe1cc1a5b914590f4a262b26432678c38c553a9a8fbe4dc9a6222a",
+        "src/team-bots.mjs": "b403dd29f289d8288cdc37bd11f01c2afbc1950dd0cfaee794d368c919fc6cc2",
+        "src/store.mjs": "da8f41db16c2685c0e08e39ad4078c0d1a1e42e0b3d636b2d70d7ede8d13540f",
+        "src/index.mjs": "848161cead03c0f7935c69c8043bde249e3310befcae6eeb8fbff8e7e074d405",
+        "src/team-conversations.mjs": "f2f443fcfb556ec876225adc8e3c9349fbcb52d44477704758544e9cd1c0e6c7",
+        "src/seed.json": "c6e5bad457bbace8b5c054d6340712d3b5502446b4ff317b3f0ecf98999fc024"
+      }
+    }
+  }
+}

@@ -1,0 +1,506 @@
+{
+  "schema_version": 1,
+  "checkpoint": "teams-t3-connector-20261029",
+  "recorded_at_utc": "2026-10-30T04:21:19.455825+00:00",
+  "phase_complete": false,
+  "execution_enabled": false,
+  "runtime": {
+    "commit": "e8adfe0785e1cceef630df475015ff1b1c180667",
+    "parent": "43031991ba7246b2f1b0f38e05632009334d3aaa",
+    "branch": "codex/teams-runtime",
+    "sdk_commit": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8",
+    "cargo_lock_changed": false
+  },
+  "product": {
+    "base_commit": "def9cf9cd2991f5668aa8c17ea9b556d257c0b54",
+    "commit": "the commit containing this evidence",
+    "branch": "claude/teams",
+    "harness_pin": "eed08ca06c35371c1eb7ea5b02ebc10bcae63a12",
+    "cargo_files_changed": false,
+    "runtime_entrypoint_enabled": false
+  },
+  "counts": {
+    "distinct_selected_tests_passed": 101,
+    "failed": 0,
+    "connector_normal_passed": 13,
+    "connector_normal_explicit_fixture_ignored": 1,
+    "connector_explicit_fixture_passed": 1,
+    "connector_explicit_fixture_filtered": 13,
+    "process_passed": 15,
+    "profile_passed": 13,
+    "backend_rules_emulator_passed": 52,
+    "desktop_web_sdk_emulator_passed": 7,
+    "whole_repository_suite": false
+  },
+  "final_tests": {
+    "worker_sha256_before": "065919a51882401d442c9f2854d438c32aea640c6aceadebd3530e499a74ac04",
+    "worker_sha256_after": "065919a51882401d442c9f2854d438c32aea640c6aceadebd3530e499a74ac04",
+    "tests": [
+      {
+        "name": "team_connector",
+        "command": [
+          "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_connector-e41dd93e300cd1a2",
+          "--test-threads=1"
+        ],
+        "exit": 0,
+        "elapsed_s": 34.1,
+        "log": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/teams-connector-evidence/team_connector-final.log",
+        "binary_sha256": "22351d87f46be86eca319d155e0d1457c3c03554d59a8a95d82e865f0c500988"
+      },
+      {
+        "name": "team_invocation_process",
+        "command": [
+          "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_invocation_process-1dfd968c83f4de4f",
+          "--test-threads=1"
+        ],
+        "exit": 0,
+        "elapsed_s": 44.1,
+        "log": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/teams-connector-evidence/team_invocation_process-final.log",
+        "binary_sha256": "3e096f23360fc6b867e303c12f7ba4297df04519fb01efbdde28d02adf9138f3"
+      },
+      {
+        "name": "team_invocation_profile",
+        "command": [
+          "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_invocation_profile-5d0851103b622e6e",
+          "--test-threads=1"
+        ],
+        "exit": 0,
+        "elapsed_s": 9.0,
+        "log": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/teams-connector-evidence/team_invocation_profile-final.log",
+        "binary_sha256": "675924b7a58801d689158131dda5b812597a34ef2dc9b06f654bc05361846b38"
+      }
+    ]
+  },
+  "checks": [
+    {
+      "name": "desktop-check",
+      "command": [
+        "cargo",
+        "check",
+        "--offline",
+        "--locked",
+        "-p",
+        "harness-runtime",
+        "--lib",
+        "--features",
+        "desktop"
+      ],
+      "exit": 0,
+      "elapsed_s": 6.0,
+      "log": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/teams-connector-evidence/desktop-check.log"
+    },
+    {
+      "name": "mobile-check",
+      "command": [
+        "cargo",
+        "check",
+        "--offline",
+        "--locked",
+        "-p",
+        "harness-runtime",
+        "--lib",
+        "--features",
+        "mobile"
+      ],
+      "exit": 0,
+      "elapsed_s": 11.0,
+      "log": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/teams-connector-evidence/mobile-check.log"
+    },
+    {
+      "name": "normal-worker-build",
+      "command": [
+        "cargo",
+        "build",
+        "--offline",
+        "--locked",
+        "-p",
+        "harness-runtime",
+        "--features",
+        "desktop",
+        "--bin",
+        "harness-team-worker"
+      ],
+      "exit": 0,
+      "elapsed_s": 64.3,
+      "log": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/teams-connector-evidence/normal-worker-build.log"
+    }
+  ],
+  "format_syntax": [
+    {
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+      "command": [
+        "rustfmt",
+        "--check",
+        "--edition",
+        "2021",
+        "--config",
+        "skip_children=true",
+        "crates/runtime/src/desktop/team_connector/mod.rs",
+        "crates/runtime/src/desktop/team_connector/http.rs",
+        "crates/runtime/src/desktop/team_connector/journal.rs",
+        "crates/runtime/src/desktop/team_invocation.rs",
+        "crates/runtime/src/desktop/team_process/mod.rs",
+        "crates/runtime/src/desktop/mod.rs",
+        "crates/runtime/tests/desktop/team_connector.rs"
+      ],
+      "exit": 0
+    },
+    {
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit": 0
+    },
+    {
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+      "command": [
+        "node",
+        "--check",
+        "apps/firebase/src/team-bots.mjs"
+      ],
+      "exit": 0
+    },
+    {
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+      "command": [
+        "node",
+        "--check",
+        "apps/firebase/test/teams.bots.emulator.test.mjs"
+      ],
+      "exit": 0
+    },
+    {
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+      "command": [
+        "node",
+        "--check",
+        "apps/firebase/scripts/teams-connector-runtime.mjs"
+      ],
+      "exit": 0
+    },
+    {
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit": 0
+    }
+  ],
+  "compile_tests": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "harness-runtime",
+        "--features",
+        "desktop",
+        "--test",
+        "team_connector",
+        "--test",
+        "team_invocation_process",
+        "--test",
+        "team_invocation_profile",
+        "--no-run"
+      ],
+      "exit": 0,
+      "elapsed_s": 21.1,
+      "log": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/teams-connector-evidence/candidate-compile.log"
+    }
+  ],
+  "firebase": {
+    "command": [
+      "npm",
+      "--prefix",
+      "apps/firebase",
+      "run",
+      "test:teams"
+    ],
+    "override_commands": [
+      [
+        "/opt/homebrew/bin/node",
+        "--test",
+        "--test-concurrency=1",
+        "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/firebase/test/teams.rules.emulator.test.mjs",
+        "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/firebase/test/teams.members.emulator.test.mjs",
+        "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/firebase/test/teams.messages.emulator.test.mjs",
+        "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/firebase/test/teams.bots.emulator.test.mjs"
+      ],
+      [
+        "/opt/homebrew/bin/node",
+        "--import",
+        "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/packages/bridge-client/node_modules/tsx/dist/loader.mjs",
+        "--test",
+        "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/electron/test/teams-firestore.emulator.test.ts",
+        "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/web/test/teams-firestore.emulator.test.ts",
+        "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/web/test/teams-members.emulator.test.ts"
+      ],
+      [
+        "/opt/homebrew/bin/node",
+        "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/firebase/scripts/teams-connector-runtime.mjs"
+      ]
+    ],
+    "project": "demo-lingxi-teams-t0",
+    "exit": 0,
+    "elapsed_s": 43.2,
+    "log": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/teams-connector-evidence/firebase-final.log"
+  },
+  "emulator_fixture": {
+    "fixture": "Teams connector real Auth/Firestore/HTTP/worker",
+    "projectId": "demo-lingxi-teams-t0",
+    "model": "synthetic loopback SSE",
+    "state": "completed",
+    "messages": 3,
+    "triggers": 1,
+    "claims": 1,
+    "starts": 1,
+    "finishes": 2,
+    "rejected": {
+      "invalidToken": 401,
+      "memberClaim": 403,
+      "forgedPermit": 400
+    }
+  },
+  "worker_artifact": {
+    "path": "target/debug/harness-team-worker",
+    "sha256": "065919a51882401d442c9f2854d438c32aea640c6aceadebd3530e499a74ac04",
+    "normal_desktop_features": true,
+    "unsigned_debug": true,
+    "built_before_source_commit": true,
+    "source_bytes_verified_against_commit": true
+  },
+  "source_files": [
+    {
+      "repo": "harness-runtime",
+      "path": "crates/runtime/Cargo.toml",
+      "sha256": "949b05b0efe3eac912711e1475978639c39de6e6838f38e2d7c850ba69c4fd52",
+      "matches_commit": "e8adfe0785e1cceef630df475015ff1b1c180667"
+    },
+    {
+      "repo": "harness-runtime",
+      "path": "crates/runtime/src/desktop/mod.rs",
+      "sha256": "a91cd36fd41b7d65f46270142f28e9be05acffec22f6b48165cd81b2ed2b643f",
+      "matches_commit": "e8adfe0785e1cceef630df475015ff1b1c180667"
+    },
+    {
+      "repo": "harness-runtime",
+      "path": "crates/runtime/src/desktop/team_connector/http.rs",
+      "sha256": "23d749327d7e5021f83c23e6a8b05250700ae6a0bebad2600146ccaefd4d7465",
+      "matches_commit": "e8adfe0785e1cceef630df475015ff1b1c180667"
+    },
+    {
+      "repo": "harness-runtime",
+      "path": "crates/runtime/src/desktop/team_connector/journal.rs",
+      "sha256": "85ac6d26438fc3ce05fe0d94e1a0dcf389ae9a3429dc34a98f86336483ebdd70",
+      "matches_commit": "e8adfe0785e1cceef630df475015ff1b1c180667"
+    },
+    {
+      "repo": "harness-runtime",
+      "path": "crates/runtime/src/desktop/team_connector/mod.rs",
+      "sha256": "3d552ea1b876470ac8880ec56184e0e8293b0dc8389966d337b275265bb80395",
+      "matches_commit": "e8adfe0785e1cceef630df475015ff1b1c180667"
+    },
+    {
+      "repo": "harness-runtime",
+      "path": "crates/runtime/src/desktop/team_invocation.rs",
+      "sha256": "cdd357d075c3bbe8fc70892b2feb5b8c4da0e890b87161e6f7a77d291c848f8d",
+      "matches_commit": "e8adfe0785e1cceef630df475015ff1b1c180667"
+    },
+    {
+      "repo": "harness-runtime",
+      "path": "crates/runtime/src/desktop/team_process/mod.rs",
+      "sha256": "fcfe89dc03f68cbabd41f53724a3ea602f5c8b6b566ace74079fc2d044faa05c",
+      "matches_commit": "e8adfe0785e1cceef630df475015ff1b1c180667"
+    },
+    {
+      "repo": "harness-runtime",
+      "path": "crates/runtime/tests/desktop/team_connector.rs",
+      "sha256": "f62a8478ca4a4027983e90b7720a0aee98ac9a1bdaa44edd7c65706ddfdad92d",
+      "matches_commit": "e8adfe0785e1cceef630df475015ff1b1c180667"
+    },
+    {
+      "repo": "harness-runtime",
+      "path": "docs/TEAM_CONNECTOR.md",
+      "sha256": "7ae3320ab7e09def5ab15aaad88b8dd62bd468d1694765005fc12ba33940f281",
+      "matches_commit": "e8adfe0785e1cceef630df475015ff1b1c180667"
+    },
+    {
+      "repo": "lingxi-app",
+      "path": "apps/firebase/src/team-bots.mjs",
+      "sha256": "ee24af40d2416dfb06229b264b1745a7bc37b383d6d6c7a07535aaa39154b8ea"
+    },
+    {
+      "repo": "lingxi-app",
+      "path": "apps/firebase/test/teams.bots.emulator.test.mjs",
+      "sha256": "ca4226e88a3f436ea206c37a83c49f2b601267cbcf79b947cd2717dc09b47381"
+    },
+    {
+      "repo": "lingxi-app",
+      "path": "apps/firebase/scripts/teams-connector-runtime.mjs",
+      "sha256": "7ffbc92e2df1b832f3e1c2b4f81bab85a6d6f79e0ade37130af6c9e7421b30e0"
+    },
+    {
+      "repo": "lingxi-app",
+      "path": "docs/TEAMS.md",
+      "sha256": "c9527552f68420aa3d63825795f30d53bb6f4d22eb292363644a366d8dc08418"
+    }
+  ],
+  "logs": [
+    {
+      "path": "logs/connector.log.gz",
+      "raw_source": "target/teams-connector-evidence/team_connector-final.log",
+      "raw_bytes": 1238,
+      "raw_sha256": "376328adcf8388d869c877ac78077d6b9da1e485ef6974faff0e966d39c72060",
+      "compressed_bytes": 614,
+      "compressed_sha256": "0042f9c8b25ecdbcd42cc774e0abdbbf4aece5031741437378662cb963e97e2a",
+      "acceptance": true
+    },
+    {
+      "path": "logs/process.log.gz",
+      "raw_source": "target/teams-connector-evidence/team_invocation_process-final.log",
+      "raw_bytes": 1312,
+      "raw_sha256": "dbbee768e41275b94c24fba4aedaabffbb36f7567c8a2b74b605484d17a403e3",
+      "compressed_bytes": 645,
+      "compressed_sha256": "f830669b0575629955716c1036d601af314393b8ce1652299f37b76b3cd59013",
+      "acceptance": true
+    },
+    {
+      "path": "logs/profile.log.gz",
+      "raw_source": "target/teams-connector-evidence/team_invocation_profile-final.log",
+      "raw_bytes": 1159,
+      "raw_sha256": "8b25d04aff1742689688e55d11661ec9982f5a2fcd37809cfb5fbb9b9e84d0dd",
+      "compressed_bytes": 586,
+      "compressed_sha256": "f0038d34a3de135436da8fe0190fe84bef0f5132c9b914ad63b9015683d0c1a7",
+      "acceptance": true
+    },
+    {
+      "path": "logs/firebase.log.gz",
+      "raw_source": "target/teams-connector-evidence/firebase-final.log",
+      "raw_bytes": 23106,
+      "raw_sha256": "cc75462e573cd8c3064372100956d233800fb92022266d9bb27e201fad424fcc",
+      "compressed_bytes": 4390,
+      "compressed_sha256": "b6f13a38371031968b59e62a9c1a62ba4ffecd0a3d003f8953cefb68a7a11337",
+      "acceptance": true
+    },
+    {
+      "path": "logs/desktop-check.log.gz",
+      "raw_source": "target/teams-connector-evidence/desktop-check.log",
+      "raw_bytes": 86416,
+      "raw_sha256": "056efe2888096799e5d9b5ae54e473c470ad13a3c0cd14ac44b0eb2307af22f0",
+      "compressed_bytes": 8702,
+      "compressed_sha256": "4519d7d1da02ff209c7c6a1d43aa4f35782326a6d8f88e665b32b52f82419b88",
+      "acceptance": true
+    },
+    {
+      "path": "logs/mobile-check.log.gz",
+      "raw_source": "target/teams-connector-evidence/mobile-check.log",
+      "raw_bytes": 87817,
+      "raw_sha256": "d35ec3e298acba9b54c29f590c4e03a985ed2fe52dbbbb0022e42331ad33f97e",
+      "compressed_bytes": 8980,
+      "compressed_sha256": "7e5fab5a908f04a40412ca54fc8856d27019496948445841f500c98d5081a630",
+      "acceptance": true
+    },
+    {
+      "path": "logs/worker-build.log.gz",
+      "raw_source": "target/teams-connector-evidence/normal-worker-build.log",
+      "raw_bytes": 87183,
+      "raw_sha256": "f34d53a4babc08483a4f6e13bb1d8fdaccce96ea540d33ef6c4d3fc9ce75a73d",
+      "compressed_bytes": 8878,
+      "compressed_sha256": "3189572ef9500dd4c2d85e58bd31f6ef61e689ac51648bc0f1a770f6e5b8930f",
+      "acceptance": true
+    },
+    {
+      "path": "logs/format-syntax.log.gz",
+      "raw_source": "target/teams-connector-evidence/format-syntax.log",
+      "raw_bytes": 1150,
+      "raw_sha256": "71c295e041ad2511ec98772e99f69709e9863ab18745022159fead1241883658",
+      "compressed_bytes": 299,
+      "compressed_sha256": "bb08c6ae3b7c5f7c9456233a8eb971ce9d190310ab9f6fb0b964ada288b6eab1",
+      "acceptance": true
+    },
+    {
+      "path": "logs/compile-tests.log.gz",
+      "raw_source": "target/teams-connector-evidence/candidate-compile.log",
+      "raw_bytes": 86745,
+      "raw_sha256": "074805425b79b3c2f48507da2f55e27a36667fc484a41c5160a99a0a2af623d5",
+      "compressed_bytes": 8815,
+      "compressed_sha256": "66b379172fa6763575d75b801bb9bbd4e78f015d1c4058fefe5664913ed19e6c",
+      "acceptance": true
+    },
+    {
+      "path": "logs/outer-sandbox-history.log.gz",
+      "raw_source": "target/teams-connector-evidence/first-test.log",
+      "raw_bytes": 92746,
+      "raw_sha256": "1352652b6dff12a9e90851d59ffb7b7a6eafdb67c34d1877559056f59f677666",
+      "compressed_bytes": 9863,
+      "compressed_sha256": "efa2ade355294af7acbc66db5204c22867c1b06cf9bdfff3b9ce13c6443cf41e",
+      "acceptance": false
+    }
+  ],
+  "report_sha256": "a745b6d1760326d36260bdc822f934a04f9c040f1bcce5051ba739dfaf7fbb7a",
+  "review": {
+    "skill": "/Users/luolingfeng/.codex/skills/code-review/SKILL.md",
+    "agent": "/root/teams_connector_review2",
+    "files_reviewed": 12,
+    "mode": "read-only static; no reviewer tests/build/network/account access",
+    "recommendation": "APPROVE for disabled prerequisite",
+    "unresolved_findings": 0,
+    "fixed_findings": [
+      "backend-compatible original-human UID through private profile",
+      "owner-only manual recovery for expired claimed work"
+    ],
+    "documentation_precision_corrections": [
+      "JSON-body bounds",
+      "same still-running execute:false only",
+      "poll delay plus request bound",
+      "kill and bounded reaping; drop does not await"
+    ],
+    "final_document_confirmation": "reviewer confirmed supplied revisions; parent applied and verified final bytes"
+  },
+  "resource_boundary": {
+    "disk_floor_bytes": 2147483648,
+    "disk_free_bytes": 23879680000,
+    "build_test_floor_watchdog": true,
+    "weekly_used_percent": 61,
+    "weekly_wrap_percent": 98,
+    "usage_reset_used": false,
+    "cleanup_performed": false
+  },
+  "actions": {
+    "local_commits_only": true,
+    "push_merge_deploy_iam": false,
+    "real_model_provider": false,
+    "production_auth_accounts": false,
+    "emulator_accounts": true,
+    "saved_test_accounts_or_sessions_accessed": false,
+    "browser_device_actions": false
+  },
+  "limits": {
+    "platform": "macOS only",
+    "model_auth": "selected static Anthropic API key only",
+    "worker_tools": "all denied; no question sender",
+    "http_json_body_bytes": 65536,
+    "http_token_and_request_timeout_seconds": 5,
+    "poll_delay_after_success_seconds": 2,
+    "reap_allowance_seconds": 2,
+    "backend_total_lease_seconds": 300,
+    "hard_real_time_termination_proven": false,
+    "scope": "single queue item; no product startup/account/discovery integration"
+  },
+  "remaining_gates": [
+    "product account/session/queue discovery and manual recovery UI",
+    "authenticated owner-only tool approval broker",
+    "separate original-human UID/generation/question broker",
+    "detached containment and independent resource/termination ceilings before tools",
+    "other provider/auth and live provider request validation",
+    "all four T3 client UIs and signed/native/device acceptance",
+    "authorized publication and Firebase deployment"
+  ]
+}

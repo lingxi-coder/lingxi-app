@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "revision": "2580fbcd1e6c5671bb25241cf5ccc465b30c3456",
+  "development": false,
+  "sha256": {
+    "harness-team-host": "228d1a7658aa50f3d8dbe656cd647eca25a13ecf9397a6426042758c0069e62f",
+    "harness-team-worker": "229b0e3ea0ae975e6b9dbb2ed1fcb214c463efc4e907b73b527323be69cfac08"
+  }
+}

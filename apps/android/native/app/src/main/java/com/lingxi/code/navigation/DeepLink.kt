@@ -23,11 +23,14 @@ data class DeepLink(val route: String, val params: Map<String, String>, val payl
                 require(decoded.isNotEmpty() && decoded != "." && decoded != ".." && decoded.none { it == '/' || it == '\\' || it < ' ' || it == '\u007f' })
                 decoded
             }
-            require(Regex("^(session/[^/]+|project/[^/]+|new|settings/[^/]+|provider/[^/]+|extensions/(mcp|skill|plugin)/[^/]+|cron/(job|run)/[^/]+|terminal/[^/]+|apps/[^/]+|market/[^/]+|runtime/(agent|task|plan|review|activity)/[^/]+|import/(mcp|plugin|skill|provider)|remote/[^/]+/[^/]+)$").matches(route))
+            require(Regex("^(session/[^/]+|project/[^/]+|new|settings/[^/]+|provider/[^/]+|extensions/(mcp|skill|plugin)/[^/]+|cron/(job|run)/[^/]+|terminal/[^/]+|apps/[^/]+|market/[^/]+|runtime/(agent|task|plan|review|activity)/[^/]+|import/(mcp|plugin|skill|provider)|remote/[^/]+/[^/]+|team/(join|inbox))$").matches(route))
             val params = pairs(uri.rawQuery).mapValues { (key, value) ->
                 if (key == "message") value.lowercase(java.util.Locale.ROOT) else value
             }
-            require(params.all { (k, v) -> k in setOf("workspace", "message", "mode", "scope", "review", "runId", "revision") && v.isNotEmpty() && v.length <= 512 && v.none { it < ' ' || it == '\u007f' } })
+            require(params.all { (k, v) -> k in setOf("workspace", "message", "mode", "scope", "review", "runId", "revision", "code") && v.isNotEmpty() && v.length <= 512 && v.none { it < ' ' || it == '\u007f' } })
+            if (route == "team/inbox") require(params.isEmpty())
+            if (route == "team/join") require(params.keys == setOf("code") && Regex("^[A-Za-z0-9_-]{32}$").matches(params.getValue("code")))
+            else require("code" !in params)
             require(params["review"] == null || (route.startsWith("apps/") && params["review"] == "agent"))
             require(params["runId"] == null || (route.startsWith("apps/") && params["review"] == "agent" && params.getValue("runId").length <= 128))
             require(params["revision"] == null || (route.startsWith("apps/") && params["review"] == "agent" && params["runId"] != null &&

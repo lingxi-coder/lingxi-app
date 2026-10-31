@@ -1,0 +1,110 @@
+{
+  "headers": [
+    {
+      "headers": {
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "glob": "**"
+    },
+    {
+      "headers": {
+        "Cache-Control": "public,max-age=31536000,immutable"
+      },
+      "glob": "/assets/**"
+    },
+    {
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "glob": "/admin/**"
+    },
+    {
+      "headers": {
+        "Content-Security-Policy": "default-src 'none'; script-src 'self' 'sha256-7W/YoJpFCJstxnYHwNalADkRes3g4YLFL9UTNmX28eY='; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src https://lingxi-5e4b2-default-rtdb.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'"
+      },
+      "glob": "/remote"
+    },
+    {
+      "headers": {
+        "Content-Security-Policy": "default-src 'none'; script-src 'self' 'sha256-7W/YoJpFCJstxnYHwNalADkRes3g4YLFL9UTNmX28eY='; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src https://lingxi-5e4b2-default-rtdb.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'"
+      },
+      "glob": "/remote/**"
+    },
+    {
+      "headers": {
+        "Content-Security-Policy": "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+      },
+      "glob": "/login/remote"
+    },
+    {
+      "headers": {
+        "Cache-Control": "public,max-age=300",
+        "Content-Type": "application/json"
+      },
+      "glob": "/.well-known/**"
+    },
+    {
+      "glob": "/teams",
+      "headers": {
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "Content-Security-Policy": "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://apis.google.com https://www.googleapis.com"
+      }
+    },
+    {
+      "glob": "/teams/**",
+      "headers": {
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "Content-Security-Policy": "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://apis.google.com https://www.googleapis.com"
+      }
+    },
+    {
+      "glob": "/open/team/join",
+      "headers": {
+        "Referrer-Policy": "no-referrer",
+        "Cache-Control": "no-store"
+      }
+    }
+  ],
+  "rewrites": [
+    {
+      "glob": "/v1/teams",
+      "run": {
+        "serviceId": "teamsapi",
+        "region": "us-central1"
+      }
+    },
+    {
+      "glob": "/v1/teams/**",
+      "run": {
+        "serviceId": "teamsapi",
+        "region": "us-central1"
+      }
+    },
+    {
+      "glob": "/teams",
+      "path": "/teams/index.html"
+    },
+    {
+      "glob": "/teams/**",
+      "path": "/teams/index.html"
+    },
+    {
+      "glob": "/open/team/join",
+      "path": "/teams/index.html"
+    },
+    {
+      "glob": "/v1/**",
+      "run": {
+        "serviceId": "catalogapi",
+        "region": "us-central1"
+      }
+    },
+    {
+      "glob": "**",
+      "path": "/index.html"
+    }
+  ]
+}

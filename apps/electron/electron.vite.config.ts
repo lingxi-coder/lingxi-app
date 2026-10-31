@@ -28,6 +28,7 @@ export default defineConfig({
           localApp: resolve(__dirname, 'src/preload/localApp.ts'),
           // The hidden WebRTC window of Remote Control: hands its page one MessagePort.
           remoteRtc: resolve(__dirname, 'src/preload/remoteRtc.ts'),
+          teamsData: resolve(__dirname, 'src/preload/teamsData.ts'),
         },
         output: {
           format: 'cjs',
@@ -44,10 +45,12 @@ export default defineConfig({
           index: resolve(__dirname, 'src/renderer/index.html'),
           // Hidden page of Remote Control (WebRTC); never shown.
           remoteRtc: resolve(__dirname, 'src/renderer/remote-rtc.html'),
+          teamsData: resolve(__dirname, 'src/renderer/teams-data.html'),
         },
       },
     },
     resolve: {
+      dedupe: ['react', 'react-dom', 'firebase'],
       alias: {
         '@renderer': resolve(__dirname, 'src/renderer'),
       },

@@ -1,4 +1,5 @@
 import { setLanguagePreference } from '../src/renderer/i18n/useI18n';
+import { botsCatalog } from '../src/renderer/i18n/botsCatalog';
 import { chatCatalog } from '../src/renderer/i18n/chatCatalog';
 import { computerCatalog } from '../src/renderer/i18n/computerCatalog';
 import { desktopCatalog } from '../src/renderer/i18n/desktopCatalog';
@@ -12,8 +13,8 @@ import { runtimeCatalog } from '../src/renderer/i18n/runtimeCatalog';
 import { settingsCatalog } from '../src/renderer/i18n/settingsCatalog';
 import { shellCatalog } from '../src/renderer/i18n/shellCatalog';
 import { uiCatalog } from '../src/renderer/i18n/uiCatalog';
-import { voiceSettingsCatalog } from '../src/renderer/i18n/voiceSettingsCatalog';
 import { updateCatalog } from '../src/renderer/i18n/updateCatalog';
+import { voiceSettingsCatalog } from '../src/renderer/i18n/voiceSettingsCatalog';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -44,7 +45,7 @@ test('shared catalog formatting supports position reorder, unsigned numbers, lit
 
 test('every static desktop translation lookup exists in every supported language', () => {
   const rendererRoot = fileURLToPath(new URL('../src/renderer', import.meta.url));
-  const extras = { ...chatCatalog, ...computerCatalog, ...desktopCatalog, ...extensionCatalog, ...flowCatalog, ...gitCatalog, ...interactionCatalog, ...miscCatalog, ...navigationCatalog, ...runtimeCatalog, ...settingsCatalog, ...shellCatalog, ...uiCatalog, ...voiceSettingsCatalog, ...updateCatalog };
+  const extras = { ...botsCatalog, ...chatCatalog, ...computerCatalog, ...desktopCatalog, ...extensionCatalog, ...flowCatalog, ...gitCatalog, ...interactionCatalog, ...miscCatalog, ...navigationCatalog, ...runtimeCatalog, ...settingsCatalog, ...shellCatalog, ...uiCatalog, ...updateCatalog, ...voiceSettingsCatalog };
   const sharedRoot = new URL('../../../resources/translations/', import.meta.url);
   const catalogs = Object.fromEntries(DESKTOP_LOCALES.map(locale => [locale, JSON.parse(readFileSync(new URL(`${locale}.json`, sharedRoot), 'utf8'))]));
   function files(directory: string): string[] {

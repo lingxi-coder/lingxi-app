@@ -1,0 +1,43 @@
+{
+  "device": "iPhone 11 / iOS 27.0.1",
+  "app": "com.lingxi.code.full",
+  "device_usb_discovered": true,
+  "coredevice_actual_transport": "wired",
+  "mobile_mcp_agent": {
+    "bundle": "com.mobilenext.devicekit-iosUITests.xctrunner",
+    "version": "0.0.35",
+    "installed": true,
+    "ui_read_result": "failed to wait for agent: timed out waiting for WebDriverAgent to be ready",
+    "attempts": 3
+  },
+  "xctest_ui": {
+    "attempts": 3,
+    "latest_log": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-device-bot-live-20261029-usb.log",
+    "latest_result": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-device-bot-live-20261029-usb.xcresult",
+    "runner_exit_code": 74,
+    "xcodebuild_exit_code": 65,
+    "test_method_executed": false,
+    "error": "XCTestDriverInterface:XCTestManager_IDEInterface channel refused; runner exited before establishing connection"
+  },
+  "control_unit": {
+    "test": "RemoteBotsTests/testDirectoryForgetsEverythingWhenTheComputerChanges",
+    "result": "1 pass",
+    "log": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-unit-driver-diagnostic.log",
+    "xcresult": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-unit-driver-diagnostic.xcresult"
+  },
+  "devicehub": {
+    "screen_read": "pass",
+    "first_navigation": "drawer, Remote control, Account",
+    "later_coordinate_input": "noWindowsAvailable, persists after user brought window to front and CUA session reset"
+  },
+  "root_cause": "undetermined; failures precede Bot UI test execution",
+  "upstream_comparable_reports": [
+    "https://github.com/mobile-next/mobilecli/issues/487",
+    "https://github.com/zhongerxin/iPhone-use/issues/19"
+  ],
+  "upstream_limit": "Reports show similar failures and transport differences; they do not establish this device's root cause. Current wired retry also failed.",
+  "changes_to_device_data_or_pairing": false,
+  "later_mobile_mcp_recovered": true,
+  "later_actual_ui_evidence": "ios-terra-live.json",
+  "current_status": "Historical bootstrap failures preserved. Mobile MCP later drove a real Bot reply and Back/reopen; XCTest has not subsequently passed."
+}

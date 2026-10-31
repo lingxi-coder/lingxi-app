@@ -1,0 +1,22 @@
+{
+  "pid": 31865,
+  "command": [
+    "xcodebuild",
+    "-xctestrun",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/Build/Products/LingxiCodeFull-bot-live-20261029.xctestrun",
+    "-destination",
+    "platform=iOS,id=00008030-001549902184802E,arch=arm64",
+    "-resultBundlePath",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-device-bot-live-20261029-usb.xcresult",
+    "-parallel-testing-enabled",
+    "NO",
+    "-only-testing:LingxiCodeUITests/RemoteBotsDeviceAcceptanceUITests",
+    "test-without-building"
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app",
+  "floor_gib": 4.0,
+  "started_at": 1793260371.1059022,
+  "exit_code": 65,
+  "stopped_for_disk": false,
+  "free_gib": 7.26
+}

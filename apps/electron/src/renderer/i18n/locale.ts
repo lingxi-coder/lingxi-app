@@ -1,3 +1,4 @@
+import { botsCatalog } from './botsCatalog';
 import { chatCatalog } from './chatCatalog';
 import { computerCatalog } from './computerCatalog';
 import { desktopCatalog } from './desktopCatalog';
@@ -24,7 +25,7 @@ export type DesktopLocale = typeof DESKTOP_LOCALES[number];
 export type LanguagePreference = DesktopLocale | '';
 export const LANGUAGE_STORAGE_KEY = 'lingxi.desktop.language';
 const catalogs: Record<DesktopLocale, Record<string, unknown>> = { 'zh-Hans': hans, 'zh-Hant': hant, en, ja, ko };
-const extraCatalog = { ...chatCatalog, ...computerCatalog, ...desktopCatalog, ...extensionCatalog, ...flowCatalog, ...gitCatalog, ...interactionCatalog, ...miscCatalog, ...navigationCatalog, ...runtimeCatalog, ...settingsCatalog, ...shellCatalog, ...uiCatalog, ...voiceSettingsCatalog, ...updateCatalog };
+const extraCatalog = { ...botsCatalog, ...chatCatalog, ...computerCatalog, ...desktopCatalog, ...extensionCatalog, ...flowCatalog, ...gitCatalog, ...interactionCatalog, ...miscCatalog, ...navigationCatalog, ...runtimeCatalog, ...settingsCatalog, ...shellCatalog, ...uiCatalog, ...voiceSettingsCatalog, ...updateCatalog };
 
 export function matchLocale(tag: string): DesktopLocale | null {
   const parts = tag.replace(/_/g, '-').toLowerCase().split('-');

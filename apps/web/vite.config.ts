@@ -49,8 +49,13 @@ const sharedSources = [
 
 export default defineConfig({
   plugins: [react(), compilerDocumentation()],
-  resolve: { alias: sharedSources },
+  resolve: { alias: sharedSources, dedupe: ['react', 'react-dom', 'firebase'] },
   define: { __LINGXI_WEB_VERSION__: JSON.stringify(version) },
   // The dev server only serves files under the app by default; the shared sources are two directories up.
-  server: { fs: { allow: [repoRoot] } },
+  server: { fs: {
+    allow: [repoRoot],
+    // Keep reusable acceptance credentials/session exports private even though
+    // shared source modules live outside the Web directory.
+    deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/teams-t1-private/**'],
+  } },
 });

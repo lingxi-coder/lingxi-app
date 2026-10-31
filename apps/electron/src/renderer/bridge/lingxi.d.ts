@@ -1,9 +1,11 @@
 import type { LocalAppsApi, LocalAppEditRequest } from '../../shared/localApps';
 import type { ProjectCreationPurpose, ProjectFolderSelection } from '../../shared/projectCreation';
 import type { AccountApi } from '../../shared/account.js';
+import type { DesktopTeamsApi } from '../../../../../packages/teams';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type { ScheduledApi } from '../../shared/scheduled';
 import type { RemoteControlApi } from '../../shared/remoteControl';
+import type { BotsApi } from '../../shared/bots';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../../shared/visualization';
 import type { GitApi } from '../../shared/git.js';
 import type { TerminalApi } from '../../shared/terminal.js';
@@ -70,6 +72,8 @@ export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEvent
 export interface SessionRuntimeSummary {
   projectPath: string;
   sessionId: string;
+  /** Set when the session is a Bot's. It is not a project's session and is listed with its Bot, not with the projects. */
+  botId?: string;
   connection: ConnectionState;
   turnActive: boolean;
   pendingInteractions: number;
@@ -160,12 +164,14 @@ export interface LingxiApi {
   onLocalAppEdit?(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled?: ScheduledApi;
   remoteControl?: RemoteControlApi;
+  bots?: BotsApi;
   git?: GitApi;
   terminal: TerminalApi;
   getPathForFile(file: File): string;
   platform: NodeJS.Platform;
   isElectron: true;
   account: AccountApi;
+  teams: DesktopTeamsApi;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
   openSettingsFile(path: string): Promise<void>;
@@ -173,6 +179,7 @@ export interface LingxiApi {
     telemetryEnabled?: boolean;
     theme?: 'dark' | 'light' | 'system';
     collapseThoughtsByDefault?: boolean;
+    botsKeepAwake?: boolean;
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;

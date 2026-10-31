@@ -74,6 +74,37 @@ final class RemoteControlTests: XCTestCase {
     }
 
     @MainActor
+    func testManagerFilesBotReportsUnderTheirComputerAndDropsThoseOfAReplacedClient() {
+        let manager = RemoteControlManager()
+        let bot = RemoteBotSummaryFfi(botId: "bot-1", name: "Scribe", description: "", status: .running,
+            waitingThreads: 1, lastActivityAtMs: nil)
+        let chats = RemoteBotThreadsStateFfi(threads: [], error: nil)
+        // A new manager is on its first client, whose reports carry generation 0.
+        manager.receive(bots: .bots(bots: [bot]), hostID: host, generation: 0)
+        manager.receive(botThreads: chats, hostID: host, botID: "bot-1", generation: 0)
+        XCTAssertEqual(manager.botDirectory.bots(host: host), .bots(bots: [bot]))
+        XCTAssertEqual(manager.botDirectory.chats(host: host, bot: "bot-1"), chats)
+        XCTAssertEqual(manager.botDirectory.bots(host: "another-computer"), .unknown)
+
+        manager.receive(bots: .unsupported, hostID: host, generation: 1)
+        manager.receive(botThreads: RemoteBotThreadsStateFfi(threads: nil, error: nil), hostID: host, botID: "bot-1", generation: 1)
+        XCTAssertEqual(manager.botDirectory.bots(host: host), .bots(bots: [bot]))
+        XCTAssertEqual(manager.botDirectory.chats(host: host, bot: "bot-1"), chats)
+    }
+
+    @MainActor
+    func testManagerWithoutAClientShowsNoBotsAndRefusesToStartAChat() async {
+        let manager = RemoteControlManager()
+        manager.hideBot(RemoteBotKey(hostID: host, botID: "bot-1"))
+        XCTAssertNil(manager.botOfThread(session))
+        XCTAssertEqual(manager.botDirectory.bots(host: host), .unknown)
+        do {
+            _ = try await manager.createBotChat(RemoteBotKey(hostID: host, botID: "bot-1"))
+            XCTFail("a chat was started with no connection")
+        } catch { XCTAssertEqual(error as? RemoteFfiError, .NotConnected) }
+    }
+
+    @MainActor
     func testRemoteProjectionCannotBootstrapLocalEngine() async {
         let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)

@@ -1,0 +1,130 @@
+{
+  "main": "daffddd21e77e53e9381a215d05856b1ac6b2462",
+  "rebased_head": "4d74c78f0cb9b8f8bb4eaa7932288bd7fa3add83",
+  "original_head": "f65fd4390dac4de0eba8f1ded94bfacffc8991c7",
+  "backup_branch": "codex/desktop-bot-before-main-20261028-f65fd4390",
+  "pushed": false,
+  "passed": {
+    "electron_related": 631,
+    "bridge_client": 345,
+    "web_remote": 169,
+    "android_unit": 1244,
+    "rust_remote": 153,
+    "mobile_ffi": 70,
+    "android_device_bot_ui": 17,
+    "ios_device_remote_unit": 20,
+    "electron_permission_regression": 45,
+    "electron_login_and_remote_regression": 67,
+    "actual_platform_conversations": 3,
+    "actual_android_question_and_desktop_sync": true,
+    "actual_android_remote_revocation_and_restore": true
+  },
+  "generated_bindings": [
+    {
+      "path": "apps/ios/native/Generated/harness_runtime.swift",
+      "bytes": 177543,
+      "sha256": "f2def31e476711810e90030f5b8d570c84b824e793bb6c490fa158c0f1787e81"
+    },
+    {
+      "path": "apps/ios/native/Generated/client.swift",
+      "bytes": 773985,
+      "sha256": "b50382287c37bfadf62d3e5b3b4d45869b2880324724ad7c79b2e18122bcb8ae"
+    },
+    {
+      "path": "apps/ios/native/Generated/LingxiCodeBindings.swift",
+      "bytes": 527163,
+      "sha256": "e610b6fd32bc722c5ae40c529b846e2dd404105f885930cc280f5bb54cc4ca3c"
+    },
+    {
+      "path": "apps/android/native/app/src/main/java/com/lingxi/code/bindings/runtime/harness_runtime.kt",
+      "bytes": 264041,
+      "sha256": "85ae0946e2407a7e2c20550fc673835c34f0aea06935c7818572d2c6612032a6"
+    },
+    {
+      "path": "apps/android/native/app/src/main/java/com/lingxi/code/bindings/android/android_aar.kt",
+      "bytes": 672076,
+      "sha256": "b3952cccd2dbcf63b15609f82faaf9630984fe18d848f6bc787a939b1556b969"
+    },
+    {
+      "path": "apps/android/native/app/src/main/java/com/lingxi/code/bindings/client/client.kt",
+      "bytes": 766719,
+      "sha256": "4479826811d420c55fc7a512cfa64dc8beb1a2374a6e674c506c58c17272ea24"
+    }
+  ],
+  "native_libraries_for_devices_rebuilt": true,
+  "device_e2e_completed": false,
+  "stop_reason": "iPhone automation/device connection repeatedly disconnects; cold-start restore and permission-label discrepancy need follow-up.",
+  "source_head": "82e718fbf",
+  "source_changes_under_validation": [],
+  "android_device": {
+    "device": "Galaxy S25 / Android 16",
+    "abi": "arm64-v8a",
+    "native_library_fresh": true,
+    "bindings_from_phone_library": true,
+    "full_apk_native_verification": true,
+    "unit_tests": 1244,
+    "instrumentation_tests": 17,
+    "instrumentation_duration_seconds": 90.338,
+    "installed_without_data_reset": true,
+    "cold_launch_observed": true,
+    "artifacts_sha256": {
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libios_framework.a": "25d10c37d36d9fe86e38fe61a7fbbbd3791a6869076fbe49ad136e552bc11ccf",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libandroid_aar.dylib": "62d0f499744c6c3529aeeaa897c201492a9ca2a526eb5af89252e2b11c28a552",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/uniffi-bindgen": "389b98c8e9289180ca2a15897b428969cbad94fe727ce3959e0ab50526cdfb7e",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-linux-android/debug/libandroid_aar.so": "569fb636d76dde5823d06c1c55839a7d7ca1e9515bb1e5952f28306c999e99fd",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/src/play/jniLibs/arm64-v8a/libandroid_aar.so": "7a634a4e6fc295a4ee473b5d0fbfc18e794b6d2eabffba1f0581c6880cc772f2",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/nativeSymbols/play/arm64-v8a/libandroid_aar.so": "569fb636d76dde5823d06c1c55839a7d7ca1e9515bb1e5952f28306c999e99fd",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/outputs/apk/play/debug/app-play-debug.apk": "bb57b6588ebfb2b524267383985f6cc29ce2cea12d1370a1b97c1daf8b427b21",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/outputs/apk/androidTest/play/debug/app-play-debug-androidTest.apk": "b9f980b9081a37fec8f4b49273c792396037b2b751abb62621bcaab9c7b7bd1d"
+    },
+    "first_instrumentation_run": "Started while screen was locked; one test failed before user unlocked; stopped only own test app and reran entire suite with 17 pass.",
+    "source_heading_fix": "Sessions header now follows Bots, after Local Apps.",
+    "real_remote_evidence": "android-terra-live.json",
+    "original_timeout_restored": true
+  },
+  "platform_native_status": {
+    "android": "Fresh arm64 JNI and binding/APK pair built, installed and UI-tested",
+    "ios": "Fresh current arm64 FFI/bindings, FullDebug app+tests compile/sign, update install, 20 focused Remote/Bot device unit tests pass",
+    "desktop": "Fresh source bridge and Flare signed package static/runtime pass; explicit Ask and interactive full-screen expired login verified"
+  },
+  "current_stage": "All three real Luna echo conversations pass; Android recovery/question/revocation pass. iPhone cold-start reopen incomplete due to device disconnection; remote permission label mismatch remains.",
+  "ios_sdk_provenance": "ios-gstreamer-input-provenance.json",
+  "ios_device_library_pair": "ios-device-binding-library-pair.json",
+  "ios_device": {
+    "device": "iPhone 11 / iOS 27.0.1",
+    "bundle": "com.lingxi.code.full",
+    "signing_team": "AZ4AX7J833",
+    "full_app_and_tests_build": "pass",
+    "installed_as_update": true,
+    "focused_unit_tests": 20,
+    "bot_device_ui_test_compiled": true,
+    "real_remote_conversation_e2e": "Actual reply, same-thread Desktop observation and Back/reopen pass; full lifecycle incomplete",
+    "driver_diagnostic": "ios-runtime-driver-diagnostic.json",
+    "session": "7855bf54-2a84-470d-9de2-4e615d2c6a6e",
+    "cold_launch_remote_reopen": "incomplete: system alert then device loss",
+    "permission_mode_display": "Auto in iOS remote composer; Ask in Desktop same thread; no mode changed",
+    "live_evidence": "ios-terra-live.json"
+  },
+  "desktop_package": "desktop-signed-package.json",
+  "desktop_actual_ui": "desktop-permission-actual-ui.json",
+  "i18n_gate": {
+    "pass": false,
+    "unchanged_from_head": true,
+    "proof": "i18n-comparison.json"
+  },
+  "tested_source_fix_commit": "82e718fbf",
+  "real_model": "openai-chatgpt/gpt-6-luna",
+  "live_evidence": "live-bot-evidence.json",
+  "committed_fixes": {
+    "main_integration": "56a7d4038",
+    "explicit_ask_and_device_preparation": "9a1c75f32",
+    "expired_account_login": "82e718fbf"
+  },
+  "core_conversation_all_three_passed": true,
+  "automation_agent": "gpt-6.1-terra",
+  "cleanup_final": "cleanup-ios-precompile-20261029.json",
+  "checkpoint_utc": "2026-10-29T08:34:11.944839+00:00",
+  "free_gib_at_checkpoint": 6.104,
+  "final_desktop_state": "final-desktop-state.json",
+  "android_timeout_restore": "android-timeout-restored-final.json"
+}

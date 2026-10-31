@@ -129,6 +129,18 @@ export const strings = {
   needsComputerAccess: text('等待电脑上的授权', 'Waiting on the computer'),
   untitled: text('未命名会话', 'Untitled session'),
 
+  // bots
+  bots: text('Bot', 'Bots'),
+  botNewChat: text('新对话', 'New chat'),
+  botNoChats: text('还没有对话', 'No chats yet'),
+  botGone: text(
+    '这个 Bot 现在无法远程访问。可能是电脑上关掉了它的远程开关，或者它已被删除。',
+    'This Bot can’t be reached now. Its Remote Control switch may be off on the computer, or it was deleted.',
+  ),
+  botWaiting: text('{n} 个对话等你回复', '{n} waiting for you'),
+  backToBot: text('返回 {name}', 'Back to {name}'),
+  backToComputer: text('返回 {name}', 'Back to {name}'),
+
   // session
   sessionLoading: text('正在加载会话…', 'Loading the session…'),
   sessionOffline: text('已离线，显示的是最后收到的内容。', 'Offline. Showing what was received last.'),
@@ -144,6 +156,8 @@ export const strings = {
   fromDevice: text('来自 {name}', 'From {name}'),
   fromThisDevice: text('来自此浏览器', 'From this browser'),
   fromScheduled: text('定时任务', 'Scheduled task'),
+  fromBot: text('来自 Bot「{name}」', 'From Bot {name}'),
+  fromAnotherBot: text('来自另一个 Bot', 'From another Bot'),
   omittedNote: text('此处有一条内容过大，未同步到远程。', 'An item here was too large to send.'),
   omittedKind: text('此处的“{kind}”内容过大，未同步到远程。', 'A “{kind}” item here was too large to send.'),
   computerAccessNote: text('电脑正在请求访问：{apps}。请在电脑上处理。', 'The computer is asking for access to: {apps}. Handle it on the computer.'),

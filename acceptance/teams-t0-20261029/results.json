@@ -1,0 +1,130 @@
+{
+  "date": "2026-10-29",
+  "branch": "claude/teams",
+  "baseCommit": "492a62e977aecd0be0ebeeca0060bfedacf80a27",
+  "T0Complete": true,
+  "rules": {
+    "passed": 15,
+    "failed": 0,
+    "skipped": 0
+  },
+  "sdkTests": {
+    "passed": 6,
+    "failed": 0,
+    "skipped": 0
+  },
+  "electronMain": {
+    "passed": true,
+    "electron": "43.1.1",
+    "node": "24.18.0",
+    "customToken": true,
+    "snapshotListener": true,
+    "isolatedUserData": true
+  },
+  "browser": {
+    "passed": true,
+    "changes": [
+      "change002"
+    ]
+  },
+  "nativeProbes": {
+    "android": "baseline and Firestore Debug APK builds passed",
+    "ios": "baseline and Firestore unsigned arm64 Release app builds passed",
+    "sizes": "sizes.json"
+  },
+  "backendUnit": {
+    "passed": 23,
+    "failed": 0,
+    "skipped": 22,
+    "note": "environment-dependent tests use the dedicated emulator command"
+  },
+  "webUnit": {
+    "passed": 231,
+    "failed": 0,
+    "skipped": 1,
+    "note": "the emulator-only Web test passed separately"
+  },
+  "typecheck": {
+    "desktopMain": true,
+    "web": true
+  },
+  "build": {
+    "bridgeClient": true,
+    "web": true
+  },
+  "independentReview": "passed after initialization cleanup and immutable retry evidence fixes",
+  "sourceSha256": {
+    "infra/firebase/firestore.default.rules": "904254d571b16bda80c24834ce53dd320774df4d9b0a58d9c5b8aba17684d0f1",
+    "firebase.json": "308af8359212f3a20a736035a3cc62bc4cc09a94b41d46c824c3517a6420fe09",
+    "apps/firebase/src/team-conversations.mjs": "b5f3f05d655af479aa70424b7b99381b705032e75b6ad0a6a12e5ee0d45bf2aa",
+    "apps/firebase/test/teams.rules.emulator.test.mjs": "d8164eeb851cd7fef7145edb93b26da42d7df4765886c80dc964dfb9fff7b152",
+    "apps/electron/src/main/teams/firestore.ts": "ac5bc8daadb73cec6673a1ba4e098be654b704e4baf57c1070a60c92b6db17b1",
+    "apps/web/src/teams/firestore.ts": "c4999319055337c8868feb98bacbedc51abb4257a2ed4460d4a9ceeb41c16b29",
+    "apps/ios/native/project.yml": "f79da970213847e03378608dcdb2078b3bcac344624809e01150bc071ff68151",
+    "apps/android/native/app/build.gradle.kts": "043c5c2a3f770b7da25fbf69a2636d5c241ea58f8dc933aed04677abe2285512",
+    "apps/android/native/gradle/libs.versions.toml": "c0b3c87957e26cb04b23a2e707e4183cd9eedb5194299d573d2e493661b2960d"
+  },
+  "logs": {
+    "rules-and-sdk.log": {
+      "path": "acceptance/teams-t0-20261029/logs/rules-and-sdk.log.gz",
+      "uncompressedBytes": 14289,
+      "sha256": "b7361ca55ca1517f704f8b93d65430c79aa39cc3b8e053c384fa9a74d802c8d6"
+    },
+    "runtime.log": {
+      "path": "acceptance/teams-t0-20261029/logs/runtime.log.gz",
+      "uncompressedBytes": 1386,
+      "sha256": "40ea8ef42faeeeedb717adcee1eb9ee372e8651af852671c5b04bbd1b9118295"
+    },
+    "android.log": {
+      "path": "acceptance/teams-t0-20261029/logs/android.log.gz",
+      "uncompressedBytes": 3854,
+      "sha256": "cdfcbde99457dfd2e850ce365f0400f8ab49c3e56a50873939bac5a4cbac16ce"
+    },
+    "ios-baseline.log": {
+      "path": "acceptance/teams-t0-20261029/logs/ios-baseline.log.gz",
+      "uncompressedBytes": 3205734,
+      "sha256": "d26de2db1c7116088d808bf3e5be4bec7c9134001df450ce98bdaf2ff8fcfa9d"
+    },
+    "ios-firestore.log": {
+      "path": "acceptance/teams-t0-20261029/logs/ios-firestore.log.gz",
+      "uncompressedBytes": 667173,
+      "sha256": "8e35b061c4bd3888093c8de7199afdb3f9ea22b6096443f512f04e7153e7da22"
+    },
+    "backend-unit.log": {
+      "path": "acceptance/teams-t0-20261029/logs/backend-unit.log.gz",
+      "uncompressedBytes": 4780,
+      "sha256": "e7016e1da3637d9a6b003812691c25bef1e9a43243710ba6ea041466e05e434a"
+    },
+    "web-unit.log": {
+      "path": "acceptance/teams-t0-20261029/logs/web-unit.log.gz",
+      "uncompressedBytes": 21731,
+      "sha256": "d17230eaef07cb24421d8c3f1f136b4b2b906baf53a911872daa3929436ed6c2"
+    },
+    "web-typecheck.log": {
+      "path": "acceptance/teams-t0-20261029/logs/web-typecheck.log.gz",
+      "uncompressedBytes": 101,
+      "sha256": "7348e6eabd717984da3717ddc0a4a0654b531d4a87e9792cf40e5807d3483ec7"
+    },
+    "web-build.log": {
+      "path": "acceptance/teams-t0-20261029/logs/web-build.log.gz",
+      "uncompressedBytes": 1577,
+      "sha256": "525106163bfd49563cec21566ac70f376a5775f95fce8d8b6ac88168b73fccf7"
+    },
+    "desktop-typecheck.log": {
+      "path": "acceptance/teams-t0-20261029/logs/desktop-typecheck.log.gz",
+      "uncompressedBytes": 100,
+      "sha256": "0de16c970bd230373a26ac84cbec70b4256dfb2284a0fee3361905265653c090"
+    },
+    "bridge-build.log": {
+      "path": "acceptance/teams-t0-20261029/logs/bridge-build.log.gz",
+      "uncompressedBytes": 61,
+      "sha256": "2025e9433c10dbfbc005fc7c5633d3834d42c0cda1a899bf57be682809393c0c"
+    }
+  },
+  "limits": [
+    "T1-T5 APIs/UI/runtime integration and real second-account acceptance remain pending",
+    "Native size probes are not full signed products or physical-device acceptance",
+    "Named Firestore database emulator rules are tested via isolated projects plus production config mapping because firebase-tools does not initialize multi-database rules",
+    "No production Firebase deployment or push"
+  ]
+}

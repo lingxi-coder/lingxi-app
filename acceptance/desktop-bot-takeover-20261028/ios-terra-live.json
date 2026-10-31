@@ -1,0 +1,14 @@
+{
+  "device": "iPhone 11",
+  "os": "iOS 27.0.1",
+  "app": "com.lingxi.code.full",
+  "bot": "Desktop Bot Luna Acceptance",
+  "sessionId": "7855bf54-2a84-470d-9de2-4e615d2c6a6e",
+  "modelVisible": "GPT-6 Luna",
+  "permissionModeVisible": "Auto",
+  "permissionModeNote": "Remote conversation composer AX showed Auto; Desktop Bot configuration was independently reported as default. No mode changed and echo used no tools.",
+  "echo": {"result": "passed", "prompt": "Reply with exactly BOT_E2E_IOS_LUNA_20261029. Do not use tools.", "assistant": "BOT_E2E_IOS_LUNA_20261029", "screenshot": "ios-terra-echo.png"},
+  "backAndReopen": {"result": "passed", "observation": "Returned to Bot list, opened the same session, observed both request and assistant marker."},
+  "coldStart": {"result": "partial", "observation": "After terminate and launch, local New Conversation displayed Failed to resume session. Navigated via Remote Control to the same paired host, but an unrelated Cellular Plan Removed system alert appeared and Mobile MCP device connection disappeared before reopening the Bot. No contacts update was authorized or performed.", "screenshot": "ios-terra-cold-resume-error.png"},
+  "deviceConnection": "Mobile MCP reported PairRecord error 22 and then device not found; CoreDevice subsequently still listed the iPhone connected. No re-pairing or reinstall was attempted."
+}

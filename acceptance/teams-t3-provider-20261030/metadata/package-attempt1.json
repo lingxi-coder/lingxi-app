@@ -1,0 +1,12 @@
+{
+  "exit": -15,
+  "elapsed_s": 2934.9,
+  "command": [
+    "/bin/bash",
+    "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t3-provider-private/package-provider.sh"
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/electron",
+  "log": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t3-provider-private/evidence/native-package-provider-r1.log",
+  "freeAfter": 2132185088,
+  "stopped": "2 GiB disk floor"
+}

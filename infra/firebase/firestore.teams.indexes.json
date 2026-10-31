@@ -1,0 +1,30 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "triggers",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "botKey",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "seq",
+          "order": "ASCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "catalogParts",
+      "fieldPath": "json",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "messages",
+      "fieldPath": "text",
+      "indexes": []
+    }
+  ]
+}

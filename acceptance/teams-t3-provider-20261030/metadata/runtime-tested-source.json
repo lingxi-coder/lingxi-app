@@ -1,0 +1,22 @@
+{
+  "head": "2580fbcd1e6c5671bb25241cf5ccc465b30c3456",
+  "sha256": {
+    "crates/runtime/src/desktop/mod.rs": "286060aa76cc503bdd1f7932518d1118bbfec464543860e3293bb6d548e39e78",
+    "crates/runtime/src/desktop/assembly.rs": "78c9cea3b3b83c00e7b042b9337657b693d05dd8493c153fb07f03ca6c52dfaf",
+    "crates/runtime/src/desktop/credentials.rs": "d254d9086e4b23e25743ab0e3bee3d40630e9aa639dc8dac0e1e0b961149a363",
+    "crates/runtime/src/desktop/team_invocation.rs": "982164fae4e26d481179461ce62cba4118343bd66cd43632d64ae8b1fcf4218f",
+    "crates/runtime/src/desktop/team_connector/host.rs": "46b248ccdb110d5ffa01af6b101cc7ea07d9857728812d1667521840efb8ed84",
+    "crates/runtime/src/desktop/team_process/mod.rs": "3f0313dde4c8a3afcc2393d8d84153402a1218476ecb9ca5d5adccfaf0034d59",
+    "crates/runtime/src/desktop/team_process/model.rs": "93237cde56e1b74bd5fbbfe1c05dccb929fba9e838796013e46453c250dba596",
+    "crates/runtime/src/desktop/team_process/protocol.rs": "bd49b35f289f14c68809d97ce663497b35d319bbbd5aa3c5b1e182e9351ceaae",
+    "crates/runtime/src/desktop/team_process/worker.rs": "96199818cb798885712036d87f5ec117bcc2f48e51daf3909917874ec4882dff",
+    "crates/runtime/tests/desktop/team_invocation_process.rs": "abb827868f95e88d8bc5c68edb316cebe8c5a690dd32564628cfef41c0081169",
+    "crates/runtime/tests/desktop/team_process_interactions.rs": "0d2183bf0a4744c77078b0f8573e33b35e5adcd016b98112e833e6473c9744bd",
+    "Cargo.toml": "286ce45cf9699b8d0113b55937e9a056969983d54fb0c7547a863511b0f9f024",
+    "Cargo.lock": "e4bc620607b8adcbee4034be6197d21d7c35bbe3d87ebdf6f45208e6de30797e",
+    "crates/runtime/src/bin/team_worker.rs": "10782f3a8c4bc865bc1d2b9a1ef9a08e11cac5bc296e6bbeb96ad483487bb666",
+    "crates/runtime/src/bin/team_host.rs": "8bdd7ea404ac46ab047aeb616a524333ad47985436a315a7df60bc6c046c24bf"
+  },
+  "p_head": "876844fa6b7fc8372f631dbc953e64dc61b4f66c",
+  "p_native_projection_sha256": "ad24d200c46ef12e9f4cc98444c7429a2184acaf615bbf0418751641470b5660"
+}

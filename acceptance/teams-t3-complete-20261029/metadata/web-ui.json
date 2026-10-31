@@ -1,0 +1,441 @@
+{
+  "passed": true,
+  "checks": {
+    "originalHumanOnly": true,
+    "cardsAndWebBindingGuidance": true,
+    "realQuestionAnswer": true,
+    "permittedBotDM": true,
+    "plainMentionNeverExecutes": true,
+    "explicitGroupTarget": true,
+    "realQueuedStatus": true,
+    "noExecutorCapabilities": true,
+    "liveQuestionsCompleteWithExactReplies": true
+  },
+  "commands": [
+    {
+      "action": "bots",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "web-human-live-thread",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "botState",
+      "conversationId": "web-human-live-thread",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "web-human-live-thread",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "botAnswer",
+      "conversationId": "web-human-live-thread",
+      "questionId": "8829fda4a17dce1f6effd7684ebef8c3fd0fd9dd59bd828662ef4da6dbed8565",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "web-human-live-thread",
+      "status": 200
+    },
+    {
+      "action": "create",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "kind": "bot_dm",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "mutate",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "botState",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "botState",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "botState",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "botAnswer",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "questionId": "29c738ed0f327e301d8b21e7338a408d23b9d7239da33b3033be39985c60b8dc",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "status": 200
+    },
+    {
+      "action": "create",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "kind": "group",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "mutate",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "mutate",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "targets": [
+        "bot:fixture-owner:mOga8ZlDCkCA0cLU9ZEniQ:nDF32iFXtQbn-9A1OB09cA"
+      ],
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "botState",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "bots",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "botState",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "botAnswer",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "questionId": "d62272459b71165edfd9a2d9dc772cfc1eae1363c2c7d4482f011357569b76e2",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "status": 200
+    },
+    {
+      "action": "create",
+      "conversationId": "1c710715-0413-4e85-8644-01dad41a01e3",
+      "kind": "bot_dm",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "1c710715-0413-4e85-8644-01dad41a01e3",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "1c710715-0413-4e85-8644-01dad41a01e3",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "mutate",
+      "conversationId": "1c710715-0413-4e85-8644-01dad41a01e3",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "1c710715-0413-4e85-8644-01dad41a01e3",
+      "status": 200
+    },
+    {
+      "action": "botState",
+      "conversationId": "1c710715-0413-4e85-8644-01dad41a01e3",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "1c710715-0413-4e85-8644-01dad41a01e3",
+      "status": 200
+    },
+    {
+      "action": "list",
+      "status": 200
+    },
+    {
+      "action": "sync",
+      "conversationId": "1c710715-0413-4e85-8644-01dad41a01e3",
+      "status": 200
+    }
+  ],
+  "observations": [
+    {
+      "conversationId": "web-human-live-thread",
+      "state": "running",
+      "questionId": "8829fda4a17dce1f6effd7684ebef8c3fd0fd9dd59bd828662ef4da6dbed8565",
+      "answered": false
+    },
+    {
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "state": "queued",
+      "answered": false
+    },
+    {
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "state": "queued",
+      "answered": false
+    },
+    {
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "state": "running",
+      "questionId": "29c738ed0f327e301d8b21e7338a408d23b9d7239da33b3033be39985c60b8dc",
+      "answered": false
+    },
+    {
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "state": "queued",
+      "answered": false
+    },
+    {
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "state": "running",
+      "questionId": "d62272459b71165edfd9a2d9dc772cfc1eae1363c2c7d4482f011357569b76e2",
+      "answered": false
+    },
+    {
+      "conversationId": "1c710715-0413-4e85-8644-01dad41a01e3",
+      "state": "queued",
+      "answered": false
+    }
+  ],
+  "runtimeErrors": [],
+  "scope": "Shared TeamsPanel/MessagesPanel + product Web adapter + real local Auth/Firestore/HTTP fixture; Desktop owner tool approval and production deployment excluded.",
+  "output": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/playwright/teams-t3-web-r4",
+  "finalReplies": [
+    {
+      "teamId": "t3runtime-mvunlqxr-60572",
+      "conversationId": "web-human-live-thread",
+      "triggerId": "449ae08a51956ed3870b37c50202d5ffbd6a1ddd0a939fe625f04059dac52f52",
+      "state": "completed",
+      "replyId": "bot_f34eb52c1a5d4cd59ac7c5f993acb483fce477a19a3291ec97c10a11f477",
+      "replyCount": 1,
+      "text": "Current acceptance result completed once."
+    },
+    {
+      "teamId": "t3runtime-mvunlqxr-60572",
+      "conversationId": "9ffcf091-7bce-443d-aac5-1c8d7521f79b",
+      "triggerId": "fae3c85c6460f2734a3e05ec23ffd6e6169dad6128e00373e20e38a211571c7d",
+      "state": "completed",
+      "replyId": "bot_98dba3abf475f126dc43b192463126c43e4a1e36327c90c6f2c29ffdd389",
+      "replyCount": 1,
+      "text": "Current acceptance result completed once."
+    },
+    {
+      "teamId": "t3runtime-mvunlqxr-60572",
+      "conversationId": "22635d83-853f-4e1d-8d0e-17c0f440a55a",
+      "triggerId": "4169a6726960cc92d73313ab42a85f0d03e689471ef632e16373c28d0a759665",
+      "state": "completed",
+      "replyId": "bot_2cbda996dcd11aa943bbf8120d36476fced7a488433092cb7968bd2c02bc",
+      "replyCount": 1,
+      "text": "Current acceptance result completed once."
+    }
+  ]
+}

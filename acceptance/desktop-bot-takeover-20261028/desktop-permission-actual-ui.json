@@ -1,0 +1,22 @@
+{
+  "bot_id": "-n_RW8JdXhLQEi2loxRatQ",
+  "existing_unset_mode_ui": "App default",
+  "saved_ask_mode": "default",
+  "generated_default_mode": "default",
+  "new_chat_ui": "Permission mode: Ask for approval",
+  "screenshot": "desktop-ask-verified.png",
+  "real_model_requests_sent": 0,
+  "real_conversation_e2e": "pending approved catalog model and account sign-in",
+  "model_catalog": [
+    "GPT-6.1 Sol",
+    "GPT-6 Astra",
+    "GPT-6 Sol",
+    "GPT-6 Luna",
+    "GPT-5.6 Sol",
+    "GPT-5.6 Terra",
+    "GPT-5.6 Luna"
+  ],
+  "requested_models_available": false,
+  "account_before_pairing": "signed out; normal browser sign-in timed out; retry from Desktop Account page required",
+  "galaxy_before_pairing": "locked; awaiting user unlock"
+}

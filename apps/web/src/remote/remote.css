@@ -37,6 +37,14 @@
 .rc-status-running { background: var(--accent-soft); color: var(--accent); }
 .rc-status-requires_action, .rc-pending-tag { color: var(--warning); font-size: 12px; }
 
+/* Bots */
+.rc-bot-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.rc-bot-head > div { min-width: 0; }
+.rc-bot-head h2 { margin-bottom: 4px; }
+.rc-bot-head p { margin-bottom: 4px; }
+.rc-bot-description { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-bot-chats { margin-top: 14px; }
+
 .rc-badge { flex: none; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); font-size: 11px; color: var(--ink-3); }
 .rc-badge-direct { color: var(--accent); border-color: var(--accent); }
 

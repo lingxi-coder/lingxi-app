@@ -22,6 +22,11 @@ pub fn client_protocol_major() -> u32 {
 /// Label of the reliable, ordered DataChannel that carries RPC fragments.
 pub const DATA_CHANNEL_LABEL: &str = "lingxi-agent";
 
+/// `initialize.app.features` value of a viewer that understands Bots: the `bots.*`
+/// and `bot.*` methods and the `bot` prompt origin. The host adds none of them to
+/// what any other viewer sees.
+pub const REMOTE_FEATURE_BOTS: &str = "bots";
+
 /// Largest fragment (kind byte included); one fragment is one DataChannel message.
 pub const FRAGMENT_MAX_BYTES: usize = 16384;
 /// Fragment size a tunnel sender uses so that three fragments fill one frame.

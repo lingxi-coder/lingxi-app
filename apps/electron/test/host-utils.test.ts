@@ -5,10 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  BOT_PERMISSION_TIMEOUT_SECS,
   DiagnosticBuffer,
   MAX_DIAGNOSTICS,
   MAX_PINNED_SESSIONS,
   MAX_PROJECTS,
+  REMOTE_PERMISSION_TIMEOUT_SECS,
   buildBridgeArguments,
   buildBridgeEnvironment,
   buildCredentialEnvelope,
@@ -662,4 +664,24 @@ test('remote-capable runtimes wait for phone approvals while ordinary runtimes k
   assert.deepEqual(remote.slice(-4), ['--permission-timeout-secs', '1800', '--ask-user-question-timeout', 'never']);
   assert.ok(!buildBridgeArguments(base).includes('--permission-timeout-secs'));
   assert.ok(!buildBridgeArguments({ ...base, remoteControlEnabled: true, listSessionsJson: true }).includes('--permission-timeout-secs'));
+});
+
+test('a remote runtime waits half an hour for an answer unless it is told to wait longer, and the longest wait is a day', () => {
+  const base = { workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, remoteControlEnabled: true };
+  assert.equal(REMOTE_PERMISSION_TIMEOUT_SECS, 1800);
+  assert.equal(BOT_PERMISSION_TIMEOUT_SECS, 86_400, 'the most bridge-server accepts');
+  assert.deepEqual(buildBridgeArguments(base).slice(-4), ['--permission-timeout-secs', '1800', '--ask-user-question-timeout', 'never']);
+  assert.deepEqual(buildBridgeArguments({ ...base, permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS }).slice(-4), ['--permission-timeout-secs', '86400', '--ask-user-question-timeout', 'never'], 'the question timeout stays as it is');
+  const longer = buildBridgeArguments({ ...base, permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS });
+  assert.equal(longer.filter((argument) => argument === '--permission-timeout-secs').length, 1, 'the one flag, not a second one');
+  assert.deepEqual(longer.filter((argument) => argument === '--ask-user-question-timeout').length, 1);
+});
+
+test('a timeout is only a remote runtime\'s: without Remote Control the engine keeps its own defaults, whatever the timeout says', () => {
+  const base = { workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS };
+  for (const config of [base, { ...base, remoteControlEnabled: false }, { ...base, remoteControlEnabled: true, listSessionsJson: true }]) {
+    const args = buildBridgeArguments(config);
+    assert.ok(!args.includes('--permission-timeout-secs'), JSON.stringify(config));
+    assert.ok(!args.includes('--ask-user-question-timeout'), JSON.stringify(config));
+  }
 });

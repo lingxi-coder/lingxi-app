@@ -1,0 +1,104 @@
+{
+  "at": "2026-10-30T09:15:43.641Z",
+  "release": "sites/lingxi-5e4b2/releases/1793351712560000",
+  "version": "sites/lingxi-5e4b2/versions/71b4954f989e8405",
+  "origin": "https://lingxi-5e4b2.web.app",
+  "probes": [
+    {
+      "path": "/index.html",
+      "finalURL": "https://lingxi-5e4b2.web.app/index.html",
+      "redirects": [],
+      "status": 200,
+      "rawSha256": "1448d126aa9c24dd2b2357dcbd9dbdc4be9daae2b965de14e18649d62f2f2a4f",
+      "hostingGzipHash": "a1fd13b08beef277d7c0bf7e8e445dfbba38980e0839a501537e0e4b94900c73",
+      "headers": {
+        "cache-control": "max-age=3600",
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": null,
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "x-content-type-options": "nosniff"
+      }
+    },
+    {
+      "path": "/teams",
+      "finalURL": "https://lingxi-5e4b2.web.app/teams/",
+      "redirects": [
+        {
+          "url": "https://lingxi-5e4b2.web.app/teams",
+          "status": 301,
+          "location": "/teams/"
+        }
+      ],
+      "status": 200,
+      "rawSha256": "a032eb4d940ce141e402d1e39005cc6ec670a0c66edb5bbae63f7c402a3c7ed8",
+      "hostingGzipHash": "cba44c0635c5c93a5a4a20995fe3edee5724b3a7e1a0fc3eb0464d92232d568f",
+      "headers": {
+        "cache-control": "no-store",
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://apis.google.com https://www.googleapis.com",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff"
+      }
+    },
+    {
+      "path": "/teams/probe",
+      "finalURL": "https://lingxi-5e4b2.web.app/teams/probe",
+      "redirects": [],
+      "status": 200,
+      "rawSha256": "a032eb4d940ce141e402d1e39005cc6ec670a0c66edb5bbae63f7c402a3c7ed8",
+      "hostingGzipHash": "cba44c0635c5c93a5a4a20995fe3edee5724b3a7e1a0fc3eb0464d92232d568f",
+      "headers": {
+        "cache-control": "no-store",
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://apis.google.com https://www.googleapis.com",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff"
+      }
+    },
+    {
+      "path": "/open/team/join",
+      "finalURL": "https://lingxi-5e4b2.web.app/open/team/join",
+      "redirects": [],
+      "status": 200,
+      "rawSha256": "a032eb4d940ce141e402d1e39005cc6ec670a0c66edb5bbae63f7c402a3c7ed8",
+      "hostingGzipHash": "cba44c0635c5c93a5a4a20995fe3edee5724b3a7e1a0fc3eb0464d92232d568f",
+      "headers": {
+        "cache-control": "no-store",
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": null,
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff"
+      }
+    },
+    {
+      "path": "/v1/teams",
+      "finalURL": "https://lingxi-5e4b2.web.app/v1/teams",
+      "redirects": [],
+      "status": 401,
+      "rawSha256": "4314ee762e7f73ce485d6a229f4489a9f6fa8aa34035c6e2bb530e9db64795b2",
+      "hostingGzipHash": "ccba616466d39f8effdadb95fad8bc57d9447c37c6a8f76398791d8a6c616a04",
+      "headers": {
+        "cache-control": "no-store",
+        "content-type": "application/json; charset=utf-8",
+        "content-security-policy": null,
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff"
+      }
+    },
+    {
+      "path": "/v1/teams/probe",
+      "finalURL": "https://lingxi-5e4b2.web.app/v1/teams/probe",
+      "redirects": [],
+      "status": 401,
+      "rawSha256": "4314ee762e7f73ce485d6a229f4489a9f6fa8aa34035c6e2bb530e9db64795b2",
+      "hostingGzipHash": "ccba616466d39f8effdadb95fad8bc57d9447c37c6a8f76398791d8a6c616a04",
+      "headers": {
+        "cache-control": "no-store",
+        "content-type": "application/json; charset=utf-8",
+        "content-security-policy": null,
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff"
+      }
+    }
+  ]
+}

@@ -29,6 +29,8 @@ export interface SessionAttachmentDeps {
   runtime: RemoteRuntime;
   channel: RemoteViewerChannel;
   clock: Clock;
+  /** The viewer understands Bots: it is sent the origin `bot` and the sending Bot's name, which any other viewer is not. */
+  botAware?: boolean;
   /** The runtime went away under the attachment (it told the viewer with `session.closed` first). */
   onEnded?: () => void;
 }
@@ -55,6 +57,7 @@ export class SessionAttachment {
   private readonly runtime: RemoteRuntime;
   private readonly channel: RemoteViewerChannel;
   private readonly clock: Clock;
+  private readonly botAware: boolean;
   private readonly onEnded: (() => void) | undefined;
   private unobserve: (() => void) | undefined;
   private batch: RemoteSeqRecord[] = [];
@@ -68,6 +71,7 @@ export class SessionAttachment {
     this.runtime = deps.runtime;
     this.channel = deps.channel;
     this.clock = deps.clock;
+    this.botAware = deps.botAware === true;
     this.onEnded = deps.onEnded;
   }
 
@@ -91,7 +95,7 @@ export class SessionAttachment {
     this.unobserve = this.runtime.observeRemote((observation) => this.observe(observation));
     this.lastPending = pendingSignature(view.pending);
     if (canResume(view, resume)) {
-      for (const { seq, record } of recordsAfter(view, resume.after_seq)) this.sendRecord(seq, record);
+      for (const { seq, record } of recordsAfter(view, resume.after_seq, false, this.botAware)) this.sendRecord(seq, record);
       return { mode: 'delta', epoch: view.epoch, pending: view.pending };
     }
     this.sendSnapshotFrames(view);
@@ -125,7 +129,7 @@ export class SessionAttachment {
         return;
       }
       case 'prompt':
-        this.push(recordForPrompt(this.sessionId, observation.entry));
+        this.push(recordForPrompt(this.sessionId, observation.entry, this.botAware));
         return;
       case 'interaction':
         this.push(recordForInteraction(observation.interaction));
@@ -195,6 +199,6 @@ export class SessionAttachment {
   }
 
   private sendSnapshotFrames(view: RemoteRuntimeView): void {
-    for (const frame of buildSnapshot(view)) this.channel.notify('session.snapshot', frame);
+    for (const frame of buildSnapshot(view, this.botAware)) this.channel.notify('session.snapshot', frame);
   }
 }

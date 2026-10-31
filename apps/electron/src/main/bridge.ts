@@ -96,6 +96,8 @@ import type {
   BridgeRuntimeVersions,
   ConnectionState,
   HostPermissionRequest,
+  HostTurnOptions,
+  HostTurnResult,
   InteractionRecord,
   PromptJournalEntry,
   PromptSource,
@@ -212,6 +214,18 @@ const MAX_INTERACTION_RECORDS = 200;
 
 const REMOTE_STATE_EVENTS: ReadonlySet<string> = new Set(REMOTE_STATE_EVENT_TYPES);
 
+/** How long a host turn waits for the engine to end a cancelled turn before it is let go. */
+const HOST_TURN_CANCEL_GRACE_MS = 10_000;
+
+/** A random 53-bit turn id, never 0, so that the host's turn is told apart from the ones the window and devices number. */
+function randomHostTurnId(): number {
+  for (;;) {
+    const bytes = randomBytes(8);
+    const id = (bytes.readUInt32BE(0) & 0x1fffff) * 2 ** 32 + bytes.readUInt32BE(4);
+    if (id > 0) return id;
+  }
+}
+
 // Mod UI requests share the runtime's ordinary command lane, and a transcript
 // mounts a render site per tool row, so opening a long chat asks for well over
 // a hundred renders at once. The Bridge closes a connection with 64 commands
@@ -267,6 +281,10 @@ export class SessionRuntime {
   private servedCodexToken: string | undefined;
   private oauthPersistence: Promise<void> = Promise.resolve();
   private activeTurnId: number | undefined;
+  /** The turn that ended last. `turn_ended` does not say which, and the active one is let go of by the time the notifier hears of it. */
+  private endedTurnId: number | undefined;
+  /** The turn the host ran last, by the id it gave it; the ones the window and devices number are small and their own. */
+  private hostTurnId: number | undefined;
   private cancellingTurn = false;
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
   /** Permission requests remain replayable until the engine reports a terminal resolution. */
@@ -997,6 +1015,95 @@ export class SessionRuntime {
     }
   }
 
+  /**
+   * Send a prompt as the host and wait for its turn to end: what the assistant
+   * ended with, what the turn cost, how it ended. The prompt goes the ordinary
+   * way, which queues behind a turn that is running, so a session that is not
+   * idle is refused rather than joined. A turn that stops for a permission or a
+   * question carries on once someone answers it in the chat; this just waits.
+   * Rejects when the connection is lost or the session is closed first.
+   */
+  async runHostTurn(prompt: string, options: HostTurnOptions = {}): Promise<HostTurnResult> {
+    if (this.disposed) throw new Error('The session was closed.');
+    if (this.turnActive || this.pendingInteractions > 0) throw new Error('busy: The session is working on something else.');
+    const { signal } = options;
+    if (signal?.aborted) return { status: 'cancelled', text: '' };
+    const turnId = randomHostTurnId();
+    this.hostTurnId = turnId;
+    const costBefore = this.lastKnownCost?.total_usd ?? 0;
+    return new Promise<HostTurnResult>((resolve, reject) => {
+      let started = false;
+      let done = false;
+      // The text of the message being written, and of the last one that was finished.
+      let streaming = '';
+      let finished = '';
+      let failure: string | undefined;
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      const said = (): string => (streaming.trim() !== '' ? streaming : finished);
+      const settle = (outcome: HostTurnResult | Error): void => {
+        if (done) return;
+        done = true;
+        stopObserving();
+        if (graceTimer !== undefined) clearTimeout(graceTimer);
+        signal?.removeEventListener('abort', cancel);
+        if (outcome instanceof Error) reject(outcome);
+        else resolve(outcome);
+      };
+      const cancel = (): void => {
+        if (done || graceTimer !== undefined) return;
+        try { this.cancelTurn(turnId); } catch { settle({ status: 'cancelled', text: said() }); return; }
+        graceTimer = setTimeout(() => settle({ status: 'cancelled', text: said() }), options.cancelGraceMs ?? HOST_TURN_CANCEL_GRACE_MS);
+        graceTimer.unref?.();
+      };
+      const stopObserving = this.observeRemote((observation) => {
+        if (observation.type === 'disposed') { settle(new Error('The session was closed.')); return; }
+        if (observation.type === 'state') {
+          // Closing a session says it is disconnected first, so what it was told is read off the flag.
+          if (observation.state.status !== 'connected') settle(new Error(this.disposed ? 'The session was closed.' : 'interrupted: The connection to the session was lost.'));
+          return;
+        }
+        if (observation.type !== 'event') return;
+        const event = observation.envelope.event;
+        if (event.type === 'turn_started') {
+          if (event.turn_id === turnId) started = true;
+          return;
+        }
+        if (!started) return;
+        if (event.type === 'text_delta') streaming += event.text;
+        else if (event.type === 'message_complete') {
+          const complete = event.message === undefined
+            ? streaming
+            : event.message.blocks.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n');
+          if (complete.trim() !== '') finished = complete;
+          streaming = '';
+        } else if (event.type === 'error') failure ??= event.message;
+        else if (event.type === 'turn_ended') {
+          const total = event.cost?.total_usd;
+          const costUsd = typeof total === 'number' && Number.isFinite(total) ? Math.max(0, total - costBefore) : undefined;
+          const result = { text: said(), ...(costUsd !== undefined ? { costUsd } : {}) };
+          if (event.outcome.type === 'cancelled') settle({ status: 'cancelled', ...result });
+          else if (failure !== undefined) settle({ status: 'failed', error: failure, ...result });
+          else if (event.stop_reason === 'error') settle({ status: 'failed', error: 'The turn ended with an error.', ...result });
+          else if (event.outcome.type === 'max_turns') settle({ status: 'failed', error: 'The reply reached its length limit and was cut short.', ...result });
+          else settle({ status: 'completed', ...result });
+        }
+      });
+      signal?.addEventListener('abort', cancel, { once: true });
+      const failed = (error: unknown): void => {
+        settle(signal?.aborted ? { status: 'cancelled', text: '' } : error instanceof Error ? error : new Error(String(error)));
+      };
+      const sentToEngine = (): void => {
+        if (done) return;
+        try { options.onSent?.(); } catch { /* Whoever wanted to know cannot make the turn fail. */ }
+      };
+      try {
+        const sent = this.sendPrompt(prompt, [], turnId, undefined, options.source ?? { origin: 'scheduled' });
+        if (sent) sent.then(sentToEngine, failed);
+        else sentToEngine();
+      } catch (error) { failed(error); }
+    });
+  }
+
   private sendCronCommand(command: Extract<ClientCommand, { type: 'cron_manage' }>): Promise<CronJobDto[]> {
     if (this.resumeOperationInProgress) return Promise.reject(new Error('This chat is being resumed.'));
     if (this.ownedSessionResumeRequired) return Promise.reject(new Error('Resume this chat before managing its scheduled tasks.'));
@@ -1123,7 +1230,8 @@ export class SessionRuntime {
         notifier.turnStarted(this.sessionId, ref);
         break;
       case 'turn_ended':
-        notifier.turnEnded(this.sessionId, ref);
+        // A turn the host ran (a task handed to a Bot) is one nobody is waiting to come back to.
+        notifier.turnEnded(this.sessionId, ref, { idle: this.endedTurnId === undefined || this.endedTurnId !== this.hostTurnId });
         break;
       case 'session_ended':
         notifier.sessionEnded(this.sessionId);
@@ -1299,6 +1407,7 @@ export class SessionRuntime {
       text,
       origin: source?.origin ?? 'desktop',
       ...(source?.deviceName !== undefined ? { deviceName: source.deviceName } : {}),
+      ...(source?.fromBotName !== undefined ? { fromBotName: source.fromBotName } : {}),
       images: images.map((image) => ({ media_type: image.media_type, base64: image.base64 })),
     };
     const journal = [...this.promptJournal, entry];
@@ -1986,6 +2095,7 @@ export class SessionRuntime {
       allowTeamOnboarding: launch.allowTeamOnboarding,
       scheduledController: launch.scheduledController,
       remoteControlEnabled: launch.remoteControlEnabled,
+      permissionTimeoutSecs: launch.permissionTimeoutSecs,
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });
 
@@ -2543,6 +2653,7 @@ export class SessionRuntime {
       }
       if (event.type === 'tool_use_started' && (event.tool === 'computer' || event.tool === 'browser')) this.computerAccessInTurn = true;
       if (event.type === 'turn_ended' || event.type === 'session_ended') {
+        this.endedTurnId = this.activeTurnId;
         this.activeTurn = false;
         this.activeTurnGeneration = undefined;
         this.activeTurnId = undefined;

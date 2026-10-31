@@ -110,7 +110,10 @@ class RemoteSessionHolder : ViewModel() {
     }
 }
 
-/** One session of a computer, with the conversation UI of the app. Side chat and voice are off. */
+/**
+ * One session of a computer, with the conversation UI of the app. Side chat and voice are off.
+ * [botName] is the Bot the session is a chat of, if it is one: back leads to that Bot.
+ */
 @Composable
 internal fun RemoteSessionScreen(
     manager: RemoteControlManager,
@@ -118,6 +121,7 @@ internal fun RemoteSessionScreen(
     hostName: String,
     sessionId: String,
     title: String?,
+    botName: String?,
     isDark: Boolean,
     onBack: () -> Unit,
 ) {
@@ -200,11 +204,14 @@ internal fun RemoteSessionScreen(
     Column(Modifier.fillMaxSize().background(t.windowBg)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onBack) {
-                LXIcon(LXIconName.X, size = 20.dp, color = t.text2, contentDescription = stringResource(R.string.remote_back))
+                LXIcon(
+                    LXIconName.X, size = 20.dp, color = t.text2,
+                    contentDescription = botName?.let { stringResource(R.string.remote_back_to_bot_fmt, it) } ?: stringResource(R.string.remote_back),
+                )
             }
             Column(Modifier.weight(1f)) {
                 Text(state.session.title, color = t.text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(hostName, color = t.text3, fontSize = 12.sp, maxLines = 1)
+                Text(listOfNotNull(botName, hostName).joinToString(" · "), color = t.text3, fontSize = 12.sp, maxLines = 1)
             }
         }
         if (meta.hasOlder) {

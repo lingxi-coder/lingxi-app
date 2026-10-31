@@ -1,0 +1,35 @@
+name: TeamsMembersProbe
+options:
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    GENERATE_INFOPLIST_FILE: YES
+    CODE_SIGNING_ALLOWED: NO
+    TARGETED_DEVICE_FAMILY: "1,2"
+packages:
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk.git
+    exactVersion: 12.19.2
+targets:
+  TeamsMembersProbe:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - path: ../../../../apps/ios/native/Sources/Teams
+      - path: ../../../../apps/ios/native/Sources/App/CanonicalDeepLink.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.teamsmembers.probe
+    dependencies:
+      - package: Firebase
+        product: FirebaseAuth
+      - package: Firebase
+        product: FirebaseFirestore
+schemes:
+  TeamsMembersProbe:
+    build:
+      targets:
+        TeamsMembersProbe: all

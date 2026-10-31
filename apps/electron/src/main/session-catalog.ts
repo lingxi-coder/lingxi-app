@@ -21,6 +21,12 @@ export interface ProjectSessionCatalogOptions {
   timeoutMs?: number;
   /** Keep project metadata warm while session/runtime work is in flight. */
   cacheTtlMs?: number;
+  /**
+   * Read this configuration home instead of the default one. The catalog modes
+   * of the bridge server take the home from `LINGXI_CONFIG_DIR` only (they
+   * ignore `--session-config-home`), so this sets that variable for the child.
+   */
+  configHome?: string;
   spawnProcess?: typeof spawn;
 }
 
@@ -270,7 +276,7 @@ export class ProjectSessionCatalog {
     return new Promise<string>((resolve, reject) => {
       const child = (this.options.spawnProcess ?? spawn)(bin, args, {
         cwd: canonical,
-        env: buildBridgeEnvironment(process.env),
+        env: { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });

@@ -368,6 +368,44 @@ test('trust approval echoes the displayed canonical directory and re-prompts whe
   assert.equal(f.settings.getPublic().activeSession?.projectPath, changedTarget);
 });
 
+test('/cd into the app\'s own data is refused and rolled back, and adds no project', async (t) => {
+  const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const inside = join(f.userData, 'bots', 'someone', 'workspace');
+  mkdirSync(inside, { recursive: true });
+  await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: inside }), /belongs to the app's own data/);
+  assert.equal(f.original.cwd, f.source, 'the engine is back where it was');
+  assert.deepEqual(f.original.changes, [{ path: inside }, { path: f.source, trust_accepted: true, trusted_directory: f.source }]);
+  assert.deepEqual(f.settings.getPublic().projects, [f.source]);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);
+  assert.equal(f.runtimes.get(sessionId), f.original);
+  assert.deepEqual(f.calls.close, []); assert.deepEqual(f.calls.open, []);
+  assert.equal(f.original.releases, 1);
+});
+
+test('an engine that asks to trust a folder of the app\'s own data is not asked of the owner', async (t) => {
+  const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const inside = join(f.userData, 'logs');
+  mkdirSync(inside, { recursive: true });
+  f.original.setWorkingDirectory = async (request) => {
+    f.original.changes.push({ ...request });
+    return request.path === f.source ? { status: 'ok', cwd: f.source, changed: false, transcript_relocated: false }
+      : { status: 'needs_trust', directory: realpathSync.native(inside) };
+  };
+  await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: inside }), /belongs to the app's own data/);
+  assert.deepEqual(f.calls.trust, [], 'the owner was not asked to trust it');
+  assert.deepEqual(f.settings.getPublic().projects, [f.source]);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);
+});
+
+test('a session whose folder lies in the app\'s own data is not added as a project by opening it', async (t) => {
+  const f = hostFixture(t), inside = join(f.userData, 'bots', 'someone', 'workspace'), id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
+  mkdirSync(inside, { recursive: true });
+  f.catalog.find = async () => ({ ...f.row(inside, id), workspace_path: inside });
+  await assert.rejects(f.host.openSessionAndActivate({ projectPath: f.source, sessionId: id }), /belongs to the app's own data/);
+  assert.deepEqual(f.calls.trust, []);
+  assert.deepEqual(f.settings.getPublic().projects, [f.source]);
+});
+
 test('canceling trust or a rejected native cd leaves the old session authoritative', async (t) => {
   for (const cancelTrust of [true, false]) {
     const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');

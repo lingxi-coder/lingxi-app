@@ -1,0 +1,10 @@
+{
+  "device": "adb-RFCY419G0ZY-0PklpP._adb-tls-connect._tcp",
+  "original": "600000",
+  "temporary": "1800000",
+  "started_at": 1793257344.046178,
+  "restore_pending": false,
+  "observed_before_restore": "1800000",
+  "restored": true,
+  "restored_at": 1793262543.03525
+}

@@ -657,7 +657,6 @@ async fn run_serve(a: &ServeArgs) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut cfg = harness_runtime::desktop::DesktopConfig::default();
     cfg.api_base = crate::init::resolve_api_base();
-    cfg.api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
     cfg.cwd = cwd;
     cfg.lingxi_home = crate::run::lingxi_home_dir();
     // This command exports LingXi's own tool surface. Configured outbound MCP

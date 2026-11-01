@@ -36,22 +36,6 @@ export const DESKTOP_COMMANDS: readonly DesktopCommand[] = [
     },
   },
   {
-    name: 'login',
-    args: 'none',
-    async run(args, ctx) {
-      if (args) return ctx.emit('/login takes no arguments', true);
-      await ctx.login();
-    },
-  },
-  {
-    name: 'logout',
-    args: 'none',
-    async run(args, ctx) {
-      if (args) return ctx.emit('/logout takes no arguments', true);
-      await ctx.logout();
-    },
-  },
-  {
     name: 'add-dir',
     args: 'optional',
     async run(args, ctx) {

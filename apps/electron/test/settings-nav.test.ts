@@ -12,17 +12,16 @@ test('the nav declares all twenty pages across four groups', () => {
   );
 });
 
-test('layered is a data property, not a group property — account formats and other pages break the correspondence', () => {
+test('layered is a data property, not a group property — provider accounts and other pages break the correspondence', () => {
   // layered means "this page's values live in the four settings layers and need
   // the layer switcher to pick a target". Group is a navigation concept and
   // does not determine this. Named here explicitly so a future edit that
   // "fixes" one of these back to match its group is caught, not shipped:
   //   - mcp: inside 编码, but NOT layered (its own three-scope storage, no layers).
-  //   - custom-providers: outside 编码, but layered (writes settings.providers/routing).
+  //   - custom-providers: Host-global and independent of project layers.
   //   - fusion: its strategy list owns the three settings scopes and its filter.
   const layeredIds = new Set([
     'permissions', 'tools-agent', 'skills', 'hooks', 'plugins',
-    'provider-credentials', 'custom-providers',
   ]);
   for (const page of SETTINGS_NAV) {
     assert.equal(
@@ -33,7 +32,7 @@ test('layered is a data property, not a group property — account formats and o
 });
 
 test('client-owned pages do not need the engine', () => {
-  for (const id of ['account', 'appearance', 'projects', 'diagnostics', 'about', 'voice', 'notifications', 'remote-control', 'computer-use']) {
+  for (const id of ['account', 'appearance', 'projects', 'diagnostics', 'about', 'voice', 'notifications', 'remote-control', 'computer-use', 'custom-providers']) {
     assert.equal(
       SETTINGS_NAV.find((p) => p.id === id)?.needsEngine, false,
       `${id} lives in the client and must stay usable with no engine`,

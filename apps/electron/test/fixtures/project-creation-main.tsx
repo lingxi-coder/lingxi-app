@@ -49,7 +49,6 @@ function snapshot() {
     if (fixture.bootstrapErrorOnce) { fixture.bootstrapErrorOnce = false; throw new Error('Fixture metadata refresh failed'); }
     return snapshot();
   },
-  providerCredentials: async () => [],
   pickProjectFolder: async (purpose: string) => {
     fixture.pickerPurposes.push(purpose);
     fixture.picks++;

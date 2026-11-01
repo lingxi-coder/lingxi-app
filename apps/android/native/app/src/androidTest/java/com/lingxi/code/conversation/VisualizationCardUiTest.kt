@@ -203,7 +203,7 @@ class VisualizationCardUiTest {
         val engine = requireNotNull(NativeEngineFactory.build(
             context = context,
             apiBase = "https://invalid.example",
-            apiKey = "",
+
             model = "",
             providerProfilesJson = "{}",
             routingJson = """{"mobileEnabledProfiles":[]}""",

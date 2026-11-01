@@ -319,7 +319,7 @@ pub const RESTRICTED_HELP: &str = "Restricted mode: removes the built-in tools t
 )]
 #[allow(clippy::struct_excessive_bools, clippy::doc_markdown)]
 pub struct Argv {
-    /// Top-level subcommand (mcp, auth, plugin, project, setup-token, agents, attach,
+    /// Top-level subcommand (mcp, provider, plugin, project, agents, attach,
     /// install, update, doctor, auto-mode, ultrareview, gateway). Declared BEFORE the
     /// `prompt` positional so clap resolves a leading subcommand-name token as
     /// the subcommand (and an optional-value global flag like `-d`/`-r` before
@@ -525,9 +525,8 @@ pub struct Argv {
     pub verbose: bool,
 
     /// Minimal mode: skip hooks, LSP, plugin sync, attribution, auto-memory,
-    /// background prefetches, keychain reads, and LINGXI.md auto-discovery. Sets
-    /// LINGXI_SIMPLE=1. Anthropic auth is strictly ANTHROPIC_API_KEY or
-    /// apiKeyHelper via --settings (OAuth and keychain are never read).
+    /// background prefetches and LINGXI.md auto-discovery. Sets
+    /// LINGXI_SIMPLE=1. Model authentication still uses named provider accounts.
     //
     // WIRED: `run_cli` exports `LINGXI_SIMPLE=1` (binary
     // `process.env.CLAUDE_CODE_SIMPLE="1"` on a pre-`--` `--bare` token) and
@@ -885,8 +884,8 @@ pub struct Argv {
     #[arg(long = "ax-screen-reader")]
     pub ax_screen_reader: bool,
 
-    /// File resources to download at startup. Format: file_id:relative_path
-    /// (e.g. --file file_abc:doc.txt file_def:img.png)
+    /// Account-pinned files to download at startup: JSON objects containing
+    /// resource (SDK ProviderFileRef) and relativePath. Unscoped IDs are rejected.
     #[arg(long = "file", value_name = "specs", num_args = 1..)]
     pub file: Option<Vec<String>>,
 

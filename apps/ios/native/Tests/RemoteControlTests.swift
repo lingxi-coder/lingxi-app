@@ -33,7 +33,7 @@ final class RemoteControlTests: XCTestCase {
     #if canImport(harness_runtimeFFI)
     @MainActor
     func testRemoteProjectionAcceptsDesktopTurnsAndRetainsStablePromptIdentity() {
-        let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
         source.replaceRemoteTranscript([], sessionID: session)
         source.appendRemotePrompt(turnID: 10, text: "from desktop", images: [], origin: "Desktop")
@@ -56,7 +56,7 @@ final class RemoteControlTests: XCTestCase {
 
     @MainActor
     func testRemoteHistoryImageHydrationPreservesRowsAndAccountInvalidationClearsData() {
-        let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
         let ref = session + ":m:0:0"
         source.replaceRemoteTranscript([MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "photo".clientTextDto)],
@@ -106,7 +106,7 @@ final class RemoteControlTests: XCTestCase {
 
     @MainActor
     func testRemoteProjectionCannotBootstrapLocalEngine() async {
-        let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
         do { try await source.prepare(); XCTFail("remote projection built a local engine") }
         catch { XCTAssertTrue(error is RemoteFfiError) }

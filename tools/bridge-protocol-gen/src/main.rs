@@ -379,7 +379,7 @@ fn ts_type(ty: &Type, imports: &mut BTreeSet<String>) -> Result<String> {
             }
             if !matches!(
                 name.as_str(),
-                "TaskRowDto" | "OpenAiOAuthSessionDto" | "CoordinatorWorkerDto" | "UiSurfaceDto"
+                "TaskRowDto" | "CoordinatorWorkerDto" | "UiSurfaceDto"
             ) {
                 imports.insert(name.clone());
             }
@@ -913,7 +913,6 @@ fn generate(root: &Path) -> Result<String> {
         render_variants("ClientCommand", &command_variants, true, &mut imports)?;
     let (event, event_keys) = render_variants("ClientEvent", &event_variants, false, &mut imports)?;
     let (task, _) = render_struct(struct_item(&listings, "TaskRowDto")?, &mut imports)?;
-    let (oauth, _) = render_struct(struct_item(&events, "OpenAiOAuthSessionDto")?, &mut imports)?;
     let (worker, _) = render_struct(
         struct_item(&listings, "CoordinatorWorkerDto")?,
         &mut imports,
@@ -943,7 +942,6 @@ fn generate(root: &Path) -> Result<String> {
     }
     output.push_str(&surface);
     output.push_str(&task);
-    output.push_str(&oauth);
     output.push_str(&worker);
     output.push_str(&command);
     output.push_str(&event);

@@ -337,7 +337,7 @@ export function Voice({ bridge }: PageContentProps) {
       {cloud.binding === 'explicit_profile' && <Row title={tr('audio_settings_account')} align="center">
         <select aria-label={tr('desktop_voice_account_a11y', operationLabel(kind))} value={cloud.profileId ?? ''} onChange={(event) => changeCloud({ profileId: event.target.value || null, modelId: null })} style={inputStyle(t)}>
           <option value="">{tr('audio_settings_select_account')}</option>
-          {[...new Set([...(bridge.bootstrap?.providerCredentials?.filter((entry) => entry.configured).map((entry) => entry.providerId) ?? []), ...(snapshot.providerCatalog?.map((entry) => entry.profileId) ?? []), ...(cloud.profileId ? [cloud.profileId] : [])])].map((id) => <option key={id} value={id}>{({ openai: 'OpenAI', 'openai-chatgpt': 'Codex Auth', deepseek: 'DeepSeek', kimi: 'Kimi', openrouter: 'OpenRouter', zai: 'Z.ai' } as Record<string, string>)[id] ?? id}</option>)}
+          {[...new Set([...(bridge.bootstrap?.providerAccountSnapshot?.accounts.filter(entry => entry.enabled).map(entry => entry.executionBindingId) ?? []), ...(snapshot.providerCatalog?.map((entry) => entry.profileId) ?? []), ...(cloud.profileId ? [cloud.profileId] : [])])].map((id) => <option key={id} value={id}>{({ openai: 'OpenAI', 'openai-chatgpt': 'Codex Auth', deepseek: 'DeepSeek', kimi: 'Kimi', openrouter: 'OpenRouter', zai: 'Z.ai' } as Record<string, string>)[id] ?? id}</option>)}
         </select>
       </Row>}
       <Row title={tr('audio_model')} desc={capabilityReadiness === 'ready' ? undefined : tr("desktop_voice_check_capability")} align="center">

@@ -18,6 +18,7 @@ struct IOSAudioAttachmentSessionRoutes {
     private struct Entry: Equatable {
         let ownerID: String
         var context: IOSAudioSessionContext?
+        var requestedProfileID: String?
     }
 
     private var entries: [IOSMediaAttachmentIdentity: Entry] = [:]
@@ -27,7 +28,7 @@ struct IOSAudioAttachmentSessionRoutes {
         if let current = entries[attachment] {
             return current.ownerID == ownerID
         }
-        entries[attachment] = Entry(ownerID: ownerID, context: nil)
+        entries[attachment] = Entry(ownerID: ownerID, context: nil, requestedProfileID: nil)
         insertionOrder.append(attachment)
         return true
     }
@@ -42,9 +43,26 @@ struct IOSAudioAttachmentSessionRoutes {
            context.sessionId.isEmpty || context.engineAttachmentIdentity != attachment {
             return false
         }
+        if let context, context.accountScope == "unbound",
+           let previous = current.context, previous.sessionId == context.sessionId,
+           previous.accountScope != nil, previous.accountScope != "unbound",
+           current.requestedProfileID == context.profileId {
+            return true
+        }
         current.context = context
+        current.requestedProfileID = context?.profileId
         entries[attachment] = current
         return true
+    }
+
+    mutating func bindSelected(owner: IOSAudioOwner?, expectedProfileID: String, profileID: String, accountScope: String) {
+        guard case let .attached(attachment, .session(sessionID))? = owner,
+              var entry = entries[attachment], let context = entry.context,
+              context.sessionId == sessionID,
+              context.profileId == expectedProfileID || entry.requestedProfileID == expectedProfileID else { return }
+        entry.context = IOSAudioSessionContext(sessionId: sessionID, profileId: profileID,
+            accountScope: accountScope, engineAttachmentIdentity: attachment)
+        entries[attachment] = entry
     }
 
     @discardableResult
@@ -147,6 +165,7 @@ final class IOSAudioProviderService {
         let requestJSON: String
         let profileID: String
         let modelID: String?
+        var owner: IOSAudioOwner? = nil
     }
 
     @MainActor
@@ -300,7 +319,7 @@ final class IOSAudioProviderService {
             }
             if sessionContextOwnerID == ownerID {
                 selectedSessionAttachmentIdentity = engineAttachmentIdentity
-                sessionContext = next
+                sessionContext = sessionRoutes.context(for: engineAttachmentIdentity)
                 if let region, contextRegion != region {
                     contextRegion = region
                     host = nil
@@ -395,16 +414,19 @@ final class IOSAudioProviderService {
         IOSAudioService.shared.publishCapabilitySnapshot()
     }
 
-    func pinRealtime(snapshot: AudioConfigurationSnapshot) async throws -> (host: IosAudioProviderHost, requestJSON: String) {
+    func pinRealtime(snapshot: AudioConfigurationSnapshot) async throws -> (host: IosAudioProviderHost, requestJSON: String, owner: IOSAudioOwner?) {
         guard snapshot.configuration.conversation.interaction == "turn_based" else {
             throw AudioServiceFailure.nativeFailure("Interruptible realtime capture is unavailable. Select turn-based conversation.")
         }
         let binding = snapshot.configuration.conversation.cloud
+        let owner = binding.binding == "follow_session" ? selectedFollowSessionOwner() : nil
+        let capturedContext = sessionRoutes.context(for: owner)
         guard let profileID = profileID(for: binding), !profileID.isEmpty else { throw AudioServiceFailure.unavailable }
         let transport = try obtainHost(binding: binding)
         guard let adapter = transport as? IOSAudioProviderHost else { throw AudioServiceFailure.unsupported }
         let request = try requestJSON(binding: binding, kind: "realtime", operationID: UUID().uuidString.lowercased(), snapshot: snapshot, voice: snapshot.configuration.conversation.voice?.id)
         var object = try Self.object(try await transport.capabilities(requestJson: request))
+        guard sessionRoutes.context(for: owner) == capturedContext else { throw CancellationError() }
         let capability = Self.parseRealtimeCapability(object)
         let modelID = binding.modelId ?? capability.modelID
         guard capability.supported, capability.readiness == "ready", capability.models.contains(modelID) else {
@@ -418,7 +440,7 @@ final class IOSAudioProviderService {
         var cloud = object["cloud"] as? [String: Any] ?? [:]
         cloud["modelId"] = modelID as Any? ?? NSNull()
         object["cloud"] = cloud
-        return (adapter.host, String(decoding: try JSONSerialization.data(withJSONObject: object, options: .sortedKeys), as: UTF8.self))
+        return (adapter.host, String(decoding: try JSONSerialization.data(withJSONObject: object, options: .sortedKeys), as: UTF8.self), owner)
     }
 
     private static func parseRealtimeCapability(_ object: [String: Any]) -> IOSRealtimeCapability {
@@ -459,7 +481,7 @@ final class IOSAudioProviderService {
         cloud["modelId"] = model as Any? ?? NSNull()
         pinnedRequest["cloud"] = cloud
         let pinnedJSON = String(decoding: try JSONSerialization.data(withJSONObject: pinnedRequest, options: .sortedKeys), as: UTF8.self)
-        return PinnedOperation(id: id, host: host, requestJSON: pinnedJSON, profileID: profile, modelID: model)
+        return PinnedOperation(id: id, host: host, requestJSON: pinnedJSON, profileID: profile, modelID: model, owner: owner)
     }
 
     func transcribe(
@@ -582,14 +604,26 @@ final class IOSAudioProviderService {
         return ownerAttachment == engineAttachmentIdentity && context.sessionId == sessionID
     }
 
+    func bindSelectedAccount(_ response: [String: Any], owner: IOSAudioOwner?, requestJSON: String) {
+        guard let context = response["usageContext"] as? [String: Any],
+              let profile = context["profileId"] as? String, !profile.isEmpty,
+              let scope = context["accountScope"] as? String, !scope.isEmpty, scope != "unbound",
+              let request = try? Self.object(requestJSON),
+              let expectedProfile = (request["session"] as? [String: Any])?["profileId"] as? String else { return }
+        sessionRoutes.bindSelected(owner: owner, expectedProfileID: expectedProfile, profileID: profile, accountScope: scope)
+        if let selectedSessionAttachmentIdentity {
+            sessionContext = sessionRoutes.context(for: selectedSessionAttachmentIdentity)
+        }
+    }
+
     private func recordUsage(_ response: [String: Any], operation: PinnedOperation) {
-        guard let raw = response["usage"] as? [String: Any] else { return }
-        let context = response["usageContext"] as? [String: Any] ?? [:]
-        let request = (try? Self.object(operation.requestJSON)) ?? [:]
-        let binding = (request["cloud"] as? [String: Any])?["binding"] as? String
-        let account = context["accountScope"] as? String ?? (binding == "follow_session" ? (request["session"] as? [String: Any])?["accountScope"] as? String : nil) ?? "profile:\(operation.profileID)"
-        appendUsage(raw, operationID: operation.id, profileID: context["profileId"] as? String ?? operation.profileID,
-            accountScope: account, modelID: (context["modelId"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+        bindSelectedAccount(response, owner: operation.owner, requestJSON: operation.requestJSON)
+        guard let raw = response["usage"] as? [String: Any],
+              let context = response["usageContext"] as? [String: Any],
+              let profile = context["profileId"] as? String, !profile.isEmpty,
+              let scope = context["accountScope"] as? String, !scope.isEmpty, scope != "unbound" else { return }
+        appendUsage(raw, operationID: operation.id, profileID: profile, accountScope: scope,
+            modelID: (context["modelId"] as? String).flatMap { $0.isEmpty ? nil : $0 })
     }
 
     func recordRealtimeUsage(_ json: String) {
@@ -646,7 +680,7 @@ final class IOSAudioProviderService {
         }
         let snapshot = ProviderRepository.shared.makeLaunchSnapshot()
         let configuredRegion = contextRegion ?? (DesktopSettingsRepository.shared.effective["providerRegion"] as? String)
-        let region = configuredRegion == "china_mainland" || configuredRegion == "china" ? "china" : "international"
+        let region = configuredRegion == "china_mainland" ? "china_mainland" : "international"
         if profilesJSON != snapshot.providerProfilesJSON || hostRegion != region {
             hostRegion = region
             host = nil

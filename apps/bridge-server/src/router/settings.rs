@@ -228,6 +228,20 @@ impl EngineCommandRouter {
             }
         };
 
+        if patch
+            .iter()
+            .any(|(key, _)| matches!(key.as_str(), "providers" | "routing" | "providerRegion"))
+        {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Protocol,
+                message:
+                    "Provider settings are Host-global; use the Host provider settings command."
+                        .into(),
+            })
+            .await;
+            return;
+        }
+
         let suggestion_setting = patch
             .iter()
             .find(|(key, _)| key == "promptSuggestionEnabled")

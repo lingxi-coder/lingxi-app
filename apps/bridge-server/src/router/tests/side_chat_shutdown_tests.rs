@@ -14,7 +14,6 @@ use client::protocol::text::ClientTextDto;
 use command_api::RegistrySlashDispatcher;
 use futures_util::{SinkExt, StreamExt};
 use harness_runtime::side_chat::{SideChatFactory, SideChatSession};
-use lingxi_core::host::auth::{AuthError, AuthHandle, LoginInfo};
 use lingxi_core::host::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
@@ -36,31 +35,7 @@ const AUTH_TOKEN: &str = "side-chat-shutdown-token-32chars";
 
 type TestSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-struct StubAuth;
 
-#[async_trait]
-impl AuthHandle for StubAuth {
-    fn register_account_change_observer(
-        &self,
-        _observer: Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
-    ) {
-    }
-
-    async fn login(&self) -> Result<LoginInfo, AuthError> {
-        Ok(LoginInfo {
-            email: "side-chat-test@example.invalid".into(),
-            org_id: "side-chat-test".into(),
-        })
-    }
-
-    async fn logout(&self) -> Result<(), AuthError> {
-        Ok(())
-    }
-
-    async fn current_user(&self) -> Option<LoginInfo> {
-        None
-    }
-}
 
 struct EmptyTasks;
 
@@ -356,7 +331,6 @@ async fn endpoint_shutdown_waits_for_live_side_chat_child_to_stop() {
     let router = Arc::new(
         EngineCommandRouter::new(
             parent.clone() as Arc<dyn OrchestratorHandle>,
-            Arc::new(StubAuth),
             Arc::new(EmptyTasks),
             None,
             None,

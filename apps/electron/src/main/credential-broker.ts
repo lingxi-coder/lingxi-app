@@ -1,11 +1,7 @@
-import type { ProviderModelCatalogEntryDto } from '@lingxi/bridge-client';
-import type { FusionInvocation } from '../shared/fusionStrategy.js';
-import { providerById } from '../shared/providers.js';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { CODEX_PROVIDER_ID, parseCodexSession, type CodexOAuthSession } from './codex-auth.js';
 
 const CREDENTIAL_BROKER_BIN = process.platform === 'win32'
   ? 'lingxi-credential-client.exe'
@@ -17,19 +13,6 @@ const MAX_STDERR_BYTES = 8 * 1024;
 // Includes native cold service readiness (60s), one operation (15s), and
 // helper signature/install overhead. This remains a hard process deadline.
 const DEFAULT_TIMEOUT_MS = 90_000;
-
-export const providerEnvironmentVariables: Readonly<Record<string, string>> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-  kimi: 'MOONSHOT_API_KEY',
-  'kimi-code': 'KIMI_API_KEY',
-  gemini: 'GEMINI_API_KEY',
-  openrouter: 'OPENROUTER_API_KEY',
-  zai: 'ZAI_API_KEY',
-  'glm-coding': 'GLM_API_KEY',
-  'github-copilot': 'GITHUB_TOKEN',
-};
 
 export interface CredentialBrokerHealth {
   protocolVersion: number;
@@ -62,6 +45,7 @@ export interface PluginSecretDeletionSummary {
 }
 
 export interface ProviderCredentialBroker {
+  readonly credentialChannel?: 'development' | 'production';
   health(): Promise<CredentialBrokerHealth>;
   listStatus(providerIds: readonly string[]): Promise<CredentialBrokerStatus[]>;
   preview(providerId: string): Promise<CredentialBrokerPreview>;
@@ -75,7 +59,6 @@ export interface ProviderCredentialBroker {
   deletePluginSecret(pluginId: string, key: string): Promise<void>;
 }
 
-type ProviderCredentialResolver = Pick<ProviderCredentialBroker, 'resolve'>;
 
 type BrokerRequest = {
   op: 'health' | 'store' | 'retrieve' | 'contains' | 'delete' | 'list' | 'preview';
@@ -235,283 +218,9 @@ function readStringField(value: Record<string, unknown>, field: string): string 
   return candidate;
 }
 
-export function resolveProviderIdForModel(model: string | null | undefined): string | undefined {
-  if (!model) return undefined;
-  const separator = model.indexOf('/');
-  if (separator > 0 && separator < model.length - 1) {
-    const prefix = model.slice(0, separator);
-    if (prefix === 'builtin' || prefix === 'claude') return 'anthropic';
-    return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(prefix) ? prefix : undefined;
-  }
-  return model.startsWith('claude') ? 'anthropic' : undefined;
-}
-
-/** Credential slots declared by one provider/connection, including its failover keys. */
-export function resolveProfileCredentialIds(profileId: string, settings: unknown, official: readonly ProviderModelCatalogEntryDto[] = []): string[] {
-  const providers = isRecord(settings) && isRecord(settings.providers) ? settings.providers : {};
-  const separator = profileId.search(/[:#]/);
-  const group = separator < 0 ? profileId : profileId.slice(0, separator);
-  const profile = providers[group];
-  if (!isRecord(profile)) return providerById(profileId) || official.some((entry) => entry.definition && entry.provider_id === profileId) ? [profileId] : [];
-  const keys = (value: unknown, fallback: string[]): string[] => {
-    if (value === undefined) return fallback;
-    if (!Array.isArray(value) || value.length === 0
-      || !value.every((id) => typeof id === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(id))) return [];
-    return value as string[];
-  };
-  const inherited = keys(profile.credentialIds, [group]);
-  if (!Array.isArray(profile.connections)) return inherited;
-  const connectionId = profileId.startsWith(`${group}:`) ? profileId.slice(group.length + 1).split('#')[0] : undefined;
-  const connections = profile.connections.filter(isRecord);
-  if (connectionId !== undefined && !connections.some((connection) => connection.id === connectionId)) return [];
-  // A selected connection may fail over to another connection of the same
-  // provider. Only this group's keys are eligible; other profiles stay private.
-  return [...new Set(connections.flatMap((connection) => keys(connection.credentialIds, inherited)))];
-}
-
-/** Host writes may target a known provider or an explicitly configured key slot. */
 export function configuredCredentialProviderIds(settings: unknown): string[] {
-  const providers = isRecord(settings) && isRecord(settings.providers) ? settings.providers : {};
-  return [...new Set(Object.keys(providers).flatMap((profile) =>
-    /^[a-z0-9][a-z0-9._-]{0,63}$/.test(profile) && isRecord(providers[profile])
-      ? [profile, ...resolveProfileCredentialIds(profile, settings)] : []))];
-}
-
-/** Mirror registered custom model/alias resolution; decrypt only the selected route's keys. */
-export function resolveModelCredentialProviderIds(model: string, settings: unknown, official: readonly ProviderModelCatalogEntryDto[] = []): string[] {
-  const config = isRecord(settings) ? settings : {};
-  const providers = isRecord(config.providers) ? config.providers : {};
-  const routing = isRecord(config.routing) ? config.routing : {};
-  const rows: Array<{ provider: string; model: string; aliases: string[]; credentialProfile?: string }> = [];
-  for (const [provider, profile] of Object.entries(providers)) {
-    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(provider) || !isRecord(profile)) continue;
-    const connections = Array.isArray(profile.connections) ? profile.connections.filter(isRecord) : [profile];
-    for (const connection of connections) {
-      const models = connection.models ?? profile.models;
-      if (!Array.isArray(models)) continue;
-      for (const entry of models) {
-        const id = typeof entry === 'string' ? entry : isRecord(entry) && typeof entry.id === 'string' ? entry.id : undefined;
-        if (!id) continue;
-        rows.push({ provider, model: id, aliases: isRecord(entry) && Array.isArray(entry.aliases)
-          ? entry.aliases.filter((alias): alias is string => typeof alias === 'string') : [] });
-      }
-    }
-  }
-  const explicit = (reference: string): typeof rows[number] | undefined => {
-    const slash = reference.indexOf('/');
-    if (slash < 1 || slash === reference.length - 1) return undefined;
-    const credentialProfile = reference.slice(0, slash), id = reference.slice(slash + 1);
-    const provider = credentialProfile.split(/[:#]/)[0]!;
-    const found = rows.find((row) => row.provider === provider && row.model === id);
-    if (found) return credentialProfile === provider ? found : { ...found, credentialProfile };
-    // Built-in targets are explicitly provider-qualified, never inferred from an unknown alias.
-    if (official.some((entry) => entry.definition && entry.provider_id === provider && entry.models.some((m) => m.model_id === id)) || providerById(provider)) return { provider, model: id, aliases: [] };
-    return undefined;
-  };
-  if (isRecord(routing.aliases)) {
-    for (const [alias, target] of Object.entries(routing.aliases)) {
-      const row = typeof target === 'string' ? explicit(target) : undefined;
-      if (!row) continue;
-      if (!rows.includes(row)) rows.push(row);
-      if (!row.aliases.includes(alias)) row.aliases.push(alias);
-    }
-  }
-  // The engine checks exact ids/aliases before interpreting a slash as a profile qualifier.
-  let matches = rows.filter((row) => row.model === model || row.aliases.includes(model));
-  if (!matches.length) {
-    const slash = model.indexOf('/');
-    if (slash > 0) matches = rows.filter((row) => row.provider === model.slice(0, slash)
-      && (row.model === model.slice(slash + 1) || row.aliases.includes(model.slice(slash + 1))));
-  }
-  if (new Set(matches.map((row) => row.provider)).size > 1) return []; // Same-group connections are one model choice.
-  const primary = matches[0] ?? explicit(model);
-  const legacy = primary ? undefined : resolveProviderIdForModel(model);
-  const primaryId = primary?.provider ?? (legacy && providerById(legacy) ? legacy : undefined);
-  if (!primaryId) return [];
-  const ids = new Set(resolveProfileCredentialIds(primary?.credentialProfile ?? primaryId, settings, official));
-  const chain = isRecord(routing.fallback) ? routing.fallback[primary?.model ?? model] : undefined;
-  if (Array.isArray(chain)) {
-    for (const target of chain) {
-      const row = typeof target === 'string' ? explicit(target) : undefined;
-      if (row) for (const id of resolveProfileCredentialIds(row.credentialProfile ?? row.provider, settings, official)) ids.add(id);
-    }
-  }
-  return [...ids];
-}
-
-/** A private credential view; the captured reference/config revision stays unchanged. */
-export function fusionCredentialSelection<T extends { config: Record<string, unknown> }>(
-  selection: T,
-  invocation: Pick<FusionInvocation, 'models' | 'preset' | 'maxPanel'> = {},
-  parentProfile?: string,
-): T {
-  const config = selection.config;
-  let panels: unknown[];
-  if (invocation.models) {
-    // Fusion resolves literal model ids inside one profile. A bare id inherits
-    // the captured conversation profile, never an ordinary routing alias.
-    panels = invocation.models.map((model) => {
-      const colon = model.indexOf(':');
-      if (colon < 0 && !parentProfile) throw new Error('The current conversation provider is unavailable for bare Fusion model ids.');
-      return { profile: colon < 0 ? parentProfile : model.slice(0, colon), model: colon < 0 ? model : model.slice(colon + 1) };
-    });
-  } else {
-    const integer = (key: string, fallback: number) => typeof config[key] === 'number' && Number.isInteger(config[key]) ? config[key] as number : fallback;
-    const preset = invocation.preset ?? (config.preset === 'fast' ? 'fast' : 'quality');
-    const configuredMax = Math.max(2, Math.min(8, integer('maxPanel', 8)));
-    const maxPanel = Math.max(2, Math.min(configuredMax, invocation.maxPanel ?? configuredMax));
-    const required = Math.max(2, integer('minSuccessfulPanels', 2));
-    const presetCount = integer(preset === 'fast' ? 'fastPanelCount' : 'qualityPanelCount', preset === 'fast' ? 2 : 3);
-    const wanted = Math.max(Math.min(presetCount, maxPanel), required);
-    panels = Array.isArray(config.panelModels) ? config.panelModels.slice(0, wanted) : [];
-  }
-  return { ...selection, config: { ...config, panelModels: panels } };
-}
-
-/** Fusion routes are explicit settings choices, independent of the parent model. */
-export function resolveFusionCredentialProviderIds(settings: unknown, selection: { config: Record<string, unknown> }, explicit = false, official: readonly ProviderModelCatalogEntryDto[] = []): string[] {
-  const fusion = selection.config;
-  if (!explicit && fusion.enabled !== true) return [];
-  const choices = [
-    ...(Array.isArray(fusion.panelModels) ? fusion.panelModels : []),
-    fusion.analystModel,
-  ];
-  return [...new Set(choices.flatMap((choice) => {
-    if (!isRecord(choice) || typeof choice.profile !== 'string' || typeof choice.model !== 'string') return [];
-    // Configured Fusion routes are exact pairs. Ordinary aliases and fallback
-    // chains can refer to unrelated providers that this ensemble never calls.
-    const profile = choice.profile.trim();
-    if (!choice.model.trim()) return [];
-    return resolveProfileCredentialIds(profile, settings, official);
-  }))];
-}
-
-export function readProviderEnvironmentCredential(
-  providerId: string,
-  environment: NodeJS.ProcessEnv = process.env,
-): string | undefined {
-  const variable = providerEnvironmentVariables[providerId];
-  const value = variable ? environment[variable] : undefined;
-  return typeof value === 'string' && value.length > 0 && value.length <= 16_384 ? value : undefined;
-}
-
-export async function resolveProviderCredential(
-  providerId: string,
-  options: {
-    credentialBroker?: ProviderCredentialResolver;
-    environment?: NodeJS.ProcessEnv;
-  } = {},
-): Promise<string | undefined> {
-  const id = validateProviderId(providerId);
-  // OAuth JSON is not an API key and must never enter the key injection path.
-  if (id === CODEX_PROVIDER_ID) return undefined;
-  return readProviderEnvironmentCredential(id, options.environment)
-    ?? await options.credentialBroker?.resolve(id);
-}
-
-export async function resolveCodexOAuthSession(broker?: ProviderCredentialResolver): Promise<CodexOAuthSession | undefined> {
-  const secret = await broker?.resolve(CODEX_PROVIDER_ID);
-  if (!secret) return undefined;
-  try { return parseCodexSession(JSON.parse(secret)); }
-  catch { throw new Error('Codex 登录凭据无效，请重新登录。'); }
-}
-
-type SessionLaunchCredentials = { apiKey?: string; providerCredentials?: Record<string, string> };
-
-interface LaunchCacheEntry<T> {
-  value: T;
-  expiresAt: number;
-}
-
-/**
- * Reuse broker-owned launch material across the short burst of runtimes a
- * Desktop window commonly creates. The cache lives only in the Electron main
- * process, expires quickly, and is explicitly invalidated after credential or
- * plugin-secret mutations; secret bytes never cross into renderer state.
- */
-export class SessionLaunchCache {
-  private readonly credentialEntries = new Map<string, LaunchCacheEntry<SessionLaunchCredentials>>();
-  private readonly credentialPending = new Map<string, Promise<SessionLaunchCredentials>>();
-  private pluginSecretsEntry?: LaunchCacheEntry<Record<string, Record<string, string>>>;
-  private pluginSecretsPending?: Promise<Record<string, Record<string, string>>>;
-  private generation = 0;
-
-  constructor(private readonly ttlMs = 30_000) {}
-
-  credentials(model: string | null | undefined, broker?: ProviderCredentialResolver): Promise<SessionLaunchCredentials> {
-    const key = model ?? '';
-    const now = Date.now();
-    const cached = this.credentialEntries.get(key);
-    if (cached && cached.expiresAt > now) return Promise.resolve(cached.value);
-    if (cached) this.credentialEntries.delete(key);
-    const pending = this.credentialPending.get(key);
-    if (pending) return pending;
-    const generation = this.generation;
-    const operation = resolveSessionLaunchCredentials(model, { credentialBroker: broker })
-      .then((value) => {
-        // Invalidation also fences callers already waiting on a broker read;
-        // avoiding cache insertion alone would still return the retired key.
-        if (generation !== this.generation) return this.credentials(model, broker);
-        this.credentialEntries.set(key, { value, expiresAt: Date.now() + this.ttlMs });
-        return value;
-      })
-      .finally(() => {
-        if (this.credentialPending.get(key) === operation) this.credentialPending.delete(key);
-      });
-    this.credentialPending.set(key, operation);
-    return operation;
-  }
-
-  pluginSecrets(broker?: ProviderCredentialBroker): Promise<Record<string, Record<string, string>>> {
-    const now = Date.now();
-    if (this.pluginSecretsEntry && this.pluginSecretsEntry.expiresAt > now) return Promise.resolve(this.pluginSecretsEntry.value);
-    this.pluginSecretsEntry = undefined;
-    if (this.pluginSecretsPending) return this.pluginSecretsPending;
-    const generation = this.generation;
-    const operation = resolveSessionLaunchPluginSecrets(broker)
-      .then((value) => {
-        if (generation === this.generation) this.pluginSecretsEntry = { value, expiresAt: Date.now() + this.ttlMs };
-        return value;
-      })
-      .finally(() => {
-        if (this.pluginSecretsPending === operation) this.pluginSecretsPending = undefined;
-      });
-    this.pluginSecretsPending = operation;
-    return operation;
-  }
-
-  invalidate(): void {
-    this.generation += 1;
-    this.credentialEntries.clear();
-    this.pluginSecretsEntry = undefined;
-    this.credentialPending.clear();
-    this.pluginSecretsPending = undefined;
-  }
-}
-
-export async function resolveSessionLaunchCredentials(
-  model: string | null | undefined,
-  options: {
-    credentialBroker?: ProviderCredentialResolver;
-    environment?: NodeJS.ProcessEnv;
-  } = {},
-): Promise<{ apiKey?: string; providerCredentials?: Record<string, string> }> {
-  const providerId = resolveProviderIdForModel(model);
-  if (!providerId) return {};
-  const credential = await resolveProviderCredential(providerId, options);
-  if (!credential) return {};
-  // All host-owned keys enter the mutable credential store. The legacy
-  // api_key scalar binds Anthropic's auth source at engine construction.
-  return { providerCredentials: { [providerId]: credential } };
-}
-
-export async function resolveProviderTestCredential(
-  providerId: string,
-  credentialOverride: string | undefined,
-  credentialBroker?: ProviderCredentialResolver,
-): Promise<string | undefined> {
-  if (credentialOverride !== undefined) return credentialOverride;
-  return credentialBroker?.resolve(validateProviderId(providerId));
+  const config = isRecord(settings) && isRecord(settings.effective_json) ? settings.effective_json : settings;
+  return isRecord(config) && isRecord(config.providers) ? Object.keys(config.providers) : [];
 }
 
 class ChildProcessCredentialBrokerTransport implements CredentialBrokerTransport {
@@ -613,6 +322,8 @@ class CredentialBrokerClient implements ProviderCredentialBroker {
     private readonly transport: CredentialBrokerTransport,
     private readonly channel: 'development' | 'production',
   ) {}
+
+  get credentialChannel(): 'development' | 'production' { return this.channel; }
 
   health(): Promise<CredentialBrokerHealth> {
     this.healthPromise ??= this.loadHealth().catch((error) => {

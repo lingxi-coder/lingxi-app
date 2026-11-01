@@ -1,202 +1,48 @@
-# 灵犀 Code · iPhone — in-process engine over UniFFI (M10 A2)
+# iOS in-process engine
 
-This document covers the engine integration end to end: how to reproduce the
-gitignored bindings, regenerate the Xcode project, run the keyless simulator
-e2e test, and do a REAL run that streams live model output. It is the in-process
-analog of the verified Electron↔bridge real-conversation path — **one** protocol
-(`client-protocol`), **one** transport (UniFFI), **one** listener (SwiftUI).
+The app calls the shared engine through generated UniFFI Swift bindings. `MobileEngineHandle.submit` delivers `ClientEvent` values through `IosEventListener`; account management uses `providerAccountsSnapshot` and `providerAccountCommand` on the same handle.
 
-```
-SwiftUI (ConversationSource / XCTest)
-   │  buildIosEngine(...) + handle.submit(.sendPrompt(...))
-   ▼
-UniFFI  ── generated Swift bindings (Generated/*.swift) + LingxiCodeFFI.xcframework
-   │
-   ▼
-in-process engine  (MobileEngineHandle, handle-owned tokio runtime)
-   │  every ClientEvent
-   ▼
-IosEventListener.onEvent(_:)   ← Swift listener (EngineListener / CollectingListener)
-```
+## Build matching bindings and native libraries
 
-## 0. Prerequisites
+Use macOS with Xcode 27+, XcodeGen, the repository Rust toolchain and its iOS targets. Supply the official pinned GStreamer SDK through `LINGXI_GSTREAMER_SDK_IOS`; see [the SDK instructions](../../../scripts/ci/GSTREAMER_SDK.md). The build also verifies the Cargo-locked Mobile Linux native support and rootfs.
 
-- macOS + Xcode 27+ (iOS 27 SDK or newer; the app deployment target is iOS 26.0)
-- `brew install xcodegen`
-- Rust toolchain with the iOS std targets (`aarch64-apple-ios`,
-  `aarch64-apple-ios-sim`, `x86_64-apple-ios`). The build script installs any
-  missing ones for the workspace's pinned toolchain.
-
-## 1. Reproduce the engine bindings (gitignored)
-
-The generated Swift bindings (`Generated/`) and the FFI static-library
-xcframework (`Frameworks/LingxiCodeFFI.xcframework`) are **git-ignored** and
-reproduced from the Rust workspace. Run this before the first `xcodegen
-generate`, and again whenever the UniFFI surface
-(`apps/ios/ffi`, `client-protocol`, …) changes:
+From `apps/ios/native`:
 
 ```sh
-cd apps/ios/native
 scripts/build-xcframework.sh
 scripts/install-sherpa-runtime.sh
-```
-
-It builds a host cdylib + per-arch staticlibs, generates the Swift bindings
-(deduped into a single Swift module), forces the `IosEventListener`
-callback-vtable registration in `buildIosEngine` (see note below), and assembles
-the xcframework. **No secrets are baked in** — the engine reads
-`ANTHROPIC_API_KEY` from the runtime environment, never from the framework.
-
-> **Callback-vtable init note.** UniFFI 0.28 registers a `callback_interface`'s
-> foreign vtable inside its namespace's `private` lazy `initializationResult`,
-> forced only by that namespace's `uniffiEnsureInitialized()`. The generated
-> synchronous `buildIosEngine` does **not** force it, so without a patch the
-> first engine event would panic in Rust with *"Foreign pointer not set"*. The
-> build script deterministically injects `uniffiEnsureInitialized()` as
-> `buildIosEngine`'s first statement (a bindings fix only — no engine-semantics
-> change). This is what lets the listener receive events at all.
-
-The Sherpa installer is separate from the Rust/UniFFI build. It verifies the
-pinned runtime artifact recorded in `resources/voice/models.json` and stages the
-gitignored Sherpa and ONNX Runtime static XCFrameworks required by Local-only
-Voice.
-
-## 2. Regenerate the Xcode project
-
-```sh
-cd apps/ios/native
-xcodegen generate     # produces LingxiCode.xcodeproj from project.yml (gitignored)
-```
-
-`project.yml` defines two targets:
-
-- **`LingxiCode`** (app) — compiles `Sources/` + the generated `Generated/`
-  bindings and links `LingxiCodeFFI.xcframework`.
-- **`LingxiCodeTests`** (`bundle.unit-test`) — the engine round-trip suite in
-  `Tests/`, hosted in the app target (so it shares the compiled bindings) and
-  also linking the FFI xcframework so the per-namespace `harness_runtimeFFI` clang
-  module is importable. The `LingxiCode` scheme runs this target under `test`.
-
-## 3. Keyless simulator e2e test (no API key required)
-
-`Tests/EngineRoundtripTests.swift` builds the engine via `buildIosEngine(...)`,
-registers a `CollectingListener` (an `IosEventListener`), submits
-`.sendPrompt("Reply with exactly: hello from lingxi")`, and asserts the streamed
-`ClientEvent` path with an `XCTestExpectation`.
-
-It is designed to pass **KEYLESS**. With no `ANTHROPIC_API_KEY`:
-
-- `buildIosEngine(...)` succeeds — the engine host is constructed and the foreign
-  listener is registered (the handshake). No network, no key needed.
-- `submit(.sendPrompt(...))` returns Ok — the turn is spawned on the engine's
-  owned runtime; a turn failure is **not** thrown here, it streams to the
-  listener.
-- the keyless turn then surfaces a **terminal `ClientEvent.error`** to the
-  listener. On the simulator `cfg(target_os = "ios")` is **true**, so the engine
-  builds the real `IosPlatform` whose `http` handle is the shared
-  `reqwest` + `rustls` client (`platform_common::http::ReqwestHttp`). The turn
-  therefore makes a **real HTTPS request** to the Anthropic-compatible endpoint,
-  and the terminal error is a real transport outcome — a `401`
-  (`non-success HTTP status 401: …`) when the request reaches the host, or a
-  `connection failed: …` when the simulator has no route to it. **Either is a
-  real-client result**; what it is *not* is the old `platform-posix-minimal` SSE
-  stub (`posix-minimal: … SSE stub …`).
-
-The test asserts both that an `.error` event arrived (proving the full
-SwiftUI→UniFFI→engine→listener path in-process) **and**, negatively, that the
-error message does not carry the posix-minimal stub markers (`posix-minimal` /
-`SSE stub` / `HTTP stub`) — proving a real `reqwest` call was made. This stays
-hermetic: it passes for a `401` *or* a connection error, without a secret and
-without requiring network success.
-
-Run it (no key in the environment):
-
-```sh
-cd apps/ios/native
-scripts/build-xcframework.sh        # once, if not already reproduced
-xcodegen generate                   # once, if the project is not generated
-
-# pick an available iPhone simulator
-D=$(xcrun simctl list devices available | grep -oE 'iPhone[^(]*' \
-      | grep -v 'BAZEL\|_2[0-9]' | head -1 | xargs)
-xcodebuild -scheme LingxiCode -sdk iphonesimulator \
-  -destination "platform=iOS Simulator,name=$(echo "$D" | sed 's/ *$//')" \
-  test CODE_SIGNING_ALLOWED=NO
-```
-
-Expected: `** TEST SUCCEEDED **`. The test log prints the real engine event
-stream it received over the UniFFI listener — a **real** transport error from
-the `reqwest`+`rustls` client, e.g.:
-
-```
-[P4] keyless ClientEvents received via UniFFI listener: turnStarted(turnId: nil) | error(kind: ...ErrorKindDto.transport, message: "streaming transport error: non-success HTTP status 401: ...")
-```
-
-or, when the simulator cannot reach the host:
-
-```
-[P4] keyless ClientEvents received via UniFFI listener: turnStarted(turnId: nil) | error(kind: ...ErrorKindDto.transport, message: "streaming transport error: connection failed: ...")
-```
-
-## 4. REAL run (with a key → live `textDelta`)
-
-To exercise the same path with a working model call, provide a real key **in the
-environment** (never hardcoded, never committed). The engine reads
-`ANTHROPIC_API_KEY` (and optional `ANTHROPIC_BASE_URL` / `LINGXI_MODEL`) at
-runtime via `EngineConfig.fromEnvironment`.
-
-### Run the app
-
-In Xcode: open `LingxiCode.xcodeproj`, edit the **LingxiCode** scheme →
-*Run → Arguments → Environment Variables*, add `ANTHROPIC_API_KEY = <your key>`
-(optionally `LINGXI_USE_ENGINE = 1` to force the engine source), then ⌘R on an
-iPhone simulator and send a prompt. The conversation streams real
-`ClientEvent.textDelta` into the assistant bubble.
-
-From the command line (key stays in your shell, not in any file):
-
-```sh
-cd apps/ios/native
-export ANTHROPIC_API_KEY=...        # your key — environment only
 xcodegen generate
-open LingxiCode.xcodeproj           # ⌘R; the engine source is selected because a key is present
 ```
 
-### Run the test against a live endpoint
+`Generated/` and `Frameworks/LingxiCodeFFI.xcframework` are ignored build outputs. Regenerate both when the Rust FFI or shared protocol changes. The default build contains ARM64 device and ARM64/x86_64 simulator slices. `LINGXI_ARM64_DEVICE_SIM_ONLY=1` builds both Apple Silicon execution targets for local verification; `LINGXI_SIM_ARM64_ONLY=1` produces a simulator-only artifact unsuitable for device delivery.
 
-The keyless test asserts the `.error` path, so it is unaffected by a present
-key (it does not require success). To observe a live `textDelta` stream from the
-test path instead, set the key in the environment before running `xcodebuild
-test`:
+The script combines generated namespace module maps, deduplicates shared Swift scaffolding and initializes callback registration. These transformations preserve the generated ABI. To stage a complete pair before replacing the app inputs, set `LINGXI_GENERATED_DIR` and `LINGXI_FRAMEWORKS_DIR` to isolated output directories.
+
+## Configure accounts
+
+Configure Provider definitions and enabled model bindings in Settings, then add independent API key or supported OAuth accounts under that Provider. iOS OAuth uses a device code: open the verification page, approve the code and let the account-bound Host flow finish. Credentials go through the native secure-storage interface; the app does not obtain LLM credentials from environment variables.
+
+The Host owns account priority, availability and model permissions. Swift displays the metadata-only `modelAvailability` projection. Discovery marks access unverified; successful model use confirms access. A model-specific denial affects that account/model pair. It does not authorize metered API billing for an OAuth account.
+
+To validate a real model call, add an account through Settings and send a prompt using an eligible model. Never embed credentials in source, build arguments or test logs.
+
+## Run native tests
+
+Select an isolated simulator and run the hosted tests:
 
 ```sh
-cd apps/ios/native
-export ANTHROPIC_API_KEY=...        # environment only — NEVER committed/printed
-D=$(xcrun simctl list devices available | grep -oE 'iPhone[^(]*' \
-      | grep -v 'BAZEL\|_2[0-9]' | head -1 | xargs)
-xcodebuild -scheme LingxiCode -sdk iphonesimulator \
-  -destination "platform=iOS Simulator,name=$(echo "$D" | sed 's/ *$//')" \
+TEST_RUNNER_LINGXI_UI_TESTING=1 xcodebuild -scheme LingxiCodeStore -sdk iphonesimulator \
+  -destination 'platform=iOS Simulator,id=<isolated-simulator-uuid>' \
+  -only-testing:LingxiCodeTests/ProviderAccountRepositoryTests \
+  -only-testing:LingxiCodeTests/SecureStorageReplacementTests \
+  -only-testing:LingxiCodeTests/IOSCloudAudioTests \
   test CODE_SIGNING_ALLOWED=NO
 ```
 
-With a valid key reaching a real Anthropic-compatible endpoint, the same
-listener receives `turnStarted` → one or more `textDelta` → `turnEnded` (the
-`[P4] …` log line then shows `textDelta(...)` entries). The simulator's
-`IosPlatform` now uses the real `reqwest`+`rustls` HTTP/SSE client
-(`platform_common::http::ReqwestHttp`, shared with desktop and Android), so the
-streamed `textDelta` is a genuine network response — no stub stands in the path.
-The keyless terminal-error assertion (a real `401` / connection error, never the
-`posix-minimal … SSE stub`) is the portable, secret-free proof that the entire
-in-process transport — including the real client — is wired.
+The host UI flag prevents its default conversation from initializing an unrelated Linux runtime before a unit fixture; tests still call the real FFI. The SDK permits one immutable kernel/rootfs configuration per app process. Run each filesystem-dependent positive method (`NativeSettingsEngineRoundtripTests/testKeylessLayerWritesReadBackAndSurviveEngineRebuild` and `NativeAdminEngineRoundtripTests/testKeylessAdminCatalogsAndCorrelatedHookValidationReturnThroughNativeCallbacks`) in a separate fresh `test-without-building` invocation with that flag. Keep every positive assertion; an unavailable simulator kernel does not prevent verified host-path translation.
 
-## Files
+`ProviderAccountsNativeUITests` launches the actual app with the host UI flag explicitly disabled and checks synthetic account creation, disabling, persistence after restart and deletion. It never invokes the account-test or prompt-send actions. Run this UI case with normal simulator signing (`CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-`); its real system Keychain requires the application entitlement packaging that unsigned source-only tests omit.
 
-| Path | Role |
-|---|---|
-| `Sources/Conversation/ConversationSource.swift` | the `ConversationSource` seam; `EngineConversationSource` builds the handle and maps `ClientEvent`s onto SwiftUI state |
-| `Sources/Bridge/EngineModule.swift` | UniFFI link smoke (force-links the static archive) |
-| `Tests/EngineRoundtripTests.swift` | the keyless simulator e2e (this document's §3) |
-| `scripts/build-xcframework.sh` | reproduces `Generated/` + `Frameworks/LingxiCodeFFI.xcframework` |
-| `scripts/install-sherpa-runtime.sh` | verifies and stages the pinned Sherpa + ONNX Runtime XCFrameworks |
-| `project.yml` | XcodeGen spec: app target, `LingxiCodeTests` unit-test target, and the test scheme |
-```
+`ProviderAccountRepositoryTests` covers device-code flow, priority, model projections, stale responses and read-only recovery. `SecureStorageReplacementTests` covers isolated secure-storage replacement and real FFI account persistence/model projection with synthetic credentials. `NativeSettingsEngineRoundtripTests` checks empty-account startup and settings persistence. `EngineRoundtripTests` checks terminal events from an unconfigured model turn; it does not establish successful upstream authentication or inference.
+
+Native test results require freshly matched bindings and libraries. Isolated Swift source tests do not establish native ABI or device acceptance. Real OAuth approval and physical-device acceptance are separate checks.

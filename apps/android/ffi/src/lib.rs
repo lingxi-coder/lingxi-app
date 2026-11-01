@@ -84,8 +84,7 @@ pub use harness_runtime::mobile::{
     max_audio_payload_bytes, ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto,
     CronTaskDto, FiredCronJobDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
     MobileEngineHandle, MobileSessionMode, ModelBillingModeDto, ModelCapabilitiesDto,
-    ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, PermissionRequestSink,
-    ProviderConnectionTestDto, SessionModeDto,
+    ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, PermissionRequestSink, SessionModeDto,
 };
 mod callbacks;
 mod configuration;
@@ -183,7 +182,6 @@ use host::android_guest_shell_enabled;
 pub use host::build_android_cron_store;
 #[cfg(feature = "uniffi")]
 pub use host::build_android_engine;
-#[cfg(feature = "uniffi")]
 #[cfg(feature = "uniffi")]
 pub use host::build_mobile_engine;
 #[cfg(feature = "uniffi")]
@@ -306,12 +304,12 @@ pub use remote::*;
 // ---------------------------------------------------------------------------
 //
 // The Kotlin app implements a crate-local async `AndroidSecureStorage` callback
-// interface backed by the Android Keystore / EncryptedSharedPreferences. The
+// interface backed by Android Keystore and encrypted files. The
 // engine's `lingxi_core::types::SecureStorageData` is serde-encoded by the bridge into an
 // OPAQUE `blob: Vec<u8>` keyed by (service, account); the native side stores /
 // returns the blob verbatim (encrypted at rest by the Keystore). The bridge
 // adapts it to the shared `lingxi_core::host::SecureStorage` seam and reports
-// is_encrypted()=true / backend=AndroidKeystore so OAuth /login can persist.
+// is_encrypted()=true / backend=AndroidKeystore for provider account credentials.
 //
 // The bridge struct/impl + its error-fan-out are gated to `target_os =
 // "android"` (not just `uniffi`) because they serde-encode through `serde_json`,
@@ -342,8 +340,8 @@ pub use remote::*;
 // taking the event listener, one app-scoped audio callback, other device callbacks,
 // and plain config strings, threading the runtime
 // config into a `MobileConfig`, and delegating to the shared
-// `harness_runtime::mobile::build_mobile_engine`. ADDITIVE — it does not touch the
-// existing non-exported `build_mobile_engine` above, the `platform-api` crate, or iOS.
+// `harness_runtime::mobile::build_mobile_engine`. The Rust PlatformImpls entry
+// point and this foreign callback entry point both delegate to that shared host.
 
 /// Device-capability stubs for the camera / share callbacks the Android
 /// constructor does not (yet) wire. A text/speech conversation never invokes

@@ -46,12 +46,10 @@ async function cleanupHarness(
     handle: (channel: string, handler: (...args: any[]) => any) => handlers.set(channel, handler),
     removeHandler: (channel: string) => handlers.delete(channel),
   };
-  let invalidations = 0;
   const bridge = {
     registerIpc() {},
     registerWindow() {},
     runtimeSummaries: [],
-    invalidateLaunchConfigCache() { invalidations += 1; },
     hasActiveWork: () => false,
     get: () => undefined,
   };
@@ -90,7 +88,7 @@ async function cleanupHarness(
     assert.ok(handler, 'cleanup IPC handler must be registered');
     return handler({ sender: window, senderFrame: window.mainFrame }, pluginId, lastScopeRemoved);
   };
-  return { configHome, deleted, invoke, invalidations: () => invalidations, refs, root };
+  return { configHome, deleted, invoke, refs, root };
 }
 
 test('last-scope uninstall deletes broker keys absent from the current schema and preserves other plugins', async t => {
@@ -108,7 +106,6 @@ test('last-scope uninstall deletes broker keys absent from the current schema an
   assert.deepEqual(result, { pluginId: PLUGIN_ID, status: 'cleared', deletedCount: 2, failedCount: 0 });
   assert.deepEqual(h.deleted.sort(), [`${PLUGIN_ID}/CURRENT_TOKEN`, `${PLUGIN_ID}/RENAMED_ORPHAN_TOKEN`]);
   assert.deepEqual(h.refs, [{ pluginId: 'other@acme', key: 'TOKEN' }]);
-  assert.equal(h.invalidations(), 1);
 });
 
 test('non-final scope retains all broker credentials', async t => {
@@ -121,7 +118,6 @@ test('non-final scope retains all broker credentials', async t => {
 
   assert.deepEqual(result, { pluginId: PLUGIN_ID, status: 'retained', deletedCount: 0, failedCount: 0 });
   assert.deepEqual(h.deleted, []);
-  assert.equal(h.invalidations(), 0);
 });
 
 test('malformed or unavailable registry fails closed before broker enumeration', async t => {
@@ -178,7 +174,6 @@ test('partial broker deletion is reported and a retry clears only the remaining 
   const retry = await h.invoke();
   assert.deepEqual(retry, { pluginId: PLUGIN_ID, status: 'cleared', deletedCount: 1, failedCount: 0 });
   assert.deepEqual(refs, [{ pluginId: 'other@acme', key: 'TOKEN' }]);
-  assert.equal(h.invalidations(), 2);
 });
 
 test('registry change after broker listing aborts deletion and keeps credentials', async t => {

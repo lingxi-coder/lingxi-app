@@ -19,10 +19,11 @@ pub struct IosAudioProviderHost {
 pub fn build_ios_audio_provider_host(
     profiles_json: String,
     region: String,
+    account_home: String,
     secure_storage: Box<dyn IosSecureStorage>,
 ) -> Result<Arc<IosAudioProviderHost>, MobileEngineError> {
     Ok(Arc::new(IosAudioProviderHost {
-        inner: common::AudioProviderCore::new(profiles_json, region, secure_storage)?,
+        inner: common::AudioProviderCore::new(profiles_json, region, account_home, secure_storage)?,
     }))
 }
 

@@ -254,8 +254,8 @@ targets:
   # XCTest simulator e2e (M10 A2 / P4): builds the in-process engine via
   # `buildIosEngine`, submits a prompt, and asserts the streamed ClientEvent path
   # reaches a test `IosEventListener` — proving SwiftUI→UniFFI→engine→listener
-  # in-process. Passes KEYLESS: with no ANTHROPIC_API_KEY the turn surfaces a
-  # terminal `.error` event. Hosted in the app target so it shares the app's
+  # in-process. An isolated empty account store yields a terminal model error.
+  # Hosted in the app target so it shares the app's
   # compiled UniFFI bindings; also links the FFI xcframework so the per-namespace
   # `harness_runtimeFFI` clang module is importable here.
   LingxiCodeTests:

@@ -1,3 +1,4 @@
+import type { ProviderAccountSnapshot } from '../src/shared/providerAccounts';
 /** Explicit demo-only integration fixture. Never part of the ordinary unit suite. */
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -16,6 +17,7 @@ import { TeamConnector } from '../src/main/teams/connector';
 import { TeamPrivateStore } from '../src/main/teams/privateStore';
 import { runTeamHost, type TeamHostBootstrap } from '../src/main/teams/process';
 import { TeamOwnerApprovalBroker } from '../src/main/remoteControl/teamApprovals';
+const { validatePackageOutputRoot } = await import(new URL('../scripts/package-support.mjs', import.meta.url).href);
 const { verifyTeamIdentifier } = await import(new URL('../scripts/credential-broker.mjs', import.meta.url).href);
 
 const productRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -34,7 +36,8 @@ const binaryMode = process.env.TEAM_T3_PACKAGED_APP ? 'signedpackage' : 'debug';
 let packagedApp: string | undefined;
 let binaries: { host: string; worker: string };
 if (process.env.TEAM_T3_PACKAGED_APP) {
-  const allowed = realpathSync('/Users/luolingfeng/lingxi/.worktrees/teams/output/teams-t3-macos');
+  assert.ok(process.env.LINGXI_PACKAGE_OUTPUT_ROOT, 'signed Team validation requires the explicit isolated package output root');
+  const allowed = realpathSync(validatePackageOutputRoot(process.env.LINGXI_PACKAGE_OUTPUT_ROOT));
   packagedApp = realpathSync(process.env.TEAM_T3_PACKAGED_APP);
   assert.ok(packagedApp.startsWith(`${allowed}${sep}`), 'packaged app must be inside the owned Teams macOS output root');
   assert.equal(basename(packagedApp), 'LingXi Code.app'); assert.ok(lstatSync(packagedApp).isDirectory());
@@ -336,6 +339,34 @@ function files(directory: string): string[] {
 }
 async function startConnector(): Promise<void> {
   assert.ok(account);
+  const helper = packagedApp ? join(packagedApp, 'Contents/Resources/bin/bridge-server') : process.env.LINGXI_BRIDGE_SERVER_BIN;
+  assert.ok(helper, 'set LINGXI_BRIDGE_SERVER_BIN to the current protocol-31 helper; stale debug binaries are not accepted');
+  const address = modelServer.address(); assert.ok(address && typeof address !== 'string');
+  const fixtureEndpoint = `http://127.0.0.1:${address.port}`;
+  const definitions = { anthropic: { type: 'anthropic', baseUrl: fixtureEndpoint, models: [{ id: MODEL }] } };
+  const accountCommand = (request: Record<string, unknown>): ProviderAccountSnapshot => JSON.parse(execFileSync(helper,
+    ['--provider-account-command', '--session-config-home', configHome], { encoding: 'utf8', maxBuffer: 2 * 1024 * 1024,
+      env: { HOME: home, PATH: process.env.PATH, LANG: 'C', LINGXI_CONFIG_DIR: configHome },
+      input: JSON.stringify({ metadata_only: true, backend: 'desktop-broker', credential_channel: 'development',
+        profiles_json: JSON.stringify(definitions), request_json: JSON.stringify(request) }),
+    }));
+  let accountSnapshot = accountCommand({ action: 'list', expectedRevision: 0 });
+  if (!accountSnapshot.accounts.length) accountSnapshot = accountCommand({ action: 'add', expectedRevision: accountSnapshot.configRevision,
+    providerId: 'anthropic', displayName: 'Synthetic Team fixture', executionBindingId: 'anthropic', authKind: 'api_key' });
+  const providerAccount = accountSnapshot.accounts[0]!;
+  assert.equal(providerAccount.executionBindingId, 'anthropic');
+  const versionPublished = JSON.parse(execFileSync(helper, ['--provider-account-command', '--session-config-home', configHome], {
+    encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, env: { HOME: home, PATH: process.env.PATH, LANG: 'C', LINGXI_CONFIG_DIR: configHome },
+    input: JSON.stringify({ metadata_only: true, backend: 'desktop-broker', credential_channel: 'development', request_json: '',
+      publish_credential_version: { accountId: providerAccount.accountId, identityGeneration: providerAccount.identityGeneration, credentialRevision: 1 } }),
+  }));
+  assert.equal(versionPublished.published, true);
+
+  const modelProfile = { provider_id: 'anthropic', profile_name: 'anthropic', base_url: 'https://api.anthropic.com',
+    protocol: 'anthropic_messages', auth: 'api_key', credential: { source: 'host_managed', key: 'team-selected-model' },
+    models: [{ display_model: MODEL, request_model: MODEL, billing_model: MODEL,
+      capability_support: { streaming: 'supported', tools: 'supported' } }], extra: {} };
+
   const store = new BotStore({ userData, home, defaultConfigHome: configHome }), privateStore = new TeamPrivateStore(userData);
   service = new TeamsService(account, { projectId, apiKey: 'synthetic-emulator-key', appId: 'teams-main-runtime' }, base,
     { host: '127.0.0.1', authPort: 9098, firestorePort: 8085 });
@@ -365,12 +396,15 @@ async function startConnector(): Promise<void> {
   connector = new TeamConnector({ service, store, content: new BotContent(store), privateStore, retryMs: 250,
     binaries: () => binaries, defaultModel: () => MODEL,
     modelRoute: async () => ({ route: { model_provider: 'anthropic', model_protocol: 'anthropic_messages', model_id: MODEL,
-      model_endpoint: 'https://api.anthropic.com', credential_id: 'anthropic-api-key',
-      model_profile: { provider_id: 'anthropic', profile_name: 'anthropic', base_url: 'https://api.anthropic.com',
-        protocol: 'anthropic_messages', auth: 'api_key', credential: { source: 'host_managed', key: 'team-selected-model' },
-        models: [{ display_model: MODEL, request_model: MODEL, billing_model: MODEL,
-          capability_support: { streaming: 'supported', tools: 'supported' } }], extra: {} } }, assertCurrent: async () => {} }),
-    modelCredential: async credentialId => { assert.equal(credentialId, 'anthropic-api-key'); return MODEL_KEY; },
+      model_endpoint: 'https://api.anthropic.com', credential_id: 'anthropic', model_profile: modelProfile }, profiles: [modelProfile], assertCurrent: async () => {} }),
+    modelAccounts: async (_credentialId, bindingId, profiles) => {
+      assert.equal(bindingId, 'anthropic'); assert.deepEqual(profiles, [modelProfile]);
+      const snapshot = accountCommand({ action: 'list', expectedRevision: 0 });
+      return { providerAccountHome: configHome, providerAccounts: snapshot, providerAccountCredentials: {
+        [providerAccount.accountId]: { credential_revision: 1, identity_generation: providerAccount.identityGeneration,
+          kind: { kind: 'api_key', key: MODEL_KEY } },
+      } };
+    },
     permission: (input, signal) => approvalBroker.request({ ...input, showLocal: async () => {
       assert.equal(input.target.ownerUid, ownerUid); assert.equal(input.toolName, 'Bash');
       assert.equal(input.target.triggerId, desktopTriggerId); approvals.push({ triggerId: input.target.triggerId, toolName: input.toolName });
@@ -383,6 +417,7 @@ async function startConnector(): Promise<void> {
       // environment switch, account setting, renderer or deep link can select it.
       const modelAddress = modelServer.address(); assert.ok(modelAddress && typeof modelAddress !== 'string');
       const bootstrap = { ...input.bootstrap, endpoint,
+        ...(input.bootstrap.credentials ? { credentials: { ...input.bootstrap.credentials, provider_account_profiles: input.bootstrap.credentials.provider_account_profiles.map(profile => ({ ...profile, base_url: `http://127.0.0.1:${modelAddress.port}` })) } } : {}),
         ...(input.bootstrap.snapshot ? { snapshot: { ...input.bootstrap.snapshot, model_endpoint: `http://127.0.0.1:${modelAddress.port}`,
           model_profile: { ...input.bootstrap.snapshot.model_profile, base_url: `http://127.0.0.1:${modelAddress.port}` } } } : {}) } as unknown as TeamHostBootstrap;
       try {

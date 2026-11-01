@@ -1,7 +1,7 @@
 //! Top-level subcommand layer — byte-parity with claude-code 2.1.191.
 //!
-//! claude-code registers `mcp`, `auth`, `agents`, `auto-mode`, `doctor`,
-//! `gateway` (2.1.198), `install`, `plugin|plugins`, `project`, `setup-token`,
+//! claude-code registers `mcp`, `provider`, `agents`, `auto-mode`, `doctor`,
+//! `gateway` (2.1.198), `install`, `plugin|plugins`, `project`,
 //! `ultrareview`, and `update|upgrade` as commander subcommands. lingxi-cli historically had NO
 //! subcommand layer (flat clap struct), so a bare token like `mcp`/`auth` was
 //! swallowed as a chat prompt and started a (billable) LLM turn, while a
@@ -21,7 +21,6 @@ use clap::Subcommand;
 
 pub mod agents;
 pub mod attach;
-pub mod auth;
 pub mod auto_mode;
 pub mod auto_mode_setup;
 pub mod bg_worker;
@@ -41,11 +40,11 @@ pub mod plugin_init;
 pub mod plugin_install;
 pub mod plugin_tag;
 pub mod project;
+pub mod provider;
 pub mod remote_control;
 pub mod respawn;
 pub mod rm;
 pub mod sandbox;
-pub mod setup_token;
 pub mod stop;
 pub mod ultrareview;
 pub mod update;
@@ -61,8 +60,8 @@ pub enum Commands {
     Link(deep_links::Link),
     /// Configure and manage MCP servers
     Mcp(mcp::Cli),
-    /// Manage authentication
-    Auth(auth::Cli),
+    /// Manage provider accounts on this execution host
+    Provider(provider::Cli),
     /// Inspect or reset auto mode classifier configuration
     #[command(name = "auto-mode")]
     AutoMode(auto_mode::Cli),
@@ -95,9 +94,6 @@ pub enum Commands {
     /// Start a persistent remote-control server
     #[command(name = "remote-control")]
     RemoteControl(remote_control::Cli),
-    /// Set up a long-lived authentication token (requires Claude subscription)
-    #[command(name = "setup-token")]
-    SetupToken(setup_token::Cli),
     /// Import config from another AI coding agent into LingXi
     //
     // (CLI-14, cc2.1.238) `r.command("import")` — visible, positional
@@ -157,7 +153,7 @@ impl Commands {
             Commands::Open(_) => "open",
             Commands::Link(_) => "link",
             Commands::Mcp(_) => "mcp",
-            Commands::Auth(_) => "auth",
+            Commands::Provider(_) => "provider",
             Commands::AutoMode(_) => "auto-mode",
             Commands::AutoModeSetup(_) => "auto-mode-setup",
             Commands::Doctor(_) => "doctor",
@@ -166,7 +162,6 @@ impl Commands {
             Commands::Plugin(_) => "plugin",
             Commands::Project(_) => "project",
             Commands::RemoteControl(_) => "remote-control",
-            Commands::SetupToken(_) => "setup-token",
             Commands::Import(_) => "import",
             Commands::ImportConversations(_) => "import-conversations",
             Commands::Sandbox(_) => "sandbox",
@@ -190,7 +185,7 @@ impl Commands {
             Commands::Open(c) => deep_links::open(c),
             Commands::Link(c) => deep_links::link(c),
             Commands::Mcp(c) => mcp::run(c).await,
-            Commands::Auth(c) => auth::run(c).await,
+            Commands::Provider(c) => provider::run(c).await,
             Commands::AutoMode(c) => auto_mode::run(c).await,
             Commands::AutoModeSetup(c) => auto_mode_setup::run(c).await,
             Commands::Doctor(c) => doctor::run(c).await,
@@ -199,7 +194,6 @@ impl Commands {
             Commands::Plugin(c) => plugin::run(c).await,
             Commands::Project(c) => project::run(c).await,
             Commands::RemoteControl(c) => remote_control::run(c).await,
-            Commands::SetupToken(c) => setup_token::run(c).await,
             Commands::Import(c) => import::run(c).await,
             Commands::ImportConversations(c) => import::run_conversations(c).await,
             Commands::Sandbox(c) => sandbox::run(c).await,
@@ -233,7 +227,6 @@ mod top_level_name_tests {
             ("install", "install"),
             ("doctor", "doctor"),
             ("mcp", "mcp"),
-            ("auth", "auth"),
             ("remote-control", "remote-control"),
             ("logs", "logs"),
             ("stop", "stop"),

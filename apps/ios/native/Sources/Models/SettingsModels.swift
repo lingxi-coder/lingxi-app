@@ -317,8 +317,7 @@ struct LinuxRuntimeState: Equatable {
 enum Presets {
     /// A preset's `models` are suggestions AND the fallback the app writes into
     /// `ProviderStoredProfile.modelID` when it has no better answer (adding a
-    /// provider, or migrating a legacy Anthropic Keychain whose stored model
-    /// belongs to someone else). That fallback becomes the launch
+    /// provider). That fallback becomes the launch
     /// `defaultModelID`, so every id here must be one the engine still curates
     /// (`traits::is_curated_model`) — a stale id is registered only because it
     /// is the configured default and renders as a stray row above the real

@@ -150,7 +150,7 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         struct Offline: Error {}
         func source() -> EngineConversationSource {
             EngineConversationSource(config: EngineConfig(
-                apiBase: "https://invalid.example", apiKey: "", model: "",
+                apiBase: "https://invalid.example", model: "",
                 appSandboxRoot: NSTemporaryDirectory(), projectCwd: nil,
                 sessionMode: .code, visionDelegationEnabled: false),
                 handleBuilder: { _, _, _, _ in throw Offline() })

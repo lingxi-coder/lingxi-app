@@ -1,3 +1,4 @@
+import type { ProviderAccountModelAvailability } from '../../../../shared/providerAccounts';
 import { useI18n } from '../../../i18n/useI18n';
 import { tr } from '../../../i18n/locale';
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
@@ -95,13 +96,10 @@ export function candidatesFromCatalog(
   return rows;
 }
 
-/** Use the host's credential/configuration status, including custom profiles. */
-export function configuredCandidates(
-  rows: readonly CandidateRow[],
-  credentials: readonly { providerId: string; configured: boolean }[] = [],
-): CandidateRow[] {
-  const configured = new Set(credentials.filter((entry) => entry.configured).map((entry) => entry.providerId));
-  return rows.filter((row) => configured.has(row.choice.profile === 'builtin' ? 'anthropic' : row.choice.profile));
+/** Shared runtime eligibility includes the exact account and model permissions. */
+export function configuredCandidates(rows: readonly CandidateRow[], availability: readonly ProviderAccountModelAvailability[] = []): CandidateRow[] {
+  return rows.filter(row => availability.some(entry => entry.executionBindingId === (row.choice.profile === 'builtin' ? 'anthropic' : row.choice.profile)
+    && entry.modelId === row.choice.model && entry.eligibleAccountIds.length > 0));
 }
 
 export function ChoiceSelect({
@@ -293,8 +291,8 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
   currentContext.current = { catalog, sessionId: bridge.activeSession?.sessionId };
   const busy = pendingWrite !== null;
   const dirty = draft !== null && JSON.stringify(draft.value) !== draft.original;
-  const candidates = useMemo(() => configuredCandidates(candidatesFromCatalog(bridge.desktop.providerModelCatalog ?? []), bridge.bootstrap?.providerCredentials),
-    [bridge.desktop.providerModelCatalog, bridge.bootstrap?.providerCredentials]);
+  const candidates = useMemo(() => configuredCandidates(candidatesFromCatalog(bridge.desktop.providerModelCatalog ?? []), bridge.bootstrap?.providerAccountSnapshot?.modelAvailability),
+    [bridge.desktop.providerModelCatalog, bridge.bootstrap?.providerAccountSnapshot?.modelAvailability]);
   const analystCandidates = useMemo(() => candidates.filter((row) => row.analystCapable), [candidates]);
   const operation = bridge.configurationOperations?.fusion;
   const finishWrite = useCallback((id: number, failure?: string) => {

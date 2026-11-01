@@ -88,10 +88,37 @@ fn default_limit() -> usize {
 pub struct AudioProviderHost {
     client: sdk::LlmClient,
     credential_ids: BTreeMap<String, String>,
-    storage: Option<Arc<dyn lingxi_core::host::SecureStorage>>,
-    bound_services: Option<llm_runtime::services::ProviderServices>,
-    keys: BTreeMap<String, sdk::protocol::Secret<String>>,
+    bound_services: llm_runtime::services::ProviderServices,
     pending: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
+}
+
+struct AudioSelection {
+    route: audio::AudioRoute,
+    client: sdk::LlmClient,
+    credential: sdk::protocol::Secret<String>,
+    account: llm_runtime::services::SelectedServiceAccount,
+}
+
+struct AudioCallFailure {
+    value: Value,
+    provider: Option<audio::AudioError>,
+}
+impl AudioCallFailure {
+    fn local(kind: &str, message: &str) -> Self {
+        Self {
+            value: failure(kind, message),
+            provider: None,
+        }
+    }
+    fn provider(error: audio::AudioError) -> Self {
+        Self {
+            value: failure("provider_error", "selected audio provider request failed"),
+            provider: Some(error),
+        }
+    }
+    fn into_value(self) -> Value {
+        self.provider.map_or(self.value, provider_failure)
+    }
 }
 
 impl AudioProviderHost {
@@ -104,11 +131,78 @@ impl AudioProviderHost {
         Self {
             client: services.client().clone(),
             credential_ids,
-            storage: None,
-            bound_services: Some(services),
-            keys: BTreeMap::new(),
+            bound_services: services,
             pending: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_empty() -> Self {
+        Self::test_with_transport(Arc::new(http_client::provider_transport().unwrap()), None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_transport(
+        transport: Arc<dyn sdk::Transport>,
+        key: Option<&str>,
+    ) -> Self {
+        use lingxi_core::host::provider_accounts::{
+            AccountAuthKind, AccountMetadata, CredentialRef,
+        };
+        let mut assembled = provider_config::assemble(provider_config::AssembleInputs {
+            official_catalog: None,
+            anthropic_api_base: "https://api.anthropic.com".into(),
+            anthropic_models: vec![],
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            user_providers: BTreeMap::new(),
+            routing: None,
+        });
+        let accounts = key
+            .map(|_| {
+                vec![AccountMetadata {
+                    account_id: "00000000-0000-4000-8000-000000000001".into(),
+                    provider_id: "openai".into(),
+                    display_name: "Fixture".into(),
+                    auth_kind: AccountAuthKind::ApiKey,
+                    execution_binding_id: "openai".into(),
+                    credential_ref: CredentialRef {
+                        store_scope: "fixture".into(),
+                        secret_ref: "acct.00000000-0000-4000-8000-000000000001".into(),
+                    },
+                    enabled: true,
+                    user_priority: 0,
+                    config_revision: 1,
+                    identity_generation: 1,
+                }]
+            })
+            .unwrap_or_default();
+        provider_config::assemble_account_profiles(&mut assembled, &accounts).unwrap();
+        let pool = Arc::new(llm_runtime::accounts::AccountPool::new(
+            accounts,
+            Arc::new(llm_runtime::accounts::MemoryAccountPoolStore::default()),
+        ));
+        let mut model = llm_runtime::ModelRuntime::from_config(assembled.client_config)
+            .unwrap()
+            .with_account_pool(pool);
+        if let Some(key) = key {
+            model = model.with_credential_provider(Arc::new(
+                llm_runtime::StaticCredentialProvider::new(llm_runtime::Credential::ApiKey(
+                    key.into(),
+                )),
+            ));
+        }
+        let ids = assembled
+            .credential_sources
+            .into_iter()
+            .map(|source| (source.profile_name, source.credential_id))
+            .collect();
+        Self::from_provider_services(
+            model
+                .provider_services(llm_runtime::Region::International, transport)
+                .unwrap(),
+            ids,
+        )
     }
 
     /// Exact immutable SDK client snapshot supplied to shared media routing.
@@ -116,90 +210,9 @@ impl AudioProviderHost {
         self.client.snapshot()
     }
 
-    /// Unbound standalone hosts have no dynamic owner catalog. A bound host
-    /// must continue to match its owner's scoped provider configuration.
+    /// The host must continue to match its owning account catalog.
     pub(crate) fn profile_is_current(&self, profile: &str) -> bool {
-        self.bound_services
-            .as_ref()
-            .is_none_or(|services| services.profile_is_current(profile))
-    }
-
-    /// Resolve a credential for an already pinned profile without exposing it
-    /// to logs or native callback DTOs.
-    pub(crate) async fn credential_for_profile(
-        &self,
-        profile: &str,
-    ) -> Result<sdk::protocol::Secret<String>, Value> {
-        self.credential(profile).await
-    }
-
-    /// Build a host from serialized provider profiles and trusted credential sources.
-    ///
-    /// `region` must be `china` or `international`. `keys` supplies secret overrides
-    /// keyed by credential ID; absent keys are read from `storage` when available.
-    pub fn new(
-        profiles_json: &str,
-        region: &str,
-        storage: Option<Arc<dyn lingxi_core::host::SecureStorage>>,
-        keys: BTreeMap<String, String>,
-    ) -> Result<Self, String> {
-        if profiles_json.len() > 512 * 1024 {
-            return Err("provider configuration is too large".into());
-        }
-        let user_providers = if profiles_json.trim().is_empty() {
-            BTreeMap::new()
-        } else {
-            serde_json::from_str(profiles_json).map_err(|_| "invalid provider configuration")?
-        };
-        let region = match region {
-            "china" => sdk::protocol::Region::ChinaMainland,
-            "international" => sdk::protocol::Region::International,
-            _ => return Err("audio requires an explicit supported usage region".into()),
-        };
-        let assembled = provider_config::assemble_for_region(
-            provider_config::AssembleInputs {
-                // Standalone audio has no engine owner; session audio reuses
-                // the running owner through from_provider_services instead.
-                official_catalog: None,
-                anthropic_api_base: "https://api.anthropic.com".into(),
-                anthropic_models: vec![],
-                anthropic_has_api_key: false,
-                anthropic_has_oauth: false,
-                user_providers,
-                routing: None,
-            },
-            region,
-        );
-        if !assembled.warnings.is_empty() {
-            return Err("invalid or unsupported provider configuration".into());
-        }
-        let credential_ids = assembled
-            .credential_sources
-            .into_iter()
-            .map(|source| (source.profile_name, source.credential_id))
-            .collect();
-        let host = llm_runtime::ModelRuntime::from_config(assembled.client_config)
-            .map_err(|_| "cannot build audio provider configuration")?;
-        let transport =
-            http_client::provider_transport().map_err(|_| "audio transport is unavailable")?;
-        // Reuse the runtime's complete authenticator registry. Rebuilding an SDK
-        // client with only its default authenticators rejects valid OAuth/GCP
-        // profiles even when the requested audio route uses a separate API key.
-        let services = host
-            .provider_services(region, Arc::new(transport))
-            .map_err(|_| "cannot build audio provider services")?;
-        let client = services.client().clone();
-        Ok(Self {
-            client,
-            credential_ids,
-            storage,
-            bound_services: None,
-            keys: keys
-                .into_iter()
-                .map(|(id, key)| (id, sdk::protocol::Secret::new(key)))
-                .collect(),
-            pending: Arc::new(Mutex::new(BTreeMap::new())),
-        })
+        self.bound_services.profile_is_current(profile)
     }
 
     /// Cancel an active transcription, synthesis, or realtime operation by its request identity.
@@ -275,72 +288,59 @@ impl AudioProviderHost {
                             "select an exact audio provider profile",
                         )
                     })?;
-                (profile.clone(), format!("profile:{profile}"))
+                (
+                    profile.clone(),
+                    lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.into(),
+                )
             }
             _ => return Err(failure("invalid_request", "unknown cloud audio binding")),
         };
         Ok(audio::AudioRoute::new(profile, account))
     }
 
-    async fn credential(&self, profile: &str) -> Result<sdk::protocol::Secret<String>, Value> {
-        if let Some(services) = &self.bound_services {
-            return services
-                .service_credential(profile)
-                .await
-                .map_err(|error| match error {
-                    llm_runtime::LlmError::UnsupportedCapability { .. } => failure(
-                        "unsupported",
-                        "selected profile authentication cannot provide audio credentials",
-                    ),
-                    llm_runtime::LlmError::Authentication { .. } => failure(
-                        "needs_configuration",
-                        "configure the selected provider's credential",
-                    ),
-                    _ => failure(
-                        "unavailable",
-                        "the selected provider's credential source is unavailable",
-                    ),
-                });
-        }
-        let id = self.credential_ids.get(profile).ok_or_else(|| {
-            failure(
-                "needs_configuration",
-                "audio profile has no credential source",
+    async fn select_audio(&self, request: &AudioRequest) -> Result<AudioSelection, Value> {
+        let route = self.resolve(request)?;
+        let selected = self
+            .bound_services
+            .resolve_audio_account(
+                &route.profile_name,
+                operation(&request.kind)?,
+                request.cloud.model_id.as_deref(),
+                (request.cloud.binding == "follow_session"
+                    && route.account_scope
+                        != lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE)
+                    .then_some(route.account_scope.as_str()),
             )
-        })?;
-        if let Some(key) = self.keys.get(id) {
-            return Ok(key.clone());
-        }
-        let store = self.storage.as_ref().ok_or_else(|| {
-            failure(
-                "needs_configuration",
-                "configure the selected provider's credential",
-            )
-        })?;
-        let account = if id == "anthropic" || id == "anthropic-api-key" {
-            "anthropic-api-key".into()
-        } else {
-            format!("provider-key-{id}")
-        };
-        let data = store
-            .retrieve("lingxi", &account)
             .await
-            .map_err(|_| failure("unavailable", "audio credential storage is unavailable"))?
-            .ok_or_else(|| {
-                failure(
-                    "needs_configuration",
-                    "configure the selected provider's credential",
-                )
-            })?;
-        let key = String::from_utf8(data.expose_secret_bytes().to_vec())
-            .map_err(|_| failure("unavailable", "audio credential encoding is invalid"))?;
-        if key.is_empty() {
-            return Err(failure(
-                "needs_configuration",
-                "configure the selected provider's credential",
-            ));
+            .map_err(service_failure)?;
+        Ok(AudioSelection {
+            route: audio::AudioRoute::new(
+                selected.actual_profile.clone(),
+                selected.account_scope.clone(),
+            ),
+            client: selected.services.client().clone(),
+            credential: selected.credential.clone(),
+            account: selected,
+        })
+    }
+
+    async fn audio_capability_preview(
+        &self,
+        profile: &str,
+        operation: audio::AudioOperation,
+        model: Option<&str>,
+    ) -> Result<Vec<audio::AudioCapabilities>, Value> {
+        match self
+            .bound_services
+            .audio_account_capabilities(profile, operation, model)
+            .await
+        {
+            Ok(caps) => Ok(caps),
+            // An empty account directory still permits structural metadata for
+            // the configuration UI. Business dispatch must use the resolver.
+            Err(llm_runtime::LlmError::AllAccountsUnavailable { .. }) => Ok(Vec::new()),
+            Err(error) => Err(service_failure(error)),
         }
-        Ok(sdk::protocol::Secret::new(key))
     }
 
     /// Return a JSON capability/readiness snapshot for a serialized [`AudioRequest`].
@@ -351,8 +351,24 @@ impl AudioProviderHost {
         let result = async {
             let request = self.parse(input)?;
             let route = self.resolve(&request)?;
-            let caps = self.client.audio().capabilities(&route).map_err(|_| failure("unsupported", "the selected audio provider profile is unsupported"))?;
             let operation = operation(&request.kind)?;
+            let services = &self.bound_services;
+            let (caps, account_credential_error) = {
+                let candidates = self.audio_capability_preview(&route.profile_name, operation, request.cloud.model_id.as_deref()).await?;
+                let mut ready = None;
+                let mut credential_error = None;
+                for candidate in &candidates {
+                    match services.service_credential_source(&candidate.profile_name).await {
+                        Ok(llm_runtime::CredentialSource::None | llm_runtime::CredentialSource::Unknown) => {},
+                        Ok(_) => { ready = Some(candidate.clone()); break; },
+                        Err(error) => credential_error = Some(service_failure(error)),
+                    }
+                }
+                let present = ready.is_some();
+                let caps = ready.or_else(|| candidates.into_iter().next()).or_else(|| self.client.audio().capabilities(&route).ok())
+                    .ok_or_else(|| failure("unsupported", "the selected audio provider profile is unsupported"))?;
+                (caps, if present { None } else { Some(credential_error.unwrap_or_else(|| failure("needs_configuration", "configure an eligible audio account credential"))) })
+            };
             let descriptor = caps.operation(operation);
             let adapter_supported = if operation == audio::AudioOperation::NativeRealtime { caps.agent_conversation } else { caps.supports(operation) };
             let model = caps.model(operation, request.cloud.model_id.as_deref());
@@ -367,7 +383,9 @@ impl AudioProviderHost {
                 else if !rate_supported { Some("this provider requires normal speech speed") }
                 else if !interaction_supported { Some("this provider requires turn-based conversation") }
                 else { None };
-            let credential_error = if supported && configuration_reason.is_none() { self.credential(&route.profile_name).await.err() } else { None };
+            let credential_error = if supported && configuration_reason.is_none() {
+                account_credential_error
+            } else { None };
             let readiness = if !supported { "unsupported" } else if configuration_reason.is_some() { "needs_configuration" }
                 else if credential_error.as_ref().is_some_and(|error| error["error"]["kind"] == "unavailable") { "unavailable" }
                 else if credential_error.is_some() { "needs_configuration" } else { "ready" };
@@ -390,12 +408,12 @@ impl AudioProviderHost {
     /// supported recorded formats (`audio/wav`, `audio/x-wav`, `audio/mp4`,
     /// `audio/m4a`, `audio/mpeg`, `audio/flac`, or `audio/webm`).
     pub async fn transcribe(&self, input: &str, bytes: Vec<u8>, mime_type: &str) -> String {
-        self.run(input, |request, route, options| async move {
+        self.run(input, |request, route, client, options| async move {
             if request.kind != "recognition"
                 || bytes.is_empty()
                 || bytes.len() > request.max_payload_bytes
             {
-                return Err(failure(
+                return Err(AudioCallFailure::local(
                     "invalid_request",
                     "invalid bounded transcription input",
                 ));
@@ -406,14 +424,12 @@ impl AudioProviderHost {
                 "audio/mpeg" => "mp3",
                 "audio/flac" => "flac",
                 "audio/webm" => "webm",
-                _ => return Err(failure("unsupported", "unsupported recorded audio format")),
+                _ => return Err(AudioCallFailure::local("unsupported", "unsupported recorded audio format")),
             };
-            let caps = self.client.audio().capabilities(&route).map_err(provider_failure)?;
+            let caps = client.audio().capabilities(&route).map_err(AudioCallFailure::provider)?;
             let language = caps.operation(audio::AudioOperation::FileTranscription)
                 .and_then(|descriptor| descriptor.language_hint_for_locale(request.language.as_deref()));
-            let output = self
-                .client
-                .audio()
+            let output = client.audio()
                 .transcribe(
                     &route,
                     audio::AudioInput::from_bytes(
@@ -429,7 +445,7 @@ impl AudioProviderHost {
                     &options,
                 )
                 .await
-                .map_err(provider_failure)?;
+                .map_err(AudioCallFailure::provider)?;
             Ok(json!({"text":output.text,"language":output.language,"usage":output.usage,"usageContext":{"operationId":request.operation_id,"profileId":route.profile_name,"accountScope":route.account_scope,"modelId":output.model,"providerId":output.provider_id}}))
         })
         .await
@@ -440,60 +456,145 @@ impl AudioProviderHost {
     /// The request kind must be `speech`; the selected route must return mono
     /// PCM16 audio with a positive sample rate.
     pub async fn synthesize(&self, input: &str, text: &str) -> String {
-        self.run(input, |request,route,options| async move {
-            if request.kind != "speech" { return Err(failure("invalid_request", "synthesis requires speech configuration")); }
-            if text.trim().is_empty() || text.len() > request.max_payload_bytes.min(MAX_REQUEST_BYTES) { return Err(failure("invalid_request", "synthesis requires bounded nonempty text")); }
+        self.run(input, |request,route,client,options| async move {
+            if request.kind != "speech" { return Err(AudioCallFailure::local("invalid_request", "synthesis requires speech configuration")); }
+            if text.trim().is_empty() || text.len() > request.max_payload_bytes.min(MAX_REQUEST_BYTES) { return Err(AudioCallFailure::local("invalid_request", "synthesis requires bounded nonempty text")); }
             let mut synthesis = audio::SynthesisRequest::new(text);
-            let caps = self.client.audio().capabilities(&route).map_err(provider_failure)?;
+            let caps = client.audio().capabilities(&route).map_err(AudioCallFailure::provider)?;
             synthesis.language = caps.operation(audio::AudioOperation::Synthesis)
                 .and_then(|descriptor| descriptor.language_hint_for_locale(request.language.as_deref()));
             synthesis.model=request.cloud.model_id; synthesis.voice=request.voice;
-            let output=self.client.audio().synthesize(&route,&synthesis,&options).await.map_err(provider_failure)?;
-            let audio::AudioOutput::Stream(stream)=output else { return Err(failure("unsupported", "this route returns a provider URL rather than playable PCM")); };
-            let audio=stream.collect(request.max_payload_bytes).await.map_err(provider_failure)?;
+            let output=client.audio().synthesize(&route,&synthesis,&options).await.map_err(AudioCallFailure::provider)?;
+            let audio::AudioOutput::Stream(stream)=output else { return Err(AudioCallFailure::local("unsupported", "this route returns a provider URL rather than playable PCM")); };
+            let audio=stream.collect(request.max_payload_bytes).await.map_err(AudioCallFailure::provider)?;
             if audio.metadata.format != audio::AudioFormat::Pcm16Le || audio.metadata.channels != Some(1)
-                || audio.bytes.is_empty() || audio.bytes.len()%2!=0 { return Err(failure("unsupported", "provider did not return PCM16 mono audio")); }
-            let rate=audio.metadata.sample_rate_hz.filter(|rate| *rate>0).ok_or_else(|| failure("unavailable", "provider PCM audio is missing its sample rate"))?;
+                || audio.bytes.is_empty() || audio.bytes.len()%2!=0 { return Err(AudioCallFailure::local("unsupported", "provider did not return PCM16 mono audio")); }
+            let rate=audio.metadata.sample_rate_hz.filter(|rate| *rate>0).ok_or_else(|| AudioCallFailure::local("unavailable", "provider PCM audio is missing its sample rate"))?;
             Ok(json!({"pcmBase64":STANDARD.encode(audio.bytes),"sampleRateHz":rate,"usage":audio.usage,"usageContext":{"operationId":request.operation_id,"profileId":audio.metadata.route.profile_name,"accountScope":audio.metadata.route.account_scope,"modelId":audio.metadata.model,"providerId":audio.metadata.provider_id}}))
         }).await
     }
 
     async fn run<F, Fut>(&self, input: &str, execute: F) -> String
     where
-        F: FnOnce(AudioRequest, audio::AudioRoute, sdk::RequestOptions) -> Fut,
-        Fut: std::future::Future<Output = Result<Value, Value>>,
+        F: FnOnce(AudioRequest, audio::AudioRoute, sdk::LlmClient, sdk::RequestOptions) -> Fut,
+        Fut: std::future::Future<Output = Result<Value, AudioCallFailure>>,
     {
-        let result=async {
-            let request=self.parse(input)?;
-            let route=self.resolve(&request)?;
-            let caps=self.client.audio().capabilities(&route).map_err(|_| failure("unsupported","audio profile is unavailable"))?;
-            if !caps.supports(operation(&request.kind)?) { return Err(failure("unsupported","selected provider does not support this audio operation")); }
+        let request = match self.parse(input) {
+            Ok(request) => request,
+            Err(error) => return error.to_string(),
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(request.timeout_ms);
+        let identity = request.operation_id.clone();
+        let cancel = CancellationToken::new();
+        {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if pending.contains_key(&identity) {
+                return failure("busy", "audio operation identity is already active").to_string();
+            }
+            pending.insert(identity.clone(), cancel.clone());
+        }
+        let _guard = PendingGuard {
+            host: self,
+            identity,
+        };
+        let work = async {
+            let route = self.resolve(&request)?;
             let op = operation(&request.kind)?;
-            let model = caps.model(op, request.cloud.model_id.as_deref())
-                .map_err(|_| failure("unsupported", "selected audio model is unsupported"))?;
-            if request.voice.as_ref().is_some_and(|voice| !model.voices.is_empty() && !model.voices.iter().any(|entry| &entry.id == voice)) {
-                return Err(failure("unsupported", "selected audio voice is unsupported"));
+            // Validate request controls from metadata before touching credentials
+            // or claiming a recovery probe. The shared resolver still owns the
+            // concrete account choice and validates its operation/model support.
+            let mut previews = self
+                .audio_capability_preview(
+                    &route.profile_name,
+                    op,
+                    request.cloud.model_id.as_deref(),
+                )
+                .await?;
+            if previews.is_empty() {
+                if let Ok(caps) = self.client.audio().capabilities(&route) {
+                    previews.push(caps);
+                }
             }
-            if op == audio::AudioOperation::Synthesis && (!model.formats.contains(&audio::AudioFormat::Pcm16Le) || request.rate.is_some_and(|rate| !rate.is_finite() || (rate - 1.0).abs() > f32::EPSILON)) {
-                return Err(failure("unsupported", "selected audio output format or speech rate is unsupported"));
-            }
-            let key=self.credential(&route.profile_name).await?;
-            let options=sdk::RequestOptions {credential:Some(key),account_scope:Some(route.account_scope.clone()),total_timeout:Some(Duration::from_millis(request.timeout_ms)),..Default::default()};
-            let identity=request.operation_id.clone();
-            let cancel=CancellationToken::new();
+            if !previews.is_empty()
+                && previews
+                    .iter()
+                    .all(|caps| validate_audio_controls(&request, op, caps).is_err())
             {
-                let mut pending=self.pending.lock().unwrap_or_else(|e| e.into_inner());
-                if pending.contains_key(&identity) { return Err(failure("busy","audio operation identity is already active")); }
-                pending.insert(identity.clone(),cancel.clone());
+                if let Err(error) = validate_audio_controls(&request, op, &previews[0]) {
+                    return Err(error);
+                }
             }
-            let _guard=PendingGuard{host:self,identity};
-            tokio::select! { biased;
-                _=cancel.cancelled()=>Err(failure("cancelled","audio operation cancelled")),
-                result=tokio::time::timeout(Duration::from_millis(request.timeout_ms),execute(request,route,options)) => result.unwrap_or_else(|_| Err(failure("timeout","audio operation deadline exceeded")))
+            let mut selected = self.select_audio(&request).await?;
+            let caps = selected
+                .client
+                .audio()
+                .capabilities(&selected.route)
+                .map_err(|_| failure("unsupported", "audio profile is unavailable"))?;
+            validate_audio_controls(&request, op, &caps)?;
+            let options = sdk::RequestOptions {
+                credential: Some(selected.credential.clone()),
+                account_scope: Some(selected.route.account_scope.clone()),
+                total_timeout: Some(
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                ),
+                ..Default::default()
+            };
+            let result = execute(request, selected.route, selected.client, options).await;
+            match &result {
+                Ok(_) => selected.account.succeeded().await,
+                Err(error) => {
+                    if let Some(error) = error.provider.as_ref() {
+                        selected.account.failed_audio(error).await;
+                    }
+                }
             }
-        }.await;
+            result.map_err(AudioCallFailure::into_value)
+        };
+        let result = tokio::select! { biased;
+            _ = cancel.cancelled() => Err(failure("cancelled", "audio operation cancelled")),
+            result = tokio::time::timeout_at(deadline, work) => result.unwrap_or_else(|_| Err(failure("timeout", "audio operation deadline exceeded"))),
+        };
         result.unwrap_or_else(|error| error).to_string()
     }
+}
+
+fn validate_audio_controls(
+    request: &AudioRequest,
+    operation: audio::AudioOperation,
+    caps: &audio::AudioCapabilities,
+) -> Result<(), Value> {
+    if !caps.supports(operation) {
+        return Err(failure(
+            "unsupported",
+            "selected provider does not support this audio operation",
+        ));
+    }
+    let model = caps
+        .model(operation, request.cloud.model_id.as_deref())
+        .map_err(|_| failure("unsupported", "selected audio model is unsupported"))?;
+    if request.voice.as_ref().is_some_and(|voice| {
+        !model.voices.is_empty() && !model.voices.iter().any(|entry| &entry.id == voice)
+    }) {
+        return Err(failure(
+            "unsupported",
+            "selected audio voice is unsupported",
+        ));
+    }
+    if operation == audio::AudioOperation::Synthesis
+        && (!model.formats.contains(&audio::AudioFormat::Pcm16Le)
+            || request
+                .rate
+                .is_some_and(|rate| !rate.is_finite() || (rate - 1.0).abs() > f32::EPSILON))
+    {
+        return Err(failure(
+            "unsupported",
+            "selected audio output format or speech rate is unsupported",
+        ));
+    }
+    Ok(())
 }
 
 struct PendingGuard<'a> {
@@ -521,6 +622,33 @@ fn operation(kind: &str) -> Result<audio::AudioOperation, Value> {
 pub fn failure(kind: &str, message: &str) -> Value {
     json!({"error":{"kind":kind,"message":message}})
 }
+fn service_failure(error: llm_runtime::LlmError) -> Value {
+    match error {
+        llm_runtime::LlmError::AllAccountsUnavailable {
+            accounts,
+            earliest_recovery_ms,
+        } => {
+            json!({"error":{"kind":"all_accounts_unavailable","message":"all eligible audio accounts are unavailable",
+            "accounts":accounts.iter().map(|account| account.as_public_failure()).collect::<Vec<_>>(),"earliestRecoveryMs":earliest_recovery_ms}})
+        }
+        llm_runtime::LlmError::UnsupportedCapability { .. } => failure(
+            "unsupported",
+            "selected audio operation is unavailable for this account",
+        ),
+        llm_runtime::LlmError::Authentication { .. } | llm_runtime::LlmError::OAuthRefreshDead => {
+            failure(
+                "needs_configuration",
+                "the selected audio account requires authentication",
+            )
+        }
+        llm_runtime::LlmError::InvalidRequest { .. } => failure(
+            "invalid_request",
+            "the audio account binding is no longer valid",
+        ),
+        _ => failure("unavailable", "the selected audio account is unavailable"),
+    }
+}
+
 fn provider_failure(error: audio::AudioError) -> Value {
     use sdk::providers::openai::audio::AudioError as OpenAiError;
     // Preserve a useful status without returning provider bodies, identifiers,
@@ -620,34 +748,28 @@ mod tests {
     #[tokio::test]
     async fn device_locale_is_translated_before_native_audio_dispatch() {
         let wire = Arc::new(NativeWireCapture::default());
-        let profiles = sdk::builtin_providers()
-            .unwrap()
-            .into_iter()
-            .filter(|p| p.profile_name == "openai")
-            .collect::<Vec<_>>();
-        let client = sdk::LlmClientBuilder::with_transport(wire.clone(), &profiles)
-            .with_region(sdk::protocol::Region::International)
-            .build()
-            .unwrap();
-        let host = AudioProviderHost {
-            client,
-            credential_ids: BTreeMap::from([("openai".into(), "openai".into())]),
-            storage: None,
-            bound_services: None,
-            keys: BTreeMap::from([(
-                "openai".into(),
-                sdk::protocol::Secret::new("host-test-key".into()),
-            )]),
-            pending: Arc::new(Mutex::new(BTreeMap::new())),
-        };
+        let host = AudioProviderHost::test_with_transport(wire.clone(), Some("host-test-key"));
         let mut synthesis = request("speech");
         synthesis["language"] = json!("en-US");
         let result: Value =
             serde_json::from_str(&host.synthesize(&synthesis.to_string(), "hello").await).unwrap();
         assert!(result.get("error").is_none(), "{result}");
         assert_eq!(result["sampleRateHz"], 24000);
+        let selected_scope = result["usageContext"]["accountScope"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let identity: llm_runtime::accounts::AccountResourceScope =
+            serde_json::from_str(&selected_scope).unwrap();
+        assert_eq!(identity.account_id, "00000000-0000-4000-8000-000000000001");
+        assert_eq!(
+            result["usageContext"]["profileId"],
+            format!("account.{}", identity.account_id)
+        );
         let mut recognition = request("recognition");
         recognition["language"] = json!("en-US");
+        recognition["cloud"] = json!({"binding":"follow_session"});
+        recognition["session"] = json!({"sessionId":"fixture-session","profileId":format!("account.{}", identity.account_id),"accountScope":selected_scope});
         let result: Value = serde_json::from_str(
             &host
                 .transcribe(&recognition.to_string(), vec![1, 2, 3], "audio/wav")
@@ -655,6 +777,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["text"], "audio contract verified");
+        assert_eq!(result["usageContext"]["accountScope"], selected_scope);
         let sent = wire.sent.lock().unwrap();
         let speech: Value = serde_json::from_slice(&sent[0].1).unwrap();
         assert!(speech.get("language").is_none());
@@ -687,7 +810,7 @@ mod tests {
     }
 
     fn host() -> AudioProviderHost {
-        AudioProviderHost::new("{}", "international", None, BTreeMap::new()).unwrap()
+        AudioProviderHost::test_empty()
     }
 
     fn request(kind: &str) -> Value {
@@ -723,7 +846,10 @@ mod tests {
             .resolve(&host.parse(&value.to_string()).unwrap())
             .unwrap();
         assert_eq!(route.profile_name, "openai");
-        assert_eq!(route.account_scope, "profile:openai");
+        assert_eq!(
+            route.account_scope,
+            lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+        );
         value["maxPayloadBytes"] = json!(MAX_AUDIO_BYTES + 1);
         assert!(host.parse(&value.to_string()).is_err());
     }
@@ -742,6 +868,20 @@ mod tests {
             serde_json::from_str(&host.synthesize(&value.to_string(), "hello").await).unwrap();
         assert_eq!(output["error"]["kind"], "unsupported");
         assert!(host.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_managed_directory_never_dispatches_with_a_base_credential() {
+        let wire = Arc::new(NativeWireCapture::default());
+        let host = AudioProviderHost::test_with_transport(wire.clone(), None);
+        let result: Value = serde_json::from_str(
+            &host
+                .synthesize(&request("speech").to_string(), "hello")
+                .await,
+        )
+        .unwrap();
+        assert_eq!(result["error"]["kind"], "all_accounts_unavailable");
+        assert!(wire.sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -7,12 +7,11 @@ import org.json.JSONObject
 internal class ProviderImportEntry(
     val id: String,
     val definition: JSONObject,
-    val credential: String?,
     val conflict: Boolean,
     val warnings: List<String>,
     val error: String?,
 ) {
-    override fun toString() = "ProviderImportEntry(id=$id, credential=<redacted>)"
+    override fun toString() = "ProviderImportEntry(id=$id)"
 }
 internal class ProviderImportResult(val entries: List<ProviderImportEntry>, val warnings: List<String>)
 
@@ -27,18 +26,12 @@ internal fun parseProviderImport(text: String, existing: JSONObject): ProviderIm
     val topWarnings = if (wrapped && root.keys().asSequence().any { it !in setOf("provider","providers", "\$schema") }) listOf("Only provider definitions are imported. Other top-level settings are ignored.") else emptyList()
     val entries = map.keys().asSequence().map { id ->
         val warnings = mutableListOf<String>()
-        var credential: String? = null
         val definition = JSONObject()
         val issue = runCatching {
             val raw = map.getJSONObject(id)
-            fun key(value: Any?) {
-                if (value == null || value == JSONObject.NULL || value == "") return
-                require(value is String) { "API key must be text" }
-                val env = Regex("^\\{env:([A-Za-z_][A-Za-z0-9_]*)\\}$").matchEntire(value)
-                if (env != null) definition.put("apiKeyEnv",env.groupValues[1])
-                else {
-                    require(!Regex("\\{(?:env|file):").containsMatchIn(value)) { "Unsupported credential reference. Use an API key or an environment variable name." }
-                    credential = value
+            fun rejectCredential(value: Any?) {
+                require(value == null || value == JSONObject.NULL || value == "") {
+                    "Import configuration without credentials. Apply it, then add an account in account management."
                 }
             }
             if (openCode) {
@@ -48,7 +41,7 @@ internal fun parseProviderImport(text: String, existing: JSONObject): ProviderIm
                 val options = if (raw.has("options")) raw.getJSONObject("options") else JSONObject()
                 require(options.keys().asSequence().all { it in setOf("baseURL","apiKey") }) { "Unsupported request options. Remove them before importing." }
                 if (options.has("baseURL")) definition.put("baseUrl",options.getString("baseURL"))
-                key(options.opt("apiKey"))
+                rejectCredential(options.opt("apiKey"))
                 val models = raw.getJSONObject("models")
                 val converted = JSONArray()
                 models.keys().asSequence().forEach { alias ->
@@ -68,14 +61,14 @@ internal fun parseProviderImport(text: String, existing: JSONObject): ProviderIm
                 if (models != null) for (index in 0 until models.length()) {
                     if (models.opt(index) is String) models.put(index,JSONObject().put("id",models.getString(index)))
                 }
-                key(raw.opt("apiKey"))
+                rejectCredential(raw.opt("apiKey"))
             }
             validateProviderDefinitions(JSONObject().put(id,definition))
         }.exceptionOrNull()?.let { cause ->
             // JSON parser exceptions can contain input values, including secrets.
             if (cause is org.json.JSONException || cause is java.net.URISyntaxException) "Invalid provider shape. Check the definition in the source JSON." else cause.message ?: "Invalid provider definition"
         }
-        ProviderImportEntry(id,definition,credential,existing.has(id),warnings.distinct(),issue)
+        ProviderImportEntry(id,definition,existing.has(id),warnings.distinct(),issue)
     }.toList()
     return ProviderImportResult(entries,topWarnings)
 }

@@ -1,5 +1,5 @@
+import { createHash, randomUUID } from 'node:crypto';
 import {
-  CODEX_PROVIDER_ID,
   CODEX_CLIENT_ID,
   CODEX_ISSUER,
   parseCodexSession,
@@ -25,7 +25,7 @@ export const CODEX_SESSION_EXPIRED = 'Codex 登录已过期，请重新登录。
 
 export interface CodexSessionStore {
   resolve(providerId: string): Promise<string | undefined>;
-  set(providerId: string, credential: string): Promise<unknown>;
+  set(providerId: string, credential: string, identityGeneration?: number): Promise<unknown>;
   delete(providerId: string): Promise<unknown>;
 }
 
@@ -41,9 +41,11 @@ export interface CodexSessionStore {
  * interleaves with a refresh, and a rotation is persisted before anyone sees
  * its access token.
  */
-export class CodexTokenManager {
+class AccountTokenAuthority {
   private session: CodexOAuthSession | undefined;
   private loaded = false;
+  private pendingPersistence?: CodexOAuthSession;
+  private readonly refreshOwner = randomUUID();
   private queue: Promise<unknown> = Promise.resolve();
   private lastRefreshAt = 0;
   private lastFailureAt = 0;
@@ -52,7 +54,11 @@ export class CodexTokenManager {
   private timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly opts: {
-    store?: CodexSessionStore;
+    store: CodexSessionStore;
+    credentialId: string;
+    /** Durable refresh intent prevents reuse after an unknown exchange outcome. */
+    intentId: string;
+    withLock?: <T>(operation: () => Promise<T>) => Promise<T>;
     fetch?: typeof fetch;
     /** Wall-clock milliseconds; a sleeping laptop must not delay expiry. */
     now?: () => number;
@@ -61,8 +67,9 @@ export class CodexTokenManager {
 
   private now(): number { return (this.opts.now ?? Date.now)(); }
 
-  private run<T>(operation: () => Promise<T>): Promise<T> {
-    const next = this.queue.catch(() => undefined).then(operation);
+  private run<T>(operation: () => Promise<T>, lockHeld = false): Promise<T> {
+    if (lockHeld) return operation();
+    const next = this.queue.catch(() => undefined).then(() => this.opts.withLock ? this.opts.withLock(operation) : operation());
     this.queue = next;
     return next;
   }
@@ -83,76 +90,82 @@ export class CodexTokenManager {
   }
 
   private async read(): Promise<CodexOAuthSession | undefined> {
-    const secret = await this.opts.store?.resolve(CODEX_PROVIDER_ID);
+    const secret = await this.opts.store.resolve(this.opts.credentialId);
     if (!secret) return undefined;
     try { return parseCodexSession(JSON.parse(secret)); }
     catch { throw new Error('Codex 登录凭据无效，请重新登录。'); }
   }
 
   /** The session to use now, refreshed first when it is about to expire. */
-  current(): Promise<CodexOAuthSession | undefined> {
+  current(lockHeld = false): Promise<CodexOAuthSession | undefined> {
     return this.run(async () => {
-      if (!this.loaded) {
+      if (this.pendingPersistence) return this.refresh();
+      if (this.opts.intentId && await this.opts.store.resolve(this.opts.intentId)) throw this.failed('Codex 刷新结果未确认，请重新登录。');
+      if (!this.loaded || this.opts.intentId) {
         this.session = await this.read();
         this.loaded = true;
       }
       const session = this.session;
       if (session?.refresh_token && this.dueSoon(session)) {
-        return this.refresh().catch((error: unknown) => {
+        return this.refresh().catch(async (error: unknown) => {
           this.reportFailure(error);
+          if (this.pendingPersistence || (this.opts.intentId && await this.opts.store.resolve(this.opts.intentId))
+            || (error instanceof Error && error.message === CODEX_SESSION_EXPIRED)
+            || !this.session || this.session.expires_at <= this.now() / 1000) throw error;
           return this.session;
         });
       }
       return session;
-    });
+    }, lockHeld);
   }
 
   /**
    * An engine's access token expired or was rejected. Refresh, unless a
    * refresh just happened: engines asking together share one.
    */
-  renew(): Promise<CodexOAuthSession | undefined> {
+  renew(rejectedAccessToken?: string, lockHeld = false): Promise<CodexOAuthSession | undefined> {
     return this.run(async () => {
-      if (!this.loaded) {
+      if (this.pendingPersistence) return this.refresh();
+      if (this.opts.intentId && await this.opts.store.resolve(this.opts.intentId)) throw this.failed('Codex 刷新结果未确认，请重新登录。');
+      if (!this.loaded || this.opts.intentId) {
         this.session = await this.read();
         this.loaded = true;
       }
       if (!this.session?.refresh_token) return this.session;
-      if (this.now() - this.lastRefreshAt < RECENT_REFRESH_MS) return this.session;
+      if (rejectedAccessToken && this.session.access_token !== rejectedAccessToken) return this.session;
+      if (!rejectedAccessToken && this.now() - this.lastRefreshAt < RECENT_REFRESH_MS) return this.session;
       return this.refresh().catch((error: unknown) => {
         this.reportFailure(error);
         throw error;
       });
-    });
+    }, lockHeld);
   }
 
   /** Store a new sign-in and serve it to every engine. */
-  signIn(session: CodexOAuthSession): Promise<void> {
+  signIn(session: CodexOAuthSession, identityGeneration?: number, lockHeld = false, commit?: () => Promise<void>): Promise<void> {
     return this.run(async () => {
-      await this.opts.store?.set(CODEX_PROVIDER_ID, JSON.stringify(session));
+      await this.opts.store.set(this.opts.credentialId, JSON.stringify(session), identityGeneration);
+      await commit?.();
+      if (this.opts.intentId) await this.opts.store.delete(this.opts.intentId);
+      this.pendingPersistence = undefined;
       this.lastFailureAt = 0;
       this.lastRefreshAt = this.now();
       this.publish(session);
-    });
+    }, lockHeld);
   }
 
   /** Forget the session and take it away from every engine. */
-  signOut(): Promise<void> {
+  signOut(lockHeld = false): Promise<void> {
     return this.run(async () => {
-      await this.opts.store?.delete(CODEX_PROVIDER_ID);
+      await this.opts.store.delete(this.opts.credentialId);
+      if (this.opts.intentId) await this.opts.store.delete(this.opts.intentId);
+      this.pendingPersistence = undefined;
       this.lastFailureAt = 0;
       this.publish(undefined);
-    });
+    }, lockHeld);
   }
 
-  /**
-   * A session an engine signed in to by itself. Only one with a refresh token
-   * replaces the stored session; the engine stops refreshing it from here on.
-   */
-  adopt(session: CodexOAuthSession): Promise<void> {
-    if (!session.refresh_token) return Promise.resolve();
-    return this.signIn(parseCodexSession(session));
-  }
+  invalidate(): void { this.loaded = false; this.session = undefined; this.pendingPersistence = undefined; }
 
   /** Refresh ahead of expiry. Safe to call often. */
   check(): void {
@@ -192,6 +205,10 @@ export class CodexTokenManager {
 
   /** Runs on the queue. */
   private async refresh(): Promise<CodexOAuthSession | undefined> {
+    if (this.pendingPersistence) return this.persistRotation(this.pendingPersistence);
+    if (this.opts.intentId && await this.opts.store.resolve(this.opts.intentId)) {
+      throw this.failed('Codex 刷新结果未确认，请重新登录。');
+    }
     // Re-read: the stored session is the authority, and it may be newer than
     // the copy this process holds.
     const stored = await this.read();
@@ -205,6 +222,11 @@ export class CodexTokenManager {
     }
     if (!stored.refresh_token) throw new Error(CODEX_SESSION_EXPIRED);
     if (this.now() - this.lastFailureAt < RETRY_AFTER_FAILURE_MS) throw new Error(this.lastFailure);
+    if (this.opts.intentId) {
+      if (!this.opts.store) throw new Error('Codex 安全凭据存储不可用。');
+      await this.opts.store.set(this.opts.intentId, JSON.stringify({ owner: this.refreshOwner,
+        refreshTokenDigest: createHash('sha256').update(stored.refresh_token).digest('hex'), startedAt: this.now() }));
+    }
     let response: Response;
     try {
       response = await (this.opts.fetch ?? fetch)(`${CODEX_ISSUER}/oauth/token`, {
@@ -223,23 +245,41 @@ export class CodexTokenManager {
       const code = typeof error === 'string' ? error
         : error && typeof error === 'object' ? (error as Record<string, unknown>).code : undefined;
       // Never relay the response body: it may echo the refresh token.
+      if (this.opts.intentId) await this.opts.store.delete(this.opts.intentId);
       if (typeof code === 'string' && TERMINAL_REFRESH_ERRORS.has(code)) throw this.failed(CODEX_SESSION_EXPIRED);
       throw this.failed(`Codex 登录刷新失败（HTTP ${response.status}）。`);
     }
     const renewed = sessionFromTokenResponse(await response.json(), this.now());
+    if ((stored.subject && renewed.subject && stored.subject !== renewed.subject)
+      || (stored.account_id && renewed.account_id && stored.account_id !== renewed.account_id)) throw this.failed('Codex 账号身份发生变化，请重新登录。');
     const next: CodexOAuthSession = {
       ...renewed,
       refresh_token: renewed.refresh_token ?? stored.refresh_token,
       ...(renewed.account_id ?? stored.account_id ? { account_id: renewed.account_id ?? stored.account_id } : {}),
+      ...(renewed.subject ?? stored.subject ? { subject: renewed.subject ?? stored.subject } : {}),
       ...(renewed.email ?? stored.email ? { email: renewed.email ?? stored.email } : {}),
     };
-    try {
-      await this.opts.store?.set(CODEX_PROVIDER_ID, JSON.stringify(next));
-    } catch {
-      // The old refresh token is spent; keep serving the new session from
-      // memory rather than lose it, and say the next launch may need a sign-in.
-      this.opts.onError?.('Codex 登录已刷新，但无法写入安全存储；重启后可能需要重新登录。');
+    this.pendingPersistence = next;
+    return this.persistRotation(next);
+  }
+
+  private async persistRotation(next: CodexOAuthSession): Promise<CodexOAuthSession> {
+    if (this.opts.intentId) {
+      const intent = await this.opts.store.resolve(this.opts.intentId);
+      if (!intent || JSON.parse(intent).owner !== this.refreshOwner) {
+        this.pendingPersistence = undefined; this.loaded = false; this.session = undefined;
+        throw this.failed('Codex 登录凭据已更改，请重试。');
+      }
     }
+    try {
+      await this.opts.store.set(this.opts.credentialId, JSON.stringify(next));
+      if (this.opts.intentId) await this.opts.store.delete(this.opts.intentId);
+    } catch {
+      // Never publish a rotation until durable commit. Keep only the new grant
+      // in memory and retry its persistence, never exchange the spent token.
+      throw this.failed('Codex 登录已刷新，但无法写入安全存储；请重试保存或重新登录。');
+    }
+    this.pendingPersistence = undefined;
     this.lastRefreshAt = this.now();
     this.lastFailureAt = 0;
     this.publish(next);
@@ -255,4 +295,52 @@ export function codexAccessToken(session: CodexOAuthSession): CodexOAuthSession 
     ...(session.account_id ? { account_id: session.account_id } : {}),
     fedramp: session.fedramp,
   };
+}
+
+/** One independent refresh authority and queue per stable local account. */
+export class CodexTokenManager {
+  private readonly accounts = new Map<string, AccountTokenAuthority>();
+  private timer?: ReturnType<typeof setInterval>;
+  private readonly listeners = new Set<(session: CodexOAuthSession | undefined, accountId: string) => void>();
+  constructor(private readonly opts: {
+    store: CodexSessionStore;
+    fetch?: typeof fetch;
+    now?: () => number;
+    onError?: (message: string) => void;
+    withAccountLock?: <T>(accountId: string, operation: () => Promise<T>) => Promise<T>;
+  }) {}
+  private authority(accountId: string): AccountTokenAuthority {
+    let authority = this.accounts.get(accountId);
+    if (!authority) {
+      if (!/^acct\.[a-f0-9-]{36}$/.test(accountId)) throw new Error('invalid OAuth account reference');
+      authority = new AccountTokenAuthority({ ...this.opts, credentialId: accountId,
+        intentId: `${accountId}.intent`,
+        ...(this.opts.withAccountLock ? { withLock: <T>(operation: () => Promise<T>) => this.opts.withAccountLock!(accountId, operation) } : {}),
+      });
+      authority.subscribe(session => { for (const listener of this.listeners) listener(session, accountId); });
+      this.accounts.set(accountId, authority);
+    }
+    return authority;
+  }
+  subscribe(listener: (session: CodexOAuthSession | undefined, accountId: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+  current(accountId: string, lockHeld = false): Promise<CodexOAuthSession | undefined> { return this.authority(accountId).current(lockHeld); }
+  renew(accountId: string, rejectedAccessToken?: string, lockHeld = false): Promise<CodexOAuthSession | undefined> { return this.authority(accountId).renew(rejectedAccessToken, lockHeld); }
+  signIn(session: CodexOAuthSession, accountId: string, identityGeneration?: number, lockHeld = false, commit?: () => Promise<void>): Promise<void> { return this.authority(accountId).signIn(session, identityGeneration, lockHeld, commit); }
+  async hasPendingCommit(accountId: string): Promise<boolean> { return Boolean(await this.opts.store.resolve(`${accountId}.intent`)); }
+  signOut(accountId: string, lockHeld = false): Promise<void> { return this.authority(accountId).signOut(lockHeld); }
+  invalidate(accountId: string): void { this.accounts.get(accountId)?.invalidate(); }
+  check(): void { for (const authority of this.accounts.values()) authority.check(); }
+  start(intervalMs = 60_000): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => this.check(), intervalMs);
+    this.timer.unref?.();
+  }
+  watch(accountId: string, intervalMs?: number): void {
+    const authority = this.authority(accountId);
+    if (!this.timer) authority.start(intervalMs);
+  }
+  dispose(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; for (const authority of this.accounts.values()) authority.dispose(); this.listeners.clear(); }
 }

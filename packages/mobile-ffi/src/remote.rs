@@ -61,6 +61,97 @@ use tokio::task::JoinHandle;
 /// Largest image the desktop accepts in a prompt.
 const MAX_PROMPT_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 
+fn validate_remote_provider_account_request(request: &str) -> Result<(), RemoteFfiError> {
+    if request.len() > 65_536 {
+        return Err(RemoteFfiError::InvalidArgument {
+            message: "account request is too large".into(),
+        });
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(request).map_err(|_| RemoteFfiError::InvalidArgument {
+            message: "invalid account request".into(),
+        })?;
+    let action = value
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if matches!(
+        action,
+        "begin_oauth" | "poll_oauth" | "complete_oauth" | "cancel_oauth"
+    ) || (action == "add"
+        && value.get("authKind").and_then(serde_json::Value::as_str) == Some("oauth"))
+    {
+        return Err(RemoteFfiError::Rpc {
+            code: "forbidden".into(),
+            detail: "OAuth sign-in must complete on the execution Host; remote browser authorization is unavailable".into(),
+        });
+    }
+    if !matches!(
+        action,
+        "list"
+            | "add"
+            | "update"
+            | "reorder"
+            | "set_enabled"
+            | "set_credential"
+            | "remove"
+            | "logout"
+            | "clear_credential"
+            | "test"
+            | "set_policy"
+    ) {
+        return Err(RemoteFfiError::InvalidArgument {
+            message: "unsupported account action".into(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod provider_account_rpc_tests {
+    use super::*;
+
+    #[test]
+    fn account_rpc_accepts_account_actions_and_rejects_arbitrary_commands() {
+        for action in [
+            "list",
+            "add",
+            "update",
+            "reorder",
+            "set_enabled",
+            "set_credential",
+            "remove",
+            "logout",
+            "test",
+        ] {
+            assert!(validate_remote_provider_account_request(
+                &serde_json::json!({"action":action,"expectedRevision":0}).to_string()
+            )
+            .is_ok());
+        }
+        assert!(
+            validate_remote_provider_account_request(r#"{"action":"inject_credentials"}"#).is_err()
+        );
+        assert!(validate_remote_provider_account_request(r#"{"type":"send_prompt"}"#).is_err());
+        assert!(validate_remote_provider_account_request("invalid").is_err());
+    }
+
+    #[test]
+    fn account_rpc_withholds_oauth_until_execution_host_browser_authority_exists() {
+        for request in [
+            r#"{"action":"begin_oauth","accountId":"a"}"#,
+            r#"{"action":"poll_oauth","accountId":"a"}"#,
+            r#"{"action":"complete_oauth","accountId":"a"}"#,
+            r#"{"action":"cancel_oauth","accountId":"a"}"#,
+            r#"{"action":"add","authKind":"oauth"}"#,
+        ] {
+            assert!(
+                matches!(validate_remote_provider_account_request(request), Err(RemoteFfiError::Rpc { code, .. }) if code == "forbidden")
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -2581,6 +2672,53 @@ impl RemoteControlCore {
             current: models.current,
             details: models.details.unwrap_or_default(),
         })
+    }
+
+    /// Manage accounts on the authenticated execution Host. This dedicated
+    /// RPC cannot submit arbitrary engine commands or inject runtime secrets.
+    pub async fn provider_account_command(
+        &self,
+        request_json: String,
+        credential: Option<String>,
+    ) -> Result<String, RemoteFfiError> {
+        validate_remote_provider_account_request(&request_json)?;
+        if credential
+            .as_ref()
+            .is_some_and(|value| value.len() > 65_536)
+        {
+            return Err(RemoteFfiError::InvalidArgument {
+                message: "account credential is too large".into(),
+            });
+        }
+        let (connection, generation) = {
+            let active = self.core.active.lock().expect("active");
+            let active = active.as_ref().ok_or(RemoteFfiError::NotConnected)?;
+            (
+                active.connection.clone(),
+                self.core.current.load(Ordering::SeqCst),
+            )
+        };
+        let mut params = serde_json::json!({ "request_json": request_json });
+        if let Some(credential) = credential {
+            params["credential"] = serde_json::Value::String(credential);
+        }
+        let response = connection
+            .request("provider.accounts", Some(params), None)
+            .await
+            .map_err(rpc_error)?;
+        if generation != self.core.current.load(Ordering::SeqCst)
+            || connection.state().phase != ConnectionPhase::Ready
+        {
+            return Err(RemoteFfiError::NotConnected);
+        }
+        response
+            .get("snapshot_json")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| RemoteFfiError::Rpc {
+                code: "invalid_params".into(),
+                detail: "invalid account response".into(),
+            })
     }
 
     /// Where the Bots and their chats are reported; `None` stops the reports. Set it

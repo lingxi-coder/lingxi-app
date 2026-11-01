@@ -79,7 +79,7 @@ pub struct AndroidMobileLinuxConfigFfi {
 /// Android-provided multi-provider configuration for the mobile engine.
 ///
 /// The JSON strings contain non-secret provider/routing settings only. API
-/// keys are sent separately through `SetProviderCredential` and persist in the
+/// keys are sent separately through the account command facade and persist in the
 /// injected encrypted `AndroidSecureStorage` implementation.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -186,7 +186,6 @@ pub struct AndroidEngineLaunchConfigFfi {
     /// Standalone Local App model host; disables personal session startup.
     pub app_agent_host: bool,
     pub api_base: String,
-    pub api_key: String,
     pub model: String,
     pub session_mode: SessionModeDto,
     pub vision_delegation_enabled: bool,
@@ -199,7 +198,7 @@ pub struct AndroidEngineLaunchConfigFfi {
     pub mobile_linux: Option<AndroidMobileLinuxConfigFfi>,
     /// Device physical memory reported by the Android host.
     pub physical_memory_bytes: u64,
-    /// Stable native-host facts. Absent for legacy launch entry points.
+    /// Stable native-host facts. Optional for deterministic embedders.
     pub host_environment: Option<AndroidHostEnvironmentFfi>,
 }
 

@@ -317,20 +317,6 @@ final class LocalAppAgentHostLifecycleTests: XCTestCase {
         ), .restartRequired)
     }
 
-    func testKeychainReadFailureIsNotADeletedValue() throws {
-        XCTAssertNil(try Keychain.decodeRead(status: errSecItemNotFound, data: nil))
-        XCTAssertNil(try Keychain.decodeRead(status: errSecSuccess, data: Data()))
-        XCTAssertEqual(try Keychain.decodeRead(status: errSecSuccess, data: Data("fixture".utf8)), "fixture")
-        XCTAssertThrowsError(try Keychain.decodeRead(status: errSecInteractionNotAllowed, data: nil)) { error in
-            XCTAssertEqual(error as? Keychain.ReadError, .status(errSecInteractionNotAllowed))
-        }
-        XCTAssertThrowsError(try Keychain.decodeRead(status: errSecSuccess, data: nil)) { error in
-            XCTAssertEqual(error as? Keychain.ReadError, .invalidData)
-        }
-        XCTAssertThrowsError(try Keychain.decodeRead(status: errSecSuccess, data: Data([0xff]))) { error in
-            XCTAssertEqual(error as? Keychain.ReadError, .invalidData)
-        }
-    }
 }
 
 @MainActor

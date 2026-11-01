@@ -48,6 +48,8 @@ interface RemoteSessionPort {
     suspend fun setModel(model: String)
     suspend fun setReasoning(selection: ReasoningSelectionDto)
     suspend fun setPermissionMode(mode: RemotePermissionModeFfi)
+    suspend fun providerAccountCommand(requestJson: String, credential: String?): String =
+        error("remote host account management unavailable")
     suspend fun listModels(): RemoteModelsFfi
 
     /**
@@ -219,6 +221,12 @@ class RemoteConversationSource(
     }
 
     override suspend fun denyPermission(requestId: ULong) = port.respondPermission(requestId, allow = false)
+
+    override val supportsProviderAccountOAuth: Boolean get() = false
+    override suspend fun providerAccountsSnapshot(): String =
+        port.providerAccountCommand("{\"action\":\"list\",\"expectedRevision\":0}", null)
+    override suspend fun providerAccountCommand(requestJson: String, credential: String?): String =
+        port.providerAccountCommand(requestJson, credential)
 
     override suspend fun submitClientCommand(command: ClientCommand) {
         when (command) {

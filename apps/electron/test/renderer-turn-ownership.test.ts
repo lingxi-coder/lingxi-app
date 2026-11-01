@@ -45,7 +45,7 @@ function eventHarness(purpose: 'flow' | 'composer' = 'flow') {
     cancellingRefs: { current: new Map() }, cancellationTasks: { current: new Map() }, activeSessionIdRef: { current: 'A' },
     cancelledTrackedTokens: { current: new Set() }, pendingTrackedDispatches: { current: new Set() },
     updateRuntime: () => {}, scheduleProjectCatalogRefresh: () => {}, clearSlashTurnClaim: () => {}, isPendingFusionSessionRestore: () => false,
-    shouldReleaseSlashTurn: () => false, host: { command: async () => {} },
+    shouldReleaseSlashTurn: () => false, host: { command: async () => {} }, accountSnapshotRefresh: { refresh: async () => {} },
   };
   evaluate('globalThis.completeTrackedSpeech = ' + declaration(bridgeSource, 'completeTrackedSpeech'), context);
   const call = find(bridgeSource, (node) => ts.isCallExpression(node) && node.expression.getText(bridgeSource) === 'host.onEvent');

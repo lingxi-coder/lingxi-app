@@ -23,6 +23,12 @@ import sys
 
 tool = Path(sys.argv[0]).name
 args = sys.argv[1:]
+external_generator = tool == "external-bindgen"
+if external_generator:
+    tool, args = "cargo", ["run", *args]
+if tool == "cargo" and not external_generator and args[0] in ("build", "run") and os.environ.get("JNI_FIXTURE_FORBID_HOST_CARGO") == "1":
+    print("fixture forbids rebuilding or invoking the generator through Cargo", file=sys.stderr)
+    sys.exit(31)
 if tool == "rustup":
     if args[:2] == ["show", "active-toolchain"]:
         print("fixture-toolchain (default)")
@@ -44,6 +50,11 @@ elif tool == "cargo":
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"unstripped metadata fixture")
     elif args[0] == "run":
+        if os.environ.get("JNI_FIXTURE_EXPECT_FRESH_LIBRARY") == "1":
+            library = Path(args[args.index("--library") + 1])
+            if library.read_bytes() != b"new-library-arm64-v8a":
+                print("fixture generator did not receive the fresh unstripped library", file=sys.stderr)
+                sys.exit(32)
         output = Path(args[args.index("--out-dir") + 1]) / "com/lingxi/code/bindings"
         output.mkdir(parents=True, exist_ok=True)
         (output / "partial.kt").write_text("partially generated")
@@ -102,6 +113,12 @@ class AndroidJniPromotionTests(unittest.TestCase):
         script.parent.mkdir(parents=True)
         shutil.copy2(SCRIPT, script)
         self.script = script
+        # These transaction tests mock Cargo/NDK, not SDK resolution. Keep the
+        # platform wrapper boundary transparent; its SDK validation has its own suite.
+        sdk_wrapper = self.repo / "scripts/lib/mobile_gstreamer_cargo.py"
+        sdk_wrapper.parent.mkdir(parents=True)
+        sdk_wrapper.write_text("import subprocess, sys\n"
+                               "raise SystemExit(subprocess.call(sys.argv[sys.argv.index('--') + 1:]))\n")
         ffi = self.repo / "apps/android/ffi/uniffi.toml"
         ffi.parent.mkdir(parents=True)
         ffi.write_text("# unused mock bindgen config\n")
@@ -147,6 +164,7 @@ class AndroidJniPromotionTests(unittest.TestCase):
         self.env.pop("LINGXI_ANDROID_JNILIBS_DIR", None)
         self.env.pop("LINGXI_ANDROID_NATIVE_SYMBOLS_DIR", None)
         self.env.pop("LINGXI_KOTLIN_OUT", None)
+        self.env.pop("LINGXI_BINDGEN_PATH", None)
         self.handwritten = self.kotlin / "com/lingxi/code/Handwritten.kt"
         self.handwritten.parent.mkdir(parents=True)
         self.handwritten.write_text("handwritten app source")
@@ -185,6 +203,25 @@ class AndroidJniPromotionTests(unittest.TestCase):
         result = self.run_script(JNI_FIXTURE_FAIL_BINDGEN="1")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("bindgen failed", result.stderr)
+        self.assert_preserved(before)
+
+    def test_external_generator_uses_fresh_library_without_host_cargo(self):
+        generator = self.bin / "external-bindgen"
+        generator.write_text(MOCK_TOOL)
+        generator.chmod(0o755)
+        result = self.run_script(LINGXI_BINDGEN_PATH=str(generator), JNI_FIXTURE_FORBID_HOST_CARGO="1",
+                                 JNI_FIXTURE_EXPECT_FRESH_LIBRARY="1", JNI_FIXTURE_MARK_STRIPPED="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(files(self.kotlin / PACKAGE)), 3)
+        for abi in ABIS:
+            self.assertEqual((self.jni / abi / LIBRARY).read_bytes(), b"stripped runtime")
+
+    def test_unusable_external_generator_preserves_previous_pair(self):
+        self.seed_previous_pair()
+        before = (files(self.jni), files(self.kotlin), files(self.symbols))
+        result = self.run_script(LINGXI_BINDGEN_PATH=str(self.root / "missing-generator"))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("generator is not executable", result.stderr)
         self.assert_preserved(before)
 
     def test_second_abi_promotion_failure_rolls_back_previous_pair(self):

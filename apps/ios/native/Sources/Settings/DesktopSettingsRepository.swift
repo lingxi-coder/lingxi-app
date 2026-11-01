@@ -40,10 +40,7 @@ final class DesktopSettingsRepository {
     private(set) var locked: Set<String> = []
     private(set) var mergedKeys: Set<String> = []
     private(set) var filesJSON = "[]"
-    private(set) var auth: AuthStateDto?
     private(set) var doctor: DoctorReportDto?
-    private(set) var credentialStates: [String: Bool] = [:]
-    private(set) var credentialStorageEncrypted: Bool?
     private(set) var catalogs: [String: String] = [:]
     private(set) var documents: [String: String] = [:]
     private(set) var skillCatalog: SkillAdminCatalog?
@@ -57,16 +54,11 @@ final class DesktopSettingsRepository {
     @ObservationIgnored private var pending: (key: String, json: String, layer: DesktopSettingsLayer)?
     @ObservationIgnored private var operations: Set<UInt64> = []
     @ObservationIgnored private var readRequests: Set<String> = []
-    @ObservationIgnored private var credentialRequests: [UInt64: (ids: [String], expected: Bool?)] = [:]
     @ObservationIgnored private var nextOperation: UInt64 = 8_400_000
     @ObservationIgnored private var confirmationTimeout: Task<Void, Never>?
-    @ObservationIgnored private var credentialModelRefresh: Task<Void, Never>?
-    @ObservationIgnored var credentialCommitHandler: (([String], Set<String>, Bool) -> Void)?
 
     func configure(submitter: ((ClientCommand) async throws -> Void)?) {
         confirmationTimeout?.cancel()
-        credentialModelRefresh?.cancel()
-        credentialModelRefresh = nil
         sourceGeneration += 1
         providerModels = []
         self.submitter = submitter
@@ -87,10 +79,6 @@ final class DesktopSettingsRepository {
         documents = [:]
         skillCatalog = nil
         skillDocument = nil
-        credentialStates = [:]
-        credentialStorageEncrypted = nil
-        credentialRequests = [:]
-        auth = nil
         doctor = nil
         if saving { errorMessage = "The engine connection changed before the save was confirmed." }
         saving = false
@@ -103,7 +91,7 @@ final class DesktopSettingsRepository {
     func refresh() async {
         guard connected else { return }
         readRequests.insert("settings")
-        await send(.refreshListings(which: [.settings, .auth, .doctor, .models]))
+        await send(.refreshListings(which: [.settings, .doctor, .models]))
     }
 
     func ownValue(key: String, layer: DesktopSettingsLayer) -> Any? { layers[layer.rawValue]?[key] }
@@ -250,34 +238,6 @@ final class DesktopSettingsRepository {
         if let errorMessage { throw ProviderBulkImport.ImportError(errorMessage) }
     }
 
-    func refreshCredentials(providerIDs: [String] = []) async {
-        guard connected else { return }
-        let ids = Array(Set(providerIDs + providerModels.map(\.providerId) + Array((effective["providers"] as? [String: Any] ?? [:]).keys)))
-            .map { $0 == "builtin" ? "anthropic" : $0 }.sorted()
-        guard !ids.isEmpty else { return }
-        nextOperation += 1
-        let operation = nextOperation
-        credentialRequests[operation] = (ids, nil)
-        await send(.listProviderCredentials(operationId: operation, providerIds: ids, previewProviderIds: []))
-    }
-
-    func saveCredential(providerID: String, secret: String?) async {
-        guard connected, !saving, !providerID.isEmpty else { return }
-        discardCredentialListings(for: [providerID])
-        nextOperation += 1
-        let operation = nextOperation
-        credentialRequests[operation] = ([providerID], secret != nil)
-        saving = true
-        errorMessage = nil
-        statusMessage = "Waiting for secure storage confirmation…"
-        startConfirmationTimeout()
-        if let secret {
-            await send(.setProviderCredential(operationId: operation, providerId: providerID, credential: .init(value: secret)))
-        } else {
-            await send(.deleteProviderCredential(operationId: operation, providerId: providerID))
-        }
-    }
-
     func consume(_ event: ClientEvent) {
         switch event {
         case let .settingsSnapshot(effectiveJson, provenanceJson, filesJson, activeJson, locked, layersJson, mergedKeys):
@@ -313,26 +273,6 @@ final class DesktopSettingsRepository {
             }
         case let .providerModelCatalog(providers):
             providerModels = providers
-            Task { await refreshCredentials() }
-        case let .providerCredentialStatus(operationId, configured, unavailable, encrypted, _, error):
-            guard let request = credentialRequests.removeValue(forKey: operationId) else { return }
-            credentialStorageEncrypted = encrypted
-            if request.expected == nil || error == nil {
-                for id in request.ids { credentialStates[id] = unavailable.contains(id) ? nil : configured.contains(id) }
-            }
-            if let expected = request.expected {
-                confirmationTimeout?.cancel()
-                saving = false
-                if let error { fail(error) }
-                else if request.ids.contains(where: { unavailable.contains($0) || configured.contains($0) != expected }) {
-                    fail("Secure storage did not confirm the requested credential change.")
-                } else {
-                    discardCredentialListings(for: request.ids)
-                    credentialCommitHandler?(request.ids, Set(configured), encrypted)
-                    refreshModelsAfterCredentialCommit()
-                }
-            } else if let error { errorMessage = error }
-        case let .authState(state): auth = state
         case let .doctorReport(report): doctor = report
         case let .skillCatalog(json):
             readRequests.remove("skill")
@@ -374,40 +314,6 @@ final class DesktopSettingsRepository {
         }
     }
 
-    private func refreshModelsAfterCredentialCommit() {
-        let generation = sourceGeneration
-        guard let submitter else { return }
-        saving = true
-        startConfirmationTimeout()
-        credentialModelRefresh = Task { [weak self] in
-            defer {
-                if self?.sourceGeneration == generation {
-                    self?.confirmationTimeout?.cancel()
-                    self?.credentialModelRefresh = nil
-                    self?.saving = false
-                }
-            }
-            do {
-                try Task.checkCancellation()
-                guard self?.sourceGeneration == generation else { return }
-                try await submitter(.listModels)
-                try Task.checkCancellation()
-                guard self?.sourceGeneration == generation else { return }
-                self?.statusMessage = "Credential change confirmed by secure storage."
-            } catch {
-                guard !Task.isCancelled, self?.sourceGeneration == generation else { return }
-                self?.fail("Credential change was saved, but refreshing available models failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    private func discardCredentialListings(for providerIDs: [String]) {
-        let ids = Set(providerIDs)
-        credentialRequests = credentialRequests.filter { _, request in
-            request.expected != nil || ids.isDisjoint(with: request.ids)
-        }
-    }
-
     private func startConfirmationTimeout(_ timeout: Duration = .seconds(20)) {
         confirmationTimeout?.cancel()
         let generation = sourceGeneration
@@ -420,12 +326,10 @@ final class DesktopSettingsRepository {
 
     private func fail(_ message: String) {
         confirmationTimeout?.cancel()
-        credentialModelRefresh?.cancel()
         errorMessage = message
         statusMessage = nil
         saving = false
         pending = nil
         operations = []
-        credentialRequests = credentialRequests.filter { $0.value.expected == nil }
     }
 }

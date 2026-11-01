@@ -1,3 +1,6 @@
+import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
+import { CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, type ProviderAccountCommand } from '../shared/providerAccounts.js';
+import type { DesktopProviderAccounts } from './provider-accounts.js';
 import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
 import { CH_APPLICATION_ICON } from '../shared/applicationIcon.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
@@ -47,7 +50,6 @@ import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-cl
 import type {
   BridgeRuntimeVersions,
   ConnectionState,
-  ProviderConnectionTestResult,
   RuntimeEventEnvelope,
   SessionRef,
   SessionRuntimeSummary,
@@ -60,9 +62,6 @@ import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
 import {
   deletePluginSecretsForPlugin,
-  readProviderEnvironmentCredential,
-  resolveCodexOAuthSession,
-  resolveProviderTestCredential,
   validatePluginSecretPluginId,
   type CredentialBrokerStatus,
   type ProviderCredentialBroker,
@@ -86,32 +85,9 @@ import {
   CH_NATIVE_AUDIO_OPERATION,
   CH_NATIVE_AUDIO_REQUEST,
 } from '../shared/nativeAudio.js';
-import { PROVIDER_IDS, providerById, providersFromCatalog } from '../shared/providers.js';
-import { CODEX_PROVIDER_ID, loginCodex } from './codex-auth.js';
-import type { CodexTokenManager } from './codex-tokens.js';
+import { providerById, providersFromCatalog } from '../shared/providers.js';
 import type { SettingsStore } from './settings.js';
 
-export interface CredentialMetadata {
-  configured: boolean;
-  encryptionAvailable: boolean;
-  /** Display-safe fixed mask plus at most the final four credential characters. */
-  credentialPreview?: string;
-  /** The running engine received a credential from an external runtime source. */
-  runtimeOnly?: true;
-  /** An explicit process environment key currently overrides secure storage. */
-  environmentOverride?: true;
-  /** Display-safe reason why the signed credential broker is unavailable. */
-  storageError?: string;
-  /**
-   * Signed-in Codex account address, for display only. Never carries a token;
-   * the credential itself stays in the main process.
-   */
-  codexAccountEmail?: string;
-}
-
-export interface ProviderCredentialMetadata extends CredentialMetadata {
-  providerId: string;
-}
 
 export interface PluginSecretMetadata {
   pluginId: string;
@@ -139,12 +115,6 @@ export const CH_WORKSPACE_SET = 'lingxi:workspace:set';
 export const CH_PROJECT_REMOVE = 'lingxi:project:remove';
 export const CH_SESSION_PIN_SET = 'lingxi:session-pin:set';
 export const CH_WORKSPACE_FILES_SEARCH = 'lingxi:workspace-files:search';
-export const CH_PROVIDER_CREDENTIALS_GET = 'lingxi:provider-credentials:get';
-export const CH_PROVIDER_CREDENTIAL_SET = 'lingxi:provider-credential:set';
-export const CH_PROVIDER_CREDENTIAL_CLEAR = 'lingxi:provider-credential:clear';
-export const CH_PROVIDER_CONNECTION_TEST = 'lingxi:provider-connection:test';
-export const CH_CODEX_LOGIN = 'lingxi:codex:login';
-export const CH_CODEX_CANCEL = 'lingxi:codex:cancel';
 export const CH_PLUGIN_SECRET_GET = 'lingxi:plugin-secret:get';
 export const CH_PLUGIN_SECRET_SET = 'lingxi:plugin-secret:set';
 export const CH_PLUGIN_SECRET_CLEAR = 'lingxi:plugin-secret:clear';
@@ -412,7 +382,7 @@ export interface BootstrapState {
   scheduledWorkspace?: string;
   runtimes: SessionRuntimeSummary[];
   projectCatalogs: Record<string, ProjectSessionCatalogState>;
-  providerCredentials?: ProviderCredentialMetadata[];
+  providerAccountSnapshot?: ProviderAccountSnapshot;
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
@@ -510,7 +480,6 @@ export class HostController {
   private terminals?: TerminalManager;
   private offTerminals?: () => void;
   private readonly terminalDeliveries = new Map<WebContents, TerminalDelivery>();
-  private codexLoginAbort?: AbortController;
   private registered = false;
   private navigationQueue: Promise<void> = Promise.resolve();
   private bootstrapRevision = 0;
@@ -525,13 +494,7 @@ export class HostController {
   private readonly catalogs = new Map<string, ProjectSessionCatalogState>();
   private readonly catalogRequestGenerations = new Map<string, number>();
   private catalogEpoch = 0;
-  private readonly brokerConfiguredProviders = new Set<string>();
-  private readonly brokerCredentialPreviews = new Map<string, string>();
   private brokerStorageError: string | undefined;
-  private codexAccountEmail: string | undefined;
-  private credentialStatusPromise?: Promise<void>;
-  private credentialStatusCacheExpiresAt = 0;
-  private credentialStatusGeneration = 0;
   private readonly credentialMutations = new Map<string, Promise<unknown>>();
   private offNativeAudio?: () => void;
   private scheduled?: ScheduledTaskService;
@@ -553,11 +516,13 @@ export class HostController {
     private readonly mediaAccess?: MediaAccessReader,
     private readonly credentialBroker?: ProviderCredentialBroker,
     private readonly nativeAudio?: NativeAudioManager,
-    private readonly codexLogin: typeof loginCodex = loginCodex,
     private readonly directoryDialogs: WorkspaceDialogs = workspaceDialogs,
   ) {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
+
+  private providerAccounts?: DesktopProviderAccounts;
+  attachProviderAccounts(service: DesktopProviderAccounts): void { this.providerAccounts = service; }
 
   private account?: AccountService;
   private offAccount?: () => void;
@@ -1225,118 +1190,48 @@ export class HostController {
       if (canonicalWorkspace(active.projectPath) !== project) throw new Error('session project mismatch');
       return readWorkspaceFilePreview(project, path);
     });
-    this.ipc.handle(CH_PROVIDER_CREDENTIALS_GET, async (event: IpcMainInvokeEvent, providerId?: unknown) => {
+    this.ipc.handle('lingxi:provider-accounts:routing:get', (event: IpcMainInvokeEvent) => {
+      this.assertSender(event); return this.providerAccounts?.lastRouting;
+    });
+    this.ipc.handle('lingxi:provider-settings', async (event: IpcMainInvokeEvent, patch?: unknown, expected?: unknown) => {
       this.assertSender(event);
-      if (this.credentialBroker) {
-        await this.refreshCredentialBrokerStatus(
-          providerId !== undefined ? (await this.requireCredentialProvider(providerId)).id : undefined,
-        );
-      } else if (providerId !== undefined) {
-        const provider = await this.requireCredentialProvider(providerId);
-        const runtime = this.currentRuntime();
-        if (runtime?.connectionState.status === 'connected') {
-          await runtime.listProviderCredentials([provider.id], [provider.id]);
-        }
+      if (patch !== undefined) {
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch) || !expected || typeof expected !== 'object' || Array.isArray(expected)) throw new Error('Invalid provider settings.');
+        this.assertNoActiveTurn();
       }
-      return this.providerCredentialSnapshot();
+      const result = await this.sessionCatalog.providerSettings(patch as Record<string, unknown> | undefined, expected as Record<string, unknown> | undefined);
+      if (patch !== undefined) {
+        try { await this.bridge.applyProviderSettings(); }
+        catch { throw new Error('Provider settings were saved but could not be applied. Retry when active work has finished.'); }
+      }
+      return result;
     });
-    this.ipc.handle(CH_PROVIDER_CREDENTIAL_SET, async (event: IpcMainInvokeEvent, providerId: unknown, credential: unknown) => {
+    this.ipc.handle(CH_PROVIDER_ACCOUNTS, async (event: IpcMainInvokeEvent, request?: unknown, credential?: unknown) => {
       this.assertSender(event);
-      const provider = await this.requireCredentialProvider(providerId);
-      if (provider.id === CODEX_PROVIDER_ID) throw new Error('请使用 Codex 账号登录。');
-      if (typeof credential !== 'string') throw new Error('invalid credential');
-      const credentialMetadata = await this.enqueueCredentialMutation(provider.id, () => this.credentialBroker
-        ? this.setCredentialThroughBroker(provider.id, credential)
-        : this.setCredentialThroughRuntime(provider.id, credential));
-      return { credential: credentialMetadata, settings: this.settings.getPublic() };
-    });
-    this.ipc.handle(CH_CODEX_LOGIN, async (event: IpcMainInvokeEvent) => {
-      this.assertSender(event);
-      this.assertNoActiveTurn();
-      if (!this.credentialBroker) throw new Error('Codex 登录需要可用的安全凭据存储。');
-      if (this.codexLoginAbort) throw new Error('Codex 登录正在进行。');
+      if (!this.providerAccounts) throw new Error('Secure provider account storage is unavailable.');
+      if (request === undefined) return this.providerAccounts.snapshot();
+      if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('Invalid account operation.');
+      const command = request as ProviderAccountCommand;
+      if (!['list', 'add', 'update', 'reorder', 'enable', 'remove', 'test', 'logout', 'reconnect', 'set_policy'].includes(command.action)
+        || !Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0
+        || (command.operationId !== undefined && (!Number.isSafeInteger(command.operationId) || command.operationId < 0))
+        || (credential !== undefined && typeof credential !== 'string')) throw new Error('Invalid account operation.');
+      if (command.action !== 'list' && command.action !== 'test') this.assertNoActiveTurn();
+      if (command.action === 'add') {
+        const provider = await this.requireCredentialProvider(command.executionBindingId ?? command.providerId);
+        if ((command.authKind === 'oauth') !== (provider.id === 'openai-chatgpt')
+          || command.providerId !== (provider.id === 'openai-chatgpt' ? 'openai' : provider.id)) throw new Error('Authentication method is unavailable for this provider.');
+      }
       const abort = new AbortController();
-      this.codexLoginAbort = abort;
       const cancel = () => abort.abort();
       event.sender.once('destroyed', cancel);
-      try {
-        await this.credentialBroker.health();
-        const session = await this.codexLogin({ openExternal: (url) => shell.openExternal(url), signal: abort.signal });
-        this.assertNoActiveTurn();
-        if (abort.signal.aborted) throw new Error('Codex 登录已取消。');
-        // Every open chat is served the new session's access tokens.
-        await this.requireCodexTokens().signIn(session)
-          .catch(() => { throw new Error('Codex 登录凭据无法保存到安全存储，请重试。'); });
-        this.brokerConfiguredProviders.add(CODEX_PROVIDER_ID);
-        this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
-        this.brokerStorageError = undefined;
-        this.invalidateCredentialBrokerStatus();
-        this.bridge.invalidateLaunchConfigCache();
-        this.codexAccountEmail = session.email;
-        return { credential: this.providerCredentialMetadata(CODEX_PROVIDER_ID), settings: this.settings.getPublic() };
-      } finally {
-        event.sender.removeListener('destroyed', cancel);
-        if (this.codexLoginAbort === abort) this.codexLoginAbort = undefined;
-      }
+      try { return await this.providerAccounts.command(command, credential as string | undefined, abort.signal); }
+      finally { event.sender.removeListener('destroyed', cancel); }
     });
-    this.ipc.handle(CH_CODEX_CANCEL, (event: IpcMainInvokeEvent) => {
+    this.ipc.handle(CH_PROVIDER_ACCOUNTS_CANCEL, (event: IpcMainInvokeEvent, operationId?: unknown) => {
       this.assertSender(event);
-      this.codexLoginAbort?.abort();
-    });
-    this.ipc.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
-      this.assertSender(event);
-      const provider = await this.requireCredentialProvider(providerId);
-      if (provider.id === CODEX_PROVIDER_ID) {
-        this.assertNoActiveTurn();
-        this.codexLoginAbort?.abort();
-        if (!this.credentialBroker) throw new Error('Codex 安全凭据存储不可用。');
-        await this.requireCodexTokens().signOut();
-        this.brokerConfiguredProviders.delete(CODEX_PROVIDER_ID);
-        this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
-        this.codexAccountEmail = undefined;
-        this.bridge.invalidateLaunchConfigCache();
-        return this.providerCredentialMetadata(CODEX_PROVIDER_ID);
-      }
-      await this.enqueueCredentialMutation(provider.id, async () => {
-        if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
-        else {
-          this.requireWorkspace();
-          await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
-          this.bridge.invalidateLaunchConfigCache();
-        }
-      });
-      return this.providerCredentialMetadata(provider.id);
-    });
-    this.ipc.handle(CH_PROVIDER_CONNECTION_TEST, async (
-      event: IpcMainInvokeEvent,
-      providerId: unknown,
-      credentialOverride?: unknown,
-    ): Promise<ProviderConnectionTestResult> => {
-      this.assertSender(event);
-      const provider = this.requireProvider(providerId);
-      if (provider.id === CODEX_PROVIDER_ID) throw new Error('Codex 登录使用 ChatGPT 认证，不支持 API Key 连接测试。');
-      if (credentialOverride !== undefined && typeof credentialOverride !== 'string') {
-        throw new Error('invalid credential');
-      }
-      this.assertNoActiveTurn();
-      this.requireWorkspace();
-      const configuredBase = provider.id === 'anthropic'
-        ? this.settings.getPublic().apiBaseUrl
-        : undefined;
-      const reference = provider.defaultModel ?? '';
-      const slash = reference.indexOf('/');
-      const model = slash >= 0 ? reference.slice(slash + 1) : reference;
-      const testCredential = await resolveProviderTestCredential(
-        provider.id,
-        credentialOverride,
-        this.credentialBroker,
-      );
-      return this.requireCurrentRuntime().testProviderConnection(
-        provider.id,
-        configuredBase ?? provider.defaultApiBase,
-        model,
-        testCredential,
-      );
+      if (typeof operationId !== 'number' || !Number.isSafeInteger(operationId) || operationId < 0) throw new Error('Invalid account operation.');
+      this.providerAccounts?.cancel(operationId as number | undefined);
     });
     this.ipc.handle(CH_PLUGIN_SECRET_GET, async (
       event: IpcMainInvokeEvent,
@@ -1370,7 +1265,6 @@ export class HostController {
       validatePluginSecretPluginId(pluginId);
       return this.enqueuePluginSecretMutation(pluginId, async () => {
         const preview = await this.credentialBroker!.setPluginSecret(pluginId, key, secret);
-        this.bridge.invalidateLaunchConfigCache();
         let restartRequired = this.hasActiveWork();
         if (!restartRequired) {
           try {
@@ -1400,7 +1294,6 @@ export class HostController {
       validatePluginSecretPluginId(pluginId);
       return this.enqueuePluginSecretMutation(pluginId, async () => {
         await this.credentialBroker!.deletePluginSecret(pluginId, key);
-        this.bridge.invalidateLaunchConfigCache();
         let restartRequired = this.hasActiveWork();
         if (!restartRequired) {
           try {
@@ -1576,8 +1469,6 @@ export class HostController {
       } catch (error) {
         const diagnostic = sanitizeDiagnostic(error);
         this.brokerStorageError = credentialBrokerDisplayError(diagnostic);
-        this.brokerConfiguredProviders.clear();
-        this.brokerCredentialPreviews.clear();
         this.diagnostics.add('warn', 'host', `credential broker status refresh failed: ${diagnostic}`);
         this.diagnostics.add('warn', 'host', diagnosticEvent('bootstrap_phase_failed', {
           durationMs: Date.now() - credentialStatusStartedAt,
@@ -1606,7 +1497,7 @@ export class HostController {
         sessions: state.sessions.map((session) => ({ ...session })),
         ...(state.error ? { error: state.error } : {}),
       }])),
-      providerCredentials: this.providerCredentialSnapshot(),
+      providerAccountSnapshot: this.providerAccounts?.latestSnapshot,
       ...(this.credentialBroker
         ? { credentialBrokerAvailable: this.brokerStorageError === undefined }
         : {}),
@@ -1648,8 +1539,7 @@ export class HostController {
       },
       // The signed-in account address is personal data and stays out of the
       // exported report; the settings page reads it over IPC instead.
-      providerCredentials: this.providerCredentialSnapshot()
-        .map(({ codexAccountEmail: _email, ...metadata }) => metadata),
+      providerAccountSnapshot: this.providerAccounts?.latestSnapshot,
       connection: this.currentRuntime()?.connectionState ?? { status: 'idle' },
       bridgeRuntime: this.currentRuntime()?.runtimeVersions,
       diagnostics: this.diagnostics.snapshot(),
@@ -1695,175 +1585,9 @@ export class HostController {
     return this.bridge.runtimeSummaries.some((runtime) => runtime.turnActive || runtime.pendingInteractions > 0);
   }
 
-  private providerCredentialSnapshot(): ProviderCredentialMetadata[] {
-    const runtime = this.currentRuntime();
-    const activeProviders = new Set(
-      runtime?.connectionState.status === 'connected'
-        ? runtime.activeCredentialProviderIds
-        : [],
-    );
-    const persistedProviders = this.credentialBroker
-      ? new Set(this.brokerConfiguredProviders)
-      : new Set(runtime?.persistedCredentialProviderIds ?? []);
-    const engineStorageEncrypted = this.credentialBroker
-      ? this.brokerStorageError === undefined
-      : runtime?.providerCredentialStorageEncrypted ?? false;
-    const credentialPreviews = this.credentialBroker
-      ? Object.fromEntries(this.brokerCredentialPreviews)
-      : runtime?.providerCredentialPreviews ?? {};
-    return this.credentialProviderIds().map((providerId) => {
-      if (providerId === CODEX_PROVIDER_ID && !this.credentialBroker) {
-        return { providerId, configured: false, encryptionAvailable: false,
-          storageError: 'Codex 登录需要支持安全凭据代理的桌面构建。' };
-      }
-      const codexEmail = providerId === CODEX_PROVIDER_ID && this.codexAccountEmail
-        ? { codexAccountEmail: this.codexAccountEmail }
-        : {};
-      const environmentOverride = readProviderEnvironmentCredential(providerId) ? { environmentOverride: true as const } : {};
-      if (persistedProviders.has(providerId)) {
-        return {
-          providerId,
-          configured: true,
-          encryptionAvailable: engineStorageEncrypted,
-          ...(credentialPreviews[providerId]
-            ? { credentialPreview: credentialPreviews[providerId] }
-            : {}),
-          ...codexEmail,
-          ...environmentOverride,
-        };
-      }
-      if (activeProviders.has(providerId)) {
-        return {
-          providerId,
-          configured: true,
-          encryptionAvailable: false,
-          ...(credentialPreviews[providerId]
-            ? { credentialPreview: credentialPreviews[providerId] }
-            : {}),
-          runtimeOnly: true,
-          ...codexEmail,
-          ...environmentOverride,
-        };
-      }
-      return {
-        providerId,
-        configured: false,
-        encryptionAvailable: engineStorageEncrypted,
-        ...(this.brokerStorageError ? { storageError: this.brokerStorageError } : {}),
-      };
-    });
-  }
-
-  private providerCredentialMetadata(providerId: string): ProviderCredentialMetadata {
-    return this.providerCredentialSnapshot().find((metadata) => metadata.providerId === providerId)
-      ?? { providerId, configured: false, encryptionAvailable: false };
-  }
-
-  private async refreshCredentialBrokerStatus(previewProviderId?: string): Promise<void> {
-    if (!this.credentialBroker) return;
-    if (previewProviderId === undefined) {
-      if (Date.now() < this.credentialStatusCacheExpiresAt) return;
-      if (this.credentialStatusPromise) return this.credentialStatusPromise;
-      const operation = this.refreshCredentialBrokerStatusUncached();
-      this.credentialStatusPromise = operation
-        .then(() => { this.credentialStatusCacheExpiresAt = Date.now() + CREDENTIAL_STATUS_CACHE_TTL_MS; })
-        .finally(() => { this.credentialStatusPromise = undefined; });
-      return this.credentialStatusPromise;
-    }
-    await this.refreshCredentialBrokerStatusUncached(previewProviderId);
-  }
-
-  private async refreshCredentialBrokerStatusUncached(previewProviderId?: string): Promise<void> {
-    if (!this.credentialBroker) return;
-    const generation = this.credentialStatusGeneration;
-    const nextConfigured = new Set(
-      (await this.credentialBroker.listStatus(this.credentialProviderIds()))
-        .filter((entry: CredentialBrokerStatus) => entry.configured)
-        .map((entry: CredentialBrokerStatus) => entry.providerId),
-    );
-    if (generation !== this.credentialStatusGeneration) return this.refreshCredentialBrokerStatusUncached(previewProviderId);
+  private async refreshCredentialBrokerStatus(): Promise<void> {
+    await this.providerAccounts?.snapshot();
     this.brokerStorageError = undefined;
-    this.brokerConfiguredProviders.clear();
-    for (const providerId of nextConfigured) this.brokerConfiguredProviders.add(providerId);
-    for (const providerId of this.credentialProviderIds()) {
-      if (!nextConfigured.has(providerId)) this.brokerCredentialPreviews.delete(providerId);
-    }
-    // The account address is read back here rather than carried in memory from
-    // login, so it survives an app restart. It is display-only: a session that
-    // fails to parse must not fail the broker status refresh, which is what
-    // gates every other provider row.
-    try {
-      this.codexAccountEmail = nextConfigured.has(CODEX_PROVIDER_ID)
-        ? (await resolveCodexOAuthSession(this.credentialBroker))?.email
-        : undefined;
-    } catch {
-      this.codexAccountEmail = undefined;
-    }
-    if (!previewProviderId || previewProviderId === CODEX_PROVIDER_ID) return;
-    const preview = await this.credentialBroker.preview(previewProviderId);
-    if (generation !== this.credentialStatusGeneration) return this.refreshCredentialBrokerStatusUncached(previewProviderId);
-    if (!preview.configured) {
-      this.brokerConfiguredProviders.delete(previewProviderId);
-      this.brokerCredentialPreviews.delete(previewProviderId);
-      return;
-    }
-    this.brokerConfiguredProviders.add(previewProviderId);
-    if (preview.maskedValue) this.brokerCredentialPreviews.set(previewProviderId, preview.maskedValue);
-    else this.brokerCredentialPreviews.delete(previewProviderId);
-  }
-
-  private invalidateCredentialBrokerStatus(): void {
-    this.credentialStatusGeneration += 1;
-    this.credentialStatusCacheExpiresAt = 0;
-  }
-
-  private async setCredentialThroughRuntime(providerId: string, credential: string): Promise<ProviderCredentialMetadata> {
-    this.requireWorkspace();
-    const stored = await this.requireCurrentRuntime().setProviderCredential(providerId, credential);
-    if (!stored.configured_provider_ids.includes(providerId)) {
-      throw new Error(`provider credential was not persisted (${providerId})`);
-    }
-    this.bridge.invalidateLaunchConfigCache();
-    return {
-      providerId,
-      configured: true,
-      encryptionAvailable: stored.storage_encrypted,
-      ...(stored.credential_previews?.[providerId]
-        ? { credentialPreview: stored.credential_previews[providerId] }
-        : {}),
-    };
-  }
-
-  private async setCredentialThroughBroker(providerId: string, credential: string): Promise<ProviderCredentialMetadata> {
-    const stored = await this.credentialBroker!.set(providerId, credential);
-    if (!stored.configured) throw new Error(`provider credential was not persisted (${providerId})`);
-    this.bridge.invalidateLaunchConfigCache();
-    const environmentCredential = readProviderEnvironmentCredential(providerId);
-    this.brokerStorageError = undefined;
-    this.brokerConfiguredProviders.add(providerId);
-    this.invalidateCredentialBrokerStatus();
-    if (stored.maskedValue) this.brokerCredentialPreviews.set(providerId, stored.maskedValue);
-    else this.brokerCredentialPreviews.delete(providerId);
-    await this.bridge.refreshCachedProviderCredential(providerId, environmentCredential ?? credential);
-    return {
-      providerId,
-      configured: true,
-      encryptionAvailable: true,
-      ...(environmentCredential ? { environmentOverride: true } : {}),
-      ...(stored.maskedValue ? { credentialPreview: stored.maskedValue } : {}),
-    };
-  }
-
-  private async clearCredentialThroughBroker(providerId: string): Promise<void> {
-    await this.credentialBroker!.delete(providerId);
-    this.bridge.invalidateLaunchConfigCache();
-    this.brokerConfiguredProviders.delete(providerId);
-    this.brokerCredentialPreviews.delete(providerId);
-    this.brokerStorageError = undefined;
-    this.invalidateCredentialBrokerStatus();
-    const environmentCredential = readProviderEnvironmentCredential(providerId);
-    if (environmentCredential) await this.bridge.refreshCachedProviderCredential(providerId, environmentCredential);
-    else await this.bridge.clearCachedProviderCredential(providerId);
   }
 
   private enqueueCredentialMutation<T>(providerId: string, operation: () => Promise<T>): Promise<T> {
@@ -1924,7 +1648,6 @@ export class HostController {
 
     let restartRequired = false;
     if (summary.deletedCount > 0) {
-      this.bridge.invalidateLaunchConfigCache();
       restartRequired = this.hasActiveWork();
       if (!restartRequired) {
         try {
@@ -1950,16 +1673,13 @@ export class HostController {
     };
   }
 
-  private credentialProviderIds(): string[] {
-    const runtime = this.currentRuntime();
-    return [...new Set([...PROVIDER_IDS, ...(runtime?.configuredCredentialIds ?? runtime?.customProviderIds ?? [])])];
-  }
-
   private async requireCredentialProvider(providerId: unknown): Promise<{ id: string }> {
     if (typeof providerId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(providerId)) {
       throw new Error('invalid provider id');
     }
     if (providerById(providerId)) return this.requireProvider(providerId);
+    const profiles = (await this.sessionCatalog.providerSettings()).effective.providers;
+    if (profiles && typeof profiles === 'object' && !Array.isArray(profiles) && Object.hasOwn(profiles, providerId)) return { id: providerId };
     const runtime = this.currentRuntime();
     if (!(runtime?.configuredCredentialIds ?? runtime?.customProviderIds)?.includes(providerId)) {
       if (!runtime?.ensureCustomProviderConfigured) throw new Error('unsupported provider');
@@ -2015,12 +1735,6 @@ export class HostController {
   /** The app's own data, the Bots among it, is not a place for a project. */
   private assertNotAppData(canonical: string): void {
     if (this.settings.isAppDataFolder(canonical)) throw new Error("This folder belongs to the app's own data and cannot be used as a project.");
-  }
-
-  private requireCodexTokens(): CodexTokenManager {
-    const tokens = this.bridge.codexTokens;
-    if (!tokens) throw new Error('Codex 安全凭据存储不可用。');
-    return tokens;
   }
 
   private assertNoActiveTurn(): void {
@@ -2563,7 +2277,7 @@ export class HostController {
     for (const channel of this.botsChannels) this.ipc.removeHandler(channel);
     this.botsChannels = [];
     this.botsUi = undefined;
-    this.codexLoginAbort?.abort();
+    this.providerAccounts?.cancel();
     this.offTerminals?.();
     this.offGit?.();
     for (const target of this.gitWatches.keys()) this.detachGit(target);
@@ -2578,8 +2292,7 @@ export class HostController {
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_SESSION_WORKSPACE,
       CH_WORKSPACE_FILES_SEARCH, CH_COMPUTER_SETTINGS,
-      CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
-      CH_PROVIDER_CONNECTION_TEST, CH_CODEX_LOGIN, CH_CODEX_CANCEL,
+      CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, 'lingxi:provider-accounts:routing:get', 'lingxi:provider-settings',
       CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR, CH_PLUGIN_SECRET_CLEANUP,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_INTERFACE_LOCALE, CH_OPEN_SYSTEM_SETTINGS,

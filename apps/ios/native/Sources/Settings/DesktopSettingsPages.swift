@@ -623,7 +623,7 @@ struct DesktopCustomProvidersPage: View {
                 }.textFieldStyle(.roundedBorder).autocorrectionDisabled().textInputAutocapitalization(.never)
                     .disabled(!repository.canEdit(key: "providers", layer: layer))
             }
-            EngineProfileCredentialsEditor(initialProviderID: profileID)
+            EngineProfileAccountsEditor(initialProviderID: profileID)
             GroupBox(String(localized: "settings_provider_routing_aliases")) {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(aliases.keys.sorted(), id: \.self) { name in
@@ -755,54 +755,41 @@ struct DesktopCustomProvidersPage: View {
     private func save(_ key: String, _ value: Any) { Task { await repository.save(key: key, json: DesktopSettingsRepository.json(value), layer: layer) } }
 }
 
-struct EngineProfileCredentialsEditor: View {
+struct EngineProfileAccountsEditor: View {
     var initialProviderID = ""
+    @State private var selectedBinding = ""
     @State private var repository = DesktopSettingsRepository.shared
-    @State private var providerID = ""
-    @State private var secret = ""
-    private var ids: [String] { repository.credentialStates.keys.sorted() }
+    private var bindings: [String] {
+        Array(Set(repository.providerModels.map(\.providerId) +
+            Array((repository.effective["providers"] as? [String: Any] ?? [:]).keys))).sorted()
+    }
+    private var connections: [String] {
+        let providers = repository.effective["providers"] as? [String: Any] ?? [:]
+        let profile = providers[selectedBinding] as? [String: Any] ?? [:]
+        let rows = profile["connections"] as? [[String: Any]] ?? []
+        return rows.compactMap { ($0["id"] as? String).map { "\(selectedBinding):\($0)" } }
+    }
     var body: some View {
-        GroupBox("settings_parity_credentials") {
+        GroupBox("Accounts") {
             VStack(alignment: .leading, spacing: 12) {
-                Text(String(localized: "settings_credential_storage_separate"))
-                    .font(.caption).foregroundStyle(.secondary)
-                if let encrypted = repository.credentialStorageEncrypted {
-                    Label(encrypted ? String(localized: "settings_credential_storage_encrypted") : String(localized: "settings_credential_storage_unencrypted"), systemImage: encrypted ? "lock.fill" : "lock.open")
-                        .font(.caption)
+                Picker("settings_credential_profile_id", selection: $selectedBinding) {
+                    Text("settings_provider_choose").tag("")
+                    ForEach(bindings, id: \.self) { Text($0).tag($0) }
                 }
-                if !ids.isEmpty {
-                    Picker(String(localized: "model_detail_provider"), selection: $providerID) {
-                        Text(String(localized: "settings_provider_choose")).tag("")
-                        ForEach(ids, id: \.self) { id in Text(id).tag(id) }
+                if !selectedBinding.isEmpty {
+                    NavigationLink("Accounts") {
+                        ProviderAccountsPage(
+                            providerId: selectedBinding == "openai-chatgpt" ? "openai" : selectedBinding,
+                            executionBindingId: selectedBinding, executionBindingIds: connections,
+                            allowsAPIKey: selectedBinding != "openai-chatgpt",
+                            allowsOAuth: selectedBinding == "openai-chatgpt")
                     }
                 }
-                TextField(String(localized: "settings_credential_profile_id"), text: $providerID).textFieldStyle(.roundedBorder)
-                    .autocorrectionDisabled().textInputAutocapitalization(.never)
-                if let configured = repository.credentialStates[providerID] {
-                    Text(configured ? String(localized: "settings_parity_secret_configured") : String(localized: "settings_parity_secret_missing")).font(.caption)
-                }
-                SecureField(String(localized: "settings_provider_api_key"), text: $secret).textFieldStyle(.roundedBorder)
-                    .autocorrectionDisabled().textInputAutocapitalization(.never)
-                HStack {
-                    Button("settings_save") {
-                        let id = providerID
-                        let value = secret
-                        secret = ""
-                        Task { await repository.saveCredential(providerID: id, secret: value) }
-                    }.disabled(!repository.connected || repository.saving || providerID.isEmpty || secret.isEmpty)
-                    Button(String(localized: "settings_provider_clear_credential"), role: .destructive) {
-                        let id = providerID
-                        secret = ""
-                        Task { await repository.saveCredential(providerID: id, secret: nil) }
-                    }.disabled(!repository.connected || repository.saving || repository.credentialStates[providerID] != true)
-                    Button("settings_linux_refresh_button") { Task { await repository.refreshCredentials() } }.disabled(!repository.connected)
-                }
             }
-        }.onAppear { providerID = initialProviderID }
-        .onChange(of: initialProviderID) { _, value in providerID = value; secret = "" }
-        .onChange(of: repository.sourceGeneration) { _, _ in providerID = ""; secret = "" }
-        .onChange(of: providerID) { _, _ in secret = "" }
-        .task(id: repository.sourceGeneration) { await repository.refreshCredentials() }
+        }
+        .onAppear { selectedBinding = initialProviderID }
+        .onChange(of: initialProviderID) { _, value in selectedBinding = value }
+        .onChange(of: repository.sourceGeneration) { _, _ in selectedBinding = initialProviderID }
     }
 }
 

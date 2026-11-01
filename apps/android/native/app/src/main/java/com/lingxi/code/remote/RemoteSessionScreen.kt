@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
@@ -60,6 +61,12 @@ import com.lingxi.code.theme.LingXiTheme
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewmodel.initializer
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import com.lingxi.code.settings.ProviderAccountModelAvailability
+import com.lingxi.code.settings.decodeProviderAccounts
 
 /** A followed session: its source and the view model that renders it. */
 class RemoteChat internal constructor(
@@ -147,6 +154,23 @@ internal fun RemoteSessionScreen(
 
     val scope = rememberCoroutineScope()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    var accountAvailability by remember(remote) { mutableStateOf(emptyList<ProviderAccountModelAvailability>()) }
+    LaunchedEffect(remote, lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                try {
+                    accountAvailability = decodeProviderAccounts(withTimeout(10_000) { remote.source.providerAccountsSnapshot() }).modelAvailability
+                } catch (_: TimeoutCancellationException) {
+                    accountAvailability = emptyList()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    accountAvailability = emptyList()
+                }
+                delay(15_000)
+            }
+        }
+    }
     DisposableEffect(remote, lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -235,6 +259,7 @@ internal fun RemoteSessionScreen(
             onNewChat = {},
             onSelectModel = chat::selectModel,
             remoteModelSelection = true,
+            accountModelAvailability = accountAvailability,
             onSelectReasoning = chat::selectReasoning,
             isDark = isDark,
             showTopBar = false,

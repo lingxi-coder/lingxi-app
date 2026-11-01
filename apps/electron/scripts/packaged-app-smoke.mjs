@@ -203,37 +203,25 @@ export function sanitizePackagedAppEnvironment(source, overrides = {}) {
   return env;
 }
 
-const SAFE_CREDENTIAL_METADATA_KEYS = new Set([
-  'configured',
-  'credentialPreview',
-  'encryptionAvailable',
-  'providerId',
-  'codexAccountEmail',
-]);
-
 const SAFE_BOOTSTRAP_PROMPT_PLACEHOLDERS = new Set([
   'Connect a provider in Settings to start coding…',
   'Waiting for the local engine…',
 ]);
 
-export function isSafeProviderCredentialSnapshot(providerCredentials) {
-  return Array.isArray(providerCredentials)
-    && providerCredentials.length > 0
-    && providerCredentials.every((entry) => {
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
-      if (Object.keys(entry).some((key) => !SAFE_CREDENTIAL_METADATA_KEYS.has(key))) return false;
-      if (typeof entry.providerId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(entry.providerId)) return false;
-      if (typeof entry.configured !== 'boolean' || entry.encryptionAvailable !== true) return false;
-      if (entry.codexAccountEmail !== undefined && (
-        entry.providerId !== 'openai-chatgpt'
-        || typeof entry.codexAccountEmail !== 'string'
-        || !/^[^\s@]+@[^\s@]+$/.test(entry.codexAccountEmail)
-      )) return false;
-      if (entry.credentialPreview === undefined) return true;
-      return typeof entry.credentialPreview === 'string'
-        && entry.credentialPreview.startsWith('••••')
-        && Array.from(entry.credentialPreview.slice(4)).length <= 4;
-    });
+export function isSafeProviderAccountSnapshot(snapshot) {
+  const only = (row, keys) => row && typeof row === 'object' && !Array.isArray(row)
+    && Object.keys(row).every(key => keys.includes(key));
+  if (!only(snapshot, ['storeScope', 'configRevision', 'accounts', 'health', 'modelEntitlements', 'modelAvailability', 'providerPolicies', 'scopedHealth'])
+    || typeof snapshot.storeScope !== 'string' || !Number.isSafeInteger(snapshot.configRevision)
+    || !Array.isArray(snapshot.accounts) || !Array.isArray(snapshot.health)) return false;
+  return snapshot.accounts.every(row => only(row, ['accountId', 'providerId', 'displayName', 'authKind', 'executionBindingId', 'credentialRef', 'enabled', 'userPriority', 'configRevision', 'identityGeneration'])
+    && typeof row.accountId === 'string' && ['api_key', 'oauth'].includes(row.authKind)
+    && only(row.credentialRef, ['storeScope', 'secretRef']) && typeof row.credentialRef.secretRef === 'string')
+    && (snapshot.scopedHealth ?? []).every(row => only(row, ['accountId', 'identityGeneration', 'scopeKind', 'scopeId', 'unavailableUntilMs', 'reason']))
+    && snapshot.health.every(row => only(row, ['accountId', 'identityGeneration', 'status', 'reason', 'cooldownUntilMs', 'healthRevision']))
+    && (snapshot.modelEntitlements ?? []).every(row => only(row, ['accountId', 'identityGeneration', 'modelId', 'status', 'observedAtMs', 'retryAtMs', 'reason']))
+    && (snapshot.modelAvailability ?? []).every(row => only(row, ['providerId', 'executionBindingId', 'modelId', 'eligibleAccountIds', 'confirmedAccountIds', 'unverifiedAccountIds', 'forbiddenAccountIds']))
+    && Object.values(snapshot.providerPolicies ?? {}).every(row => only(row, ['allowSubscriptionToMetered']) && typeof row.allowSubscriptionToMetered === 'boolean');
 }
 
 export function isExpectedBootstrapPromptPlaceholder(placeholder, bootstrap) {
@@ -700,7 +688,7 @@ async function assertBundledSidecar(page, appPath, tempRoot) {
     { timeoutMs: 60_000, label: 'keyless bundled bridge connection' },
   );
   assert.equal(
-    isSafeProviderCredentialSnapshot(bootstrap.providerCredentials),
+    isSafeProviderAccountSnapshot(bootstrap.providerAccountSnapshot),
     true,
     'packaged credential snapshot must stay encrypted and metadata-only',
   );
@@ -1142,25 +1130,37 @@ async function prepareCustomProvider(page, probe, restore = false) {
     const patch = { providers: { [probe.providerId]: {
       type: 'openai', baseUrl: probe.baseUrl, models: [{ id: 'smoke-model' }],
     } } };
-    await evaluate(page, `window.lingxi.command(${JSON.stringify(sessionId)}, ${JSON.stringify({
-      type: 'update_settings', destination: 'user', patch_json: JSON.stringify(patch),
-    })})`);
+    await evaluate(page, `(async () => { const snapshot = await window.lingxi.providerSettings(); await window.lingxi.providerSettings(${JSON.stringify(patch)}, snapshot.raw); })()`);
   }
   await evaluate(page, `window.lingxi.command(${JSON.stringify(sessionId)}, {type:'refresh_listings',which:[{type:'settings'}]})`);
   await waitFor(() => evaluate(page, `window.__lingxiSmoke.events.some(e => e.type === 'settings_snapshot' && JSON.parse(e.effective_json).providers?.[${JSON.stringify(probe.providerId)}])`), { label: 'custom provider settings snapshot' });
   log('custom provider settings confirmed');
+  let metadata = await evaluate(page, 'window.lingxi.providerAccounts.snapshot()');
   if (!restore) {
-    const saved = await evaluate(page, `window.lingxi.setProviderCredential(${JSON.stringify(probe.providerId)}, ${JSON.stringify(probe.key)})`);
-    log('custom provider credential stored');
-    assert.equal(saved.credential.configured, true);
-    assert.equal(saved.credential.encryptionAvailable, true);
+    metadata = await evaluate(page, `window.lingxi.providerAccounts.command(${JSON.stringify({
+      action: 'add', expectedRevision: metadata.configRevision, providerId: probe.providerId,
+      displayName: 'Packaged smoke test account', executionBindingId: probe.providerId, authKind: 'api_key',
+    })}, ${JSON.stringify(probe.key)})`);
+    log('custom provider account stored');
   }
-  const metadata = await evaluate(page, `window.lingxi.providerCredentials(${JSON.stringify(probe.providerId)})`);
-  const credential = metadata.find((entry) => entry.providerId === probe.providerId);
-  assert.equal(credential?.configured, true, 'custom key must survive a full packaged app restart');
-  assert.equal(credential?.encryptionAvailable, true);
-  assert.equal(JSON.stringify(metadata).includes(probe.key), false, 'credential status must contain metadata only');
+  const credential = metadata.accounts.find(entry => entry.accountId === probe.accountId)
+    ?? metadata.accounts.find(entry => entry.providerId === probe.providerId);
+  assert.ok(credential, 'custom account must survive a full packaged app restart');
+  probe.accountId = credential.accountId;
+  assert.equal(metadata.health.find(entry => entry.accountId === credential.accountId)?.status, 'ready');
+  assert.equal(isSafeProviderAccountSnapshot(metadata), true);
+  assert.equal(JSON.stringify(metadata).includes(probe.key), false, 'account status must contain metadata only');
   return sessionId;
+}
+
+async function removeCustomProviderAccount(page, probe) {
+  if (!probe.accountId) return;
+  const snapshot = await evaluate(page, 'window.lingxi.providerAccounts.snapshot()');
+  if (!snapshot.accounts.some(entry => entry.accountId === probe.accountId)) return;
+  const cleared = await evaluate(page, `window.lingxi.providerAccounts.command(${JSON.stringify({
+    action: 'remove', expectedRevision: snapshot.configRevision, accountId: probe.accountId,
+  })})`);
+  assert.equal(cleared.accounts.some(entry => entry.accountId === probe.accountId), false);
 }
 
 export function assertCustomProviderTurn(events) {
@@ -1380,7 +1380,7 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
       && current.activeSession?.sessionId !== sessionId && current.activeSession?.sessionId;
   }, { label: 'second chat for LocalApp modification' });
   assert.notEqual(otherSession, sessionId, 'the pre-Modify chat must differ from the saved authoring session');
-  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Apps')?.click()`);
+  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === 'Apps')?.click()`);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'packaged Apps library' });
   await evaluate(page, `(() => {
     const tile = Array.from(document.querySelectorAll('.local-app-tile')).find(tile => tile.querySelector('h2')?.textContent === ${JSON.stringify(created.name)});
@@ -1393,7 +1393,7 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
   // through the real New chat action and verify the composer follows that chat.
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat')?.click()`);
   await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId !== '${sessionId}' && !document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && !document.querySelector('.local-app-chat-card'))`), { label: 'new unrelated source-project chat has its own transcript and draft' });
-  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Apps')?.click()`);
+  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === 'Apps')?.click()`);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'return to application library' });
   const screenshot = await page.send('Page.captureScreenshot', { format: 'png' });
   const evidence = process.env.LINGXI_LOCAL_APP_EVIDENCE;
@@ -1493,9 +1493,7 @@ export async function runPackagedCredentialStability(appPath) {
         checks.push({ launch, refresh, type: 'refresh', credentialConfigured: true, authenticatedRequest: true });
       }
       if (launch === 3) {
-        await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(probe.providerId)})`);
-        const cleared = await evaluate(page, `window.lingxi.providerCredentials(${JSON.stringify(probe.providerId)})`);
-        assert.equal(cleared.find(entry => entry.providerId === probe.providerId)?.configured, false);
+        await removeCustomProviderAccount(page, probe);
       }
       await close();
       await stopOwnedBroker();
@@ -1512,13 +1510,13 @@ export async function runPackagedCredentialStability(appPath) {
     if (page) {
       try {
         const events = await evaluate(page, `window.__lingxiSmoke?.events.filter(e =>
-          ['error', 'model_changed', 'provider_credential_status', 'settings_snapshot'].includes(e.type)).map(e =>
+          ['error', 'model_changed', 'provider_accounts_updated', 'settings_snapshot'].includes(e.type)).map(e =>
           e.type === 'settings_snapshot' ? { type: e.type, testProfile: JSON.parse(e.effective_json).providers?.[${JSON.stringify(probe.providerId)}] } : e)`);
         writeFileSync(join(tempRoot, 'credential-events.json'), JSON.stringify(events, null, 2), { mode: 0o600 });
       } catch {}
     }
     if (page) {
-      try { await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(probe.providerId)})`); } catch {}
+      try { await removeCustomProviderAccount(page, probe); } catch {}
     }
     try { await close(); } catch {
       if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
@@ -1673,9 +1671,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     const customSession = await prepareCustomProvider(page, customProbe, true);
     await assertCustomProviderRequest(page, customProbe, customSession);
     await assertPackagedLocalApps(page, customProbe, customSession, cdpPort, join(tempHome, '.lingxi'));
-    await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(customProbe.providerId)})`);
-    const cleared = await evaluate(page, `window.lingxi.providerCredentials(${JSON.stringify(customProbe.providerId)})`);
-    assert.equal(cleared.find((entry) => entry.providerId === customProbe.providerId)?.configured, false);
+    await removeCustomProviderAccount(page, customProbe);
     assertNoRendererErrors();
     await waitForTemporaryCredentialBroker(tempHome, brokerManifest.channel, protectedBrokerProcessIds);
     await closePackagedApp(browser, child, copiedAppBundleId);
@@ -1712,7 +1708,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
       log(`app diagnostics: ${diagnosticLines.slice(-8).join('\n')}`);
     }
     if (page && customProbe) {
-      try { await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(customProbe.providerId)})`); } catch {}
+      try { await removeCustomProviderAccount(page, customProbe); } catch {}
     }
     if (customProbe) await customProbe.close();
     if (browser) {

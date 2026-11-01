@@ -16,6 +16,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -25,7 +26,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -71,25 +71,15 @@ private fun ProviderKind.blurb(): String = when (this) {
 private fun ProviderKind.preset(of: GenericProvider): ProviderPreset =
     presets.firstOrNull { it.id == of.preset } ?: presets.last()
 
-internal data class ProviderApplyUiState(
-    val labelRes: Int,
-    val enabled: Boolean,
-    val saveCredential: Boolean,
-)
+internal data class ProviderApplyUiState(val labelRes: Int, val enabled: Boolean)
 
-internal fun providerApplyUiState(
-    hasPendingConfiguration: Boolean,
-    hasCredentialDraft: Boolean,
-    busy: Boolean,
-): ProviderApplyUiState = ProviderApplyUiState(
+internal fun providerApplyUiState(hasPendingConfiguration: Boolean, busy: Boolean) = ProviderApplyUiState(
     labelRes = when {
         busy -> R.string.settings_provider_applying
-        hasCredentialDraft -> R.string.settings_provider_save_and_apply
         hasPendingConfiguration -> R.string.settings_provider_apply
         else -> R.string.settings_provider_applied
     },
-    enabled = !busy && (hasCredentialDraft || hasPendingConfiguration),
-    saveCredential = hasCredentialDraft,
+    enabled = !busy && hasPendingConfiguration,
 )
 
 // MARK: - Provider list ------------------------------------------------------
@@ -110,6 +100,8 @@ fun ProviderListPage(
     onRefreshCatalog: () -> Unit = {},
     onReconnectEngine: () -> Unit = {},
     onNavigate: (route: String) -> Unit = {},
+    catalogRefreshEnabled: Boolean = true,
+    catalogRefreshNotice: String? = null,
 ) {
     val t = LingXiTheme.palette
     val arr = state.providers(kind)
@@ -117,8 +109,11 @@ fun ProviderListPage(
 
     Column(Modifier.fillMaxWidth()) {
         if (kind != ProviderKind.Llm) Blurb(kind.blurb())
-        else androidx.compose.material3.TextButton(onClick = onRefreshCatalog) {
-            Text(stringResource(R.string.settings_parity_refresh_catalog))
+        else {
+            androidx.compose.material3.TextButton(enabled = catalogRefreshEnabled, onClick = onRefreshCatalog) {
+                Text(stringResource(R.string.settings_parity_refresh_catalog))
+            }
+            catalogRefreshNotice?.let { Text(it, color = t.text4) }
         }
 
         SettingsSection(label = stringResource(R.string.settings_provider_added_count_fmt, arr.size)) {
@@ -209,7 +204,7 @@ fun ProviderListPage(
                             SettingsRoutes.CUSTOM_PROVIDERS to "Custom providers & routing",
                             SettingsRoutes.providerList(ProviderKind.Search.name) to "Web search providers",
                             SettingsRoutes.providerList(ProviderKind.Fetch.name) to "Web fetch providers",
-                            SettingsRoutes.CREDENTIALS to "Provider credentials",
+                            SettingsRoutes.PROVIDER_ACCOUNTS to "Provider credentials",
                         )
                         pages.forEachIndexed { index, (route, title) ->
                             SettingsRow(
@@ -393,10 +388,9 @@ fun ProviderPickerPage(
 // MARK: - Provider edit ------------------------------------------------------
 
 /**
- * The provider editor: a live credential-status banner,
- * display-name / API-base / API-key (show-hide) fields, an optional cx field
- * (Google search), an LLM default-model radio (or a free model-id field for
- * custom), and an enable / set-default / remove section.
+ * The provider editor: connection metadata, Host-owned LLM accounts, model
+ * defaults and visibility, plus enable / set-default / remove controls.
+ * Search and fetch providers retain their service-specific key fields.
  *
  * State is hoisted: every field edits through [store]; [providerId] is looked up
  * each recomposition so the rendered values track the store. If the provider was
@@ -417,6 +411,7 @@ fun ProviderEditPage(
         Text(settingsLabel("This provider is not configured on this device."), color = t.text3)
         return
     }
+    val accountSnapshot by store.providerAccounts.state.collectAsState()
     val preset = kind.preset(of = editing)
     var showKey by remember(providerId) { mutableStateOf(false) }
     val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
@@ -427,34 +422,13 @@ fun ProviderEditPage(
     var removalMessage by remember(providerId) { mutableStateOf<String?>(null) }
     var removing by remember(providerId) { mutableStateOf(false) }
     var applying by remember(providerId) { mutableStateOf(false) }
-    var credentialBusy by remember(providerId) { mutableStateOf(false) }
-    var connectionBusy by remember(providerId) { mutableStateOf(false) }
-    var connectionMessage by remember(providerId) { mutableStateOf<String?>(null) }
-    val resources = LocalResources.current
-    var credentialMessage by remember(providerId, editing.credentialConfigured) {
-        mutableStateOf(
-            when {
-                kind != ProviderKind.Llm -> resources.getString(R.string.settings_provider_credential_llm_only)
-                !store.state.value.providers(kind).any { it.id == providerId } -> ""
-                !store.state.value.providers(kind).first { it.id == providerId }.credentialConfigured ->
-                    resources.getString(R.string.settings_provider_credential_not_saved)
-                else -> resources.getString(R.string.settings_provider_credential_saved_unverified)
-            },
-        )
-    }
-    val builtInSupported = kind != ProviderKind.Llm || ProviderSettingsRepository.engineCredentialIdFor(editing) != null
     val catalogEntry = if (kind == ProviderKind.Llm) {
-        ProviderSettingsRepository.engineCredentialIdFor(editing)
-            ?.let { profileId -> state.llmCatalogEntries.firstOrNull { it.profileId == profileId } }
-    } else {
-        null
-    }
+        state.llmCatalogEntries.firstOrNull { it.profileId == ProviderSettingsRepository.profileNameFor(editing) }
+    } else null
     val catalogModels = catalogEntry?.modelDetails.orEmpty()
-    val applyState = providerApplyUiState(
-        hasPendingConfiguration = providerId in state.pendingLlmProviderChanges,
-        hasCredentialDraft = keyDraft.isNotBlank(),
-        busy = applying || credentialBusy || connectionBusy,
-    )
+    val pickerModelIds = (catalogModels.map { it.modelId } + accountSnapshot.modelAvailability
+        .filter { it.executionBindingId == ProviderSettingsRepository.profileNameFor(editing) }.map { it.modelId }).distinct()
+    val applyState = providerApplyUiState(providerId in state.pendingLlmProviderChanges, applying)
 
     Column(Modifier.fillMaxWidth()) {
         FieldLabel(stringResource(R.string.settings_display_name))
@@ -469,116 +443,41 @@ fun ProviderEditPage(
         SettingsField(
             value = editing.url,
             onValueChange = { v ->
-                connectionMessage = null
                 store.updateProvider(kind, providerId) { it.copy(url = v) }
-                store.markProviderConnectionUnverified(kind, providerId)
             },
             placeholder = preset.defaultUrl,
+            modifier = Modifier.testTag("provider.api-base"),
         )
         FieldHint(stringResource(R.string.settings_provider_url_hint_fmt, preset.defaultUrl.ifEmpty { "—" }))
 
-        FieldLabel(stringResource(R.string.settings_provider_api_key))
-        KeyField(
-            value = keyDraft,
-            placeholder = if (editing.credentialConfigured) {
-                preset.keyPrefix + stringResource(R.string.settings_provider_key_saved_placeholder)
-            } else {
-                preset.keyPrefix + "..."
-            },
-            show = showKey,
-            onToggleShow = { showKey = !showKey },
-            onValueChange = { v ->
-                if (v != keyDraft) {
-                    connectionMessage = null
-                    store.markProviderConnectionUnverified(kind, providerId)
-                }
-                keyDraft = v
-            },
-        )
-        FieldHint(
-            when {
-                kind != ProviderKind.Llm -> stringResource(R.string.settings_provider_hint_local_only)
-                !builtInSupported -> stringResource(R.string.settings_provider_hint_not_in_catalog)
-                editing.credentialConfigured -> stringResource(R.string.settings_provider_hint_overwrite)
-                else -> stringResource(R.string.settings_provider_hint_secure_store)
-            },
-        )
-
-        StatusBanner(
-            status = editing.status,
-            message = connectionMessage,
-            actionLabel = if (kind == ProviderKind.Llm) stringResource(R.string.settings_provider_test_connection) else stringResource(R.string.common_not_supported),
-            enabled = kind == ProviderKind.Llm &&
-                builtInSupported &&
-                !connectionBusy &&
-                !credentialBusy &&
-                !applying,
-        ) {
-            val testedDraft = keyDraft.trim()
-            connectionBusy = true
-            connectionMessage = resources.getString(R.string.settings_provider_connecting)
-            store.testProviderConnection(kind, providerId, testedDraft.takeIf { it.isNotEmpty() }) { result ->
-                if (keyDraft.trim() == testedDraft) {
-                    connectionMessage = result.message + if (result.connected && !result.usedStoredCredential) {
-                        resources.getString(R.string.settings_provider_key_unsaved_suffix)
-                    } else {
-                        ""
-                    }
-                } else {
-                    store.markProviderConnectionUnverified(kind, providerId)
-                    connectionMessage = resources.getString(R.string.settings_provider_key_changed_retest)
-                }
-                connectionBusy = false
-            }
+        if (kind == ProviderKind.Llm) {
+            ProviderAccountsSection(
+                bindingId = ProviderSettingsRepository.profileNameFor(editing),
+                repository = store.providerAccounts,
+                canAddAccounts = providerId !in state.pendingLlmProviderChanges,
+                onChanged = { store.refreshAfterProviderAccountMutation() },
+            )
+        } else {
+            FieldLabel(stringResource(R.string.settings_provider_api_key))
+            KeyField(value = keyDraft, placeholder = preset.keyPrefix + "...", show = showKey,
+                onToggleShow = { showKey = !showKey }, onValueChange = { keyDraft = it })
+            FieldHint(stringResource(R.string.settings_provider_hint_local_only))
         }
 
         if (kind == ProviderKind.Llm) {
             SettingsSection(
                 label = stringResource(R.string.settings_provider_apply),
-                footer = when {
-                    keyDraft.isNotBlank() || !editing.credentialConfigured -> credentialMessage
-                    providerId in state.pendingLlmProviderChanges ->
-                        stringResource(R.string.settings_provider_apply_footer_pending)
-                    else -> stringResource(R.string.settings_provider_apply_footer_applied)
-                },
+                footer = stringResource(if (providerId in state.pendingLlmProviderChanges)
+                    R.string.settings_provider_apply_footer_pending else R.string.settings_provider_apply_footer_applied),
             ) {
                 SettingsRow(
                     label = stringResource(R.string.settings_provider_apply_config_reconnect),
-                    sub = stringResource(R.string.settings_provider_apply_config_sub),
-                    chevron = false,
-                    isLast = true,
-                    trailing = {
-                        ProviderTextAction(
-                            label = stringResource(applyState.labelRes),
-                            enabled = applyState.enabled,
-                            onClick = {
-                                applying = true
-                                if (applyState.saveCredential) {
-                                    val submittedDraft = keyDraft
-                                    credentialMessage = resources.getString(R.string.settings_provider_saving_applying)
-                                    store.saveProviderCredential(kind, providerId, submittedDraft) { error ->
-                                        if (error != null) {
-                                            credentialMessage = resources.getString(R.string.settings_provider_save_failed_fmt, error)
-                                            applying = false
-                                        } else {
-                                            val unchangedDraft = keyDraft == submittedDraft
-                                            if (unchangedDraft) keyDraft = ""
-                                            credentialMessage = resources.getString(if (unchangedDraft) R.string.settings_provider_credential_saved_secure else R.string.settings_provider_credential_not_saved)
-                                            // Structural edits can be applied alongside the key. A
-                                            // newer draft must remain available instead of closing it.
-                                            if (unchangedDraft && store.state.value.pendingLlmProviderChanges.isNotEmpty()) {
-                                                onReconnectEngine()
-                                            }
-                                            applying = false
-                                        }
-                                    }
-                                } else {
-                                    onReconnectEngine()
-                                    applying = false
-                                }
-                            },
-                        )
-                    },
+                    sub = stringResource(R.string.settings_provider_apply_config_sub), chevron = false, isLast = true,
+                    trailing = { ProviderTextAction(stringResource(applyState.labelRes), applyState.enabled) {
+                        applying = true
+                        onReconnectEngine()
+                        applying = false
+                    } },
                 )
             }
         }
@@ -606,10 +505,10 @@ fun ProviderEditPage(
                     label = stringResource(R.string.settings_provider_visible_models),
                     value = if (!editing.showInModelPicker) stringResource(R.string.settings_badge_disabled) else {
                         val selected = ProviderModelVisibilityRules.selectedCatalogModelIds(
-                            catalogModels.map { it.modelId },
+                            pickerModelIds,
                             ProviderModelVisibility(showInModelPicker = editing.showInModelPicker, visibleModelIds = editing.visibleModelIds),
                         )
-                        "${selected.size} / ${catalogModels.size}"
+                        "${selected.size} / ${pickerModelIds.size}"
                     },
                     onTap = { focusManager.clearFocus(); keyboard?.hide(); modelSheet = "visibility" },
                     isLast = true,
@@ -626,6 +525,8 @@ fun ProviderEditPage(
                 modifier = Modifier.testTag("provider.advanced"),
             )
         }
+
+        if (kind == ProviderKind.Llm) FieldHint(stringResource(R.string.provider_account_configuration_remove_hint))
 
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -672,6 +573,7 @@ fun ProviderEditPage(
             provider = editing,
             models = catalogModels,
             catalogLoaded = state.llmCatalogLoaded,
+            accountAvailability = accountSnapshot.modelAvailability.filter { it.executionBindingId == ProviderSettingsRepository.profileNameFor(editing) },
             manageVisibility = modelSheet == "visibility",
             onUpdate = { next ->
                 store.updateProvider(kind, providerId) {
@@ -679,9 +581,7 @@ fun ProviderEditPage(
                 }
             },
             onSelect = { model ->
-                connectionMessage = null
                 store.updateProvider(kind, providerId) { it.copy(model = model) }
-                store.markProviderConnectionUnverified(kind, providerId)
             },
             onDismiss = { modelSheet = null },
         )
@@ -697,85 +597,9 @@ fun ProviderEditPage(
                         provider = editing,
                         presetDefaultUrl = preset.defaultUrl,
                         onChange = { next ->
-                            connectionMessage = null
                             store.updateProvider(kind, providerId) { next }
-                            store.markProviderConnectionUnverified(kind, providerId)
                         },
                     )
-                }
-
-                if (kind == ProviderKind.Llm) {
-                    SettingsSection(
-                        label = stringResource(R.string.settings_section_credentials),
-                        footer = credentialMessage,
-                    ) {
-                        SettingsRow(
-                            label = stringResource(R.string.settings_provider_save_credential),
-                            sub = if (builtInSupported) stringResource(R.string.settings_provider_write_secure_store) else stringResource(R.string.settings_provider_preset_not_in_catalog),
-                            chevron = false,
-                            trailing = {
-                                Text(
-                                    stringResource(R.string.voice_save_button),
-                                    color = if (builtInSupported) t.accent else t.text4,
-                                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.Medium,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .clickable(
-                                            enabled = builtInSupported &&
-                                                keyDraft.isNotBlank() &&
-                                                !credentialBusy &&
-                                                !applying &&
-                                                !connectionBusy,
-                                        ) {
-                                            credentialBusy = true
-                                            val submittedDraft = keyDraft
-                                            store.saveProviderCredential(kind, providerId, submittedDraft) { error ->
-                                                credentialMessage =
-                                                    error?.let { resources.getString(R.string.settings_provider_save_failed_fmt, it) } ?: resources.getString(R.string.settings_provider_credential_saved_secure)
-                                                if (error == null) {
-                                                    if (keyDraft == submittedDraft) keyDraft = ""
-                                                    else credentialMessage = resources.getString(R.string.settings_provider_credential_not_saved)
-                                                }
-                                                credentialBusy = false
-                                            }
-                                        }
-                                        .padding(horizontal = 7.dp, vertical = 5.dp),
-                                )
-                            },
-                        )
-                        SettingsRow(
-                            label = stringResource(R.string.settings_provider_clear_credential),
-                            sub = if (editing.credentialConfigured) stringResource(R.string.settings_provider_clear_credential_sub) else stringResource(R.string.settings_provider_no_saved_credential),
-                            chevron = false,
-                            isLast = true,
-                            trailing = {
-                                Text(
-                                    stringResource(R.string.settings_provider_clear_key),
-                                    color = if (editing.credentialConfigured && builtInSupported) t.danger else t.text4,
-                                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.Medium,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .clickable(
-                                            enabled = editing.credentialConfigured &&
-                                                builtInSupported &&
-                                                !credentialBusy &&
-                                                !applying &&
-                                                !connectionBusy,
-                                        ) {
-                                            credentialBusy = true
-                                            store.clearProviderCredential(kind, providerId) { error ->
-                                                credentialMessage =
-                                                    error?.let { resources.getString(R.string.settings_provider_clear_failed_fmt, it) } ?: resources.getString(R.string.settings_provider_credential_cleared)
-                                                credentialBusy = false
-                                            }
-                                        }
-                                        .padding(horizontal = 7.dp, vertical = 5.dp),
-                                )
-                            },
-                        )
-                    }
                 }
 
                 SettingsSection {
@@ -891,30 +715,6 @@ private fun Badge(text: String, color: Color, strong: Boolean = false) {
             .clip(RoundedCornerShape(4.dp))
             .background(color.tint(0.18f))
             .padding(horizontal = 6.dp, vertical = 1.dp),
-    )
-}
-
-@Composable
-private fun StatusBanner(
-    status: ConnStatus,
-    message: String?,
-    actionLabel: String,
-    enabled: Boolean,
-    onTest: () -> Unit,
-) {
-    val t = LingXiTheme.palette
-    val testing = status == ConnStatus.Testing
-    androidx.compose.material3.ListItem(
-        headlineContent = { Text(status.localizedLabel(), color = if (status == ConnStatus.Error) t.danger else t.text) },
-        supportingContent = message?.takeIf { it.isNotBlank() }?.let {{ Text(it, color = t.text3) }},
-        leadingContent = if (testing) {{ androidx.compose.material3.CircularProgressIndicator(Modifier.size(24.dp)) }} else null,
-        trailingContent = {
-            androidx.compose.material3.TextButton(onClick = onTest, enabled = enabled && !testing) {
-                Text(if (testing) stringResource(R.string.settings_provider_testing) else actionLabel)
-            }
-        },
-        colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
-        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
     )
 }
 

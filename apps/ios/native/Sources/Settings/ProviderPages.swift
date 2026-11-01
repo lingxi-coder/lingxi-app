@@ -61,12 +61,12 @@ struct ModelsSettingsPage: View {
         .task {
             retryMaxAttemptsText = String(repository.routingSettings.retryMaxAttempts)
             retryBackoffMsText = String(repository.routingSettings.retryBackoffMs)
-            store.llmProviders = repository.legacyProviders()
+            store.llmProviders = repository.settingsProviders()
             await repository.refreshCatalog()
-            await repository.refreshCredentialStatus()
+            await repository.refreshAccounts()
         }
         .onChange(of: repository.syncRevision) { _, _ in
-            store.llmProviders = repository.legacyProviders()
+            store.llmProviders = repository.settingsProviders()
         }
     }
 
@@ -150,9 +150,9 @@ struct ModelsSettingsPage: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: state.oauthState?.signedIn == true ? "person.crop.circle" : "circle.fill")
-                    .font(.caption2).foregroundStyle(state.legacyStatus.dot(t))
-                    .accessibilityLabel(state.profile.enabled ? state.statusLabel : String(localized: "settings_badge_disabled"))
+                Image(systemName: "circle.fill")
+                    .font(.caption2).foregroundStyle(repository.hasConfiguredAccount(for: state.profile) ? t.ok : t.text4)
+                    .accessibilityLabel(state.profile.enabled ? repository.hasConfiguredAccount(for: state.profile) ? String(localized: "settings_provider_status_configured") : String(localized: "settings_provider_unconfigured") : String(localized: "settings_badge_disabled"))
                 if state.profile.isDefault {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(t.accent)
                         .accessibilityLabel(String(localized: "settings_badge_default"))
@@ -294,9 +294,9 @@ struct ModelsSettingsPage: View {
                 .accessibilityIdentifier(entry.accessibilityID)
             }
             NavigationLink {
-                EngineCredentialsPage()
+                EngineAccountsPage()
             } label: {
-                Text("settings_parity_credentials")
+                Text("Accounts")
             }
         }
         .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
@@ -323,17 +323,16 @@ private struct ProviderTile: View {
     }
 }
 
-/// Engine-profile credentials are an advanced, desktop-parity editor; it lives
-/// one level below the hub instead of at the bottom of the provider list.
-private struct EngineCredentialsPage: View {
+/// Accounts for explicitly configured execution bindings, including custom providers.
+private struct EngineAccountsPage: View {
     @Environment(\.theme) private var t
 
     var body: some View {
         ScrollView {
-            EngineProfileCredentialsEditor().padding(16)
+            EngineProfileAccountsEditor().padding(16)
         }
         .background(Color(uiColor: .systemGroupedBackground))
-        .navigationTitle(String(localized: "settings_parity_credentials"))
+        .navigationTitle("Accounts")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -476,8 +475,6 @@ struct ProviderEditorForm: View {
     @State private var repository = ProviderRepository.shared
     @State private var draft: ProviderEditorDraft
     @State private var title: String
-    @State private var showKey = false
-    @State private var editingStoredCredential = false
     @State private var saving = false
     @State private var removing = false
     @State private var confirmingRemove = false
@@ -491,14 +488,13 @@ struct ProviderEditorForm: View {
     }
 
     private var busy: Bool {
-        saving || removing || draft.operationInFlight || draft.connectionState == .testing
+        saving || removing
     }
 
     var body: some View {
         Form {
             identitySection
-            apiKeySection
-            oauthSection
+            accountsSection
             statusSection
             modelSection
             Section {
@@ -548,19 +544,9 @@ struct ProviderEditorForm: View {
 
     private var statusSection: some View {
         Section {
-            Button(action: testConnection) {
-                HStack {
-                    Text("settings_provider_test_connection")
-                    Spacer(minLength: 8)
-                    if draft.connectionState == .testing {
-                        ProgressView()
-                    } else {
-                        Text(statusLabel).font(.subheadline).foregroundStyle(statusColor)
-                    }
-                }
+            LabeledContent("Status") {
+                Text(statusLabel).font(.subheadline).foregroundStyle(statusColor)
             }
-            .accessibilityIdentifier("provider.test")
-            .disabled(draft.operationInFlight)
         } footer: {
             if let detail = draft.validationMessage ?? draft.detailMessage ?? actionError {
                 Text(detail)
@@ -614,121 +600,35 @@ struct ProviderEditorForm: View {
         }
     }
 
-    // MARK: Credentials
+    // MARK: Accounts
+
+    private var accountsSection: some View {
+        Section {
+            if needsInitialProfileSave {
+                Button("Save provider first", action: save)
+                Text("Save this provider, then add accounts.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else {
+                NavigationLink {
+                    ProviderAccountsPage(providerId: repository.logicalProviderID(for: draft.profile),
+                        executionBindingId: repository.engineProfileID(for: draft.profile),
+                        executionBindingIds: repository.executionBindingIDs(for: draft.profile),
+                        allowsAPIKey: !isOAuthOnly,
+                        allowsOAuth: repository.accountOAuthAvailable(for: draft.profile))
+                } label: {
+                    Label("Accounts and priority", systemImage: "person.2")
+                }
+                .accessibilityIdentifier("provider.accounts")
+            }
+        }
+    }
 
     private var isOAuthOnly: Bool {
         draft.profile.presetID == "openai-chatgpt"
     }
 
-    /// Render the OAuth block when this preset can sign in, OR when a session
-    /// already exists for a preset whose login is withheld — otherwise a
-    /// previously-signed-in account would keep a credential the UI can no
-    /// longer show or revoke.
-    private var showsOAuth: Bool {
-        repository.oauthProvider(for: draft.profile.presetID) != nil
-            && (repository.oauthLoginAvailable(for: draft.profile.presetID) || draft.oauthState?.signedIn == true)
-    }
-
-    private var storedKeyCollapsed: Bool {
-        draft.hasStoredAPIKey && !editingStoredCredential && draft.pendingSecret.isEmpty && !draft.clearCredentialOnApply
-    }
-
-    @ViewBuilder private var apiKeySection: some View {
-        if isOAuthOnly {
-            if !showsOAuth {
-                Section {
-                    Text(String(localized: "settings_provider_oauth_only"))
-                        .font(.footnote)
-                        .foregroundStyle(Color.secondary)
-                }
-                .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
-            }
-        } else {
-            Section {
-                if storedKeyCollapsed {
-                    LabeledContent {
-                        Text("••••••••••••").font(.callout.monospaced()).foregroundStyle(Color.secondary)
-                    } label: {
-                        Text(String(localized: "settings_provider_api_key")).foregroundStyle(Color.primary)
-                    }
-                    Button(String(localized: "settings_provider_replace_key")) {
-                        editingStoredCredential = true
-                        draft.clearCredentialOnApply = false
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(t.accent)
-                } else {
-                    HStack(spacing: 8) {
-                        Group {
-                            if showKey {
-                                TextField(String(localized: "settings_provider_api_key_placeholder"), text: $draft.pendingSecret)
-                            } else {
-                                SecureField(String(localized: "settings_provider_api_key_placeholder"), text: $draft.pendingSecret)
-                            }
-                        }
-                        .font(.callout.monospaced())
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .accessibilityIdentifier("provider.api-key")
-                        Button { showKey.toggle() } label: {
-                            Image(systemName: showKey ? "eye.slash" : "eye")
-                                .frame(minWidth: 44, minHeight: 44)
-                        }
-                        .accessibilityLabel(showKey ? String(localized: "settings_provider_hide_key") : String(localized: "settings_provider_show_key"))
-                        .buttonStyle(.borderless)
-                        .font(.body)
-                        .foregroundStyle(t.accent)
-                        .accessibilityIdentifier("provider.api-key.visibility")
-                    }
-                }
-                if draft.hasStoredAPIKey || draft.clearCredentialOnApply {
-                    Button(role: draft.clearCredentialOnApply ? nil : .destructive) {
-                        draft.clearCredentialOnApply.toggle()
-                        if draft.clearCredentialOnApply { draft.pendingSecret = "" }
-                        editingStoredCredential = false
-                    } label: {
-                        Text(draft.clearCredentialOnApply
-                            ? String(localized: "settings_provider_keep_key")
-                            : String(localized: "settings_provider_clear_key"))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(draft.clearCredentialOnApply ? t.accent : t.danger)
-                    .accessibilityIdentifier("provider.api-key.clear")
-                }
-            } header: {
-                Text(String(localized: "settings_provider_api_key"))
-            }
-            .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
-        }
-    }
-
-    @ViewBuilder private var oauthSection: some View {
-        if showsOAuth {
-            Section {
-                if let oauth = draft.oauthState, oauth.signedIn {
-                    LabeledContent {
-                        Text(oauth.accountLabel ?? String(localized: "settings_provider_status_configured"))
-                            .foregroundStyle(t.ok)
-                    } label: {
-                        Text(String(localized: "settings_provider_oauth")).foregroundStyle(Color.primary)
-                    }
-                    Button(String(localized: "settings_provider_logout"), role: .destructive) { logoutOAuth() }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(t.danger)
-                } else if repository.oauthLoginAvailable(for: draft.profile.presetID) {
-                    Button(String(localized: "settings_provider_login")) { loginOAuth() }
-                        .buttonStyle(.plain)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(t.accent)
-                        .accessibilityIdentifier("provider.oauth.login")
-                }
-            } header: {
-                Text(String(localized: "settings_provider_oauth"))
-            } footer: {
-                if isOAuthOnly { Text(String(localized: "settings_provider_oauth_only")) }
-            }
-            .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
-        }
+    private var needsInitialProfileSave: Bool {
+        draft.isNew && repository.requiresSavedAccountBinding(for: draft.profile)
     }
 
     // MARK: Model
@@ -882,21 +782,18 @@ struct ProviderEditorForm: View {
 
     private var statusLabel: String {
         switch draft.connectionState {
-        case .testing: return String(localized: "settings_provider_status_testing")
-        case .connected: return String(localized: "settings_provider_status_connected")
         case .failed: return String(localized: "settings_provider_status_failed")
         case .idle:
-            if draft.hasPendingSecret { return String(localized: "settings_provider_status_pending_apply") }
-            return draft.hasStoredCredential ? String(localized: "settings_provider_status_configured") : String(localized: "settings_provider_unconfigured")
+            return repository.hasConfiguredAccount(for: draft.profile)
+                ? String(localized: "settings_provider_status_configured") : String(localized: "settings_provider_unconfigured")
         }
     }
 
     private var statusColor: Color {
         switch draft.connectionState {
-        case .testing: return t.statusTesting
-        case .connected: return t.statusConnected
         case .failed: return t.statusError
-        case .idle: return draft.hasStoredCredential || draft.hasPendingSecret ? t.statusConnected : t.text4
+        case .idle: return repository.hasConfiguredAccount(for: draft.profile)
+            ? t.statusConnected : t.text4
         }
     }
 
@@ -909,38 +806,6 @@ struct ProviderEditorForm: View {
     }
 
     // MARK: Actions
-
-    private func testConnection() {
-        guard !draft.operationInFlight else { return }
-        var request = draft
-        request.operationInFlight = false
-        actionError = nil
-        draft.operationInFlight = true
-        draft.connectionState = .testing
-        Task { @MainActor in
-            draft = await repository.testConnection(for: request)
-        }
-    }
-
-    private func loginOAuth() {
-        guard !draft.operationInFlight else { return }
-        let request = draft
-        actionError = nil
-        draft.operationInFlight = true
-        Task { @MainActor in
-            draft = await repository.loginOAuth(for: request)
-        }
-    }
-
-    private func logoutOAuth() {
-        guard !draft.operationInFlight else { return }
-        let request = draft
-        actionError = nil
-        draft.operationInFlight = true
-        Task { @MainActor in
-            draft = await repository.logoutOAuth(for: request)
-        }
-    }
 
     private func save() {
         guard !busy else { return }
@@ -1093,6 +958,9 @@ private struct ProviderModelsPage: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(details?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
                                     .foregroundStyle(Color.primary)
+                                Text(ProviderAccountRepository.shared.modelAccessDescription(
+                                    bindingId: repository.engineProfileID(for: draft.profile), modelId: model))
+                                    .font(.caption).foregroundStyle(.secondary)
                                 if (details?.preferredDisplayName ?? ModelDisplay.modelName(for: model)) != model {
                                     Text(model)
                                         .font(.subheadline)

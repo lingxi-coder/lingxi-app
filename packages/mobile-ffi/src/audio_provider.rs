@@ -1,5 +1,5 @@
 //! Canonical mobile audio host and realtime-session lifecycle.
-use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use super::{PlatformRealtimeAudioListener, PlatformSecureStorage, PlatformSecureStorageBridge};
 use harness_runtime::mobile::{MobileEngineError, MobileEngineHandle};
@@ -12,18 +12,20 @@ impl AudioProviderCore {
     pub(super) fn new(
         profiles_json: String,
         region: String,
+        account_home: String,
         secure_storage: Box<dyn PlatformSecureStorage>,
     ) -> Result<Self, MobileEngineError> {
         let storage = Arc::new(PlatformSecureStorageBridge {
             inner: secure_storage,
         });
-        let inner = audio_provider::AudioProviderHost::new(
+        let (services, ids) = harness_runtime::account_audio::build_account_audio_services(
+            account_home.into(),
             &profiles_json,
             &region,
-            Some(storage),
-            BTreeMap::new(),
+            storage,
         )
         .map_err(MobileEngineError::Internal)?;
+        let inner = audio_provider::AudioProviderHost::from_provider_services(services, ids);
         Ok(Self { inner })
     }
 

@@ -48,6 +48,7 @@ internal fun ProviderModelSheet(
     onUpdate: (GenericProvider) -> Unit,
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit,
+    accountAvailability: List<ProviderAccountModelAvailability> = emptyList(),
 ) {
     val t = LingXiTheme.palette
     var query by remember { mutableStateOf("") }
@@ -56,8 +57,11 @@ internal fun ProviderModelSheet(
     val matches = remember(models, query) {
         models.filter { query.isBlank() || it.modelId.contains(query.trim(), ignoreCase = true) || it.displayName.contains(query.trim(), ignoreCase = true) }
     }
+    val projectedModels = accountAvailability.filter { row -> models.none { it.modelId == row.modelId } }
+    val projectedMatches = projectedModels.filter { query.isBlank() || it.modelId.contains(query.trim(), ignoreCase = true) }
+    val allModelIds = (models.map { it.modelId } + projectedModels.map { it.modelId }).distinct()
     val selectedIds = ProviderModelVisibilityRules.selectedCatalogModelIds(
-        models.map { it.modelId }, ProviderModelVisibility(showInModelPicker = provider.showInModelPicker, visibleModelIds = provider.visibleModelIds),
+        allModelIds, ProviderModelVisibility(showInModelPicker = provider.showInModelPicker, visibleModelIds = provider.visibleModelIds),
     )
     ModelSelectionSheet(
         title = stringResource(if (manageVisibility) R.string.settings_provider_visible_models else R.string.settings_provider_default_model),
@@ -104,14 +108,14 @@ internal fun ProviderModelSheet(
                     }
                 }
             }
-            if (models.isEmpty()) {
+            if (models.isEmpty() && projectedModels.isEmpty()) {
                 item {
                     Text(
                         stringResource(if (catalogLoaded) R.string.settings_provider_model_catalog_unavailable else R.string.settings_provider_catalog_loading),
                         color = t.text3, modifier = Modifier.padding(24.dp),
                     )
                 }
-            } else if (matches.isEmpty()) {
+            } else if (matches.isEmpty() && projectedMatches.isEmpty()) {
                 item { Text(stringResource(R.string.composer_no_matching_models), color = t.text3, modifier = Modifier.padding(24.dp)) }
             }
             if (!manageVisibility || provider.showInModelPicker) {
@@ -119,18 +123,48 @@ internal fun ProviderModelSheet(
                     val selected = if (manageVisibility) model.modelId in selectedIds else model.modelId == provider.model
                     val select = {
                         if (manageVisibility) {
-                            val base = provider.visibleModelIds ?: models.map { it.modelId }
+                            val base = provider.visibleModelIds ?: allModelIds
                             onUpdate(provider.copy(visibleModelIds = if (selected) base - model.modelId else (base + model.modelId).distinct()))
                         } else onSelect(model.modelId)
                     }
                     ListItem(
                         headlineContent = { Text(model.displayName) },
-                        supportingContent = if (model.displayName != model.modelId) {{ Text(model.modelId) }} else null,
+                        supportingContent = {
+                            val availability = accountAvailability.firstOrNull { it.modelId == model.modelId }
+                            Column {
+                                if (model.displayName != model.modelId) Text(model.modelId)
+                                Text(accountModelPermissionLabel(availability?.permissionStatus ?: "unverified"))
+                                if (availability != null && availability.eligibleAccountIds.isEmpty()) Text(stringResource(R.string.provider_account_model_no_eligible))
+                            }
+                        },
                         leadingContent = {
                             if (manageVisibility) Checkbox(checked = selected, onCheckedChange = null)
                             else RadioButton(selected = selected, onClick = null)
                         },
                         trailingContent = { ModelDetailsInfoButton(onClick = { details = model }) },
+                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                        modifier = (if (manageVisibility) Modifier.toggleable(selected, role = Role.Checkbox) { select() }
+                            else Modifier.selectable(selected, role = Role.RadioButton, onClick = select))
+                            .testTag("provider.models.row.${model.modelId}"),
+                    )
+                }
+            }
+            if (!manageVisibility || provider.showInModelPicker) {
+                items(projectedMatches, key = { "host-model.${it.modelId}" }) { model ->
+                    val selected = if (manageVisibility) model.modelId in selectedIds else model.modelId == provider.model
+                    val select = {
+                        if (manageVisibility) {
+                            val base = provider.visibleModelIds ?: allModelIds
+                            onUpdate(provider.copy(visibleModelIds = if (selected) base - model.modelId else (base + model.modelId).distinct()))
+                        } else onSelect(model.modelId)
+                    }
+                    ListItem(
+                        headlineContent = { Text(model.modelId) },
+                        supportingContent = { Column {
+                            Text(accountModelPermissionLabel(model.permissionStatus))
+                            if (model.eligibleAccountIds.isEmpty()) Text(stringResource(R.string.provider_account_model_no_eligible))
+                        } },
+                        leadingContent = { if (manageVisibility) Checkbox(checked = selected, onCheckedChange = null) else RadioButton(selected = selected, onClick = null) },
                         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                         modifier = (if (manageVisibility) Modifier.toggleable(selected, role = Role.Checkbox) { select() }
                             else Modifier.selectable(selected, role = Role.RadioButton, onClick = select))

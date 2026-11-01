@@ -92,8 +92,6 @@ const ICON_BY_COMMAND: Readonly<Record<string, CommandPaletteIconName>> = {
   insights: 'activity',
   keybindings: 'sliders',
   lint: 'check',
-  login: 'logIn',
-  logout: 'logOut',
   loop: 'refresh',
   mcp: 'mcp',
   memory: 'brain',

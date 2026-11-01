@@ -11,7 +11,7 @@ import { ghostButtonStyle, inputStyle } from './ghostButton';
 /**
  * `permissions.{allow,deny,ask,defaultMode,additionalDirectories}` as
  * `editingLayer`'s OWN raw value — never `snapshot.effective`. Same fix as
- * `CustomProviders.providersFromLayer`: `permissions` is a `DeepMerge` key
+ * provider settings: `permissions` is a `DeepMerge` key
  * (`core/src/settings/schema.rs`'s `MERGE_STRATEGIES`), so `effective` is
  * a cross-layer merge that would fork other layers' rules into whichever
  * layer this page saves to if it were used as the write-time base.

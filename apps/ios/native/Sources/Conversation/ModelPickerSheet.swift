@@ -229,6 +229,9 @@ struct ModelPickerSheet: View {
                         Text(item.name)
                             .font(.body)
                             .foregroundStyle(Color.primary)
+                        Text(ProviderAccountRepository.shared.modelAccessDescription(
+                            bindingId: String(reference.split(separator: "/", maxSplits: 1).first ?? ""), modelId: item.modelId))
+                            .font(.caption).foregroundStyle(.secondary)
                         // The provider header supplies context; repeat only
                         // a distinct wire ID so similar model names stay clear.
                         if item.name != item.modelId {

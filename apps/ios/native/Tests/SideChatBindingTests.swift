@@ -16,13 +16,9 @@ final class SideChatBindingTests: XCTestCase {
         let mediaHostComposition = try IOSNativeMediaHostComposition(
             audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
         )
-        let engine = try buildIosEngine(
-            apiBase: "https://api.anthropic.com", apiKey: "", model: "",
-            appSandboxRoot: root.path,
-            listener: NoopEventListener(), mediaHost: mediaHostComposition.nativeHost,
+        let engine = try buildIosEngineWithConfig(config: try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: root, apiBase: "https://api.anthropic.com", model: ""), listener: NoopEventListener(), mediaHost: mediaHostComposition.nativeHost,
             share: ShareImpl(), notifications: NotificationImpl(),
-            clipboard: ClipboardImpl(), permissions: NoopPermissionSink(),
-            mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: root), secureStorage: nil, deviceControl: nil)
+            clipboard: ClipboardImpl(), permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
         let info = try await createIosSideChat(
             engine: engine, requestId: UUID().uuidString, initialInput: nil,
             listener: NoopEventListener(), permissions: NoopPermissionSink())

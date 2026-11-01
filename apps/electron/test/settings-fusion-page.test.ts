@@ -144,12 +144,7 @@ test('Fusion only offers configured providers including custom profiles and buil
     provider_id, provider_label: provider_id,
     models: [model('test-model', { provider_id, fusion_analyst_capable: true })],
   })));
-  assert.deepEqual(configuredCandidates(rows, [
-    { providerId: 'openai', configured: false },
-    { providerId: 'deepseek', configured: true },
-    { providerId: 'custom', configured: true },
-    { providerId: 'anthropic', configured: true },
-  ]).map((row) => row.choice.profile), ['deepseek', 'custom', 'builtin']);
+  assert.deepEqual(configuredCandidates(rows, ['deepseek', 'custom', 'anthropic'].map(executionBindingId => ({ providerId: executionBindingId, executionBindingId, modelId: 'test-model', eligibleAccountIds: ['mock-account'], confirmedAccountIds: [], unverifiedAccountIds: ['mock-account'], forbiddenAccountIds: [] }))).map(row => row.choice.profile), ['deepseek', 'custom', 'builtin']);
   assert.deepEqual(configuredCandidates(rows), []);
   assert.deepEqual(configuredCandidates(rows, []), []);
 });

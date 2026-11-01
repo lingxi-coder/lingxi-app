@@ -51,7 +51,7 @@ final class RemoteConversationSource: ConversationSource {
             mediaHostInitializationError: mediaHostInitializationError
         )
         projection = EngineConversationSource(config: EngineConfig(
-            apiBase: "", apiKey: "", model: "", appSandboxRoot: "", projectCwd: nil,
+            apiBase: "", model: "", appSandboxRoot: "", projectCwd: nil,
             sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
         projection.replaceRemoteTranscript([], sessionID: sessionID)
         model.slashCommandsLoaded = true
@@ -262,6 +262,19 @@ final class RemoteConversationSource: ConversationSource {
         case let .cancelAskUserQuestion(id): try await client().cancelQuestion(sessionId: sessionID, requestId: id)
         default: throw RemoteFfiError.Rpc(code: "forbidden", detail: String(localized: "remote_err_forbidden"))
         }
+    }
+
+    func providerAccountsSnapshot() async throws -> String {
+        try await providerAccountCommand(requestJSON: ProviderAccountCommand(action: "list").encoded(), credential: nil)
+    }
+
+    func providerAccountCommand(requestJSON: String, credential: String?) async throws -> String {
+        guard valid, manager.uid == uid, manager.connection?.hostId == hostID,
+              manager.connection?.phase == .ready else { throw RemoteFfiError.NotConnected }
+        let result = try await client().providerAccountCommand(requestJson: requestJSON, credential: credential)
+        guard valid, !Task.isCancelled, manager.uid == uid, manager.connection?.hostId == hostID,
+              manager.connection?.phase == .ready else { throw CancellationError() }
+        return result
     }
     func loadOlder() { perform { try await $0.loadOlderMessages(sessionId: self.sessionID) } }
     func retryPrompt(_ id: String) { perform { try await $0.retryPrompt(sessionId: self.sessionID, promptId: id) } }

@@ -4,7 +4,8 @@ pub(super) fn command_runs_config_startup(command: Option<&crate::commands::Comm
     match command {
         Some(crate::commands::Commands::Project(project)) => project.command.is_some(),
         Some(
-            crate::commands::Commands::Sandbox(_)
+            crate::commands::Commands::Provider(_)
+            | crate::commands::Commands::Sandbox(_)
             | crate::commands::Commands::Attach(_)
             | crate::commands::Commands::RemoteControl(_)
             | crate::commands::Commands::Rm(_)
@@ -25,7 +26,6 @@ pub(super) fn command_initializes_user_id(command: Option<&crate::commands::Comm
         Some(
             crate::commands::Commands::Mcp(_)
                 | crate::commands::Commands::Doctor(_)
-                | crate::commands::Commands::SetupToken(_)
                 | crate::commands::Commands::Install(_)
                 | crate::commands::Commands::Update(_)
         )

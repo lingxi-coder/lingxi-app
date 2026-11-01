@@ -130,7 +130,7 @@ pub struct NativeRealtimeSession {
 pub(crate) async fn prepare_provider_realtime(
     host: &AudioProviderHost,
     mut request: AudioRequest,
-    prepared: RealtimeAgentContext,
+    mut prepared: RealtimeAgentContext,
 ) -> Result<PreparedRealtimeProvider, Value> {
     if request.kind != "realtime" {
         return Err(failure(
@@ -139,8 +139,18 @@ pub(crate) async fn prepare_provider_realtime(
         ));
     }
     bind_session(&mut request, &prepared)?;
-    let route = host.resolve(&request)?;
-    let snapshot = host.client_snapshot();
+    let mut selected = host.select_audio(&request).await?;
+    let route = selected.route.clone();
+    let snapshot = selected.client.snapshot();
+    prepared.profile_name = Some(route.profile_name.clone());
+    prepared.account_scope = Some(route.account_scope.clone());
+    if request.cloud.binding == "follow_session" {
+        request.session = Some(SessionContext {
+            session_id: prepared.session_id.clone(),
+            profile_id: route.profile_name.clone(),
+            account_scope: route.account_scope.clone(),
+        });
+    }
     let caps = snapshot
         .audio()
         .capabilities(&route)
@@ -217,7 +227,7 @@ pub(crate) async fn prepare_provider_realtime(
             "\nFor this audio conversation, use {locale} as the requested spoken-language preference."
         ));
     }
-    let credential = host.credential_for_profile(&route.profile_name).await?;
+    let credential = selected.credential.clone();
     let tools = prepared
         .tools
         .iter()
@@ -252,12 +262,15 @@ pub(crate) async fn prepare_provider_realtime(
             &snapshot,&route,AudioRealtimeConfig {model:request.cloud.model_id.clone(),voice:request.voice.clone(),instructions:Some(instructions)},tools,prepared.history.clone(),credential,transport,RealtimeLimits::default()
         ))=>result.map_err(|_|failure("timeout","native realtime connection deadline exceeded"))?.map_err(|_|failure("provider_error","native realtime connection failed"))?,
     };
+    selected.account.succeeded().await;
     let input_format_json = format_json(&connected.input_format)?;
     let output_format_json = format_json(&connected.output_format)?;
     let model_id = connected.model.clone();
     let session_ready = json!({
         "type":"session_ready",
         "model":model_id,
+        "profileId":route.profile_name,
+        "accountScope":route.account_scope,
         "inputFormat":input_format_json,
         "outputFormat":output_format_json,
         "capabilities":connected.capabilities
@@ -708,14 +721,14 @@ fn canonical_event(event: RealtimeEvent, ready: &Value) -> Result<Option<Value>,
 mod tests {
     use super::*;
     fn request(session_id: &str, profile_id: &str) -> AudioRequest {
-        serde_json::from_value(json!({"operationId":"op","kind":"realtime","cloud":{"binding":"follow_session"},"session":{"sessionId":session_id,"profileId":profile_id,"accountScope":format!("profile:{profile_id}")}})).unwrap()
+        serde_json::from_value(json!({"operationId":"op","kind":"realtime","cloud":{"binding":"follow_session"},"session":{"sessionId":session_id,"profileId":profile_id,"accountScope":lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE}})).unwrap()
     }
     fn prepared() -> orchestrator::RealtimeAgentContext {
         orchestrator::RealtimeAgentContext {
             session_id: "current-session".into(),
             attachment_id: None,
             profile_name: Some("current-profile".into()),
-            account_scope: Some("profile:current-profile".into()),
+            account_scope: Some(lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.into()),
             instructions: String::new(),
             history: vec![],
             tools: vec![],
@@ -741,6 +754,37 @@ mod tests {
         assert_eq!(current.cloud.profile_id.as_deref(), Some("audio-profile"));
         current.session.as_mut().unwrap().session_id = "old-session".into();
         assert!(bind_session(&mut current, &prepared()).is_err());
+    }
+
+    #[test]
+    fn concrete_account_binding_survives_unbound_host_context_and_cannot_downgrade() {
+        let scope = serde_json::to_string(&llm_runtime::accounts::AccountResourceScope {
+            store_scope: "fixture-domain".into(),
+            account_id: "b".into(),
+            identity_generation: 4,
+        })
+        .unwrap();
+        let mut bound = request("current-session", "account.b");
+        bound.session.as_mut().unwrap().account_scope = scope.clone();
+        bind_session(&mut bound, &prepared()).unwrap();
+        assert_eq!(bound.session.as_ref().unwrap().account_scope, scope);
+        // The logical binding selects the policy pool; concrete identity is
+        // checked by its shared resolver before provider dispatch.
+        assert_eq!(
+            bound.session.as_ref().unwrap().profile_id,
+            "current-profile"
+        );
+        let mut concrete = prepared();
+        concrete.profile_name = Some("account.b".into());
+        concrete.account_scope = Some(scope.clone());
+        let mut downgraded = request("current-session", "account.b");
+        assert!(bind_session(&mut downgraded, &concrete).is_err());
+        let mut wrong_identity = request("current-session", "account.a");
+        wrong_identity.session.as_mut().unwrap().account_scope = scope.clone();
+        assert!(bind_session(&mut wrong_identity, &prepared()).is_err());
+        let mut same = request("current-session", "account.b");
+        same.session.as_mut().unwrap().account_scope = scope;
+        bind_session(&mut same, &concrete).unwrap();
     }
 
     #[test]
@@ -813,39 +857,79 @@ fn bind_session(
     request: &mut AudioRequest,
     prepared: &orchestrator::RealtimeAgentContext,
 ) -> Result<(), Value> {
-    if let Some(supplied) = &request.session {
-        if supplied.session_id != prepared.session_id {
-            return Err(failure(
-                "stale_session",
-                "Agent session changed before native realtime admission",
-            ));
-        }
-        if request.cloud.binding == "follow_session"
-            && (prepared.profile_name.as_deref() != Some(supplied.profile_id.as_str())
-                || supplied.account_scope != format!("profile:{}", supplied.profile_id))
+    if request
+        .session
+        .as_ref()
+        .is_some_and(|supplied| supplied.session_id != prepared.session_id)
+    {
+        return Err(failure(
+            "stale_session",
+            "Agent session changed before native realtime admission",
+        ));
+    }
+    if request.cloud.binding != "follow_session" {
+        return Ok(());
+    }
+    let profile = prepared
+        .profile_name
+        .as_ref()
+        .filter(|profile| !profile.trim().is_empty())
+        .ok_or_else(|| {
+            failure(
+                "needs_configuration",
+                "native realtime requires the current session provider profile",
+            )
+        })?;
+    let prepared_scope = prepared.account_scope.as_ref().ok_or_else(|| {
+        failure(
+            "needs_configuration",
+            "native realtime requires the current session account context",
+        )
+    })?;
+    let intent = lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE;
+    let scope = if let Some(supplied) = &request.session {
+        if prepared_scope != intent {
+            if supplied.account_scope != *prepared_scope || supplied.profile_id != *profile {
+                return Err(failure(
+                    "stale_session",
+                    "native realtime account binding changed",
+                ));
+            }
+        } else if supplied.account_scope == intent {
+            if supplied.profile_id != *profile || supplied.account_scope != intent {
+                return Err(failure(
+                    "stale_session",
+                    "Agent audio profile changed before native realtime admission",
+                ));
+            }
+        } else if let Ok(identity) = serde_json::from_str::<
+            llm_runtime::accounts::AccountResourceScope,
+        >(&supplied.account_scope)
+        {
+            if supplied.profile_id != format!("account.{}", identity.account_id) {
+                return Err(failure(
+                    "stale_session",
+                    "native realtime account identity does not match its profile",
+                ));
+            }
+        } else if !supplied.account_scope.starts_with("explicit-service.")
+            || supplied.profile_id != *profile
         {
             return Err(failure(
                 "stale_session",
-                "Agent audio profile changed before native realtime admission",
+                "native realtime account scope is invalid",
             ));
         }
-    }
-    if request.cloud.binding == "follow_session" {
-        let profile = prepared
-            .profile_name
-            .as_ref()
-            .filter(|profile| !profile.trim().is_empty())
-            .ok_or_else(|| {
-                failure(
-                    "needs_configuration",
-                    "native realtime requires the current session's exact profile",
-                )
-            })?;
-        request.session = Some(SessionContext {
-            session_id: prepared.session_id.clone(),
-            profile_id: profile.clone(),
-            account_scope: format!("profile:{profile}"),
-        });
-    }
+        supplied.account_scope.clone()
+    } else {
+        prepared_scope.clone()
+    };
+    // The original Host binding chooses the eligible pool. A concrete supplied
+    // resource scope is retained and checked by the shared resolver before I/O.
+    request.session = Some(SessionContext {
+        session_id: prepared.session_id.clone(),
+        profile_id: profile.clone(),
+        account_scope: scope,
+    });
     Ok(())
 }

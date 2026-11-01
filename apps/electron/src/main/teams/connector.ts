@@ -1,3 +1,4 @@
+import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
 import type { BindLocalTeamBotInput, LocalTeamBot, TeamBotCard } from '../../../../../packages/teams/bots.js';
 import type { TeamSummary } from '../../../../../packages/teams/index.js';
 import type { TeamConversation } from '../../../../../packages/teams/messages.js';
@@ -21,10 +22,11 @@ export interface TeamConnectorOptions {
   service: TeamHostApi; store: BotStore; content: Pick<BotContent, 'teamInstructions'>; privateStore: TeamPrivateStore;
   binaries(): { host: string; worker: string };
   defaultModel(): string | undefined;
-  /** Resolve exactly one selectable native catalog route, including its static key slot. */
+  /** Resolve exactly one selectable native catalog route, including its frozen account execution profiles. */
   modelRoute(selected: string): Promise<TeamModelSelection>;
-  /** Only the frozen route's static key. No account/OAuth/ambient credentials. */
-  modelCredential(credentialId: string): Promise<string | undefined>;
+  /** Canonical account metadata with grants limited to the frozen execution profiles. */
+  modelAccounts: (credentialId: string, executionBindingId: string, profiles: readonly Record<string, unknown>[]) => Promise<ProviderAccountLaunch | undefined>;
+  renewModelAccount?: (accountId: string, identityGeneration: number, credentialRevision: number) => Promise<void>;
   permission(input: Parameters<TeamHostProcessOptions['permission']>[0] & { accountEpoch: number; assertCurrent(): void }, signal: AbortSignal): Promise<boolean>;
   platform?: NodeJS.Platform;
   run?: (options: TeamHostProcessOptions) => Promise<TeamHostResult>;
@@ -105,10 +107,10 @@ export class TeamConnector implements LocalTeamHost {
     const instructions = await this.options.content.teamInstructions(input.botId); service.assertHostContext(context);
     // A racing local edit cannot bind a mixture of two Bot configurations.
     if (this.options.store.get(input.botId).revision !== bot.revision) throw new Error('BOT_REVISION_CONFLICT');
-    const credential = await this.options.modelCredential(route.credential_id); service.assertHostContext(context);
-    if (!credential) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    const accounts = await this.options.modelAccounts(route.credential_id, route.model_provider, selection.profiles); service.assertHostContext(context);
+    if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
     await selection.assertCurrent(); service.assertHostContext(context);
-    const snapshot = await this.options.privateStore.saveSnapshot(uid, { instructions, ...route }); service.assertHostContext(context);
+    const snapshot = await this.options.privateStore.saveSnapshot(uid, { instructions, ...route, provider_account_profiles: selection.profiles }); service.assertHostContext(context);
     await selection.assertCurrent(); service.assertHostContext(context);
     this.stopBinding(input.teamId, botKey);
     // Save the intended revision first. A lost bind response can then be discovered,
@@ -357,10 +359,10 @@ export class TeamConnector implements LocalTeamHost {
   private async execute(context: TeamAccountContext, target: TeamBotTarget, binding: BotTeamBinding, controller: AbortController, assert: () => void, retry: boolean, ready: () => void): Promise<TeamHostResult> {
     try {
     const binaries = this.options.binaries(), roots = await this.options.privateStore.owner(context.uid); assert();
-    let snapshot: TeamPersonaSnapshot | undefined, key: string | undefined;
+    let snapshot: TeamPersonaSnapshot | undefined, accounts: ProviderAccountLaunch | undefined;
     if (!retry) {
       snapshot = await this.options.privateStore.snapshot(context.uid, binding.snapshot); assert();
-      key = await this.options.modelCredential(snapshot.credential_id).catch(() => undefined); assert();
+      accounts = await this.options.modelAccounts(snapshot.credential_id, snapshot.model_provider, snapshot.provider_account_profiles); assert();
     }
     if (controller.signal.aborted) throw new Error('INVALID_SESSION');
     const assertCurrent = () => {
@@ -372,9 +374,19 @@ export class TeamConnector implements LocalTeamHost {
     return (this.options.run ?? runTeamHost)({ executable: binaries.host, home: roots.home, tmp: roots.tmp,
       bootstrap: { version: 1, type: 'start', mode: retry ? 'retry_result' : 'run', owner_uid: context.uid, account_epoch: context.epoch,
         endpoint: 'https://lingxios.net/v1/teams/messages', journal_root: roots.journal, runtime_root: roots.runtime,
-        worker_executable: binaries.worker, target, ...(key && snapshot ? { snapshot: { instructions: snapshot.instructions, model_provider: snapshot.model_provider, model_protocol: snapshot.model_protocol,
-          model_id: snapshot.model_id, model_endpoint: snapshot.model_endpoint, model_profile: snapshot.model_profile, model_api_key: key,
+        worker_executable: binaries.worker, target, ...(accounts ? { credentials: providerAccountEnvelope(accounts, snapshot!.provider_account_profiles) } : {}), ...(accounts && snapshot ? { snapshot: { instructions: snapshot.instructions, model_provider: snapshot.model_provider, model_protocol: snapshot.model_protocol,
+          model_id: snapshot.model_id, model_endpoint: snapshot.model_endpoint, model_profile: snapshot.model_profile,
           max_turns: 8, max_input_bytes: 32 * 1024, output_tokens_per_request: 2048, physical_dispatches: 12 } } : {}) },
+      accountCredentials: snapshot && this.options.modelAccounts ? async request => {
+        assertCurrent();
+        const current = await this.options.modelAccounts!(snapshot!.credential_id, snapshot!.model_provider, snapshot!.provider_account_profiles); assertCurrent();
+        if (!current?.providerAccounts.accounts.some(account => account.accountId === request.accountId && account.identityGeneration === request.identityGeneration)) throw new Error('TEAM_MODEL_UNAVAILABLE');
+        if (!this.options.renewModelAccount) throw new Error('TEAM_MODEL_UNAVAILABLE');
+        await this.options.renewModelAccount(request.accountId, request.identityGeneration, request.credentialRevision); assertCurrent();
+        const refreshed = await this.options.modelAccounts!(snapshot!.credential_id, snapshot!.model_provider, snapshot!.provider_account_profiles); assertCurrent();
+        if (!refreshed) throw new Error('TEAM_MODEL_UNAVAILABLE');
+        return refreshed;
+      } : undefined,
       signal: controller.signal, assertCurrent, token: () => this.options.service.hostToken(context),
       permission: async (input, signal) => {
         assertCurrent(); const allow = await this.options.permission({ ...input, accountEpoch: context.epoch, assertCurrent }, signal).catch(() => false); assertCurrent(); return allow === true;

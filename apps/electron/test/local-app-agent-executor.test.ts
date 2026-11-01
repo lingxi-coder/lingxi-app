@@ -8,6 +8,7 @@ import { LocalAppAgentExecutor, type LocalAppAgentExecutorOptions } from '../src
 import type { LocalAppAgentExecution } from '../src/main/local-apps/agentBroker.ts';
 
 // Real child pipes exercise framing, cancellation and reaping; no provider access.
+function accountEnvelope(key = 'TEST_KEY') { const id = '11111111-1111-4111-8111-111111111111'; return { providerAccountHome: '/mock/host', providerAccounts: { storeScope: 'mock', configRevision: 1, health: [], accounts: [{ accountId: id, providerId: 'test', executionBindingId: 'test', displayName: 'Mock', authKind: 'api_key' as const, credentialRef: { storeScope: 'mock', secretRef: `acct.${id}` }, enabled: true, userPriority: 0, configRevision: 1, identityGeneration: 1 }] }, providerAccountCredentials: { [id]: { identity_generation: 1, credential_revision: 1, kind: { kind: 'api_key' as const, key } } } }; }
 const CHILD = String.raw`
 const readline = require('node:readline'), fs = require('node:fs');
 const mode = process.argv[1]; let runId, sequence=0, start;
@@ -25,7 +26,7 @@ lines.on('line', raw => {
   const marker=message.configHome+'/.config.json';
   if(mode==='initializes_config' && !fs.existsSync(marker)) fs.writeFileSync(marker,'{"initialized":true}');
   if(mode==='changes_config') fs.writeFileSync(marker,JSON.stringify({updated:Date.now(),pid:process.pid}));
-  out({type:'catalog',models:[{provider_id:'test',request_model:'vision',display_model:'Test vision',capabilities:{vision:true,tools:true}}],
+  out({type:'catalog',models:[{provider_id:'test',request_model:'vision',display_model:'Test vision',...(mode==='missing_eligibility'?{}:{canSelect:mode!=='model_access'}),capabilities:{vision:true,tools:true}}],
    builtins:[{name:'Read'}],mcpTools:[{serverConfigId:'server',configRevision:mode==='changed'?'changed':'one',rawToolName:'search',definitionFingerprint:'definition',configIndex:0,label:'Nutrition'}],
    mcpConfigs:[{name:'nutrition',headers:{Authorization:'PRIVATE_MCP_HEADER'}}]});
  } else if(message.type==='start') {
@@ -41,7 +42,7 @@ lines.on('line', raw => {
   if(mode==='wait' || mode==='wait_ignore_cancel' || mode==='wait_unconfirmed' || mode==='wait_wrong_cleanup_owner') { process.on('SIGTERM',()=>{fs.writeFileSync('sigterm','signalled');setTimeout(()=>process.exit(0),120);}); out({type:'permission',requestId:9,toolName:'Read',input:{path:'test-file'}}); return; }
   if(mode==='hold_after_success') { setInterval(()=>{if(fs.existsSync('exit_release')) process.exit(0);},10); finish(); return; }
   if(mode==='question') return out({type:'question',requestId:8,questions:[{question:'Which color?',header:'Color',multi_select:false,options:[{label:'Red',description:'Test'}]}]});
-  if(mode==='refresh') return out({type:'credential_required',provider:'codex'});
+  if(mode==='refresh') return out({type:'credential_required',accountId:'11111111-1111-4111-8111-111111111111',identityGeneration:1,credentialRevision:1});
   out({type:'text',delta:'some final text'}); out({type:'tool_started',toolCallId:'c1',tool:'Read'}); out({type:'tool_finished',toolCallId:'c1',tool:'Read'}); out({type:'usage',usage:{inputTokens:7}}); finish();
   if(mode==='trailing_frame') out({type:'text',delta:'late output'});
  } else if(message.type==='cancel') {
@@ -54,7 +55,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, mode='succes
  const root=await fs.mkdtemp(join(tmpdir(),'lingxi-agent-executor-'));
  const children: ReturnType<typeof spawn>[]=[];
  const options: LocalAppAgentExecutorOptions={configHome:root,root,serverBin:'test-bridge',
-  credentials:async()=>({providerCredentials:{test:'TEST_KEY'}}),credentialStatus:async()=>new Set(['test']),permission:async()=>false,question:async()=>null,
+  credentials:async()=>accountEnvelope(),permission:async()=>false,question:async()=>null,
   spawnProcess:((_bin:unknown,_args:unknown,opts:unknown)=>{
    const child=spawn(process.execPath,['-e',CHILD,mode],opts as Parameters<typeof spawn>[2]);children.push(child);return child;
   }) as typeof spawn,...overrides};
@@ -93,7 +94,7 @@ test('catalog strips private config; execution preserves model, identity, limits
  assert.ok(phases.includes('thinking') && phases.includes('tool'));
  const sent=JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/agui-v1/tasks/11111111-1111-4111-8111-111111111111/start.json'),'utf8'));
  assert.equal(sent.model,'test/vision');assert.equal(sent.appId,'a11111111111111111111111111111111');assert.equal(sent.versionId,'1'.repeat(64));assert.equal(sent.invocationId,'inv-one');assert.equal(sent.maxTurns,4);assert.equal(sent.timeoutMs,10000);
- assert.deepEqual(sent.toolPolicy,{builtinTools:[],mcpTools:[]});assert.deepEqual(sent.mcpConfigs,[]);assert.deepEqual(sent.credentials.provider_keys,{test:'TEST_KEY'});
+ assert.deepEqual(sent.toolPolicy,{builtinTools:[],mcpTools:[]});assert.deepEqual(sent.mcpConfigs,[]);assert.equal(sent.credentials.provider_account_credentials['11111111-1111-4111-8111-111111111111'].kind.key,'TEST_KEY');
  assert.deepEqual(sent.modelCapabilities,{vision:true,structuredOutput:true});
  assert.equal(sent.input.protocolThreadId,'thread-one');assert.equal(sent.input.protocolInputDigest,'a'.repeat(64));assert.equal(sent.input.protocolMessageSha256,'b'.repeat(64));
 });
@@ -231,9 +232,9 @@ test('question dismissal sends typed cancellation',async t=>{
 });
 test('credential refresh keeps the selected provider and sends keys only over stdin',async t=>{
  const requests:unknown[]=[];
- const {root,executor,execution}=await fixture(t,'refresh',{credentials:async(providerId,refresh)=>{requests.push([providerId,refresh??false]);return {providerCredentials:{test:refresh?'NEW_TEST_KEY':'OLD_TEST_KEY'}};}});
+ const {root,executor,execution}=await fixture(t,'refresh',{credentials:async(providerId,refresh)=>{requests.push([providerId,refresh??false]);return accountEnvelope(refresh?'NEW_TEST_KEY':'OLD_TEST_KEY');}});
  await executor.execute(execution);assert.deepEqual(requests,[['test',false],['test',true]]);
- assert.equal(JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/agui-v1/tasks/11111111-1111-4111-8111-111111111111/control.json'),'utf8')).credentials.provider_keys.test,'NEW_TEST_KEY');
+ assert.equal(JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/agui-v1/tasks/11111111-1111-4111-8111-111111111111/control.json'),'utf8')).credentials.provider_account_credentials['11111111-1111-4111-8111-111111111111'].kind.key,'NEW_TEST_KEY');
 });
 for(const [mode,code] of [['wrong_owner','executor_protocol'],['missing_result','invalid_result'],['error','model_execution_failed']] as const) {
  test(`rejects ${mode} without leaking diagnostics`,async t=>{
@@ -242,16 +243,12 @@ for(const [mode,code] of [['wrong_owner','executor_protocol'],['missing_result',
  });
 }
 
-test('catalog caches credential status but observes configuration edits before its TTL expires', async t => {
- let credentialReads = 0;
- const { root, executor, children } = await fixture(t, 'success', { credentialStatus: async () => { credentialReads++; return new Set(['test']); } });
- await executor.catalog(); await executor.catalog();
- assert.equal(children.length, 1); assert.equal(credentialReads, 1);
+test('catalog caches native model eligibility but observes configuration edits before its TTL expires', async t => {
+ const { root, executor, children } = await fixture(t, 'success');
+ await executor.catalog(); await executor.catalog(); assert.equal(children.length, 1);
  await fs.writeFile(join(root, 'settings.json'), '{"model":"updated"}');
- await executor.catalog();
- assert.equal(children.length, 2, 'a settings mutation invalidates the private catalog immediately');
- executor.invalidateCatalog(); await executor.catalog();
- assert.equal(credentialReads, 2);
+ await executor.catalog(); assert.equal(children.length, 2, 'a settings mutation invalidates the private catalog immediately');
+ executor.invalidateCatalog(); await executor.catalog(); assert.equal(children.length, 3);
 });
 
 test('fresh host configuration initialization is re-read before publishing the catalog', async t => {
@@ -290,3 +287,17 @@ for(const code of ['chat_context_unavailable','chat_context_compaction_unsupport
   });
  });
 }
+
+
+test('Local App model selection consumes native model eligibility without provider-wide inference', async t => {
+ const { executor } = await fixture(t, 'model_access');
+ const catalog = await executor.catalog();
+ assert.equal(catalog.models[0].providerId, 'test');
+ assert.equal(catalog.models[0].canSelect, false);
+ assert.equal(catalog.models[0].supportsVision, true);
+});
+
+test('Local App catalog rejects missing native model eligibility', async t => {
+ const { executor } = await fixture(t, 'missing_eligibility');
+ await assert.rejects(executor.catalog(), { code: 'executor_protocol' });
+});

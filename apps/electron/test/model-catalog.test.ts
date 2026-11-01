@@ -161,7 +161,7 @@ test('defaults Kimi Code to the model available on every membership tier', () =>
 
 test('routes an unconfigured known provider to its settings while preserving the model', () => {
   assert.deepEqual(
-    resolveModelSelection('deepseek/deepseek-flash', [{ providerId: 'deepseek', configured: false }]),
+    resolveModelSelection('deepseek/deepseek-flash', [{ providerId: 'deepseek', executionBindingId: 'deepseek', modelId: 'deepseek-flash', eligibleAccountIds: [], confirmedAccountIds: [], unverifiedAccountIds: [], forbiddenAccountIds: ['account-a'] }]),
     { kind: 'connect', providerId: 'deepseek', reference: 'deepseek/deepseek-flash' },
   );
 });
@@ -170,14 +170,14 @@ test('maps built-in models to Anthropic and waits for credential status', () => 
   assert.deepEqual(resolveModelSelection('builtin/claude-sonnet-5'), {
     kind: 'loading', providerId: 'anthropic', reference: 'builtin/claude-sonnet-5',
   });
-  assert.deepEqual(resolveModelSelection('builtin/claude-sonnet-5', [{ providerId: 'anthropic', configured: true }]), {
+  assert.deepEqual(resolveModelSelection('builtin/claude-sonnet-5', [{ providerId: 'anthropic', executionBindingId: 'anthropic', modelId: 'claude-sonnet-5', eligibleAccountIds: ['account-a'], confirmedAccountIds: ['account-a'], unverifiedAccountIds: [], forbiddenAccountIds: [] }]), {
     kind: 'select', reference: 'builtin/claude-sonnet-5',
   });
 });
 
-test('keeps unknown and unqualified engine models directly selectable', () => {
-  assert.deepEqual(resolveModelSelection('community/custom-model', []), { kind: 'select', reference: 'community/custom-model' });
-  assert.deepEqual(resolveModelSelection('custom-model'), { kind: 'select', reference: 'custom-model' });
+test('unknown and unqualified models require shared account eligibility', () => {
+  assert.deepEqual(resolveModelSelection('community/custom-model', []), { kind: 'connect', providerId: 'community', reference: 'community/custom-model' });
+  assert.deepEqual(resolveModelSelection('custom-model'), { kind: 'loading', providerId: '', reference: 'custom-model' });
 });
 
 test('model confirmation requires the authoritative model_changed value', () => {
@@ -294,4 +294,53 @@ test('picker visibility can hide every row without changing the current-model la
     modelDisplayLabel(modelReference(current), [{ reference: current, display_name: 'GPT 5.7 Preview' }]),
     'GPT 5.7 Preview',
   );
+});
+
+test('model eligibility follows exact shared account-model permission instead of a provider-wide credential flag', () => {
+  const availability = [
+    { providerId: 'openai', executionBindingId: 'openai', modelId: 'gpt-accessible', eligibleAccountIds: ['api-account'], confirmedAccountIds: ['api-account'], unverifiedAccountIds: [], forbiddenAccountIds: [] },
+    { providerId: 'openai', executionBindingId: 'openai', modelId: 'gpt-restricted', eligibleAccountIds: [], confirmedAccountIds: [], unverifiedAccountIds: [], forbiddenAccountIds: ['api-account'] },
+    { providerId: 'openai', executionBindingId: 'openai-chatgpt', modelId: 'gpt-restricted', eligibleAccountIds: ['subscription-account'], confirmedAccountIds: [], unverifiedAccountIds: ['subscription-account'], forbiddenAccountIds: [] },
+  ];
+  assert.equal(resolveModelSelection('openai/gpt-accessible', availability).kind, 'select');
+  assert.equal(resolveModelSelection('openai/gpt-restricted', availability).kind, 'connect');
+  assert.equal(resolveModelSelection('openai-chatgpt/gpt-restricted', availability).kind, 'select');
+  assert.equal(resolveModelSelection('openai/unknown-model', availability).kind, 'connect');
+});
+
+
+test('account-specific discovered models join the provider catalog while retaining user visibility choices', () => {
+  const reference = 'openai/account-only-model';
+  const providers = [{ provider_id: 'openai', provider_label: 'OpenAI', models: [] }];
+  const availability = [{ providerId: 'openai', executionBindingId: 'openai', modelId: 'account-only-model', eligibleAccountIds: ['account-a'], confirmedAccountIds: [], unverifiedAccountIds: ['account-a'], forbiddenAccountIds: [] }];
+  assert.deepEqual(filterVisibleModelReferences([reference], providers, undefined, availability), [reference]);
+  assert.deepEqual(filterVisibleModelReferences([reference], providers, { openai: { showInModelPicker: false } }, availability), []);
+  assert.deepEqual(filterVisibleModelReferences([reference], providers, { openai: { visibleModelIds: [] } }, availability), []);
+  assert.deepEqual(filterVisibleModelReferences([reference], providers, undefined, [{ ...availability[0], eligibleAccountIds: [] }]), []);
+});
+
+
+test('OpenAI groups OAuth and API models together while selecting only exact eligible bindings', () => {
+  const groups = groupModelReferences(['openai/gpt-6.1-sol', 'gemini/example', 'openai-chatgpt/gpt-6.1-sol']);
+  const openai = groups.find(group => group.providerId === 'openai')!;
+  assert.equal(groups.filter(group => group.providerId === 'openai').length, 1);
+  assert.equal(openai.providerLabel, 'OpenAI');
+  assert.deepEqual(openai.models.map(model => model.reference), ['openai/gpt-6.1-sol', 'openai-chatgpt/gpt-6.1-sol']);
+  const snapshot = [{ providerId: 'openai', executionBindingId: 'openai-chatgpt', modelId: 'gpt-6.1-sol', eligibleAccountIds: ['oauth'], confirmedAccountIds: [], unverifiedAccountIds: ['oauth'], forbiddenAccountIds: [] }];
+  const sections = modelBillingGroups(openai, [], snapshot);
+  assert.equal(sections[0].label, 'subscription');
+  assert.equal(resolveModelSelection(sections[0].models[0].reference, snapshot).kind, 'select');
+  assert.equal(sections[1].label, 'api_key');
+  assert.equal(resolveModelSelection(sections[1].models[0].reference, snapshot).kind, 'connect');
+  const api = { ...snapshot[0], executionBindingId: 'openai', eligibleAccountIds: ['api'], confirmedAccountIds: ['api'], unverifiedAccountIds: [] };
+  assert.equal(modelBillingGroups(openai, [], [api])[0].label, 'api_key');
+});
+
+
+test('OpenAI visibility choices apply to OAuth models in the same logical provider', () => {
+  const reference = 'openai-chatgpt/gpt-6.1-sol';
+  const availability = [{ providerId: 'openai', executionBindingId: 'openai-chatgpt', modelId: 'gpt-6.1-sol', eligibleAccountIds: ['oauth'], confirmedAccountIds: [], unverifiedAccountIds: ['oauth'], forbiddenAccountIds: [] }];
+  assert.deepEqual(filterVisibleModelReferences([reference], [], { openai: { showInModelPicker: false } }, availability), []);
+  assert.deepEqual(filterVisibleModelReferences([reference], [], { openai: { visibleModelIds: [] } }, availability), []);
+  assert.deepEqual(filterVisibleModelReferences([reference], [], { openai: { visibleModelIds: ['gpt-6.1-sol'] } }, availability), [reference]);
 });

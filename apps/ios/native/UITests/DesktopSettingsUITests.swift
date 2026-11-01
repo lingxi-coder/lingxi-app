@@ -76,19 +76,19 @@ final class DesktopSettingsUITests: XCTestCase {
             XCTAssertTrue(preset.exists)
             XCTAssertFalse(app.buttons["provider.preset.anthropic"].exists)
             preset.tap()
-            let key = app.secureTextFields["provider.api-key"]
-            for _ in 0..<8 {
-                if key.isHittable { break }
-                app.collectionViews.allElementsBoundByIndex.last!.swipeUp()
-            }
+            let accounts = app.buttons["provider.accounts"]
+            XCTAssertTrue(accounts.waitForExistence(timeout: 8), app.debugDescription)
+            XCTAssertGreaterThanOrEqual(accounts.frame.height, 44)
+            accounts.tap()
+            let addAccount = app.buttons["provider.account.add"]
+            XCTAssertTrue(addAccount.waitForExistence(timeout: 5), app.debugDescription)
+            addAccount.tap()
+            let key = app.secureTextFields["provider.account.api-key"]
             XCTAssertTrue(key.exists, app.debugDescription)
-            let visibility = app.buttons["provider.api-key.visibility"]
-            XCTAssertGreaterThanOrEqual(visibility.frame.height, 44)
             attach("Provider-editor-\(theme)-\(largeText ? "large" : "standard")")
-            visibility.tap()
-            XCTAssertTrue(app.textFields["provider.api-key"].exists)
-            visibility.tap()
-            XCTAssertTrue(app.secureTextFields["provider.api-key"].exists)
+            XCTAssertFalse(app.textFields["provider.account.api-key"].exists)
+            app.buttons["provider.account.cancel"].tap()
+            app.navigationBars["账号"].buttons["DeepSeek"].tap()
             let model = app.buttons["provider.model"]
             for _ in 0..<8 {
                 if model.isHittable { break }

@@ -1,3 +1,5 @@
+import type { ProviderAccountSnapshot, ProviderAccountRouting } from '../shared/providerAccounts.js';
+import type { RuntimeProviderAccountCredential } from './provider-accounts.js';
 import type {
   AudioCapabilitySnapshotDto,
   AudioOperationIdDto,
@@ -15,8 +17,6 @@ import type { RemotePending, RemotePromptOrigin, RemoteRecord, RemoteTurnState }
 import type { SessionRuntime } from './bridge.js';
 import type { ProcessCommand, listProcessCommands, readProcessCommand } from './bridgeDiscovery.js';
 import { DiagnosticBuffer } from './host-utils.js';
-import type { OpenAiOAuthSession } from './host-utils.js';
-import type { CodexTokenManager } from './codex-tokens.js';
 import type { HostNotifier } from './notifications.js';
 
 export type { HostPermissionRequest } from '../shared/permission.js';
@@ -70,9 +70,9 @@ export interface BridgeLaunchConfig {
   initialProjectRoot?: string;
   configHome?: string;
   globalConfigPath?: string;
-  apiKey?: string;
-  providerCredentials?: Record<string, string>;
-  openaiOAuth?: OpenAiOAuthSession;
+  providerAccounts?: ProviderAccountSnapshot;
+  providerAccountHome?: string;
+  providerAccountCredentials?: Record<string, RuntimeProviderAccountCredential>;
   /** Broker-owned sensitive plugin options, passed only over child stdin. */
   pluginSecrets?: Record<string, Record<string, string>>;
   trusted: boolean;
@@ -95,6 +95,9 @@ export interface BridgeRuntimeVersions {
 }
 
 export interface BridgeManagerOptions {
+  onProviderAccountRouting?: (event: ProviderAccountRouting) => void;
+  renewProviderAccount?: (accountId: string, identityGeneration: number, credentialRevision: number) => Promise<void>;
+  resolveProviderAccounts?: () => Promise<{providerAccounts: ProviderAccountSnapshot; providerAccountCredentials: Record<string, RuntimeProviderAccountCredential>;providerAccountHome?: string} | undefined>;
   /** Actual desktop package version; absent in deterministic test hosts. */
   appVersion?: string;
   getTelemetryConfig?: () => import('./telemetryPolicy.js').DesktopTelemetryConfig;
@@ -148,18 +151,9 @@ export interface BridgeManagerOptions {
    * is a separate `Frame` arm handled by `client.on('permission')` below.
    */
   notifier?: HostNotifier;
-  /** Resolve a broker-owned credential only when this session first selects its provider. */
-  resolveProviderCredential?: (providerId: string) => Promise<string | undefined>;
-  /** The host's current Codex session, refreshed first when about to expire. */
-  resolveOpenAiOAuth?: () => Promise<OpenAiOAuthSession | undefined>;
-  /** An engine's Codex access token expired or was rejected: refresh it. */
-  renewOpenAiOAuth?: () => Promise<OpenAiOAuthSession | undefined>;
-  /** A Codex sign-in made inside an engine, for the host to adopt. */
-  onOpenAiOAuthUpdated?: (session: OpenAiOAuthSession) => Promise<void>;
   /** Internal cache hook used by SessionRuntimeManager; never exposed to renderer IPC. */
   onActivityChanged?: () => void;
   /** Invalidate Electron-main launch material after a credential/config mutation. */
-  invalidateLaunchConfigCache?: () => void;
   onFirstPromptSent?: () => boolean | void;
   /** SECURITY: consulted before a `set_permission_mode: bypassPermissions`
    * command is forwarded to the engine. Must show a blocking acceptance dialog
@@ -168,7 +162,6 @@ export interface BridgeManagerOptions {
   confirmBypassPermissions?: () => Promise<boolean>;
 }
 
-export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
 
 export interface SessionRef {
   projectPath: string;
@@ -214,8 +207,6 @@ export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions,
   onFirstPromptSent?: (ref: SessionRef) => boolean | void;
   /** Maximum retained runtimes when enough idle sessions are evictable. */
   maxCachedRuntimes?: number;
-  /** The one refresher of the Codex session; every engine is served its access tokens. */
-  codexTokens?: CodexTokenManager;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

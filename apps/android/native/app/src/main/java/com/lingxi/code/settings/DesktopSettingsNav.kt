@@ -16,7 +16,7 @@ val desktopSettingsEntries = listOf(
     DesktopSettingsEntry(SettingsRoutes.VOICE, "Voice", "Personal", listOf("tts", "stt", "audio")),
     DesktopSettingsEntry(SettingsRoutes.ARCHIVED, "Archived chats", "Personal", listOf("restore")),
     DesktopSettingsEntry(SettingsRoutes.PROJECTS, "Projects & trust", "Personal"),
-    DesktopSettingsEntry(SettingsRoutes.CREDENTIALS, "Provider credentials", "Models & services", listOf("api key", "auth")),
+    DesktopSettingsEntry(SettingsRoutes.PROVIDER_ACCOUNTS, "Provider credentials", "Models & services", listOf("api key", "auth")),
     DesktopSettingsEntry(SettingsRoutes.CUSTOM_PROVIDERS, "Custom providers & routing", "Models & services", listOf("providers", "aliases", "fallback", "retry")),
     DesktopSettingsEntry(SettingsRoutes.ENGINE_PERMISSIONS, "Permissions", "Coding", listOf("allow", "deny", "ask")),
     DesktopSettingsEntry(SettingsRoutes.TOOLS_AGENT, "Tools & agent behavior", "Coding", listOf("promptSuggestionEnabled", "enabledTools", "thinking", "outputStyle")),

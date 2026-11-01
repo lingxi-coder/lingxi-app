@@ -74,7 +74,7 @@ export type {
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '30.0.0';
+export const CLIENT_PROTOCOL_VERSION = '31.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -153,7 +153,6 @@ export type ListingKindDto =
   | { type: 'memory' }
   | { type: 'status' }
   | { type: 'settings' }
-  | { type: 'auth' }
   | { type: 'doctor' }
   | { type: 'tasks' };
 
@@ -1370,11 +1369,6 @@ export interface StatusSnapshotDto {
   cwd: string;
   status_line?: string;
 }
-
-/** Auth state (listings.rs `AuthStateDto`). */
-export type AuthStateDto =
-  | { type: 'signed_out' }
-  | { type: 'signed_in'; email: string; org_id: string };
 
 /** Outcome of a single doctor check (listings.rs `CheckStatusDto`). */
 export type CheckStatusDto = { type: 'pass' } | { type: 'warn' } | { type: 'fail' };

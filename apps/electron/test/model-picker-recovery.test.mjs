@@ -98,7 +98,7 @@ test('the model control is refused only when nothing is up to take the change', 
 
     // And the reply it asked for lands in the list.
     assert.equal(listed.rows, 4);
-    assert.equal(listed.firstRowLabel, 'OpenRouter Auto');
+    assert.equal(listed.firstRowLabel, 'OpenRouter AutoAccess unverified');
 
     // A composer that cannot SEND — no provider connected, no trusted workspace
     // — must still let the model change; that control is the way out. The

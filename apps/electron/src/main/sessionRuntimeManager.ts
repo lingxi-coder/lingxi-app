@@ -4,7 +4,6 @@ import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { SessionRuntime } from './bridge.js';
-import type { CodexTokenManager } from './codex-tokens.js';
 import { urlOrigin } from './bridgeEvents.js';
 import {
   CH_ANSWER_ASK_USER_QUESTION,
@@ -31,7 +30,7 @@ import type {
   SessionRuntimeManagerOptions,
   SessionRuntimeSummary,
 } from './bridgeTypes.js';
-import { sanitizeDiagnostic, type OpenAiOAuthSession } from './host-utils.js';
+import { sanitizeDiagnostic } from './host-utils.js';
 import { VisualizationRouter } from './visualization.js';
 import {
   CH_VISUALIZATION_MOUNT,
@@ -100,7 +99,6 @@ export interface RemoteLease {
  */
 export class SessionRuntimeManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
-  private readonly mutatedProviderCredentials = new Set<string>();
   private readonly openingSessions = new Map<string, { projectPath: string; transcriptPath?: string; promise: Promise<SessionRuntime>; activate: boolean }>();
   private readonly restartingSessions = new Map<string, Set<Promise<void>>>();
   private readonly backgroundSessionLeases = new Map<string, number>();
@@ -146,10 +144,22 @@ export class SessionRuntimeManager {
       throw new Error(`maxCachedRuntimes must be between 1 and ${MAX_CONFIGURED_CACHED_RUNTIMES}`);
     }
     this.maxCachedRuntimes = requestedLimit;
-    opts.codexTokens?.subscribe((session) => { void this.serveCodexToken(session); });
   }
 
-  get codexTokens(): CodexTokenManager | undefined { return this.opts.codexTokens; }
+  async refreshProviderAccounts(): Promise<void> {
+    await Promise.all([...this.runtimes.values()].filter(runtime => runtime.connectionState.status === 'connected')
+      .map(runtime => runtime.refreshProviderAccounts()));
+  }
+
+  async applyProviderSettings(): Promise<void> {
+    const targets = [...this.runtimes.values()].map(runtime => ({ runtime, ref: { projectPath: runtime.projectPath, sessionId: runtime.sessionId } }));
+    for (const { runtime, ref } of targets) {
+      if (this.runtimes.get(ref.sessionId) !== runtime) continue;
+      await this.restart(ref, () => {
+        if (this.runtimes.get(ref.sessionId) !== runtime || [...this.runtimes.values()].some(item => item.hasActiveWork)) throw new Error('Provider settings were saved; wait for active work before applying them.');
+      });
+    }
+  }
 
   get size(): number {
     return this.runtimes.size;
@@ -163,9 +173,7 @@ export class SessionRuntimeManager {
     return Object.freeze([...this.runtimes.values()].flatMap((runtime) => runtime.replaySnapshot()));
   }
 
-  invalidateLaunchConfigCache(): void {
-    this.opts.invalidateLaunchConfigCache?.();
-  }
+
 
   get(sessionId: string): SessionRuntime | undefined {
     return this.runtimes.get(sessionId);
@@ -300,12 +308,6 @@ export class SessionRuntimeManager {
     if (resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     const runtimeOptions = this.runtimeOptions(ref);
     const runtime = new SessionRuntime({ ...runtimeOptions, remountControls }, sessionMode);
-    // A newly opened session can adopt an engine that was absent from the
-    // credential-write fanout. Mark only keys changed during this host's
-    // lifetime; the idle runtime resolves their latest values before readiness.
-    for (const providerId of this.mutatedProviderCredentials) {
-      void runtime.refreshCachedProviderCredential(providerId);
-    }
     this.runtimes.set(ref.sessionId, runtime);
     this.touch(ref.sessionId);
     for (const listener of [...this.runtimeCreatedListeners]) this.announceRuntime(listener, runtime);
@@ -624,31 +626,6 @@ export class SessionRuntimeManager {
     ));
   }
 
-  /** Serve the host's Codex access token to every connected engine, or stop serving one. */
-  async serveCodexToken(session: OpenAiOAuthSession | undefined): Promise<void> {
-    await Promise.all([...this.runtimes.values()].map((runtime) => runtime.serveCodexToken(session).catch((error: unknown) => {
-      this.opts.diagnostics?.add('warn', 'bridge', `Codex access token was not served: ${sanitizeDiagnostic(error)}`);
-    })));
-  }
-
-  async refreshCachedProviderCredential(providerId: string, credential: string): Promise<void> {
-    await this.updateCachedProviderCredential(providerId, credential);
-  }
-
-  async clearCachedProviderCredential(providerId: string): Promise<void> {
-    await this.updateCachedProviderCredential(providerId);
-  }
-
-  private async updateCachedProviderCredential(providerId: string, credential?: string): Promise<void> {
-    this.mutatedProviderCredentials.add(providerId);
-    // Invalidate every runtime, including a pending load or a disconnected
-    // sidecar that may later be recovered without restarting its process.
-    const results = await Promise.allSettled([...this.runtimes.values()]
-      .map((runtime) => runtime.refreshCachedProviderCredential(providerId, credential)));
-    const failed = results.find((result) => result.status === 'rejected');
-    if (failed?.status === 'rejected') throw failed.reason;
-  }
-
   async disableTelemetry(): Promise<void> {
     // Revoke all host exporters synchronously before any network acknowledgement.
     const results = await Promise.allSettled([...this.runtimes.values()].map(runtime => runtime.disableTelemetry()));
@@ -659,7 +636,6 @@ export class SessionRuntimeManager {
   async dispose(): Promise<void> {
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
-    this.mutatedProviderCredentials.clear();
     this.lastUsed.clear();
     this.sessionModelHints.clear();
     this.activeSessionId = null;
@@ -783,16 +759,10 @@ export class SessionRuntimeManager {
       onFirstPromptSent,
       maxCachedRuntimes: _maxCachedRuntimes,
       workspaceSettings,
-      codexTokens,
       ...base
     } = this.opts;
     return {
       ...base,
-      ...(codexTokens ? {
-        resolveOpenAiOAuth: () => codexTokens.current(),
-        renewOpenAiOAuth: () => codexTokens.renew(),
-        onOpenAiOAuthUpdated: (session: OpenAiOAuthSession) => codexTokens.adopt(session),
-      } : {}),
       sessionId: ref.sessionId,
       projectPath: ref.projectPath,
       resumeTranscriptPath: this.sessionTranscriptPaths.get(ref.sessionId),

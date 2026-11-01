@@ -9,6 +9,7 @@ final class IOSAudioProviderHost: IOSAudioProviderHostDriving {
         host = try buildIosAudioProviderHost(
             profilesJson: profilesJSON,
             region: region,
+            accountHome: MobileUserStorage.directories().configHome,
             secureStorage: SecureStorageImpl()
         )
     }

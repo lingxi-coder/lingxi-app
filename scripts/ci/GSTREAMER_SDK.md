@@ -52,5 +52,20 @@ The installer exports the existing build contracts:
   prefix used for pkg-config and runtime dependency discovery.
 - `LINGXI_GSTREAMER_SDK_LINUX` points to the temporary staged package SDK.
 
+For disk-constrained iOS builds, the installer accepts `ios --ios-platform-only`
+to retain the official iOS device and fat simulator slices while excluding
+unused tvOS slices. The archive SHA-256 and every member path/link are validated
+before filtering. The default installer still extracts the full archive.
+Android builds can use `android --android-platform-only` to retain the required
+`arm64` and `x86_64` SDK roots while excluding unused 32-bit ABI directories,
+with the same full-archive digest and member validation.
+
+An interrupted iOS extraction can use `--ios-platform-only --resume-staging
+<temporary-sibling-directory>` with the same `--root`. The installer checks
+existing file bytes against the verified archive, appends only a missing suffix,
+and promotes that directory after validating both required iOS slices. A changed
+archive, corrupt prefix, or staging path outside the SDK's temporary siblings is
+rejected; no completed SDK marker is written on failure.
+
 Do not make media builds optional in these jobs to avoid SDK setup. The offline
 fixture suite is `python3 scripts/tests/test_gstreamer_sdk.py`.

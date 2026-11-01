@@ -20,17 +20,10 @@ pub(crate) fn process_stderr() -> Output {
 struct CliHeadlessServices {
     background_forker: Arc<crate::bg_session_forker::CliBgSessionForker>,
     auto_connect_ide: bool,
-    oauth_descriptor: crate::headless_oauth::OAuthDescriptorCache,
 }
 
 #[async_trait::async_trait]
 impl HeadlessHostServices for CliHeadlessServices {
-    fn oauth_descriptor_credential(
-        &self,
-    ) -> Option<harness_runtime::headless::host::OAuthDescriptorCredential> {
-        self.oauth_descriptor.credential()
-    }
-
     fn request_identity(&self) -> Option<harness_runtime::desktop::DesktopRequestIdentity> {
         Some(harness_runtime::desktop::DesktopRequestIdentity {
             device_id: migrations::global_config::get_or_create_user_id(),
@@ -190,7 +183,6 @@ pub(crate) async fn run(argv: &Argv, permission_mode: permission::PermissionMode
     let services = Arc::new(CliHeadlessServices {
         background_forker,
         auto_connect_ide: argv.ide,
-        oauth_descriptor: crate::headless_oauth::OAuthDescriptorCache::default(),
     });
     #[cfg(unix)]
     let io = match crate::headless_process_io::open() {

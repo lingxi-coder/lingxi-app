@@ -669,16 +669,8 @@ async function runCustomProvidersScenario(window, webContents) {
   await click('导入 JSON');
   await fill('JSON 配置', JSON.stringify({ providers: { dual: { type: 'openai', baseUrl: 'https://example.com', apiKeyEnv: 'FALLBACK_KEY', apiKey: 'test-only-explicit-key', models: [{ id: 'm' }] } } }));
   await click('解析并预览');
-  const dualAuth = await run('({ mode:document.querySelector(\'[aria-label="认证方式"]\').value, keyPresent:Boolean(document.querySelector(\'[aria-label="API 密钥"]\')) })');
+  const dualAuth = await run('({ keyPresent:Boolean(document.querySelector(\'[aria-label="API 密钥"]\')) })');
   await click('← 返回 Provider 列表');
-  await run('window.__settingsScreenTest.setLayeredSnapshot({user:{providers:{Legacy:{type:"openai",baseUrl:"https://legacy.example",apiKeyEnv:"LEGACY_KEY",models:["legacy-model"]}}},project:{},local:{}})');
-  await delay(35);
-  await click('编辑');
-  await fill('模型 ID 1', ' legacy-model ');
-  await fill('baseUrl', ' https://legacy.example/v1 ');
-  await click('保存 Provider');
-  await waitFor(webContents, 'window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers?.Legacy?.baseUrl === "https://legacy.example/v1"');
-  const legacy = await run('window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers.Legacy');
   await click('导入 JSON');
   await fill('JSON 配置', JSON.stringify({ providers: { priced: {
     type: 'openai', baseUrl: 'https://example.com', apiKeyEnv: 'PRICED_KEY',
@@ -696,7 +688,7 @@ async function runCustomProvidersScenario(window, webContents) {
   await click('确认导入 1 个 Provider');
   await waitFor(webContents, 'window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers?.priced');
   const toggledPricing = await run('window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers.priced.pricing');
-  return { pricingTargetProtected, toggledPricing, legacy, malformedRowSurvives, dualAuth, retryError, locked, saved, fixedId, edited, invalidText, conflictSkipped, partial, retried, clearedOnSwitch, overflow };
+  return { pricingTargetProtected, toggledPricing, malformedRowSurvives, dualAuth, retryError, locked, saved, fixedId, edited, invalidText, conflictSkipped, partial, retried, clearedOnSwitch, overflow };
 }
 
 async function runProviderSessionIsolation(webContents) {

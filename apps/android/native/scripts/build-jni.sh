@@ -336,10 +336,16 @@ done
 # Cargo target directory may be rebuilt by another checkout while bindgen runs.
 INTROSPECT_LIB="${JNILIBS_DIR}/$(abi_of "${TARGETS[0]}")/${SONAME}"
 
-# Build the standalone metadata extractor before generating bindings from the
-# matching staged cdylib; this does not compile a second platform's runtime.
-log "Building standalone native bindings generator…"
-cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p native-bindgen --bin uniffi-bindgen
+# An already-built generator can be retained across build-cache cleanup. It
+# still reads metadata from this invocation's fresh, unstripped JNI library.
+if [[ -n "${LINGXI_BINDGEN_PATH:-}" ]]; then
+  [[ -x "${LINGXI_BINDGEN_PATH}" ]] || { echo "ERROR: bindings generator is not executable: ${LINGXI_BINDGEN_PATH}" >&2; exit 1; }
+  BINDGEN_COMMAND=("${LINGXI_BINDGEN_PATH}")
+else
+  log "Building standalone native bindings generator…"
+  cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p native-bindgen --bin uniffi-bindgen
+  BINDGEN_COMMAND=(cargo run --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p native-bindgen --bin uniffi-bindgen --)
+fi
 
 # Generate into this invocation's staging tree. The existing Kotlin package
 # remains usable even if bindgen writes partial files and then fails.
@@ -348,9 +354,7 @@ GEN_PKG_DIR="${KOTLIN_OUT}/${PKG_REL_PATH}"
 mkdir -p "${BINDINGS_STAGE}"
 
 log "Generating Kotlin bindings → ${GEN_PKG_DIR} (package com.lingxi.code.bindings)…"
-cargo run --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p native-bindgen \
-  --bin uniffi-bindgen -- \
-  generate \
+"${BINDGEN_COMMAND[@]}" generate \
   --library "${INTROSPECT_LIB}" \
   --language kotlin \
   --config "${UNIFFI_CONFIG}" \

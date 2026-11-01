@@ -873,8 +873,7 @@ async fn run_agents_connect_flow(cli: &Cli) -> Result<(), String> {
     let availability = build.runtime.provider_availability.clone();
     let catalog_registry = build.runtime.catalog_registry.clone();
     let key_store = build.runtime.credentials.clone();
-    let oauth = build.runtime.oauth_connect_driver.clone();
-    let copilot = build.runtime.connect_copilot.clone();
+    let account_config = build.provider_account_config.clone();
     drop(build);
 
     let mut widget =
@@ -929,11 +928,10 @@ async fn run_agents_connect_flow(cli: &Cli) -> Result<(), String> {
     let action = result?;
     if let Some(action) = action {
         crate::mode::run_connect_action(
+            account_config,
             catalog_registry,
             action,
             key_store,
-            oauth,
-            copilot,
             turn_tx,
         )
         .await;

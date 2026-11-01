@@ -6,7 +6,7 @@ enum LocalAppAgentModelHostConfiguration {
 
     static func digest(_ configuration: IosEngineLaunchConfigFfi) -> String {
         let identity = [configuration.providerConfig?.providerProfilesJson ?? "", configuration.providerConfig?.routingJson ?? "",
-                        configuration.model, configuration.apiBase, configuration.apiKey, configuration.nativeConfigHome,
+                        configuration.model, configuration.apiBase, configuration.nativeConfigHome,
                         configuration.appSandboxRoot, configuration.mobileLinux?.managedRoot ?? "",
                         configuration.mobileLinux?.brandId ?? "", configuration.mobileLinux?.linuxUser ?? "",
                         configuration.mobileLinux?.configDirName ?? ""].joined(separator: "\u{0}")

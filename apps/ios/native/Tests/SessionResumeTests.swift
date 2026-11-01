@@ -41,7 +41,6 @@ final class SessionResumeTests: XCTestCase {
         private func makeSource() -> EngineConversationSource {
             let config = EngineConfig(
                 apiBase: "https://api.anthropic.com",
-                apiKey: "",
                 model: "",
                 appSandboxRoot: NSTemporaryDirectory(),
                                 sessionMode: .code,
@@ -1640,7 +1639,6 @@ visionDelegationEnabled: true)
         ) -> EngineConversationSource {
             let config = EngineConfig(
                 apiBase: "https://api.anthropic.com",
-                apiKey: "",
                 model: "",
                 appSandboxRoot: NSTemporaryDirectory(),
                                 sessionMode: .code,

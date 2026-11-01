@@ -7,6 +7,7 @@ import com.lingxi.code.bindings.android.AndroidSecureStorage
 import com.lingxi.code.bindings.android.SecureStorageFfiException
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.NoSuchFileException
 import java.security.KeyStore
 import java.util.Base64
 import javax.crypto.Cipher
@@ -25,9 +26,9 @@ import javax.crypto.spec.GCMParameterSpec
  * leaves hardware) and persist the sealed bytes under [baseDir]. Each entry is
  * `<baseDir>/<b64(service)>/<b64(account)>.bin = iv || AES-256-GCM(blob)`.
  *
- * Injecting this store flips the engine's `oauth_supported` true, so OAuth
- * `/login` persists its tokens instead of failing at the persist step. The
- * seal/unseal path mirrors the device-test `KeystoreGitCredentialProvider`.
+ * Provider account commands persist API keys and OAuth grants through this
+ * store. The seal/unseal path mirrors the device-test
+ * `KeystoreGitCredentialProvider`.
  *
  * Mirrors the other `com.lingxi.code.*` adapters: it implements the generated
  * UniFFI callback interface and maps failures onto the flat `SecureStorageFfiException`
@@ -84,9 +85,15 @@ class AndroidSecureStorageAdapter internal constructor(
         return try {
             synchronized(storeLock) {
                 val dir = File(baseDir, enc(service))
-                val files = dir.listFiles().orEmpty()
-                files.filter { it.isFile && it.name.endsWith(SUFFIX) }
-                    .map { dec(it.name.removeSuffix(SUFFIX)) }
+                val entries = try {
+                    Files.newDirectoryStream(dir.toPath())
+                } catch (_: NoSuchFileException) {
+                    return@synchronized emptyList()
+                }
+                entries.use { paths ->
+                    paths.map { it.toFile() }.filter { it.isFile && it.name.endsWith(SUFFIX) }
+                        .map { dec(it.name.removeSuffix(SUFFIX)) }
+                }
             }
         } catch (t: Throwable) {
             throw ioError("list", t)

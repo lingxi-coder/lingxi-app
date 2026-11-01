@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import os
 import pathlib
@@ -41,6 +42,133 @@ def job_block(path: pathlib.Path, job_name: str) -> str:
 
 
 class GStreamerSDKTests(unittest.TestCase):
+    def ios_archive_fixture(self, directory: pathlib.Path) -> tuple[pathlib.Path, dict]:
+        downloads = directory / "downloads"
+        downloads.mkdir()
+        archive = downloads / "fixture-sdk.tar.xz"
+        files = {
+            "GStreamer.xcframework/Info.plist": plistlib.dumps({
+                "AvailableLibraries": [{"LibraryIdentifier": name} for name in (*gstreamer_sdk.IOS_SLICES, "tvos-arm64")]
+            }),
+        }
+        for name in (*gstreamer_sdk.IOS_SLICES, "tvos-arm64"):
+            files[f"GStreamer.xcframework/{name}/libGStreamer.a"] = b"verified archive bytes"
+            files[f"GStreamer.xcframework/{name}/Headers/gst/gst.h"] = b"fixture header"
+        with tarfile.open(archive, "w:xz") as output:
+            for name, data in files.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                output.addfile(member, io.BytesIO(data))
+        return archive, {"filename": archive.name, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}
+
+    def test_ios_platform_only_keeps_device_and_simulator_without_tvos(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            archive, _ = self.ios_archive_fixture(base)
+            target = base / "selected"
+            gstreamer_sdk.safe_extract_tar(archive, target, ios_platform_only=True)
+            framework = gstreamer_sdk.select_ios_xcframework(target)
+            self.assertFalse((framework / "tvos-arm64").exists())
+            full = base / "default"
+            gstreamer_sdk.safe_extract_tar(archive, full)
+            self.assertTrue((full / "GStreamer.xcframework/tvos-arm64/libGStreamer.a").is_file())
+
+    def test_android_platform_only_keeps_both_supported_abis_without_32_bit_slices(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            archive = base / "android.tar.xz"
+            with tarfile.open(archive, "w:xz") as output:
+                for abi in ("arm64", "x86_64", "armv7", "x86"):
+                    for module in gstreamer_sdk.ANDROID_MODULES:
+                        member = tarfile.TarInfo(f"{abi}/lib/pkgconfig/{module}.pc")
+                        output.addfile(member)
+            target = base / "selected"
+            gstreamer_sdk.safe_extract_tar(archive, target, android_platform_only=True)
+            self.assertEqual(gstreamer_sdk.select_android_root(target), target.resolve())
+            self.assertFalse((target / "armv7").exists())
+            self.assertFalse((target / "x86").exists())
+
+    def test_android_platform_filter_still_rejects_unsafe_skipped_abi(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            archive = base / "unsafe.tar.xz"
+            with tarfile.open(archive, "w:xz") as output:
+                output.addfile(tarfile.TarInfo("armv7/../../outside-sdk"))
+            with self.assertRaisesRegex(gstreamer_sdk.SetupError, "unsafe SDK archive path"):
+                gstreamer_sdk.safe_extract_tar(archive, base / "selected", android_platform_only=True)
+
+    def test_ios_platform_filter_still_rejects_unsafe_skipped_member_paths_and_links(self) -> None:
+        for link in (False, True):
+            with self.subTest(link=link), tempfile.TemporaryDirectory() as directory:
+                base = pathlib.Path(directory)
+                archive = base / "unsafe.tar.xz"
+                with tarfile.open(archive, "w:xz") as output:
+                    name = "GStreamer.xcframework/tvos-arm64/unsafe"
+                    member = tarfile.TarInfo(name if link else name + "/../../../escape")
+                    if link:
+                        member.type = tarfile.SYMTYPE
+                        member.linkname = "/outside-staging"
+                    output.addfile(member)
+                with self.assertRaises(gstreamer_sdk.SetupError):
+                    gstreamer_sdk.safe_extract_tar(archive, base / "selected", ios_platform_only=True)
+
+    def test_ios_sdk_resume_verifies_existing_prefix_and_promotes_same_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            _, artifact = self.ios_archive_fixture(base)
+            root = base / "sdk"
+            stage = base / ".sdk-interrupted"
+            partial = stage / "archive/GStreamer.xcframework/ios-arm64/libGStreamer.a"
+            partial.parent.mkdir(parents=True)
+            partial.write_bytes(b"verified")
+            framework = gstreamer_sdk.prepare_archive_sdk("ios", root, artifact,
+                ios_platform_only=True, resume_staging=stage)
+            self.assertEqual((framework / "ios-arm64/libGStreamer.a").read_bytes(), b"verified archive bytes")
+            self.assertFalse(stage.exists())
+            self.assertFalse((framework / "tvos-arm64").exists())
+            self.assertEqual((root / ".lingxi-gstreamer-sdk-sha256").read_text().strip(), artifact["sha256"])
+
+    def test_ios_sdk_resume_never_accepts_a_changed_verified_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            _, artifact = self.ios_archive_fixture(base)
+            stage = base / ".sdk-interrupted"
+            (stage / "archive").mkdir(parents=True)
+            artifact["sha256"] = "0" * 64
+            with self.assertRaisesRegex(gstreamer_sdk.SetupError, "SHA-256 mismatch"):
+                gstreamer_sdk.prepare_archive_sdk("ios", base / "sdk", artifact,
+                    ios_platform_only=True, resume_staging=stage)
+            self.assertTrue(stage.exists())
+            self.assertFalse((base / "sdk").exists())
+
+    def test_ios_sdk_resume_rejects_corrupt_existing_bytes_without_promoting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            _, artifact = self.ios_archive_fixture(base)
+            stage = base / ".sdk-interrupted"
+            partial = stage / "archive/GStreamer.xcframework/ios-arm64/libGStreamer.a"
+            partial.parent.mkdir(parents=True)
+            partial.write_bytes(b"corrupt")
+            with self.assertRaisesRegex(gstreamer_sdk.SetupError, "differs from verified archive"):
+                gstreamer_sdk.prepare_archive_sdk("ios", base / "sdk", artifact,
+                    ios_platform_only=True, resume_staging=stage)
+            self.assertTrue(stage.exists())
+            self.assertFalse((base / "sdk").exists())
+
+    def test_ios_sdk_resume_rejects_staging_archive_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            _, artifact = self.ios_archive_fixture(base)
+            stage = base / ".sdk-interrupted"
+            stage.mkdir()
+            other = base / "other"
+            other.mkdir()
+            (stage / "archive").symlink_to(other, target_is_directory=True)
+            with self.assertRaisesRegex(gstreamer_sdk.SetupError, "inside its staging root"):
+                gstreamer_sdk.prepare_archive_sdk("ios", base / "sdk", artifact,
+                    ios_platform_only=True, resume_staging=stage)
+            self.assertEqual(list(other.iterdir()), [])
+
     def test_lock_pins_official_1288_artifacts(self) -> None:
         lock = gstreamer_sdk.load_lock()
         expected_digests = {

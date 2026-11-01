@@ -12,6 +12,8 @@ import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.settings.ProviderSettingsRepository
+import com.lingxi.code.settings.ProviderAccountsRepository
+import com.lingxi.code.secure.AndroidSecureStorageAdapter
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -266,6 +268,7 @@ class LocalAppAgentAcceptanceTest {
         val originalProvidersLlmRaw: String?,
         val originalAudioProviderRegionPresent: Boolean,
         val originalAudioProviderRegionRaw: String?,
+        val fixtureAccountId: String = UUID.randomUUID().toString(),
         var credentialSource: com.lingxi.code.conversation.EngineConversationSource? = null,
         var credentialWriteAttempted: Boolean = false,
         var appAgentHostTouched: Boolean = false,
@@ -784,11 +787,12 @@ class LocalAppAgentAcceptanceTest {
 
     private suspend fun recoverInterruptedSkillFixture(journal: File) {
         if (!journal.isFile) return
-        val interruptedProviderId = JSONObject(journal.readText()).getString("providerId")
+        val interrupted = JSONObject(journal.readText())
+        val interruptedProviderId = interrupted.getString("providerId")
         check(interruptedProviderId.startsWith("agui-fixture-")) {
             "The interrupted Skill fixture journal contains an unexpected provider ID."
         }
-        removeInterruptedSkillFixtureProvider(interruptedProviderId)
+        removeInterruptedSkillFixtureProvider(interruptedProviderId, interrupted.getString("accountId"))
         check(journal.delete() || !journal.exists()) {
             "The interrupted Skill fixture journal could not be cleared after secure cleanup."
         }
@@ -807,46 +811,42 @@ class LocalAppAgentAcceptanceTest {
             "The existing audio region preference is not stored as a string and cannot be snapshotted safely."
         }
         val providerSettings = ProviderSettingsRepository(context)
-        try {
-            val originalProviders = providerSettings.loadProviderState().first
-            val originalDefaultModel = providerSettings.engineLaunchConfig().defaultModel
-            check(originalProviders.none { it.id.startsWith("agui-fixture-") }) {
-                "An interrupted test fixture provider remains; run the exact fixture credential cleanup first."
-            }
-            val providerId = "agui-fixture-" + UUID.randomUUID().toString().replace("-", "").take(16)
-            check(originalProviders.none { it.id == providerId }) {
-                "The random test provider ID unexpectedly collides with a saved provider."
-            }
-            return SkillFixtureResources(
-                apps = UnifiedLocalApps.get(context),
-                sources = mutableListOf(),
-                ids = mutableListOf(),
-                providerSettings = providerSettings,
-                originalProviders = originalProviders,
-                originalDefaultModel = originalDefaultModel,
-                providerBaseUrl = providerBaseUrl,
-                fixtureProvider = GenericProvider(
-                    id = providerId,
-                    preset = "custom",
-                    name = "Local App acceptance fixture",
-                    url = providerBaseUrl,
-                    key = "",
-                    model = providerModel,
-                    status = ConnStatus.Configured,
-                    enabled = true,
-                    credentialConfigured = true,
-                    showInModelPicker = false,
-                ),
-                fixtureJournal = journal,
-                originalProvidersLlmPresent = originalProvidersLlmPresent,
-                originalProvidersLlmRaw = originalProvidersLlmRaw,
-                originalAudioProviderRegionPresent = originalAudioProviderRegionPresent,
-                originalAudioProviderRegionRaw = originalAudioProviderRegionRaw,
-            )
-        } catch (failure: Throwable) {
-            providerSettings.close()
-            throw failure
+        val originalProviders = providerSettings.loadProviderState().first
+        val originalDefaultModel = providerSettings.engineLaunchConfig().defaultModel
+        check(originalProviders.none { it.id.startsWith("agui-fixture-") }) {
+            "An interrupted test fixture provider remains; run the exact fixture credential cleanup first."
         }
+        val providerId = "agui-fixture-" + UUID.randomUUID().toString().replace("-", "").take(16)
+        check(originalProviders.none { it.id == providerId }) {
+            "The random test provider ID unexpectedly collides with a saved provider."
+        }
+        return SkillFixtureResources(
+            apps = UnifiedLocalApps.get(context),
+            sources = mutableListOf(),
+            ids = mutableListOf(),
+            providerSettings = providerSettings,
+            originalProviders = originalProviders,
+            originalDefaultModel = originalDefaultModel,
+            providerBaseUrl = providerBaseUrl,
+            fixtureProvider = GenericProvider(
+                id = providerId,
+                preset = "custom",
+                name = "Local App acceptance fixture",
+                url = providerBaseUrl,
+                key = "",
+                model = providerModel,
+                status = ConnStatus.Configured,
+                enabled = true,
+                credentialConfigured = true,
+                showInModelPicker = false,
+            ),
+            fixtureJournal = journal,
+            originalProvidersLlmPresent = originalProvidersLlmPresent,
+            originalProvidersLlmRaw = originalProvidersLlmRaw,
+            originalAudioProviderRegionPresent = originalAudioProviderRegionPresent,
+            originalAudioProviderRegionRaw = originalAudioProviderRegionRaw,
+        )
+
     }
 
     private suspend fun configureSkillFixtureProvider(resources: SkillFixtureResources, providerKey: String) {
@@ -854,7 +854,8 @@ class LocalAppAgentAcceptanceTest {
             "Configure a host default model before running the test-only provider acceptance."
         }
         check(!resources.fixtureJournal.exists()) { "A Skill fixture journal already exists before provider configuration." }
-        resources.fixtureJournal.writeText(JSONObject().put("providerId", resources.fixtureProvider.id).toString())
+        resources.fixtureJournal.writeText(JSONObject().put("providerId", resources.fixtureProvider.id)
+            .put("accountId", resources.fixtureAccountId).toString())
         resources.providerSettings.persistProviders(ProviderKind.Llm, resources.originalProviders + resources.fixtureProvider)
         persistProviderRowsForAcceptance(resources.originalProviders + resources.fixtureProvider)
         val providerRowsWithFixture = rawProviderRowsWithFixture(resources.originalProvidersLlmRaw, resources.fixtureProvider)
@@ -872,16 +873,70 @@ class LocalAppAgentAcceptanceTest {
             reuseProcessSource = false,
         ) as? com.lingxi.code.conversation.EngineConversationSource
             ?: error("Could not create an isolated native source for the synthetic fixture credential.")
-        resources.providerSettings.bindSource(resources.credentialSource)
         resources.credentialWriteAttempted = true
-        val credential = resources.providerSettings.setCredential(resources.fixtureProvider, providerKey)
-        check(credential.error == null && credential.storageEncrypted &&
-            resources.fixtureProvider.id in credential.configuredProviderIds &&
-            resources.fixtureProvider.id !in credential.unavailableProviderIds) {
-            "The synthetic acceptance provider credential was not stored in the Android secure credential service."
-        }
+        addFixtureProviderAccount(checkNotNull(resources.credentialSource), resources.fixtureProvider,
+            resources.fixtureAccountId, providerKey)
         assertEquals("Adding the test-only provider must preserve the chat default model",
             resources.originalDefaultModel, resources.providerSettings.engineLaunchConfig().defaultModel)
+    }
+
+    private fun fixtureAccountName(providerId: String) = "Local App acceptance fixture $providerId"
+
+    private suspend fun addFixtureProviderAccount(
+        source: com.lingxi.code.conversation.ConversationSource,
+        provider: GenericProvider,
+        accountId: String,
+        key: String,
+    ) {
+        UUID.fromString(accountId)
+        val binding = ProviderSettingsRepository.profileNameFor(provider)
+        val accounts = ProviderAccountsRepository().apply { bindSource(source) }
+        try {
+            accounts.refresh()
+            check(accounts.state.value.error == null)
+            check(accounts.command("add", JSONObject().put("accountId", accountId)
+                .put("providerId", binding).put("executionBindingId", binding)
+                .put("displayName", fixtureAccountName(provider.id)).put("authKind", "api_key"), key) == null) {
+                "The synthetic acceptance account could not be stored."
+            }
+            val snapshot = accounts.state.value
+            val added = snapshot.accounts.single { it.accountId == accountId }
+            check(added.executionBindingId == binding && added.providerId == binding && added.authKind == "api_key")
+            check(snapshot.modelAvailability.any { it.executionBindingId == binding && accountId in it.eligibleAccountIds }) {
+                "The Host did not project the synthetic acceptance account as eligible."
+            }
+            check("acct.$accountId" in AndroidSecureStorageAdapter(context).list("provider-accounts.${snapshot.storeScope}")) {
+                "The synthetic acceptance credential is absent from the encrypted Android store."
+            }
+        } finally { accounts.bindSource(null) }
+    }
+
+    private suspend fun removeFixtureProviderAccount(
+        source: com.lingxi.code.conversation.ConversationSource,
+        providerId: String,
+        accountId: String,
+    ) {
+        check(providerId.startsWith("agui-fixture-"))
+        UUID.fromString(accountId)
+        val accounts = ProviderAccountsRepository().apply { bindSource(source) }
+        try {
+            accounts.refresh()
+            check(accounts.state.value.error == null)
+            val original = accounts.state.value
+            original.accounts.singleOrNull { it.accountId == accountId }?.let { account ->
+                check(account.providerId == providerId && account.executionBindingId == providerId &&
+                    account.displayName == fixtureAccountName(providerId) && account.authKind == "api_key") {
+                    "Refusing to remove an account that is not the exact synthetic fixture."
+                }
+                check(accounts.command("remove", JSONObject().put("accountId", accountId)) == null) {
+                    "The synthetic acceptance account could not be removed."
+                }
+            }
+            check(accounts.state.value.accounts.none { it.accountId == accountId })
+            check("acct.$accountId" !in AndroidSecureStorageAdapter(context).list("provider-accounts.${original.storeScope}")) {
+                "The synthetic acceptance credential remains in encrypted storage; retain its recovery journal."
+            }
+        } finally { accounts.bindSource(null) }
     }
 
     private suspend fun publishAndConfigureSkillApp(
@@ -1190,11 +1245,7 @@ class LocalAppAgentAcceptanceTest {
                     val source = checkNotNull(resources.credentialSource) {
                         "The isolated credential source was lost before secure credential cleanup."
                     }
-                    resources.providerSettings.bindSource(source)
-                    val deleted = resources.providerSettings.deleteCredential(resources.fixtureProvider)
-                    check(deleted.error == null && resources.fixtureProvider.id !in deleted.configuredProviderIds) {
-                        "The synthetic acceptance provider credential could not be deleted from secure storage."
-                    }
+                    removeFixtureProviderAccount(source, resources.fixtureProvider.id, resources.fixtureAccountId)
                     credentialCleanupComplete = true
                 }
             }
@@ -1208,7 +1259,6 @@ class LocalAppAgentAcceptanceTest {
             collectCleanupFailure {
                 if (resources.appAgentHostTouched) resources.apps.agentHost(JSONObject().put("op", "catalog"))
             }
-            collectCleanupFailure { resources.providerSettings.bindSource(null) }
             collectCleanupFailure {
                 resources.providerSettings.persistProviders(ProviderKind.Llm, providerRowsToPersist)
             }
@@ -1224,7 +1274,6 @@ class LocalAppAgentAcceptanceTest {
                     resources.originalDefaultModel, resources.providerSettings.engineLaunchConfig().defaultModel)
             }
             collectCleanupFailure { resources.credentialSource?.close() }
-            collectCleanupFailure { resources.providerSettings.close() }
 
             val rawProviderRowsToRestore = if (credentialCleanupComplete) {
                 resources.originalProvidersLlmRaw
@@ -1456,7 +1505,7 @@ class LocalAppAgentAcceptanceTest {
         return ref
     }
 
-    private suspend fun removeInterruptedSkillFixtureProvider(providerId: String) {
+    private suspend fun removeInterruptedSkillFixtureProvider(providerId: String, accountId: String) {
         check(providerId.startsWith("agui-fixture-")) {
             "Interrupted fixture cleanup only accepts the exact synthetic provider namespace."
         }
@@ -1502,12 +1551,7 @@ class LocalAppAgentAcceptanceTest {
                 reuseProcessSource = false,
             ) as? com.lingxi.code.conversation.EngineConversationSource
                 ?: error("Could not create an isolated native source to remove the interrupted fixture credential.")
-            providerSettings.bindSource(credentialSource)
-            val deleted = providerSettings.deleteCredential(checkNotNull(credentialProvider))
-            check(deleted.error == null && providerId !in deleted.configuredProviderIds) {
-                "The interrupted Skill fixture credential could not be deleted from secure storage."
-            }
-            providerSettings.bindSource(null)
+            removeFixtureProviderAccount(credentialSource, providerId, accountId)
             val restoredProviders = llmProviders.filterNot { it.id == providerId }
             rowsForRestore = restoredProviders
             providerSettings.persistProviders(ProviderKind.Llm, restoredProviders)
@@ -1521,38 +1565,30 @@ class LocalAppAgentAcceptanceTest {
             cleanupComplete = true
         } finally {
             try {
-                providerSettings.bindSource(null)
+                credentialSource?.close()
             } finally {
-                try {
-                    credentialSource?.close()
-                } finally {
-                    try {
-                        providerSettings.close()
-                    } finally {
-                        val restoredRaw = if (cleanupComplete) {
-                            rawProviderRowsWithoutFixture(
-                                originalProvidersLlmRaw,
-                                providerId,
-                                requirePresent = fixtureProviderRowPresent,
-                            )
-                        } else if (fixtureProviderRowPresent) {
-                            originalProvidersLlmRaw
-                        } else {
-                            rawProviderRowsWithFixture(originalProvidersLlmRaw, checkNotNull(credentialProvider))
-                        }
-                        val restoredRawPresent = if (cleanupComplete) {
-                            originalProvidersLlmPresent && restoredRaw != null
-                        } else {
-                            originalProvidersLlmPresent || restoredRaw != null
-                        }
-                        restoreProviderSettingsRawValues(
-                            providersPresent = restoredRawPresent,
-                            providersRaw = restoredRaw,
-                            audioRegionPresent = originalAudioProviderRegionPresent,
-                            audioRegionRaw = originalAudioProviderRegionRaw,
-                        )
-                    }
+                val restoredRaw = if (cleanupComplete) {
+                    rawProviderRowsWithoutFixture(
+                        originalProvidersLlmRaw,
+                        providerId,
+                        requirePresent = fixtureProviderRowPresent,
+                    )
+                } else if (fixtureProviderRowPresent) {
+                    originalProvidersLlmRaw
+                } else {
+                    rawProviderRowsWithFixture(originalProvidersLlmRaw, checkNotNull(credentialProvider))
                 }
+                val restoredRawPresent = if (cleanupComplete) {
+                    originalProvidersLlmPresent && restoredRaw != null
+                } else {
+                    originalProvidersLlmPresent || restoredRaw != null
+                }
+                restoreProviderSettingsRawValues(
+                    providersPresent = restoredRawPresent,
+                    providersRaw = restoredRaw,
+                    audioRegionPresent = originalAudioProviderRegionPresent,
+                    audioRegionRaw = originalAudioProviderRegionRaw,
+                )
             }
         }
         val restoredProviders = checkNotNull(rowsForRestore) {
@@ -1574,11 +1610,14 @@ class LocalAppAgentAcceptanceTest {
     @Test fun cleanupInterruptedSkillFixtureProvider() = runBlocking<Unit> {
         val providerId = InstrumentationRegistry.getArguments().getString("fixtureCleanupProviderId")
             ?: error("Pass the exact interrupted test-fixture provider ID for cleanup.")
+        val accountId = InstrumentationRegistry.getArguments().getString("fixtureCleanupAccountId")
+            ?: error("Pass the exact interrupted test-fixture account UUID for cleanup.")
         val journal = File(context.filesDir, "ag-ui-android-skill-fixture-provider.json")
         if (journal.isFile) {
             assertEquals(providerId, JSONObject(journal.readText()).getString("providerId"))
+            assertEquals(accountId, JSONObject(journal.readText()).getString("accountId"))
         }
-        removeInterruptedSkillFixtureProvider(providerId)
+        removeInterruptedSkillFixtureProvider(providerId, accountId)
         if (journal.isFile) {
             check(journal.delete() || !journal.exists()) {
                 "The interrupted Skill fixture journal could not be cleared after secure cleanup."

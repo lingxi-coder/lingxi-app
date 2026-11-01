@@ -43,7 +43,6 @@ object HeadlessEngineFactory {
             context = appContext,
             scenario = NativeEngineScenario.ScheduledHeadless,
             apiBase = environment.apiBase,
-            apiKey = environment.apiKey,
             model = environment.model.ifBlank { providerLaunch.defaultModel },
             providerProfilesJson = providerLaunch.providerProfilesJson,
             routingJson = providerLaunch.routingJson,

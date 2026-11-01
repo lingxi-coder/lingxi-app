@@ -69,7 +69,7 @@ test('new sessions show the welcome and editable draft before the engine is read
       });
     });
 
-    for (const key of ['bootstrapWelcome', 'bootstrapEditable', 'bootstrapBlocked', 'pendingWelcome', 'pendingEditable', 'pendingBlocked', 'draftPreserved', 'connectedSend', 'failureRestoresDraft']) assert.equal(result[key], true, key);
+    for (const key of ['bootstrapWelcome', 'bootstrapEditable', 'bootstrapBlocked', 'temporaryReason', 'automaticRecovery', 'recoveryPreservesDraft', 'pendingWelcome', 'pendingEditable', 'pendingBlocked', 'draftPreserved', 'connectedSend', 'failureRestoresDraft']) assert.equal(result[key], true, key);
 
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');

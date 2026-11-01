@@ -10,7 +10,6 @@ private actor AdminRoundtripListener: IosEventListener {
 
     func onEvent(event: ClientEvent) async { events.append(event) }
     func onWorkflowProgress(originSessionId: String, taskId: String, runId: String, progress: WorkflowProgressDto) async {}
-    func onWorkflowProgress(taskId: String, runId: String, progress: WorkflowProgressDto) async {}
     func clear() { events.removeAll(keepingCapacity: true) }
     func pop() -> ClientEvent? { events.isEmpty ? nil : events.removeFirst() }
 }
@@ -21,7 +20,9 @@ final class NativeAdminEngineRoundtripTests: XCTestCase {
     func testKeylessAdminCatalogsAndCorrelatedHookValidationReturnThroughNativeCallbacks() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("native-admin-\(UUID().uuidString)", isDirectory: true)
-        let workspace = root.appendingPathComponent("Projects/\(UUID().uuidString.lowercased())/workspace", isDirectory: true)
+        let directories = MobileUserStorage.directories(managedRoot: root.appendingPathComponent("runtime", isDirectory: true).path)
+        let workspace = URL(fileURLWithPath: directories.projects, isDirectory: true)
+            .appendingPathComponent("\(UUID().uuidString.lowercased())/workspace", isDirectory: true)
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         try await exercise(root: root, workspace: workspace)
@@ -41,12 +42,12 @@ final class NativeAdminEngineRoundtripTests: XCTestCase {
             appAgentHost: false,
             brandId: directories.brandId, linuxUser: directories.linuxUser,
             configDirName: directories.configDirName, nativeConfigHome: directories.configHome,
-            apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code,
+            apiBase: "https://invalid.example", model: "", sessionMode: .code,
             visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: workspace.path,
             projectAdditionalDirectories: [],
             projectMountGrants: [],
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
-            mobileLinux: nil,
+            mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: root),
             physicalMemoryBytes: 0, hostEnvironment: nil),
             listener: listener, mediaHost: mediaHost, share: ShareImpl(),
             notifications: NotificationImpl(), clipboard: ClipboardImpl(),

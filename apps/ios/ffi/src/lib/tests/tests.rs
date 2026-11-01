@@ -50,7 +50,6 @@ fn launch_config_with_project_mounts(
         .unwrap()
         .config_home,
         api_base: String::new(),
-        api_key: String::new(),
         model: String::new(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
         vision_delegation_enabled: false,
@@ -776,7 +775,6 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
         config_dir_name: paths.config_dir_name.clone(),
         native_config_home: paths.config_home.clone(),
         api_base: "https://example.invalid".to_string(),
-        api_key: "sk-test".to_string(),
         model: "claude-test".to_string(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
         vision_delegation_enabled: false,
@@ -801,7 +799,6 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
         workspace.canonicalize().expect("canonical workspace")
     );
     assert_eq!(cfg.api_base, "https://example.invalid");
-    assert_eq!(cfg.api_key, "sk-test");
     assert_eq!(cfg.default_model, "claude-test");
     assert!(cfg.startup_catalog.is_some());
     assert!(!cfg.vision_delegation_enabled);
@@ -851,7 +848,6 @@ fn ios_host_environment_maps_stable_native_facts_without_model_state() {
         config_dir_name: paths.config_dir_name.clone(),
         native_config_home: paths.config_home.clone(),
         api_base: String::new(),
-        api_key: String::new(),
         model: String::new(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
         vision_delegation_enabled: true,
@@ -906,7 +902,6 @@ fn ios_provider_only_app_agent_uses_native_brand_config_without_mobile_linux_set
         config_dir_name: paths.config_dir_name.clone(),
         native_config_home: paths.config_home.clone(),
         api_base: String::new(),
-        api_key: String::new(),
         model: String::new(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
         vision_delegation_enabled: false,

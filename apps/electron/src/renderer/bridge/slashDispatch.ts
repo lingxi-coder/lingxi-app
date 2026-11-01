@@ -43,8 +43,6 @@ export interface DesktopCommandContext {
   clearSession(name?: string): Promise<void>;
   forceCompact(instructions?: string): Promise<void>;
   copyLastResponse(): Promise<boolean>;
-  login(): Promise<void>;
-  logout(): Promise<void>;
   reloadPlugins(): Promise<void>;
   openTasks(): Promise<void>;
   showHelp(): void;

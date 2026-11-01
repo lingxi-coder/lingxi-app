@@ -1,3 +1,4 @@
+import { fixtureAccountSnapshot } from './provider-accounts-mock';
 import { useCallback, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SettingsScreen } from '../../src/renderer/components/settings/SettingsScreen';
@@ -80,7 +81,9 @@ function Fixture() {
     activeSession: { sessionId, projectPath: sessionId === 'fixture' ? '/fixture' : '/other-project' }, connected: true, sessionLoading: false,
     settingsSnapshotEvent: { type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}', layers_json: '{"user":{},"project":{},"local":{}}' },
     refreshSettingsSnapshot: async () => {},
-    bootstrap: { settings: {}, workspace: {}, providerCredentials: [{ providerId: 'fixture', configured: true }] },
+    bootstrap: { settings: {}, workspace: {}, providerAccountSnapshot: { ...fixtureAccountSnapshot(['fixture']),
+      modelAvailability: Array.from({ length: 72 }, (_, index) => ({ providerId: 'fixture', executionBindingId: 'fixture', modelId: `model-${index}`,
+        eligibleAccountIds: ['00000000-0000-4000-8000-000000000001'], confirmedAccountIds: [], unverifiedAccountIds: ['00000000-0000-4000-8000-000000000001'], forbiddenAccountIds: [] })) } },
     desktop: { providerModelCatalog: [{ provider_id: 'fixture', provider_label: 'Configured provider',
       models: Array.from({ length: 72 }, (_, index) => ({ model_id: `model-${index}`, display_name: `Model ${String(index).padStart(2, '0')}`, fusion_analyst_capable: true })) }] },
     updateEngineSettings: async () => {}, fusionAdmin,

@@ -32,6 +32,7 @@ branding.workspace = true
 harness-runtime = { workspace = true, default-features = true, features = ["desktop"] }
 # The CLI's provider-key and credential commands use the shared engine store.
 secret = { workspace = true }
+provider-config = { workspace = true }
 # F2-01: `harness_runtime::desktop::build` takes an `Arc<dyn client_adapter::PermissionRequestSink>`
 # whose method carries a `client_protocol::permission::PermissionRequest`. The CLI
 # defines a no-op sink (it opts into `NoOpPermissionGate`), so it names both

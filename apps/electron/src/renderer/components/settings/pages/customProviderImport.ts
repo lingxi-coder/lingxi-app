@@ -102,22 +102,6 @@ function validateConnections(draft: CustomProviderDraft): string | null {
   return null;
 }
 
-/**
- * Whether authentication is satisfied at the CONNECTION level.
- *
- * `addProviderConnection` moves `apiKeyEnv` down onto the connections, so a
- * multi-connection provider legitimately has none at provider level. Demanding
- * one there rejected a provider whose every connection is authenticated.
- */
-export function connectionsCarryAuth(draft: CustomProviderDraft): boolean {
-  const connections = Array.isArray(draft.connections) ? draft.connections : [];
-  if (!connections.length) return false;
-  return connections.every((connection) =>
-    nonempty((connection as Record<string, unknown>).apiKeyEnv) ||
-    (Array.isArray((connection as Record<string, unknown>).credentialIds) &&
-      ((connection as Record<string, unknown>).credentialIds as unknown[]).length > 0));
-}
-
 export function validateCustomProvider(draft: CustomProviderDraft): string | null {
   // A provider with `connections` is validated CONNECTION BY CONNECTION below;
   // the provider entry itself only supplies defaults, so it need not satisfy
@@ -288,18 +272,17 @@ export function parseProviderImport(text: string, existing: Record<string, Custo
   }
   return result;
 }
-export function validateImportEntry(entry: ProviderImportEntry, options: { credentialConfigured?: boolean } = {}): string | null {
+export function validateImportEntry(entry: ProviderImportEntry): string | null {
   const issue = validateProfileName(entry.name) ?? entry.diagnostics.find(d => d.severity === 'error')?.message ?? validateCustomProvider(trimProviderDraft(entry.draft));
   if (issue) return issue;
-  if (entry.draft.type !== 'bedrock-claude' && !nonempty(entry.apiKey) && !nonempty(entry.draft.apiKeyEnv) && !connectionsCarryAuth(entry.draft) && !options.credentialConfigured) return tr('desktop_settings_fc019e5232');
   return null;
 }
-export function mergeProviderImport(current: Record<string, CustomProviderDraft>, entries: ProviderImportEntry[], options: { credentialConfigured?: (name: string) => boolean } = {}): { providers: Record<string, CustomProviderDraft>; credentials: Record<string, string> } {
+export function mergeProviderImport(current: Record<string, CustomProviderDraft>, entries: ProviderImportEntry[]): { providers: Record<string, CustomProviderDraft>; credentials: Record<string, string> } {
   const selected = entries.filter(entry => entry.selected);
   if (!selected.length) throw new Error(tr('desktop_settings_9d9db82aa8'));
   const names = new Set<string>();
   for (const entry of selected) {
-    const error = validateImportEntry(entry, { credentialConfigured: options.credentialConfigured?.(entry.name) });
+    const error = validateImportEntry(entry);
     if (error) throw new Error(error);
     if (names.has(entry.name)) throw new Error(tr('desktop_settings_6d23eca32d'));
     names.add(entry.name);

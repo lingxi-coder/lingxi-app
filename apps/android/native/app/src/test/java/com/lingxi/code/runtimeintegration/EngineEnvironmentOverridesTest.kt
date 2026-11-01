@@ -5,7 +5,7 @@ import org.junit.Test
 
 class EngineEnvironmentOverridesTest {
     @Test
-    fun readsOnlyTheThreeSupportedDevelopmentOverrides() {
+    fun readsOnlyEndpointAndModelDevelopmentOverrides() {
         val overrides = resolveEngineEnvironmentOverrides(
             mapOf(
                 "ANTHROPIC_API_KEY" to "fixture-key",
@@ -15,7 +15,6 @@ class EngineEnvironmentOverridesTest {
             ),
         )
 
-        assertEquals("fixture-key", overrides.apiKey)
         assertEquals("https://proxy.example.test", overrides.apiBase)
         assertEquals("claude-opus", overrides.model)
     }
@@ -24,7 +23,6 @@ class EngineEnvironmentOverridesTest {
     fun missingEnvironmentValuesRemainEmptyForCurrentProviderConfiguration() {
         val overrides = resolveEngineEnvironmentOverrides(emptyMap())
 
-        assertEquals("", overrides.apiKey)
         assertEquals("", overrides.apiBase)
         assertEquals("", overrides.model)
     }
@@ -39,7 +37,7 @@ class EngineEnvironmentOverridesTest {
         )
 
         assertEquals(
-            "EngineEnvironmentOverrides(apiBaseConfigured=true, apiKeyConfigured=true, modelConfigured=false)",
+            "EngineEnvironmentOverrides(apiBaseConfigured=true, modelConfigured=false)",
             overrides.toString(),
         )
     }

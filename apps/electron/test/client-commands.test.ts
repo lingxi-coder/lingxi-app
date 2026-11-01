@@ -40,9 +40,7 @@ test('the guard can actually fail', () => {
 test('the shared definition covers every newly-added command and listing kind', () => {
   const shared = readFileSync(join(root, 'src/shared/clientCommands.ts'), 'utf8');
   const newCommands = [
-    'login',
-    'logout',
-    'force_compact',
+        'force_compact',
     'list_session_agents',
     'load_session_agent_transcript',
     'initialize_proactivity',
@@ -59,7 +57,7 @@ test('the shared definition covers every newly-added command and listing kind', 
   for (const name of newCommands) {
     assert.ok(shared.includes(`'${name}'`), `expected AllowedClientCommand to mention '${name}'`);
   }
-  const newListingKinds = ['auth', 'settings', 'mcp', 'skills', 'hooks', 'agents'];
+  const newListingKinds = ['settings', 'mcp', 'skills', 'hooks', 'agents'];
   for (const kind of newListingKinds) {
     assert.ok(shared.includes(`'${kind}'`), `expected refresh_listings.which to mention '${kind}'`);
   }

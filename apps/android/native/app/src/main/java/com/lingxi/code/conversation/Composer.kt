@@ -85,6 +85,9 @@ import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.ModelProviderStatus
 import com.lingxi.code.settings.ModelRecentsStore
+import com.lingxi.code.settings.ProviderAccountModelAvailability
+import com.lingxi.code.settings.accountModelPermissionLabel
+import com.lingxi.code.settings.findModelAvailability
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.voiceHold
 
@@ -143,10 +146,12 @@ fun Composer(
     inputEnabled: Boolean = enabled,
     /** True when no enabled Provider/model choice has been persisted yet. */
     modelSetupRequired: Boolean = false,
+    modelAvailabilityNotice: String? = null,
     /** Opens the LLM Provider settings page from the chip or send action. */
     onOpenModelSettings: () -> Unit = {},
     /** Current settings/credential state keyed by the engine provider profile. */
     modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
+    accountModelAvailability: List<ProviderAccountModelAvailability> = emptyList(),
     remoteModelSelection: Boolean = false,
     /** Opens a specific provider editor, or the provider list when id is null. */
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
@@ -435,7 +440,9 @@ fun Composer(
                 ComposerContextWindow(contextUsage, model.details?.contextBudget?.effectiveInputBudget, model.details)
                 ModelChip(
                     model = model, models = availableModels, modelSetupRequired = modelSetupRequired,
+                    modelAvailabilityNotice = modelAvailabilityNotice,
                     onOpenModelSettings = onOpenModelSettings, providerStatuses = modelProviderStatuses,
+                    accountAvailability = accountModelAvailability,
                     remoteModelSelection = remoteModelSelection,
                     onOpenProviderSettings = onOpenProviderSettings, onModelChange = onModelChange,
                     reasoning = reasoning, onReasoningChange = onReasoningChange,
@@ -531,8 +538,10 @@ private fun ModelChip(
     model: ModelOption,
     models: List<ModelOption>,
     modelSetupRequired: Boolean,
+    modelAvailabilityNotice: String?,
     onOpenModelSettings: () -> Unit,
     providerStatuses: List<ModelProviderStatus>,
+    accountAvailability: List<ProviderAccountModelAvailability>,
     remoteModelSelection: Boolean,
     onOpenProviderSettings: (String?) -> Unit,
     onModelChange: (ModelOption) -> Unit,
@@ -545,8 +554,14 @@ private fun ModelChip(
     var open by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var selectedDetails by remember { mutableStateOf<CatalogModelDetails?>(null) }
-    val visibleModels = remember(models, providerStatuses) {
-        EngineModelCatalog.visibleModels(models, providerStatuses)
+    val visibleModels = remember(models, providerStatuses, accountAvailability) {
+        val projectedIds = accountAvailability.map { "${it.executionBindingId}/${it.modelId}" }
+        val projectedModels = EngineModelCatalog.options(projectedIds.filter { id -> models.none { it.id == id } })
+        val visibility = providerStatuses.map { provider ->
+            val hostIds = accountAvailability.filter { it.executionBindingId == provider.profileId }.map { it.modelId }
+            provider.copy(catalogModelIds = provider.catalogModelIds?.let { (it + hostIds).distinct() })
+        }
+        EngineModelCatalog.visibleModels(models + projectedModels, visibility)
     }
     val filteredModels = remember(visibleModels, query) { EngineModelCatalog.filter(visibleModels, query) }
     val groups = remember(filteredModels) { EngineModelCatalog.groups(filteredModels) }
@@ -566,17 +581,18 @@ private fun ModelChip(
         }
     }
 
-    val modelDescription = if (modelSetupRequired) stringResource(R.string.composer_setup_model)
+    val firstSetup = modelSetupRequired && modelAvailabilityNotice == null
+    val modelDescription = modelAvailabilityNotice ?: if (firstSetup) stringResource(R.string.composer_setup_model)
         else "${model.name}, $reasoningLabel"
     Box {
         IconButton(
             onClick = {
-                if (modelSetupRequired) onOpenModelSettings() else open = true
+                if (firstSetup) onOpenModelSettings() else open = true
             },
             modifier = Modifier
                 .size(48.dp)
                 .then(
-                    if (modelSetupRequired) Modifier.testTag(UiTags.MODEL_SETUP_CHIP)
+                    if (firstSetup) Modifier.testTag(UiTags.MODEL_SETUP_CHIP)
                     else Modifier.testTag(UiTags.MODEL_PICKER_CHIP),
                 )
                 .semantics { contentDescription = modelDescription },
@@ -621,7 +637,7 @@ private fun ModelChip(
                         items(recents, key = { "recent:${it.id}" }) { m ->
                             ModelPickerRow(
                                 model = m, active = m.id == model.id,
-                                providerStatuses = providerStatuses, remoteModelSelection = remoteModelSelection,
+                                providerStatuses = providerStatuses, accountAvailability = accountAvailability, remoteModelSelection = remoteModelSelection,
                                 onShowDetails = { selectedDetails = it },
                                 onSelected = {
                                     open = false
@@ -647,7 +663,7 @@ private fun ModelChip(
                         items(group.models, key = { "provider:${it.id}" }) { m ->
                             ModelPickerRow(
                                 model = m, active = m.id == model.id,
-                                providerStatuses = providerStatuses, remoteModelSelection = remoteModelSelection,
+                                providerStatuses = providerStatuses, accountAvailability = accountAvailability, remoteModelSelection = remoteModelSelection,
                                 onShowDetails = { selectedDetails = it },
                                 onSelected = {
                                     open = false
@@ -689,6 +705,7 @@ private fun ModelPickerRow(
     model: ModelOption,
     active: Boolean,
     providerStatuses: List<ModelProviderStatus>,
+    accountAvailability: List<ProviderAccountModelAvailability>,
     remoteModelSelection: Boolean,
     onShowDetails: (CatalogModelDetails) -> Unit,
     onSelected: () -> Unit,
@@ -696,18 +713,25 @@ private fun ModelPickerRow(
 ) {
     val t = LingXiTheme.palette
     val providerStatus = EngineModelCatalog.providerStatus(model.providerId, providerStatuses)
-    val canSelect = modelPickerCanSelect(remoteModelSelection, providerStatus)
+    val availability = findModelAvailability(accountAvailability, model.id)
+    val canSelect = availability?.hasEligibleAccounts == true
     val currentLabel = stringResource(R.string.composer_current_model)
     ListItem(
         headlineContent = { Text(model.name) },
         supportingContent = {
-            Text(model.id.substringAfter('/'), maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Column {
+                Text(model.id.substringAfter('/'), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(accountModelPermissionLabel(availability?.permissionStatus ?: "unverified"))
+                if (!canSelect) {
+                    Text(stringResource(R.string.provider_account_model_no_eligible))
+                }
+            }
         },
         leadingContent = { RadioButton(selected = active, onClick = null, enabled = canSelect) },
         trailingContent = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 model.details?.let { details -> ModelDetailsInfoButton(onClick = { onShowDetails(details) }) }
-                if (!canSelect) Text(
+                if (!canSelect && !remoteModelSelection) Text(
                     stringResource(R.string.composer_configure_button),
                     color = t.accent,
                     style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
@@ -717,7 +741,7 @@ private fun ModelPickerRow(
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.fillMaxWidth()
             .selectable(selected = active, role = Role.RadioButton) {
-                if (canSelect) onSelected() else onOpenProviderSettings(providerStatus?.settingsId)
+                if (canSelect) onSelected() else if (!remoteModelSelection) onOpenProviderSettings(providerStatus?.settingsId)
             }
             .semantics { if (active) contentDescription = currentLabel },
     )
@@ -738,9 +762,3 @@ private fun ModelSearchField(
             .testTag(UiTags.MODEL_PICKER_SEARCH),
     )
 }
-
-
-
-/** Remote model commands are validated by the desktop that supplied the catalog. */
-internal fun modelPickerCanSelect(remote: Boolean, provider: ModelProviderStatus?): Boolean =
-    remote || provider?.canSelect == true

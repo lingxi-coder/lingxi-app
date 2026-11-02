@@ -232,6 +232,7 @@ export class SessionRuntime {
   private readonly queuedModUiRequests: Array<{ send(): void; reject(error: Error): void }> = [];
   private archiving = false;
   private changingWorkspace = false;
+  private audioOperations = 0;
   private activeCronExecutions = 0;
   private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
   private readonly pendingScheduledTurns = new Map<string, { resolve: (summary: string) => void; reject: (error: Error) => void }>();
@@ -865,6 +866,21 @@ export class SessionRuntime {
     return () => { this.archiving = false; };
   }
 
+  /** Keep an admitted audio operation attached to this runtime incarnation. */
+  retainAudioOperation(): () => void {
+    if (this.disposed || this.state.status !== 'connected' || this.isStarting || this.resumeOperationInProgress || this.ownedSessionResumeRequired
+      || this.archiving || this.changingWorkspace) throw new Error('This chat is changing; audio cannot start yet.');
+    this.audioOperations++;
+    this.notifyActivityChanged();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.audioOperations--;
+      this.notifyActivityChanged();
+    };
+  }
+
   /** Fence prompts, restarts, eviction and other controls throughout host migration. */
   beginWorkspaceChange(): () => void {
     if (this.ownedSessionResumeRequired && !this.resumeOperationInProgress) throw new Error('Resume this chat before changing its directory.');
@@ -1127,8 +1143,10 @@ export class SessionRuntime {
     return this.activeTurn || this.pendingPromptHydrations.size > 0 || this.pendingModelSwitch !== undefined;
   }
 
+  get hasActiveAudio(): boolean { return this.audioOperations > 0; }
+
   get hasActiveWork(): boolean {
-    return this.resumeOperationInProgress || this.changingWorkspace || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.pendingSlashCommands.size > 0 || this.hasActiveAgents || this.pendingInteractions > 0;
+    return this.hasActiveAudio || this.resumeOperationInProgress || this.changingWorkspace || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.pendingSlashCommands.size > 0 || this.hasActiveAgents || this.pendingInteractions > 0;
   }
 
   private currentResumeOwner(): PendingSessionResume | null {
@@ -1777,6 +1795,7 @@ export class SessionRuntime {
       this.assertNoLiveSideChats();
       await beforeRestart?.();
       this.assertNoLiveSideChats();
+      if (this.audioOperations > 0) throw new Error('Stop audio before restarting this chat.');
       if (this.draftSessionMode !== undefined) this.draftModeRestorationRequired = true;
       this.setState({ status: 'restarting' });
       try {

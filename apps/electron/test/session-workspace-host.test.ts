@@ -14,6 +14,9 @@ import type { ProjectSessionCatalogRow } from '../src/main/session-catalog';
 import { SettingsStore } from '../src/main/settings';
 import { TerminalManager } from '../src/main/terminal';
 import type { SessionCatalogScope, SessionOpenSelection } from '../src/shared/sessionWorkspace';
+import { CH_NATIVE_AUDIO_FLOW_LEASE } from '../src/shared/nativeAudio';
+import { CH_REALTIME_AUDIO_COMMAND } from '../src/shared/realtimeAudio';
+import { audioConfigurationDefaults } from '../src/shared/generatedAudioConfiguration';
 
 const sessionId = '11111111-2222-4333-8444-555555555555';
 const otherId = '22222222-3333-4444-8555-666666666666';
@@ -30,6 +33,8 @@ class WorkspaceRuntime {
   runtimeControls: string | undefined;
   busy = false;
   leased = false;
+  audioOperations = 0;
+  realtimeAudioSupported = true;
   reads = 0;
   leases = 0;
   releases = 0;
@@ -41,9 +46,19 @@ class WorkspaceRuntime {
     this.transcriptPath = join(projectPath, `${sessionId}.jsonl`);
     this.promptDirectories = [projectPath];
   }
-  get hasActiveWork(): boolean { return this.busy || this.leased; }
+  get hasActiveWork(): boolean { return this.busy || this.leased || this.audioOperations > 0; }
+  retainAudioOperation(): () => void {
+    if (this.leased) throw new Error('This chat is changing; audio cannot start yet.');
+    this.audioOperations++;
+    let released = false;
+    return () => { if (!released) { released = true; this.audioOperations--; } };
+  }
+  onRealtimeAudioEvent(): () => void { return () => {}; }
+  startRealtimeAudio(): void {}
+  realtimeAudioInput(): void {}
+  stopRealtimeAudio(): void {}
   beginWorkspaceChange(): () => void {
-    if (this.busy || this.leased) throw new Error('Wait for active work before changing this chat’s directory.');
+    if (this.hasActiveWork) throw new Error('Wait for active work before changing this chat’s directory.');
     this.leased = true; this.leases++;
     let released = false;
     return () => { if (!released) { released = true; this.leased = false; this.releases++; } };
@@ -101,6 +116,7 @@ function hostFixture(t: TestContext) {
     terminals: [] as Array<{ before: SessionRef; after: SessionRef }>,
   };
   const bridge = {
+    registerWindow() {}, registerIpc() {},
     get: (id: string) => runtimes.get(id),
     require: (requested: SessionRef) => {
       const runtime = runtimes.get(requested.sessionId);
@@ -108,6 +124,7 @@ function hostFixture(t: TestContext) {
       return runtime;
     },
     isProjectClosing: () => false,
+    retainBackgroundSession: () => () => {},
     hasActiveWork: (projectPath: string) => [...runtimes.values()].some((runtime) => runtime.projectPath === projectPath && runtime.hasActiveWork),
     setSessionDirectoryGrants: (id: string, paths: readonly string[]) => { grants.set(id, [...paths]); },
     setSessionProjectRoot: (id: string, projectPath: string) => { projectRoots.set(id, projectPath); },
@@ -156,8 +173,9 @@ function hostFixture(t: TestContext) {
     pickDirectory: async (path) => { calls.picks.push(path); return undefined; },
     trustDirectory: async (path) => { calls.trust.push(path); return true; },
   };
+  const handlers = new Map<string, (...args: any[]) => any>();
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any,
-    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, dialogs);
+    { handle: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), removeHandler() {} } as any, undefined, undefined, undefined, dialogs);
   // The test uses the real orchestration and store; unrelated provider and OS
   // bootstrap services are replaced by their current persisted observations.
   (host as any).bootstrap = () => ({ settings: settings.getPublic(), activeSession: settings.getPublic().activeSession,
@@ -170,7 +188,7 @@ function hostFixture(t: TestContext) {
   };
   host.attachTerminals(terminals);
   t.after(async () => { host.dispose(); await terminals.dispose(); rmSync(root, { recursive: true, force: true }); });
-  return { root, source, target, userData, ref, settings, original, runtimes, grants, projectRoots, promptDirectories, calls, bridge, row, catalog, dialogs, host };
+  return { root, source, target, userData, ref, settings, original, runtimes, grants, projectRoots, promptDirectories, calls, bridge, row, catalog, dialogs, host, handlers };
 }
 
 test('opening a pasted uppercase UUID retains the canonical runtime and persisted owner', async t => {
@@ -1050,6 +1068,70 @@ test('a busy current copy blocks switching to an exact selected copy with the sa
   assert.deepEqual(f.calls.trust, []);
   assert.equal(f.runtimes.get(sessionId), f.original);
   assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);
+});
+
+test('an admitted standard audio operation prevents replacing its owner but allows another UUID to open', async t => {
+  const f = hostFixture(t), selected = f.row(f.target);
+  f.catalog.select = async (path, id, selection) => id === sessionId ? selected : f.row(path, id);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { id: 1, mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  f.host.registerWindow(sender as any, frame.url); f.host.registerIpc();
+  const event = { sender, senderFrame: frame }, lease = f.handlers.get(CH_NATIVE_AUDIO_FLOW_LEASE)!;
+  const leaseId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  lease(event, sessionId, leaseId, true);
+  await assert.rejects(f.host.openSessionAndActivate(f.ref, { scope: 'repository', transcriptPath: selected.path }), /active work/);
+  await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), /active work/);
+  assert.deepEqual(f.calls.close, []); assert.deepEqual(f.original.changes, []);
+  assert.equal(f.runtimes.get(sessionId), f.original);
+  await f.host.openSessionAndActivate({ projectPath: f.source, sessionId: otherId }, { scope: 'current', transcriptPath: f.row(f.source, otherId).path });
+  assert.equal(f.runtimes.get(sessionId), f.original, 'different-session navigation retains the audio owner');
+  lease(event, sessionId, leaseId, false);
+  await f.host.openSessionAndActivate(f.ref, { scope: 'repository', transcriptPath: selected.path });
+  assert.notEqual(f.runtimes.get(sessionId), f.original);
+});
+
+test('an admitted remount prevents a later audio operation from claiming its old owner', async t => {
+  const f = hostFixture(t), selected = f.row(f.target);
+  f.catalog.select = async () => selected;
+  let entered!: () => void, resume!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const waiting = new Promise<void>(resolve => { resume = resolve; });
+  f.dialogs.trustDirectory = async () => { entered(); await waiting; return true; };
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { id: 1, mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  f.host.registerWindow(sender as any, frame.url); f.host.registerIpc();
+  const switching = f.host.openSessionAndActivate(f.ref, { scope: 'repository', transcriptPath: selected.path });
+  await started;
+  assert.throws(() => f.handlers.get(CH_NATIVE_AUDIO_FLOW_LEASE)!({ sender, senderFrame: frame }, sessionId,
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', true), /changing/);
+  resume(); await switching;
+  assert.notEqual(f.runtimes.get(sessionId), f.original);
+});
+
+test('realtime startup and its adopted lane both retain the exact runtime until stopped', async t => {
+  const f = hostFixture(t), selected = f.row(f.target);
+  f.catalog.select = async () => selected;
+  let entered!: () => void, resume!: (value: unknown) => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const readiness = new Promise(resolve => { resume = resolve; });
+  (f.host as any).nativeAudio = { request: () => { entered(); return readiness; }, onEvent: () => () => {} };
+  const getPublic = f.settings.getPublic.bind(f.settings);
+  (f.settings as any).getPublic = () => ({ ...getPublic(), voice: audioConfigurationDefaults() });
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { id: 1, mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  f.host.registerWindow(sender as any, frame.url); f.host.registerIpc();
+  const event = { sender, senderFrame: frame }, command = f.handlers.get(CH_REALTIME_AUDIO_COMMAND)!;
+  const starting = command(event, 'start'); await started;
+  assert.equal(f.original.audioOperations, 1);
+  await assert.rejects(f.host.openSessionAndActivate(f.ref, { scope: 'repository', transcriptPath: selected.path }), /active work/);
+  resume({ snapshot: { realtimeReadiness: { ready: true } } }); await starting;
+  assert.equal(f.original.audioOperations, 1, 'the adopted realtime lane owns the runtime after startup returns');
+  await assert.rejects(f.host.openSessionAndActivate(f.ref, { scope: 'repository', transcriptPath: selected.path }), /active work/);
+  assert.deepEqual(f.calls.close, []);
+  await command(event, 'stop');
+  assert.equal(f.original.audioOperations, 0);
+  await f.host.openSessionAndActivate(f.ref, { scope: 'repository', transcriptPath: selected.path });
+  assert.notEqual(f.runtimes.get(sessionId), f.original);
 });
 
 test('an exact selection already open at the same source and transcript reuses its runtime', async (t) => {

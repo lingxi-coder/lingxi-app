@@ -349,6 +349,11 @@ async function main() {
       await waitFor(webContents, `window.__composerDraftTest.audioFinishCount() === ${finishCount + 1}`);
       assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.audioCancelCount()`), audioCancelCount);
       await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === 'dictated text'`);
+      await waitFor(webContents, `window.__composerDraftTest.audioOwnerEvents().some(event => event.action === 'release')`);
+      const audioOwnerEvents = await webContents.executeJavaScript(`window.__composerDraftTest.audioOwnerEvents()`);
+      assert.deepEqual(audioOwnerEvents.map(event => event.action), ['retain', 'listen', 'finish', 'release']);
+      assert.ok(audioOwnerEvents[0].sessionId && audioOwnerEvents[0].leaseId);
+      assert.ok(audioOwnerEvents.every(event => event.sessionId === audioOwnerEvents[0].sessionId && event.leaseId === audioOwnerEvents[0].leaseId));
       const dictatedText = await webContents.executeJavaScript(`document.querySelector('[aria-label="Prompt"]')?.textContent`);
 
       await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);

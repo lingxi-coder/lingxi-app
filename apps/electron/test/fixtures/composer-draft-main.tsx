@@ -45,6 +45,8 @@ let settlePendingAudioListen: ((result: AudioOperationResultDto) => void) | unde
 let audioCancelCount = 0;
 let audioFinishCount = 0;
 const audioLeases = new Map<string, string>();
+const audioOwnerEvents: Array<{ action: string; sessionId?: string; leaseId?: string }> = [];
+type AudioOwner = { sessionId: string; leaseId: string };
 
 function supportedAudioSnapshot() {
   const snapshot = defaultNativeAudioSnapshot();
@@ -57,7 +59,9 @@ function supportedAudioSnapshot() {
   return snapshot;
 }
 
-function executeAudioOperation(operation: AudioOperationDto): Promise<NativeAudioOperationResponse> {
+function executeAudioOperation(operation: AudioOperationDto, _revision?: number, _configuration?: unknown, owner?: AudioOwner): Promise<NativeAudioOperationResponse> {
+  if (owner && audioLeases.get(owner.sessionId) !== owner.leaseId) throw new Error('Fixture audio execution has no owner');
+  if (owner) audioOwnerEvents.push({ action: operation.type, ...owner });
   audioOperationTypes.push(operation.type);
   if (operation.type === 'listen') {
     return new Promise((resolve) => {
@@ -75,13 +79,17 @@ function executeAudioOperation(operation: AudioOperationDto): Promise<NativeAudi
   return Promise.resolve({ snapshot: supportedAudioSnapshot(), result });
 }
 
-function cancelAudioOperation(): Promise<void> {
+function cancelAudioOperation(owner?: AudioOwner): Promise<void> {
+  if (owner && audioLeases.get(owner.sessionId) !== owner.leaseId) throw new Error('Fixture audio cancellation has no owner');
+  if (owner) audioOwnerEvents.push({ action: 'cancel', ...owner });
   audioCancelCount += 1;
   settlePendingAudioListen?.({ type: 'failed', error: { kind: 'cancelled', message: 'fixture audio was cancelled' } });
   return Promise.resolve();
 }
 
-function finishAudioListen(): Promise<void> {
+function finishAudioListen(owner?: AudioOwner): Promise<void> {
+  if (owner && audioLeases.get(owner.sessionId) !== owner.leaseId) throw new Error('Fixture audio finish has no owner');
+  if (owner) audioOwnerEvents.push({ action: 'finish', ...owner });
   audioFinishCount += 1;
   settlePendingAudioListen?.({ type: 'transcript', text: 'dictated text', language: 'en-US' });
   return Promise.resolve();
@@ -167,6 +175,7 @@ function bridgeFixture(sessionId: string | null, running: boolean, backgroundSta
         if (audioLeases.get(owner) !== lease) throw new Error('Fixture audio lease does not match');
         audioLeases.delete(owner);
       }
+      audioOwnerEvents.push({ action: retain ? 'retain' : 'release', sessionId: owner, leaseId: lease });
     },
     activeSession,
     bootstrap: {
@@ -287,11 +296,12 @@ function Fixture() {
       sendPending: () => sendPending,
       lastSentPrompt: () => lastSentPrompt,
       resolveSend: () => resolvePendingSend?.(),
-      clearAudioRequests: () => { audioRequests.length = 0; audioOperationTypes.length = 0; },
+      clearAudioRequests: () => { audioRequests.length = 0; audioOperationTypes.length = 0; audioOwnerEvents.length = 0; },
       audioRequestTypes: () => audioRequests.map((request) => request.type),
       audioOperationTypes: () => [...audioOperationTypes],
       audioCancelCount: () => audioCancelCount,
       audioFinishCount: () => audioFinishCount,
+      audioOwnerEvents: () => [...audioOwnerEvents],
       setModels: (next) => setModels(next === 'all' ? ALL_MODELS : next),
       modelRefreshCount: () => modelRefreshCount,
       setReady,
@@ -369,6 +379,7 @@ declare global {
       audioOperationTypes(): AudioOperationDto['type'][];
       audioCancelCount(): number;
       audioFinishCount(): number;
+      audioOwnerEvents(): Array<{ action: string; sessionId?: string; leaseId?: string }>;
       setModels(models: string[] | 'all'): void;
       modelRefreshCount(): number;
       setReady(ready: boolean): void;

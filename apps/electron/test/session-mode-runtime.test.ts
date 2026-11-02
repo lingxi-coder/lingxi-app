@@ -360,8 +360,9 @@ test('voice flow retains its owner and provider context across navigation and re
   settings.conversationSpaces.register(source); settings.conversationSpaces.register(target); settings.setActiveSession(source);
   const handlers = new Map<string, (...args: any[]) => any>(), released: string[] = [], contexts: unknown[] = [];
   let cancels = 0, finishes = 0;
-  const bridge = { registerWindow() {}, registerIpc() {}, get: (id: string) => ({ projectPath: path, sessionId: id,
-    audioSessionContext: { sessionId: id, profileId: `profile-${id}` } }),
+  const runtimes = new Map([sessionId, targetId].map(id => [id, { projectPath: path, sessionId: id,
+    audioSessionContext: { sessionId: id, profileId: `profile-${id}` }, retainAudioOperation: () => () => {} }]));
+  const bridge = { registerWindow() {}, registerIpc() {}, get: (id: string) => runtimes.get(id), isProjectClosing: () => false,
     retainBackgroundSession: (ref: { sessionId: string }) => () => released.push(ref.sessionId) };
   const audio = { onEvent: () => () => {}, executeUiAudioOperation: async (_operation: unknown, _window: unknown, _revision: unknown, _override: unknown, context: unknown) => { contexts.push(context); return {}; },
     cancelUiAudioOperations: async () => { cancels++; }, finishUiAudioListen: async () => { finishes++; } };
@@ -383,17 +384,77 @@ test('voice flow retains its owner and provider context across navigation and re
   await cancel(event, owner); await finish(event, owner);
   assert.deepEqual(contexts, [{ session: { sessionId, profileId: `profile-${sessionId}` } }]);
   assert.equal(cancels, 1); assert.equal(finishes, 1);
+  const original = runtimes.get(sessionId)!;
+  runtimes.set(sessionId, { ...original });
+  await assert.rejects(execute(event, { type: 'speak', text: 'replacement' }, undefined, undefined, owner), /owner changed/);
+  runtimes.set(sessionId, original);
   lease(event, sessionId, second, false);
-  assert.deepEqual(released, []);
+  assert.deepEqual(released, [sessionId], 'the completed execute released its own reservation');
   assert.throws(() => lease(event, targetId, second, true), /another conversation/);
   lease(event, sessionId, first, false);
   lease(event, targetId, second, true);
   lease(event, sessionId, first, false);
-  assert.deepEqual(released, [sessionId]);
+  assert.deepEqual(released, [sessionId, sessionId]);
   lease(event, targetId, second, false);
-  assert.deepEqual(released, [sessionId, targetId]);
+  assert.deepEqual(released, [sessionId, sessionId, targetId]);
   await execute(event, { type: 'speak', text: 'current' });
   assert.deepEqual(contexts[1], { session: { sessionId: targetId, profileId: `profile-${targetId}` } });
+});
+
+test('a native operation retains its owner until it settles even if its flow lease is released', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-audio-operation-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId, mode: 'chat' });
+  settings.setActiveSession({ projectPath: path, sessionId });
+  const finished = deferred<any>(), handlers = new Map<string, (...args: any[]) => any>();
+  let reservations = 0;
+  const runtime = { projectPath: path, sessionId, retainAudioOperation: () => { reservations++; return () => { reservations--; }; } };
+  const bridge = { registerWindow() {}, registerIpc() {}, get: () => runtime, isProjectClosing: () => false,
+    retainBackgroundSession: () => () => {} };
+  const audio = { onEvent: () => () => {}, executeUiAudioOperation: () => finished.promise };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+    { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any, undefined, undefined, audio as any);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { id: 7, mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  try {
+    const event = { sender, senderFrame: frame }, leaseId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const lease = handlers.get(CH_NATIVE_AUDIO_FLOW_LEASE)!;
+    lease(event, sessionId, leaseId, true);
+    const executing = handlers.get(CH_NATIVE_AUDIO_OPERATION)!(event, { type: 'listen' }, undefined, undefined, { sessionId, leaseId });
+    assert.equal(reservations, 2);
+    lease(event, sessionId, leaseId, false);
+    assert.equal(reservations, 1);
+    finished.resolve({ result: { type: 'transcript', text: 'done' } }); await executing;
+    assert.equal(reservations, 0);
+  } finally { host.dispose(); }
+});
+
+test('renderer teardown holds the audio runtime until native cancellation is confirmed', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-audio-detach-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId, mode: 'chat' });
+  settings.setActiveSession({ projectPath: path, sessionId });
+  const cancelled = deferred<void>(), handlers = new Map<string, (...args: any[]) => any>();
+  let reservations = 0, background = 0;
+  const runtime = { projectPath: path, sessionId, retainAudioOperation: () => { reservations++; return () => { reservations--; }; } };
+  const bridge = { registerWindow() {}, registerIpc() {}, get: () => runtime, isProjectClosing: () => false,
+    retainBackgroundSession: () => { background++; return () => { background--; }; } };
+  const audio = { onEvent: () => () => {}, cancelUiAudioOperations: () => cancelled.promise };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+    { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any, undefined, undefined, audio as any);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = Object.assign(new EventEmitter(), { id: 7, mainFrame: frame, isDestroyed: () => false, send() {} });
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  try {
+    handlers.get(CH_NATIVE_AUDIO_FLOW_LEASE)!({ sender, senderFrame: frame }, sessionId, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', true);
+    sender.emit('did-start-navigation', {}, frame.url, false, true);
+    assert.equal(reservations, 1); assert.equal(background, 1);
+    cancelled.resolve(undefined); await cancelled.promise; await new Promise(resolve => setImmediate(resolve));
+    assert.equal(reservations, 0); assert.equal(background, 0);
+  } finally { host.dispose(); }
 });
 
 test('a failed latest switch restores the confirmed space after rapid opposing choices', async t => {

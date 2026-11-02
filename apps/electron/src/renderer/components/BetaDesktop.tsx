@@ -1972,6 +1972,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const modelPickerVisibility = bridge.bootstrap?.settings.modelPickerVisibility;
   const dictationOwner = useRef<NativeAudioOwner | null>(null);
   const dictationSessionId = useRef<string | null>(null);
+  const dictationLease = useRef<{ sessionId: string; leaseId: string } | null>(null);
   const autoplayOwner = useRef<NativeAudioOwner | null>(null);
   const autoplaySubscription = useRef<(() => void) | null>(null);
   const activeAudioSessionId = useRef(activeSessionId);
@@ -2557,13 +2558,14 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const cancelStandardListening = useCallback(async () => {
     dictationGeneration.current += 1;
     const owner = dictationOwner.current;
+    const lease = dictationLease.current;
     standardListeningRef.current = false;
     dictationOwner.current = null;
     dictationSessionId.current = null;
     dictationInsertionRange.current = null;
     setVoiceState('idle');
-    if (!audio || !owner) return;
-    try { await bridge.audioCancel(); } catch {}
+    if (!audio || !owner || !lease) return;
+    try { await bridge.audioCancel(lease); } catch {}
   }, [audio, bridge.audioCancel]);
 
   const cancelAutoplay = useCallback(async () => {
@@ -2585,10 +2587,20 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       setAudioGuidance(audioSetupGuidance('unsupported'));
       return;
     }
+    if (dictationLease.current || flowOwnerSessionId.current) {
+      setAudioGuidance(audioSetupGuidance('unavailable', 'Another conversation owns the audio session.'));
+      return;
+    }
+    const ownerSessionId = activeAudioSessionId.current;
+    if (!ownerSessionId) {
+      setAudioGuidance(audioSetupGuidance('unavailable', 'Open a conversation before starting audio.'));
+      return;
+    }
     const editor = input.current;
     dictationInsertionRange.current = editor ? editorSelection(editor).cloneRange() : savedEditorSelection.current?.cloneRange() ?? null;
     const owner = audioOwner('dictation');
-    const ownerSessionId = activeAudioSessionId.current;
+    const lease = { sessionId: ownerSessionId, leaseId: crypto.randomUUID() };
+    dictationLease.current = lease;
     const ownerDraftGeneration = imageDraftGeneration.current;
     dictationOwner.current = owner;
     dictationSessionId.current = ownerSessionId;
@@ -2598,11 +2610,15 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     setAudioGuidance(null);
     setImageNotice(null);
     let preserveFailureState = false;
+    let retained = false;
     try {
+      await bridge.audioRetainFlow(lease.sessionId, lease.leaseId, true);
+      retained = true;
+      if (generation !== dictationGeneration.current) return;
       const response = await bridge.audioExecute({
         type: 'listen',
         language: resolveAudioLanguage(voicePrefs.language, typeof navigator !== 'undefined' ? navigator.language : 'en-US'),
-      }, bridge.bootstrap?.settings.voiceRevision ?? 0);
+      }, bridge.bootstrap?.settings.voiceRevision ?? 0, undefined, lease);
       if (generation !== dictationGeneration.current) return;
       if ((response.result.type === 'failed' || response.result.type === 'failed_without_resource')
         && ownerSessionId !== activeAudioSessionId.current) return;
@@ -2635,20 +2651,27 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     } catch (cause) {
       if (generation === dictationGeneration.current) setAudioGuidance(audioSetupGuidance('unavailable', cause instanceof Error ? cause.message : ''));
     } finally {
-      if (generation === dictationGeneration.current) {
-        standardListeningRef.current = false;
-        dictationOwner.current = null;
-        dictationSessionId.current = null;
-        dictationInsertionRange.current = null;
-        if (!preserveFailureState && ownerSessionId === activeAudioSessionId.current) setVoiceState('idle');
+      try { if (retained) await bridge.audioRetainFlow(lease.sessionId, lease.leaseId, false); }
+      catch (cause) {
+        if (generation === dictationGeneration.current) setAudioGuidance(audioSetupGuidance('unavailable', cause instanceof Error ? cause.message : ''));
+      } finally {
+        if (dictationLease.current === lease) dictationLease.current = null;
+        if (generation === dictationGeneration.current) {
+          standardListeningRef.current = false;
+          dictationOwner.current = null;
+          dictationSessionId.current = null;
+          dictationInsertionRange.current = null;
+          if (!preserveFailureState && ownerSessionId === activeAudioSessionId.current) setVoiceState('idle');
+        }
       }
     }
   };
 
   const finishStandardListening = async () => {
-    if (!standardListeningRef.current) return;
+    const lease = dictationLease.current;
+    if (!standardListeningRef.current || !lease) return;
     try {
-      await bridge.audioFinishListen();
+      await bridge.audioFinishListen(lease);
     } catch (cause) {
       setAudioGuidance(audioSetupGuidance('unavailable', cause instanceof Error ? cause.message : ''));
     }
@@ -2678,7 +2701,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const startFlowMode = useCallback(async () => {
     const sessionId = activeAudioSessionId.current;
     if (!sessionId) return;
-    if (flowOwnerSessionId.current || standardListeningRef.current || autoplayOwner.current) {
+    if (flowOwnerSessionId.current || standardListeningRef.current || dictationLease.current || autoplayOwner.current) {
       setAudioGuidance(audioSetupGuidance('unavailable', 'Another conversation owns the audio session.'));
       return;
     }

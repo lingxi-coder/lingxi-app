@@ -577,7 +577,8 @@ export class HostController {
   private realtimeAudioWindow?: WebContents;
   private realtimeAudioStartingSession?: string;
   private realtimeAudioStartToken?: object;
-  private readonly audioFlowLeases = new Map<WebContents, { sessionId: string; leaseId: string; release: () => void }>();
+  private readonly audioFlowLeases = new Map<WebContents, { sessionId: string; leaseId: string; runtime: SessionRuntime; release: () => void }>();
+  private readonly detachedAudioLeases = new Set<{ release: () => void }>();
   private readonly sessionCatalog: ProjectSessionCatalog;
   private readonly catalogs = new Map<string, ProjectSessionCatalogState>();
   private readonly catalogRequestGenerations = new Map<string, number>();
@@ -783,13 +784,17 @@ export class HostController {
       this.terminalDeliveries.delete(webContents);
     };
     const detachAudio = () => {
-      this.audioFlowLeases.get(webContents)?.release();
+      const lease = this.audioFlowLeases.get(webContents);
       this.audioFlowLeases.delete(webContents);
+      if (lease) this.detachedAudioLeases.add(lease);
       if (this.realtimeAudioWindow === webContents) this.realtimeAudioStartToken = undefined;
       if (this.realtimeAudioWindow === webContents) void this.realtimeAudioController?.stop().catch((error) => {
         this.diagnostics.add('warn', 'host', `realtime audio teardown failed: ${sanitizeDiagnostic(error)}`);
       });
-      void this.nativeAudio?.cancelUiAudioOperations(String(webContents.id), true).catch((error) => {
+      const cancelled = this.nativeAudio?.cancelUiAudioOperations(String(webContents.id), true) ?? Promise.resolve();
+      void cancelled.then(() => {
+        if (lease) { this.detachedAudioLeases.delete(lease); lease.release(); }
+      }).catch((error) => {
         this.diagnostics.add('warn', 'host', `desktop UI audio teardown failed: ${sanitizeDiagnostic(error)}`);
       });
     };
@@ -1612,16 +1617,19 @@ export class HostController {
       if (!this.nativeAudio) throw new Error('native audio is unavailable on this host');
       const owner = this.requireAudioFlowAccess(event.sender, flow);
       const sessionId = owner?.sessionId ?? this.settings.getPublic().activeSession?.sessionId;
-      const runtime = sessionId ? this.bridge.get(sessionId) : undefined;
+      const runtime = owner?.runtime ?? (sessionId ? this.bridge.get(sessionId) : undefined);
       if (owner && !runtime) throw new Error('audio flow session is unavailable');
       const session = runtime?.audioSessionContext;
-      return this.nativeAudio.executeUiAudioOperation(
-        operation,
-        String(event.sender.id),
-        configurationRevision as number | undefined,
-        configurationOverride,
-        { session: session ? { ...session } : undefined },
-      );
+      const release = owner ? this.retainAudioRuntime(owner.runtime) : () => {};
+      try {
+        return await this.nativeAudio.executeUiAudioOperation(
+          operation,
+          String(event.sender.id),
+          configurationRevision as number | undefined,
+          configurationOverride,
+          { session: session ? { ...session } : undefined },
+        );
+      } finally { release(); }
     });
     this.ipc.handle(CH_REALTIME_AUDIO_COMMAND, async (event: IpcMainInvokeEvent, command: unknown) => {
       this.assertSender(event);
@@ -1634,7 +1642,7 @@ export class HostController {
         retainRuntime: (runtime) => {
           const owned = this.bridge.get(runtime.sessionId);
           if (owned !== runtime) throw new Error('The realtime audio session is no longer available.');
-          return this.bridge.retainBackgroundSession({ projectPath: owned.projectPath, sessionId: owned.sessionId });
+          return this.retainAudioRuntime(owned);
         },
         publish: (state) => { if (this.realtimeAudioWindow && !this.realtimeAudioWindow.isDestroyed()) this.realtimeAudioWindow.send(CH_REALTIME_AUDIO_STATE, state); },
       });
@@ -1652,7 +1660,7 @@ export class HostController {
         const configuration = this.settings.getPublic().voice;
         if (!configuration) throw new Error('configure realtime audio before starting');
         const revision = this.settings.getPublic().voiceRevision ?? 0;
-        const release = this.bridge.retainBackgroundSession(session);
+        const release = this.retainAudioRuntime(runtime);
         const startToken = {};
         this.realtimeAudioStartToken = startToken;
         this.realtimeAudioStartingSession = session.sessionId;
@@ -1698,8 +1706,8 @@ export class HostController {
       if (previous) throw new Error('another conversation owns audio flow');
       const runtime = this.bridge.get(sessionId);
       if (!runtime || this.settings.getPublic().activeSession?.sessionId !== sessionId) throw new Error('audio flow session is unavailable');
-      const release = this.bridge.retainBackgroundSession({ projectPath: runtime.projectPath, sessionId });
-      this.audioFlowLeases.set(event.sender, { sessionId, leaseId, release });
+      const release = this.retainAudioRuntime(runtime);
+      this.audioFlowLeases.set(event.sender, { sessionId, leaseId, runtime, release });
     });
     this.ipc.handle(CH_NATIVE_AUDIO_CANCEL, async (event: IpcMainInvokeEvent, flow?: unknown) => {
       this.assertSender(event);
@@ -1713,13 +1721,31 @@ export class HostController {
     });
   }
 
-  private requireAudioFlowAccess(sender: WebContents, value: unknown): { sessionId: string; leaseId: string } | undefined {
+  private requireAudioFlowAccess(sender: WebContents, value: unknown): { sessionId: string; leaseId: string; runtime: SessionRuntime } | undefined {
     const owner = this.audioFlowLeases.get(sender);
     if (!owner && value === undefined) return undefined;
     if (!owner || !value || typeof value !== 'object' || Array.isArray(value)) throw new Error('another conversation owns audio flow');
     const input = value as Record<string, unknown>;
     if (input['sessionId'] !== owner.sessionId || input['leaseId'] !== owner.leaseId) throw new Error('another conversation owns audio flow');
+    if (this.bridge.get(owner.sessionId) !== owner.runtime) throw new Error('The audio session owner changed.');
     return owner;
+  }
+
+  private retainAudioRuntime(runtime: SessionRuntime): () => void {
+    if (this.bridge.get(runtime.sessionId) !== runtime || this.isProjectClosing(runtime.projectPath)) {
+      throw new Error('The audio session is no longer available.');
+    }
+    const releaseOperation = runtime.retainAudioOperation();
+    let releaseBackground: () => void;
+    try { releaseBackground = this.bridge.retainBackgroundSession({ projectPath: runtime.projectPath, sessionId: runtime.sessionId }); }
+    catch (error) { releaseOperation(); throw error; }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      releaseOperation();
+      releaseBackground();
+    };
   }
 
   private assertSender(event: IpcMainInvokeEvent): void {
@@ -2205,6 +2231,7 @@ export class HostController {
 
   private assertRestartAllowed(ref: SessionRef, runtime: ReturnType<SessionRuntimeManager['get']>, recovering = false): void {
     if (!runtime) throw new Error(`session runtime is not open: ${ref.sessionId}`);
+    if (runtime.hasActiveAudio) throw new Error('Stop audio before restarting this chat.');
     const active = this.settings.getPublic().activeSession;
     if (!active || active.sessionId !== ref.sessionId || active.projectPath !== ref.projectPath) {
       throw new Error('the requested session is no longer active; credential was saved but the engine was not restarted');
@@ -3032,6 +3059,8 @@ export class HostController {
     this.realtimeAudioStartToken = undefined;
     for (const lease of this.audioFlowLeases.values()) lease.release();
     this.audioFlowLeases.clear();
+    for (const lease of this.detachedAudioLeases) lease.release();
+    this.detachedAudioLeases.clear();
     void this.realtimeAudioController?.stop().catch((error) => {
       this.diagnostics.add('warn', 'host', `realtime audio teardown failed: ${sanitizeDiagnostic(error)}`);
     });

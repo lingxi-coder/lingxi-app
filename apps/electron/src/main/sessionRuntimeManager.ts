@@ -694,6 +694,7 @@ export class SessionRuntimeManager {
 
   private async restartInternal(ref: SessionRef, beforeRestart?: () => void): Promise<void> {
     const runtime = this.require(ref);
+    if (runtime.hasActiveAudio) throw new Error('Stop audio before restarting this chat.');
     const recovering = runtime.connectionState.status !== 'connected' || runtime.isStarting;
     const opening = this.openingSessions.get(ref.sessionId);
     if (opening) {
@@ -701,6 +702,7 @@ export class SessionRuntimeManager {
       if (recovering) beforeRestart?.();
       await opening.promise;
       if (this.require(ref) !== runtime) throw new Error('session runtime was replaced while restarting');
+      if (runtime.hasActiveAudio) throw new Error('Stop audio before restarting this chat.');
       if (recovering) {
         // The open already completed transport recovery and owned restoration.
         // Joining that recovery must not replace a still-living sidecar.
@@ -710,6 +712,7 @@ export class SessionRuntimeManager {
     }
     if (runtime.connectionState.status !== 'connected' || runtime.isStarting) {
       beforeRestart?.();
+      if (runtime.hasActiveAudio) throw new Error('Stop audio before restarting this chat.');
       await runtime.start();
       beforeRestart?.();
       if (!runtime.recoveredLiveConnection || runtime.needsSessionResume) await runtime.restoreOwnedSessionIfNeeded();

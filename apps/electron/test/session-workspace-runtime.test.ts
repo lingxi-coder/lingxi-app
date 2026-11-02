@@ -102,6 +102,48 @@ function connectedRuntime(t: TestContext) {
   return { runtime, client };
 }
 
+test('audio admission and workspace/archive lifecycle exclude one another on the same runtime', t => {
+  const { runtime } = connectedRuntime(t);
+  const release = runtime.retainAudioOperation();
+  assert.equal(runtime.hasActiveWork, true);
+  assert.throws(() => runtime.beginWorkspaceChange(), /active work/);
+  assert.throws(() => runtime.beginArchive(), /active work/);
+  release(); release();
+  assert.equal(runtime.hasActiveWork, false);
+  const endChange = runtime.beginWorkspaceChange();
+  assert.throws(() => runtime.retainAudioOperation(), /changing/);
+  endChange();
+  const endArchive = runtime.beginArchive();
+  assert.throws(() => runtime.retainAudioOperation(), /changing/);
+  endArchive();
+});
+
+test('audio admitted while a restart callback waits prevents stopping the owner', async t => {
+  const { runtime } = connectedRuntime(t), entered = deferred<void>(), finish = deferred<void>();
+  const restarting = runtime.restart(async () => { entered.resolve(undefined); await finish.promise; });
+  await entered.promise;
+  const release = runtime.retainAudioOperation();
+  finish.resolve(undefined);
+  await assert.rejects(restarting, /Stop audio/);
+  assert.equal(runtime.connectionState.status, 'connected');
+  release();
+});
+
+test('manager close and project removal preserve an owner with admitted audio', async t => {
+  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
+  t.after(() => manager.dispose());
+  const ref = { projectPath: '/project', sessionId };
+  const runtime = await manager.ensure(ref, false);
+  (runtime as any).setState({ status: 'connected' });
+  const release = runtime.retainAudioOperation();
+  await assert.rejects(manager.closeSession(ref), /active work/);
+  await assert.rejects(manager.closeProject(ref.projectPath), /active turns/);
+  assert.equal(manager.get(sessionId), runtime);
+  release();
+  await manager.closeSession(ref);
+  assert.equal(manager.get(sessionId), undefined);
+});
+
 function selectedResumeRuntime(t: TestContext, timeoutMs = 1500) {
   const runtime = new SessionRuntime({ sessionId, projectPath: '/project', sessionResumeTimeoutMs: timeoutMs,
     launchConfig: () => ({ workspace: '/project', trusted: true, sessionId }) });

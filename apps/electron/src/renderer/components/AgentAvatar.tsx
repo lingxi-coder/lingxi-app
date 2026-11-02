@@ -34,9 +34,11 @@ const AVATARS = [
 
 /** Stable across refreshes, renames, status changes, and display surfaces. */
 export function agentAvatarIndex(agentId: string): number {
+  // Tool results may use a bare UUID while the agent list uses agent:<UUID>.
+  const key = agentId.startsWith('agent:') ? agentId : `agent:${agentId}`;
   let hash = 0;
-  for (let index = 0; index < agentId.length; index += 1) {
-    hash = (hash * 31 + agentId.charCodeAt(index)) % 2147483647;
+  for (let index = 0; index < key.length; index += 1) {
+    hash = (hash * 31 + key.charCodeAt(index)) % 2147483647;
   }
   return hash % AVATARS.length;
 }

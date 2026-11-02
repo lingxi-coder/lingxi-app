@@ -72,6 +72,11 @@ struct ConversationTimelineView: View {
     @ViewBuilder
     private func segmentView(_ segment: Segment) -> some View {
         switch segment {
+        case let .skillInstructions(rowID, message, name):
+            ConversationSkillInstructionsRow(name: name, text: message.text,
+                isExpanded: expandedToolCalls.contains("skill:\(rowID)"),
+                onToggle: { onToggleToolCall("skill:\(rowID)") })
+                .id(rowID)
         case let .message(rowID, message) where message.visualization != nil:
             VisualizationCardView(
                 sessionId: visualizationSessionId,
@@ -256,6 +261,22 @@ struct ConversationTimelineView: View {
                 }
             }
         }
+        var previousTool: ConversationToolTrace?
+        for index in result.indices {
+            switch result[index] {
+            case let .toolBatch(_, tools):
+                previousTool = tools.last
+            case .reasoning:
+                continue
+            case let .message(id, message):
+                if let tool = previousTool, ConversationSkillInstructions.matches(message, tool: tool) {
+                    result[index] = .skillInstructions(id: id, message: message, name: tool.header?.primary ?? tool.tool)
+                }
+                previousTool = nil
+            default:
+                previousTool = nil
+            }
+        }
         if !groups.isEmpty || !result.isEmpty || (streaming && hasLiveOwner) {
             let hasRunningTool = result.contains { segment in
                 if case let .toolBatch(_, tools) = segment { return tools.contains { $0.status == .running } }
@@ -279,6 +300,7 @@ struct ConversationTimelineView: View {
 
     private enum Segment: Identifiable {
         case message(id: String, message: Message)
+        case skillInstructions(id: String, message: Message, name: String)
         case commandOutput(id: String, output: ConversationCommandOutput)
         case reasoning(id: String, text: String, isRunning: Bool)
         case thinkingSlot(isVisible: Bool)
@@ -302,7 +324,7 @@ struct ConversationTimelineView: View {
             switch self {
             case .thinkingSlot:
                 return "thought:bottom-slot"
-            case let .message(id, _), let .commandOutput(id, _), let .reasoning(id, _, _),
+            case let .message(id, _), let .skillInstructions(id, _, _), let .commandOutput(id, _), let .reasoning(id, _, _),
                  let .toolBatch(id, _), let .notice(id, _), let .agents(id, _):
                 return id
             }
@@ -355,6 +377,28 @@ struct ConversationTimelineView: View {
 
 }
 
+private struct ConversationSkillInstructionsRow: View {
+    @Environment(\.theme) private var t
+    let name: String
+    let text: String
+    let isExpanded: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button(action: onToggle) {
+                HStack(spacing: 8) {
+                    LXIcon(name: .sparkles, size: 16, color: t.text3, stroke: 1.6)
+                    Text(name).font(.footnote).foregroundStyle(t.text3)
+                }.frame(minHeight: 40).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(isExpanded ? String(localized: "chat_agent_details_collapse") : String(localized: "chat_agent_details_expand"))
+            if isExpanded { AIText(markdown: text).padding(.leading, 24) }
+        }
+    }
+}
+
 private struct ConversationThoughtRow: View {
     @Environment(\.theme) private var t
     let isRunning: Bool
@@ -374,6 +418,7 @@ private struct ConversationToolBatchRow: View {
     @Environment(\.theme) private var t
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var isFocused: Bool
+    @State private var isHovering = false
 
     let id: String
     let tools: [ConversationToolTrace]
@@ -415,7 +460,7 @@ private struct ConversationToolBatchRow: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(t.text4)
                         .timelineChevron(
-                            isHighlighted: isFocused,
+                            isHighlighted: isFocused || isHovering,
                             isExpanded: isExpanded,
                             reduceMotion: reduceMotion
                         )
@@ -430,6 +475,7 @@ private struct ConversationToolBatchRow: View {
             }
             .buttonStyle(.plain)
             .focused($isFocused)
+            .onHover { isHovering = $0 }
             .accessibilityLabel(String(localized: "chat_tool_batch_count \(tools.count)"))
             .accessibilityValue(isExpanded
                 ? String(localized: "chat_agent_details_collapse")

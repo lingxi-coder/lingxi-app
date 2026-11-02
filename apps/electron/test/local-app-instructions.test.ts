@@ -4,7 +4,7 @@ import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { Stage } from '../src/renderer/components/Stage';
 import { LocalAppInstructions } from '../src/renderer/components/LocalAppInstructions';
-import { localAppInstructionIds } from '../src/renderer/components/localAppInstructionPresentation';
+import { skillInstructionNames } from '../src/renderer/components/localAppInstructionPresentation';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import type { RunItem, ToolRunItem } from '../src/renderer/model/runItem';
@@ -23,15 +23,27 @@ function render(element: React.ReactElement, dark = false) {
 }
 
 test('only the adjacent desktop skill companion receives instruction presentation', () => {
-  assert.deepEqual([...localAppInstructionIds([skill, body])], ['instructions']);
-  assert.deepEqual([...localAppInstructionIds([skill, { type: 'thinking', id: 't', text: '' }, body])], ['instructions']);
+  assert.deepEqual([...skillInstructionNames([skill, body])], [['instructions', 'local-app']]);
+  assert.deepEqual([...skillInstructionNames([skill, { type: 'thinking', id: 't', text: '' }, body])], [['instructions', 'local-app']]);
   for (const items of [[body], [skill, { ...body, text: 'Create a clock' }],
     [skill, { ...body, delivery: 'pending' as const }],
     [{ ...skill, status: 'error' as const }, body],
     [{ ...skill, view: { ...skill.view, primary: 'another-skill' } }, body],
     [skill, { ...body, role: 'assistant' as const }, body]]) {
-    assert.equal(localAppInstructionIds(items).size, 0);
+    assert.equal(skillInstructionNames(items).size, 0);
   }
+});
+
+test('other skill prompts are recognized from their tool output without hiding unrelated user messages', () => {
+  const text = '# LingXi API guide\n\nComplete instructions.';
+  const api: ToolRunItem = { ...skill, view: { ...skill.view, primary: 'lingxi-api' }, nativeOutput: { body: text } };
+  const prompt = { ...body, text };
+  assert.deepEqual([...skillInstructionNames([api, prompt])], [['instructions', 'lingxi-api']]);
+  assert.equal(skillInstructionNames([api, { ...prompt, text: '# A different request\n\nPlease help.' }]).size, 0);
+  const html = render(React.createElement(Stage, { liveItems: [api, prompt], sessionKey: 'test' }));
+  assert.match(html, /data-run-type="skill-instructions"/);
+  assert.match(html, /lingxi-api/);
+  assert.doesNotMatch(html, /Complete instructions\.|user-message-bubble/);
 });
 
 test('skill instructions start collapsed without a user bubble and retain the transcript anchor', () => {

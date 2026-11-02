@@ -780,6 +780,11 @@ private fun MessageList(
                     is ChatRenderItem.Tools -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
                         ToolGroupView(TranscriptBlock.Tools(item.calls, item.anchor), state.expandedToolCalls, stableOnToggleToolCall)
                     }
+                    is ChatRenderItem.SkillInstructions -> SkillInstructionsView(
+                        name = item.name, text = item.message.text,
+                        expanded = "skill:${item.key}" in state.expandedToolCalls,
+                        onToggle = { stableOnToggleToolCall("skill:${item.key}") }, onOpenLink = stableOnOpenLink,
+                    )
                     is ChatRenderItem.Message, is ChatRenderItem.Streaming -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
                         MessageBubble(
                             message = when (item) {

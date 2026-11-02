@@ -3474,6 +3474,7 @@ final class EngineConversationSource: ConversationSource {
                     trace.display = derivedDisplay
                     trace.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                     trace.localApp = isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson)
+                    trace.skillBody = isError ? nil : ConversationSkillInstructions.body(tool: tool, json: resultJson)
                     trace.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                 }
                 model.statusLine = wasCancelled
@@ -5259,6 +5260,7 @@ final class EngineConversationSource: ConversationSource {
                         merged.display = lowered
                         merged.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                         merged.localApp = isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson)
+                        merged.skillBody = isError ? nil : ConversationSkillInstructions.body(tool: tool, json: resultJson)
                         merged.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                         pendingRun?.tools[index] = merged
                     } else {
@@ -5272,7 +5274,8 @@ final class EngineConversationSource: ConversationSource {
                             display: lowered,
                             spawnedAgentID: ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson),
                             questionAnswers: isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson),
-                            localApp: isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson)
+                            localApp: isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson),
+                            skillBody: isError ? nil : ConversationSkillInstructions.body(tool: tool, json: resultJson)
                         )
                         pendingRun?.tools.append(trace)
                     }

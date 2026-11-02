@@ -8,6 +8,15 @@ import SwiftUI
 /// `ForEach` id, SwiftUI tears the row down and rebuilds it, which moves the
 /// scroll position under the reader.
 final class ConversationTimelineSegmentsTests: XCTestCase {
+    func testSkillPromptRequiresMatchingCompletedToolBody() {
+        let body = "# LingXi API guide\n\nFull instructions."
+        let trace = ConversationToolTrace(id: "skill", tool: "Skill", status: .completed, skillBody: body)
+        XCTAssertTrue(ConversationSkillInstructions.matches(Message(role: .user, text: body), tool: trace))
+        XCTAssertFalse(ConversationSkillInstructions.matches(Message(role: .user, text: "Another request"), tool: trace))
+        var failed = trace
+        failed.status = .failed
+        XCTAssertFalse(ConversationSkillInstructions.matches(Message(role: .user, text: body), tool: failed))
+    }
     func testCompactSpacingAndThinkingVisibilityDoesNotChangeLayout() {
         let user = Message(role: .user, text: "Question")
         let assistant = Message(role: .ai, text: "Reply")

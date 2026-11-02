@@ -1,5 +1,23 @@
 # Chat / Code 上下文与跨端集成交接
 
+## 2026-11-02 合并后续作（当前状态，优先于全部旧快照）
+
+当前 App HEAD 为 `c4adeaa69`（包含 Desktop 调度 owner/导航、Sidebar 去重、fixture 对齐与精确目录 remount 修复；此前 checkpoint 为 `daf4cf41d3174ec982304bf741a6d23524bfdf80`），包括 main 合并 `0b2c85ceac1568fe76c084eaecaaf64a8dc74766` 和 Desktop 异步远程准入修复。SDK 已有 `58edfaff943fb769f6ccd0c82f731f95e263d516`、`f061fb74b4fc605b17a760f6c7bb0a4b61d5186e` 两次本地修复提交；App 当前 pin 为后者，LLM 为 `0c2f041e856265e093e404d9b202c4238f73ef3c`。**SDK 和三端仍有授权范围内的未提交后续修复，当前 pin 不是最终交付版本。未推送。**
+
+独立审查进一步确认并正在修复的合同：
+
+- 移动冷恢复必须同时提供 UUID、固定 mode 和持久化的 exact transcript path；路径保留 SDK 给出的 guest/host 坐标，客户端不推导。SDK 负责可信映射、目录组件 no-follow 及 writer authority 校验；缺路径不能退回 UUID 搜索。
+- selected-session 调度持久化 ID/path/mode/opaque scope key；new/task-session 显式保存 session mode/scope key。claim、首次绑定及结果必须使用同一执行快照，不能从后来编辑的 task 或 cwd 重建逻辑归属。
+- 原始 `Automation.runs` 会被截断或随任务删除，不能充当永久 owner 证据。SDK 正加入独立持久 reservation ledger，以及 before-model owner-confirmation；分配 owner 不等于已执行。ledger 与 task 是分步持久化，不能宣称两个文件同一原子事务。
+- App 在短 admission gate 内确认并持久化 owner，确认后立即放开新会话，模型长 turn 不持全局 gate。取消需等待该次 admission 的 native 终结屏障，之后严格重扫 ledger 或冻结新 claims；既有 owner/turn 不停止。
+- Desktop/移动的冷、热恢复都必须把首次捕获的文件 authority 贯穿到 writer bootstrap/activation。独立 fork 捕获新 target authority；合法 compaction/relocation 在事务中迁移 authority。
+
+Desktop 这次提交保留跨空间编辑时的可信任务模式，调度历史打开在 Host queue、runtime activation、renderer generation 和页面回调各自校验归属。新建的全部调度会话在首次绑定前持久化空锚点。175 项调度相关回归和前后端类型检查通过；精确目录 remount 与 metadata 相关 145 项定向和 Node types 通过。完整 provisional Desktop 为 3841 pass / 3 fail / 16 skip，其中 Bot test double 已另行修复并整文件 24/24 通过，剩余需最终 Bridge binary 与实际 Rust producer Cron fixture。最终 pin 后还要重新验证真实集成。
+
+验收范围不变：Desktop default、Android Direct、iOS Full，各一个 flavor。最新证据见 `acceptance/conversation-spaces-20261101/validation-index.md`。此前 Desktop 3576/12 skip 与 Web 286/3 skip 是对应源快照的通过结果；新的 Cron DTO 和来源合同改变后仍需重跑受影响检查。iOS host 与 Android 隔离 JVM 有增量通过记录，但不等于真实 FFI/原生设备验收。
+
+旧 pin 的 iOS host staticlib 构建已在尚未到达 FFI crate 时安全停止，没有生成新库或绑定；退出 `-2` 是 superseded-source 中断，不能算通过。SDK `desktop,mobile` lib-test 编译曾通过，但其后又有 source/ledger 修复，因此仍需最终正确 feature 组合的测试。绑定必须等最终 SDK 提交、App locked resolver 后重新生成。当前 TS 生成仅 provisional，用于并行排查源类型，最终必须走 resolver 的官方 `--check`。
+
 ## 2026-11-02 main 同步状态（优先于下方历史快照）
 
 按用户要求，先将各仓库的 `origin/main` 合入任务分支，保留主线账户、MCP、界面及其他修复。App 合并前的功能检查点为 `d3a32a21d`；不覆盖常规 checkout，不推送或合入 main。

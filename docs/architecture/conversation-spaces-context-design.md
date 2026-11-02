@@ -2,7 +2,7 @@
 
 文档日期：2026-11-01（America/Los_Angeles）。
 
-本文描述本轮修订后的产品契约、源码架构和继续实现时必须遵守的约束。**设计契约已经确定，但整条协议 32 集成链尚未完成验收**：App 的 Cargo 依赖仍固定在协议 31 的 Harness 提交，移动端生成绑定也尚未同步。源码位置、版本快照、验证记录和执行顺序见[交接文档](../plans/2026-11-01-conversation-spaces-handoff.md)。
+本文描述本轮修订后的产品契约、源码架构和继续实现时必须遵守的约束。**设计契约已经确定，但整条协议 32 集成链尚未完成验收**。2026-11-02 已将 main 合入任务分支，App 锁定的 Harness 与 TS 协议均为 32；合并后的移动端 FFI 重生成、原生编译和设备验证仍在推进。源码位置、不可变依赖、验证记录和执行顺序见[交接文档](../plans/2026-11-01-conversation-spaces-handoff.md)。
 
 ## 1. 已确定的产品决策
 
@@ -51,6 +51,8 @@ Workspace = { cwd, exact transcript path, filesystem/trust context }
 Global 会话仍然需要真实目录供工具运行。Desktop 使用应用私有的 `general-chat-workspace`；移动端使用平台已有的 Global workspace。
 
 `cwd` 可以变化。Global 会话执行 `/cd` 进入某个项目目录后仍然是 Global；Project 会话离开项目目录后也不会自动变成另一个 Project。目录规则与文件系统信任仍按实际执行环境处理，不能据此反推逻辑 Project。
+
+合并后集成采用稳定物理来源策略：普通 `/cd` 在原 transcript 中持久化 `relocated` 工作目录记录，保持该会话已经捕获的物理文件路径；alias 只用于发现。`/cd` 的发现记录必须限定本次会话 UUID/来源，不能把原 bucket 的其他历史带入新 Project；显式 `/add-dir` 的既有目录发现范围另行保留。这样 cwd 变化不会使调度目标、永久 owner 记录或冷恢复指针失效。显式 fork/retarget 的发布与 authority 转移仍有各自的校验，不能把目录 alias 当作同 UUID 其他文件的授权。
 
 恢复时必须保留实际捕获的 transcript 路径。不能仅凭 UUID 和当前 cwd，重新猜测另一个 worktree 中的同名 JSONL。
 
@@ -263,6 +265,31 @@ SDK Rust DTO、snapshot/ordinal 合约、TS 生成类型、客户端 validator�
 顺序为：捕获精确 source → 验证固定身份与 expected mode → 获取相应 authority/claim → 恢复原 UUID、epoch、cwd、消息和 turn journal → 接入启动服务、hooks 和后续工作。
 
 允许修复的损坏范围仅限已确认的 torn JSONL 尾片段。修复前必须在固定文件 authority 下比较原始字节；完整行或中间损坏保持报错。不能以恢复为名对旧数据做补 header 迁移。
+
+### 9.5 精确来源与 writer authority
+
+移动端冷恢复同时提交 UUID、expected mode 和持久化的 transcript path；热恢复也经过同一来源捕获与校验。客户端原样保留 SDK 返回的 guest/host 路径坐标，由 SDK 使用可信挂载映射解析，不能按当前 cwd 重建路径。缺路径或原文件丢失直接失败，即使其他目录存在同 UUID 的副本也不能接管。
+
+显式、未限定来源的 Desktop/CLI UUID 查询可以使用严格唯一查找；多个匹配必须报错。查找一旦选定来源，后续 claim、bootstrap、writer activation 必须继续使用捕获的 root/file identity。fork 使用发布新文件时返回的 authority，不能再次按路径打开并把替换文件当作刚发布的目标。
+
+故障边界是所有合作的 SDK writer 通过 UUID lease 和共享持久化事务协调，以及对可观测外部 root/leaf 替换的拒绝。检测到替换后不得确认写入成功或幂等成功；可能已经落盘的操作应保留恢复证据并报告不确定状态。正常 compaction、尾片段修复和 cwd 重定位在事务内迁移 authority，不能为避免竞争而停用这些能力。这里不承诺抵御绕过锁的同用户进程在最后一次检查之后主动更换命名空间；这不是跨文件系统 inode CAS 或 WAL 协议。
+
+### 9.6 调度来源与永久 owner 记录
+
+| 目标类型 | 当前格式必需的执行身份 |
+| --- | --- |
+| 新会话 / 首次 TaskSession | `sessionMode`、`sessionScopeKey`。 |
+| SelectedSession | `targetSessionId`、`targetSessionTranscriptPath`、`targetSessionMode`、`targetSessionScopeKey`。 |
+| 已绑定 TaskSession | `ownedSessionId`、`ownedSessionTranscriptPath`、`ownedSessionMode`、`ownedSessionScopeKey`。 |
+| Run receipt | 实际执行的 session ID、path、mode、scope key。 |
+
+scope key 是宿主内部路由信息，不是授权凭据。claim 和首次绑定比较完整来源元组；任务编辑或 cwd 改变后不能用新配置解释旧 run。任务的历史 runs 可裁剪，任务也可删除，因此 SDK 另存不会随任务或历史裁剪而消失的 owner reservation ledger。先写 ledger、后写 task 是两步持久化；reservation 证明 owner 已分配，并不证明模型已运行。
+
+移动端执行采用两个准入边界：原生生成候选 UUID 后、任何可发现来源写入之前调用 `beginOwner(candidate)`，App 校验并只预留这个 UUID；SDK 落盘来源和 reservation 后调用 `confirmOwner(receipt)`，App 持久化 owner 才允许模型启动。其他 UUID 的普通 New Chat 和已有 turn 继续运行。确认后即可释放预留，不应持有覆盖整个模型 turn 的全局锁。
+
+此准入保证覆盖同一 App 进程中的前台与后台 scheduler（iOS BGTask、Android WorkManager 常规路径），各 scope 的 ledger 事务保护合作 SDK 写入；不将启动扫描宣称为跨所有 scope 的跨进程全局原子 claim。
+
+取消必须等待本次原生 admission 的 `cancelAndWait` 屏障，再严格核对 ledger 与 App mirror；核对失败只冻结新的 claims，保留既有 owner 的执行。负责调度的移动 controller 不创建对话 header/anchor，也不能接受普通对话输入；实际 child 在准入后启动。没有显式 automation 配置的移动 fire/create/update 直接拒绝，不能产生无 owner 的临时会话。
 
 ## 10. 跨空间继续
 

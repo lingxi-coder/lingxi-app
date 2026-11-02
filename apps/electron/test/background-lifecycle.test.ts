@@ -220,16 +220,20 @@ test('archive rechecks workers after cron cleanup before persisting its archive 
   const fixture = await hostFixture();
   const entered = deferred();
   const resume = deferred();
-  fixture.transport.onCommand = (command) => {
-    if (command.type !== 'cron_manage') throw new Error(`unexpected command ${command.type}`);
-    assert.equal(command.request.action, 'list');
+  (fixture.host as any).scheduled = { manage: async (scope: string, request: { action: string }) => {
+    assert.equal(scope, fixture.projectPath);
+    assert.equal(request.action, 'list');
     entered.resolve();
-    void resume.promise.then(() => fixture.transport.emit('event', {
-      type: 'cron_result', request_id: command.request_id, jobs: [],
-    }));
-  };
+    await resume.promise;
+    return [];
+  } };
+  const path = join(fixture.projectPath, `${sessionId}.jsonl`);
+  const captured = { requested: fixture.ref,
+    source: { ref: fixture.ref, transcriptPath: path }, owner: fixture.ref,
+    selection: { scope: 'current', transcriptPath: path }, runtime: fixture.runtime,
+    apply: async (action: string) => { assert.equal(action, 'verify'); } };
   try {
-    const archiving = (fixture.host as any).archiveSessionInternal(fixture.ref);
+    const archiving = (fixture.host as any).archiveSessionInternal(fixture.ref, captured);
     const rejected = assert.rejects(archiving, /Chat was not archived.*(?:active work|active turn|background|pending interactions)/i);
     await entered.promise;
     fixture.transport.workerStarts();

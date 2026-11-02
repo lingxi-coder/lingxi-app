@@ -81,11 +81,7 @@ test('the host tells the terminal manager when a chat or project goes away', asy
     closeSession: async () => { calls.push('closeSession'); },
     closeProject: async () => { calls.push('closeProject:bridge'); },
     newSession: async () => ++newCount === 1 ? replacement : { projectPath: project, sessionId: '33333333-4444-4555-8666-777777777777' },
-    withBackgroundSession: async (_r: unknown, _e: unknown, _m: unknown, run: (runtime: unknown) => Promise<unknown>) => run({
-      projectPath: project, connectionState: { status: 'connected' },
-      beginArchive: () => () => undefined,
-      manageCron: async () => [],
-    }),
+    withBackgroundSession: () => { throw new Error('archive must not start a cold session'); },
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer());
   host.attachTerminals(manager as any);
@@ -117,7 +113,13 @@ test('the host tells the terminal manager when a chat or project goes away', asy
 
     calls.length = 0;
     settings.setActiveSession(ref);
-    await (host as any).archiveSessionInternal(ref);
+    (host as any).scheduled = { manage: async (scope: string, request: { action: string }) => {
+      assert.equal(scope, project); assert.equal(request.action, 'list'); return [];
+    }, dispose() {} };
+    const captured = { requested: ref, source: { ref: { ...ref, mode: 'code' }, row, transcriptPath: path },
+      owner: { ...ref, mode: 'code', projectId: project }, selection: { scope: 'current', transcriptPath: path },
+      apply: async (action: string) => { assert.equal(action, 'verify'); } };
+    await (host as any).archiveSessionInternal(ref, captured);
     assert.ok(calls.includes(`closeScope:${sessionId}`), 'archiving a chat closes its shells');
 
     calls.length = 0;

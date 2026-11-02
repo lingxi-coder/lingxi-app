@@ -20,6 +20,7 @@ import { collapseFor, collapseInitial, collapseOpen, collapseSet } from './colla
 import { CommandOutput } from './CommandOutput';
 import { CompactionStatus } from './CompactionStatus';
 import { Icon } from './Icon';
+import { ImagePreview } from './ImagePreview';
 import type { SessionAgentSummaryDto, UiJsonValue } from '@lingxi/bridge-client';
 import { TranscriptAgents } from './TranscriptAgents';
 import { anchorTranscriptAgents, placeTranscriptAgents, type AgentAnchors } from './transcriptAgentPlacement';
@@ -95,10 +96,10 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
         <div role="group" aria-label={tr('desktop_stage_images')} style={{ display: 'grid', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>
           {images.map((image, index) => (
             <div key={`${image.media_type}-${index}`} style={{ overflow: 'hidden', minWidth: 0, borderRadius: 11, background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 12%, transparent)` }}>
-              <img
+              <ImagePreview
                 src={image.url}
                 alt={tr('desktop_stage_image', index + 1)}
-                style={{ display: 'block', width: '100%', maxHeight: 260, aspectRatio: images.length > 1 ? '4 / 3' : 'auto', objectFit: 'contain', background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 8%, transparent)`, outlineOffset: -1 }}
+                imageStyle={{ display: 'block', width: '100%', maxHeight: 260, aspectRatio: images.length > 1 ? '4 / 3' : 'auto', objectFit: 'contain', background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 8%, transparent)`, outlineOffset: -1 }}
               />
             </div>
           ))}

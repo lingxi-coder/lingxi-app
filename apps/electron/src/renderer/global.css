@@ -1,4 +1,5 @@
 @import './components/settings/pages/ComputerUse.css';
+@import './components/ImagePreview.css';
 @import './components/ComputerAccessPrompt.css';
 @import './components/ToolRows.css';
 @import './components/ActivityView.css';

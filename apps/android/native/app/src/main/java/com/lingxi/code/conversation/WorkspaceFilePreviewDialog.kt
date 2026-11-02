@@ -20,10 +20,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.foundation.gestures.transformable
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.ui.geometry.Offset
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -40,7 +36,6 @@ import androidx.core.content.FileProvider
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
-import coil3.compose.AsyncImage
 import com.lingxi.code.R
 import com.lingxi.code.project.*
 import kotlinx.coroutines.*
@@ -49,6 +44,10 @@ import java.util.UUID
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun WorkspaceFilePreviewDialog(snapshot: FileSnapshot, entry: WorkspaceFileEntry, onDismiss: () -> Unit) {
+    if (entry.kind == "image") {
+        ImagePreviewDialog(ImagePreviewSource.LocalFile(snapshot.file, fileMime(entry.name)), onDismiss, closeTag = "files.preview.close", previewTag = "files.preview")
+        return
+    }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var text by remember { mutableStateOf<String?>(null) }
@@ -102,14 +101,6 @@ import java.util.UUID
                             val lines = remember(text) { text!!.splitToSequence('\n').flatMap { line -> if (line.isEmpty()) sequenceOf("") else line.chunked(4096).asSequence() }.toList() }
                             LazyColumn(Modifier.weight(1f).testTag("files.text-preview"), contentPadding = PaddingValues(16.dp)) {
                                 items(lines.size) { index -> SelectionContainer { Text(lines[index], fontFamily = FontFamily.Monospace, modifier = Modifier.fillMaxWidth()) } }
-                            }
-                        }
-                        "image" -> {
-                            var zoom by remember { mutableFloatStateOf(1f) }
-                            var pan by remember { mutableStateOf(Offset.Zero) }
-                            val transform = rememberTransformableState { scale, offset, _ -> zoom = (zoom * scale).coerceIn(1f, 5f); pan = if (zoom == 1f) Offset.Zero else pan + offset }
-                            Box(Modifier.weight(1f).fillMaxWidth().transformable(transform), contentAlignment = Alignment.Center) {
-                                AsyncImage(snapshot.file, entry.name, modifier = Modifier.fillMaxSize().graphicsLayer { scaleX = zoom; scaleY = zoom; translationX = pan.x; translationY = pan.y })
                             }
                         }
                         "media" -> WorkspaceMediaPreview(snapshot.file, Modifier.weight(1f))

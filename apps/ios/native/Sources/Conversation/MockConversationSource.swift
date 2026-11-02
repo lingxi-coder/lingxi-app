@@ -89,6 +89,25 @@ final class MockConversationSource: ConversationSource {
                 source.model.engineSessionsLoaded = true
                 return source
             }
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_IMAGE_PREVIEW"] == "1" {
+                let format = UIGraphicsImageRendererFormat()
+                format.scale = 1
+                let data = UIGraphicsImageRenderer(size: CGSize(width: 780, height: 1688), format: format).pngData { context in
+                    UIColor.systemGroupedBackground.setFill(); context.fill(CGRect(x: 0, y: 0, width: 780, height: 1688))
+                    for index in 0..<8 {
+                        let rect = CGRect(x: 30, y: 60 + index * 195, width: 720, height: 165)
+                        UIColor.secondarySystemGroupedBackground.setFill(); UIBezierPath(roundedRect: rect, cornerRadius: 26).fill()
+                        ("Image preview · \(index + 1)" as NSString).draw(at: CGPoint(x: 64, y: rect.minY + 56), withAttributes: [.font: UIFont.systemFont(ofSize: 32), .foregroundColor: UIColor.label])
+                    }
+                }
+                let image = MessageImage(mediaType: "image/png", url: "data:image/png;base64," + data.base64EncodedString())
+                let message = Message(role: .user, text: "Image preview fixture", images: [image])
+                source.model.messages = [message]
+                source.model.items = [.message(message)]
+                source.model.isNew = false
+                source.model.activeSessionId = "ui-image-preview"
+                return source
+            }
             if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_COMPACT_TRANSCRIPT"] == "1" {
                 var prompt = Message(
                     role: .user,

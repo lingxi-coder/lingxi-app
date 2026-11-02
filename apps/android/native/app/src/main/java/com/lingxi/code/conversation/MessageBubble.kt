@@ -248,6 +248,10 @@ fun MessageBubble(
 @Composable
 private fun AttachedImages(images: List<ImageRefDto>) {
     val t = LingXiTheme.palette
+    var selectedImage by remember { mutableStateOf<ImageRefDto?>(null) }
+    selectedImage?.let { image ->
+        ImagePreviewDialog(ImagePreviewSource.Encoded(image.base64, image.mediaType), onDismiss = { selectedImage = null })
+    }
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(7.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp),
@@ -268,6 +272,7 @@ private fun AttachedImages(images: List<ImageRefDto>) {
                     modifier = Modifier
                         .size(116.dp)
                         .clip(RoundedCornerShape(11.dp))
+                        .clickable(role = androidx.compose.ui.semantics.Role.Button) { selectedImage = image }
                         .background(t.surfaceActive)
                         .border(0.5.dp, t.border, RoundedCornerShape(11.dp)),
                 )

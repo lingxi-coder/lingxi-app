@@ -2,6 +2,8 @@ import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import { CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, type ProviderAccountCommand } from '../shared/providerAccounts.js';
 import type { DesktopProviderAccounts } from './provider-accounts.js';
 import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
+import { CH_IMAGE_SAVE } from '../shared/imageSave.js';
+import { registerImageSave } from './imageSave.js';
 import { CH_APPLICATION_ICON } from '../shared/applicationIcon.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
 import { nativeTr, setNativeLocale } from '../shared/nativeLocale.js';
@@ -736,6 +738,7 @@ export class HostController {
       this.assertSender(event);
       return icon;
     });
+    registerImageSave(this.ipc, event => this.assertSender(event), options => dialog!.showSaveDialog(options));
     this.registerRemoteControlIpc();
     this.registerBotsIpc();
     this.ipc.handle(CH_ACCOUNT, (event: IpcMainInvokeEvent, command: unknown) => {
@@ -2285,7 +2288,7 @@ export class HostController {
     this.terminalDeliveries.clear();
     if (!this.registered) return;
     for (const channel of [
-      CH_APPLICATION_ICON,
+      CH_APPLICATION_ICON, CH_IMAGE_SAVE,
       CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_FOLDER_PICK, CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,

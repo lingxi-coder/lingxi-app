@@ -3,6 +3,7 @@ import { providerAccountUnavailableReasons } from '../bridge/credentialRecovery'
 import { reasoningSelectionLabel } from '../model/reasoningLabel';
 import { tr } from '../i18n/locale';
 import { DesktopIcon } from './DesktopIcon';
+import { ImagePreview } from './ImagePreview';
 import { localAppAuthoringPrompt, localAppDraftDisposition, type LocalAppDraft } from '../bridge/localAppChat';
 import { NeedsInputBadge, sessionNeedsInput } from './NeedsInputBadge';
 import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, audioSetupGuidance, type AudioSetupGuidance } from '../audio/audioFeatureGate';
@@ -3471,7 +3472,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           <div aria-label={tr('desktop_chat_image_attachments')} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>
             {imageAttachments.map((attachment) => (
               <div key={attachment.id} title={attachment.name} style={{ position: 'relative', width: 74, height: 62, overflow: 'hidden', borderRadius: 10, background: t.surfaceHover, outline: `1px solid color-mix(in oklab, ${t.borderStrong} 55%, transparent)` }}>
-                <img src={attachment.previewUrl} alt={attachment.name} style={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover', outline: `1px solid color-mix(in oklab, ${t.text} 10%, transparent)`, outlineOffset: -1 }} />
+                <ImagePreview src={attachment.previewUrl} alt={attachment.name} style={{ height: '100%' }} imageStyle={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover', outline: `1px solid color-mix(in oklab, ${t.text} 10%, transparent)`, outlineOffset: -1 }} />
                 <button type="button" aria-label={tr('desktop_chat_remove_named', attachment.name)} title={tr('desktop_chat_remove_image')} onClick={() => removeImage(attachment.id)} style={{ position: 'absolute', top: 3, right: 3, width: 24, height: 24, display: 'grid', placeItems: 'center', padding: 0, border: 0, borderRadius: 99, background: 'rgba(0,0,0,.62)', color: '#fff', cursor: 'pointer' }}><Icon name="x" size={11} stroke={2} /></button>
               </div>
             ))}

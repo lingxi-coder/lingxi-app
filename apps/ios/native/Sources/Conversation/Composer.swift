@@ -908,6 +908,7 @@ private struct ComposerTurnActionIcon: View {
 /// Android `AttachmentThumb`.
 private struct AttachmentThumb: View {
     @Environment(\.theme) private var t
+    @State private var preview = false
     let attachment: ComposerAttachment
     let onRemove: () -> Void
 
@@ -915,7 +916,7 @@ private struct AttachmentThumb: View {
         HStack(spacing: 8) {
             #if canImport(UIKit)
                 ZStack(alignment: .topTrailing) {
-                    Image(uiImage: attachment.image)
+                    Button { preview = true } label: { Image(uiImage: attachment.image)
                         .resizable()
                         .scaledToFill()
                         .frame(width: 74, height: 62)
@@ -924,6 +925,12 @@ private struct AttachmentThumb: View {
                             RoundedRectangle(cornerRadius: 10)
                                 .stroke(t.borderStrong.opacity(0.55), lineWidth: 0.5)
                         }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(String(localized: "chat_preview_attached_image"))
+                    .fullScreenCover(isPresented: $preview) {
+                        NativeImagePreview(source: "data:\(attachment.mediaType);base64,\(attachment.base64)", mediaType: attachment.mediaType, fallbackImage: attachment.image)
+                    }
                     Button(action: onRemove) {
                         LXIcon(name: .x, size: 11, color: .white, stroke: 2)
                             .frame(width: 24, height: 24)

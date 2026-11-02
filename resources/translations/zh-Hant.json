@@ -1,4 +1,12 @@
 {
+  "image_preview_save": "儲存圖片",
+  "image_preview_save_failed": "圖片儲存失敗，請重試",
+  "image_preview_saved": "圖片已儲存",
+  "image_preview_failed": "無法顯示這張圖片",
+  "image_preview_loading": "正在載入圖片…",
+  "image_preview_zoom_in": "放大",
+  "image_preview_zoom_out": "縮小",
+  "image_preview_fit": "符合視窗",
   "chat_compact_during_turn": "對話進行中，暫時無法壓縮上下文",
   "chat_message_copy": "複製",
   "chat_message_copied": "已複製",

@@ -1,5 +1,6 @@
 import SwiftUI
 import QuickLook
+import UniformTypeIdentifiers
 
 struct WorkspaceFilePreview: View {
     let repository: WorkspaceDirectoryRepository
@@ -15,7 +16,11 @@ struct WorkspaceFilePreview: View {
     }
     private var nativeFile: Bool { ["pdf", "jpg", "jpeg", "png", "gif", "heic", "webp", "bmp", "tiff", "mp4", "mov", "m4v", "mp3", "wav", "m4a", "aac", "flac", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "rtf", "pages", "numbers", "key"].contains(snapshot.url.pathExtension.lowercased()) }
     var body: some View {
-        if nativeFile && QLPreviewController.canPreview(snapshot.url as NSURL) {
+        if ["jpg", "jpeg", "png", "gif", "heic", "webp", "bmp", "tiff"].contains(snapshot.url.pathExtension.lowercased()) {
+            NativeImagePreview(source: snapshot.url.absoluteString,
+                               mediaType: UTType(filenameExtension: snapshot.url.pathExtension)?.preferredMIMEType ?? "image/png",
+                               closeIdentifier: "files.preview.close")
+        } else if nativeFile && QLPreviewController.canPreview(snapshot.url as NSURL) {
             WorkspaceQuickLook(url: snapshot.url, onClose: { dismiss() })
         } else { fallbackContent }
     }

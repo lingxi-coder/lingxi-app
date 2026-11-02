@@ -478,6 +478,8 @@ fun ComposerAttachment.toImageRef(): ImageRefDto = ImageRefDto(
 @Composable
 private fun AttachmentThumb(attachment: ComposerAttachment, onRemove: () -> Unit) {
     val t = LingXiTheme.palette
+    var preview by remember { mutableStateOf(false) }
+    if (preview) ImagePreviewDialog(ImagePreviewSource.Encoded(attachment.base64, attachment.mediaType), onDismiss = { preview = false })
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -489,7 +491,8 @@ private fun AttachmentThumb(attachment: ComposerAttachment, onRemove: () -> Unit
             contentScale = ContentScale.Crop,
             modifier = Modifier
                 .size(48.dp)
-                .clip(RoundedCornerShape(10.dp)),
+                .clip(RoundedCornerShape(10.dp))
+                .clickable(role = androidx.compose.ui.semantics.Role.Button) { preview = true },
         )
         Text(
             text = "${attachment.width}×${attachment.height}",

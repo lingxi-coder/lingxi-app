@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="image_preview_save">이미지 저장</string>
+    <string name="image_preview_save_failed">이미지를 저장하지 못했습니다. 다시 시도하세요.</string>
+    <string name="image_preview_saved">이미지를 저장했습니다</string>
+    <string name="image_preview_failed">이 이미지를 표시할 수 없습니다</string>
+    <string name="image_preview_loading">이미지 불러오는 중…</string>
+    <string name="image_preview_zoom_in">확대</string>
+    <string name="image_preview_zoom_out">축소</string>
+    <string name="image_preview_fit">화면에 맞추기</string>
+</resources>

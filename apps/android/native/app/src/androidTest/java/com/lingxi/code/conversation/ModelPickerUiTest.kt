@@ -20,6 +20,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onFirst
@@ -125,7 +126,7 @@ class ModelPickerUiTest {
         rule.onNodeWithTag(UiTags.MODEL_PICKER_CHIP).performClick()
         rule.onNodeWithTag(UiTags.MODEL_PICKER_SEARCH).assertIsDisplayed()
         rule.onNodeWithText("连接失败").assertIsDisplayed()
-        rule.onNodeWithText("已连接").assertIsDisplayed()
+        rule.onNodeWithText(InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.settings_provider_status_configured)).assertIsDisplayed()
         rule.onNodeWithText("Thinking · Tools · 1M context").assertDoesNotExist()
 
         rule.onNodeWithTag(UiTags.MODEL_PICKER_SEARCH).performTextInput("sonnet")
@@ -195,6 +196,28 @@ class ModelPickerUiTest {
         ).onFirst().performClick()
         assertEquals("anthropic/claude-sonnet-5", selectedModel.get())
     }
+    @Test fun subscriptionOnlyHostModelRemainsSelectableBesideApiCatalog() {
+        val selected = AtomicReference<String?>(null)
+        val apiModels = EngineModelCatalog.options(listOf("openai/api-only"))
+        val apiStatus = ModelProviderStatus(profileId = "openai", settingsId = "openai", name = "OpenAI",
+            status = ConnStatus.Configured, enabled = true, credentialConfigured = false,
+            catalogModelIds = listOf("api-only"))
+        val projection = listOf(ProviderAccountModelAvailability("openai", "openai-chatgpt", "subscription-only",
+            listOf("oauth-a"), emptyList(), listOf("oauth-a"), emptyList()))
+        setIsolatedContent {
+            LingXiTheme(darkTheme = false) {
+                Composer(text = "", onTextChange = {}, model = apiModels.single(), onSend = {},
+                    onModelChange = { selected.set(it.id) }, availableModels = apiModels,
+                    modelProviderStatuses = listOf(apiStatus), accountModelAvailability = projection)
+            }
+        }
+        rule.onNodeWithTag(UiTags.MODEL_PICKER_CHIP).performClick()
+        rule.onNodeWithTag(UiTags.MODEL_PICKER_SEARCH).performTextInput("subscription-only")
+        rule.onNode(hasText("subscription-only") and !hasSetTextAction()).assertIsDisplayed().performClick()
+        assertEquals("openai-chatgpt/subscription-only", selected.get())
+        capture("subscription-model-selected")
+    }
+
     @Test
     fun hostModelProjectionShowsPermissionsAndIncludesAccountOnlyModel() {
         val selectedModel = AtomicReference<String?>(null)

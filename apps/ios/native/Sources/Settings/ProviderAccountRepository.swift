@@ -179,6 +179,7 @@ final class ProviderAccountRepository {
 
     private(set) var snapshot = ProviderAccountSnapshot.empty
     private(set) var busy = false
+    private(set) var snapshotReadFailed = false
     private(set) var errorMessage: String?
     private(set) var oauthSupported = true
     private var loader: SnapshotLoader?
@@ -216,6 +217,7 @@ final class ProviderAccountRepository {
         commandHandler = command
         self.oauthSupported = oauthSupported
         snapshot = .empty
+        snapshotReadFailed = false
         busy = false
         errorMessage = nil
         lastSelections = [:]
@@ -272,6 +274,31 @@ final class ProviderAccountRepository {
         }
     }
 
+    func configurationDescription(executionBindingId: String) -> String {
+        let providerId = snapshot.modelAvailability.first { $0.executionBindingId == executionBindingId }?.providerId
+            ?? snapshot.accounts.first { $0.executionBindingId == executionBindingId }?.providerId
+            ?? executionBindingId
+        return configurationDescription(providerId: providerId)
+    }
+
+    func configurationDescription(providerId: String) -> String {
+        if snapshotReadFailed { return String(localized: "Unable to read account status") }
+        if snapshot.storeScope.isEmpty { return String(localized: "Loading accounts…") }
+        let logicalID = providerId == "openai-chatgpt" ? "openai" : providerId
+        let rows = accounts(providerId: logicalID)
+        if rows.isEmpty { return String(localized: "settings_provider_unconfigured") }
+        let enabled = rows.filter(\.enabled)
+        let statuses = enabled.compactMap { health(for: $0)?.status }
+        let label: String
+        if enabled.isEmpty { label = String(localized: "Disabled") }
+        else if statuses.contains("ready") { label = String(localized: "settings_provider_status_configured") }
+        else if statuses.contains("storage_unavailable") { label = String(localized: "Secure storage unavailable") }
+        else if statuses.contains("cooling_down") || statuses.contains("quota_exhausted") { label = String(localized: "Temporarily unavailable") }
+        else if statuses.contains("needs_auth") { label = String(localized: "Sign-in required") }
+        else { label = String(localized: "Status unverified") }
+        return "\(label) · \(enabled.count)/\(rows.count)"
+    }
+
     func health(for account: ProviderAccount) -> ProviderAccountHealth? {
         snapshot.health.filter {
             $0.accountId == account.accountId && $0.identityGeneration == account.identityGeneration
@@ -313,10 +340,12 @@ final class ProviderAccountRepository {
             let result = try Self.decode(try await loader())
             guard binding == generation, read == readRevision, !Task.isCancelled else { return false }
             accept(result)
+            snapshotReadFailed = false
             errorMessage = nil
             return true
         } catch {
             guard binding == generation, read == readRevision, !Task.isCancelled else { return false }
+            snapshotReadFailed = true
             errorMessage = error.localizedDescription
             return false
         }
@@ -466,7 +495,11 @@ final class ProviderAccountRepository {
 
     func modelAccessDescription(bindingId: String, modelId: String) -> String {
         guard let row = modelAvailability(bindingId: bindingId, modelId: modelId) else {
-            return String(localized: "Model access unverified")
+            return String(localized: "Status unverified")
+        }
+        if row.eligibleAccountIds.isEmpty && row.confirmedAccountIds.isEmpty
+            && row.unverifiedAccountIds.isEmpty && row.forbiddenAccountIds.isEmpty {
+            return String(localized: "No eligible account currently")
         }
         let groups = [(row.confirmedAccountIds, String(localized: "Model access confirmed")),
             (row.unverifiedAccountIds, String(localized: "Model access unverified")),

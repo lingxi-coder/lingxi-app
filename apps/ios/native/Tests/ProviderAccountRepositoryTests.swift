@@ -4,6 +4,46 @@ import XCTest
 
 @MainActor
 final class ProviderAccountRepositoryTests: XCTestCase {
+    func testConfigurationUsesLogicalOAuthProviderAndReadErrorsStayDistinct() async throws {
+        let repository = ProviderAccountRepository()
+        let raw = try snapshot(1)
+        repository.configure(load: { raw }, command: { _, _ in throw ProviderAccountError.invalidResponse })
+        let loaded = await repository.refresh()
+        XCTAssertTrue(loaded)
+        let configured = repository.configurationDescription(providerId: "openai")
+        XCTAssertEqual(configured, repository.configurationDescription(providerId: "openai-chatgpt"))
+        XCTAssertTrue(configured.hasSuffix("2/2"))
+        XCTAssertFalse(repository.modelIsAvailable(reference: "openai/model"))
+        _ = await repository.perform(.init(action: "test", accountId: "a"))
+        XCTAssertEqual(repository.configurationDescription(providerId: "openai"), configured)
+        repository.configure(load: { throw ProviderAccountError.unavailable }, command: { _, _ in raw })
+        _ = await repository.refresh()
+        XCTAssertEqual(repository.configurationDescription(providerId: "openai"), String(localized: "Unable to read account status"))
+    }
+
+    func testConnectionConfigurationResolvesLogicalProviderFromHostSnapshot() async throws {
+        let repository = ProviderAccountRepository()
+        let raw = try snapshot(1, accounts: ["a"])
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any])
+        var rows = try XCTUnwrap(object["accounts"] as? [[String: Any]])
+        rows[0]["providerId"] = "custom-group"
+        rows[0]["executionBindingId"] = "custom-group:primary"
+        object["accounts"] = rows
+        let payload = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        repository.configure(load: { payload }, command: { _, _ in payload })
+        _ = await repository.refresh()
+        let expected = repository.configurationDescription(providerId: "custom-group")
+        XCTAssertTrue(expected.hasSuffix("1/1"))
+        XCTAssertEqual(repository.configurationDescription(executionBindingId: "custom-group:primary"), expected)
+        XCTAssertEqual(repository.configurationDescription(executionBindingId: "missing:connection"), String(localized: "settings_provider_unconfigured"))
+        object["modelAvailability"] = [["providerId": "custom-group", "executionBindingId": "custom-group:secondary", "modelId": "model",
+            "eligibleAccountIds": ["a"], "confirmedAccountIds": [], "unverifiedAccountIds": ["a"], "forbiddenAccountIds": []]]
+        let projectedPayload = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        repository.configure(load: { projectedPayload }, command: { _, _ in projectedPayload })
+        _ = await repository.refresh()
+        XCTAssertEqual(repository.configurationDescription(executionBindingId: "custom-group:secondary"), expected)
+    }
+
     private func snapshot(_ revision: UInt64, accounts: [String] = ["a", "b"], needsAuth: String? = nil) throws -> String {
         let rows: [[String: Any]] = accounts.enumerated().map { priority, id in
             ["accountId": id, "providerId": "openai", "displayName": "Account \(id)",

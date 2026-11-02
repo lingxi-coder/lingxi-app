@@ -8,6 +8,7 @@ import SwiftUI
 /// chain, so a provider is now two taps from the settings home.
 struct ModelsSettingsPage: View {
     @Environment(\.theme) private var t
+    @Environment(\.scenePhase) private var scenePhase
     @State private var repository = ProviderRepository.shared
     @State private var desktop = DesktopSettingsRepository.shared
     @State private var addingProvider = false
@@ -57,7 +58,17 @@ struct ModelsSettingsPage: View {
         } message: {
             Text(removeError ?? "")
         }
-        .refreshable { await repository.refreshOfficialCatalog() }
+        .refreshable {
+            await repository.refreshOfficialCatalog()
+            await repository.refreshAccounts()
+        }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                await repository.refreshAccounts()
+                do { try await Task.sleep(for: .seconds(15)) } catch { return }
+            }
+        }
         .task {
             retryMaxAttemptsText = String(repository.routingSettings.retryMaxAttempts)
             retryBackoffMsText = String(repository.routingSettings.retryBackoffMs)
@@ -145,14 +156,12 @@ struct ModelsSettingsPage: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(state.profile.name).font(.body).foregroundStyle(Color.primary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(state.profile.modelID.isEmpty ? "—" : state.profile.modelID)
+                    Text(state.profile.enabled ? ProviderAccountRepository.shared.configurationDescription(
+                        providerId: repository.logicalProviderID(for: state.profile)) : String(localized: "Disabled"))
                         .font(.subheadline).foregroundStyle(Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: "circle.fill")
-                    .font(.caption2).foregroundStyle(repository.hasConfiguredAccount(for: state.profile) ? t.ok : t.text4)
-                    .accessibilityLabel(state.profile.enabled ? repository.hasConfiguredAccount(for: state.profile) ? String(localized: "settings_provider_status_configured") : String(localized: "settings_provider_unconfigured") : String(localized: "settings_badge_disabled"))
                 if state.profile.isDefault {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(t.accent)
                         .accessibilityLabel(String(localized: "settings_badge_default"))

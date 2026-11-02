@@ -564,7 +564,10 @@ private fun ModelChip(
         EngineModelCatalog.visibleModels(models + projectedModels, visibility)
     }
     val filteredModels = remember(visibleModels, query) { EngineModelCatalog.filter(visibleModels, query) }
-    val groups = remember(filteredModels) { EngineModelCatalog.groups(filteredModels) }
+    val groups = remember(filteredModels, accountAvailability) {
+        EngineModelCatalog.pickerGroups(filteredModels, accountAvailability.filter { it.hasEligibleAccounts }
+            .map { "${it.executionBindingId}/${it.modelId}" }.toSet())
+    }
     val recentsStore = remember(context) { ModelRecentsStore(context) }
     // Re-read on every open rather than once: a pick made in this composition
     // must be at the top the next time the menu is shown.
@@ -653,9 +656,15 @@ private fun ModelChip(
                         item(key = "header:${group.id}") {
                             val status = EngineModelCatalog.providerStatus(group.id, providerStatuses)
                             ListItem(
-                                headlineContent = { Text(group.name, style = androidx.compose.material3.MaterialTheme.typography.titleSmall) },
+                                headlineContent = { Text(when (group.id) {
+                                    "openai-chatgpt" -> "OpenAI · " + stringResource(R.string.provider_account_auth_chatgpt)
+                                    "openai" -> "OpenAI · " + stringResource(R.string.provider_account_auth_api_key)
+                                    else -> group.name
+                                }, style = androidx.compose.material3.MaterialTheme.typography.titleSmall) },
                                 supportingContent = if (remoteModelSelection) null else {{
-                                    Text(status?.displayLabel ?: stringResource(R.string.settings_provider_unconfigured))
+                                    Text(if (group.models.any { m -> findModelAvailability(accountAvailability, m.id)?.hasEligibleAccounts == true })
+                                        stringResource(R.string.settings_provider_status_configured)
+                                    else status?.displayLabel ?: stringResource(R.string.settings_provider_unconfigured))
                                 }},
                                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                             )
@@ -721,7 +730,11 @@ private fun ModelPickerRow(
         supportingContent = {
             Column {
                 Text(model.id.substringAfter('/'), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(accountModelPermissionLabel(availability?.permissionStatus ?: "unverified"))
+                Text(if (availability == null) stringResource(R.string.provider_account_status_unknown)
+                    else if (availability.eligibleAccountIds.isEmpty() && availability.forbiddenAccountIds.isEmpty()
+                        && availability.unverifiedAccountIds.isEmpty() && availability.confirmedAccountIds.isEmpty())
+                        stringResource(R.string.provider_account_model_no_eligible)
+                    else accountModelPermissionLabel(availability.permissionStatus))
                 if (!canSelect) {
                     Text(stringResource(R.string.provider_account_model_no_eligible))
                 }

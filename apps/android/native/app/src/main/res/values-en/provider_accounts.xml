@@ -64,4 +64,7 @@
     <string name="provider_account_unavailable_storage">Unable to read secure account storage. Unlock the device and retry.</string>
     <string name="provider_account_unavailable_model">Current accounts lack access to these models. Model permissions refresh automatically.</string>
     <string name="provider_account_unavailable_generic">No suitable model account is available. Availability refreshes automatically; check account status or choose another model.</string>
+    <string name="provider_account_permissions_count">Model permissions (%1$d)</string>
+    <string name="provider_account_remove_confirmation">Remove “%1$s” and its credentials?</string>
+    <string name="provider_accounts_read_failed">Unable to read account status. Refresh or reconnect to the Host.</string>
 </resources>

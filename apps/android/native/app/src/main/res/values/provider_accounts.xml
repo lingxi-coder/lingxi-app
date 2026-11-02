@@ -64,4 +64,7 @@
     <string name="provider_account_unavailable_storage">无法读取账号安全存储。请解锁设备并重试。</string>
     <string name="provider_account_unavailable_model">当前账号没有这些模型的访问权限，列表会自动刷新权限状态。</string>
     <string name="provider_account_unavailable_generic">当前没有适用的可用模型账号。列表会自动刷新，请检查账号状态或选择其他模型。</string>
+    <string name="provider_account_permissions_count">模型权限（%1$d）</string>
+    <string name="provider_account_remove_confirmation">移除“%1$s”及其凭据？</string>
+    <string name="provider_accounts_read_failed">无法读取账号状态，请刷新或重新连接 Host。</string>
 </resources>

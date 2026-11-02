@@ -95,6 +95,25 @@ data class ProviderAccountsState(
     val lastSelectedModel: String? = null,
     val allAccountsUnavailable: Boolean = false,
 ) {
+    fun providerAccounts(bindingId: String): List<ProviderAccountRow> = accounts.filter {
+        if (bindingId == "openai" || bindingId == "openai-chatgpt") it.providerId == "openai"
+        else it.providerId == bindingId || it.executionBindingId == bindingId || it.executionBindingId.startsWith("$bindingId:")
+    }
+
+    fun configurationStatus(bindingId: String): String {
+        if (error != null) return "read_failed"
+        if (!loaded) return "loading"
+        val rows = providerAccounts(bindingId)
+        if (rows.isEmpty()) return "unconfigured"
+        val enabled = rows.filter { it.enabled }
+        if (enabled.isEmpty()) return "disabled"
+        if (enabled.any { it.status == "ready" }) return "configured"
+        if (enabled.any { it.status == "storage_unavailable" }) return "storage_unavailable"
+        if (enabled.any { it.status == "cooling_down" || it.status == "quota_exhausted" }) return "temporarily_unavailable"
+        if (enabled.any { it.status == "needs_auth" }) return "needs_auth"
+        return "unverified"
+    }
+
     /** Copy only: the Host projection remains the sole model/account eligibility authority. */
     val availabilityProblem: ProviderAccountAvailabilityProblem? get() {
         if (!loaded || accounts.isEmpty() || modelAvailability.any { it.hasEligibleAccounts }) return null

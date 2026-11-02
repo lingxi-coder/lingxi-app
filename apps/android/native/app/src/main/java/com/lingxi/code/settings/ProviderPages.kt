@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -105,6 +106,13 @@ fun ProviderListPage(
 ) {
     val t = LingXiTheme.palette
     val arr = state.providers(kind)
+    val accountState by store.providerAccounts.state.collectAsState()
+    val owner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.LaunchedEffect(kind, owner) {
+        if (kind == ProviderKind.Llm) owner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) { store.providerAccounts.refresh(); kotlinx.coroutines.delay(15_000) }
+        }
+    }
     var advancedExpanded by remember(kind) { mutableStateOf(false) }
 
     Column(Modifier.fillMaxWidth()) {
@@ -132,6 +140,7 @@ fun ProviderListPage(
                     provider = p,
                     preset = preset,
                     kind = kind,
+                    accountState = accountState,
                     isLast = i == arr.size - 1,
                     onTap = { onEdit(p.id) },
                 )
@@ -229,6 +238,7 @@ private fun ProviderRow(
     preset: ProviderPreset,
     kind: ProviderKind,
     isLast: Boolean,
+    accountState: ProviderAccountsState,
     onTap: () -> Unit,
 ) {
     val t = LingXiTheme.palette
@@ -255,9 +265,13 @@ private fun ProviderRow(
                     if (!provider.enabled) Badge(stringResource(R.string.settings_badge_disabled), t.text4)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Box(Modifier.size(6.dp).clip(CircleShape).background(provider.status.dot(t)))
+                    Box(Modifier.size(6.dp).clip(CircleShape).background(
+                        if (kind == ProviderKind.Llm) {
+                            if (accountState.configurationStatus(ProviderSettingsRepository.profileNameFor(provider)) == "configured" && provider.enabled) t.ok else t.text4
+                        } else provider.status.dot(t)))
                     Text(
-                        "${provider.status.localizedLabel()} · ${provider.model.ifEmpty { "—" }}",
+                        if (kind == ProviderKind.Llm) providerConfigurationLabel(accountState, ProviderSettingsRepository.profileNameFor(provider))
+                        else "${provider.status.localizedLabel()} · ${provider.model.ifEmpty { "—" }}",
                         color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, fontFamily = LXFont.mono,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )

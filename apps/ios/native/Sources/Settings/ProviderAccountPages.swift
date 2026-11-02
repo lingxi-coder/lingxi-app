@@ -10,6 +10,7 @@ struct ProviderAccountsPage: View {
     @State private var repository = ProviderAccountRepository.shared
     private enum AccountSheet: String, Identifiable { case add, deviceCode; var id: String { rawValue } }
     @State private var sheet: AccountSheet?
+    @State private var confirmMetered = false
 
     private var accounts: [ProviderAccount] { repository.accounts(providerId: providerId) }
 
@@ -22,7 +23,7 @@ struct ProviderAccountsPage: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(account.displayName)
-                            Text(account.executionBindingId).font(.caption).foregroundStyle(.secondary)
+                            Text(account.authKind == "oauth" ? "ChatGPT subscription" : "API key").font(.caption).foregroundStyle(.secondary)
                             Text(accountStatus(account)).font(.caption).foregroundStyle(.secondary)
                             if repository.wasLastUsed(account) {
                                 Text("Last used").font(.caption).foregroundStyle(.secondary)
@@ -48,9 +49,10 @@ struct ProviderAccountsPage: View {
                     Toggle("Allow subscription fallback to metered API", isOn: Binding(
                         get: { repository.snapshot.providerPolicies?[providerId]?.allowSubscriptionToMetered ?? false },
                         set: { allowed in
-                            Task {
-                                await repository.perform(.init(action: "set_policy", providerId: providerId,
-                                    allowSubscriptionToMetered: allowed))
+                            if allowed { confirmMetered = true }
+                            else {
+                                Task { await repository.perform(.init(action: "set_policy", providerId: providerId,
+                                    allowSubscriptionToMetered: false)) }
                             }
                         }
                     ))
@@ -61,6 +63,15 @@ struct ProviderAccountsPage: View {
             if let error = repository.errorMessage {
                 Section { Text(error).foregroundStyle(.red) }
             }
+        }
+        .confirmationDialog("Allow subscription fallback to metered API", isPresented: $confirmMetered, titleVisibility: .visible) {
+            Button("Allow API charges") {
+                Task { await repository.perform(.init(action: "set_policy", providerId: providerId,
+                    allowSubscriptionToMetered: true)) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("May incur API charges when subscription accounts are unavailable.")
         }
         .navigationTitle("Accounts")
         .toolbar { EditButton().disabled(repository.busy) }

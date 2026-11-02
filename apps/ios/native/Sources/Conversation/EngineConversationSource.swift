@@ -2459,7 +2459,8 @@ final class EngineConversationSource: ConversationSource {
             latestActivity: dto.agentId == ConversationModel.mainAgentID
                 ? nil
                 : dto.latestActivity.map(displayText),
-            updatedAtMs: dto.updatedAtMs ?? 0
+            updatedAtMs: dto.updatedAtMs ?? 0,
+            reportDelivery: dto.reportDelivery
         )
         return ConversationModel.normalizedAgentSummaryForSource(summary)
     }
@@ -2797,7 +2798,8 @@ final class EngineConversationSource: ConversationSource {
             modelProfile: summary.modelProfile,
             status: summary.status,
             latestActivity: activity ?? summary.latestActivity,
-            updatedAtMs: summary.updatedAtMs
+            updatedAtMs: summary.updatedAtMs,
+            reportDelivery: summary.reportDelivery
         ))
     }
 

@@ -28,6 +28,7 @@ data class SessionAgentUi(
     val model: String?,
     val status: String,
     val latestActivity: String?,
+    val reportDelivery: String? = null,
 )
 
 enum class WorkflowResumeUiState {
@@ -54,6 +55,7 @@ fun SessionAgentSummaryDto.toSessionAgentUi(): SessionAgentUi = SessionAgentUi(
     model = model,
     status = status,
     latestActivity = latestActivity?.displayText(),
+    reportDelivery = reportDelivery,
 )
 
 internal fun TaskStatusDto.isAttentionStatus(): Boolean =

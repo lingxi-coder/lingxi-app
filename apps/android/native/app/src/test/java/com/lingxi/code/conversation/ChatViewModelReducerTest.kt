@@ -1656,7 +1656,7 @@ class ChatViewModelReducerTest {
 
     @Test
     fun sessionAgentTextProjectsToDisplayOnlyAtTheUiBoundary() {
-        val summary = SessionAgentSummaryDto(
+        val summary = SessionAgentSummaryDto(reportDelivery = "flagged",
             agentId = "agent:worker",
             name = ClientTextDto(codeUnits = listOf('A'.code.toUShort(), 0xD800.toUShort())),
             agentType = "worker",
@@ -1673,6 +1673,7 @@ class ChatViewModelReducerTest {
 
         assertEquals("A�", ui.name)
         assertEquals("x😃", ui.latestActivity)
+        assertEquals("flagged", ui.reportDelivery)
     }
 
     @Test

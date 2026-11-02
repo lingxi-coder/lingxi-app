@@ -24,6 +24,17 @@ import XCTest
 
     @MainActor
 final class SessionResumeTests: XCTestCase {
+        func testReportDeliveryBindingsRoundTripWithoutShiftingAgentFields() throws {
+            for delivery in [nil, "pending", "delivered", "flagged", "withheld"] as [String?] {
+                let agent = SessionAgentSummaryDto(reportDelivery: delivery,
+                    agentId: "agent:binding-test", name: sourceText("测试 agent"), agentType: "explorer",
+                    model: "subscription-model", modelProfile: "openai-chatgpt", status: "completed",
+                    latestActivity: sourceText("Done"), updatedAtMs: 123456789)
+                let buffer = FfiConverterTypeSessionAgentSummaryDto.lower(agent)
+                XCTAssertEqual(try FfiConverterTypeSessionAgentSummaryDto.lift(buffer), agent)
+            }
+        }
+
 
         private func agentRow(index: UInt64, message: MessageDto) -> SessionAgentMessageRowDto {
             SessionAgentMessageRowDto(messageIndex: index, messageUuid: "fixture-row-\(index)", message: message, apiErrorJson: nil)
@@ -86,7 +97,7 @@ visionDelegationEnabled: true)
         func testSessionAgentListIsScopedAndSelectable() {
             let source = makeSource()
             source.model.activeSessionId = "session-a"
-            let summary = SessionAgentSummaryDto(
+            let summary = SessionAgentSummaryDto(reportDelivery: "delivered",
                 agentId: "agent:child-1",
                 name: sourceText("researcher"),
                 agentType: "explorer",
@@ -105,9 +116,10 @@ visionDelegationEnabled: true)
             let child = source.model.agentSummaries.first { $0.id == "agent:child-1" }
             XCTAssertEqual(child?.model, "deepseek-flash")
             XCTAssertEqual(child?.modelProfile, "deepseek")
+            XCTAssertEqual(child?.reportDelivery, "delivered")
             XCTAssertEqual(
                 source.model.agentSummaries.first?.name,
-                String(localized: "chat_agent_main")
+                ConversationAgentSummary.main.name
             )
             source.model.upsertAgentSummary(ConversationAgentSummary(
                 id: ConversationModel.mainAgentID,
@@ -119,7 +131,7 @@ visionDelegationEnabled: true)
             XCTAssertEqual(source.model.agentSummaries.first?.latestActivity, "12 messages · model")
             source.applyForTesting(.sessionAgentUpdated(
                 sessionId: "session-a",
-                agent: SessionAgentSummaryDto(
+                agent: SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: ConversationModel.mainAgentID,
                     name: sourceText("Remote main"),
                     agentType: "main",
@@ -130,7 +142,7 @@ visionDelegationEnabled: true)
                     updatedAtMs: nil
                 )
             ))
-            XCTAssertEqual(source.model.agentSummaries.first?.name, String(localized: "chat_agent_main"))
+            XCTAssertEqual(source.model.agentSummaries.first?.name, ConversationAgentSummary.main.name)
             XCTAssertEqual(source.model.agentSummaries.first?.latestActivity, "12 messages · model")
             source.selectAgent("agent:child-1")
             XCTAssertTrue(source.model.isSelectedAgentReadOnly)
@@ -144,7 +156,7 @@ visionDelegationEnabled: true)
 
             source.applyForTesting(.sessionAgentUpdated(
                 sessionId: "session-a",
-                agent: SessionAgentSummaryDto(
+                agent: SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("designer"),
                     agentType: "workflow-subagent",
@@ -157,7 +169,7 @@ visionDelegationEnabled: true)
             ))
             source.applyForTesting(.sessionAgentList(
                 sessionId: "session-a",
-                agents: [SessionAgentSummaryDto(
+                agents: [SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("designer"),
                     agentType: "workflow-subagent",
@@ -186,7 +198,7 @@ visionDelegationEnabled: true)
                     func update(_ status: String, at timestamp: UInt64) {
                         source.applyForTesting(.sessionAgentUpdated(
                             sessionId: "session-a",
-                            agent: SessionAgentSummaryDto(
+                            agent: SessionAgentSummaryDto(reportDelivery: nil,
                                 agentId: agentID, name: sourceText("preparer"), agentType: "workflow-subagent",
                                 model: nil, modelProfile: nil, status: status,
                                 latestActivity: nil, updatedAtMs: timestamp
@@ -232,7 +244,7 @@ visionDelegationEnabled: true)
 
             source.applyForTesting(.sessionAgentUpdated(
                 sessionId: "session-a",
-                agent: SessionAgentSummaryDto(
+                agent: SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("designer"),
                     agentType: "workflow-subagent",
@@ -249,7 +261,7 @@ visionDelegationEnabled: true)
 
             source.applyForTesting(.sessionAgentUpdated(
                 sessionId: "session-a",
-                agent: SessionAgentSummaryDto(
+                agent: SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("designer"),
                     agentType: "workflow-subagent",
@@ -271,7 +283,7 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: "agent:child-1", name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(reportDelivery: nil, agentId: "agent:child-1", name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent("agent:child-1")
             source.applyForTesting(.sessionAgentTranscript(
@@ -293,7 +305,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(
+                SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("worker"),
                     agentType: "general",
@@ -325,7 +337,7 @@ visionDelegationEnabled: true)
             let agentID = "agent:child-1"
             let same = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "same".clientTextDto)])
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(
+                SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("worker"),
                     agentType: "general",
@@ -363,7 +375,7 @@ visionDelegationEnabled: true)
             let agentID = "agent:child-1"
             let repeated = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "same".clientTextDto)])
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(reportDelivery: nil, agentId: agentID, name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -393,7 +405,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(
+                SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("worker"),
                     agentType: "general",
@@ -446,7 +458,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(
+                SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("worker"),
                     agentType: "general",
@@ -486,7 +498,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(
+                SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("worker"),
                     agentType: "general",
@@ -534,7 +546,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(reportDelivery: nil, agentId: agentID, name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -578,7 +590,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(
+                SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("worker"),
                     agentType: "general",
@@ -625,7 +637,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(reportDelivery: nil, agentId: agentID, name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -650,8 +662,8 @@ visionDelegationEnabled: true)
             let first = "agent:first"
             let second = "agent:second"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: first, name: sourceText("first"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil),
-                SessionAgentSummaryDto(agentId: second, name: sourceText("second"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(reportDelivery: nil, agentId: first, name: sourceText("first"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil),
+                SessionAgentSummaryDto(reportDelivery: nil, agentId: second, name: sourceText("second"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(first)
             source.selectAgent(second)
@@ -666,7 +678,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(
+                SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("worker"),
                     agentType: "general",
@@ -708,7 +720,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-old"
             let agentID = "agent:old"
             source.applyForTesting(.sessionAgentList(sessionId: "session-old", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: sourceText("old"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(reportDelivery: nil, agentId: agentID, name: sourceText("old"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
             source.model.activeSessionId = "session-new"
@@ -729,7 +741,7 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(
+                SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: "agent:child-1",
                     name: sourceText("worker"),
                     agentType: "general",
@@ -750,7 +762,7 @@ visionDelegationEnabled: true)
             ))
             XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["live tail"])
             XCTAssertEqual(source.model.selectedAgentSummary?.status, "idle", "transcript delivery must preserve authoritative lifecycle state")
-            source.applyForTesting(.sessionAgentUpdated(sessionId: "session-a", agent: SessionAgentSummaryDto(
+            source.applyForTesting(.sessionAgentUpdated(sessionId: "session-a", agent: SessionAgentSummaryDto(reportDelivery: nil,
                 agentId: "agent:child-1", name: sourceText("worker"), agentType: "general", model: nil,
                 modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: 1
             )))
@@ -780,7 +792,7 @@ visionDelegationEnabled: true)
             let agentID = "agent:child-1"
             let same = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "same".clientTextDto)])
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(
+                SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("worker"),
                     agentType: "general",
@@ -1068,7 +1080,7 @@ visionDelegationEnabled: true)
             let agentID = "agent:design"
             source.model.activeSessionId = sessionID
             source.applyForTesting(.sessionAgentList(sessionId: sessionID, agents: [
-                SessionAgentSummaryDto(
+                SessionAgentSummaryDto(reportDelivery: nil,
                     agentId: agentID,
                     name: sourceText("design"),
                     agentType: "designer",
@@ -1767,6 +1779,11 @@ visionDelegationEnabled: true)
         init(submitHandler: @escaping (ClientCommand) async throws -> Void) {
             self.submitHandler = submitHandler
             super.init(noHandle: .init())
+        }
+
+        override func workspaceState() async -> WorkspaceStateDto {
+            WorkspaceStateDto(sessionId: "fixture-session", cwd: "/fixture", projectRoot: "/fixture",
+                additionalDirectories: [], transcriptPath: "/fixture/session.jsonl")
         }
 
         override func visualizationHost(origin: String) -> VisualizationHost? { nil }

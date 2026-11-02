@@ -126,6 +126,21 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertNil(object["visibleModelIDs"])
     }
 
+    func testPickerPreservesIndependentApiAndSubscriptionVisibility() throws {
+        let repository = providerConfigurationTestRepository(persistenceURL: persistenceURL)
+        let api = repository.addProfile(presetID: "openai")
+        let subscription = repository.addProfile(presetID: "openai-chatgpt")
+        repository.updateProfile(api) { $0.showInModelPicker = true }
+        repository.updateProfile(subscription) { $0.showInModelPicker = false }
+        let references = ["openai/shared-model", "openai-chatgpt/shared-model"]
+        XCTAssertEqual(repository.visibleModelReferences(references), ["openai/shared-model"])
+        repository.updateProfile(api) { $0.showInModelPicker = false }
+        repository.updateProfile(subscription) { $0.showInModelPicker = true }
+        XCTAssertEqual(repository.visibleModelReferences(references), ["openai-chatgpt/shared-model"])
+        repository.updateProfile(subscription) { $0.visibleModelIDs = ["allowed"] }
+        XCTAssertEqual(repository.visibleModelReferences(references), [])
+    }
+
     func testVisibleModelHelpersHonorProviderSwitchAndExplicitAllowlist() throws {
         let repository = providerConfigurationTestRepository(persistenceURL: persistenceURL)
         let openai = repository.addProfile(presetID: "openai")

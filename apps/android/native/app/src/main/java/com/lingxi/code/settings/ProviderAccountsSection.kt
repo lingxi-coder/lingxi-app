@@ -52,6 +52,8 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
     var edit by remember(bindingId) { mutableStateOf<ProviderAccountRow?>(null) }
     var adding by remember(bindingId) { mutableStateOf(false) }
     var oauth by remember(bindingId) { mutableStateOf(false) }
+    var confirmRemove by remember(bindingId) { mutableStateOf<ProviderAccountRow?>(null) }
+    var modelsExpanded by remember(bindingId) { mutableStateOf(false) }
     var confirmMetered by remember(bindingId) { mutableStateOf(false) }
     var name by remember(bindingId) { mutableStateOf("") }
     var key by remember(bindingId) { mutableStateOf("") }
@@ -60,7 +62,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
     val palette = LingXiTheme.palette
     ReportSettingsDraft("provider-account-$bindingId", key.isNotEmpty() || adding || edit != null)
     LaunchedEffect(bindingId, state.bindingGeneration, lifecycleOwner) {
-        edit = null; adding = false; key = ""; confirmMetered = false
+        edit = null; adding = false; key = ""; confirmMetered = false; confirmRemove = null
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
                 repository.refresh()
@@ -111,7 +113,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                 }
                 Text(statusLabel + (account.cooldownUntilMs?.let { " · ${DateFormat.getDateTimeInstance().format(Date(it))}" } ?: ""),
                     color = palette.text3, modifier = Modifier.padding(horizontal = 12.dp))
-                state.scopedHealth.filter { it.accountId == account.accountId }.forEach { health ->
+                state.scopedHealth.filter { it.accountId == account.accountId && it.identityGeneration == account.identityGeneration }.forEach { health ->
                     val scopeLabel = stringResource(if (health.scopeKind == "model") R.string.provider_account_scope_model else R.string.provider_account_scope_endpoint)
                     val reasonLabel = stringResource(when (health.reason) {
                         "rate_limited" -> R.string.provider_account_rate_limited
@@ -124,7 +126,12 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                         health.unavailableUntilMs?.let { " · ${DateFormat.getDateTimeInstance().format(Date(it))}" }.orEmpty(),
                         color = palette.text3, modifier = Modifier.padding(horizontal = 12.dp))
                 }
-                state.modelEntitlements.filter { it.accountId == account.accountId }.sortedBy { it.modelId }.forEach { entitlement ->
+                var permissionsExpanded by remember(account.accountId) { mutableStateOf(false) }
+                val entitlements = state.modelEntitlements.filter { it.accountId == account.accountId && it.identityGeneration == account.identityGeneration }.sortedBy { it.modelId }
+                if (entitlements.isNotEmpty()) TextButton(onClick = { permissionsExpanded = !permissionsExpanded }) {
+                    Text(stringResource(R.string.provider_account_permissions_count, entitlements.size))
+                }
+                if (permissionsExpanded) entitlements.forEach { entitlement ->
                     Text(stringResource(R.string.provider_account_model_observed, entitlement.modelId, accountModelPermissionLabel(entitlement.status)) +
                         entitlement.retryAtMs?.let { " · ${DateFormat.getDateTimeInstance().format(Date(it))}" }.orEmpty(),
                         color = palette.text3, modifier = Modifier.padding(horizontal = 12.dp))
@@ -165,9 +172,11 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
         val modelRows = state.modelAvailability.filter { it.providerId == logicalProviderId }
             .sortedWith(compareBy<ProviderAccountModelAvailability> { it.modelId }.thenBy { it.executionBindingId })
         if (modelRows.isNotEmpty()) {
-            Text(stringResource(R.string.provider_account_models_union), color = palette.text)
-            Text(stringResource(R.string.provider_account_models_verification_hint), color = palette.text3)
-            modelRows.forEach { model ->
+            TextButton(onClick = { modelsExpanded = !modelsExpanded }) {
+                Text(stringResource(R.string.provider_account_models_union))
+            }
+            if (modelsExpanded) Text(stringResource(R.string.provider_account_models_verification_hint), color = palette.text3)
+            if (modelsExpanded) modelRows.forEach { model ->
                 val authLabel = stringResource(if (model.executionBindingId == "openai-chatgpt") R.string.provider_account_auth_chatgpt else R.string.provider_account_auth_api_key)
                 val names = accounts.filter { it.accountId in model.eligibleAccountIds }.joinToString { it.displayName }
                 Text("${model.modelId} · $authLabel · ${accountModelPermissionLabel(model.permissionStatus)}", color = palette.text)
@@ -216,6 +225,18 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
         if (message != null || state.error != null) Text(message ?: state.error.orEmpty(), color = if (message == null || messageIsError) palette.danger else palette.text3, modifier = Modifier.padding(12.dp))
         TextButton(enabled = !busy, onClick = { scope.launch { repository.refresh() } }) { Text(stringResource(R.string.provider_accounts_refresh)) }
     }
+    confirmRemove?.let { account ->
+        AlertDialog(
+            onDismissRequest = { confirmRemove = null },
+            title = { Text(stringResource(R.string.provider_account_remove)) },
+            text = { Text(stringResource(R.string.provider_account_remove_confirmation, account.displayName)) },
+            confirmButton = { TextButton(enabled = !busy, onClick = {
+                confirmRemove = null
+                execute("remove", JSONObject().put("accountId", account.accountId)) { edit = null; key = "" }
+            }) { Text(stringResource(R.string.provider_account_remove), color = palette.danger) } },
+            dismissButton = { TextButton(onClick = { confirmRemove = null }) { Text(stringResource(android.R.string.cancel)) } },
+        )
+    }
     if (confirmMetered) AlertDialog(
         onDismissRequest = { confirmMetered = false },
         title = { Text(stringResource(R.string.provider_account_allow_metered)) },
@@ -232,6 +253,8 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
             title = { Text(stringResource(if (adding) R.string.provider_account_add_title else R.string.provider_account_edit)) },
             text = {
                 Column {
+                    if (busy) androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+                    if (message != null) Text(message.orEmpty(), color = palette.danger)
                     OutlinedTextField(value = name, onValueChange = { name = it }, enabled = !busy, singleLine = true,
                         label = { Text(stringResource(R.string.settings_display_name)) })
                     if (!oauth) OutlinedTextField(value = key, onValueChange = { key = it }, enabled = !busy, singleLine = true,
@@ -242,7 +265,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                             execute("clear_credential", JSONObject().put("accountId", account.accountId)) { edit = null; key = "" }
                         }) { Text(stringResource(if (oauth) R.string.provider_account_logout else R.string.settings_provider_clear_key)) }
                         TextButton(enabled = !busy, onClick = {
-                            execute("remove", JSONObject().put("accountId", account.accountId)) { edit = null; key = "" }
+                            confirmRemove = account
                         }) { Text(stringResource(R.string.provider_account_remove), color = palette.danger) }
                     }
                 }
@@ -286,3 +309,20 @@ internal fun accountAvailabilityProblemLabel(problem: ProviderAccountAvailabilit
     ProviderAccountAvailabilityProblem.ModelForbidden -> R.string.provider_account_unavailable_model
     ProviderAccountAvailabilityProblem.NoEligibleAccount -> R.string.provider_account_unavailable_generic
 })
+
+@Composable
+internal fun providerConfigurationLabel(state: ProviderAccountsState, bindingId: String): String {
+    val status = stringResource(when (state.configurationStatus(bindingId)) {
+        "read_failed" -> R.string.provider_accounts_read_failed
+        "loading" -> R.string.provider_accounts_loading
+        "unconfigured" -> R.string.settings_provider_unconfigured
+        "configured" -> R.string.settings_provider_status_configured
+        "disabled" -> R.string.provider_account_disabled
+        "needs_auth" -> R.string.provider_account_needs_auth
+        "temporarily_unavailable" -> R.string.provider_account_temporarily_unavailable
+        "storage_unavailable" -> R.string.provider_account_storage_unavailable
+        else -> R.string.provider_account_status_unknown
+    })
+    val accounts = state.providerAccounts(bindingId)
+    return if (accounts.isEmpty()) status else "$status · ${accounts.count { it.enabled }}/${accounts.size}"
+}

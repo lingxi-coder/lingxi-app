@@ -752,9 +752,15 @@ final class ProviderRepository {
         let parts = reference.split(separator: "/", maxSplits: 1).map(String.init)
         guard parts.count == 2 else { return true }
         if catalogLoader != nil, catalogLoadState == .loaded {
-            guard authoritativeCatalogReferences().contains(reference) else { return false }
+            let projected = accountRepository.snapshot.modelAvailability.contains {
+                "\($0.executionBindingId)/\($0.modelId)" == reference
+            }
+            guard projected || authoritativeCatalogReferences().contains(reference) else { return false }
         }
-        guard let state = profiles.first(where: { engineProfileID(for: $0.profile) == parts[0] }) else {
+        let logicalID = parts[0] == "openai-chatgpt" ? "openai" : parts[0]
+        // Each saved execution channel keeps its own picker preferences.
+        let exact = profiles.first { executionBindingIDs(for: $0.profile).contains(parts[0]) }
+        guard let state = exact ?? profiles.first(where: { logicalProviderID(for: $0.profile) == logicalID }) else {
             return true
         }
         guard state.profile.showInModelPicker else { return false }
@@ -1174,7 +1180,7 @@ final class ProviderRepository {
 
     func hasConfiguredAccount(for profile: ProviderStoredProfile) -> Bool {
         accountRepository.snapshot.accounts.contains { account in
-            guard executionBindingIDs(for: profile).contains(account.executionBindingId), account.enabled else { return false }
+            guard account.providerId == logicalProviderID(for: profile), account.enabled else { return false }
             let health = accountRepository.health(for: account)
             return ["ready", "cooling_down", "quota_exhausted"].contains(health?.status ?? "")
                 && health?.reason != "credential_missing"

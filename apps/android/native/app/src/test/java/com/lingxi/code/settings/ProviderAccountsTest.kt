@@ -17,6 +17,29 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ProviderAccountsTest {
+    @Test fun configurationGroupsOAuthWithOpenAIAndKeepsEntitlementsSeparate() {
+        val state = decodeProviderAccounts(snapshot())
+        val oauth = state.accounts.first().copy(providerId = "openai", executionBindingId = "openai-chatgpt", status = "ready")
+        val configured = state.copy(accounts = listOf(oauth), loaded = true, modelAvailability = emptyList())
+        assertEquals("configured", configured.configurationStatus("openai"))
+        assertEquals("configured", configured.configurationStatus("openai-chatgpt"))
+        assertEquals("unconfigured", configured.configurationStatus("anthropic"))
+        assertEquals("disabled", configured.copy(accounts = listOf(oauth.copy(enabled = false))).configurationStatus("openai"))
+        assertEquals("read_failed", configured.copy(error = "read failed").configurationStatus("openai"))
+        assertEquals("read_failed", configured.copy(error = "Engine unavailable").configurationStatus("openai"))
+        assertEquals("storage_unavailable", configured.copy(accounts = listOf(oauth.copy(status = "storage_unavailable"))).configurationStatus("openai"))
+        assertEquals("loading", ProviderAccountsState().configurationStatus("openai"))
+    }
+
+    @Test fun pickerKeepsSubscriptionAdjacentAndRetainsExactExecutionReference() {
+        val models = com.lingxi.code.model.EngineModelCatalog.options(listOf(
+            "openai/shared-model", "anthropic/other", "openai-chatgpt/shared-model"))
+        val groups = com.lingxi.code.model.EngineModelCatalog.pickerGroups(models, setOf("openai-chatgpt/shared-model"))
+        assertEquals(listOf("openai-chatgpt", "openai", "anthropic"), groups.map { it.id })
+        assertEquals("openai-chatgpt/shared-model", groups.first().models.single().id)
+        assertEquals("openai/shared-model", groups[1].models.single().id)
+    }
+
     @Test fun healthNeverReordersUserPriorityAndOldIdentityHealthIsIgnored() {
         val state = decodeProviderAccounts(snapshot())
         assertEquals(listOf("A", "B"), state.accounts.map { it.accountId })

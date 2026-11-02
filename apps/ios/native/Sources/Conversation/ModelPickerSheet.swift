@@ -90,10 +90,14 @@ struct ModelPickerSheet: View {
                         }
                     }
                     ForEach(sections) { section in
-                        Section(section.name) {
+                        Section {
                             ForEach(section.models.map(\.reference), id: \.self) {
                                 row($0, slot: "provider")
                             }
+                        } header: {
+                            Text(section.name)
+                        } footer: {
+                            Text(ProviderAccountRepository.shared.configurationDescription(executionBindingId: section.providerId))
                         }
                     }
                 }
@@ -121,6 +125,7 @@ struct ModelPickerSheet: View {
         .onChange(of: controlsError) { _, error in
             if error != nil { requestedModel = nil }
         }
+        .task { await ProviderAccountRepository.shared.refresh() }
         .presentationDragIndicator(.visible)
         .sheet(item: $selectedDetails) { details in
             ModelDetailsSheet(
@@ -169,7 +174,11 @@ struct ModelPickerSheet: View {
 
     /// The references surviving the search box, in engine order.
     private var visibleModels: [String] {
-        repository.visibleModelReferences(availableModels)
+        let projected = ProviderAccountRepository.shared.snapshot.modelAvailability.map {
+            "\($0.executionBindingId)/\($0.modelId)"
+        }
+        var seen = Set<String>()
+        return repository.visibleModelReferences((availableModels + projected).filter { seen.insert($0).inserted })
     }
 
     /// The references surviving the search box, in engine order.
@@ -196,7 +205,9 @@ struct ModelPickerSheet: View {
     /// then group, so a provider whose models all filter out disappears with
     /// them (same order of operations as the Android picker).
     private var sections: [ModelProviderSection] {
-        ModelDisplay.sections(for: matches, detailsByReference: detailsByReference)
+        let accounts = ProviderAccountRepository.shared
+        return ModelDisplay.pickerSections(for: matches, detailsByReference: detailsByReference,
+            eligibleReferences: Set(matches.filter { accounts.modelIsAvailable(reference: $0) }))
     }
 
     /// Recently-picked references that also survive the search, in recency

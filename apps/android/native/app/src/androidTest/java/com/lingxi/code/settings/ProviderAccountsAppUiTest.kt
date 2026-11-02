@@ -143,6 +143,9 @@ class ProviderAccountsAppUiTest {
         capture("restored-after-process-restart")
         compose.onNodeWithText(label(R.string.provider_account_edit)).performScrollTo().performClick()
         compose.onNodeWithText(label(R.string.provider_account_remove)).performClick()
+        val confirmation = context.getString(R.string.provider_account_remove_confirmation, restored.displayName)
+        compose.onNode(hasText(label(R.string.provider_account_remove)) and hasClickAction() and
+            hasAnyAncestor(isDialog() and hasAnyDescendant(hasText(confirmation)))).performClick()
         compose.waitUntil(30_000) { store.providerAccounts.state.value.accounts.none { it.accountId == restored.accountId } }
         assertFalse(runBlocking { AndroidSecureStorageAdapter(context).list("provider-accounts.${state.storeScope}") }
             .contains("acct.${restored.accountId}"))

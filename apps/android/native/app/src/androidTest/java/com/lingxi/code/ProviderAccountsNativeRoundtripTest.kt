@@ -41,7 +41,7 @@ class ProviderAccountsNativeRoundtripTest {
                     return secureStorage.retrieve(service, account)
                 }
             }
-            fun build(): MobileEngineHandle = buildAndroidEngine(
+            fun buildOnce(): MobileEngineHandle = buildAndroidEngine(
                 config = AndroidEngineLaunchConfigFfi(
                     // None maps to MobileConfig.startup_catalog=None: no catalog
                     // prefetch/load/subscription or upstream discovery. The Host
@@ -64,6 +64,19 @@ class ProviderAccountsNativeRoundtripTest {
                 computerUse = null, shell = null, git = null, gitCredentialProvider = null,
                 secureStorage = storageBoundary, deviceControl = null,
             )
+            suspend fun build(): MobileEngineHandle = withTimeout(15_000) {
+                // Disposal starts asynchronous native media cleanup. Only retry
+                // its explicit admission fence; every other build failure propagates.
+                var rebuilt: MobileEngineHandle? = null
+                while (rebuilt == null) {
+                    try { rebuilt = buildOnce() }
+                    catch (error: MobileEngineException.Internal) {
+                        if (error.message?.contains("a previous media attachment has an unconfirmed drain") != true) throw error
+                        kotlinx.coroutines.delay(50)
+                    }
+                }
+                rebuilt
+            }
             var engine: MobileEngineHandle? = null
             try {
                 engine = build()

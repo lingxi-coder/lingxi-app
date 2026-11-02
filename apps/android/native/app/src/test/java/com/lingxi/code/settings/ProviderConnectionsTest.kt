@@ -229,6 +229,7 @@ class ProviderConnectionsTest {
         status = ConnStatus.Idle,
         enabled = true,
         credentialConfigured = true,
+        catalogBaseUrl = "https://api.deepseek.com",
     )
 
     private fun withSecondConnection(

@@ -632,6 +632,16 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
         Some(path) => validate_transcript_path(config_home, Path::new(path))?,
         None => locate_session_transcript(config_home, cwd, session_id)?,
     };
+    // A public background resume must reject a Chat transcript before it can
+    // publish a job or start a daemon. A live handoff already admitted by the
+    // foreground owner is the sole exception: its worker continues that owner.
+    if !context
+        .options
+        .as_ref()
+        .is_some_and(|options| options.preserve_admitted_context)
+    {
+        validate_public_resume_source(config_home, session_id, &transcript)?;
+    }
     let effective_cwd = if fork {
         cwd.to_string()
     } else {
@@ -814,6 +824,7 @@ async fn prepare_resume_transcript(
     fork: bool,
 ) -> std::io::Result<PathBuf> {
     let source = locate_session_transcript(config_home, cwd, source_session_id)?;
+    validate_public_resume_source(config_home, source_session_id, &source)?;
     if !fork {
         return Ok(source);
     }
@@ -838,6 +849,27 @@ async fn prepare_resume_transcript(
     )
     .await
     .map(|(path, _)| path)
+    .map_err(std::io::Error::other)
+}
+
+/// Check the exact source selected for a public background resume before any
+/// durable job, branch or writer authority is created.
+fn validate_public_resume_source(
+    config_home: &Path,
+    session_id: &str,
+    path: &Path,
+) -> std::io::Result<()> {
+    let id = uuid::Uuid::parse_str(session_id)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let path = crate::init::validate_exact_tui_resume_path(config_home, id, path)
+        .map_err(std::io::Error::other)?;
+    let content = std::fs::read_to_string(path)?;
+    crate::init::validate_resume_mode(
+        &content,
+        id,
+        Some(lingxi_core::host::session_context::ConversationMode::Code),
+    )
+    .map(|_| ())
     .map_err(std::io::Error::other)
 }
 
@@ -1279,7 +1311,7 @@ mod tests {
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         std::fs::write(
             &transcript,
-            format!("{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"/tmp/proj\"}}\n"),
+            format!("{{\"type\":\"fixed-session-mode\",\"sessionId\":\"{session_id}\",\"sessionMode\":\"code\",\"instructionEpoch\":0}}\n{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"/tmp/proj\"}}\n"),
         )
         .unwrap();
         // Empty prompt = resume-as-bg (no seed turn), unlike a fork with a `[prompt]`.
@@ -1316,6 +1348,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_background_resume_and_fork_reject_chat_before_publication() {
+        let home = tmpdir();
+        let cwd = "/tmp/proj";
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let target_id = uuid::Uuid::new_v4().to_string();
+        let transcript = session::jsonl::path::session_path(&home, cwd, &session_id);
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        let original = format!(
+            "{{\"type\":\"fixed-session-mode\",\"sessionId\":\"{session_id}\",\"sessionMode\":\"chat\",\"instructionEpoch\":0}}\n{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"{cwd}\"}}\n"
+        );
+        std::fs::write(&transcript, &original).unwrap();
+        for fork in [false, true] {
+            let error = prepare_resume_transcript(&home, cwd, &session_id, &target_id, fork)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("session_mode_mismatch"));
+        }
+        let mut spawner = CaptureSpawner::default();
+        let lockp = FakeLockProbe {
+            live: HashMap::new(),
+        };
+        let error = dispatch_resumed_session_inner(
+            &home,
+            &home,
+            cwd,
+            &session_id,
+            &"".into(),
+            false,
+            &ForkLaunchContext::default(),
+            None,
+            &lockp,
+            &mut spawner,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("session_mode_mismatch"));
+        assert!(spawner.spawns.is_empty());
+        assert!(!agents_registry::jobs_dir(&home).exists());
+        assert!(!home.join("sessions").exists());
+        assert!(!session::jsonl::path::session_path(&home, cwd, &target_id).exists());
+        assert_eq!(std::fs::read_to_string(transcript).unwrap(), original);
+    }
+
+    #[test]
+    fn admitted_chat_handoff_retains_its_identity_in_the_launch_spec() {
+        let home = tmpdir();
+        let cwd = "/tmp/proj";
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let transcript = session::jsonl::path::session_path(&home, cwd, &session_id);
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        let original = format!(
+            "{{\"type\":\"fixed-session-mode\",\"sessionId\":\"{session_id}\",\"sessionMode\":\"chat\",\"instructionEpoch\":0}}\n{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"{cwd}\"}}\n"
+        );
+        std::fs::write(&transcript, &original).unwrap();
+        let context = ForkLaunchContext {
+            options: Some(BackgroundLaunchOptions {
+                preserve_admitted_context: true,
+                ..BackgroundLaunchOptions::default()
+            }),
+            transcript_path: Some(transcript.display().to_string()),
+            ..ForkLaunchContext::default()
+        };
+        let mut spawner = CaptureSpawner::default();
+        let lockp = FakeLockProbe {
+            live: HashMap::new(),
+        };
+        let short = dispatch_resumed_session_inner(
+            &home,
+            &home,
+            cwd,
+            &session_id,
+            &"".into(),
+            false,
+            &context,
+            None,
+            &lockp,
+            &mut spawner,
+        )
+        .unwrap();
+        let spec = crate::background_launch::read_launch_spec(&home, &short).unwrap();
+        assert_eq!(spec.session_id, session_id);
+        assert!(spec.options.preserve_admitted_context);
+        assert_eq!(
+            std::fs::canonicalize(&spec.transcript_path).unwrap(),
+            std::fs::canonicalize(&transcript).unwrap()
+        );
+        assert_eq!(std::fs::read_to_string(transcript).unwrap(), original);
+    }
+
+    #[tokio::test]
     async fn background_fork_uses_the_exact_selected_worktree_transcript() {
         let home = tmpdir();
         let source_id = uuid::Uuid::new_v4().to_string();
@@ -1331,7 +1452,8 @@ mod tests {
             let row = serde_json::json!({"type":"user", "uuid":uuid::Uuid::new_v4(),
                 "parentUuid":null, "sessionId":source_id, "cwd":cwd,
                 "message":{"role":"user", "content":content}});
-            std::fs::write(path, format!("{row}\n")).unwrap();
+            let header = serde_json::json!({"type":"fixed-session-mode", "sessionId":source_id, "sessionMode":"code", "instructionEpoch":0});
+            std::fs::write(path, format!("{header}\n{row}\n")).unwrap();
         }
         filetime::set_file_mtime(&other, filetime::FileTime::from_unix_time(2_000_000_000, 0))
             .unwrap();
@@ -1357,7 +1479,7 @@ mod tests {
         std::fs::write(
             &source,
             format!(
-                "{{\"type\":\"user\",\"uuid\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"parentUuid\":null,\"sessionId\":\"{source_id}\",\"cwd\":\"/tmp/source\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}}}}\n"
+                "{{\"type\":\"fixed-session-mode\",\"sessionId\":\"{source_id}\",\"sessionMode\":\"code\",\"instructionEpoch\":0}}\n{{\"type\":\"user\",\"uuid\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"parentUuid\":null,\"sessionId\":\"{source_id}\",\"cwd\":\"/tmp/source\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}}}}\n"
             ),
         )
         .unwrap();
@@ -1369,8 +1491,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
         let branch = std::fs::read_to_string(&target).unwrap();
         let profile =
-            session::JsonlWriter::session_mode_transition_from_source(&branch, target_id).unwrap();
-        assert!(profile.active_epoch > 0);
+            session::JsonlWriter::fixed_session_profile_from_source(&branch, target_id).unwrap();
+        assert!(profile.instruction_epoch > 0);
         assert!(branch.contains(target_id));
         let context = ForkLaunchContext {
             transcript_path: Some(target.display().to_string()),
@@ -1618,7 +1740,7 @@ mod tests {
             std::fs::write(
                 &transcript,
                 format!(
-                    "{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"{worktree_cwd}\"}}\n"
+                    "{{\"type\":\"fixed-session-mode\",\"sessionId\":\"{session_id}\",\"sessionMode\":\"code\",\"instructionEpoch\":0}}\n{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"{worktree_cwd}\"}}\n"
                 ),
             )
             .unwrap();

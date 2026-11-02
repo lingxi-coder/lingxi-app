@@ -242,7 +242,7 @@ export interface BotsApi {
   create(request: BotCreateRequest): Promise<BotUi>;
   update(botId: string, expectedRevision: number, patch: BotUpdateRequest): Promise<BotUi>;
   delete(botId: string): Promise<void>;
-  openSession(botId: string, sessionId?: string): Promise<BotSessionRefUi>;
+  openSession(botId: string, sessionId?: string, transcriptPath?: string): Promise<BotSessionRefUi>;
   /** Called when the host made a session of a Bot the displayed one without being asked by the window. */
   onSessionShown(callback: (session: BotSessionRefUi) => void): () => void;
   listSessions(botId: string): Promise<BotSessionsUi>;

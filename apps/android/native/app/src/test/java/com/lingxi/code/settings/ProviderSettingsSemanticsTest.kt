@@ -206,7 +206,7 @@ class ProviderSettingsSemanticsTest {
 
     @Test
     fun replacingSavedCredential_preservesRoutingWithoutRequiringEngineReconnect() {
-        val store = SettingsStore()
+        val store = catalogBackedStore()
         val id = store.addProvider(ProviderKind.Llm, "anthropic")
         val snapshot = ProviderCredentialSnapshot(
             configuredProviderIds = setOf("anthropic"),
@@ -225,7 +225,7 @@ class ProviderSettingsSemanticsTest {
 
     @Test
     fun sharedCredentialSaveAndDeleteUpdateAllProviderRowsWithoutChangingRouting() {
-        val store = SettingsStore()
+        val store = catalogBackedStore()
         val first = store.addProvider(ProviderKind.Llm, "deepseek")
         val second = store.addProvider(ProviderKind.Llm, "deepseek")
         store.updateProvider(ProviderKind.Llm, first) { it.copy(model = "deepseek-flash") }
@@ -246,7 +246,7 @@ class ProviderSettingsSemanticsTest {
 
     @Test
     fun lateStoredKeyProbeCannotResurrectCredentialDeletedThroughAnotherProviderRow() {
-        val store = SettingsStore()
+        val store = catalogBackedStore()
         val first = store.addProvider(ProviderKind.Llm, "deepseek")
         val second = store.addProvider(ProviderKind.Llm, "deepseek")
         val configured = ProviderCredentialSnapshot(setOf("deepseek"), emptySet(), true)
@@ -364,7 +364,7 @@ class ProviderSettingsSemanticsTest {
 
     @Test
     fun changingCredentialIdentityWhileSavingKeepsConfirmationOnItsOriginalCredential() {
-        val store = SettingsStore()
+        val store = catalogBackedStore()
         val id = store.addProvider(ProviderKind.Llm, "deepseek")
         val other = store.addProvider(ProviderKind.Llm, "deepseek")
         store.updateProvider(ProviderKind.Llm, id) { it.copy(url = "https://custom.example/v1") }
@@ -454,6 +454,12 @@ class ProviderSettingsSemanticsTest {
         assertEquals(listOf("credential"), calls)
     }
 
+    private fun catalogBackedStore() = SettingsStore().apply {
+        setLlmCatalogEntries(listOf("anthropic", "deepseek", "openai").map { id ->
+            com.lingxi.code.bindings.client.ProviderModelCatalogEntryDto(id, null, id, emptyList(), null, null)
+        })
+    }
+
     private fun provider() = GenericProvider(
         id = "l_openai",
         preset = "openai",
@@ -463,5 +469,6 @@ class ProviderSettingsSemanticsTest {
         model = "gpt-4o",
         status = ConnStatus.Idle,
         enabled = true,
+        catalogBaseUrl = "https://api.openai.com/v1",
     )
 }

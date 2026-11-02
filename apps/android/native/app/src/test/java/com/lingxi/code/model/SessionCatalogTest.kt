@@ -86,6 +86,7 @@ class SessionCatalogTest {
             messageCount = 17,
             modifiedRfc3339 = "2024-06-15T11:00:00Z",
             nowEpochSeconds = now,
+            mode = SessionMode.Code,
         )
         assertEquals("abc-123", row.uuid)
         assertEquals("上海差旅规划", row.title)
@@ -94,7 +95,7 @@ class SessionCatalogTest {
     }
 
     @Test fun rowFrom_blankTitle_usesPlaceholder() {
-        val row = SessionCatalog.rowFrom("u", "", 0, "2024-06-15T12:00:00Z", now)
+        val row = SessionCatalog.rowFrom("u", "", 0, "2024-06-15T12:00:00Z", now, mode = SessionMode.Code)
         assertEquals("未命名会话", row.title)
     }
 }

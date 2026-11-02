@@ -25,6 +25,7 @@ import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
 import com.lingxi.code.model.SessionRow
+import com.lingxi.code.model.persistenceKey
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -206,11 +207,6 @@ class ChatViewModelReducerTest {
             resumeFailure?.let { throw it }
         }
 
-        override suspend fun resumeEmptySession(uuid: String, title: String) {
-            operations += "resume-empty:$uuid"
-            resumeFailure?.let { throw it }
-        }
-
         override suspend fun newSession() { operations += "new" }
         override suspend fun newSession(cwd: String) { operations += "new:$cwd" }
 
@@ -235,10 +231,10 @@ class ChatViewModelReducerTest {
         override val activeSessionState = active.asStateFlow()
         override suspend fun cancel() { cancelCount++ }
         override suspend fun resumeSession(uuid: String) {
-            active.value = ActivatedSession(uuid, emptyList(), SessionActivationKind.Resumed)
+            active.value = ActivatedSession(uuid, emptyList(), SessionActivationKind.Resumed, com.lingxi.code.model.SessionMode.Code)
         }
         override suspend fun newSession() {
-            active.value = ActivatedSession("new-engine", emptyList(), SessionActivationKind.Started)
+            active.value = ActivatedSession("new-engine", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code)
         }
     }
 
@@ -638,7 +634,7 @@ class ChatViewModelReducerTest {
         val execution = RecordingBackgroundExecution()
         val vm = ChatViewModel(source = RecordingSource(), backgroundExecution = execution)
         vm.applyActivatedSession(
-            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
         )
         runCurrent()
 
@@ -661,7 +657,7 @@ class ChatViewModelReducerTest {
         val execution = RecordingBackgroundExecution()
         val vm = ChatViewModel(source = RecordingSource(), backgroundExecution = execution)
         vm.applyActivatedSession(
-            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
         )
         runCurrent()
 
@@ -677,7 +673,7 @@ class ChatViewModelReducerTest {
         val execution = RecordingBackgroundExecution()
         val vm = ChatViewModel(source = RecordingSource(), backgroundExecution = execution)
         vm.applyActivatedSession(
-            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
         )
         runCurrent()
 
@@ -715,6 +711,7 @@ class ChatViewModelReducerTest {
             "session-a",
             listOf(Message(Role.User, "prior"), Message(Role.Ai, "prior answer")),
             SessionActivationKind.Resumed,
+            com.lingxi.code.model.SessionMode.Code,
         )
         runCurrent()
         val running = TurnRecoverySnapshotDto(
@@ -765,6 +762,7 @@ class ChatViewModelReducerTest {
                 sessionId = "session-a",
                 transcript = restored,
                 kind = SessionActivationKind.Resumed,
+                mode = com.lingxi.code.model.SessionMode.Code,
             )
             runCurrent()
 
@@ -822,6 +820,7 @@ class ChatViewModelReducerTest {
             "session-a",
             emptyList(),
             SessionActivationKind.Resumed,
+            com.lingxi.code.model.SessionMode.Code,
         )
         runCurrent()
         val running = TurnRecoverySnapshotDto(
@@ -879,6 +878,7 @@ class ChatViewModelReducerTest {
             "session-a",
             emptyList(),
             SessionActivationKind.Resumed,
+            com.lingxi.code.model.SessionMode.Code,
         )
         runCurrent()
         vm.reduceClientEvent(
@@ -911,6 +911,7 @@ class ChatViewModelReducerTest {
                 "session-a",
                 emptyList(),
                 SessionActivationKind.Resumed,
+                com.lingxi.code.model.SessionMode.Code,
             )
             runCurrent()
 
@@ -961,7 +962,7 @@ class ChatViewModelReducerTest {
             val execution = RecordingBackgroundExecution()
             val vm = ChatViewModel(source, backgroundExecution = execution)
             vm.applyActivatedSession(
-                ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+                ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
             )
             vm.send("first prompt")
             runCurrent()
@@ -1008,7 +1009,7 @@ class ChatViewModelReducerTest {
         val execution = RecordingBackgroundExecution()
         val vm = ChatViewModel(source, backgroundExecution = execution)
         vm.applyActivatedSession(
-            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
         )
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
@@ -1063,6 +1064,7 @@ class ChatViewModelReducerTest {
             "session-a",
             emptyList(),
             SessionActivationKind.Resumed,
+            com.lingxi.code.model.SessionMode.Code,
         )
         runCurrent()
 
@@ -1118,6 +1120,7 @@ class ChatViewModelReducerTest {
                 "session-a",
                 emptyList(),
                 SessionActivationKind.Resumed,
+                com.lingxi.code.model.SessionMode.Code,
             )
             runCurrent()
             assertTrue(vm.state.value.durableRecoveryBlocked)
@@ -1173,7 +1176,7 @@ class ChatViewModelReducerTest {
             backgroundExecution = execution,
         )
         vm.applyActivatedSession(
-            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
         )
 
         vm.reduceClientEvent(
@@ -1288,6 +1291,97 @@ class ChatViewModelReducerTest {
         )
         runCurrent()
         assertEquals(listOf(true, false), execution.activeStates)
+    }
+
+    @Test
+    fun hiddenOwnersShellResultStaysWithItsSourceWhileAnotherOwnerRuns() = runTest(dispatcher) {
+        val codeSource = EmittingSource()
+        val chatSource = EmittingSource()
+        val code = ChatViewModel(codeSource)
+        val chat = ChatViewModel(chatSource)
+        val codeMode = com.lingxi.code.model.SessionMode.Code
+        val chatMode = com.lingxi.code.model.SessionMode.Chat
+        code.applyActivatedSession(ActivatedSession("code-session", emptyList(), SessionActivationKind.Resumed, codeMode))
+        chat.applyActivatedSession(ActivatedSession("chat-session", emptyList(), SessionActivationKind.Resumed, chatMode))
+        val owners = SessionOwnerRegistry<ChatViewModel>()
+        assertTrue(owners.register("global", "code-session", codeMode, code))
+        assertTrue(owners.register("global", "chat-session", chatMode, chat))
+
+        var selected = checkNotNull(owners.find("global", "code-session", codeMode))
+        selected.send("run shell")
+        codeSource.stream.emit(checkNotNull(clientEventToReply(ClientEvent.ToolUseStarted(
+            id = "code-tool", tool = "Bash", inputJson = """{"command":"printf same"}""", header = currentToolHeaderFixture(),
+        ))))
+        selected = checkNotNull(owners.find("global", "chat-session", chatMode))
+        selected.send("independent chat")
+        chatSource.stream.emit(checkNotNull(clientEventToReply(ClientEvent.ToolUseStarted(
+            id = "chat-tool", tool = "Bash", inputJson = """{"command":"printf same"}""", header = currentToolHeaderFixture(),
+        ))))
+        codeSource.stream.emit(checkNotNull(clientEventToReply(ClientEvent.ToolUseResult(
+            id = "code-tool", tool = "Bash",
+            resultJson = """{"exit_code":0,"stdout":"first\nsecond 🔧","stderr":"warning\n","truncated":false}""",
+            isError = false, display = currentToolDisplayFixture(),
+        ))))
+        codeSource.stream.emit(ReplyEvent.End)
+        runCurrent()
+
+        assertSame(chat, selected)
+        assertEquals("first\nsecond 🔧", code.state.value.shellTools.single().stdout)
+        assertEquals("warning\n", code.state.value.shellTools.single().stderr)
+        assertEquals(ShellToolStatus.Completed, code.state.value.shellTools.single().status)
+        assertEquals("", chat.state.value.shellTools.single().stdout)
+        assertTrue(chat.state.value.streaming)
+        assertEquals(0, codeSource.cancelCount)
+        assertEquals(0, chatSource.cancelCount)
+    }
+
+    @Test
+    fun conflictingActivationIsRejectedBeforeItCanReplaceOrControlAnOwner() = runTest(dispatcher) {
+        val mode = com.lingxi.code.model.SessionMode.Chat
+        val source = RecordingSource()
+        val original = ChatViewModel(RecordingSource())
+        val contender = ChatViewModel(source)
+        val owners = SessionOwnerRegistry<ChatViewModel>()
+        assertTrue(owners.register("global", "session-a", mode, original))
+        contender.setSessionOwnerAdmission { scope, id, announced ->
+            owners.register(scope.persistenceKey(), id, announced, contender)
+        }
+
+        contender.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, mode))
+        assertTrue(contender.sessionOwnerRejected)
+        assertEquals("new", contender.state.value.session.id)
+        assertFalse(contender.state.value.sessionReady)
+        assertNotNull(contender.state.value.error)
+        assertSame(original, owners.find("global", "session-a", mode))
+        contender.send("must remain a draft")
+        contender.cancel()
+        assertTrue(source.submitted.isEmpty())
+        assertEquals(0, source.cancelCount)
+
+        contender.applyActivatedSession(ActivatedSession("session-b", emptyList(), SessionActivationKind.Started, mode))
+        assertFalse(contender.state.value.sessionReady)
+        assertNull(owners.find("global", "session-b", mode))
+    }
+
+    @Test
+    fun retainedActivationRejectsProjectionWithAConflictingFixedMode() = runTest(dispatcher) {
+        val vm = ChatViewModel(ConnectingConversationSource(DefaultConversationStrings))
+        val session = SessionRef("session-a", "")
+        vm.prepareInitialSessionRestore(session, com.lingxi.code.model.ConversationScope.Global)
+        val retained = RetainedConversationTranscript(
+            sessionId = session.id, turnId = null,
+            state = vm.state.value.copy(sessionMode = com.lingxi.code.model.SessionMode.Chat),
+            afterSequence = 0L, turnToken = 0L, turnOrigin = ConversationTurnOrigin.Ordinary,
+            pendingAssistantIdentity = null, optimisticRowsByToken = emptyMap(),
+            assistantTranscriptUuidsByIdentity = emptyMap(), pendingAssistantTranscriptUuids = emptySet(),
+            assistantRowsByIdentity = emptyMap(), reasoningBeforeResponse = null,
+            assistantReasoningByIdentity = emptyMap(), assistantIdentityTurnToken = 0L,
+        )
+        vm.applyActivatedSession(ActivatedSession(session.id, emptyList(), SessionActivationKind.Started,
+            com.lingxi.code.model.SessionMode.Code, retainedProjection = retained))
+        assertTrue(vm.sessionOwnerRejected)
+        assertFalse(vm.state.value.sessionReady)
+        assertTrue(vm.state.value.messages.isEmpty())
     }
 
     @Test
@@ -1719,7 +1813,7 @@ class ChatViewModelReducerTest {
     @Test
     fun workspaceSwitchReusingCurrentSourceKeepsItAliveForSuccessiveNewSessions() = runTest(dispatcher) {
         val reused = SessionControlSource()
-        reused.active.value = ActivatedSession("existing", emptyList(), SessionActivationKind.Started)
+        reused.active.value = ActivatedSession("existing", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code)
         val vm = ChatViewModel(reused)
 
         repeat(2) { index ->
@@ -1727,7 +1821,7 @@ class ChatViewModelReducerTest {
             runCurrent()
             assertFalse("a reused source still owns the next session", reused.closed)
             assertEquals(List(index + 1) { "new" }, reused.operations)
-            reused.active.value = ActivatedSession("created-$index", emptyList(), SessionActivationKind.Started)
+            reused.active.value = ActivatedSession("created-$index", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code)
             runCurrent()
             assertEquals("created-$index", vm.state.value.session.id)
             assertTrue(vm.state.value.sessionReady)
@@ -2013,7 +2107,7 @@ class ChatViewModelReducerTest {
         val vm = ChatViewModel(src)
         vm.send("still running")
 
-        vm.resumeSession(SessionRow("B", "会话 B", 1, "刚刚"))
+        vm.resumeSession(SessionRow("B", "会话 B", 1, "刚刚", mode = com.lingxi.code.model.SessionMode.Code))
         runCurrent()
 
         assertEquals(listOf("cancel"), src.operations)
@@ -2030,6 +2124,7 @@ class ChatViewModelReducerTest {
             sessionId = "B",
             transcript = listOf(Message(Role.User, "authoritative")),
             kind = SessionActivationKind.Resumed,
+            mode = com.lingxi.code.model.SessionMode.Code,
         )
         runCurrent()
 
@@ -2077,7 +2172,7 @@ class ChatViewModelReducerTest {
         val src = SessionControlSource(resumeFailure = IllegalStateException("session file missing"))
         val vm = ChatViewModel(src)
 
-        vm.resumeSession(SessionRow("missing", "丢失会话", 0, "刚刚"))
+        vm.resumeSession(SessionRow("missing", "丢失会话", 0, "刚刚", mode = com.lingxi.code.model.SessionMode.Code))
         runCurrent()
 
         assertFalse(vm.state.value.sessionTransitioning)
@@ -2095,10 +2190,10 @@ class ChatViewModelReducerTest {
         val vm = ChatViewModel(src)
         val uuid = "19587a33-0725-48db-abca-8a2aed345f6b"
 
-        vm.resumeSession(SessionRow(uuid, "空会话", 0, "刚刚"))
+        vm.resumeSession(SessionRow(uuid, "空会话", 0, "刚刚", mode = com.lingxi.code.model.SessionMode.Code))
         runCurrent()
 
-        assertEquals(listOf("resume-empty:$uuid"), src.operations)
+        assertEquals(listOf("resume:$uuid"), src.operations)
         assertEquals(uuid, vm.state.value.session.id)
         assertTrue(vm.state.value.sessionTransitioning)
     }
@@ -2111,9 +2206,6 @@ class ChatViewModelReducerTest {
             mapOf(
                 "chat.session.id" to "s-keep",
                 "chat.session.title" to "保留会话",
-                // Compatibility fixture from an older build. It must be removed
-                // without decoding or displaying any of its cached messages.
-                "chat.transcript" to arrayListOf("legacy cached transcript"),
                 "chat.draft" to "half-typed",
                 "chat.isNew" to false,
             ),
@@ -2128,7 +2220,7 @@ class ChatViewModelReducerTest {
         assertTrue(vm.state.value.sessionTransitioning)
         assertFalse(vm.state.value.sessionReady)
         assertEquals("half-typed", vm.restoredDraft)
-        assertFalse("legacy transcript key is migrated away", handle.contains("chat.transcript"))
+        assertFalse("transcripts are not persisted in saved state", handle.contains("chat.transcript"))
 
         src.active.value = ActivatedSession(
             sessionId = "s-keep",
@@ -2137,6 +2229,7 @@ class ChatViewModelReducerTest {
                 Message(Role.Ai, "engine answer"),
             ),
             kind = SessionActivationKind.Resumed,
+            mode = com.lingxi.code.model.SessionMode.Code,
         )
         runCurrent()
 
@@ -2209,7 +2302,9 @@ class ChatViewModelReducerTest {
 
         assertEquals(1, factoryCalls)
         assertEquals("reconnect must release the superseded native source", 1, original.closeCount)
-        assertEquals("replacement must establish a real engine session", 1, replacement.newSessionCount)
+        assertEquals("a prepared source must not receive a second session command", 0, replacement.newSessionCount)
+        assertTrue(vm.state.value.sessionTransitioning)
+        assertFalse(vm.state.value.sessionReady)
     }
 
     @Test
@@ -2219,11 +2314,62 @@ class ChatViewModelReducerTest {
         var calls = 0
         vm.ensureSourceInBackground(0, StandardTestDispatcher(testScheduler)) { calls++; prepared }
         assertEquals("UI caller must return before native construction", 0, calls)
-        assertSame(original, vm.engineSource.value)
+        assertTrue(vm.engineSource.value is ConnectingConversationSource)
         runCurrent()
         assertEquals(1, calls)
         assertSame(prepared, vm.engineSource.value)
         assertEquals(1, original.closeCount)
+    }
+
+    @Test
+    fun reconnectWaitsForTheOldSessionOwnerAndTimeoutCanBeRetried() = runTest(dispatcher) {
+        val original = CloseTrackingSource()
+        val replacement = CloseTrackingSource()
+        val vm = ChatViewModel(source = original, sourceGeneration = -1)
+        vm.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed, com.lingxi.code.model.SessionMode.Code))
+        var builds = 0
+        val checked = mutableListOf<String>()
+        vm.ensureSourceInBackground(0, StandardTestDispatcher(testScheduler), awaitRelease = {
+            checked += it
+            assertEquals(1, original.closeCount)
+            false
+        }) { builds++; replacement }
+        runCurrent()
+        assertEquals(listOf("session-a"), checked)
+        assertEquals(0, builds)
+        assertEquals("session-a", vm.state.value.session.id)
+        assertFalse(vm.state.value.sessionReady)
+        assertNotNull(vm.state.value.error)
+        vm.ensureSourceInBackground(1, StandardTestDispatcher(testScheduler), awaitRelease = {
+            checked += it
+            true
+        }) { builds++; replacement }
+        runCurrent()
+        assertEquals(listOf("session-a", "session-a"), checked)
+        assertEquals(1, builds)
+        assertSame(replacement, vm.engineSource.value)
+    }
+
+    @Test
+    fun reconnectRechecksVoiceWorkBeforeClosingTheOwner() = runTest(dispatcher) {
+        val original = CloseTrackingSource()
+        val replacement = CloseTrackingSource()
+        val vm = ChatViewModel(source = original, sourceGeneration = -1)
+        var checks = 0
+        var builds = 0
+        val io = StandardTestDispatcher(testScheduler)
+        vm.ensureSourceInBackground(0, io, canReplace = { ++checks == 1 }) { builds++; replacement }
+        runCurrent()
+        assertEquals(2, checks)
+        assertEquals(0, original.closeCount)
+        assertEquals(0, builds)
+        assertSame(original, vm.engineSource.value)
+
+        vm.ensureSourceInBackground(0, io, canReplace = { true }) { builds++; replacement }
+        runCurrent()
+        assertEquals(1, original.closeCount)
+        assertEquals(1, builds)
+        assertSame(replacement, vm.engineSource.value)
     }
 
     @Test
@@ -2711,7 +2857,7 @@ class ChatViewModelReducerTest {
         val pending = async { vm.awaitAppAuthoringSession("/home/lingxi/source") }
         runCurrent()
         assertFalse(pending.isCompleted)
-        source.active.value = ActivatedSession("restored-app-session", emptyList(), SessionActivationKind.Started)
+        source.active.value = ActivatedSession("restored-app-session", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code)
         runCurrent()
         assertFalse(pending.isCompleted)
         source.workspace.value = com.lingxi.code.project.SessionWorkspaceState("restored-app-session", "/home/lingxi/source", "/home/lingxi/source", emptyList(), "/transcript")
@@ -2724,7 +2870,7 @@ class ChatViewModelReducerTest {
     @Test fun appAuthoringRejectsConfirmedSessionInAnotherDirectory() = runTest {
         val source = SessionControlSource()
         val vm = ChatViewModel(source = source)
-        source.active.value = ActivatedSession("app-session", emptyList(), SessionActivationKind.Started)
+        source.active.value = ActivatedSession("app-session", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code)
         source.workspace.value = com.lingxi.code.project.SessionWorkspaceState("app-session", "/home/lingxi/other", "/home/lingxi/other", emptyList(), "/transcript")
         runCurrent()
         val failure = runCatching { vm.awaitAppAuthoringSession("/home/lingxi/source", "app-session") }.exceptionOrNull()

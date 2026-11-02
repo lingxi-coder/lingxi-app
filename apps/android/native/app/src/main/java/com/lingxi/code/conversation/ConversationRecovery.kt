@@ -41,6 +41,14 @@ internal data class DurableConversationTurnRecord(
     val turnId: Long,
 )
 
+internal fun recordHandledProcessExit(preferences: SharedPreferences, timestamp: Long, userRequested: Boolean) {
+    val editor = preferences.edit()
+    if (userRequested) {
+        preferences.all.keys.filter { it.startsWith("turn.") }.forEach(editor::remove)
+    }
+    check(editor.putLong("handled_exit_timestamp", timestamp).commit())
+}
+
 /** Minimum non-secret launch context needed for service redelivery recovery. */
 data class ConversationRecoverySpec(
     val projectId: String?,
@@ -50,9 +58,12 @@ data class ConversationRecoverySpec(
     val workspaceKey: String? = null,
     val guestPath: String? = null,
     val additionalDirectories: List<String> = emptyList(),
+    /** A new engine generation never inherits another owner's pending actions. */
+    val runtimeGeneration: String = java.util.UUID.randomUUID().toString(),
 ) {
     val scopeKey: String
         get() = "${workspaceKey ?: hostPath ?: "__global__"}#${sessionMode.wireValue}"
+    val ownerKey: String get() = "$scopeKey@$runtimeGeneration"
 
     fun projectWorkspace(): ProjectWorkspace? {
         val path = hostPath ?: return null
@@ -65,101 +76,94 @@ internal class DurableConversationTurnClientStore(
     private val preferences: SharedPreferences,
     private val scope: String,
     latestExit: ApplicationExitInfo? = null,
+    initialSessionId: String? = null,
 ) {
+    private var ownerSessionId: String? = initialSessionId?.let(::canonicalSessionId)
+
     companion object {
-        /** Recover the original source identity only for the exact saved session. */
+        private val lock = Any()
+        private fun prefix(scope: String): String = "turn." +
+            scope.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it.toInt() and 255) } + "."
+        private fun key(scope: String, sessionId: String, turnId: Long): String =
+            prefix(scope) + canonicalSessionId(sessionId) + "." + turnId
+
         fun ownerModeForSession(context: Context, workspaceKey: String, sessionId: String?): SessionMode? {
-            if (sessionId.isNullOrBlank()) return null
-            val preferences = context.applicationContext.getSharedPreferences("durable_conversation_turn", Context.MODE_PRIVATE)
-            if (!preferences.contains("turn_id")) return null
-            return ownerModeForSavedRecord(workspaceKey, sessionId, preferences.getString("session_id", null), preferences.getString("scope", null))
+            val prefs = context.applicationContext.getSharedPreferences("durable_conversation_turn", Context.MODE_PRIVATE)
+            return ownerModeForSession(prefs, workspaceKey, sessionId)
         }
-    }
-    init {
-        val handledAt = preferences.getLong("handled_exit_timestamp", 0L)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && latestExit != null && latestExit.timestamp > handledAt) {
-            if (latestExit.reason == ApplicationExitInfo.REASON_USER_REQUESTED) {
-                clearRecord()
+
+        internal fun ownerModeForSession(prefs: SharedPreferences, workspaceKey: String, sessionId: String?): SessionMode? = synchronized(lock) {
+            if (sessionId.isNullOrBlank()) return@synchronized null
+            val id = canonicalSessionId(sessionId)
+            val matches = SessionMode.entries.filter { mode ->
+                val scope = "$workspaceKey#${mode.wireValue}"
+                prefs.all.keys.any { it.startsWith(prefix(scope) + id + ".") }
             }
-            preferences.edit().putLong("handled_exit_timestamp", latestExit.timestamp).apply()
+            check(matches.size <= 1) { "Conflicting recovery modes for session $id" }
+            matches.singleOrNull()
         }
     }
 
-    constructor(
-        context: Context,
-        scope: String,
-    ) : this(
-        preferences = context.applicationContext.getSharedPreferences(
-            "durable_conversation_turn",
-            Context.MODE_PRIVATE,
-        ),
+    init {
+        synchronized(lock) {
+            val handledAt = preferences.getLong("handled_exit_timestamp", 0L)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && latestExit != null && latestExit.timestamp > handledAt) {
+                recordHandledProcessExit(preferences, latestExit.timestamp,
+                    latestExit.reason == ApplicationExitInfo.REASON_USER_REQUESTED)
+            }
+        }
+    }
+
+    constructor(context: Context, scope: String, initialSessionId: String? = null) : this(
+        preferences = context.applicationContext.getSharedPreferences("durable_conversation_turn", Context.MODE_PRIVATE),
         scope = scope,
         latestExit = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             context.getSystemService(ActivityManager::class.java)
-                .getHistoricalProcessExitReasons(context.packageName, 0, 1)
-                .firstOrNull()
-        } else {
-            null
-        },
+                .getHistoricalProcessExitReasons(context.packageName, 0, 1).firstOrNull()
+        } else null,
+        initialSessionId = initialSessionId,
     )
 
-    fun begin(sessionId: String, turnId: Long) {
-        if (sessionId.isBlank()) return
-        preferences.edit()
-            .putString("scope", scope)
-            .putString("session_id", sessionId)
-            .putLong("turn_id", turnId)
-            .commit()
+    fun begin(sessionId: String, turnId: Long) = synchronized(lock) {
+        if (sessionId.isBlank()) return@synchronized
+        ownerSessionId = canonicalSessionId(sessionId)
+        // A session has one active main turn. Replace its previous checkpoint
+        // atomically while leaving checkpoints for other sessions untouched.
+        // In particular, a late terminal for the previous turn must not clear
+        // the newly admitted turn.
+        val ownerPrefix = prefix(scope)
+        val editor = preferences.edit()
+        preferences.all.keys.filter { candidate ->
+            candidate.startsWith(ownerPrefix) &&
+                candidate.removePrefix(ownerPrefix).substringBeforeLast('.', "") == ownerSessionId
+        }.forEach(editor::remove)
+        check(editor.putLong(key(scope, sessionId, turnId), turnId).commit())
     }
 
-    fun load(): DurableConversationTurnRecord? {
-        if (preferences.getString("scope", null) != scope) return null
-        val sessionId = preferences.getString("session_id", null)?.takeIf(String::isNotBlank)
-            ?: return null
-        if (!preferences.contains("turn_id")) return null
-        return DurableConversationTurnRecord(
-            scope = scope,
-            sessionId = sessionId,
-            turnId = preferences.getLong("turn_id", 0L),
-        )
-    }
-
-    fun clear(turnId: Long? = null) {
-        val current = load() ?: return
-        if (turnId == null || current.turnId == turnId) {
-            clearRecord()
+    fun load(): DurableConversationTurnRecord? = synchronized(lock) {
+        val owner = ownerSessionId ?: return@synchronized null
+        val candidates = preferences.all.keys.filter { it.startsWith(prefix(scope)) }.mapNotNull { key ->
+            val suffix = key.removePrefix(prefix(scope))
+            val separator = suffix.lastIndexOf('.')
+            if (separator <= 0) null else {
+                val id = suffix.substring(0, separator)
+                val turn = suffix.substring(separator + 1).toLongOrNull()
+                if (turn == null || owner != id) null
+                else DurableConversationTurnRecord(scope, id, turn)
+            }
         }
+        candidates.singleOrNull()
     }
 
-    /**
-     * Clear only the exact session/turn checkpoint that produced a terminal
-     * event.  Turn ids are client supplied, so the session comparison is
-     * required as well: a late terminal event from a previous session must not
-     * erase the checkpoint belonging to the current session.
-     */
-    fun clear(sessionId: String, turnId: Long) {
-        val current = load() ?: return
-        if (
-            current.turnId == turnId &&
-            canonicalSessionId(current.sessionId) == canonicalSessionId(sessionId)
-        ) {
-            clearRecord()
-        }
+    fun clear(turnId: Long? = null) = synchronized(lock) {
+        val record = load() ?: return@synchronized
+        if (turnId == null || record.turnId == turnId) clear(record.sessionId, record.turnId)
     }
 
-    private fun clearRecord() {
-        preferences.edit()
-            .remove("scope")
-            .remove("session_id")
-            .remove("turn_id")
-            .remove("last_sequence")
-            .commit()
+    fun clear(sessionId: String, turnId: Long) = synchronized(lock) {
+        if (ownerSessionId != canonicalSessionId(sessionId)) return@synchronized
+        preferences.edit().remove(key(scope, sessionId, turnId)).commit()
     }
-}
-
-internal fun ownerModeForSavedRecord(workspaceKey: String, sessionId: String, savedSession: String?, scope: String?): SessionMode? {
-    if (savedSession == null || canonicalSessionId(savedSession) != canonicalSessionId(sessionId)) return null
-    return SessionMode.entries.firstOrNull { scope == "$workspaceKey#${it.wireValue}" }
 }
 
 /** UI-owned history kept only in the live source while its current turn runs. */
@@ -366,16 +370,18 @@ internal class RecoveringConversationSource(
     private val pendingSource: Deferred<ConversationSource?>,
     private val strings: ConversationStrings,
     override val recoverySpec: ConversationRecoverySpec,
+    private val releaseClaim: () -> Boolean = { ConversationHeadlessRecovery.releaseUiClaim(recoverySpec.ownerKey) },
 ) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource {
     private val delegateScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val models = MutableStateFlow(EngineModelState())
     private val sessions = MutableStateFlow(EngineSessionState.loading())
     private val activeSession = MutableStateFlow<ActivatedSession?>(null)
-    private val modeState = MutableStateFlow<SessionModeSnapshot?>(null)
     private val permissions = MutableStateFlow<PermissionPromptState?>(null)
     private val mcp = MutableStateFlow(emptyList<MCPServer>())
     @Volatile private var retainedSource: ConversationSource? = null
-    @Volatile private var closed = false
+    private val ownershipLock = Any()
+    private var closed = false
+    private var releasedToRecovery = false
 
     init {
         delegateScope.launch {
@@ -383,22 +389,20 @@ internal class RecoveringConversationSource(
                 delegateScope.cancel()
                 return@launch
             }
-            if (closed) {
-                delegate.close()
+            val abandoned = synchronized(ownershipLock) {
+                if (closed) !releasedToRecovery else {
+                    retainedSource = delegate
+                    null
+                }
+            }
+            if (abandoned != null) {
+                if (abandoned) delegate.close()
                 delegateScope.cancel()
                 return@launch
             }
-            retainedSource = delegate
             launch { delegate.modelState.collect { models.value = it } }
             launch { delegate.sessionState.collect { sessions.value = it } }
-            launch {
-                var first = true
-                delegate.activeSessionState.collect {
-                    activeSession.value = if (first) it?.withLatestMode(delegate.sessionModeState.value) else it
-                    if (it != null) first = false
-                }
-            }
-            launch { delegate.sessionModeState.collect { modeState.value = it } }
+            launch { delegate.activeSessionState.collect { activeSession.value = it } }
             launch { delegate.pendingPermission.collect { permissions.value = it } }
             launch { delegate.mcpServers.collect { mcp.value = it } }
         }
@@ -408,16 +412,23 @@ internal class RecoveringConversationSource(
         pendingSource.await()?.clientEvents?.let { emitAll(it) }
     }
 
+    override suspend fun collectClientEvents(onSubscribed: () -> Unit, onEvent: suspend (ClientEvent) -> Unit) {
+        val delegate = pendingSource.await()
+        if (delegate == null) onSubscribed() else delegate.collectClientEvents(onSubscribed, onEvent)
+    }
+
     override val workflowProgress: Flow<WorkflowProgressUpdate> = flow {
         pendingSource.await()?.workflowProgress?.let { emitAll(it) }
+    }
+
+    internal fun bindAudioOwner(owner: com.lingxi.code.voice.audio.AudioOwnerKey) {
+        delegateScope.launch { pendingSource.await()?.bindAudioOwner(owner) }
     }
 
     override val pendingPermission: StateFlow<PermissionPromptState?> = permissions.asStateFlow()
     override val modelState: StateFlow<EngineModelState> = models.asStateFlow()
     override val sessionState: StateFlow<EngineSessionState> = sessions.asStateFlow()
     override val activeSessionState: StateFlow<ActivatedSession?> = activeSession.asStateFlow()
-    override val supportsSessionModeChanges = true
-    override val sessionModeState: StateFlow<SessionModeSnapshot?> = modeState.asStateFlow()
     override val mcpServers: StateFlow<List<MCPServer>> = mcp.asStateFlow()
 
     override suspend fun submitClientCommand(command: ClientCommand) {
@@ -442,14 +453,8 @@ internal class RecoveringConversationSource(
         pendingSource.await()?.resumeSession(uuid)
     }
 
-    override suspend fun resumeEmptySession(uuid: String, title: String) {
-        pendingSource.await()?.resumeEmptySession(uuid, title)
-    }
-
-    override suspend fun restoreInitialSession(uuid: String, title: String, empty: Boolean): ActivatedSession? {
-        val delegate = pendingSource.await() ?: error("engine is not connected")
-        return delegate.restoreInitialSession(uuid, title, empty)
-    }
+    override fun retainedUiActivation(activation: ActivatedSession): ActivatedSession =
+        retainedSource?.retainedUiActivation(activation) ?: activation
 
     override fun retainUiTranscript(snapshot: RetainedConversationTranscript) {
         retainedSource?.retainUiTranscript(snapshot)
@@ -460,7 +465,13 @@ internal class RecoveringConversationSource(
     }
 
     override suspend fun newSession() {
-        pendingSource.await()?.newSession()
+        val delegate = pendingSource.await() ?: error("engine is not connected")
+        delegate.newSession()
+    }
+
+    override suspend fun newSession(cwd: String) {
+        val delegate = pendingSource.await() ?: error("engine is not connected")
+        delegate.newSession(cwd)
     }
 
     override suspend fun setPermissionMode(mode: String) {
@@ -530,9 +541,17 @@ internal class RecoveringConversationSource(
     }
 
     override fun close() {
-        closed = true
-        retainedSource?.let {
-            it.close()
+        val (released, delegate) = synchronized(ownershipLock) {
+            closed = true
+            releasedToRecovery = releaseClaim()
+            releasedToRecovery to retainedSource
+        }
+        if (released) {
+            // This wrapper borrowed a source still being built or monitored
+            // by the service. Its cancellation releases only the UI claim.
+            delegateScope.cancel()
+        } else if (delegate != null) {
+            delegate.close()
             delegateScope.cancel()
         }
     }

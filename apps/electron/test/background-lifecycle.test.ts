@@ -45,8 +45,9 @@ class FakeTransport extends EventEmitter {
 }
 
 async function openFakeRuntime(manager: SessionRuntimeManager, projectPath: string, id = sessionId) {
-  const ref = { projectPath, sessionId: id };
+  const ref = { projectPath, projectId: projectPath, sessionId: id, mode: 'code' as const };
   const runtime = await manager.ensure(ref, false);
+  runtime.sessionMode = 'code';
   const transport = new FakeTransport();
   const internal = runtime as any;
   internal.activeWorkspace = projectPath;
@@ -75,6 +76,7 @@ async function hostFixture() {
   settings.activateProject(projectPath);
   const manager = createManager();
   const opened = await openFakeRuntime(manager, projectPath);
+  settings.conversationSpaces.register(opened.ref);
   settings.setActiveSession(opened.ref);
   const catalog = {
     find: async () => undefined,

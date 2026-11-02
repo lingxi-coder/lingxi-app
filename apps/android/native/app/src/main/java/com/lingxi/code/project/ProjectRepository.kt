@@ -87,6 +87,7 @@ internal class ProjectRepository(
     private val userHome: File?,
     private val projectsGuestRoot: String,
     private val userHomeGuestPath: String,
+    private val ownerStateFile: File? = null,
 ) {
     init {
         projectsRoot.mkdirs()
@@ -94,7 +95,11 @@ internal class ProjectRepository(
 
     fun load(): ProjectStoreState {
         projectsRoot.mkdirs()
-        val index = readIndex()
+        val projectsIndexPath = File(projectsRoot, PROJECTS_INDEX_FILE)
+        val projectsIndexExists = projectsIndexPath.exists() || Files.isSymbolicLink(projectsIndexPath.toPath())
+        val index = try { readIndex() } catch (error: Exception) {
+            throw ProjectCatalogUnavailableException(listOf("projects-index"), "Project index is unavailable", error)
+        }
         val projectDirectories = projectsRoot.listFiles()
             .orEmpty()
             .filter { it.isDirectory && isLowercaseUuid(it.name) }
@@ -103,16 +108,40 @@ internal class ProjectRepository(
         }
         val discovered = loaded.mapNotNull { it.second.getOrNull() }
             .sortedByDescending { it.record.updatedAtEpochMillis }
+        val directoryIds = projectDirectories.mapTo(mutableSetOf()) { it.name }
+        val missing = index.projectIds.filter { it !in directoryIds }
+        val unindexed = directoryIds.filter { it !in index.projectIds }
+        if (missing.isNotEmpty() || unindexed.isNotEmpty()) {
+            val scopes = (missing + unindexed).map { "project.$it" }.sorted()
+            throw ProjectCatalogUnavailableException(scopes, "Project session index is unavailable for ${scopes.joinToString()}")
+        }
         val corruptCount = loaded.count { it.second.isFailure }
         val discoveredIds = discovered.map { it.record.id }
         val active = index.activeProjectId?.takeIf(discoveredIds::contains)
-        if (index.projectIds != discoveredIds || active != index.activeProjectId) {
-            writeIndex(ProjectIndex(active, discoveredIds))
+        val globalIndex = File(projectsRoot, GLOBAL_SESSION_INDEX_FILE)
+        val globalIndexExists = globalIndex.exists() || Files.isSymbolicLink(globalIndex.toPath())
+        val newStore = !projectsIndexExists && !globalIndexExists && projectDirectories.isEmpty()
+        if (newStore && ownerStateFile?.let { it.exists() || Files.isSymbolicLink(it.toPath()) } == true) {
+            throw ProjectCatalogUnavailableException(listOf("global", "projects-index"),
+                "Session indexes are missing while conversation state exists")
+        }
+        if (!projectsIndexExists && !newStore) {
+            throw ProjectCatalogUnavailableException(listOf("projects-index"), "Project index is missing")
+        }
+        val globalSessions = try {
+            if (newStore) emptyList() else readSessions(globalIndex)
+        } catch (error: Exception) {
+            throw ProjectCatalogUnavailableException(listOf("global"), "Global session index is unavailable", error)
+        }
+        requireUniqueSessionOwners(globalSessions, readKnownProjectSessions())
+        if (newStore) {
+            writeSessionFile(globalIndex, emptyList())
+            writeIndex(ProjectIndex())
         }
         return ProjectStoreState(
             projects = discovered,
             activeProjectId = active,
-            globalSessions = readSessions(File(projectsRoot, GLOBAL_SESSION_INDEX_FILE)),
+            globalSessions = globalSessions,
             loading = false,
             errorMessage = if (corruptCount > 0) {
                 strings.resolve(
@@ -126,14 +155,16 @@ internal class ProjectRepository(
         )
     }
 
-    fun createInternal(name: String): ProjectSnapshot =
-        createProject(name, ProjectStorageKind.Internal, null, null)
+    fun createInternal(name: String, mode: SessionMode): ProjectSnapshot =
+        createProject(name, ProjectStorageKind.Internal, null, null, mode)
 
     /** Register an existing owned source directory without copying or relocating it. */
-    fun registerAuthoringWorkspace(name: String, guestDirectory: String): ProjectSnapshot {
+    fun registerAuthoringWorkspace(name: String, guestDirectory: String, mode: SessionMode): ProjectSnapshot {
         val workspace = workspaceForDirectory("authoring", guestDirectory)
-        load().projects.firstOrNull { it.record.directory == guestDirectory }?.let { return it }
-        val created = createInternal(name)
+        load().projects.firstOrNull { it.record.directory == guestDirectory }?.let {
+            return addVisibleMode(it.record.id, mode)
+        }
+        val created = createInternal(name, mode)
         return updateProject(created.record.copy(directory = guestDirectory, activeDirectory = guestDirectory))
     }
 
@@ -141,9 +172,10 @@ internal class ProjectRepository(
         name: String,
         sourceTreeUri: String,
         sourceDisplayName: String?,
+        mode: SessionMode,
     ): ProjectSnapshot {
         require(sourceTreeUri.startsWith("content://")) { "SAF project must use a content:// URI" }
-        return createProject(name, ProjectStorageKind.SafMirror, sourceTreeUri, sourceDisplayName)
+        return createProject(name, ProjectStorageKind.SafMirror, sourceTreeUri, sourceDisplayName, mode)
     }
 
     private fun createProject(
@@ -151,6 +183,7 @@ internal class ProjectRepository(
         storageKind: ProjectStorageKind,
         sourceTreeUri: String?,
         sourceDisplayName: String?,
+        mode: SessionMode,
     ): ProjectSnapshot {
         val id = newId()
         require(isLowercaseUuid(id)) { "project id must be a lowercase UUID" }
@@ -159,6 +192,8 @@ internal class ProjectRepository(
         require(cleanName.length <= 120) { "project name is too long" }
         val dir = projectDirectory(id)
         require(!dir.exists()) { "project already exists: $id" }
+        load()
+        val index = readIndex()
         val workspace = File(dir, PROJECT_WORKSPACE_DIR)
         require(workspace.mkdirs()) { "cannot create project workspace" }
         val timestamp = now()
@@ -173,12 +208,12 @@ internal class ProjectRepository(
             sourceDisplayName = sourceDisplayName,
             directory = guestWorkspace,
             activeDirectory = guestWorkspace,
+            visibleModes = setOf(mode),
         )
         try {
             writeProject(record)
             writeSessions(id, emptyList())
             writeBaseline(id, ProjectSyncBaseline())
-            val index = readIndex()
             writeIndex(
                 ProjectIndex(
                     activeProjectId = index.activeProjectId,
@@ -192,6 +227,15 @@ internal class ProjectRepository(
         return loadProject(id)
     }
 
+    fun addVisibleMode(projectId: String, mode: SessionMode): ProjectSnapshot {
+        load()
+        val project = loadProject(projectId)
+        if (mode !in project.record.visibleModes) {
+            writeProject(project.record.copy(visibleModes = project.record.visibleModes + mode))
+        }
+        return loadProject(projectId)
+    }
+
     fun setActiveProject(projectId: String?): ProjectStoreState {
         if (projectId != null) {
             validateProjectId(projectId)
@@ -200,11 +244,18 @@ internal class ProjectRepository(
             }
         }
         val current = load()
-        writeIndex(ProjectIndex(projectId, current.projects.map { it.record.id }))
+        require(projectId == null || current.projects.any { it.record.id == projectId }) {
+            "Project is unavailable: $projectId"
+        }
+        // Isolated or temporarily missing projects still belong to the index.
+        // Changing the active project must not erase those entries.
+        val index = readIndex()
+        writeIndex(ProjectIndex(projectId, index.projectIds))
         return load()
     }
 
     fun updateProject(record: ProjectRecord): ProjectSnapshot {
+        load()
         validateProjectId(record.id)
         require(projectDirectory(record.id).isDirectory) { "project does not exist: ${record.id}" }
         val normalized = record.copy(updatedAtEpochMillis = now())
@@ -216,13 +267,19 @@ internal class ProjectRepository(
         projectId: String?,
         sessions: List<ProjectSessionSummary>,
     ): ProjectStoreState {
+        val state = load()
         val snapshot = projectId?.let { loadProject(it) }
-        val existing = snapshot?.sessions ?: load().globalSessions
-        val incoming = sessions.map { it.copy(sessionId = canonicalSessionId(it.sessionId)) }
-            .filter { it.sessionId.isNotBlank() }
+        val existing = snapshot?.sessions ?: state.globalSessions
+        val canonical = sessions.map { it.copy(sessionId = canonicalSessionId(it.sessionId)) }
+        require(canonical.all { it.sessionId.isNotBlank() }) { "Session catalog contains an empty id" }
+        require(canonical.groupBy { it.sessionId }.values.all { rows -> rows.map { it.mode }.distinct().size == 1 }) {
+            "Session catalog contains conflicting modes"
+        }
+        val incoming = canonical
             .distinctBy { it.sessionId }
             .map { row ->
                 val cached = existing.firstOrNull { it.sessionId == row.sessionId }
+                require(cached == null || cached.mode == row.mode) { "A session's mode cannot change" }
                 if (cached?.pendingCatalogConfirmation == true && row.messageCount < cached.messageCount) {
                     return@map cached
                 }
@@ -241,6 +298,7 @@ internal class ProjectRepository(
             it.sessionId !in incomingIds && (it.pendingCatalogConfirmation || it.isArchived ||
                 (snapshot != null && it.workspaceDirectory != null && it.workspaceDirectory != snapshot.record.activeDirectory))
         }).sortedByDescending { it.updatedAtEpochMillis }
+        requireNoOtherSessionOwner(state, projectId, normalized)
         if (projectId == null) {
             writeSessionFile(File(projectsRoot, GLOBAL_SESSION_INDEX_FILE), normalized)
         } else {
@@ -250,7 +308,10 @@ internal class ProjectRepository(
             val lastActive = snapshot.record.lastActiveSessionId?.takeIf { id ->
                 normalized.any { it.sessionId == id }
             }
-            writeProject(snapshot.record.copy(lastActiveSessionId = lastActive))
+            writeProject(snapshot.record.copy(
+                lastActiveSessionId = lastActive,
+                visibleModes = snapshot.record.visibleModes + normalized.map { it.mode },
+            ))
         }
         return load()
     }
@@ -268,18 +329,20 @@ internal class ProjectRepository(
         projectId: String?,
         sessionId: String,
         title: String,
-        mode: SessionMode = SessionMode.Code,
+        mode: SessionMode,
         initialMessageCount: Int = 0,
     ): ProjectStoreState {
         val canonicalId = canonicalSessionId(sessionId)
         require(canonicalId.isNotBlank()) { "session id cannot be blank" }
+        val state = load()
         val snapshot = projectId?.let {
             validateProjectId(it)
             loadProject(it)
         }
-        val sessions = snapshot?.sessions ?: load().globalSessions
+        val sessions = snapshot?.sessions ?: state.globalSessions
         val timestamp = now()
         val existing = sessions.firstOrNull { it.sessionId == canonicalId }
+        require(existing == null || existing.mode == mode) { "A session's mode cannot change" }
         val started = ProjectSessionSummary(
             sessionId = canonicalId,
             title = title.ifBlank {
@@ -297,6 +360,7 @@ internal class ProjectRepository(
             transcriptPath = existing?.transcriptPath,
         )
         val updated = listOf(started) + sessions.filterNot { it.sessionId == canonicalId }
+        requireNoOtherSessionOwner(state, projectId, updated)
         if (projectId == null) {
             writeSessionFile(File(projectsRoot, GLOBAL_SESSION_INDEX_FILE), updated)
         } else {
@@ -305,6 +369,7 @@ internal class ProjectRepository(
                 requireNotNull(snapshot).record.copy(
                     updatedAtEpochMillis = timestamp,
                     lastActiveSessionId = canonicalId,
+                    visibleModes = snapshot.record.visibleModes + mode,
                 ),
             )
         }
@@ -313,8 +378,9 @@ internal class ProjectRepository(
 
     fun setSessionArchived(projectId: String?, sessionId: String, archived: Boolean): ProjectStoreState {
         val canonicalId = canonicalSessionId(sessionId)
+        val state = load()
         val snapshot = projectId?.let { loadProject(it) }
-        val sessions = snapshot?.sessions ?: load().globalSessions
+        val sessions = snapshot?.sessions ?: state.globalSessions
         require(sessions.any { it.sessionId == canonicalId }) { "session is not indexed" }
         val updated = sessions.map {
             if (it.sessionId == canonicalId) it.copy(
@@ -331,6 +397,7 @@ internal class ProjectRepository(
     }
 
     fun markActiveSession(projectId: String, sessionId: String): ProjectStoreState {
+        load()
         validateProjectId(projectId)
         val snapshot = loadProject(projectId)
         val known = snapshot.sessions.any { it.sessionId == sessionId }
@@ -353,6 +420,7 @@ internal class ProjectRepository(
     }
 
     fun recordWorkspace(projectId: String, state: SessionWorkspaceState): ProjectStoreState {
+        load()
         val snapshot = loadProject(projectId)
         workspaceForDirectory(projectId, state.cwd)
         state.additionalDirectories.forEach { workspaceForDirectory(projectId, it, requireExisting = false) }
@@ -386,11 +454,89 @@ internal class ProjectRepository(
         return ProjectWorkspace(projectId, directory.absolutePath, guestPath)
     }
 
-    fun workspace(projectId: String): ProjectWorkspace = loadProject(projectId).workspace
+    fun workspace(projectId: String): ProjectWorkspace = loadProjectLayout(projectId).workspace
 
     fun project(projectId: String): ProjectSnapshot = loadProject(projectId)
 
+    /** Includes readable indexes of projects whose manifest was isolated. */
+    fun indexedSessionOwners(global: List<ProjectSessionSummary>): Map<String, ScopeStateStore.SessionOwner> {
+        val projects = readKnownProjectSessions()
+        requireUniqueSessionOwners(global, projects)
+        return buildMap {
+            global.forEach { put(canonicalSessionId(it.sessionId), ScopeStateStore.SessionOwner("global", it.mode)) }
+            projects.forEach { (projectId, sessions) -> sessions.forEach {
+                put(canonicalSessionId(it.sessionId), ScopeStateStore.SessionOwner("project.$projectId", it.mode))
+            } }
+        }
+    }
+
+    /** Include readable session indexes even when a project's manifest is isolated. */
+    private fun readKnownProjectSessions(): List<Pair<String, List<ProjectSessionSummary>>> {
+        val directories = projectsRoot.listFiles()
+            ?: throw ProjectCatalogUnavailableException(listOf("projects-index"), "Project indexes are unavailable")
+        val known = mutableListOf<Pair<String, List<ProjectSessionSummary>>>()
+        val unavailable = mutableListOf<String>()
+        directories.filter { isLowercaseUuid(it.name) }.forEach { dir ->
+            val sessions = if (!dir.isDirectory || Files.isSymbolicLink(dir.toPath())) null else runCatching {
+                readSessions(File(dir, PROJECT_SESSION_INDEX_FILE))
+            }.getOrNull()
+            if (sessions == null) unavailable += "project.${dir.name}"
+            else known += dir.name to sessions
+        }
+        if (unavailable.isNotEmpty()) {
+            val scopes = unavailable.sorted()
+            throw ProjectCatalogUnavailableException(scopes, "Session index is unavailable for ${scopes.joinToString()}")
+        }
+        return known
+    }
+
+    private fun requireUniqueSessionOwners(
+        global: List<ProjectSessionSummary>,
+        projects: List<Pair<String, List<ProjectSessionSummary>>>,
+    ) {
+        val owners = mutableMapOf<String, String>()
+        fun add(session: ProjectSessionSummary, owner: String) {
+            val id = canonicalSessionId(session.sessionId)
+            val previous = owners.putIfAbsent(id, owner)
+            if (previous != null && previous != owner) {
+                val scopes = listOf(previous, owner).sorted()
+                throw ProjectCatalogUnavailableException(scopes, "Session $id has conflicting workspace owners: ${scopes.joinToString()}")
+            }
+        }
+        global.forEach { add(it, "global") }
+        projects.forEach { (projectId, sessions) -> sessions.forEach { add(it, "project.$projectId") } }
+    }
+
+    private fun requireNoOtherSessionOwner(
+        state: ProjectStoreState,
+        projectId: String?,
+        sessions: List<ProjectSessionSummary>,
+    ) {
+        val incoming = sessions.mapTo(mutableSetOf()) { canonicalSessionId(it.sessionId) }
+        val others = (if (projectId == null) emptyList() else state.globalSessions) +
+            readKnownProjectSessions().filter { it.first != projectId }.flatMap { it.second }
+        require(others.none { canonicalSessionId(it.sessionId) in incoming }) {
+            "Session has a conflicting workspace owner"
+        }
+    }
+
+    private data class ProjectLayout(
+        val record: ProjectRecord,
+        val workspace: ProjectWorkspace,
+        val sourceWorkspace: ProjectWorkspace,
+    )
+
     private fun loadProject(projectId: String): ProjectSnapshot {
+        val layout = loadProjectLayout(projectId)
+        return ProjectSnapshot(
+            record = layout.record,
+            workspace = layout.workspace,
+            sourceWorkspace = layout.sourceWorkspace,
+            sessions = readSessions(File(projectDirectory(projectId), PROJECT_SESSION_INDEX_FILE)),
+        )
+    }
+
+    private fun loadProjectLayout(projectId: String): ProjectLayout {
         validateProjectId(projectId)
         val dir = projectDirectory(projectId)
         val canonicalRoot = projectsRoot.canonicalFile
@@ -407,11 +553,10 @@ internal class ProjectRepository(
         ) {
             "project workspace escaped its managed project directory"
         }
-        return ProjectSnapshot(
+        return ProjectLayout(
             record = record,
             workspace = workspaceForDirectory(projectId, record.activeDirectory, requireExisting = false).copy(additionalDirectories = record.additionalDirectories),
             sourceWorkspace = ProjectWorkspace(projectId, workspace.canonicalPath),
-            sessions = readSessions(File(dir, PROJECT_SESSION_INDEX_FILE)),
         )
     }
 
@@ -430,19 +575,19 @@ internal class ProjectRepository(
         writeJson(target, encodeSessions(sessions), ::decodeSessions)
     }
 
-    private fun readSessions(file: File): List<ProjectSessionSummary> =
-        if (file.isFile) runCatching { decodeSessions(file.readText(Charsets.UTF_8)) }.getOrDefault(emptyList())
-        else emptyList()
+    private fun readSessions(file: File): List<ProjectSessionSummary> {
+        require(!Files.isSymbolicLink(file.toPath()) && file.isFile) { "Session index is missing or not a file: $file" }
+        return decodeSessions(file.readText(Charsets.UTF_8))
+    }
 
     private fun readIndex(): ProjectIndex {
         val file = File(projectsRoot, PROJECTS_INDEX_FILE)
-        return if (file.isFile) {
-            runCatching { decodeIndex(file.readText(Charsets.UTF_8)) }.getOrElse {
-                ProjectIndex().also { recovered ->
-                    runCatching { writeIndex(recovered) }
-                }
-            }
+        return if (!Files.isSymbolicLink(file.toPath()) && file.isFile) {
+            decodeIndex(file.readText(Charsets.UTF_8))
         } else {
+            require(!Files.isSymbolicLink(file.toPath()) && !file.exists() && projectsRoot.listFiles().orEmpty().none { it.isDirectory && isLowercaseUuid(it.name) }) {
+                "Project index is missing or not a file: $file"
+            }
             ProjectIndex()
         }
     }
@@ -475,8 +620,11 @@ internal class ProjectRepository(
     private fun decodeIndex(text: String): ProjectIndex {
         val json = JSONObject(text)
         require(json.getInt("version") == 1)
-        val ids = json.getJSONArray("projectIds").stringList().filter(::isLowercaseUuid)
-        return ProjectIndex(json.optNullableString("activeProjectId"), ids.distinct())
+        val ids = json.getJSONArray("projectIds").stringList()
+        require(ids.all(::isLowercaseUuid) && ids.distinct().size == ids.size)
+        val active = json.optNullableString("activeProjectId")
+        require(active == null || active in ids)
+        return ProjectIndex(active, ids)
     }
 
     private fun encodeProject(value: ProjectRecord): String = JSONObject()
@@ -486,6 +634,7 @@ internal class ProjectRepository(
         .put("directory", value.directory)
         .put("activeDirectory", value.activeDirectory)
         .put("additionalDirectories", JSONArray(value.additionalDirectories))
+        .put("visibleModes", JSONArray(value.visibleModes.map { it.wireValue }.sorted()))
         .put("storageKind", value.storageKind.wireName)
         .put("createdAtEpochMillis", value.createdAtEpochMillis)
         .put("updatedAtEpochMillis", value.updatedAtEpochMillis)
@@ -507,6 +656,8 @@ internal class ProjectRepository(
             directory = json.getString("directory"),
             activeDirectory = json.getString("activeDirectory"),
             additionalDirectories = json.getJSONArray("additionalDirectories").stringList(),
+            visibleModes = json.getJSONArray("visibleModes").stringList()
+                .map { com.lingxi.code.model.sessionModeFromWireValue(it) }.toSet(),
             storageKind = ProjectStorageKind.fromWireName(json.getString("storageKind")),
             createdAtEpochMillis = json.getLong("createdAtEpochMillis"),
             updatedAtEpochMillis = json.getLong("updatedAtEpochMillis"),
@@ -515,9 +666,7 @@ internal class ProjectRepository(
             lastSyncAtEpochMillis = json.optNullableLong("lastSyncAtEpochMillis"),
             lastActiveSessionId = json.optNullableString("lastActiveSessionId")
                 ?.let(::canonicalSessionId),
-            syncState = runCatching {
-                ProjectSyncState.valueOf(json.getString("syncState"))
-            }.getOrElse { ProjectSyncState.Error },
+            syncState = ProjectSyncState.valueOf(json.getString("syncState")),
         )
     }
 
@@ -549,10 +698,10 @@ internal class ProjectRepository(
     private fun decodeSessions(text: String): List<ProjectSessionSummary> {
         val json = JSONObject(text)
         require(json.getInt("version") == 1)
-        return json.getJSONArray("sessions").objectList().map { row ->
+        val sessions = json.getJSONArray("sessions").objectList().map { row ->
             ProjectSessionSummary(
-                isArchived = row.optBoolean("isArchived", false),
-                pendingCatalogConfirmation = row.optBoolean("pendingCatalogConfirmation", false),
+                isArchived = row.getBoolean("isArchived"),
+                pendingCatalogConfirmation = row.getBoolean("pendingCatalogConfirmation"),
                 sessionId = canonicalSessionId(row.getString("sessionId")),
                 title = row.getString("title"),
                 workspaceDirectory = row.optNullableString("workspaceDirectory"),
@@ -561,12 +710,13 @@ internal class ProjectRepository(
                 messageCount = row.getInt("messageCount"),
                 relativeTime = row.getString("relativeTime"),
                 updatedAtEpochMillis = row.getLong("updatedAtEpochMillis"),
-                mode = when (row.optString("mode")) {
-                    SessionMode.Chat.wireValue -> SessionMode.Chat
-                    else -> SessionMode.Code
-                },
+                mode = com.lingxi.code.model.sessionModeFromWireValue(row.getString("mode")),
             )
         }
+        require(sessions.all { it.sessionId.isNotBlank() } && sessions.map { it.sessionId }.distinct().size == sessions.size) {
+            "Session index contains an empty or duplicate id"
+        }
+        return sessions
     }
 
     private fun encodeBaseline(value: ProjectSyncBaseline): String = JSONObject()

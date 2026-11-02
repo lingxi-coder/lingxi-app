@@ -47,12 +47,18 @@ internal interface ProviderRealtimeSession {
 
 /** Only a live conversation source attaches here; credentials and headless preview engines cannot replace it. */
 internal object AndroidAudioSessionContext {
-    @Volatile private var engine: MobileEngineHandle? = null
-    @Synchronized fun attach(handle: MobileEngineHandle) { engine = handle }
-    @Synchronized fun clear() { engine = null }
-    fun currentEngine(): MobileEngineHandle? = engine
-    fun detach(handle: MobileEngineHandle) { synchronized(this) { if (engine === handle) engine = null } }
-    suspend fun snapshot(owner: AudioOwnerKey, handle: MobileEngineHandle? = engine): JSONObject? {
+    private val bindings = AudioOwnerBindingRegistry<MobileEngineHandle>()
+    fun attach(handle: MobileEngineHandle) = bindings.attach(handle)
+    fun clear() = bindings.clear()
+    fun currentEngine(): MobileEngineHandle? = bindings.current()
+    fun reserve(owner: AudioOwnerKey) = bindings.reserve(owner)
+    fun bind(owner: AudioOwnerKey, handle: MobileEngineHandle) = bindings.bind(owner, handle)
+    fun release(owner: AudioOwnerKey) = bindings.release(owner)
+    fun releaseIfBound(owner: AudioOwnerKey, handle: MobileEngineHandle) = bindings.releaseIfBound(owner, handle)
+    fun isReserved(owner: AudioOwnerKey): Boolean = bindings.isReserved(owner)
+    fun engineFor(owner: AudioOwnerKey): MobileEngineHandle? = bindings.engineFor(owner)
+    fun detach(handle: MobileEngineHandle) = bindings.detach(handle)
+    suspend fun snapshot(owner: AudioOwnerKey, handle: MobileEngineHandle? = engineFor(owner)): JSONObject? {
         val current = handle ?: return null
         val json = JSONObject(current.audioSessionContext())
         if (json.isNull("profileId") || json.optString("profileId").isBlank()) return null
@@ -83,12 +89,16 @@ internal class RustProviderAudioBridge(context: Context) : ProviderAudioBridge {
     }
 
     override suspend fun capabilities(request: DeviceAudioRequest, configuration: AudioConfigurationV4, kind: String): ProviderAudioCapability {
-        val engine = AndroidAudioSessionContext.currentEngine()
+        val engine = AndroidAudioSessionContext.engineFor(request.owner)
         val session = AndroidAudioSessionContext.snapshot(request.owner, engine)
         val cloud = when (kind) {
             "recognition" -> configuration.recognition.cloud
             "speech" -> configuration.speech.cloud
             else -> configuration.conversation.cloud
+        }
+        if (AndroidAudioSessionContext.isReserved(request.owner) && session == null &&
+            (kind == "realtime" || cloud.binding == "follow_session")) {
+            throw AudioOperationException(DeviceAudioErrorKind.Unavailable, "The conversation audio owner is not ready.")
         }
         val selectedHost = if (session != null && engine != null && (cloud.binding == "follow_session" || kind == "realtime")) {
             // Clone the actual runtime SDK for every admission so profile edits cannot leave a stale host cache.

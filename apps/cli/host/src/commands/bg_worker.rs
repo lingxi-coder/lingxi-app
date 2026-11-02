@@ -785,6 +785,7 @@ pub async fn run_pty_session(cli: &PtySessionCli) -> i32 {
         outcome,
         Some(session_id),
         registration.clone(),
+        launch.options.preserve_admitted_context,
     )
     .await;
     registration.deregister();

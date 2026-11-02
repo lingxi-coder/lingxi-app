@@ -43,6 +43,8 @@ data class ProjectRecord(
     val directory: String = "",
     val activeDirectory: String = directory,
     val additionalDirectories: List<String> = emptyList(),
+    /** A project can appear in either space without copying its files. */
+    val visibleModes: Set<SessionMode>,
 )
 
 data class SessionWorkspaceState(
@@ -68,7 +70,7 @@ data class ProjectSessionSummary(
     val messageCount: Int,
     val relativeTime: String,
     val updatedAtEpochMillis: Long,
-    val mode: SessionMode = SessionMode.Code,
+    val mode: SessionMode,
     val isArchived: Boolean = false,
     val pendingCatalogConfirmation: Boolean = false,
     val workspaceDirectory: String? = null,
@@ -123,11 +125,48 @@ data class ProjectStoreState(
     val globalSessions: List<ProjectSessionSummary> = emptyList(),
     val conflicts: List<ProjectSyncConflict> = emptyList(),
     val loading: Boolean = true,
+    /** The persistent indexes could not be validated; do not select an owner. */
+    val storageUnavailable: Boolean = false,
+    val unavailableScopes: List<String> = emptyList(),
     val operation: ProjectOperation? = null,
     val errorMessage: String? = null,
 ) {
     val activeProject: ProjectSnapshot?
         get() = projects.firstOrNull { it.record.id == activeProjectId }
+}
+
+internal fun repositoryFailureState(
+    previous: ProjectStoreState,
+    recovered: ProjectStoreState?,
+    message: String?,
+    unavailableScopes: List<String> = emptyList(),
+): ProjectStoreState = (recovered?.copy(conflicts = previous.conflicts, operation = previous.operation)
+    ?: previous.copy(loading = false, storageUnavailable = true, unavailableScopes = unavailableScopes))
+    .copy(errorMessage = message)
+
+internal class ProjectCatalogUnavailableException(
+    val scopes: List<String>,
+    message: String,
+    cause: Throwable? = null,
+) : IllegalStateException(message, cause)
+
+internal fun requireOwnerRegistryPresent(present: Boolean, observedBefore: Boolean, hasIndexedOwners: Boolean) {
+    if (!present && (observedBefore || hasIndexedOwners)) {
+        throw ProjectCatalogUnavailableException(listOf("owner-registry"), "Conversation owner registry is missing")
+    }
+}
+
+internal fun requireMatchingSessionOwners(
+    indexed: Map<String, ScopeStateStore.SessionOwner>,
+    recorded: Map<String, ScopeStateStore.SessionOwner>,
+) {
+    indexed.forEach { (id, owner) ->
+        val existing = recorded[id] ?: return@forEach
+        if (existing != owner) {
+            val scopes = listOf(existing.scopeKey, owner.scopeKey).distinct().sorted()
+            throw ProjectCatalogUnavailableException(scopes, "Session $id has conflicting recorded owners: ${scopes.joinToString()}")
+        }
+    }
 }
 
 enum class ConflictResolution {

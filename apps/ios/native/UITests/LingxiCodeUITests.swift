@@ -680,7 +680,15 @@ final class LingxiCodeUITests: XCTestCase {
     /// list with a mode filter — no per-mode tabs and no per-project cards. A
     /// project is created on the projects page and starts its sessions from
     /// its own page.
-    func testSidebarEntriesCreateProjectAndStartSession() {
+    func testSidebarEntriesCreateProjectAndStartSession() throws {
+        let header = app.buttons["conversation.project-context"]
+        XCTAssertTrue(header.waitForExistence(timeout: 8), app.debugDescription)
+        let initialContext = try XCTUnwrap(header.value as? String)
+        let initialParts = initialContext.components(separatedBy: " · ")
+        XCTAssertEqual(initialParts.count, 2, initialContext)
+        let initialWorkspace = try XCTUnwrap(initialParts.last)
+        let initialMode = try XCTUnwrap(initialParts.first?.components(separatedBy: ", ").last)
+
         openDrawer()
         XCTAssertTrue(app.buttons["drawer.entry.cron"].exists)
         XCTAssertTrue(app.buttons["drawer.entry.projects"].exists)
@@ -713,6 +721,24 @@ final class LingxiCodeUITests: XCTestCase {
 
         app.buttons["project.new-session"].tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
+        let projectShown = expectation(for: NSPredicate(format: "value CONTAINS %@", projectName),
+                                       evaluatedWith: header)
+        wait(for: [projectShown], timeout: 10)
+
+        let projectDraft = "draft belonging to the project"
+        let input = app.textViews["composer.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
+        input.tap()
+        input.typeText(projectDraft)
+        app.buttons["composer.keyboard.dismiss"].tap()
+        app.buttons["conversation.new-chat"].tap()
+
+        let globalShown = expectation(for: NSPredicate { _, _ in
+            guard let value = header.value as? String else { return false }
+            return value.contains(", \(initialMode) · ") && value.hasSuffix(" · \(initialWorkspace)")
+        }, evaluatedWith: header)
+        wait(for: [globalShown], timeout: 10)
+        XCTAssertEqual(app.textViews["composer.input"].value as? String ?? "", "", app.debugDescription)
     }
 
     /// The drawer supports edge opening while leaving the chat visible.
@@ -936,7 +962,7 @@ final class LingxiCodeUITests: XCTestCase {
         app.terminate()
         let title = "修复 iOS 导航栏与会话标题同步"
         app.launchEnvironment["LINGXI_UI_TEST_SESSION_TITLE"] = title
-        app.launchArguments += ["-conversation.global.code.active-session", "ui-named-session"]
+        app.launchArguments += ["-conversation.spaces.global.code.active-session", "ui-named-session"]
         app.launch()
         let header = app.buttons["conversation.project-context"]
         XCTAssertTrue(header.waitForExistence(timeout: 12), app.debugDescription)

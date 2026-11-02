@@ -206,7 +206,12 @@ impl EngineCommandRouter {
     /// Enumerate the real persisted JSONL catalog. A missing/empty store is a
     /// successful empty listing; other loader failures are surfaced as a
     /// recoverable client error without leaking filesystem details.
-    pub(super) async fn emit_session_list(&self, limit: usize, sink: &dyn ClientEventSink) {
+    pub(super) async fn emit_session_list(
+        &self,
+        limit: usize,
+        mode: Option<client::protocol::listings::SessionModeDto>,
+        sink: &dyn ClientEventSink,
+    ) {
         let Some(store) = self.session_store.as_ref() else {
             sink.emit(ClientEvent::SessionList {
                 sessions: Vec::new(),
@@ -215,11 +220,16 @@ impl EngineCommandRouter {
             return;
         };
 
-        match session::jsonl::list_recent_sessions_with_diagnostics(
+        match session::jsonl::list_recent_sessions_in_scope_with_mode(
             &store.lingxi_home,
             &store.current_cwd(),
+            session::jsonl::SessionDiscoveryScope::Current,
             limit,
             store.fs.clone(),
+            mode.map(|mode| match mode {
+                client::protocol::listings::SessionModeDto::Chat => session::jsonl::SessionMode::Chat,
+                client::protocol::listings::SessionModeDto::Code => session::jsonl::SessionMode::Code,
+            }),
         )
         .await
         {

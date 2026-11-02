@@ -33,11 +33,13 @@ import type {
   NativeAudioOperationResponse,
   NativeAudioResponse,
   NativeAudioEvent,
+  NativeAudioFlowLease,
 } from '../../shared/nativeAudio.js';
 import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
 import type { AudioConfigurationV4 } from '../../shared/generatedAudioConfiguration.js';
 import type { SessionCatalogRow, SessionCatalogScope, SessionOpenSelection, SessionWorkspaceOperation } from '../../shared/sessionWorkspace.js';
+import type { ConversationSpace, ConversationSpacesSnapshot } from '../../shared/conversationSpaces.js';
 
 export interface WorkspaceFilePreview {
   kind: 'text' | 'binary';
@@ -106,6 +108,7 @@ export interface DiagnosticEntry {
 }
 export interface BootstrapState {
   scheduledWorkspace?: string;
+  conversationSpaces: ConversationSpacesSnapshot;
   revision: number;
   settings: PublicSettings;
   workspace: WorkspaceMetadata;
@@ -124,12 +127,13 @@ export interface BootstrapState {
 export interface WorkspaceFileSearchResult { files: string[]; directories?: string[]; truncated: boolean }
 export type Unsubscribe = () => void;
 export interface NativeAudioApi {
+  retainFlow(sessionId: string, leaseId: string, retain: boolean): Promise<void>;
   realtime(command: NativeRealtimeAudioCommand): Promise<void>;
   onRealtimeState(callback: (state: NativeRealtimeAudioState) => void): () => void;
   request(command: NativeAudioCommand): Promise<NativeAudioResponse>;
-  execute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV4): Promise<NativeAudioOperationResponse>;
-  cancel(): Promise<void>;
-  finishListen(): Promise<void>;
+  execute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV4, flow?: NativeAudioFlowLease): Promise<NativeAudioOperationResponse>;
+  cancel(flow?: NativeAudioFlowLease): Promise<void>;
+  finishListen(flow?: NativeAudioFlowLease): Promise<void>;
   onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
 }
 
@@ -187,7 +191,6 @@ export interface LingxiApi {
     notifications?: unknown;
     modelPickerVisibility?: unknown;
     sidebar?: unknown;
-    sidebar?: unknown;
   }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   pickProjectFolder(purpose?: ProjectCreationPurpose): Promise<ProjectFolderSelection | null>;
@@ -214,10 +217,14 @@ export interface LingxiApi {
   copyText(text: string): Promise<void>;
   setInterfaceLocale(locale: string, followSystem: boolean): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
-  listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string; conversationSpaces: ConversationSpacesSnapshot }>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
-  newSession(projectPath: string, model?: string): Promise<BootstrapState>;
-  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<BootstrapState>;
+  newSession(projectPath: string | null, model?: string): Promise<BootstrapState>;
+  switchConversationSpace(mode: ConversationSpace): Promise<BootstrapState>;
+  prepareSessionHandoff(sourceId: string, target: ConversationSpace, requestId: string, retry?: boolean): Promise<{ snapshot: BootstrapState; summary: string; requestId: string } | null>;
+  cancelSessionHandoff(requestId: string): Promise<void>;
+  onConversationShown?(callback: (snapshot: BootstrapState) => void): Unsubscribe;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace): Promise<BootstrapState>;
   preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
   archiveSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
   touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;

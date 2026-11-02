@@ -287,5 +287,13 @@ class ProviderProfileMappingTest {
         status = ConnStatus.Idle,
         enabled = true,
         credentialConfigured = true,
+        catalogBaseUrl = when (preset) {
+            "openai" -> "https://api.openai.com/v1"
+            "anthropic" -> "https://api.anthropic.com"
+            "deepseek" -> "https://api.deepseek.com"
+            "kimi" -> "https://api.moonshot.cn/v1"
+            "kimi-code" -> "https://api.kimi.com/coding/v1"
+            else -> null
+        },
     )
 }

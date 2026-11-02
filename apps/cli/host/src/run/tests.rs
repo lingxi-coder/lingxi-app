@@ -92,7 +92,8 @@ fn write_session(project_dir: &std::path::Path, prompt: &str, mtime: SystemTime)
         "userType": "external",
         "message": {"role": "user", "content": prompt},
     });
-    let bytes = format!("{}\n", serde_json::to_string(&line).unwrap());
+    let header = serde_json::json!({"type":"fixed-session-mode", "sessionId":uuid, "sessionMode":"code", "instructionEpoch":0});
+    let bytes = format!("{header}\n{}\n", serde_json::to_string(&line).unwrap());
     std::fs::write(&path, bytes).unwrap();
     filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(mtime)).unwrap();
     uuid
@@ -103,6 +104,43 @@ fn make_project_dir(lingxi_home: &std::path::Path, cwd: &str) -> std::path::Path
     let dir = lingxi_home.join("projects").join(project_dir_name(cwd));
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+#[tokio::test]
+async fn cli_resume_catalog_excludes_newer_chat_sessions() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let cwd = root.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let project = make_project_dir(&home, &cwd.to_string_lossy());
+    let now = SystemTime::now();
+    let code = write_session(&project, "code", now - Duration::from_secs(60));
+    let chat = write_session(&project, "chat", now);
+    for id in [code, chat] {
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(project.join(format!("{id}.jsonl")))
+                .unwrap(),
+            "{}",
+            serde_json::json!({"type":"custom-title", "sessionId":id, "customTitle":"shared title"})
+        )
+        .unwrap();
+    }
+    let path = project.join(format!("{chat}.jsonl"));
+    let content = std::fs::read_to_string(&path).unwrap();
+    let (_, body) = content.split_once('\n').unwrap();
+    let header = serde_json::json!({"type":"fixed-session-mode", "sessionId":chat, "sessionMode":"chat", "instructionEpoch":0});
+    std::fs::write(&path, format!("{header}\n{body}")).unwrap();
+    let rows = load_resume_rows_from(&home, &cwd).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].uuid, code);
+    assert_eq!(rows[0].mode, session::jsonl::SessionMode::Code);
+    assert_eq!(
+        resolve_resume_title_from(rows, "shared title"),
+        Ok(Some(code))
+    );
 }
 
 #[tokio::test]
@@ -119,21 +157,69 @@ async fn cli_independent_fork_preserves_source_and_starts_a_new_profile_epoch() 
     let path = session::jsonl::path::session_path(&home, &cwd, &source.to_string());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let rows = [
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":source, "sessionMode":"code", "instructionEpoch":7}),
         serde_json::json!({"type":"user", "uuid":message, "parentUuid":null,
             "sessionId":source, "cwd":cwd, "message":{"role":"user","content":"hello"}}),
-        serde_json::json!({"type":"session-mode", "sessionId":source, "sessionMode":"chat",
-            "contextRevision":7, "profileEpoch":7, "admittedMode":"chat", "admittedEpoch":7, "pending":false}),
     ];
-    let content = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+    let content = rows
+        .iter()
+        .map(|row| format!("{row}\n"))
+        .collect::<String>();
     std::fs::write(&path, &content).unwrap();
-    let (target_path, _) = create_independent_cli_branch(&home, &cwd, source, target, None, None).await.unwrap();
+    let (target_path, _) = create_independent_cli_branch(&home, &cwd, source, target, None, None)
+        .await
+        .unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
     let branch = std::fs::read_to_string(target_path).unwrap();
-    let profile = session::JsonlWriter::session_mode_transition_from_source(&branch, &target.to_string()).unwrap();
-    assert_eq!(profile.active, ConversationMode::Code);
-    assert!(profile.active_epoch > 7);
+    let profile =
+        session::JsonlWriter::fixed_session_profile_from_source(&branch, &target.to_string())
+            .unwrap();
+    assert_eq!(profile.mode, ConversationMode::Code);
+    assert!(profile.instruction_epoch > 7);
     let loaded = session::jsonl::route_lines(&branch);
-    assert!(!session::jsonl::build_conversation_chain(&loaded, &target.to_string()).0.is_empty());
+    assert!(
+        !session::jsonl::build_conversation_chain(&loaded, &target.to_string())
+            .0
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cli_branch_rejects_chat_before_claiming_source_or_target() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let cwd = root.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let source = Uuid::new_v4();
+    let target = Uuid::new_v4();
+    let path = crate::init::captured_resume_path_tests::transcript(
+        &home,
+        &cwd,
+        source,
+        "chat source",
+        "2026-10-28T00:00:00.000Z",
+        "chat",
+    );
+    let before = std::fs::read(&path).unwrap();
+    let error = create_independent_cli_branch(
+        &home,
+        &cwd.to_string_lossy(),
+        source,
+        target,
+        Some(&path),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("session_mode_mismatch"));
+    assert!(!home.join("sessions").exists());
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert!(!session::jsonl::path::session_path(
+        &home,
+        &cwd.to_string_lossy(),
+        &target.to_string()
+    )
+    .exists());
 }
 
 #[tokio::test]
@@ -149,6 +235,7 @@ async fn cli_independent_fork_refuses_unfinished_source_tools() {
     let path = session::jsonl::path::session_path(&home, &cwd, &source.to_string());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let rows = [
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":source, "sessionMode":"code", "instructionEpoch":0}),
         serde_json::json!({"type":"user", "uuid":message, "parentUuid":null,
             "sessionId":source, "cwd":cwd, "message":{"role":"user","content":"hello"}}),
         serde_json::json!({"type":"attachment", "uuid":Uuid::new_v4(), "parentUuid":message,
@@ -156,9 +243,14 @@ async fn cli_independent_fork_refuses_unfinished_source_tools() {
                 "type":"hook_deferred_tool", "toolUseID":"pending-tool", "toolName":"Write",
                 "toolInput":{"file_path":"/tmp/never-written", "content":"pending"}}}),
     ];
-    let content = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+    let content = rows
+        .iter()
+        .map(|row| format!("{row}\n"))
+        .collect::<String>();
     std::fs::write(&path, &content).unwrap();
-    let error = create_independent_cli_branch(&home, &cwd, source, target, None, None).await.unwrap_err();
+    let error = create_independent_cli_branch(&home, &cwd, source, target, None, None)
+        .await
+        .unwrap_err();
     assert!(error.contains("resume the original conversation first"));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
     assert!(!session::jsonl::path::session_path(&home, &cwd, &target.to_string()).exists());

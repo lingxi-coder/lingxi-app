@@ -260,7 +260,7 @@ class DurableRecoveryRoutingTest {
         val source = ParkedTurnSource()
         val vm = ChatViewModel(source)
         vm.applyActivatedSession(
-            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
         )
 
         // AttachTurn: terminal state first ...
@@ -311,7 +311,7 @@ class DurableRecoveryRoutingTest {
     private fun parkedViewModel(source: ParkedTurnSource, ids: MutableList<Int>): ChatViewModel {
         val vm = ChatViewModel(source, strings = recordingStrings(ids))
         vm.applyActivatedSession(
-            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
         )
         // Attach's snapshot arms the recovered token; ResumeTurn's repeat is what
         // marks the checkpoint inactive-and-parked.
@@ -357,10 +357,6 @@ class DurableRecoveryRoutingTest {
 
         override suspend fun resumeSession(uuid: String) {
             sessionOperations += "resume:$uuid"
-        }
-
-        override suspend fun resumeEmptySession(uuid: String, title: String) {
-            sessionOperations += "resume-empty:$uuid"
         }
 
         override suspend fun newSession() {

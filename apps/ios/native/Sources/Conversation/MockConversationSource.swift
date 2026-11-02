@@ -33,11 +33,6 @@ final class MockConversationSource: ConversationSource {
         model.sessionMode = sessionMode
     }
 
-    func setSessionMode(_ mode: SessionMode) {
-        model.sessionMode = mode
-        model.pendingSessionMode = nil
-    }
-
     #if DEBUG
         static func uiTestFixture(
             sessionMode: SessionMode = .code,

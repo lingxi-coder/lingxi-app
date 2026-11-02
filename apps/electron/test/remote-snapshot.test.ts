@@ -213,16 +213,17 @@ test('records are paged in snapshots too, in sequence order', () => {
 });
 
 
-test('snapshot mode follows the latest session state and ignores state from an older base', () => {
+test('snapshot mode comes from the current session base', () => {
   const runtime = new FakeRuntime();
   runtime.resume();
   runtime.base = { ...runtime.base!, event: { ...runtime.base!.event, mode: 'code' } as any };
-  runtime.state = [{ sessionId: SESSION_A, sequence: runtime.baseSequence + 1,
-    event: { type: 'session_mode_changed', session_id: SESSION_A, mode: 'chat', revision: 2 } as any }];
-  const current = frames(runtime)[0] as any;
-  assert.equal(current.session_mode, 'chat');
-  runtime.state = [{ sessionId: SESSION_A, sequence: runtime.baseSequence - 1,
-    event: { type: 'session_mode_changed', session_id: SESSION_A, mode: 'chat', revision: 2 } as any }];
-  const stale = frames(runtime)[0] as any;
-  assert.equal(stale.session_mode, 'code');
+  assert.equal((frames(runtime)[0] as any).session_mode, 'code');
+  runtime.base = { ...runtime.base!, event: { ...runtime.base!.event, mode: 'chat' } as any };
+  assert.equal((frames(runtime)[0] as any).session_mode, 'chat');
+});
+
+test('an admitted draft exposes its confirmed mode without a transcript base', () => {
+  const runtime = new FakeRuntime();
+  const begin = buildSnapshot({ ...runtime.remoteView(), sessionMode: 'chat' })[0] as any;
+  assert.equal(begin.session_mode, 'chat');
 });

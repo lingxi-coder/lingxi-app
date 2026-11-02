@@ -109,8 +109,10 @@ internal object NativeEngineFactory {
         visionDelegationEnabled: Boolean = true,
         mediaHost: AndroidNativeMediaHost? = null,
         projectWorkspace: ProjectWorkspace? = null,
-        sessionMode: SessionMode = SessionMode.Code,
+        sessionMode: SessionMode,
+        initialSessionId: String? = null,
         linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
+        computerUseOwnerKey: String? = null,
     ): MobileEngineHandle? {
         val appContext = context.applicationContext
         val appMediaHost = mediaHost ?: AndroidNativeMediaHostProvider.get(appContext)
@@ -130,6 +132,7 @@ internal object NativeEngineFactory {
                     apiKey = apiKey,
                     model = model,
                     sessionMode = sessionMode.toDto(),
+                    initialSessionId = initialSessionId,
                     visionDelegationEnabled = visionDelegationEnabled,
                     appFilesRoot = appContext.filesDir.canonicalPath,
                     projectCwd = projectWorkspace?.hostPath,
@@ -159,7 +162,8 @@ internal object NativeEngineFactory {
                 permissions = permissions,
                 // Direct builds supply the user-started control host; Play builds
                 // supply null. Runtime grants remain scoped to the control session.
-                computerUse = ComputerUseFeatureProvider.engineHost(),
+                computerUse = computerUseOwnerKey?.let(ComputerUseFeatureProvider::engineHost)
+                    ?: ComputerUseFeatureProvider.engineHost(),
                 // The Agent Shell shares the terminal's verified PRoot runtime.
                 shell = AndroidShellConfigFfi(
                     enableShell = true,

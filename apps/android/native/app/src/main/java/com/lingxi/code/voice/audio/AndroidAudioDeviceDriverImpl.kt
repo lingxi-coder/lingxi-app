@@ -115,6 +115,7 @@ internal class AndroidAudioDeviceDriverImpl(
     private val wavCaptures = ConcurrentHashMap<Long, AndroidWavCapture>()
     private val streamCaptures = ConcurrentHashMap<Long, AndroidRealtimePcmCapture>()
     private val streamCapturePause = ConcurrentHashMap<Long, Boolean>()
+    private val streamCaptureStateLock = Any()
     private val streamPlayback = ConcurrentHashMap<Long, AndroidRealtimePcmPlayback>()
     private val acknowledgedStreamPlayback = ConcurrentHashMap<Long, AndroidRealtimePcmPlayback>()
     private val playback = ConcurrentHashMap<Long, PlaybackState>()
@@ -137,9 +138,8 @@ internal class AndroidAudioDeviceDriverImpl(
 
     override suspend fun streamCapture(lease: AudioLease, format: RealtimePcmFormat, onChunk: suspend (ByteArray) -> Unit) {
         val capture = AndroidRealtimePcmCapture()
-        streamCaptures[lease.leaseId] = capture
-        capture.paused.set(streamCapturePause[lease.leaseId] ?: false)
-        try { capture.run(format, onChunk) } finally { streamCaptures.remove(lease.leaseId, capture); streamCapturePause.remove(lease.leaseId) }
+        registerCapture(lease, capture)
+        try { capture.run(format, onChunk) } finally { unregisterCapture(lease, capture) }
     }
 
     override suspend fun streamCapture(
@@ -149,10 +149,9 @@ internal class AndroidAudioDeviceDriverImpl(
         onReady: () -> Unit,
     ) {
         val capture = AndroidRealtimePcmCapture()
-        streamCaptures[lease.leaseId] = capture
-        capture.paused.set(streamCapturePause[lease.leaseId] ?: false)
+        registerCapture(lease, capture)
         try { capture.run(format, onChunk, onReady) }
-        finally { streamCaptures.remove(lease.leaseId, capture); streamCapturePause.remove(lease.leaseId) }
+        finally { unregisterCapture(lease, capture) }
     }
 
     override suspend fun streamCaptureTimestamped(
@@ -179,20 +178,35 @@ internal class AndroidAudioDeviceDriverImpl(
     ) {
         check(closeReceipt == null || closeReceipt.lease == lease)
         val capture = AndroidRealtimePcmCapture()
-        streamCaptures[lease.leaseId] = capture
-        capture.paused.set(streamCapturePause[lease.leaseId] ?: false)
+        registerCapture(lease, capture)
         try {
             capture.runTimestamped(format, onChunk, onReady, closeReceipt)
         } finally {
-            streamCaptures.remove(lease.leaseId, capture)
-            streamCapturePause.remove(lease.leaseId)
+            unregisterCapture(lease, capture)
             if (!capture.nativeAllocationAttempted.get()) closeReceipt?.confirmNoResource()
         }
     }
 
     override fun pauseStreamCapture(lease: AudioLease, paused: Boolean) {
-        streamCapturePause[lease.leaseId] = paused
-        streamCaptures[lease.leaseId]?.paused?.set(paused)
+        synchronized(streamCaptureStateLock) {
+            streamCapturePause[lease.leaseId] = paused
+            streamCaptures[lease.leaseId]?.setPaused(paused)
+        }
+    }
+    override suspend fun drainStreamCapture(lease: AudioLease) {
+        val capture = synchronized(streamCaptureStateLock) { streamCaptures[lease.leaseId] }
+        capture?.drainCallbacks()
+    }
+    private fun registerCapture(lease: AudioLease, capture: AndroidRealtimePcmCapture) {
+        synchronized(streamCaptureStateLock) {
+            capture.setPaused(streamCapturePause[lease.leaseId] ?: false)
+            streamCaptures[lease.leaseId] = capture
+        }
+    }
+    private fun unregisterCapture(lease: AudioLease, capture: AndroidRealtimePcmCapture) {
+        synchronized(streamCaptureStateLock) {
+            if (streamCaptures.remove(lease.leaseId, capture)) streamCapturePause.remove(lease.leaseId)
+        }
     }
     override fun streamingPlaybackPositionMs(lease: AudioLease): Long? = streamPlayback[lease.leaseId]?.positionMs()
 
@@ -527,8 +541,11 @@ internal class AndroidAudioDeviceDriverImpl(
 
     override suspend fun stop(lease: AudioLease) {
         wavCaptures[lease.leaseId]?.stop()
-        streamCaptures[lease.leaseId]?.stop()
-        streamCapturePause.remove(lease.leaseId)
+        val capture = synchronized(streamCaptureStateLock) {
+            streamCapturePause.remove(lease.leaseId)
+            streamCaptures[lease.leaseId]
+        }
+        capture?.stop()
         streamPlayback[lease.leaseId]?.stop()
         acknowledgedStreamPlayback[lease.leaseId]?.stop()
         recordings[lease.leaseId]?.let { state ->

@@ -477,6 +477,9 @@
     <string name="drawer_clear_search_a11y">Clear search</string>
     <string name="drawer_close_a11y">Close drawer</string>
     <string name="drawer_close_sidebar_a11y">Close sidebar</string>
+    <string name="session_handoff_preparing">Preparing conversation summary…</string>
+    <string name="session_handoff_open_source">Open source %1$s conversation</string>
+    <string name="session_reconnect_still_releasing">The previous session is still closing. Try again shortly.</string>
     <string name="drawer_continue_session_in_progress">Wait for the current continue action to finish.</string>
     <string name="drawer_continue_session_timeout">Continuing this session timed out. Try again.</string>
     <string name="drawer_cron_new_results_fmt">%1$d new</string>
@@ -742,15 +745,13 @@
     <string name="session_details_tasks_subtitle">Tool calls and shell commands</string>
     <string name="session_details_title">Session Details</string>
     <string name="session_details_workspace">Workspace</string>
+    <string name="conversation_state_unavailable">Unable to load conversation state because its format is unsupported or damaged.</string>
     <string name="session_index_save_failed_fmt">Failed to save session index: %1$s</string>
     <string name="session_index_save_new_failed_fmt">Failed to save new session index: %1$s</string>
     <string name="session_mode_chat">Chat</string>
     <string name="session_mode_code">Code</string>
     <string name="session_mode_chat_description">General assistant</string>
     <string name="session_mode_code_description">Software engineering assistant</string>
-    <string name="session_mode_pending">Switching to %1$s after this reply</string>
-    <string name="session_mode_setting">Setting the conversation mode…</string>
-    <string name="session_mode_retry">Could not set the mode. Choose a mode to retry.</string>
     <string name="session_panel_make_scheduled">Make it a scheduled task</string>
     <string name="session_panel_mode_hint">Changing the mode continues in a new, forked chat</string>
     <string name="session_relative_days_ago_fmt">%1$d days ago</string>
@@ -2101,6 +2102,7 @@
     <string name="remote_needs_permission">Waiting for permission</string>
     <string name="remote_needs_question">Waiting for an answer</string>
     <string name="remote_needs_computer_access">Waiting on the computer</string>
+    <string name="remote_session_reload_required">There is too much session data. Reopen the session to reload it.</string>
     <string name="remote_session_loading">Loading the session…</string>
     <string name="remote_session_offline">Offline. Showing what was received last.</string>
     <string name="remote_session_closed">This session is no longer shared.</string>

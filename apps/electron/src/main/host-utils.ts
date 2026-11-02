@@ -111,8 +111,6 @@ export interface PersistedSettings {
   lastPermissionMode?: PermissionModeId;
   /** Last user-selected fast-mode state on this device. */
   fastMode?: boolean;
-  /** Last explicitly selected conversation mode, used for new chats. */
-  lastSessionMode?: 'chat' | 'code';
   /** Whether this computer accepts Remote Control connections. Off until the user turns it on. */
   remoteControlEnabled?: boolean;
   /** The sessions viewers may see and drive (`/remote-control`, or the session menu's switch). */
@@ -230,9 +228,6 @@ export function parseSettings(value: unknown): PersistedSettings {
   }
   if (isPermissionModeId(value['lastPermissionMode'])) {
     settings.lastPermissionMode = value['lastPermissionMode'];
-  }
-  if (value['lastSessionMode'] === 'chat' || value['lastSessionMode'] === 'code') {
-    settings.lastSessionMode = value['lastSessionMode'];
   }
   if (typeof value['fastMode'] === 'boolean') {
     settings.fastMode = value['fastMode'];
@@ -722,8 +717,10 @@ export function buildBridgeArguments(config: {
   listSessionsJson?: boolean;
   sessionTranscriptPath?: string;
   restoreDraft?: boolean;
+  scheduledDurableAnchor?: boolean;
   /** Device default for a newly allocated draft, applied before startup hooks. */
   initialConversationMode?: 'chat' | 'code';
+  expectedConversationMode?: 'chat' | 'code';
   sessionScope?: 'current' | 'repository' | 'all';
   additionalDirectories?: readonly string[];
   promptDirectories?: readonly string[];
@@ -754,7 +751,9 @@ export function buildBridgeArguments(config: {
   if (config.sessionId) args.push('--session-id', config.sessionId);
   if (config.sessionTranscriptPath) args.push('--session-transcript-path', config.sessionTranscriptPath);
   if (config.restoreDraft) args.push('--restore-draft');
+  if (config.scheduledDurableAnchor) args.push('--scheduled-durable-anchor');
   if (config.initialConversationMode) args.push('--initial-conversation-mode', config.initialConversationMode);
+  if (config.expectedConversationMode) args.push('--expected-conversation-mode', config.expectedConversationMode);
   if (config.initialProjectRoot) args.push('--session-project-root', config.initialProjectRoot);
   if (config.configHome) args.push('--session-config-home', config.configHome);
   if (config.globalConfigPath) args.push('--session-global-config-path', config.globalConfigPath);

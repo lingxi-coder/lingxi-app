@@ -27,7 +27,7 @@ data class DeepLink(val route: String, val params: Map<String, String>, val payl
             val params = pairs(uri.rawQuery).mapValues { (key, value) ->
                 if (key == "message") value.lowercase(java.util.Locale.ROOT) else value
             }
-            require(params.all { (k, v) -> k in setOf("workspace", "message", "mode", "scope", "review", "runId", "revision", "code") && v.isNotEmpty() && v.length <= 512 && v.none { it < ' ' || it == '\u007f' } })
+            require(params.all { (k, v) -> k in setOf("workspace", "message", "mode", "scope", "review", "runId", "revision", "code", "turn", "generation") && v.isNotEmpty() && v.length <= 512 && v.none { it < ' ' || it == '\u007f' } })
             if (route == "team/inbox") require(params.isEmpty())
             if (route == "team/join") require(params.keys == setOf("code") && Regex("^[A-Za-z0-9_-]{32}$").matches(params.getValue("code")))
             else require("code" !in params)
@@ -36,6 +36,10 @@ data class DeepLink(val route: String, val params: Map<String, String>, val payl
             require(params["revision"] == null || (route.startsWith("apps/") && params["review"] == "agent" && params["runId"] != null &&
                 Regex("^[1-9][0-9]*$").matches(params.getValue("revision")) && params.getValue("revision").toLongOrNull() != null))
             require(params["mode"] == null || params["mode"] in setOf("chat", "code"))
+            if (route.startsWith("session/")) require(params["mode"] != null)
+            require(params["turn"] == null || (route.startsWith("session/") && params.getValue("turn").toLongOrNull()?.let { it > 0L } == true))
+            require(params["generation"] == null || (route.startsWith("session/") &&
+                runCatching { java.util.UUID.fromString(params.getValue("generation")).toString() == params.getValue("generation") }.getOrDefault(false)))
             require(params["message"] == null || (route.startsWith("session/") && Regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$").matches(params.getValue("message"))))
             val payload = if (uri.rawFragment != null) {
                 require(route == "new" || route.startsWith("terminal/") || route.startsWith("import/"))

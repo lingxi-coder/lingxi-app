@@ -20,7 +20,7 @@ export function BotChatsPanel({ chats, opening, disabled, onOpen, onRetry }: {
   /** The chat being opened: its id, or `'new'`. */
   opening: string | undefined;
   disabled: boolean;
-  onOpen(sessionId: string): void;
+  onOpen(sessionId: string, transcriptPath: string): void;
   onRetry(): void;
 }) {
   if (chats.status === 'loading') return <p role="status" className="bots-muted">{tr('bots_chats_loading')}</p>;
@@ -30,7 +30,7 @@ export function BotChatsPanel({ chats, opening, disabled, onOpen, onRetry }: {
   if (chats.sessions.length === 0) return <p className="bots-empty-line">{tr('bots_chats_empty')}</p>;
   return <ul className="bots-rows" aria-label={tr('bots_tab_chats')}>
     {chats.sessions.map((session) => <li key={session.uuid}>
-      <button type="button" className="bots-chat-row" disabled={disabled || opening !== undefined} aria-busy={opening === session.uuid || undefined} onClick={() => onOpen(session.uuid)}>
+      <button type="button" className="bots-chat-row" disabled={disabled || opening !== undefined} aria-busy={opening === session.uuid || undefined} onClick={() => onOpen(session.uuid, session.path)}>
         <span className="bots-row-title">{session.title.trim() || tr('remote_untitled')}</span>
         <span className="bots-muted">{opening === session.uuid ? tr('bots_chat_opening') : formatSessionMetadata(session.modified_rfc3339, session.message_count)}</span>
       </button>

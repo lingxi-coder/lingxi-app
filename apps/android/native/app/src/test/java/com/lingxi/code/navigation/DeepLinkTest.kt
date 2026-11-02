@@ -9,7 +9,7 @@ class DeepLinkTest {
         val returned = DeepLink.parse("lingxi://apps/a123?review=agent&runId=$runId&revision=42")!!
         assertEquals(runId, returned.params["runId"])
         assertEquals("42", returned.params["revision"])
-        for (raw in listOf("lingxi://new?review=agent", "lingxi://session/a123?review=agent",
+        for (raw in listOf("lingxi://new?review=agent", "lingxi://session/a123?mode=chat&review=agent",
             "lingxi://apps/a123?review=approve", "lingxi://apps/a123?review=agent&review=agent",
             "lingxi://apps/a123?review=agent&revision=42",
             "lingxi://apps/a123?review=agent&runId=$runId&runId=$runId",
@@ -22,7 +22,7 @@ class DeepLinkTest {
     }
 
     @Test fun messageUuidIsNormalizedWithoutChangingCaseSensitiveResourceIdentity() {
-        val link = DeepLink.parse("lingxi://session/AbC?message=123E4567-E89B-12D3-A456-426614174000")!!
+        val link = DeepLink.parse("lingxi://session/AbC?mode=chat&message=123E4567-E89B-12D3-A456-426614174000")!!
         assertEquals("session/AbC", link.route)
         assertEquals("123e4567-e89b-12d3-a456-426614174000", link.params["message"])
     }
@@ -31,7 +31,7 @@ class DeepLinkTest {
         assertEquals("hello world&next", link.payload["prompt"])
     }
     @Test fun rejectsAmbiguousLinks() {
-        for (raw in listOf("https://lingxios.net.evil/open/new", "lingxi://new?mode=chat&mode=code", "lingxi://session/%2fsecret", "lingxi://new?unknown=x", "lingxi://user:password@new")) assertNull(raw, DeepLink.parse(raw))
+        for (raw in listOf("https://lingxios.net.evil/open/new", "lingxi://new?mode=chat&mode=code", "lingxi://session/%2fsecret", "lingxi://session/abc", "lingxi://session/abc?mode=unknown", "lingxi://new?unknown=x", "lingxi://user:password@new")) assertNull(raw, DeepLink.parse(raw))
     }
 }
 

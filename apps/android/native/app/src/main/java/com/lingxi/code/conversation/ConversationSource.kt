@@ -19,10 +19,13 @@ import com.lingxi.code.runtimeintegration.NativeEngineFactory
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onSubscription
 
 /**
  * The seam between the [ChatViewModel] and whatever produces turns. The
@@ -43,10 +46,6 @@ import kotlinx.coroutines.flow.flow
  * fail-closed unavailable state when the engine can't build.
  */
 interface ConversationSource {
-    val supportsSessionModeChanges: Boolean get() = false
-    val sessionModeState: StateFlow<SessionModeSnapshot?>
-        get() = MutableStateFlow<SessionModeSnapshot?>(null).asStateFlow()
-
     /** Process-redelivery context for the engine this source owns. */
     val recoverySpec: ConversationRecoverySpec?
         get() = null
@@ -60,6 +59,17 @@ interface ConversationSource {
      */
     val clientEvents: Flow<ClientEvent>
         get() = emptyFlow()
+
+    /** Signal only once a shared event stream has registered its subscriber. */
+    suspend fun collectClientEvents(onSubscribed: () -> Unit, onEvent: suspend (ClientEvent) -> Unit) {
+        when (val stream = clientEvents) {
+            is SharedFlow<ClientEvent> -> stream.onSubscription { onSubscribed() }.collect { onEvent(it) }
+            else -> {
+                onSubscribed()
+                stream.collect { onEvent(it) }
+            }
+        }
+    }
 
     /** Structured workflow/subagent updates, pushed directly by the engine. */
     val workflowProgress: Flow<WorkflowProgressUpdate>
@@ -235,28 +245,8 @@ interface ConversationSource {
      */
     suspend fun resumeSession(uuid: String) {}
 
-    /**
-     * Resume a confirmed zero-message session while preserving its UUID.
-     *
-     * This separate proof is required only for mobile upgrades whose Project
-     * index predates the engine's empty-session JSONL anchor. Implementations
-     * without that migration concern fall back to the normal resume path.
-     */
-    suspend fun resumeEmptySession(uuid: String, title: String) {
-        resumeSession(uuid)
-    }
-
-    /** Restore a startup owner, adopting an already live matching session. */
-    suspend fun restoreInitialSession(uuid: String, title: String, empty: Boolean): ActivatedSession? {
-        val existing = activeSessionState.value
-        if (existing != null && existing.kind != SessionActivationKind.Bootstrap &&
-            com.lingxi.code.model.canonicalSessionId(existing.sessionId) == com.lingxi.code.model.canonicalSessionId(uuid)
-        ) {
-            return existing.withLatestMode(sessionModeState.value).copy(kind = SessionActivationKind.Resumed)
-        }
-        if (empty) resumeEmptySession(uuid, title) else resumeSession(uuid)
-        return null
-    }
+    /** Attach an in-process UI projection to an already confirmed owner. */
+    fun retainedUiActivation(activation: ActivatedSession): ActivatedSession = activation
 
     /**
      * The engine's REAL MCP server listing (out-of-band, sibling of [modelState]).
@@ -286,7 +276,7 @@ interface ConversationSource {
      */
     suspend fun newSession() {}
     suspend fun newSession(cwd: String) {
-        submitClientCommand(ClientCommand.NewSession(cwd = cwd, model = null))
+        error("This conversation source cannot create a session in a directory")
     }
 
     /** Release native handles and event pumps owned by this source. Idempotent. */

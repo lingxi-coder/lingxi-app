@@ -138,7 +138,7 @@ before(() => {
   };
   // Resuming replays the history as the engine's `session_resumed`.
   SessionRuntime.prototype.resumeOwnedSession = async function (this: SessionRuntime) {
-    engine.clients.get(this.sessionId)!.emitEvent({ type: 'session_resumed', session_id: this.sessionId, mode: 'default', messages: engine.history.get(this.sessionId) ?? [] });
+    engine.clients.get(this.sessionId)!.emitEvent({ type: 'session_resumed', session_id: this.sessionId, mode: 'code', messages: engine.history.get(this.sessionId) ?? [] });
   };
 });
 
@@ -379,6 +379,7 @@ async function startDesktop(backend: Backend, options: { shareSession?: boolean 
   engine.history.clear();
   engine.history.set(SESSION_A, HISTORY);
   const manager = new SessionRuntimeManager({
+    resolveSavedTranscript: async (ref: { sessionId: string }) => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }),
     launchConfig: (candidate: { sessionId?: string } | undefined) => ({ workspace: PROJECT, sessionId: candidate?.sessionId, trusted: true }),
   } as never);
   const settings = new FakePolicySettings();
@@ -395,7 +396,7 @@ async function startDesktop(backend: Backend, options: { shareSession?: boolean 
     clock,
     diagnostics: (_level, message) => log.diagnostics('info', message),
   });
-  const ref: SessionRef = { projectPath: PROJECT, sessionId: SESSION_A };
+  const ref: SessionRef = { projectPath: PROJECT, sessionId: SESSION_A, mode: 'code' };
   if (options.shareSession !== false) policy.setSessionEnabled(ref, true);
 
   const account = new class extends FakeAccount {
@@ -919,7 +920,7 @@ test('5. a dropped tunnel: the browser reconnects on a new connection, resumes w
 
     // A new base (`/clear`): the viewer is reset and sent a fresh snapshot with a new epoch.
     const resets = browser.received.filter((item) => item.method === 'session.reset').length;
-    client.emitEvent({ type: 'session_started', session_id: SESSION_A, mode: 'default' });
+    client.emitEvent({ type: 'session_started', session_id: SESSION_A, mode: 'code' });
     await backend.until(() => begins().length === 2 && controller.getState().status === 'live', 'the fresh snapshot');
     assert.equal(browser.received.filter((item) => item.method === 'session.reset').length, resets + 1);
     assert.notEqual(begins()[1].epoch, begins()[0].epoch);
@@ -930,7 +931,7 @@ test('5. a dropped tunnel: the browser reconnects on a new connection, resumes w
     // A new base while the browser is away: its old position is useless, so the resume is answered with a snapshot.
     backend.network.set(true);
     await backend.until(() => phaseOf(browser) === 'reconnecting', 'the second drop');
-    client.emitEvent({ type: 'session_resumed', session_id: SESSION_A, mode: 'default', messages: [{ role: 'assistant', blocks: [{ type: 'text', text: 'after the restart' }] }] });
+    client.emitEvent({ type: 'session_resumed', session_id: SESSION_A, mode: 'code', messages: [{ role: 'assistant', blocks: [{ type: 'text', text: 'after the restart' }] }] });
     backend.network.set(false);
     await backend.until(() => begins().length === 3 && controller.getState().status === 'live' && phaseOf(browser) === 'ready', 'the snapshot of the new base');
     assert.notEqual(begins()[2].epoch, begins()[1].epoch);

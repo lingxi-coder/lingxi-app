@@ -477,6 +477,9 @@
     <string name="drawer_clear_search_a11y">清除搜索</string>
     <string name="drawer_close_a11y">关闭抽屉</string>
     <string name="drawer_close_sidebar_a11y">关闭侧栏</string>
+    <string name="session_handoff_preparing">正在整理会话摘要…</string>
+    <string name="session_handoff_open_source">打开来源 %1$s 会话</string>
+    <string name="session_reconnect_still_releasing">上一个会话仍在关闭，请稍后重试。</string>
     <string name="drawer_continue_session_in_progress">请等待当前继续操作完成。</string>
     <string name="drawer_continue_session_timeout">继续会话超时，请重试。</string>
     <string name="drawer_cron_new_results_fmt">%1$d 个新结果</string>
@@ -742,15 +745,13 @@
     <string name="session_details_tasks_subtitle">工具调用与 Shell 命令</string>
     <string name="session_details_title">会话详情</string>
     <string name="session_details_workspace">工作区</string>
+    <string name="conversation_state_unavailable">无法加载会话状态，数据格式不受支持或已损坏。</string>
     <string name="session_index_save_failed_fmt">会话索引保存失败：%1$s</string>
     <string name="session_index_save_new_failed_fmt">新会话索引保存失败：%1$s</string>
     <string name="session_mode_chat">Chat</string>
     <string name="session_mode_code">Code</string>
     <string name="session_mode_chat_description">通用助手</string>
     <string name="session_mode_code_description">软件工程助手</string>
-    <string name="session_mode_pending">将在当前回复结束后切换为 %1$s</string>
-    <string name="session_mode_setting">正在设置会话模式…</string>
-    <string name="session_mode_retry">无法设置模式，请选择模式重试。</string>
     <string name="session_panel_make_scheduled">设为定时任务</string>
     <string name="session_panel_mode_hint">换模式会分叉成新会话继续</string>
     <string name="session_relative_days_ago_fmt">%1$d 天前</string>
@@ -2101,6 +2102,7 @@
     <string name="remote_needs_permission">等待授权</string>
     <string name="remote_needs_question">等待回答</string>
     <string name="remote_needs_computer_access">等待电脑上的授权</string>
+    <string name="remote_session_reload_required">会话数据过多，请重新打开会话以加载。</string>
     <string name="remote_session_loading">正在加载会话…</string>
     <string name="remote_session_offline">已离线，显示的是最后收到的内容。</string>
     <string name="remote_session_closed">这个会话已不再共享。</string>

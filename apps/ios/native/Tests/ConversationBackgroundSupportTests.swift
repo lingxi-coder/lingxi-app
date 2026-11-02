@@ -25,6 +25,23 @@ final class ConversationBackgroundSupportTests: XCTestCase {
         )
     }
 
+    func testConversationNotificationRejectsOldOrMismatchedOwnerRoutes() {
+        var userInfo = ConversationNotificationRoute.userInfo(
+            sessionID: "session-a", turnID: nil, workspaceKey: "global",
+            sessionMode: .chat, eventClass: .completed
+        )
+        userInfo.removeValue(forKey: "lingxi.url")
+        XCTAssertNil(ConversationNotificationRoute.appAction(from: userInfo))
+        userInfo["lingxi.url"] = "https://lingxios.net/open/session/session-a?workspace=global"
+        XCTAssertNil(ConversationNotificationRoute.appAction(from: userInfo))
+        userInfo["lingxi.url"] = "https://lingxios.net/open/session/session-b?workspace=global&mode=chat"
+        XCTAssertNil(ConversationNotificationRoute.appAction(from: userInfo))
+        userInfo["lingxi.url"] = "https://lingxios.net/open/session/session-a?workspace=global&mode=code"
+        XCTAssertNil(ConversationNotificationRoute.appAction(from: userInfo))
+        userInfo["lingxi.url"] = "https://lingxios.net/open/session/session-a?workspace=project.other&mode=chat"
+        XCTAssertNil(ConversationNotificationRoute.appAction(from: userInfo))
+    }
+
     func testForegroundSyncSuppressesNotifications() async {
         let scheduler = RecordingConversationScheduler()
         let controller = ConversationBackgroundAlertController(scheduler: scheduler)
@@ -40,7 +57,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
             ),
             pendingQuestions: [],
             backgroundTasks: [],
-            requiresExecutionLease: false
+            requiresExecutionLease: false,
+            workspaceKey: "global", sessionMode: .code
         ))
         await drainAsyncNotifications()
 
@@ -60,7 +78,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
             turnCompletion: nil,
             pendingQuestions: [question],
             backgroundTasks: [],
-            requiresExecutionLease: true
+            requiresExecutionLease: true,
+            workspaceKey: "global", sessionMode: .code
         )
         controller.sync(snapshot)
         controller.sync(snapshot)
@@ -84,7 +103,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
             turnCompletion: nil,
             pendingQuestions: [],
             backgroundTasks: [running],
-            requiresExecutionLease: true
+            requiresExecutionLease: true,
+            workspaceKey: "global", sessionMode: .code
         ))
         controller.sync(ConversationBackgroundSnapshot(
             sessionID: "session-a",
@@ -92,7 +112,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
             turnCompletion: nil,
             pendingQuestions: [],
             backgroundTasks: [completed],
-            requiresExecutionLease: false
+            requiresExecutionLease: false,
+            workspaceKey: "global", sessionMode: .code
         ))
         controller.sync(ConversationBackgroundSnapshot(
             sessionID: "session-a",
@@ -100,7 +121,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
             turnCompletion: nil,
             pendingQuestions: [],
             backgroundTasks: [completed],
-            requiresExecutionLease: false
+            requiresExecutionLease: false,
+            workspaceKey: "global", sessionMode: .code
         ))
         await drainAsyncNotifications()
 
@@ -128,7 +150,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
                 turnCompletion: nil,
                 pendingQuestions: [],
                 backgroundTasks: tasks,
-                requiresExecutionLease: false
+                requiresExecutionLease: false,
+                workspaceKey: "global", sessionMode: .code
             )
         }
 
@@ -162,7 +185,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
             turnCompletion: nil,
             pendingQuestions: [],
             backgroundTasks: [duplicate, duplicate],
-            requiresExecutionLease: false
+            requiresExecutionLease: false,
+            workspaceKey: "global", sessionMode: .code
         ))
         await drainAsyncNotifications()
 
@@ -177,7 +201,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
 
         controller.markRecoverablePause(
             sessionID: "session-a",
-            turnToken: ConversationTurnToken(clientTurnId: 5, sessionEpoch: 1)
+            turnToken: ConversationTurnToken(clientTurnId: 5, sessionEpoch: 1),
+            workspaceKey: "global", sessionMode: .code
         )
         await drainAsyncNotifications()
 
@@ -296,7 +321,7 @@ final class ConversationBackgroundSupportTests: XCTestCase {
         XCTAssertEqual(endedTasks.map(\.rawValue), [91])
     }
 
-    func testLiveActivityReconciliationAdoptsMatchingSessionAndEndsStaleSessions() {
+    func testLiveActivityReconciliationKeepsOtherSessionActivities() {
         let plan = ConversationLiveActivityReconciliationPlan.make(
             currentActivityID: "activity-b",
             activities: [
@@ -310,13 +335,25 @@ final class ConversationBackgroundSupportTests: XCTestCase {
                 title: "Running",
                 subtitle: "Background",
                 status: .running,
-                updatedAt: .now
+                updatedAt: .now,
+                workspaceKey: "global",
+                sessionMode: "code"
             )
         )
 
         XCTAssertEqual(plan.matchedActivityID, "activity-b")
-        XCTAssertEqual(plan.staleActivityIDs, ["activity-a", "activity-c"])
+        XCTAssertEqual(plan.staleActivityIDs, ["activity-c"])
         XCTAssertFalse(plan.shouldStartNew)
+    }
+
+    func testClearingOneLiveActivityDoesNotEndAnotherOwner() {
+        let plan = ConversationLiveActivityReconciliationPlan.make(
+            currentActivityID: "activity-a",
+            activities: [.init(activityID: "activity-a", sessionID: "session-a"),
+                         .init(activityID: "activity-b", sessionID: "session-b")],
+            targetSnapshot: nil
+        )
+        XCTAssertEqual(plan.staleActivityIDs, ["activity-a"])
     }
 
     func testContinuedProcessingExpirationParsesNotificationUserInfo() {
@@ -357,7 +394,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
             ),
             pendingQuestions: [],
             backgroundTasks: [],
-            requiresExecutionLease: false
+            requiresExecutionLease: false,
+            workspaceKey: "global", sessionMode: .code
         )
     }
 
@@ -453,7 +491,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
                 pendingQuestions: [],
                 pendingPermissions: permissions,
                 backgroundTasks: [],
-                requiresExecutionLease: true
+                requiresExecutionLease: true,
+                workspaceKey: "global", sessionMode: .code
             )
         }
 
@@ -483,7 +522,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
             pendingQuestions: [],
             pendingPermissions: [ConversationPendingPermission(requestId: 3, toolName: "Bash")],
             backgroundTasks: [],
-            requiresExecutionLease: true
+            requiresExecutionLease: true,
+            workspaceKey: "global", sessionMode: .code
         ))
         await drainAsyncNotifications()
 
@@ -511,7 +551,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
             pendingQuestions: [],
             pendingPermissions: [ConversationPendingPermission(requestId: 3, toolName: "Bash")],
             backgroundTasks: [],
-            requiresExecutionLease: true
+            requiresExecutionLease: true,
+            workspaceKey: "global", sessionMode: .code
         ))
         await drainAsyncNotifications()
         let afterPermission = await scheduler.snapshot()
@@ -540,7 +581,8 @@ final class ConversationBackgroundSupportTests: XCTestCase {
         controller.sync(completionSnapshot())
         controller.markRecoverablePause(
             sessionID: "session-a",
-            turnToken: ConversationTurnToken(clientTurnId: 5, sessionEpoch: 1)
+            turnToken: ConversationTurnToken(clientTurnId: 5, sessionEpoch: 1),
+            workspaceKey: "global", sessionMode: .code
         )
         await drainAsyncNotifications()
 

@@ -41,7 +41,7 @@ final class NativeAdminEngineRoundtripTests: XCTestCase {
             appAgentHost: false,
             brandId: directories.brandId, linuxUser: directories.linuxUser,
             configDirName: directories.configDirName, nativeConfigHome: directories.configHome,
-            apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code,
+            apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code, initialSessionId: nil,
             visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: workspace.path,
             projectAdditionalDirectories: [],
             projectMountGrants: [],

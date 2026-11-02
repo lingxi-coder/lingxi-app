@@ -56,7 +56,7 @@ test('confirmation creates the first directory project and its initial draft onl
   await h.create(selection.id);
   assert.deepEqual(h.settings.getPublic().projects, [h.path]);
   assert.equal(h.settings.getPublic().activeProject, h.path);
-  assert.deepEqual(h.settings.getPublic().activeSession, { projectPath: h.path, sessionId: h.previous.sessionId });
+  assert.deepEqual(h.settings.getPublic().activeSession, { projectPath: h.path, projectId: h.path, mode: 'chat', sessionId: h.previous.sessionId });
   assert.deepEqual(h.calls, [h.path]);
   await assert.rejects(h.create(selection.id), /Choose a source folder/);
 });

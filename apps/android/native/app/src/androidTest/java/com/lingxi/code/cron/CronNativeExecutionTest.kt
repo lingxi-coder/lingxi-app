@@ -97,8 +97,7 @@ class CronNativeExecutionTest {
                         assertEquals("Native execution failed: ${fired?.status}", CronFireStatusDto.Ok, fired!!.status)
                         return requireNotNull(fired.sessionId).removePrefix("sess:")
                     }
-                    val human = UUID.randomUUID().toString()
-                    engine.resumeEmptySession(human, "Human conversation")
+                    val human = engine.workspaceState().sessionId.removePrefix("sess:")
                     engine.submit(ClientCommand.SetReasoningSelection(ReasoningSelectionDto.Level("low")))
                     val before = controls()
                     assertTrue(before.qualifiedModel.endsWith("claude-sonnet-4-6"))
@@ -116,7 +115,7 @@ class CronNativeExecutionTest {
                     val selected = store.createConfigured("0 9 * * *", prompt, true,
                         fixed.change("runMode", "selected_session").change("targetSessionId", human).json)
                     assertEquals("selected_session must continue the chosen conversation", human, fire(selected.id))
-                    engine.submit(ClientCommand.ResumeSession(human, null))
+                    engine.submit(ClientCommand.ResumeSession(human, null, com.lingxi.code.bindings.client.SessionModeDto.CODE))
                     val after = controls()
                     val oneShot = store.createConfigured("0 9 * * *", prompt, false, fixed.json)
                     fire(oneShot.id)

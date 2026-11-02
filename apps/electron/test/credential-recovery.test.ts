@@ -7,6 +7,7 @@ import { DiagnosticBuffer } from '../src/main/host-utils.js';
 test('bootstrap recovers persisted Codex status after a keychain error without relogin', async () => {
   let locked = true;
   const settings = {
+    conversationSpaces: { snapshot: () => ({ activeMode: 'chat', projects: {}, navigation: { chat: {}, code: {} }, drafts: [] }) },
     getWorkspace: () => '/workspace',
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
     getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),

@@ -7,6 +7,10 @@ final class ConversationSourceReplacementTests: XCTestCase {
     func testIdleRunningAndPendingTasksKeepOriginalSource() {
         let model = ConversationModel()
         XCTAssertTrue(ConversationSourceReplacementPolicy.allowsReplacement(of: model))
+        XCTAssertFalse(ConversationSourceReplacementPolicy.allowsReplacement(of: model, hasActiveRealtimeAudio: true))
+        model.slashCommandPending = true
+        XCTAssertFalse(ConversationSourceReplacementPolicy.allowsReplacement(of: model))
+        model.slashCommandPending = false
         for status in [BackgroundTaskSnapshot.Status.pending, .running] {
             model.backgroundTasks = [BackgroundTaskSnapshot(id: "job", descriptionText: "build", status: status)]
             XCTAssertFalse(ConversationSourceReplacementPolicy.allowsReplacement(of: model))
@@ -17,10 +21,11 @@ final class ConversationSourceReplacementTests: XCTestCase {
         }
     }
 
-    func testLiveChildAgentsBlockReplacementWhileMainCanBeCancelled() {
+    func testLiveMainAndChildAgentsBlockReplacement() {
         let model = ConversationModel()
         model.streaming = true
-        XCTAssertTrue(ConversationSourceReplacementPolicy.allowsReplacement(of: model))
+        XCTAssertFalse(ConversationSourceReplacementPolicy.allowsReplacement(of: model))
+        model.streaming = false
         for status in ["running", "working", "pending", "queued", "initializing"] {
             model.replaceAgentSummaries([.main, ConversationAgentSummary(
                 id: "child-\(status)", name: "worker", agentType: "worker", status: status
@@ -69,11 +74,11 @@ final class ConversationSourceReplacementTests: XCTestCase {
     }
 
     #if canImport(harness_runtimeFFI)
-        func testBackgroundPermissionsKeepOwnerAndForegroundCancelRemainsPossible() {
+        func testEveryPendingPermissionKeepsItsOwner() {
             let model = ConversationModel()
             model.streaming = true
             model.pendingPermissions = [permission(worker: nil)]
-            XCTAssertTrue(ConversationSourceReplacementPolicy.allowsReplacement(of: model))
+            XCTAssertFalse(ConversationSourceReplacementPolicy.allowsReplacement(of: model))
             model.pendingPermissions = [permission(worker: WorkerInfoDto(name: "background", color: "background", team: nil))]
             XCTAssertFalse(ConversationSourceReplacementPolicy.allowsReplacement(of: model))
             model.streaming = false
@@ -81,14 +86,14 @@ final class ConversationSourceReplacementTests: XCTestCase {
             XCTAssertFalse(ConversationSourceReplacementPolicy.allowsReplacement(of: model))
         }
 
-        func testInactiveRecoveryRoutingExceptionDoesNotBypassBackgroundWork() {
+        func testInactiveRecoveryKeepsItsOwner() {
             let model = ConversationModel()
             model.hasInactiveDurableRecovery = true
             model.hasUnresolvedTurnRecovery = true
             model.pendingPermissions = [permission(worker: nil)]
-            XCTAssertTrue(ConversationSourceReplacementPolicy.allowsReplacement(of: model, allowInactiveRecovery: true))
+            XCTAssertFalse(ConversationSourceReplacementPolicy.allowsReplacement(of: model))
             model.backgroundTasks = [BackgroundTaskSnapshot(id: "live", descriptionText: "build", status: .running)]
-            XCTAssertFalse(ConversationSourceReplacementPolicy.allowsReplacement(of: model, allowInactiveRecovery: true))
+            XCTAssertFalse(ConversationSourceReplacementPolicy.allowsReplacement(of: model))
         }
 
         private func permission(worker: WorkerInfoDto?) -> PendingPermission {

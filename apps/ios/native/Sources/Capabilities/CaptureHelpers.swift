@@ -235,14 +235,22 @@ final class VoiceCapture {
     }
 
     func cancel() {
+        _ = cancelForDrain()
+    }
+
+    /// Return the exact capture task so a different owner cannot begin while
+    /// cancellation of this operation is still unwinding.
+    @discardableResult
+    func cancelForDrain() -> Task<Void, Never>? {
         guard let activeCapture else {
             phase = .idle
-            return
+            return nil
         }
         self.activeCapture = nil
         phase = .idle
         activeCapture.session.cancelRecognition()
         activeCapture.task.cancel()
+        return activeCapture.task
     }
 
     private func complete(id: UUID, result: VoiceCaptureResult, completion: Completion) {

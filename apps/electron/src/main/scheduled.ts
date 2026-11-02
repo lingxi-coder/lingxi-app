@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, lstat } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { CronJobDto, CronRequestDto, CronAutomationDto, CronRunDto } from '@lingxi/bridge-client';
 import type { ScheduledScope } from '../shared/scheduled.js';
 import type { SettingsStore } from './settings.js';
@@ -18,7 +18,8 @@ type ScheduledRunResult = { sessionId: string; summary: string };
 
 /** What of a session catalog the scheduler reads: the owner's, or the one a Bot keeps in its own home. */
 export interface RoutineCatalog {
-  list(projectPath: string): Promise<{ sessions: ProjectSessionCatalogRow[] }>;
+  list(projectPath: string, scope?: 'current' | 'repository' | 'all',
+    include?: (row: ProjectSessionCatalogRow) => boolean): Promise<{ sessions: ProjectSessionCatalogRow[] }>;
   find(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogRow | undefined>;
 }
 
@@ -136,7 +137,7 @@ export class ScheduledTaskService {
 
   private controllerRef(path: string): SessionRef {
     const hash = createHash('sha256').update(`lingxi-scheduled-controller:${path}`).digest('hex');
-    return { projectPath: path, sessionId: `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}` };
+    return { projectPath: path, mode: 'code', sessionId: `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}` };
   }
 
   isControllerSession(path: string, sessionId: string): boolean {
@@ -156,7 +157,7 @@ export class ScheduledTaskService {
     let entry = this.controllers.get(path);
     if (!entry) { entry = { ref, release: this.bridge.retainBackgroundSession(ref) }; this.controllers.set(path, entry); }
     // A Bot's controller starts on the Bot's model; the owner's would win over it.
-    try { return await this.bridge.ensure(ref, true, bot ? bot.model : this.settings.getPublic().model); }
+    try { return await this.bridge.ensure(ref, true, bot ? bot.model : this.settings.getPublic().model, undefined, 'code'); }
     catch (error) {
       // Release the lease THIS call created, and only while it is still the
       // registered one. Two `controller()` calls can be in flight (the 30s
@@ -220,10 +221,10 @@ export class ScheduledTaskService {
     return this.bots?.routineBotFor(path)?.catalog() ?? this.catalog;
   }
 
-  async context(scopeId: string) {
+  async context(scopeId: string, mode: 'chat' | 'code') {
     const path = this.resolveScope(scopeId);
     const runtime = await this.controller(path);
-    const refs = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionRefs().slice(-200).reverse() : [];
+    const refs = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionRefs().slice().reverse() : [];
     // Generated workspaces are separate engine catalogs. Bound both the picker
     // size and child-process concurrency; exact target validation stays unbounded.
     const loadManaged = async () => {
@@ -234,12 +235,14 @@ export class ScheduledTaskService {
           try { return await this.catalog.find(ref.projectPath, ref.sessionId); }
           catch (error) { this.report(error); return undefined; }
         }));
-        rows.push(...batch.filter((row): row is NonNullable<typeof row> => Boolean(row)));
+        rows.push(...batch.filter((row): row is NonNullable<typeof row> => Boolean(row) && row?.mode === mode));
+        if (rows.length >= 200) break;
       }
-      return rows;
+      return rows.slice(0, 200);
     };
-    const [models, catalog, managed] = await Promise.all([runtime.scheduledModelCatalog(), this.catalogFor(path).list(path), loadManaged()]);
-    const sessions = [...catalog.sessions, ...managed];
+    const [models, catalog, managed] = await Promise.all([runtime.scheduledModelCatalog(), this.catalogFor(path).list(path, 'current', (row) => row.mode === mode
+      && !this.isControllerSession(path, row.uuid) && !this.settings.isSessionArchived({ projectPath: path, sessionId: row.uuid })), loadManaged()]);
+    const sessions = [...catalog.sessions.filter((row) => row.mode === mode), ...managed];
     return { models: models.details ?? [], currentModel: models.current, sessions: sessions.filter((session) => !this.isControllerSession(path, session.uuid) && !this.settings.isSessionArchived({ projectPath: path, sessionId: session.uuid })).map((session) => ({ uuid: session.uuid, title: session.title })) };
   }
 
@@ -348,11 +351,21 @@ export class ScheduledTaskService {
     return this.retention;
   }
 
-  private async validateTarget(path: string, sessionId?: string): Promise<void> {
+  private async validateTarget(path: string, sessionId?: string): Promise<{ path?: string; mode: 'chat' | 'code' }> {
     if (!isSessionId(sessionId)) throw new Error('paused: Select a valid target chat.');
     path = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionWorkspace(sessionId)?.projectPath ?? path : path;
     if (this.settings.isSessionArchived({ projectPath: path, sessionId })) throw new Error('paused: The target chat was archived. Select another chat.');
-    if (!(await this.catalogFor(path).find(path, sessionId))) throw new Error('paused: The target chat is unavailable. Select another chat.');
+    const live = this.bridge.get(sessionId);
+    if (live) {
+      if (live.projectPath !== path || !live.sessionMode) throw new Error('paused: The target chat owner is unavailable.');
+      const state = await live.getWorkspaceState();
+      if (this.bridge.get(sessionId) !== live || !state.transcript_path || !isAbsolute(state.transcript_path)
+        || basename(state.transcript_path).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`) {
+        throw new Error('paused: The target chat source is unavailable.');
+      }
+      return { mode: live.sessionMode, path: state.transcript_path };
+    }
+    return this.bridge.requireSavedSessionSource({ projectPath: path, sessionId });
   }
 
   private async notifyOnce(key: string, title: string, body: string, ref?: SessionRef): Promise<void> {
@@ -444,17 +457,22 @@ export class ScheduledTaskService {
     const path = source.projectPath;
     this.assertTrusted(path);
     const existing = config.runMode === 'selected_session' ? config.targetSessionId : config.runMode === 'task_session' ? config.ownedSessionId : undefined;
-    if (existing) await this.validateTarget(path, existing);
-    else if (config.runMode === 'selected_session') throw new Error('paused: Select a target chat.');
+    const target = existing ? await this.validateTarget(path, existing) : undefined;
+    if (!existing && config.runMode === 'selected_session') throw new Error('paused: Select a target chat.');
     const sessionId = existing ?? randomUUID();
     const managed = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionWorkspace(sessionId) : undefined;
-    const ref = { projectPath: managed?.projectPath ?? path, sessionId };
+    const mode = target?.mode ?? source.sessionMode;
+    if (!mode) throw new Error('paused: The scheduled conversation mode is unavailable.');
+    const ref = { projectPath: managed?.projectPath ?? path, sessionId, mode };
     const previous = this.sessionQueues.get(ref.sessionId) ?? Promise.resolve();
     const operation = previous.catch(() => undefined).then(async () => {
       // Revalidate after waiting: the service, projects and targets may disappear while queued.
       this.assertRunAllowed();
       this.assertTrusted(path);
-      if (existing) await this.validateTarget(path, existing);
+      const refreshedTarget = existing ? await this.validateTarget(path, existing) : undefined;
+      if (refreshedTarget && (refreshedTarget.mode !== mode || refreshedTarget.path !== target?.path)) {
+        throw new Error('paused: The target chat source changed. Select the chat again.');
+      }
       this.assertRunAllowed();
       let executionTask = task;
       if (path === this.settings.scheduledWorkspace && !existing) {
@@ -470,6 +488,9 @@ export class ScheduledTaskService {
         executionTask = { ...task, prompt: `${task.prompt}\n\n${scheduledWorkspaceInstructions({ directory: ref.projectPath, work: join(ref.projectPath, 'work'), outputs: join(ref.projectPath, 'outputs'), memory: managed.taskId === task.id ? managed.memory : undefined })}` };
       }
       this.assertRunAllowed();
+      // A live runtime already owns its exact transcript. A cold target uses
+      // the freshly validated catalog path before any startup hook can write.
+      const transcriptPath = this.bridge.get(ref.sessionId) ? undefined : refreshedTarget?.path;
       return this.bridge.withBackgroundSession(ref, !existing, config.model, async (runtime) => {
         this.assertRunAllowed();
         const summary = await runtime.runScheduledTurn(runId, executionTask, () => {
@@ -477,7 +498,7 @@ export class ScheduledTaskService {
           return source.markCronRunStarted(runId, ref.sessionId);
         });
         return { sessionId: ref.sessionId, summary };
-      });
+      }, transcriptPath, !existing && config.runMode === 'task_session');
     });
     this.sessionQueues.set(ref.sessionId, operation);
     try {

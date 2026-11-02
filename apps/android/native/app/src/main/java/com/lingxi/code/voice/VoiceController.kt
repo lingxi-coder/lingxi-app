@@ -382,10 +382,11 @@ internal fun cancelActiveHeldVoiceSession() {
  * @return Pair of (onHoldStart, onHoldRelease) for [VoiceFlowOverlay]'s gesture.
  */
 @Composable
-fun rememberVoiceCapture(
+internal fun rememberVoiceCapture(
     onTranscript: (String) -> Unit,
     onPartialTranscript: (String) -> Unit = {},
     onError: (String, String) -> Unit = { _, _ -> },
+    bindOwner: (AudioOwnerKey) -> Unit = {},
 ): Pair<() -> Unit, () -> Unit> {
     val context = androidx.compose.ui.platform.LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -438,10 +439,13 @@ fun rememberVoiceCapture(
         onDispose {
             HeldVoiceSessionRegistry.detach(capture)
             capture.dispose()
+            com.lingxi.code.voice.audio.AndroidAudioSessionContext.release(owner)
         }
     }
 
     val onHoldStart: () -> Unit = {
+        com.lingxi.code.voice.audio.AndroidAudioSessionContext.reserve(owner)
+        bindOwner(owner)
         capture.ensurePermission()
         if (capture.isPermitted()) capture.start()
     }

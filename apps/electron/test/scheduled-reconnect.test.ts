@@ -36,7 +36,7 @@ test(cancelledBeforeBinding
   let targetClient: ReturnType<typeof transport> | undefined;
   let service!: ScheduledTaskService;
   const source = new SessionRuntime({
-    sessionId: sourceId, projectPath: workspace,
+    sessionId: sourceId, projectPath: workspace, expectedSessionMode: 'code',
     launchConfig: () => ({ workspace, trusted: true }),
     onCronRunRequested: (runtime, event) => service.run(runtime, event.run_id, event.task),
   });
@@ -54,6 +54,7 @@ test(cancelledBeforeBinding
     isSessionArchived: () => false,
   };
   const manager = {
+    get: () => undefined,
     withBackgroundSession: async (ref: { sessionId: string }, _empty: boolean, _model: unknown, operation: (runtime: SessionRuntime) => Promise<unknown>) => {
       executions++;
       target = new SessionRuntime({

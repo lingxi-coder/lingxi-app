@@ -1331,7 +1331,7 @@ import SwiftUI
 
             XCTAssertEqual(commands.count, 1)
             guard let command = commands.first else { return }
-            guard case let .resumeSession(sessionId, cwd) = command else {
+            guard case let .resumeSession(sessionId, cwd, _) = command else {
                 return XCTFail("process restoration must still request transcript replay")
             }
             XCTAssertEqual(sessionId, "session-a")
@@ -1665,7 +1665,7 @@ import SwiftUI
             } else {
                 XCTFail("the old turn must be cancelled first")
             }
-            if case let .resumeSession(sessionId, cwd) = submittedCommands[1] {
+            if case let .resumeSession(sessionId, cwd, _) = submittedCommands[1] {
                 XCTAssertEqual(sessionId, "session-b")
                 XCTAssertNil(cwd)
             } else {
@@ -1714,7 +1714,7 @@ import SwiftUI
             } else {
                 XCTFail("the shared cancellation must be submitted first")
             }
-            if case let .resumeSession(sessionId, cwd) = submittedCommands[1] {
+            if case let .resumeSession(sessionId, cwd, _) = submittedCommands[1] {
                 XCTAssertEqual(sessionId, "session-c")
                 XCTAssertNil(cwd)
             } else {
@@ -1751,7 +1751,7 @@ import SwiftUI
             } else {
                 XCTFail("the old turn must be cancelled first")
             }
-            if case let .newSession(cwd, model) = submittedCommands[1] {
+            if case let .newSession(cwd, model, _) = submittedCommands[1] {
                 XCTAssertNil(cwd)
                 XCTAssertNil(model)
             } else {

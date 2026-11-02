@@ -100,6 +100,9 @@ final class EngineListener: IosEventListener {
         self.source = source
     }
 
+    @MainActor
+    func detachSource() { source = nil }
+
     func onEvent(event: ClientEvent) async {
         enqueue(.event(event))
     }

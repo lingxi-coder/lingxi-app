@@ -17,6 +17,11 @@ final class ProjectStore {
     var operation: ProjectOperation?
     var errorMessage: String?
     var onWillArchiveSession: ((String?, String) async throws -> Void)?
+    var sessionScopeClaims: (() -> [String: ConversationScope]?)?
+    private var catalogIsHealthy = true
+    private var catalogErrorMessage: String?
+    private var projectIndexPresent = false
+    private var globalIndexPresent = false
 
     var activeProject: ProjectSnapshot? {
         projects.first(where: { $0.record.id == activeProjectId })
@@ -60,6 +65,121 @@ final class ProjectStore {
         return ProjectStore(managedRoot: managedRoot)
     }
 
+    private func validatedSessionScopeClaims() throws -> [String: ConversationScope] {
+        guard catalogIsHealthy else {
+            throw ProjectRepositoryError.invalidSessionOwnership(catalogErrorMessage ?? ProjectRepositoryError.invalidProjectData.localizedDescription)
+        }
+        if projectIndexPresent, !FileManager.default.fileExists(atPath: repository.projectsRoot.appendingPathComponent(projectIndexFileName).path) {
+            throw ProjectRepositoryError.invalidSessionOwnership("projects-index: \(ProjectRepositoryError.missingProjectIndex.localizedDescription)")
+        }
+        if globalIndexPresent, !FileManager.default.fileExists(atPath: repository.projectsRoot.appendingPathComponent(globalSessionIndexFileName).path) {
+            throw ProjectRepositoryError.invalidSessionOwnership("global: \(ProjectRepositoryError.missingSessionIndex.localizedDescription)")
+        }
+        let claims: [String: ConversationScope]
+        if let sessionScopeClaims {
+            guard let stored = sessionScopeClaims() else {
+                throw ProjectRepositoryError.invalidSessionOwnership("session-scopes: \(ProjectRepositoryError.invalidProjectData.localizedDescription)")
+            }
+            claims = stored
+        } else {
+            claims = [:]
+        }
+        if let message = Self.claimsError(claims, projects: projects, globalSessions: globalSessions,
+                                          projectIndexPresent: projectIndexPresent, globalIndexPresent: globalIndexPresent) {
+            throw ProjectRepositoryError.invalidSessionOwnership(message)
+        }
+        return claims
+    }
+
+    private static func claimsError(_ claims: [String: ConversationScope], projects: [ProjectSnapshot],
+                                    globalSessions: [ProjectSessionSummary], projectIndexPresent: Bool,
+                                    globalIndexPresent: Bool) -> String? {
+        if let conflict = SessionCatalogOwnership.firstConflictingClaim(projects: projects, globalSessions: globalSessions, claims: claims) {
+            return "\(conflict.sessionID) (\(conflict.indexed.workspaceKey), \(conflict.claimed.workspaceKey)): \(ProjectRepositoryError.conflictingSessionScope.localizedDescription)"
+        }
+        if !globalIndexPresent, claims.values.contains(.global) {
+            return "global: \(ProjectRepositoryError.missingSessionIndex.localizedDescription)"
+        }
+        let projectClaims = Set(claims.values.compactMap(\.projectID))
+        if !projectClaims.isEmpty, !projectIndexPresent {
+            return "projects-index: \(ProjectRepositoryError.missingProjectIndex.localizedDescription)"
+        }
+        if let missing = projectClaims.first(where: { id in !projects.contains(where: { $0.id == id }) }) {
+            return "project.\(missing): \(ProjectRepositoryError.invalidProjectData.localizedDescription)"
+        }
+        return nil
+    }
+
+    var sessionOwnershipError: String? {
+        do { _ = try validatedSessionScopeClaims(); return nil }
+        catch { return error.localizedDescription }
+    }
+
+    func allowsSession(_ sessionID: String, in scope: ConversationScope, mode: SessionMode? = nil) -> Bool {
+        guard let claims = try? validatedSessionScopeClaims() else { return false }
+        return SessionCatalogOwnership.allows(sessionID: sessionID, scope: scope, mode: mode,
+            projects: projects, globalSessions: globalSessions, claimedScope: claims[canonicalSessionID(sessionID)])
+    }
+
+    /// Re-read every persisted index before starting or claiming a new owner.
+    /// Existing admitted owners are handled by SessionHost and keep running.
+    private func freshAdmissionState() -> (claims: [String: ConversationScope], state: ProjectRepositoryState)? {
+        let claims: [String: ConversationScope]
+        do { claims = try validatedSessionScopeClaims() }
+        catch { errorMessage = error.localizedDescription; return nil }
+        let state = repository.admissionSnapshot()
+        if let error = state.errorMessage { errorMessage = error; return nil }
+        if projectIndexPresent && !state.projectIndexPresent {
+            errorMessage = "projects-index: \(ProjectRepositoryError.missingProjectIndex.localizedDescription)"
+            return nil
+        }
+        if globalIndexPresent && !state.globalIndexPresent {
+            errorMessage = "global: \(ProjectRepositoryError.missingSessionIndex.localizedDescription)"
+            return nil
+        }
+        if let message = Self.claimsError(claims, projects: state.projects, globalSessions: state.globalSessions,
+                                          projectIndexPresent: state.projectIndexPresent, globalIndexPresent: state.globalIndexPresent) {
+            errorMessage = message
+            return nil
+        }
+        return (claims, state)
+    }
+
+    func admitsUnclaimedOwner() -> Bool { freshAdmissionState() != nil }
+
+    func admitsSessionIdentity(_ sessionID: String, in scope: ConversationScope, mode: SessionMode) -> Bool {
+        guard let (claims, state) = freshAdmissionState() else { return false }
+        guard SessionCatalogOwnership.allows(sessionID: sessionID, scope: scope, mode: mode,
+            projects: state.projects, globalSessions: state.globalSessions,
+            claimedScope: claims[canonicalSessionID(sessionID)]) else {
+            errorMessage = ProjectRepositoryError.conflictingSessionScope.localizedDescription
+            return false
+        }
+        return true
+    }
+
+    func isSessionIndexed(_ sessionID: String, in scope: ConversationScope) -> Bool {
+        let id = canonicalSessionID(sessionID)
+        guard !id.isEmpty else { return false }
+        switch scope {
+        case .global:
+            return globalSessions.contains { canonicalSessionID($0.sessionId) == id }
+        case .project(let projectID):
+            return projects.first { $0.id == projectID }?.sessions.contains { canonicalSessionID($0.sessionId) == id } ?? false
+        case .scheduled, .remote:
+            return false
+        }
+    }
+
+    private func requireConsistentOwners(projectId: String?) throws -> ConversationScope {
+        _ = try validatedSessionScopeClaims()
+        let scope: ConversationScope = projectId.map { .project($0) } ?? .global
+        if let projectId, !projects.contains(where: { $0.id == projectId }) {
+            throw ProjectRepositoryError.projectDoesNotExist(projectId)
+        }
+        return scope
+    }
+
     func reload() {
         Task { await reloadAsync() }
     }
@@ -77,12 +197,13 @@ final class ProjectStore {
     }
 
     @discardableResult
-    func createInternal(name: String) async throws -> ProjectSnapshot {
+    func createInternal(name: String, mode: SessionMode = .code) async throws -> ProjectSnapshot {
         try await runThrowingOperation(.create, message: String(localized: "project_creating_message")) {
+            _ = try self.requireConsistentOwners(projectId: nil)
             let repository = self.repository
             let executionDomain = self.executionDomain
             return try await executionDomain.async {
-                let created = try repository.createInternal(name: name)
+                let created = try repository.createInternal(name: name, mode: mode)
                 return StoreCreateResult(project: created, state: repository.load())
             }
         } onSuccess: { result in
@@ -105,15 +226,17 @@ final class ProjectStore {
         }
         let repository = repository
         let executionDomain = executionDomain
-        let updated = try await executionDomain.async { try repository.updateProject(record) }
+        let updatedRecord = record
+        let updated = try await executionDomain.async { try repository.updateProject(updatedRecord) }
         let state = try await executionDomain.async { repository.load() }
         publish(state, preservingConflicts: true)
         return updated
     }
 
     @discardableResult
-    func importExternal(name: String, directoryURL: URL) async throws -> ProjectSnapshot {
+    func importExternal(name: String, directoryURL: URL, mode: SessionMode = .code) async throws -> ProjectSnapshot {
         try await runThrowingOperation(.import, message: String(localized: "project_importing_message")) {
+            _ = try self.requireConsistentOwners(projectId: nil)
             let repository = self.repository
             let synchronizer = self.synchronizer
             let bookmarkResolver = self.bookmarkResolver
@@ -122,7 +245,7 @@ final class ProjectStore {
                 try bookmarkResolver.withInitialAccess(to: directoryURL) { scopedURL in
                     let bookmark = try bookmarkResolver.makeBookmark(for: scopedURL)
                     _ = try requireCanonicalDirectory(scopedURL)
-                    let created = try repository.createImported(name: name, sourceBookmark: bookmark)
+                    let created = try repository.createImported(name: name, sourceBookmark: bookmark, mode: mode)
                     do {
                         let syncResult = try synchronizer.importInitial(projectId: created.record.id)
                         return StoreSyncResult(
@@ -143,7 +266,22 @@ final class ProjectStore {
         }
     }
 
+    func addMode(_ mode: SessionMode, projectID: String) async throws {
+        _ = try requireConsistentOwners(projectId: projectID)
+        guard let project = projects.first(where: { $0.id == projectID }), !project.record.visibleModes.contains(mode) else { return }
+        var record = project.record
+        record.modeMembership = record.visibleModes.union([mode])
+        let updatedRecord = record
+        let repository = repository
+        let state = try await executionDomain.async {
+            _ = try repository.updateProject(updatedRecord)
+            return repository.load()
+        }
+        publish(state, preservingConflicts: true)
+    }
+
     func persistActive(projectId: String?) async throws -> ProjectRepositoryState {
+        _ = try requireConsistentOwners(projectId: projectId)
         let repository = repository
         let persisted = try await executionDomain.async {
             try repository.setActiveProject(projectId)
@@ -167,6 +305,8 @@ final class ProjectStore {
     }
 
     func recordWorkspace(projectId: String, state: SessionWorkspaceState) async throws {
+        let scope = try requireConsistentOwners(projectId: projectId)
+        guard allowsSession(state.sessionId, in: scope) else { throw ProjectRepositoryError.conflictingSessionScope }
         let persisted = try await executionDomain.async { [repository] in
             try repository.recordWorkspace(projectId: projectId, state: state)
         }
@@ -174,6 +314,10 @@ final class ProjectStore {
     }
 
     func syncEngineSessions(projectId: String?, rows: [ProjectSessionSummary]) async throws {
+        let scope = try requireConsistentOwners(projectId: projectId)
+        guard rows.allSatisfy({ allowsSession($0.sessionId, in: scope, mode: $0.mode) }) else {
+            throw ProjectRepositoryError.conflictingSessionScope
+        }
         let repository = repository
         let next = try await executionDomain.async {
             try repository.updateSessions(projectId: projectId, sessions: rows)
@@ -186,8 +330,11 @@ final class ProjectStore {
         sessionId: String,
         title: String,
         mode: SessionMode = .code,
-        initialMessageCount: Int = 0
+        initialMessageCount: Int = 0,
+        workspaceDirectory: String? = nil
     ) async throws {
+        let scope = try requireConsistentOwners(projectId: projectId)
+        guard allowsSession(sessionId, in: scope, mode: mode) else { throw ProjectRepositoryError.conflictingSessionScope }
         let repository = repository
         let next = try await executionDomain.async {
             try repository.recordStartedSession(
@@ -195,25 +342,20 @@ final class ProjectStore {
                 sessionId: sessionId,
                 title: title,
                 mode: mode,
-                initialMessageCount: initialMessageCount
+                initialMessageCount: initialMessageCount,
+                workspaceDirectory: workspaceDirectory
             )
         }
         publish(next, preservingConflicts: true)
     }
 
     func setSessionArchived(projectId: String?, sessionId: String, archived: Bool) async throws {
+        let scope = try requireConsistentOwners(projectId: projectId)
+        guard allowsSession(sessionId, in: scope) else { throw ProjectRepositoryError.conflictingSessionScope }
         if archived { try await onWillArchiveSession?(projectId, sessionId) }
         let repository = repository
         let next = try await executionDomain.async {
             try repository.setSessionArchived(projectId: projectId, sessionId: sessionId, archived: archived)
-        }
-        publish(next, preservingConflicts: true)
-    }
-
-    func markActiveSession(projectId: String, sessionId: String) async throws {
-        let repository = repository
-        let next = try await executionDomain.async {
-            try repository.markActiveSession(projectId: projectId, sessionId: sessionId)
         }
         publish(next, preservingConflicts: true)
     }
@@ -224,6 +366,7 @@ final class ProjectStore {
 
     func reimportAsync(projectId: String) async {
         await runOperation(.reimport, projectId: projectId, message: String(localized: "project_reimporting_message")) {
+            _ = try self.requireConsistentOwners(projectId: projectId)
             let repository = self.repository
             let synchronizer = self.synchronizer
             let executionDomain = self.executionDomain
@@ -243,6 +386,7 @@ final class ProjectStore {
 
     func reauthorizeAsync(projectId: String, directoryURL: URL) async {
         await runOperation(.reimport, projectId: projectId, message: String(localized: "project_reauthorizing_message")) {
+            _ = try self.requireConsistentOwners(projectId: projectId)
             let repository = self.repository
             let synchronizer = self.synchronizer
             let bookmarkResolver = self.bookmarkResolver
@@ -277,6 +421,7 @@ final class ProjectStore {
 
     func exportAsync(projectId: String) async {
         await runOperation(.export, projectId: projectId, message: String(localized: "project_exporting_message")) {
+            _ = try self.requireConsistentOwners(projectId: projectId)
             let repository = self.repository
             let synchronizer = self.synchronizer
             let executionDomain = self.executionDomain
@@ -296,6 +441,7 @@ final class ProjectStore {
 
     func resolveConflictsAsync(projectId: String, resolution: ProjectConflictResolution) async {
         await runOperation(.resolveConflicts, projectId: projectId, message: String(localized: "project_resolving_conflicts_message")) {
+            _ = try self.requireConsistentOwners(projectId: projectId)
             let repository = self.repository
             let synchronizer = self.synchronizer
             let executionDomain = self.executionDomain
@@ -353,11 +499,15 @@ final class ProjectStore {
     }
 
     private func publish(_ state: ProjectRepositoryState, preservingConflicts: Bool = false) {
+        catalogIsHealthy = state.errorMessage == nil
+        catalogErrorMessage = state.errorMessage
+        projectIndexPresent = state.projectIndexPresent
+        globalIndexPresent = state.globalIndexPresent
         projects = state.projects
         activeProjectId = state.activeProjectId
         globalSessions = state.globalSessions
         loading = state.loading
-        errorMessage = state.errorMessage
+        errorMessage = state.errorMessage ?? sessionOwnershipError
         if !preservingConflicts {
             conflicts = []
         }

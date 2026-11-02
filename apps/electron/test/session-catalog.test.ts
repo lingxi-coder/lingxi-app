@@ -85,7 +85,7 @@ test('project catalog uses the allowlisted environment and validates session UUI
   }
 });
 
-test('project catalog defaults missing mode metadata to code for older payloads', async () => {
+test('project catalog rejects missing mode metadata instead of guessing', async () => {
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-legacy-mode-'));
   const validId = '11111111-2222-4333-8444-555555555557';
   const catalog = new ProjectSessionCatalog({
@@ -96,8 +96,7 @@ test('project catalog defaults missing mode metadata to code for older payloads'
     }))) as any,
   });
   try {
-    const result = await catalog.list(project);
-    assert.equal(result.sessions[0]?.mode, 'code');
+    await assert.rejects(catalog.list(project), /invalid session row/);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -109,7 +108,7 @@ test('project catalog rejects malformed session identities', async () => {
     serverBin: '/bridge-server',
     spawnProcess: (() => fakeChild(JSON.stringify({
       version: 1,
-      sessions: [{ uuid: 'not-a-uuid', title: 'Bad', modified_rfc3339: '', message_count: 1, path: 'bad.jsonl', empty_session: false }],
+      sessions: [{ uuid: 'not-a-uuid', title: 'Bad', modified_rfc3339: '', message_count: 1, mode: 'code', path: 'bad.jsonl', empty_session: false }],
     }))) as any,
   });
   try {
@@ -125,7 +124,7 @@ test('project catalog keeps the UI list bounded but supports exact lookup beyond
     uuid: `00000000-0000-4${String(index).padStart(3, '0')}-8000-${String(index).padStart(12, '0')}`,
     title: `Session ${index}`,
     modified_rfc3339: '',
-    message_count: 1,
+    message_count: 1, mode: 'code',
     path: `session-${index}.jsonl`,
     empty_session: false,
   }));
@@ -144,13 +143,32 @@ test('project catalog keeps the UI list bounded but supports exact lookup beyond
   }
 });
 
+test('each space is limited after hidden sessions are excluded', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-spaces-'));
+  const rows = Array.from({ length: 405 }, (_, index) => ({
+    uuid: `00000000-0000-4${index.toString(16).padStart(3, '0')}-8000-${index.toString(16).padStart(12, '0')}`,
+    title: `Session ${index}`, modified_rfc3339: '', message_count: 1,
+    mode: index < 203 ? 'code' : 'chat', path: `session-${index}.jsonl`, empty_session: false,
+  }));
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+    spawnProcess: (() => fakeChild(JSON.stringify({ version: 1, sessions: rows }))) as any });
+  try {
+    const listed = await catalog.list(project, 'current', (row) => row.uuid !== rows[0]!.uuid && row.uuid !== rows[203]!.uuid);
+    assert.equal(listed.sessions.filter((row) => row.mode === 'code').length, 200);
+    assert.equal(listed.sessions.filter((row) => row.mode === 'chat').length, 200);
+    assert.ok(listed.sessions.some((row) => row.uuid === rows[200]!.uuid));
+    assert.ok(listed.sessions.some((row) => row.uuid === rows[403]!.uuid));
+    assert.ok(!listed.sessions.some((row) => row.uuid === rows[0]!.uuid || row.uuid === rows[203]!.uuid));
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
 test('project catalog preserves validated zero-count rows and applies the sidebar limit to catalog output', async () => {
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-resumable-'));
   const emptyAnchor = {
     uuid: '11111111-2222-4333-8444-555555555556',
     title: 'New mobile session',
     modified_rfc3339: '2026-08-26T00:00:00Z',
-    message_count: 0,
+    message_count: 0, mode: 'code',
     path: 'empty.jsonl',
     empty_session: true,
   };
@@ -158,7 +176,7 @@ test('project catalog preserves validated zero-count rows and applies the sideba
     uuid: `10000000-0000-4${String(index).padStart(3, '0')}-8000-${String(index).padStart(12, '0')}`,
     title: 'Control Rename',
     modified_rfc3339: `2026-08-26T00:${String(index % 60).padStart(2, '0')}:00Z`,
-    message_count: 0,
+    message_count: 0, mode: 'code',
     path: `metadata-${index}.jsonl`,
     empty_session: false,
   }));
@@ -166,7 +184,7 @@ test('project catalog preserves validated zero-count rows and applies the sideba
     uuid: '22222222-3333-4444-8555-666666666666',
     title: 'Inspect the session catalog',
     modified_rfc3339: '2026-08-25T00:00:00Z',
-    message_count: 2,
+    message_count: 2, mode: 'code',
     path: 'conversation.jsonl',
     empty_session: false,
   };
@@ -200,7 +218,7 @@ test('project catalog coalesces concurrent reads and invalidates after a mutatio
       spawns += 1;
       return fakeChild(JSON.stringify({
         version: 1,
-        sessions: [{ uuid, title: 'Cached', modified_rfc3339: '', message_count: 1, path: 'cached.jsonl', empty_session: false }],
+        sessions: [{ uuid, title: 'Cached', modified_rfc3339: '', message_count: 1, mode: 'code', path: 'cached.jsonl', empty_session: false }],
       }));
     }) as any,
   });
@@ -234,7 +252,7 @@ test('session lookups without a fresh catalog read only that session', async () 
       spawned.push([...args]);
       return fakeChild(JSON.stringify({
         version: 1,
-        sessions: [{ uuid, title: 'Narrowed', modified_rfc3339: '', message_count: 1, path: 'narrowed.jsonl', empty_session: false }],
+        sessions: [{ uuid, title: 'Narrowed', modified_rfc3339: '', message_count: 1, mode: 'code', path: 'narrowed.jsonl', empty_session: false }],
       }));
     }) as any,
   });
@@ -266,7 +284,7 @@ function chunkedChild(buffers: Buffer[], code = 0, stderr = false) {
 
 test('catalog decodes split UTF-8 titles and transcript paths only after collecting raw bytes', async () => {
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-unicode-'));
-  const row = { uuid: '11111111-2222-4333-8444-555555555555', title: '中文标题😀', path: '/session/会话.jsonl', modified_rfc3339: '', message_count: 1, empty_session: false };
+  const row = { uuid: '11111111-2222-4333-8444-555555555555', title: '中文标题😀', path: '/session/会话.jsonl', modified_rfc3339: '', message_count: 1, mode: 'code', empty_session: false };
   const body = Buffer.from(JSON.stringify({ version: 1, sessions: [row] }));
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
     spawnProcess: (() => chunkedChild(Array.from(body, (byte) => Buffer.from([byte])))) as any });

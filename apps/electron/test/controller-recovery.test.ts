@@ -312,6 +312,29 @@ test('failed user reconnect keeps a living background owner and retries without 
   assert.equal(h.spawns, 0);
 });
 
+test('source metadata failure cannot strand work in a still-living sidecar', async t => {
+  const h = await fixture(t);
+  h.internal.client.emit('event', { type: 'coordinator_status', active_workers: 1 });
+  h.activeWorkers = 1;
+  await h.disconnect();
+  (h.manager as any).opts.resolveSavedTranscript = async () => { throw new Error('catalog unavailable'); };
+  assert.strictEqual(await h.manager.openSession(ref), h.runtime);
+  assert.equal(h.runtime.hasActiveAgents, true);
+  assert.equal(h.kills, 0);
+  assert.equal(h.spawns, 0);
+  assert.ok(!h.received.includes('resume_session'));
+});
+
+test('a dead sidecar without a saved source is not replaced by UUID', async t => {
+  const h = await fixture(t);
+  await h.disconnect();
+  h.alive = false;
+  await assert.rejects(h.manager.openSession(ref), /session source is unavailable/);
+  assert.equal(h.kills, 0);
+  assert.equal(h.spawns, 0);
+  assert.equal(h.connections, 1);
+});
+
 test('a new foreground turn admitted during hello keeps its owner and interactions', async (t) => {
   const h = await fixture(t);
   h.internal.client.emit('event', { type: 'turn_started', turn_id: 19 });

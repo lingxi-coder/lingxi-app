@@ -74,6 +74,56 @@ struct ForkPublication {
     ticket: Option<BackgroundRecoveryTicket>,
 }
 
+/// An independent fork has a new instruction authority, even though its
+/// copied transcript remains available as history.
+fn independent_background_snapshot(
+    conversation: &BgSessionSnapshot,
+) -> Result<BgSessionSnapshot, BgForkError> {
+    use lingxi_core::types::ConversationMessage;
+
+    let copied_epoch = conversation
+        .history
+        .iter()
+        .filter_map(|message| match message {
+            ConversationMessage::User {
+                origin: Some(origin),
+                ..
+            } if origin.string_at("/type") == Some("skill_activation") => {
+                origin.number_at("/context_epoch")
+            }
+            _ => None,
+        })
+        .filter(|epoch| epoch.is_finite() && *epoch >= 0.0 && epoch.fract() == 0.0)
+        .map(|epoch| epoch as u64)
+        .max()
+        .unwrap_or(0);
+    let mut snapshot = conversation.clone();
+    snapshot.instruction_epoch = conversation
+        .instruction_epoch
+        .max(copied_epoch)
+        .checked_add(1)
+        .filter(|epoch| *epoch <= (1_u64 << 53) - 1)
+        .ok_or_else(|| BgForkError::Snapshot("instruction epoch is exhausted".into()))?;
+    Ok(snapshot)
+}
+
+fn configure_fork_launch_authority(
+    context: &mut crate::background_dispatch::ForkLaunchContext,
+    admitted_handoff: bool,
+    captured_prompt: Option<Arc<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+) {
+    if let Some(options) = &mut context.options {
+        options.preserve_admitted_context = admitted_handoff;
+    }
+    // A computed prompt is scoped to the admitted turn; explicit user launch
+    // options remain in `context.options` for either kind of worker.
+    context.system_prompt = if admitted_handoff {
+        captured_prompt.map(|prompt| prompt.as_ref().clone())
+    } else {
+        None
+    };
+}
+
 /// Write the same transcript and host metadata the cold-resume loader reads.
 async fn write_background_snapshot(
     writer: &session::jsonl::writer::JsonlWriter,
@@ -83,6 +133,15 @@ async fn write_background_snapshot(
     version: &str,
     model: &str,
 ) -> Result<(), BgForkError> {
+    // Establish immutable ownership before any conversation history.
+    writer
+        .initialize_fixed_session_mode(
+            session_id,
+            conversation.mode,
+            conversation.instruction_epoch,
+        )
+        .await
+        .map_err(|error| BgForkError::Snapshot(error.to_string()))?;
     let excluded = conversation
         .model_context_excluded_messages
         .iter()
@@ -110,10 +169,7 @@ async fn write_background_snapshot(
             .await
             .map_err(|e| BgForkError::Snapshot(e.to_string()))?;
     }
-    writer
-        .append_session_mode_transition(session_id, &conversation.profile)
-        .await
-        .map_err(|e| BgForkError::Snapshot(e.to_string()))
+    Ok(())
 }
 
 fn pin_resume_source(
@@ -122,12 +178,20 @@ fn pin_resume_source(
     session_id: &str,
     context: &mut crate::background_dispatch::ForkLaunchContext,
 ) -> Result<(), BgForkError> {
-    uuid::Uuid::parse_str(session_id)
+    let uuid = uuid::Uuid::parse_str(session_id)
         .map_err(|error| BgForkError::Dispatch(format!("invalid session id: {error}")))?;
     let source = crate::background_dispatch::locate_session_transcript(
         config_home,
         &cwd.display().to_string(),
         session_id,
+    )
+    .map_err(|error| BgForkError::Dispatch(error.to_string()))?;
+    let content = std::fs::read_to_string(&source)
+        .map_err(|error| BgForkError::Dispatch(error.to_string()))?;
+    crate::init::validate_resume_mode(
+        &content,
+        uuid,
+        Some(lingxi_core::host::session_context::ConversationMode::Code),
     )
     .map_err(|error| BgForkError::Dispatch(error.to_string()))?;
     context.transcript_path = Some(source.to_string_lossy().into_owned());
@@ -289,9 +353,7 @@ impl CliBgSessionForker {
             recovery,
             mut ticket,
         } = publication;
-        if let Some(options) = &mut launch_context.options {
-            options.preserve_admitted_context = true;
-        }
+        configure_fork_launch_authority(&mut launch_context, handoff.is_some(), system_prompt);
         let cwd = cwd_pb.display().to_string();
         let session_path = session::jsonl::path::session_path(&config_home, &cwd, &session_id);
         let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd_pb.clone()));
@@ -325,9 +387,6 @@ impl CliBgSessionForker {
             // No await between export and recording the exact recovery roster.
             recovery.record_export(exported.clone());
             launch_context.shell_handoff = exported;
-        }
-        if let Some(system_prompt) = system_prompt {
-            launch_context.system_prompt = Some(system_prompt.as_ref().clone());
         }
         let remember_short = |short: &str| {
             if let Some(recovery) = &recovery {
@@ -418,7 +477,13 @@ impl BgSessionForker for CliBgSessionForker {
         prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         model: &str,
     ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, BgForkError> {
-        self.fork_with_handoff(conversation, system_prompt, prompt, model, None)
+        if conversation.mode != lingxi_core::host::session_context::ConversationMode::Code {
+            return Err(BgForkError::Dispatch(
+                "session_mode_mismatch: public CLI forks require a Code session".into(),
+            ));
+        }
+        let independent = independent_background_snapshot(conversation)?;
+        self.fork_with_handoff(&independent, system_prompt, prompt, model, None)
             .await
     }
 
@@ -472,7 +537,7 @@ impl BgSessionForker for CliBgSessionForker {
 mod tests {
     use super::*;
     use lingxi_core::host::orchestrator::OrchestratorHandle;
-    use lingxi_core::host::session_context::{ConversationMode, SessionModeTransition};
+    use lingxi_core::host::session_context::{ConversationMode, FixedSessionProfile};
     use lingxi_core::types::{
         utf16_json::Utf16JsonProjection as Source, ConversationMessage, MessageId,
     };
@@ -558,7 +623,20 @@ mod tests {
             session::jsonl::path::session_path(&home, &other.display().to_string(), &session_id);
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::create_dir_all(replacement.parent().unwrap()).unwrap();
-        std::fs::write(&source, "original").unwrap();
+        let transcript = |text: &str| {
+            let header = serde_json::json!({
+                "type": "fixed-session-mode", "sessionId": session_id,
+                "sessionMode": "code", "instructionEpoch": 0,
+            });
+            let message = serde_json::json!({
+                "type": "user", "uuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                "parentUuid": null, "sessionId": session_id,
+                "timestamp": "2026-10-21T00:00:00.000Z", "isSidechain": false,
+                "message": { "role": "user", "content": text },
+            });
+            format!("{header}\n{message}\n")
+        };
+        std::fs::write(&source, transcript("original")).unwrap();
         let mut context = crate::background_dispatch::ForkLaunchContext::default();
         pin_resume_source(&home, &cwd, &session_id, &mut context).unwrap();
         assert_eq!(
@@ -566,7 +644,8 @@ mod tests {
             source.canonicalize().unwrap()
         );
         std::fs::rename(&source, source.with_extension("moved")).unwrap();
-        std::fs::write(replacement, "different source").unwrap();
+        let replacement_content = transcript("different source");
+        std::fs::write(&replacement, &replacement_content).unwrap();
         assert!(
             crate::background_dispatch::dispatch_resumed_session_with_context(
                 &home,
@@ -590,6 +669,10 @@ mod tests {
             .is_err()
         );
         assert!(!home.join("jobs").exists());
+        assert_eq!(
+            std::fs::read_to_string(replacement).unwrap(),
+            replacement_content
+        );
         assert!(pin_resume_source(&home, &cwd, "../other", &mut context).is_err());
     }
 
@@ -690,6 +773,171 @@ mod tests {
         );
     }
 
+    #[test]
+    fn independent_fork_rebuilds_computed_prompt_but_handoff_retains_it() {
+        for admitted in [false, true] {
+            let mut context = crate::background_dispatch::ForkLaunchContext {
+                options: Some(crate::background_launch::BackgroundLaunchOptions {
+                    system_prompt: Some("explicit user prompt".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            configure_fork_launch_authority(
+                &mut context,
+                admitted,
+                Some(Arc::new("captured computed prompt".into())),
+            );
+            let options = context.options.unwrap();
+            assert_eq!(options.preserve_admitted_context, admitted);
+            assert_eq!(
+                options
+                    .system_prompt
+                    .as_ref()
+                    .and_then(|prompt| prompt.string_at("")),
+                Some("explicit user prompt")
+            );
+            assert_eq!(
+                context
+                    .system_prompt
+                    .as_ref()
+                    .and_then(|prompt| prompt.string_at("")),
+                admitted.then_some("captured computed prompt")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn independent_background_fork_retires_copied_skill_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let home = root.path().join("config");
+        let session_id = uuid::Uuid::new_v4();
+        let old_id = MessageId::new();
+        let future_id = MessageId::new();
+        let user_id = MessageId::new();
+        let origin = |epoch| {
+            Source::parse(&format!(
+            r#"{{"type":"skill_activation","context_epoch":{epoch},"skill_name":"x","skill_path":"/skill"}}"#
+        )).unwrap()
+        };
+        let source = BgSessionSnapshot {
+            history: vec![
+                ConversationMessage::user_meta(old_id, "same evidence".into())
+                    .with_origin(origin(4)),
+                ConversationMessage::user_meta(future_id, "later instruction".into())
+                    .with_origin(origin(9)),
+                ConversationMessage::user(user_id, "same evidence".into()),
+            ],
+            mode: ConversationMode::Code,
+            instruction_epoch: 4,
+            ..Default::default()
+        };
+        let independent = independent_background_snapshot(&source).unwrap();
+        assert_eq!(independent.instruction_epoch, 10);
+        assert_eq!(source.instruction_epoch, 4);
+        let path = session::jsonl::path::session_path(
+            &home,
+            &cwd.to_string_lossy(),
+            &session_id.to_string(),
+        );
+        let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.clone()));
+        let writer = session::JsonlWriter::new(path.clone(), fs);
+        write_background_snapshot(
+            &writer,
+            &independent,
+            &session_id.to_string(),
+            &cwd.to_string_lossy(),
+            "test",
+            "model",
+        )
+        .await
+        .unwrap();
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            session::JsonlWriter::fixed_session_profile_from_source(
+                &persisted,
+                &session_id.to_string()
+            )
+            .unwrap(),
+            FixedSessionProfile {
+                mode: ConversationMode::Code,
+                instruction_epoch: 10
+            }
+        );
+
+        let mut cfg = harness_runtime::desktop::DesktopConfig::default();
+        cfg.cwd = cwd.clone();
+        cfg.lingxi_home = home;
+        cfg.session_persistence = false;
+        let captured = crate::init::capture_tui_resume(&mut cfg, session_id, None)
+            .await
+            .unwrap();
+        let resumed = orchestrator::ConversationOrchestrator::new(
+            orchestrator::OrchestratorConfig::default(),
+            Arc::new(orchestrator::test_support::MockApiClient::new(vec![])),
+            Arc::new(tool_api::ToolRegistry::new()),
+            orchestrator::test_support::noop_hook_executor(),
+            Arc::new(orchestrator::test_support::NoOpPermissionGate),
+            Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            Arc::new(orchestrator::test_support::StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_session_id(lingxi_core::types::SessionId::from_uuid(session_id))
+        .with_conversation_mode(ConversationMode::Code);
+        resumed
+            .restore_captured_session_history(
+                session_id,
+                &captured.messages,
+                &captured.entries,
+                false,
+                permission::PermissionMode::Default,
+                ConversationMode::Code,
+                &cfg.session_resume_snapshot.as_ref().unwrap().content,
+            )
+            .await
+            .unwrap();
+        let session = resumed.session();
+        let state = session.lock().await;
+        assert_eq!(state.history.len(), 3);
+        let ids = state
+            .model_context_history()
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(!ids.contains(&old_id));
+        assert!(!ids.contains(&future_id));
+        assert!(ids.contains(&user_id));
+    }
+
+    #[tokio::test]
+    async fn exhausted_fork_epoch_fails_before_filesystem_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("config");
+        let runtime = root.path().join("runtime");
+        let forker = CliBgSessionForker::new(
+            home.clone(),
+            runtime.clone(),
+            Default::default(),
+            permission::PermissionMode::Default,
+        );
+        let conversation = BgSessionSnapshot {
+            mode: ConversationMode::Code,
+            instruction_epoch: (1_u64 << 53) - 1,
+            ..Default::default()
+        };
+        let error = forker
+            .fork_to_background(&conversation, None, &"".into(), "model")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, BgForkError::Snapshot(message) if message.contains("epoch is exhausted"))
+        );
+        assert!(!home.exists());
+        assert!(!runtime.exists());
+    }
+
     #[tokio::test]
     async fn background_snapshot_cold_resume_preserves_context_and_permissions() {
         let root = tempfile::tempdir().unwrap();
@@ -743,14 +991,6 @@ mod tests {
             let visible_attachment =
                 ConversationMessage::user_meta(visible_attachment_id, "same evidence".into());
             let attachment = Source::parse(r#"{"type":"environment","snapshot":{}}"#).unwrap();
-            let profile = SessionModeTransition {
-                selected: mode,
-                active: mode,
-                revision: epoch,
-                selected_epoch: epoch,
-                active_epoch: epoch,
-                pending: false,
-            };
             let conversation = BgSessionSnapshot {
                 history: vec![
                     old,
@@ -763,7 +1003,8 @@ mod tests {
                 model_context_excluded_messages: [old_id, excluded_attachment_id]
                     .into_iter()
                     .collect(),
-                profile: profile.clone(),
+                mode,
+                instruction_epoch: epoch,
                 model_reminder_attachments: vec![
                     (excluded_attachment_id, attachment.clone()),
                     (visible_attachment_id, attachment),
@@ -791,6 +1032,11 @@ mod tests {
             .await
             .unwrap();
             let raw = std::fs::read_to_string(&path).unwrap();
+            let first: serde_json::Value =
+                serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+            assert_eq!(first["type"], "fixed-session-mode");
+            assert_eq!(first["sessionId"], session_id.to_string());
+            assert_eq!(first["sessionMode"], mode.as_str());
             assert!(raw.contains("old instruction"));
             assert!(raw.contains("isModelContextExcluded"));
 
@@ -799,13 +1045,16 @@ mod tests {
                 fs.clone(),
             ));
             assert_eq!(
-                reopened.persisted_session_mode_transition().await,
-                Some(profile)
+                reopened.persisted_fixed_session_profile().await.unwrap(),
+                Some(FixedSessionProfile {
+                    mode,
+                    instruction_epoch: epoch
+                })
             );
             let mut cfg = harness_runtime::desktop::DesktopConfig::default();
             cfg.cwd = cwd.clone();
             cfg.lingxi_home = config_home.clone();
-            let captured = crate::init::capture_tui_resume(&mut cfg, session_id)
+            let captured = crate::init::capture_tui_resume(&mut cfg, session_id, None)
                 .await
                 .unwrap();
             let canonical_path = path.canonicalize().unwrap();
@@ -825,6 +1074,7 @@ mod tests {
                 cwd.clone(),
             )
             .with_session_id(lingxi_core::types::SessionId::from_uuid(session_id))
+            .with_conversation_mode(mode)
             .with_jsonl_writer(reopened);
             resumed
                 .restore_captured_session_history(
@@ -833,10 +1083,7 @@ mod tests {
                     &captured.entries,
                     false,
                     permission::PermissionMode::Plan,
-                    session::JsonlWriter::session_mode_transition_from_source(
-                        source,
-                        &session_id.to_string(),
-                    ),
+                    mode,
                     source,
                 )
                 .await
@@ -845,15 +1092,10 @@ mod tests {
             worker_options.preserve_admitted_context = true;
             let worker_options: crate::background_launch::BackgroundLaunchOptions =
                 serde_json::from_str(&serde_json::to_string(&worker_options).unwrap()).unwrap();
-            crate::run::apply_cli_resume_profile(&resumed, Some(&worker_options))
-                .await
-                .unwrap();
+            assert!(worker_options.preserve_admitted_context);
             // This is the state desktop assembly exposes before SessionStart.
             let restored = resumed.conversation_mode().await;
-            assert_eq!(
-                (restored.active, restored.selected, restored.pending),
-                (mode, mode, false)
-            );
+            assert_eq!(restored.mode, mode);
             let session = resumed.session();
             let state = session.lock().await;
             assert_eq!(state.history.len(), 6, "audit transcript is retained");
@@ -881,7 +1123,7 @@ mod tests {
             // Exercise the worker's actual runtime assembly and its mounted
             // profile boundary with the same serialized launch options.
             cfg.session_id_override = Some(session_id.to_string());
-            cfg.initial_conversation_mode = Some(ConversationMode::Code);
+            assert_eq!(cfg.initial_conversation_mode, Some(mode));
             cfg.native_settings_agent_context =
                 lingxi_core::host::NativeSettingsAgentContext::Subagent {
                     is_main_session: true,
@@ -892,13 +1134,7 @@ mod tests {
             )
             .await
             .unwrap();
-            crate::run::apply_cli_resume_profile(
-                runtime.orchestrator.as_ref(),
-                Some(&worker_options),
-            )
-            .await
-            .unwrap();
-            assert_eq!(runtime.orchestrator.conversation_mode().await.active, mode);
+            assert_eq!(runtime.orchestrator.conversation_mode().await.mode, mode);
             let mounted = runtime.orchestrator.session();
             assert!(mounted
                 .lock()
@@ -946,14 +1182,8 @@ mod tests {
         let conversation = BgSessionSnapshot {
             history: vec![old, current, user, excluded],
             model_context_excluded_messages: [excluded_id].into_iter().collect(),
-            profile: SessionModeTransition {
-                active: ConversationMode::Chat,
-                selected: ConversationMode::Code,
-                revision: 3,
-                active_epoch: 2,
-                selected_epoch: 3,
-                pending: true,
-            },
+            mode: ConversationMode::Chat,
+            instruction_epoch: 2,
             ..Default::default()
         };
         let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.clone()));
@@ -971,20 +1201,23 @@ mod tests {
         .await
         .unwrap();
         let before = std::fs::read(&path).unwrap();
+        let first: serde_json::Value =
+            serde_json::from_slice(before.split(|byte| *byte == b'\n').next().unwrap()).unwrap();
+        assert_eq!(first["sessionMode"], "chat");
+        assert_eq!(first["instructionEpoch"], 2);
         let mut cfg = harness_runtime::desktop::DesktopConfig::default();
         cfg.cwd = cwd.clone();
         cfg.lingxi_home = config_home.clone();
         cfg.session_persistence = false;
-        let captured = crate::init::capture_tui_resume(&mut cfg, session_id)
+        let captured = crate::init::capture_tui_resume(&mut cfg, session_id, None)
             .await
             .unwrap();
         assert!(cfg.session_writer_lease.is_none());
         assert!(cfg.session_resume_cost.is_none());
         let source = &cfg.session_resume_snapshot.as_ref().unwrap().content;
-        let profile = session::JsonlWriter::session_mode_transition_from_source(
-            source,
-            &session_id.to_string(),
-        );
+        let profile =
+            session::JsonlWriter::fixed_session_mode_from_source(source, &session_id.to_string())
+                .unwrap();
         let resumed = orchestrator::ConversationOrchestrator::new(
             orchestrator::OrchestratorConfig::default(),
             Arc::new(orchestrator::test_support::MockApiClient::new(vec![])),
@@ -995,7 +1228,8 @@ mod tests {
             Arc::new(orchestrator::test_support::StaticMemoryProvider::empty()),
             cwd,
         )
-        .with_session_id(lingxi_core::types::SessionId::from_uuid(session_id));
+        .with_session_id(lingxi_core::types::SessionId::from_uuid(session_id))
+        .with_conversation_mode(ConversationMode::Chat);
         resumed
             .restore_captured_session_history(
                 session_id,
@@ -1009,10 +1243,7 @@ mod tests {
             .await
             .unwrap();
         let mode = resumed.conversation_mode().await;
-        assert_eq!(
-            (mode.active, mode.selected, mode.revision, mode.pending),
-            (ConversationMode::Chat, ConversationMode::Code, 3, true)
-        );
+        assert_eq!(mode.mode, ConversationMode::Chat);
         let session = resumed.session();
         let state = session.lock().await;
         assert_eq!(state.history.len(), 4);

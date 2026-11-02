@@ -9,6 +9,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.nio.file.Files
 
 /**
  * Small durable conversation state — the last-active session id and unsent
@@ -18,9 +19,8 @@ import java.io.File
  * write-validate-rename discipline as [ProjectRepository] (shared
  * [ProjectAtomicWriter]).
  *
- * The legacy Project/global last-active fields stay with [ProjectRepository]
- * for Code compatibility. This store is authoritative for mode-scoped active
- * sessions across every workspace, drafts per conversation, and the active workspace.
+ * This store is authoritative for mode-scoped active sessions, drafts per
+ * conversation, and the active workspace.
  *
  * All suspend entry points hop to [Dispatchers.IO] and serialize on one mutex,
  * so callers may invoke them from the main thread (e.g. per-keystroke draft
@@ -35,20 +35,103 @@ class ScopeStateStore internal constructor(
     // Screens recreate this store, but all instances write the same app file.
     private val mutex = stateMutex
 
-    data class ScopeState(
-        val lastActiveSessionId: String? = null,
-        val draft: String = "",
-        /** Owner of a draft saved by the former mode-scoped layout. */
-        val draftSessionId: String? = null,
-    )
+    data class ScopeState(val lastActiveSessionId: String? = null)
 
     data class WorkspacePresentationState(
         val pinnedAtEpochMillis: Long? = null,
         val collapsed: Boolean = false,
     )
 
-    suspend fun readActiveScopeKey(): String? = withContext(Dispatchers.IO) {
-        mutex.withLock { load().activeScopeKey }
+    data class ConversationHandoff(
+        val sourceScope: String,
+        val sourceSessionId: String,
+        val sourceMode: SessionMode,
+        val targetMode: SessionMode,
+        val cutoff: String,
+        val requestId: String,
+    )
+
+    data class SessionOwner(val scopeKey: String, val mode: SessionMode)
+
+    suspend fun validate() = withContext(Dispatchers.IO) {
+        mutex.withLock { load() }
+        Unit
+    }
+
+    suspend fun readConversationHandoff(scopeKey: String, sessionId: String): ConversationHandoff? =
+        withContext(Dispatchers.IO) { mutex.withLock { load().handoffs[conversationDraftKey(scopeKey, canonicalSessionId(sessionId))] } }
+
+    /** Each space remembers its own last location across process restarts. */
+    suspend fun readActiveScopeKey(mode: SessionMode): String? = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            load().activeScopes[mode.wireValue]
+        }
+    }
+
+    suspend fun persistActiveSelection(
+        scopeKey: String,
+        mode: SessionMode,
+        allowCommit: () -> Boolean = { true },
+    ): Boolean = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            synchronized(com.lingxi.code.conversation.SessionAdmissionGate.lock) {
+                if (!allowCommit()) false else {
+                    val snapshot = load()
+                    val next = snapshot.copy(activeMode = mode,
+                        activeScopes = snapshot.activeScopes + (mode.wireValue to scopeKey))
+                    write(next)
+                    true
+                }
+            }
+        }
+    }
+
+    /** A UUID has one logical workspace and creation mode, independent of cwd. */
+    suspend fun claimSessionOwner(
+        sessionId: String,
+        scopeKey: String,
+        mode: SessionMode,
+        allowNew: () -> Boolean = { true },
+    ): Boolean =
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                val id = canonicalSessionId(sessionId)
+                require(id.isNotBlank() && id != "new")
+                require(com.lingxi.code.model.conversationScopeFromKey(scopeKey) != null) { "Invalid session owner scope" }
+                val snapshot = load()
+                val owner = SessionOwner(scopeKey, mode)
+                val previous = snapshot.sessionOwners[id]
+                if (previous != null) return@withLock previous == owner
+                synchronized(com.lingxi.code.conversation.SessionAdmissionGate.lock) {
+                    if (!allowNew()) false else {
+                        write(snapshot.copy(sessionOwners = snapshot.sessionOwners + (id to owner)))
+                        true
+                    }
+                }
+            }
+        }
+
+    suspend fun readSessionOwners(): Map<String, SessionOwner> = withContext(Dispatchers.IO) {
+        mutex.withLock { load().sessionOwners }
+    }
+
+    suspend fun matchesSessionOwner(sessionId: String, scopeKey: String, mode: SessionMode): Boolean =
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                val owner = load().sessionOwners[canonicalSessionId(sessionId)]
+                owner == null || owner == SessionOwner(scopeKey, mode)
+            }
+        }
+
+    /** Persist the draft and its origin together so neither can outlive the other. */
+    suspend fun persistHandoffDraft(
+        scopeKey: String, sessionId: String, draft: String, handoff: ConversationHandoff,
+    ) {
+        val id = canonicalSessionId(sessionId)
+        require(id.isNotBlank() && id != "new" && handoff.sourceSessionId.isNotBlank())
+        val key = conversationDraftKey(scopeKey, id)
+        mutate { it.copy(conversationDrafts = it.conversationDrafts + (key to draft),
+            handoffs = it.handoffs + (key to handoff.copy(sourceSessionId = canonicalSessionId(handoff.sourceSessionId)))) }
     }
 
     suspend fun readActiveMode(): SessionMode? = withContext(Dispatchers.IO) {
@@ -63,22 +146,10 @@ class ScopeStateStore internal constructor(
         mutex.withLock { load().scopes[scopeKey] }
     }
 
-    /** A mode switch keeps the same draft; another conversation has its own. */
-    suspend fun readConversationDraft(scopeKey: String, sessionId: String, mode: SessionMode): String? = withContext(Dispatchers.IO) {
+    suspend fun readConversationDraft(scopeKey: String, sessionId: String): String? = withContext(Dispatchers.IO) {
         mutex.withLock {
-            val snapshot = load()
             val owner = canonicalSessionId(sessionId)
-            snapshot.conversationDrafts[conversationDraftKey(scopeKey, owner)] ?: run {
-                // Older scope slots did not record a separate draft owner. The
-                // decoder captures their last-active owner once; changing the
-                // active session must never reassign that draft to a new owner.
-                listOf(mode, if (mode == SessionMode.Code) SessionMode.Chat else SessionMode.Code)
-                    .firstNotNullOfOrNull { candidate ->
-                        snapshot.scopes["$scopeKey#${candidate.wireKey}"]
-                            ?.takeIf { it.draftSessionId?.let(::canonicalSessionId) == owner }
-                            ?.draft
-                    }
-            }
+            load().conversationDrafts[conversationDraftKey(scopeKey, owner)]
         }
     }
 
@@ -104,14 +175,6 @@ class ScopeStateStore internal constructor(
         mutex.withLock { load().cronResultsSeenAtEpochMillis }
     }
 
-    suspend fun persistActiveScope(scopeKey: String) {
-        mutate { it.copy(activeScopeKey = scopeKey) }
-    }
-
-    suspend fun persistActiveMode(mode: SessionMode) {
-        mutate { it.copy(activeMode = mode) }
-    }
-
     suspend fun persistSelectedMode(mode: SessionMode) {
         mutate { it.copy(selectedMode = mode) }
     }
@@ -122,13 +185,6 @@ class ScopeStateStore internal constructor(
             snapshot.copy(
                 scopes = snapshot.scopes + (scopeKey to current.copy(lastActiveSessionId = sessionId)),
             )
-        }
-    }
-
-    suspend fun persistDraft(scopeKey: String, draft: String) {
-        mutate { snapshot ->
-            val current = snapshot.scopes[scopeKey] ?: ScopeState()
-            snapshot.copy(scopes = snapshot.scopes + (scopeKey to current.copy(draft = draft, draftSessionId = current.lastActiveSessionId)))
         }
     }
 
@@ -172,11 +228,13 @@ class ScopeStateStore internal constructor(
     }
 
     private data class Snapshot(
-        val activeScopeKey: String? = null,
         val activeMode: SessionMode = SessionMode.Code,
+        val activeScopes: Map<String, String> = emptyMap(),
         val selectedMode: SessionMode? = null,
+        val sessionOwners: Map<String, SessionOwner> = emptyMap(),
         val scopes: Map<String, ScopeState> = emptyMap(),
         val conversationDrafts: Map<String, String> = emptyMap(),
+        val handoffs: Map<String, ConversationHandoff> = emptyMap(),
         val workspacePresentation: Map<String, WorkspacePresentationState> = emptyMap(),
         val pinnedSessions: Map<String, Long> = emptyMap(),
         val cronResultsSeenAtEpochMillis: Long = 0L,
@@ -186,40 +244,61 @@ class ScopeStateStore internal constructor(
         withContext(Dispatchers.IO) {
             mutex.withLock {
                 val next = transform(load())
-                writer.write(file, encode(next)) { decode(it) }
+                write(next)
             }
         }
     }
 
-    /** A missing or corrupt file reads as empty — scope state is best-effort. */
-    private fun load(): Snapshot =
-        if (file.isFile) {
-            runCatching { decode(file.readText(Charsets.UTF_8)) }.getOrDefault(Snapshot())
-        } else {
-            Snapshot()
+    private val observationKey: String = file.absoluteFile.normalize().path
+
+    /** Never recreate a previously observed file or overwrite a corrupt one. */
+    private fun load(): Snapshot {
+        val symbolicLink = Files.isSymbolicLink(file.toPath())
+        if (symbolicLink || file.exists()) {
+            observedStateFiles.add(observationKey)
+            require(!symbolicLink && file.isFile) { "Conversation state is not a file: $file" }
+            return decode(file.readText(Charsets.UTF_8))
         }
+        check(observationKey !in observedStateFiles) { "Conversation state is missing: $file" }
+        return Snapshot()
+    }
+
+    private fun write(snapshot: Snapshot) {
+        writer.write(file, encode(snapshot)) { decode(it) }
+        observedStateFiles.add(observationKey)
+    }
 
     private fun encode(snapshot: Snapshot): String = JSONObject()
-        .put("version", 1)
-        .put("activeScopeKey", snapshot.activeScopeKey)
-        .put("activeMode", snapshot.activeMode.wireKey)
-        .put("selectedMode", snapshot.selectedMode?.wireKey)
+        .put("version", 2)
+        .put("activeMode", snapshot.activeMode.wireValue)
+        .put("activeScopes", JSONObject(snapshot.activeScopes))
+        .put("selectedMode", snapshot.selectedMode?.wireValue)
+        .put("sessionOwners", JSONObject().also { owners ->
+            snapshot.sessionOwners.forEach { (id, owner) ->
+                owners.put(id, JSONObject().put("scope", owner.scopeKey).put("mode", owner.mode.wireValue))
+            }
+        })
         .put(
             "scopes",
             JSONObject().also { scopes ->
                 snapshot.scopes.forEach { (key, state) ->
                     scopes.put(
                         key,
-                        JSONObject()
-                            .put("lastActiveSessionId", state.lastActiveSessionId)
-                            .put("draft", state.draft)
-                            .put("draftSessionId", state.draftSessionId ?: JSONObject.NULL),
+                        JSONObject().put("lastActiveSessionId", state.lastActiveSessionId),
                     )
                 }
             },
         )
         .put("conversationDrafts", JSONObject().also { drafts ->
             snapshot.conversationDrafts.forEach { (key, value) -> drafts.put(key, value) }
+        })
+        .put("handoffs", JSONObject().also { records ->
+            snapshot.handoffs.forEach { (key, value) ->
+                records.put(key, JSONObject().put("sourceScope", value.sourceScope)
+                    .put("sourceSessionId", value.sourceSessionId).put("sourceMode", value.sourceMode.wireValue)
+                    .put("targetMode", value.targetMode.wireValue).put("cutoff", value.cutoff)
+                    .put("requestId", value.requestId))
+            }
         })
         .put(
             "workspacePresentation",
@@ -241,12 +320,12 @@ class ScopeStateStore internal constructor(
             },
         )
         .put("cronResultsSeenAtEpochMillis", snapshot.cronResultsSeenAtEpochMillis)
-        .toString(2)
+        .toString(2).escapeSurrogateCodeUnits()
 
     private fun decode(text: String): Snapshot {
         val json = JSONObject(text)
-        require(json.getInt("version") == 1)
-        val scopesJson = json.optJSONObject("scopes") ?: JSONObject()
+        require(json.getInt("version") == 2)
+        val scopesJson = json.getJSONObject("scopes")
         val scopes = buildMap {
             scopesJson.keys().forEach { key ->
                 val entry = scopesJson.getJSONObject(key)
@@ -254,21 +333,43 @@ class ScopeStateStore internal constructor(
                     else entry.optString("lastActiveSessionId").takeIf { it.isNotBlank() }
                 put(
                     key,
-                    ScopeState(
-                        lastActiveSessionId = lastSessionId,
-                        draft = entry.optString("draft"),
-                        draftSessionId = if (entry.has("draftSessionId")) {
-                            if (entry.isNull("draftSessionId")) null else entry.optString("draftSessionId").takeIf { it.isNotBlank() }
-                        } else lastSessionId,
-                    ),
+                    ScopeState(lastActiveSessionId = lastSessionId),
                 )
             }
         }
-        val draftsJson = json.optJSONObject("conversationDrafts") ?: JSONObject()
+        val draftsJson = json.getJSONObject("conversationDrafts")
         val conversationDrafts = buildMap {
             draftsJson.keys().forEach { key -> put(key, draftsJson.getString(key)) }
         }
-        val workspacePresentationJson = json.optJSONObject("workspacePresentation") ?: JSONObject()
+        val activeScopesJson = json.getJSONObject("activeScopes")
+        val activeScopes = buildMap {
+            activeScopesJson.keys().forEach { key ->
+                com.lingxi.code.model.sessionModeFromWireValue(key)
+                put(key, activeScopesJson.getString(key))
+            }
+        }
+        val ownersJson = json.getJSONObject("sessionOwners")
+        val sessionOwners = buildMap {
+            ownersJson.keys().forEach { id ->
+                val owner = ownersJson.getJSONObject(id)
+                require(id.isNotBlank() && id != "new" && canonicalSessionId(id) == id) { "Invalid session owner id" }
+                val scope = owner.getString("scope")
+                require(com.lingxi.code.model.conversationScopeFromKey(scope) != null) { "Invalid session owner scope" }
+                put(id, SessionOwner(scope,
+                    com.lingxi.code.model.sessionModeFromWireValue(owner.getString("mode"))))
+            }
+        }
+        val handoffsJson = json.getJSONObject("handoffs")
+        val handoffs = buildMap {
+            handoffsJson.keys().forEach { key ->
+                val entry = handoffsJson.getJSONObject(key)
+                put(key, ConversationHandoff(entry.getString("sourceScope"), entry.getString("sourceSessionId"),
+                    com.lingxi.code.model.sessionModeFromWireValue(entry.getString("sourceMode")),
+                    com.lingxi.code.model.sessionModeFromWireValue(entry.getString("targetMode")),
+                    entry.getString("cutoff"), entry.getString("requestId")))
+            }
+        }
+        val workspacePresentationJson = json.getJSONObject("workspacePresentation")
         val workspacePresentation = buildMap {
             workspacePresentationJson.keys().forEach { key ->
                 val entry = workspacePresentationJson.getJSONObject(key)
@@ -278,45 +379,47 @@ class ScopeStateStore internal constructor(
                         pinnedAtEpochMillis = if (entry.isNull("pinnedAtEpochMillis")) {
                             null
                         } else {
-                            entry.optLong("pinnedAtEpochMillis").takeIf { it > 0L }
+                            entry.getLong("pinnedAtEpochMillis").also { require(it > 0L) }
                         },
-                        collapsed = entry.optBoolean("collapsed", false),
+                        collapsed = entry.getBoolean("collapsed"),
                     ),
                 )
             }
         }
-        val pinnedSessionsJson = json.optJSONObject("pinnedSessions") ?: JSONObject()
+        val pinnedSessionsJson = json.getJSONObject("pinnedSessions")
         val pinnedSessions = buildMap {
             pinnedSessionsJson.keys().forEach { sessionId ->
-                pinnedSessionsJson.optLong(sessionId).takeIf { it > 0L }?.let { put(sessionId, it) }
+                put(sessionId, pinnedSessionsJson.getLong(sessionId).also { require(it > 0L) })
             }
         }
         return Snapshot(
-            activeScopeKey = if (json.isNull("activeScopeKey")) {
-                null
-            } else {
-                json.optString("activeScopeKey").takeIf { it.isNotBlank() }
-            },
-            activeMode = when (json.optString("activeMode")) {
-                SessionMode.Chat.wireValue -> SessionMode.Chat
-                else -> SessionMode.Code
-            },
-            selectedMode = when (json.optString("selectedMode")) {
-                SessionMode.Chat.wireValue -> SessionMode.Chat
-                SessionMode.Code.wireValue -> SessionMode.Code
-                else -> null
-            },
+            activeMode = com.lingxi.code.model.sessionModeFromWireValue(json.getString("activeMode")),
+            activeScopes = activeScopes,
+            selectedMode = if (json.isNull("selectedMode")) null
+                else com.lingxi.code.model.sessionModeFromWireValue(json.getString("selectedMode")),
+            sessionOwners = sessionOwners,
             scopes = scopes,
             conversationDrafts = conversationDrafts,
+            handoffs = handoffs,
             workspacePresentation = workspacePresentation,
             pinnedSessions = pinnedSessions,
-            cronResultsSeenAtEpochMillis = json.optLong("cronResultsSeenAtEpochMillis", 0L),
+            cronResultsSeenAtEpochMillis = json.getLong("cronResultsSeenAtEpochMillis"),
         )
     }
 
     companion object {
         internal const val SCOPE_STATE_FILE = "scope-state.json"
         private val stateMutex = Mutex()
+        // All access is serialized by stateMutex, including across store instances.
+        private val observedStateFiles = mutableSetOf<String>()
         private fun conversationDraftKey(scopeKey: String, sessionId: String) = "$scopeKey#session:$sessionId"
+    }
+}
+
+/** JSON can escape isolated UTF-16 units; UTF-8 encoding alone replaces them. */
+private fun String.escapeSurrogateCodeUnits(): String = buildString(length) {
+    for (unit in this@escapeSurrogateCodeUnits) {
+        if (unit.isSurrogate()) append("\\u").append(unit.code.toString(16).padStart(4, '0'))
+        else append(unit)
     }
 }

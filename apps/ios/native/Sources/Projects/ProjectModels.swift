@@ -42,11 +42,12 @@ struct ProjectRecord: Identifiable, Codable, Equatable, Sendable {
     var updatedAt: Date
     var sourceBookmark: ProjectExternalBookmark? = nil
     var lastSyncAt: Date? = nil
-    var lastActiveSessionId: String? = nil
     var syncState: ProjectSyncState
     var directory: String
     var activeDirectory: String
     var additionalDirectories: [String]
+    var modeMembership: Set<SessionMode>
+    var visibleModes: Set<SessionMode> { modeMembership }
 
     init(
         id: String,
@@ -56,23 +57,23 @@ struct ProjectRecord: Identifiable, Codable, Equatable, Sendable {
         updatedAt: Date,
         sourceBookmark: ProjectExternalBookmark? = nil,
         lastSyncAt: Date? = nil,
-        lastActiveSessionId: String? = nil,
         syncState: ProjectSyncState? = nil,
         directory: String? = nil,
         activeDirectory: String? = nil,
-        additionalDirectories: [String] = []
+        additionalDirectories: [String] = [],
+        modeMembership: Set<SessionMode> = [.code]
     ) {
         self.id = id
         self.directory = directory ?? "\(LXISHGuestPaths.workspace("projects"))/\(id)/workspace"
         self.activeDirectory = activeDirectory ?? self.directory
         self.additionalDirectories = additionalDirectories
+        self.modeMembership = modeMembership
         self.name = name
         self.storageKind = storageKind
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.sourceBookmark = sourceBookmark
         self.lastSyncAt = lastSyncAt
-        self.lastActiveSessionId = lastActiveSessionId
         self.syncState = syncState ?? (storageKind == .internal ? .localOnly : .changesPending)
     }
 }
@@ -238,6 +239,8 @@ struct ProjectRepositoryState: Equatable, Sendable {
     var projects: [ProjectSnapshot] = []
     var activeProjectId: String? = nil
     var globalSessions: [ProjectSessionSummary] = []
+    var projectIndexPresent = false
+    var globalIndexPresent = false
     var loading: Bool = false
     var errorMessage: String? = nil
 

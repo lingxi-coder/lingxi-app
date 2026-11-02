@@ -22,6 +22,7 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
   mkdirSync(alias); mkdirSync(source); mkdirSync(store);
   const settings = new SettingsStore(join(root, 'settings'));
   settings.addProject(alias);
+  settings.conversationSpaces.setMode('code');
   if (options.savedSource !== false) settings.addProject(source);
   const ref = Object.freeze({ projectPath: alias, sessionId });
   const sourceRef = { projectPath: source, sessionId };
@@ -36,7 +37,7 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
     closed: [] as SessionRef[], replacements: [] as string[], trust: [] as string[], events: [] as string[],
   };
   const runtime = {
-    projectPath: source, sessionId, connectionState: { status: 'connected' }, hasActiveWork: false,
+    projectPath: source, sessionId, sessionMode: 'code' as const, connectionState: { status: 'connected' }, hasActiveWork: false,
     async getWorkspaceState() { return { cwd: this.projectPath, additional_directories: [], transcript_path: path }; },
     beginArchive() {
       if (this.hasActiveWork) throw new Error('Wait for active work before archiving this chat.');
@@ -59,7 +60,7 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
       const existing = runtimes.get(ref.sessionId);
       if (existing) assert.equal(ref.projectPath, existing.projectPath, 'metadata must reuse the authoritative runtime');
       else {
-        assert.equal(settings.hasProject(ref.projectPath), true, 'trust must persist before engine startup');
+        assert.equal(settings.isTrustedWorkspace(ref.projectPath), true, 'trust must persist before engine startup');
         calls.events.push(`start:${ref.projectPath}`); calls.started.push({ ...ref });
         runtimes.set(ref.sessionId, runtime);
       }
@@ -163,7 +164,8 @@ test('cold alias archive trusts and registers the actual source before starting 
   assert.deepEqual(f.calls.trust, [f.source]);
   assert.deepEqual(f.calls.events, [`trust:${f.source}`, `start:${f.source}`]);
   assert.deepEqual(f.calls.started, [f.sourceRef]);
-  assert.equal(f.settings.hasProject(f.source), true);
+  assert.equal(f.settings.isTrustedWorkspace(f.source), true);
+  assert.equal(f.settings.hasProject(f.source), false);
   assert.equal(f.settings.isSessionArchived(f.sourceRef), true);
   assert.equal(f.settings.isSessionArchived(f.ref), false);
 });

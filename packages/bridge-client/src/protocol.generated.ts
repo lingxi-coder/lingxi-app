@@ -2,7 +2,7 @@
 // Do not edit. Run scripts/checks/generate-client-protocol.py after updating the pin.
 // Nested DTOs and semantic validation remain in protocol.ts and validation.ts.
 
-// Custom Serde fingerprints (review changes): command=fd146aedf340aac3 event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=89d48bdcea23a4a4 event_source=7b18eb748220bb07
+// Custom Serde fingerprints (review changes): command=fd146aedf340aac3 event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=867b0213dd4ee950 event_source=d71e4c6d69413350
 
 import type {
   AgentDto,
@@ -133,9 +133,9 @@ export type ClientCommand =
   | { type: 'refresh_listings'; which: Array<ListingKindDto> }
   | { type: 'list_session_agents' }
   | { type: 'load_session_agent_transcript'; agent_id: string }
-  | { type: 'new_session'; cwd?: string | null; model?: string | null }
-  | { type: 'resume_session'; session_id: string; cwd?: string | null }
-  | { type: 'list_sessions'; limit?: number | null }
+  | { type: 'new_session'; cwd?: string | null; model?: string | null; mode: SessionModeDto }
+  | { type: 'resume_session'; session_id: string; cwd?: string | null; expected_mode: SessionModeDto }
+  | { type: 'list_sessions'; limit?: number | null; mode?: SessionModeDto | null }
   | { type: 'login' }
   | { type: 'logout' }
   | { type: 'force_compact' }
@@ -199,8 +199,10 @@ export type ClientCommand =
   | { type: 'media_control_response'; response: MediaControlResponseDto }
   | { type: 'update_media_session_modes'; modes: Array<MediaSessionModeDto> }
   | { type: 'refresh_provider_catalog'; trigger: string }
-  | { type: 'set_session_mode'; mode: SessionModeDto }
   | { type: 'get_context_manifest' }
+  | { type: 'prepare_session_handoff'; request_id: string; target_mode: SessionModeDto }
+  | { type: 'cancel_session_handoff'; request_id: string }
+  | { type: 'retry_session_handoff'; request_id: string }
 ;
 
 export type ClientEvent =
@@ -318,8 +320,9 @@ export type ClientEvent =
   | { type: 'media_device_request'; request: MediaDeviceRequestEnvelopeDto }
   | { type: 'media_service_response'; response: MediaServiceResponseDto }
   | { type: 'media_control_request'; request: MediaControlRequestDto }
-  | { type: 'session_mode_changed'; session_id: string; mode: SessionModeDto; pending_mode?: SessionModeDto; revision: number }
   | { type: 'context_manifest'; manifest_json: string }
+  | { type: 'session_handoff_prepared'; request_id: string; source_session_id: string; source_mode: SessionModeDto; target_mode: SessionModeDto; cutoff: string; summary: string }
+  | { type: 'session_handoff_failed'; request_id: string; message: string }
 ;
 
 type BasicField = readonly [string, 'string' | 'boolean' | 'number' | 'integer' | 'unsigned' | 'array' | 'map' | 'opaque', boolean, boolean, boolean];
@@ -809,14 +812,20 @@ const CLIENT_EVENT_FIELDS: Record<ClientEvent['type'], readonly BasicField[]> = 
   media_control_request: [
     ['request', 'opaque', false, false, false],
   ],
-  session_mode_changed: [
-    ['session_id', 'string', false, false, false],
-    ['mode', 'opaque', false, false, false],
-    ['pending_mode', 'opaque', true, false, true],
-    ['revision', 'unsigned', false, false, false],
-  ],
   context_manifest: [
     ['manifest_json', 'string', false, false, false],
+  ],
+  session_handoff_prepared: [
+    ['request_id', 'string', false, false, false],
+    ['source_session_id', 'string', false, false, false],
+    ['source_mode', 'opaque', false, false, false],
+    ['target_mode', 'opaque', false, false, false],
+    ['cutoff', 'string', false, false, false],
+    ['summary', 'string', false, false, false],
+  ],
+  session_handoff_failed: [
+    ['request_id', 'string', false, false, false],
+    ['message', 'string', false, false, false],
   ],
 };
 
@@ -940,8 +949,10 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   media_control_response: true,
   update_media_session_modes: true,
   refresh_provider_catalog: true,
-  set_session_mode: true,
   get_context_manifest: true,
+  prepare_session_handoff: true,
+  cancel_session_handoff: true,
+  retry_session_handoff: true,
 };
 
 export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
@@ -1059,6 +1070,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   media_device_request: true,
   media_service_response: true,
   media_control_request: true,
-  session_mode_changed: true,
   context_manifest: true,
+  session_handoff_prepared: true,
+  session_handoff_failed: true,
 };

@@ -15,6 +15,8 @@ internal interface RealtimeAgentCallbacks {
     fun onReady()
     fun onTranscript(text: String, assistant: Boolean, final: Boolean)
     fun onPlayback(playing: Boolean)
+    fun onAgentTurnStarted() {}
+    fun onAgentTurnCompleted() {}
     fun onError(message: String)
     fun onClosed()
 }
@@ -47,11 +49,37 @@ internal class AndroidRealtimeAgentLane(
     private var canTruncate = false
     private var closedNormally = false
     private val transcripts = mutableMapOf<String, String>()
+    // Admission, native start delivery, and the decision to release this lane
+    // share one boundary. A commit pins the owner before crossing FFI.
+    private val lifecycleGate = Any()
+    private var navigationRequested = false
+    private var closeCommitted = false
+    private var pendingCommits = 0
+    private val activeAgentTurns = mutableSetOf<String>()
+    private var agentSessionId: String? = null
+
+    fun finishForNavigation() {
+        synchronized(lifecycleGate) {
+            if (closeCommitted) return
+            navigationRequested = true
+            driver.pauseStreamCapture(captureLease, true)
+        }
+        if (events.trySend(NAVIGATION_EVENT).isFailure) scope.launch { runCatching { events.send(NAVIGATION_EVENT) } }
+    }
 
     fun commitInput() {
-        driver.pauseStreamCapture(captureLease, true)
+        synchronized(lifecycleGate) {
+            if (closeCommitted || navigationRequested) return
+            pendingCommits++
+            driver.pauseStreamCapture(captureLease, true)
+        }
         scope.launch {
-            try { if (isLive()) providerSession?.commitInput() }
+            try {
+                // Pause fences new frames; drain the previously admitted write
+                // before CommitAudio enters the provider's ordered command queue.
+                driver.drainStreamCapture(captureLease)
+                if (isLive()) checkNotNull(providerSession).commitInput()
+            }
             catch (error: Throwable) { events.close(error) }
         }
     }
@@ -60,6 +88,18 @@ internal class AndroidRealtimeAgentLane(
         try {
             providerSession = provider.openRealtime(request, configuration) { event ->
                 val type = if (event.length <= 65_536) runCatching { JSONObject(event).optString("type") }.getOrNull() else null
+                if (type == "agent_response_started") {
+                    val started = runCatching { JSONObject(event) }.getOrNull()
+                    synchronized(lifecycleGate) {
+                        val sessionId = started?.optString("sessionId")?.takeIf(String::isNotBlank)
+                        val turnId = started?.optString("turnId")?.takeIf(String::isNotBlank)
+                        if (!closeCommitted && started?.optString("operationId") == request.identity.id && sessionId != null && turnId != null &&
+                            (agentSessionId == null || agentSessionId == sessionId)) {
+                            agentSessionId = sessionId
+                            if (activeAgentTurns.add(turnId) && pendingCommits > 0) pendingCommits--
+                        }
+                    }
+                }
                 if (type == "usage") {
                     runCatching { AndroidAudioUsageJournal.record(request.identity.id, "realtime", JSONObject(event)) }
                 }
@@ -86,11 +126,22 @@ internal class AndroidRealtimeAgentLane(
             }
             onConnected()
             for (raw in events) {
+                if (raw == NAVIGATION_EVENT) {
+                    val closeForNavigation = synchronized(lifecycleGate) {
+                        if (navigationRequested && pendingCommits == 0 && activeAgentTurns.isEmpty()) {
+                            closeCommitted = true
+                            true
+                        } else false
+                    }
+                    if (closeForNavigation) { closedNormally = true; break }
+                    continue
+                }
                 queuedEventBytes.addAndGet(-raw.length.toLong())
                 if (!isLive()) throw CancellationException("Realtime session is no longer current")
                 val event = JSONObject(raw)
                 when (event.optString("type")) {
                     "session_ready" -> {
+                        if (captureJob != null) continue
                         val input = event.getJSONObject("inputFormat").toPcmFormat()
                         outputFormat = event.getJSONObject("outputFormat").toPcmFormat()
                         input.requireSupported(); outputFormat!!.requireSupported()
@@ -125,7 +176,9 @@ internal class AndroidRealtimeAgentLane(
                         if (playedItems.size > 128 || itemRanges.size > 512) throw AudioOperationException(DeviceAudioErrorKind.MediaTooLarge, "Realtime audio item count exceeds its bound.")
                         if (chunks == null) {
                             // This device lane has no verified AEC: mute input while native output plays.
-                            driver.pauseStreamCapture(captureLease, true)
+                            synchronized(lifecycleGate) {
+                                driver.pauseStreamCapture(captureLease, true)
+                            }
                             val lease = acquirePlayback()
                             playbackLease = lease
                             chunks = Channel(16)
@@ -139,8 +192,40 @@ internal class AndroidRealtimeAgentLane(
                         checkNotNull(chunks).send(pcm)
                     }
                     "turn_completed" -> {
+                        // This is a provider response boundary, not the Agent turn boundary:
+                        // tools or their continuation may still be running.
                         finishPlayback(acknowledge = true)
-                        driver.pauseStreamCapture(captureLease, false)
+                    }
+                    "agent_response_started" -> {
+                        val valid = synchronized(lifecycleGate) {
+                            event.optString("operationId") == request.identity.id &&
+                                event.optString("sessionId") == agentSessionId &&
+                                event.optString("turnId") in activeAgentTurns
+                        }
+                        if (valid) callbacks.onAgentTurnStarted()
+                    }
+                    "agent_turn_completed" -> {
+                        val accepted = synchronized(lifecycleGate) {
+                            val turnId = event.optString("turnId").takeIf(String::isNotBlank)
+                            if (event.optString("operationId") != request.identity.id ||
+                                event.optString("sessionId") != agentSessionId || turnId == null ||
+                                !activeAgentTurns.remove(turnId)) false else true
+                        }
+                        if (!accepted) continue
+                        // Produced by the native Agent after tools and continuation finish.
+                        finishPlayback(acknowledge = true)
+                        val closeForNavigation = synchronized(lifecycleGate) {
+                            if (pendingCommits != 0 || activeAgentTurns.isNotEmpty()) false
+                            else if (navigationRequested) {
+                                closeCommitted = true
+                                true
+                            } else {
+                                callbacks.onAgentTurnCompleted()
+                                driver.pauseStreamCapture(captureLease, false)
+                                false
+                            }
+                        }
+                        if (closeForNavigation) { closedNormally = true; break }
                     }
                     "turn_started" -> transcripts.clear()
                     "transcript" -> {
@@ -154,10 +239,11 @@ internal class AndroidRealtimeAgentLane(
                         callbacks.onTranscript(accumulated, assistant, event.optBoolean("final"))
                     }
                     "error" -> throw AudioOperationException(DeviceAudioErrorKind.Unavailable, event.optString("message", "Realtime conversation failed."))
-                    "closed" -> { closedNormally = true; break }
+                    "closed" -> { synchronized(lifecycleGate) { closeCommitted = true }; closedNormally = true; break }
                 }
             }
         } finally {
+            synchronized(lifecycleGate) { closeCommitted = true }
             val playedMs = playbackLease?.let(driver::streamingPlaybackPositionMs)
             val rate = outputFormat?.sampleRateHz ?: 0
             val playedFrame = (playedMs ?: 0) * rate / 1000
@@ -194,6 +280,8 @@ internal class AndroidRealtimeAgentLane(
             if (isLive()) callbacks.onPlayback(false)
         }
     }
+
+    private companion object { const val NAVIGATION_EVENT = "\u0000navigation-drain" }
 }
 
 private fun JSONObject.toPcmFormat() = RealtimePcmFormat(getInt("sampleRateHz"), getInt("channels"), getString("encoding"))

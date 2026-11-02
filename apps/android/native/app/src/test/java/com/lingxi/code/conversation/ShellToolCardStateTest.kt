@@ -34,6 +34,19 @@ class ShellToolCardStateTest {
     }
 
     @Test
+    fun nativeFinalResultKeepsMultilineUnicodeAndItsTruncationFlag() {
+        val update = shellFinished(
+            id = "code-tool",
+            resultJson = """{"exit_code":0,"stdout":"first\nsecond \ud83d\udd27","stderr":"warning\n","truncated":true}""",
+            isError = false,
+        )
+        assertEquals("first\nsecond 🔧", update.stdout)
+        assertEquals("warning\n", update.stderr)
+        assertTrue(update.truncated)
+        assertEquals(ShellToolStatus.Completed, update.status)
+    }
+
+    @Test
     fun timeoutWinsOverGenericFailure() {
         val update = shellFinished(
             id = "task-2",

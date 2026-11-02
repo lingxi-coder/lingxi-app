@@ -226,6 +226,14 @@ function randomHostTurnId(): number {
   }
 }
 
+interface PendingSlashCommand {
+  client: BridgeClient;
+  generation: number;
+  fusion: boolean;
+  snapshotInFlight?: boolean;
+  retryTimer?: ReturnType<typeof setTimeout>;
+}
+
 // Mod UI requests share the runtime's ordinary command lane, and a transcript
 // mounts a render site per tool row, so opening a long chat asks for well over
 // a hundred renders at once. The Bridge closes a connection with 64 commands
@@ -272,6 +280,8 @@ export class SessionRuntime {
   private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
   private readonly pendingScheduledTurns = new Map<string, { resolve: (summary: string) => void; reject: (error: Error) => void }>();
   private activeTurn = false;
+  /** A command owns its session before the engine's first lifecycle event. */
+  private readonly pendingSlashCommands = new Map<number, PendingSlashCommand>();
   private computerAccessInTurn = false;
   private activeTurnGeneration: number | undefined;
   private disconnectedForegroundPending = false;
@@ -323,97 +333,11 @@ export class SessionRuntime {
     fail(error: Error): void;
   } | undefined;
 
-  private pendingSessionModeSwitch: {
-    mode: RuntimeSessionMode;
+  private pendingDraftModeSnapshot: {
+    generation: number;
     complete(): void;
     fail(error: Error): void;
   } | undefined;
-  private readonly queuedSessionModeSwitches: Array<{
-    mode: RuntimeSessionMode;
-    persist: boolean;
-    saveSelection?: () => void;
-    client: BridgeClient;
-    generation: number;
-    resolve(): void;
-    reject(error: Error): void;
-  }> = [];
-  private pendingDraftModeSnapshot: {
-    generation: number;
-    complete(event: Extract<ClientEvent, { type: 'session_mode_changed' }>): void;
-    fail(error: Error): void;
-  } | undefined;
-
-  /** Initialize a fresh draft only; existing conversations restore their own metadata. */
-  initializeSessionMode(mode: RuntimeSessionMode): Promise<void> {
-    this.draftModeRestorationRequired = true;
-    return this.applySessionMode(mode, false).then(() => {
-      this.draftWasInitialized = true;
-      this.draftModeRestorationRequired = false;
-    });
-  }
-
-  private applySessionMode(mode: RuntimeSessionMode, persist: boolean, reservedSelection?: () => void): Promise<void> {
-    const client = this.requireClient();
-    const saveSelection = persist ? reservedSelection ?? this.opts.onSessionModeSelectionStarted?.(mode) : undefined;
-    return new Promise<void>((resolve, reject) => {
-      this.queuedSessionModeSwitches.push({ mode, persist, saveSelection, client, generation: this.generation, resolve, reject });
-      this.notifyActivityChanged();
-      this.startNextSessionModeSwitch();
-    });
-  }
-
-  private rejectQueuedSessionModeSwitches(error: Error): void {
-    for (const queued of this.queuedSessionModeSwitches.splice(0)) queued.reject(error);
-  }
-
-  private startNextSessionModeSwitch(): void {
-    if (this.pendingSessionModeSwitch) return;
-    const next = this.queuedSessionModeSwitches.shift();
-    if (!next) return;
-    if (this.disposed || this.generation !== next.generation || this.client !== next.client) {
-      next.reject(new Error('Conversation mode change was interrupted.'));
-      queueMicrotask(() => this.startNextSessionModeSwitch());
-      this.notifyActivityChanged();
-      return;
-    }
-    const { mode, persist, saveSelection, client, resolve, reject } = next;
-    const timer = setTimeout(() => {
-      // A timeout does not establish whether the engine committed. Do not
-      // submit later choices until the caller can reconcile the connection.
-      this.rejectQueuedSessionModeSwitches(new Error('Conversation mode change was interrupted after a timeout.'));
-      pending.fail(new Error('Conversation mode change timed out.'));
-    }, 10_000);
-    timer.unref();
-    const finish = (error?: Error) => {
-      if (this.pendingSessionModeSwitch !== pending) return;
-      this.pendingSessionModeSwitch = undefined;
-      clearTimeout(timer);
-      if (error) reject(error); else resolve();
-      // Keep later requests queued until this event has finished publication.
-      queueMicrotask(() => this.startNextSessionModeSwitch());
-      this.notifyActivityChanged();
-    };
-    const pending = {
-      mode,
-      complete: () => {
-        try {
-          if (persist) {
-            if (this.draftSessionMode !== undefined) this.draftSessionMode = mode;
-            if (saveSelection) saveSelection();
-            else this.opts.onSessionModeSelected?.(mode);
-          }
-          finish();
-        } catch (error) {
-          finish(new Error(`Could not save conversation mode: ${sanitizeDiagnostic(error)}`));
-        }
-      },
-      fail: (error: Error) => finish(error),
-    };
-    this.pendingSessionModeSwitch = pending;
-    this.notifyActivityChanged();
-    try { client.sendCommand({ type: 'set_session_mode', mode }); }
-    catch (error) { pending.fail(error instanceof Error ? error : new Error(String(error))); }
-  }
 
   private pendingFastModeSwitch: {
     enabled: boolean;
@@ -563,7 +487,8 @@ export class SessionRuntime {
         }
         if (slashCommand) this.assertModeReadyForSlashCommand();
         pending.sent = true;
-        client.sendCommand(slashCommand ?? { type: 'set_model', model });
+        if (slashCommand) this.sendTrackedSlashCommand(client, slashCommand);
+        else client.sendCommand({ type: 'set_model', model });
       } catch (error) {
         pending.fail(error instanceof Error ? error : new Error(String(error)));
       }
@@ -912,24 +837,19 @@ export class SessionRuntime {
     client: BridgeClient; generation: number; requestId: string; done: Promise<void>;
     resolve(): void; received: boolean; controller: AbortController; timer: ReturnType<typeof setTimeout>;
   };
+  private readonly pendingHandoffFailures = new Set<(error: Error) => void>();
   private readonly mediaConnectionRequestListeners = new Set<(request: MediaConnectionRequestDto) => void>();
   private readonly mediaControlRequestListeners = new Set<(request: MediaControlRequestDto) => void>();
 
   sessionMode?: RuntimeSessionMode;
-  private sessionModeSnapshot?: Extract<ClientEvent, { type: 'session_mode_changed' }>;
-  private sessionModeSnapshotGeneration?: number;
   /** Drafts have no transcript to resume, so retain their confirmed profile across process starts. */
   private draftSessionMode?: RuntimeSessionMode;
   private draftModeRestorationRequired: boolean;
-  private draftWasInitialized: boolean;
-  private draftConfirmedRevision?: number;
-
-  constructor(private readonly opts: BridgeManagerOptions, sessionMode?: RuntimeSessionMode, draftWasInitialized = false, draftConfirmedRevision?: number) {
-    this.sessionMode = sessionMode;
+  constructor(private readonly opts: BridgeManagerOptions, sessionMode?: RuntimeSessionMode,
+    private readonly scheduledDurableAnchor = false) {
+    this.sessionMode = sessionMode ?? opts.expectedSessionMode;
     this.draftSessionMode = sessionMode;
     this.draftModeRestorationRequired = sessionMode !== undefined;
-    this.draftWasInitialized = draftWasInitialized;
-    this.draftConfirmedRevision = draftConfirmedRevision;
     this.sessionId = opts.sessionId ?? randomUUID();
     this.ownedTranscriptPath = opts.resumeTranscriptPath;
     this.remountControls = opts.remountControls;
@@ -1106,10 +1026,14 @@ export class SessionRuntime {
         this.pendingScheduledTurns.set(runId, { resolve, reject });
         this.activeTurn = true;
         this.activeTurnGeneration = this.generation;
-        this.sessionHasHistory = true;
         try {
           client.sendCommand({ type: 'scheduled_run_turn', run_id: runId, prompt: task.prompt, model: config.model, reasoning: config.reasoning });
+          this.sessionHasHistory = true;
+          this.sessionIdentityCommitted = true;
+          this.draftSessionMode = undefined;
           this.journalPrompt(task.prompt, [], 0, { origin: 'scheduled' });
+          try { this.opts.onDurableSessionActivity?.(); }
+          catch (error) { this.diagnostics.add('warn', 'bridge', `failed to schedule session source recording: ${sanitizeDiagnostic(error)}`); }
         } catch (error) {
           this.pendingScheduledTurns.delete(runId);
           this.activeTurn = false;
@@ -1244,7 +1168,7 @@ export class SessionRuntime {
   }
 
   get hasActiveWork(): boolean {
-    return this.resumeOperationInProgress || this.changingWorkspace || this.pendingSessionModeSwitch !== undefined || this.queuedSessionModeSwitches.length > 0 || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.hasActiveAgents || this.pendingInteractions > 0;
+    return this.resumeOperationInProgress || this.changingWorkspace || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.pendingSlashCommands.size > 0 || this.hasActiveAgents || this.pendingInteractions > 0;
   }
 
   private currentResumeOwner(): PendingSessionResume | null {
@@ -1393,13 +1317,7 @@ export class SessionRuntime {
   }
 
   replaySnapshot(): readonly SequencedRuntimeEventEnvelope<ClientEvent>[] {
-    // Fresh drafts have no transcript base yet. Keep the latest authoritative
-    // mode separately so renderer reloads can still reconstruct their control.
-    const mode = this.latestState.get('session_mode_changed');
-    const replay = mode && mode.sequence > this.remoteBaseSequence
-      ? [...this.replayEvents, mode].sort((a, b) => a.sequence - b.sequence)
-      : this.replayEvents;
-    return Object.freeze(replay.map((envelope) => Object.freeze({
+    return Object.freeze(this.replayEvents.map((envelope) => Object.freeze({
       sessionId: envelope.sessionId,
       sequence: envelope.sequence,
       event: structuredClone(envelope.event),
@@ -1430,6 +1348,8 @@ export class SessionRuntime {
     const controlsEvent = this.latestState.get('conversation_controls_changed')?.event;
     return {
       sessionId: this.sessionId,
+      ...(!this.draftModeRestorationRequired && !this.ownedSessionResumeRequired && this.sessionMode
+        ? { sessionMode: this.sessionMode } : {}),
       runtimeId: this.runtimeId,
       epoch: `${this.runtimeId}:${this.remoteBaseSequence}`,
       baseSequence: this.remoteBaseSequence,
@@ -1622,6 +1542,74 @@ export class SessionRuntime {
     this.opts.onActivityChanged?.();
   }
 
+  private sendTrackedSlashCommand(client: BridgeClient, command: Extract<ClientCommand, { type: 'run_slash_command' }>): void {
+    const turnId = command.turn_id;
+    if (turnId == null) throw new Error('Slash command has no turn identity.');
+    if (this.pendingSlashCommands.has(turnId) || this.activeTurnId === turnId) {
+      throw new Error('A command with this turn identity is already active.');
+    }
+    const pending: PendingSlashCommand = {
+      client, generation: this.generation, fusion: /^\/fusion(?:\s|$)/i.test(command.raw.trim()),
+    };
+    this.pendingSlashCommands.set(turnId, pending);
+    this.notifyActivityChanged();
+    try {
+      client.sendCommand(command);
+    } catch (error) {
+      this.finishPendingSlashCommand(turnId, pending);
+      throw error;
+    }
+  }
+
+  private finishPendingSlashCommand(turnId: number, pending: PendingSlashCommand): void {
+    if (this.pendingSlashCommands.get(turnId) !== pending) return;
+    if (pending.retryTimer) clearTimeout(pending.retryTimer);
+    this.pendingSlashCommands.delete(turnId);
+    this.notifyActivityChanged();
+  }
+
+  private clearPendingSlashCommands(beforeGeneration = Infinity): void {
+    for (const [turnId, pending] of this.pendingSlashCommands) {
+      if (pending.generation < beforeGeneration) this.finishPendingSlashCommand(turnId, pending);
+    }
+  }
+
+  /** Fusion can start a background task before its independently sent task event arrives. */
+  private reconcileFusionSlash(turnId: number, pending: PendingSlashCommand): void {
+    if (pending.snapshotInFlight || this.pendingSlashCommands.get(turnId) !== pending) return;
+    pending.snapshotInFlight = true;
+    void (async () => {
+      try {
+        let installed = false;
+        await pending.client.requestRuntimeSnapshot((events) => {
+          if (this.disposed || pending.generation !== this.generation || pending.client !== this.client
+            || this.pendingSlashCommands.get(turnId) !== pending) return;
+          const roster = events.find((event) => event.type === 'session_agent_list');
+          if (roster?.type !== 'session_agent_list' || roster.session_id !== this.sessionId) {
+            throw new Error('Runtime background snapshot belongs to another session.');
+          }
+          this.gitActivity.replaceSnapshot(events);
+          installed = true;
+          this.finishPendingSlashCommand(turnId, pending);
+        });
+        if (!installed && this.pendingSlashCommands.get(turnId) === pending) {
+          throw new Error('Runtime background snapshot was not installed.');
+        }
+      } catch (error) {
+        if (this.pendingSlashCommands.get(turnId) !== pending || this.disposed
+          || pending.generation !== this.generation || pending.client !== this.client) return;
+        this.diagnostics.add('warn', 'bridge', `Fusion task handoff is unconfirmed: ${sanitizeDiagnostic(error)}`);
+        pending.retryTimer = setTimeout(() => {
+          pending.retryTimer = undefined;
+          this.reconcileFusionSlash(turnId, pending);
+        }, 1_000);
+        pending.retryTimer.unref?.();
+      } finally {
+        pending.snapshotInFlight = false;
+      }
+    })();
+  }
+
   /** A foreground terminal cannot settle independent background permission gates. */
   private clearTurnInteractions(all = false): void {
     ++this.foregroundInteractionEpoch;
@@ -1674,7 +1662,7 @@ export class SessionRuntime {
       if (this.permissionScopeChecks.get(id) !== request || generation !== this.generation
         || client !== this.client || this.disposed || this.resolvedPermissionIds.has(id)) return;
       if (!scope) return;
-      if (!scope.background_owned && ((!this.activeTurn && (!resumeOwner || this.currentResumeOwner() !== resumeOwner)) || this.cancellingTurn
+      if (!scope.background_owned && ((!this.activeTurn && this.pendingSlashCommands.size === 0 && (!resumeOwner || this.currentResumeOwner() !== resumeOwner)) || this.cancellingTurn
         || foregroundEpoch !== this.foregroundInteractionEpoch)) {
         this.diagnostics.add('warn', 'bridge', `dropped permission request ${id}: foreground owner ended or is cancelling`);
         return;
@@ -1701,9 +1689,13 @@ export class SessionRuntime {
     }
   }
 
-  async start(): Promise<void> {
+  async start(options?: { reconnectOnly?: boolean }): Promise<void> {
     if (this.disposed) throw new Error('SessionRuntime is disposed');
-    if (this.startPromise) return this.startPromise;
+    if (this.startPromise) {
+      await this.startPromise;
+      if (options?.reconnectOnly && !this.liveConnectionRecovered) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
+      return;
+    }
     if (this.state.status === 'connected') return;
     const startedAt = Date.now();
     const starting = this.restartChain.catch(() => undefined).then(async () => {
@@ -1712,7 +1704,8 @@ export class SessionRuntime {
         // Explicit restart/stop operations and automatic connection recovery
         // share one lifecycle queue, so only one sidecar can be started.
         if (this.state.status === 'connected') return;
-        if (this.child || this.client || this.adoptedPid) await this.recoverConnection();
+        if (this.child || this.client || this.adoptedPid) await this.recoverConnection(options?.reconnectOnly);
+        else if (options?.reconnectOnly) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
         else await this.startInternal();
         await this.restoreDraftSessionModeIfNeeded();
       } catch (error) {
@@ -1732,11 +1725,12 @@ export class SessionRuntime {
     return completion;
   }
 
-  private async recoverConnection(): Promise<void> {
+  private async recoverConnection(reconnectOnly = false): Promise<void> {
     this.liveConnectionRecovered = false;
-    const interruptedForeground = this.disconnectedForegroundPending || this.activeTurn || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
+    const interruptedForeground = this.disconnectedForegroundPending || this.activeTurn || this.pendingSlashCommands.size > 0 || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
     const pid = this.child?.pid ?? this.adoptedPid;
     if (!pid || !this.processIsAlive(pid)) {
+      if (reconnectOnly) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
       await this.stopBridge();
       if (this.disposed) throw new Error('SessionRuntime is disposed');
       await this.startInternal();
@@ -1774,6 +1768,9 @@ export class SessionRuntime {
           throw new Error('Runtime background snapshot belongs to another session.');
         }
         this.gitActivity.replaceSnapshot(events);
+        // The accepted hello and installed roster transfer ownership of any
+        // background work before the previous connection's leases go away.
+        this.clearPendingSlashCommands(recoveredGeneration);
         for (const event of events) this.broadcastClientEvent(event);
         this.notifyActivityChanged();
       });
@@ -1915,6 +1912,9 @@ export class SessionRuntime {
         reused: Boolean(reusable),
       });
       if (reusable) {
+        if (this.scheduledDurableAnchor && this.draftSessionMode !== undefined) {
+          throw new Error('The new scheduled chat UUID is already owned.');
+        }
         this.launchDir = reusable.launchDir;
         this.adoptedPid = reusable.pid;
         this.adoptedProcessOwned = reusable.ownedProcess;
@@ -2200,7 +2200,9 @@ export class SessionRuntime {
       bridgeDir,
       sessionTranscriptPath: this.ownedTranscriptPath,
       restoreDraft: this.draftSessionMode !== undefined,
-      initialConversationMode: this.draftWasInitialized ? undefined : this.draftSessionMode,
+      scheduledDurableAnchor: this.draftSessionMode !== undefined && this.scheduledDurableAnchor,
+      initialConversationMode: this.draftSessionMode,
+      expectedConversationMode: this.draftSessionMode === undefined ? this.sessionMode : undefined,
       additionalDirectories: launch.additionalDirectories,
       promptDirectories: launch.promptDirectories,
       initialProjectRoot: launch.initialProjectRoot,
@@ -2656,7 +2658,7 @@ export class SessionRuntime {
         return;
       }
       const resumeOwner = this.currentResumeOwner();
-      if (isTurnOwnedEvent(event) && !this.activeTurn && !resumeOwner && !resumedUsage) {
+      if (isTurnOwnedEvent(event) && !this.activeTurn && this.pendingSlashCommands.size === 0 && !resumeOwner && !resumedUsage) {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
         return;
       }
@@ -2712,38 +2714,24 @@ export class SessionRuntime {
       if (event.type === 'provider_connection_tested') {
         this.handleProviderConnectionTested(event);
       }
-      if (event.type === 'context_manifest') return;
-      if (event.type === 'session_mode_changed') {
-        if (event.session_id !== this.sessionId) return;
-        const selectedMode = event.pending_mode ?? event.mode;
-        if (this.draftModeRestorationRequired && this.draftWasInitialized) {
-          const previousRevision = this.draftConfirmedRevision;
-          if ((previousRevision !== undefined && event.revision < previousRevision)
-            || (selectedMode !== this.draftSessionMode && (previousRevision === undefined || event.revision <= previousRevision))) {
-            this.pendingDraftModeSnapshot?.fail(new Error('The restored draft conversation mode does not match its confirmed profile.'));
-            return;
+      if (event.type === 'context_manifest') {
+        const pending = this.pendingDraftModeSnapshot;
+        if (pending?.generation === generation) {
+          try {
+            const manifest: unknown = JSON.parse(event.manifest_json);
+            const session = manifest && typeof manifest === 'object' && !Array.isArray(manifest)
+              ? (manifest as Record<string, unknown>)['session'] : undefined;
+            if (!session || typeof session !== 'object' || Array.isArray(session)
+              || (session as Record<string, unknown>)['session_id'] !== this.sessionId
+              || (session as Record<string, unknown>)['mode'] !== this.draftSessionMode) {
+              throw new Error('The restored draft conversation mode does not match its owner.');
+            }
+            pending.complete();
+          } catch (error) {
+            pending.fail(error instanceof Error ? error : new Error(String(error)));
           }
-          // A newer durable selection may have committed even if its response
-          // was lost. It is authoritative, but does not change device defaults.
-          if (previousRevision !== undefined && event.revision > previousRevision) this.draftSessionMode = selectedMode;
         }
-        if (this.sessionModeSnapshotGeneration !== generation) {
-          this.sessionModeSnapshot = undefined;
-          this.sessionModeSnapshotGeneration = generation;
-        }
-        const previous = this.sessionModeSnapshot;
-        if (previous && (event.revision < previous.revision
-          || (event.revision === previous.revision && previous.pending_mode === undefined
-            && event.pending_mode !== undefined && previous.mode === event.pending_mode))) return;
-        this.sessionModeSnapshot = event;
-        this.sessionMode = event.mode;
-        if (this.draftSessionMode !== undefined) {
-          if (this.draftWasInitialized && !this.pendingSessionModeSwitch) this.draftSessionMode = selectedMode;
-          this.draftConfirmedRevision = event.revision;
-          this.opts.onDraftModeSnapshot?.(selectedMode, event.revision);
-        }
-        if (this.pendingDraftModeSnapshot?.generation === generation) this.pendingDraftModeSnapshot.complete(event);
-        if ((event.pending_mode ?? event.mode) === this.pendingSessionModeSwitch?.mode) this.pendingSessionModeSwitch.complete();
+        return;
       }
       if (event.type === 'session_resumed') {
         if (event.session_id !== this.sessionId) {
@@ -2751,9 +2739,11 @@ export class SessionRuntime {
           this.fail('engine resumed a different session id');
           return;
         }
-        this.sessionModeSnapshot = undefined;
-        this.sessionModeSnapshotGeneration = undefined;
-        this.latestState.delete('session_mode_changed');
+        if (this.sessionMode !== undefined && event.mode !== this.sessionMode) {
+          this.rejectPendingSessionResume(new Error('engine resumed a session in a different mode'));
+          this.fail('engine resumed a session in a different mode');
+          return;
+        }
         this.sessionMode = event.mode;
         this.requestAudioSessionContext(client, generation);
         this.sessionHasHistory = true;
@@ -2764,12 +2754,18 @@ export class SessionRuntime {
         }
       }
       if (event.type === 'session_started') {
-        this.sessionModeSnapshot = undefined;
-        this.sessionModeSnapshotGeneration = undefined;
-        this.latestState.delete('session_mode_changed');
+        if (event.session_id !== this.sessionId) {
+          this.pendingDraftModeSnapshot?.fail(new Error('engine started a different session id'));
+          this.fail('engine started a different session id');
+          return;
+        }
+        if (this.sessionMode !== undefined && event.mode !== this.sessionMode) {
+          this.pendingDraftModeSnapshot?.fail(new Error('engine started a session in a different mode'));
+          this.fail('engine started a session in a different mode');
+          return;
+        }
         this.sessionMode = event.mode;
-        if (event.session_id === this.sessionId) this.requestAudioSessionContext(client, generation);
-        else this.invalidateNativeMediaBinding();
+        this.requestAudioSessionContext(client, generation);
       }
       if (event.type === 'permission_mode_changed' && event.mode === this.pendingPermissionSwitch?.mode) {
         this.pendingPermissionSwitch.complete();
@@ -2779,9 +2775,6 @@ export class SessionRuntime {
       }
       if (event.type === 'error' && event.message.startsWith('set_permission_mode failed:')) {
         this.pendingPermissionSwitch?.fail(new Error(sanitizeDiagnostic(event.message)));
-      }
-      if (event.type === 'error' && event.message.startsWith('set_session_mode failed:')) {
-        this.pendingSessionModeSwitch?.fail(new Error(sanitizeDiagnostic(event.message)));
       }
       if (event.type === 'error' && event.message.startsWith('set_fast_mode failed:')) {
         this.pendingFastModeSwitch?.fail(new Error(sanitizeDiagnostic(event.message)));
@@ -2815,6 +2808,15 @@ export class SessionRuntime {
         this.activeTurn = true;
         this.activeTurnGeneration = generation;
         this.activeTurnId = event.turn_id;
+        const pending = event.turn_id === undefined ? undefined : this.pendingSlashCommands.get(event.turn_id);
+        if (pending) this.finishPendingSlashCommand(event.turn_id!, pending);
+      }
+      if (event.type === 'slash_command_result' && event.turn_id !== undefined) {
+        const pending = this.pendingSlashCommands.get(event.turn_id);
+        if (pending) {
+          if (pending.fusion && !event.is_error) this.reconcileFusionSlash(event.turn_id, pending);
+          else this.finishPendingSlashCommand(event.turn_id, pending);
+        }
       }
       if (event.type === 'tool_use_started' && (event.tool === 'computer' || event.tool === 'browser')) this.computerAccessInTurn = true;
       if (event.type === 'turn_ended' || event.type === 'session_ended') {
@@ -2927,7 +2929,7 @@ export class SessionRuntime {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
       // Same reasoning as the permission handler above: the engine is parked on
       // an answer, so a discarded request is a stall, not a no-op.
-      if ((!this.activeTurn && !this.currentResumeOwner()) || this.cancellingTurn) {
+      if ((!this.activeTurn && this.pendingSlashCommands.size === 0 && !this.currentResumeOwner()) || this.cancellingTurn) {
         this.diagnostics.add('warn', 'bridge', `dropped computer access request ${request.request_id}: ${this.cancellingTurn ? 'turn is cancelling' : 'no active turn'}`);
         return;
       }
@@ -3249,7 +3251,7 @@ export class SessionRuntime {
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
     if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
     if (this.ownedSessionResumeRequired) throw new Error('Resume this chat before sending another prompt.');
-    if (this.draftModeRestorationRequired || this.pendingSessionModeSwitch || this.queuedSessionModeSwitches.length > 0) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
+    if (this.draftModeRestorationRequired) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
     if (this.archiving) throw new Error('This chat is being archived.');
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
@@ -3293,7 +3295,7 @@ export class SessionRuntime {
     visualizationContext?: VisualizationReference,
     source?: PromptSource,
   ): void {
-    if (this.draftModeRestorationRequired || this.pendingSessionModeSwitch || this.queuedSessionModeSwitches.length > 0) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
+    if (this.draftModeRestorationRequired) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
     const needsIdentityCommit = !this.sessionIdentityCommitted;
     const traceContext = this.telemetryRevoked ? undefined : this.telemetry?.beginTurn(turnId);
     try {
@@ -3483,9 +3485,50 @@ export class SessionRuntime {
   }
 
   private assertModeReadyForSlashCommand(): void {
-    if (this.draftModeRestorationRequired || this.pendingSessionModeSwitch || this.queuedSessionModeSwitches.length > 0) {
+    if (this.draftModeRestorationRequired) {
       throw new Error('Wait for the conversation mode to be ready before sending a command.');
     }
+  }
+
+  /** Capture one read-only summary from this runtime without interrupting its turn. */
+  prepareSessionHandoff(requestId: string, targetMode: RuntimeSessionMode, signal: AbortSignal, retry = false): Promise<Extract<ClientEvent, { type: 'session_handoff_prepared' }>> {
+    const client = this.requireClient();
+    const generation = this.generation;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error, result?: Extract<ClientEvent, { type: 'session_handoff_prepared' }>) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', cancel);
+        this.pendingHandoffFailures.delete(onInterrupted);
+        client.off('event', onEvent);
+        client.off('close', onClose);
+        if (error) reject(error); else resolve(result!);
+      };
+      const cancel = () => {
+        try { client.sendCommand({ type: 'cancel_session_handoff', request_id: requestId }); } catch { /* already disconnected */ }
+        finish(new Error('Handoff cancelled.'));
+      };
+      const onClose = () => finish(new Error('The source connection closed during handoff.'));
+      const onInterrupted = (error: Error) => finish(error);
+      const onEvent = (event: ClientEvent) => {
+        if (client !== this.client || generation !== this.generation) return;
+        if ((event.type !== 'session_handoff_prepared' && event.type !== 'session_handoff_failed') || event.request_id !== requestId) return;
+        if (event.type === 'session_handoff_failed') finish(new Error(event.message));
+        else if (event.source_session_id !== this.sessionId || event.source_mode !== this.sessionMode || event.target_mode !== targetMode) {
+          finish(new Error('Handoff source or target did not match.'));
+        } else finish(undefined, event);
+      };
+      client.on('event', onEvent);
+      client.on('close', onClose);
+      this.pendingHandoffFailures.add(onInterrupted);
+      signal.addEventListener('abort', cancel, { once: true });
+      if (signal.aborted) { cancel(); return; }
+      void this.dispatchCommand(retry ? { type: 'retry_session_handoff', request_id: requestId }
+        : { type: 'prepare_session_handoff', request_id: requestId, target_mode: targetMode }).catch((error: unknown) => {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
   }
 
   /**
@@ -3496,12 +3539,20 @@ export class SessionRuntime {
    * never reaches the engine; the renderer's mode display reads the engine's
    * actual (unchanged) mode, so nothing to revert.
    */
-  async dispatchCommand(command: unknown, source?: PromptSource, reservedModeSelection?: () => void): Promise<void> {
+  async dispatchCommand(command: unknown, source?: PromptSource): Promise<void> {
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
     if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
     if (this.ownedSessionResumeRequired) throw new Error('Resume this chat before sending another command.');
     if (this.archiving) throw new Error('This chat is being archived.');
-    const validated = validateClientCommand(command, this.activeWorkspace);
+    const input = validateClientCommand(command, this.activeWorkspace);
+    if (input.type === 'run_slash_command' && /^\/(?:clear|reset|new)(?:\s|$)/.test(input.raw)) {
+      throw new Error('Start a new chat using the desktop session controls.');
+    }
+    // A slash result or subsequent turn must identify the command whose cache
+    // lease it settles, including callers that omitted the optional turn id.
+    const validated = input.type === 'run_slash_command' && input.turn_id == null
+      ? { ...input, turn_id: randomHostTurnId() }
+      : input;
     if (this.draftModeRestorationRequired) throw new Error('Wait for the conversation mode to be ready before sending a command.');
     if (validated.type === 'run_slash_command') this.assertModeReadyForSlashCommand();
     if (validated.type.startsWith('side_chat_')) {
@@ -3579,7 +3630,7 @@ export class SessionRuntime {
           return;
         }
         this.assertModeReadyForSlashCommand();
-        client.sendCommand({ ...validated, raw: pinnedRaw });
+        this.sendTrackedSlashCommand(client, { ...validated, raw: pinnedRaw });
         this.commitFusionHistory(validated);
         this.journalSlashCommand(validated, source);
       } finally {
@@ -3612,12 +3663,13 @@ export class SessionRuntime {
     if (validated.type === 'set_permission_mode' && (this.opts.getSavedPermissionMode || this.opts.onPermissionModeSelected)) {
       return this.applyPermissionMode(validated.mode, true);
     }
-    if (validated.type === 'set_session_mode') return this.applySessionMode(validated.mode, true, reservedModeSelection);
     if (validated.type === 'set_fast_mode' && (this.opts.getSavedFastMode || this.opts.onFastModeSelected)) {
       return this.applyFastMode(validated.enabled, true);
     }
     if (validated.type === 'run_slash_command') this.assertModeReadyForSlashCommand();
-    this.requireClient().sendCommand(validated);
+    const client = this.requireClient();
+    if (validated.type === 'run_slash_command') this.sendTrackedSlashCommand(client, validated);
+    else client.sendCommand(validated);
     this.commitFusionHistory(validated);
     this.journalSlashCommand(validated, source);
   }
@@ -3916,7 +3968,8 @@ export class SessionRuntime {
       this.notifyActivityChanged();
       try {
         if (selectedPath) {
-          selectedResponse = client.resumeSessionFromTranscript(this.sessionId, selectedPath, pending.controller.signal);
+          if (!this.sessionMode) throw new Error('The session mode is unavailable.');
+          selectedResponse = client.resumeSessionFromTranscript(this.sessionId, selectedPath, this.sessionMode, pending.controller.signal);
           void selectedResponse.then(() => {
             if (this.currentResumeOwner() !== pending) return;
             pending.responseReceived = true;
@@ -3926,7 +3979,8 @@ export class SessionRuntime {
             this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)), pending);
           });
         } else {
-          client.sendCommand({ type: 'resume_session', session_id: this.sessionId,
+          if (!this.sessionMode) throw new Error('The session mode is unavailable.');
+          client.sendCommand({ type: 'resume_session', session_id: this.sessionId, expected_mode: this.sessionMode,
             cwd: this.projectPath || this.activeWorkspace });
         }
       } catch (error) {
@@ -3973,12 +4027,8 @@ export class SessionRuntime {
 
   private async restoreDraftSessionModeIfNeeded(): Promise<void> {
     if (!this.draftModeRestorationRequired || this.draftSessionMode === undefined) return;
-    if (!this.draftWasInitialized) {
-      await this.initializeSessionMode(this.draftSessionMode);
-      return;
-    }
-    // A retained draft is hydrated by bridge boot under the transcript writer
-    // lease. Verify that exact profile instead of writing a new transition.
+    // Boot creates or restores the owner under the transcript writer lease.
+    // The confirmation only reads it; a conversation never changes mode.
     await this.requestDraftModeSnapshot();
     this.draftModeRestorationRequired = false;
   }
@@ -4111,9 +4161,7 @@ export class SessionRuntime {
     this.state = next;
     if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
       this.telemetry?.interrupt(next.status === 'error' ? 'error' : 'interrupted');
-      this.disconnectedForegroundPending ||= this.activeTurn || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
-      this.rejectQueuedSessionModeSwitches(new Error('Conversation mode change was interrupted.'));
-      this.pendingSessionModeSwitch?.fail(new Error('Conversation mode change was interrupted.'));
+      this.disconnectedForegroundPending ||= this.activeTurn || this.pendingSlashCommands.size > 0 || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
       this.pendingDraftModeSnapshot?.fail(new Error('Draft mode restoration was interrupted.'));
       this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
       this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
@@ -4154,6 +4202,7 @@ export class SessionRuntime {
   }
 
   private clearPendingConnectionOperations(): void {
+    for (const fail of [...this.pendingHandoffFailures]) fail(new Error('Handoff connection interrupted.'));
     for (const queued of this.queuedModUiRequests.splice(0)) queued.reject(new Error('Mod UI request interrupted.'));
     this.pendingModUiRequests.rejectSession(this.sessionId, new Error('Mod UI request interrupted.'));
     for (const pending of this.pendingCron.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled task connection interrupted.')); }
@@ -4163,8 +4212,6 @@ export class SessionRuntime {
     for (const pending of this.pendingRunBindings.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled execution interrupted.')); }
     this.pendingRunBindings.clear();
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
-    this.rejectQueuedSessionModeSwitches(new Error('Conversation mode change was interrupted.'));
-    this.pendingSessionModeSwitch?.fail(new Error('Conversation mode change was interrupted.'));
     this.pendingDraftModeSnapshot?.fail(new Error('Draft mode restoration was interrupted.'));
     this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
     this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
@@ -4285,6 +4332,7 @@ export class SessionRuntime {
     if (requestedExit) closeClient();
     if (!adoptedPid || adoptedProcessOwned) this.removeLaunchDirectory();
     else this.launchDir = null;
+    this.clearPendingSlashCommands();
   }
 
   private processIsAlive(pid: number): boolean {

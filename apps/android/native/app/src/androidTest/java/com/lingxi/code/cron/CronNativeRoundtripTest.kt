@@ -67,15 +67,19 @@ class CronNativeRoundtripTest {
         val runtime = com.lingxi.code.mobileWorkspaceTestConfiguration(root)
         val paths = com.lingxi.code.bindings.runtime.mobileUserDirectories(runtime.managedRoot)
         val workspace = File(paths.scheduledCwd).apply { mkdirs() }
-        val id = UUID.randomUUID().toString()
+        var id: String? = null
         try {
             repeat(2) { pass ->
+                if (pass > 0) {
+                    assertTrue(com.lingxi.code.bindings.runtime.waitForMobileSessionRelease(paths.configHome, checkNotNull(id), 8000u))
+                }
                 val events = Channel<ClientEvent>(Channel.UNLIMITED)
                 val engine = buildAndroidEngine(
                     config = AndroidEngineLaunchConfigFfi(
                         appVersion = null,
                         appAgentHost = false,
                         apiBase = "https://invalid.example", apiKey = "", model = "", sessionMode = SessionModeDto.CODE,
+                        initialSessionId = id,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,
                         providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":[]}"""),
                         mobileLinux = runtime,
@@ -92,13 +96,13 @@ class CronNativeRoundtripTest {
                     computerUse = null, shell = null, git = null, gitCredentialProvider = null, secureStorage = null, deviceControl = null)
 
                 try {
-                    if (pass == 0) engine.resumeEmptySession(id, "Scheduled result")
-                    else engine.submit(ClientCommand.ResumeSession(id, null))
-                    withTimeout(20_000) {
+                    if (pass == 0) {
+                        id = engine.workspaceState().sessionId.removePrefix("sess:")
+                    } else withTimeout(20_000) {
                         while (true) {
                             when (val event = events.receive()) {
                                 is ClientEvent.SessionResumed -> {
-                                    assertEquals(id, event.sessionId.removePrefix("sess:"))
+                                    assertEquals(checkNotNull(id), event.sessionId.removePrefix("sess:"))
                                     return@withTimeout
                                 }
                                 is ClientEvent.Error -> error(event.message.displayText())

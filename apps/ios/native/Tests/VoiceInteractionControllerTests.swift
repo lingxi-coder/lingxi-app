@@ -85,6 +85,80 @@ final class VoiceInteractionControllerTests: XCTestCase {
         XCTAssertEqual(second.transcribeCalls, 1)
     }
 
+    func testContextNavigationDoesNotCancelSubmittedFlowTurn() async {
+        let capture = ControllerVoiceSession(transcript: "continue work", automaticallyFinishesWhenEndpointingEnabled: true)
+        let source = ControllerConversationSource()
+        let controller = makeController(sessions: [capture])
+        controller.startFlow(source: source)
+        await settle()
+        XCTAssertTrue(source.model.streaming)
+        controller.handleContextChange()
+        await settle()
+        XCTAssertEqual(source.cancelCalls, 0)
+        XCTAssertTrue(source.model.streaming)
+    }
+
+    func testHiddenFlowKeepsItsOwnerAndFinishesSpeechBeforeAnotherOwnerCaptures() async throws {
+        let ownership = VoiceInteractionOwnership()
+        let capture = ControllerVoiceSession(transcript: "continue work", automaticallyFinishesWhenEndpointingEnabled: true)
+        let laterCapture = ControllerVoiceSession(transcript: "another owner")
+        let player = RecordingStreamingSpeechPlayer()
+        let first = ControllerConversationSource()
+        let second = ControllerConversationSource()
+        let attachmentA = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: "11111111-1111-4111-8111-111111111111", generation: 1))
+        let attachmentB = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: "22222222-2222-4222-8222-222222222222", generation: 1))
+        let ownerA = IOSAudioOwner.attached(attachment: attachmentA, logicalOwner: .session(sessionID: "A"))
+        first.voiceAudioOwner = ownerA
+        let voiceA = makeController(sessions: [capture], player: player, ownership: ownership)
+        let voiceB = makeController(sessions: [laterCapture], player: player, ownership: ownership)
+        let host = SessionHost { voiceA }
+        _ = try host.retain(source: first, scope: .global, mode: .code,
+                            sessionID: "A", workspace: "/a", draft: "")
+
+        voiceA.startFlow(source: first)
+        await settle()
+        let token = try XCTUnwrap(first.lastToken)
+        let pinned = voiceA.capability.configurationSnapshot
+        voiceA.handleContextChange()
+        first.voiceAudioOwner = .attached(attachment: attachmentB, logicalOwner: .session(sessionID: "B"))
+        voiceB.startFlow(source: second)
+        await settle()
+        XCTAssertEqual(laterCapture.transcribeCalls, 0)
+        XCTAssertEqual(voiceB.phase, .failed)
+        XCTAssertTrue(first.model.streaming)
+        XCTAssertEqual(first.cancelCalls, 0)
+
+        first.model.turnSpeechUpdates.send(.init(token: token, sequence: 1, delta: "Reply from A."))
+        await settle(30)
+        XCTAssertEqual(player.configurations.first?.audioOwner, ownerA)
+        XCTAssertEqual(player.configurations.first?.configurationSnapshot, pinned)
+        first.complete(token: token, text: "Reply from A.")
+        await settle(50)
+        XCTAssertFalse(voiceA.isPresented)
+        XCTAssertFalse(voiceA.hasOwnedAudio)
+
+        voiceB.retry()
+        await settle(30)
+        XCTAssertEqual(laterCapture.transcribeCalls, 1)
+        voiceB.close()
+    }
+
+    func testNavigationPreservesRejectedCapturedSpeechForOriginalDraft() async {
+        let capture = ControllerVoiceSession(transcript: "do not lose this")
+        let source = ControllerConversationSource()
+        let controller = makeController(sessions: [capture])
+        var originalDraft = ""
+        controller.startFlow(source: source, onRejectedTranscript: { originalDraft = $0 })
+        await settle()
+        controller.handleContextChange()
+        source.model.streaming = true
+        controller.finishListening()
+        await settle(30)
+        XCTAssertEqual(originalDraft, "do not lose this")
+        XCTAssertTrue(source.sentTexts.isEmpty)
+        XCTAssertFalse(controller.isPresented)
+    }
+
     func testFlowPinsAudioConfigurationThroughReplyAndUsesLatestRevisionOnNextListen() async {
         let first = ControllerVoiceSession(
             transcript: "pinned turn",
@@ -813,7 +887,8 @@ final class VoiceInteractionControllerTests: XCTestCase {
         readiness: VoiceConfigurationReadiness? = nil,
         readinessProvider: (@MainActor () -> VoiceConfigurationReadiness)? = nil,
         permissionRequester: (@MainActor () async -> Void)? = nil,
-        autoPlay: Bool = false
+        autoPlay: Bool = false,
+        ownership: VoiceInteractionOwnership? = nil
     ) -> VoiceInteractionController {
         let factory = ControllerVoiceSessionFactory(sessions: sessions)
         let capture = VoiceCapture(makeSession: { factory.next() })
@@ -834,6 +909,7 @@ final class VoiceInteractionControllerTests: XCTestCase {
             capability: capability,
             speechPlayer: player ?? RecordingSpeechPlayer(),
             bargeInRecognizer: bargeInRecognizer,
+            ownership: ownership ?? VoiceInteractionOwnership(),
             readinessOverride: readinessProvider ?? { ready },
             permissionRequester: permissionRequester,
             loopDelay: .zero
@@ -1320,6 +1396,7 @@ private final class ControllerConversationSource: ConversationSource {
 
     let model = ConversationModel()
     let sessionMode: SessionMode = .code
+    var voiceAudioOwner: IOSAudioOwner?
     private(set) var sentTexts: [String] = []
     private(set) var lastToken: ConversationTurnToken?
     private(set) var cancelCalls = 0

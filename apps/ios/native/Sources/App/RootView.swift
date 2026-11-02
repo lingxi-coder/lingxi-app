@@ -134,6 +134,7 @@ struct RootView: View {
     @State private var providerRepository: ProviderRepository
     @State private var clientEventCenter: ClientEventCenter
     @State private var source: any ConversationSource
+    @State private var sessionHost: SessionHost
     @State private var sourceGeneration = UUID()
     @State private var workspaceWidth: CGFloat = 0
     @State private var sessionInspectorOpen = false
@@ -161,19 +162,13 @@ struct RootView: View {
     /// update `activeSession` optimistically, but only this value is persisted.
     @State private var confirmedSession: String
     @State private var pendingSessionRestoreID: String?
-    /// A same-source resume replaces the conversation owner. Keep this until
-    /// both the destination owner and its authoritative mode are visible.
-    @State private var pendingDraftRestoreSessionID: String?
     @State private var draftOwnerSessionID: String
     @State private var draft: String
     @State private var hasUnsavedConversationMedia = false
     @State private var hasUnsavedTerminalInput = false
     @State private var voiceInteraction: VoiceInteractionController
-    @State private var conversationBackgroundExecution =
-        ConversationBackgroundExecutionController.live()
-    @State private var conversationBackgroundAlerts =
-        ConversationBackgroundAlertController.live()
     @State private var projectSwitching = false
+    @State private var pendingModeSelection: SessionMode?
     /// `LingxiAppActionStore.drain()` REMOVES what it hands back, so an action
     /// refused by `ConversationSessionMutationPolicy` used to be destroyed by
     /// the very act of reading it. A conversation notification is posted
@@ -201,6 +196,8 @@ struct RootView: View {
     @State private var sessionPinnedAt: [String: Date]
     @State private var cronResultsSeenAt: Date?
     @State private var pendingSessionFork: PendingSessionFork?
+    @State private var pendingHandoffDrafts: [SessionHandoffDraft] = []
+    @State private var handoffNavigationRevision = UUID()
     @State private var pendingConversationSelectionRestore: PendingConversationSelectionRestore?
 
     private let appSandboxRoot: String
@@ -247,16 +244,26 @@ struct RootView: View {
         settings.fetchProviders = []
 
         let snapshot = providers.makeLaunchSnapshot()
-        let activeProject = projects.activeProject
-        let initialScope = ConversationScope(projectID: activeProject?.record.id)
         let preferences = ProjectScopedPreferences.forRuntime()
+        projects.sessionScopeClaims = { preferences.sessionScopeClaims }
+        if let error = projects.sessionOwnershipError {
+            projects.errorMessage = error
+        }
         let currentMode = preferences.currentMode()
+        let rememberedScope = preferences.lastScope(mode: currentMode) ?? .global
+        let initialScope: ConversationScope
+        if let projectID = rememberedScope.projectID,
+           !projects.projects.contains(where: { $0.id == projectID && $0.record.visibleModes.contains(currentMode) }) {
+            initialScope = .global
+        } else {
+            initialScope = rememberedScope
+        }
+        projects.activeProjectId = initialScope.projectID
+        let activeProject = initialScope.projectID.flatMap { id in projects.projects.first { $0.id == id } }
         var storedSessionID = ConversationModeRestorePolicy.sessionID(
             mode: currentMode,
             scoped: preferences.storedActiveSessionID(scope: initialScope, mode: currentMode),
-            projectLastActive: projects.activeProject?.record.lastActiveSessionId,
-            activeDirectory: projects.activeProject?.record.activeDirectory,
-            sessions: projects.activeProject?.sessions ?? []
+            sessions: activeProject?.sessions ?? projects.globalSessions
         )
         #if DEBUG
             // File UI fixtures own an isolated session; never restore a persisted user session over it.
@@ -264,7 +271,10 @@ struct RootView: View {
                 storedSessionID = ""
             }
         #endif
-        let initialMode = preferences.launchMode(restoredSessionID: storedSessionID)
+        if !storedSessionID.isEmpty, !projects.admitsSessionIdentity(storedSessionID, in: initialScope, mode: currentMode) {
+            storedSessionID = ""
+        }
+        let initialMode = currentMode
         let initialProjectMountGrants: [String]
         if let activeProject {
             initialProjectMountGrants = (try? MobileUserStorage.projectMountGrantPaths(for: activeProject)) ?? []
@@ -279,8 +289,11 @@ struct RootView: View {
             project: activeProject,
             linuxRuntime: settings.linuxRuntime
         ).config
+        let initialRows = activeProject?.sessions ?? projects.globalSessions
+        let initialCwd = initialRows.first { canonicalSessionID($0.sessionId) == canonicalSessionID(storedSessionID) }?.workspaceDirectory
+            ?? activeProject?.record.activeDirectory ?? LXISHGuestPaths.workspaceRoot
         var launchOptions = ConversationSourceFactory.LaunchOptions(
-            projectCwd: activeProject?.workspace.hostURL.path,
+            projectCwd: initialCwd,
             additionalWorkspaceDirectories: activeProject?.record.additionalDirectories ?? [],
             sessionMode: initialMode,
             providerConfigured: !snapshot.enabledProfileIDs.isEmpty,
@@ -289,12 +302,13 @@ struct RootView: View {
             defaultModelID: snapshot.defaultModelID,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
             mobileLinux: runtime,
-            projectMountGrants: initialProjectMountGrants
+            projectMountGrants: initialProjectMountGrants,
+            initialSessionId: storedSessionID.isEmpty ? nil : storedSessionID
         )
         #if canImport(harness_runtimeFFI)
         launchOptions.mediaHostComposition = mediaHostComposition
         #endif
-        let conversation = ConversationSourceFactory.make(options: launchOptions)
+        var conversation = ConversationSourceFactory.make(options: launchOptions)
         #if canImport(harness_runtimeFFI)
         if let mediaHostInitializationError {
             conversation.model.error = ConversationError(kind: .host, message: mediaHostInitializationError)
@@ -348,7 +362,6 @@ struct RootView: View {
         if preferences.cronResultsSeenAt() == nil {
             preferences.setCronResultsSeenAt(Date())
         }
-        let projectID = projects.activeProjectId
         _settingsStore = State(initialValue: settings)
         _navigation = State(initialValue: AppNavigationModel())
         _projectStore = State(initialValue: projects)
@@ -359,21 +372,6 @@ struct RootView: View {
         #endif
         _providerRepository = State(initialValue: providers)
         _clientEventCenter = State(initialValue: eventCenter)
-        _source = State(initialValue: conversation)
-        _activeScope = State(initialValue: initialScope)
-        _activeMode = State(initialValue: initialMode)
-        _workspacePinnedAt = State(initialValue: preferences.workspacePinnedAt())
-        _sessionPinnedAt = State(initialValue: preferences.sessionPinnedAt())
-        _cronResultsSeenAt = State(initialValue: preferences.cronResultsSeenAt())
-        _pendingSessionFork = State(initialValue: nil)
-        _activeSession = State(initialValue: storedSessionID)
-        _confirmedSession = State(initialValue: storedSessionID)
-        _draftOwnerSessionID = State(initialValue: storedSessionID)
-        _pendingSessionRestoreID = State(initialValue: storedSessionID.isEmpty ? nil : storedSessionID)
-        let initialDraft = ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1"
-            ? ""
-            : preferences.draft(scope: initialScope, mode: initialMode, ownerSessionID: storedSessionID)
-        _draft = State(initialValue: initialDraft)
         let voiceReadinessOverride: (@MainActor () -> VoiceConfigurationReadiness)?
         #if DEBUG
             if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_VOICE_CONFIGURATION_REQUIRED"] == "1" {
@@ -398,15 +396,96 @@ struct RootView: View {
         #else
             voiceReadinessOverride = nil
         #endif
-        _voiceInteraction = State(
-            initialValue: VoiceInteractionController(
+        let sessionHost = SessionHost {
+            VoiceInteractionController(
                 voiceCapture: VoiceCapture(),
                 capability: voiceCapability,
                 speechPlayer: IOSAudioService.shared.speechPlayer,
                 bargeInRecognizer: IOSAudioService.shared.bargeInRecognizer,
                 readinessOverride: voiceReadinessOverride
             )
-        )
+        }
+        sessionHost.admitsSessionIdentity = { [weak projects] id, scope, mode in
+            projects?.admitsSessionIdentity(id, in: scope, mode: mode) ?? false
+        }
+        sessionHost.admitsUnclaimedOwner = { [weak projects] in
+            projects?.admitsUnclaimedOwner() ?? false
+        }
+        let initialRetention = sessionHost.retainInitial(
+            source: conversation, scope: initialScope, mode: initialMode,
+            sessionID: storedSessionID, workspace: initialCwd,
+            draft: preferences.draft(scope: initialScope, mode: initialMode, ownerSessionID: storedSessionID)
+        ) {
+            // The catalog may become unreadable after the first restore check.
+            // Keep the saved draft and files intact; the fresh source's first
+            // UUID must still pass the normal admission gate.
+            storedSessionID = ""
+            let fallbackCwd = activeProject?.record.activeDirectory ?? LXISHGuestPaths.workspaceRoot
+            launchOptions.initialSessionId = nil
+            launchOptions.projectCwd = fallbackCwd
+            conversation = ConversationSourceFactory.make(options: launchOptions)
+            #if canImport(harness_runtimeFFI)
+            if let mediaHostInitializationError {
+                conversation.model.error = ConversationError(kind: .host, message: mediaHostInitializationError)
+            }
+            #endif
+            return (conversation, fallbackCwd,
+                    preferences.draft(scope: initialScope, mode: initialMode, ownerSessionID: ""))
+        }
+        if let error = initialRetention.rejection, projects.errorMessage == nil {
+            projects.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
+        }
+        let initialEntry = initialRetention.entry
+        _source = State(initialValue: conversation)
+        if !storedSessionID.isEmpty, projects.isSessionIndexed(storedSessionID, in: initialScope),
+           projects.admitsSessionIdentity(storedSessionID, in: initialScope, mode: initialMode),
+           !preferences.claimSessionScope(sessionID: storedSessionID, scope: initialScope),
+           projects.errorMessage == nil {
+            projects.errorMessage = ProjectRepositoryError.conflictingSessionScope.localizedDescription
+        }
+        initialEntry.draftSourceCodeUnits = preferences.draftSourceCodeUnits(
+            scope: initialScope, mode: initialMode, ownerSessionID: storedSessionID)
+        initialEntry.handoffReference = preferences.handoffReference(sessionID: storedSessionID, scope: initialScope, mode: initialMode)
+        sessionHost.onActivity = { [weak projects] entry in
+            guard let projects, entry.scope != .scheduled,
+                  !entry.source.model.sessionTransitionPending, !entry.sessionID.isEmpty,
+                  projects.allowsSession(entry.sessionID, in: entry.scope),
+                  let first = entry.source.model.messages.first(where: { $0.role == .user }),
+                  entry.recordedFirstMessageID != first.id else { return }
+            entry.recordedFirstMessageID = first.id
+            let ownerID = entry.sessionID
+            let workspace = entry.source.model.workspaceState?.cwd ?? entry.workspace
+            Task { @MainActor in
+                do {
+                    try await projects.recordStartedSession(projectId: entry.scope.projectID, sessionId: ownerID,
+                        title: String(first.text.prefix(120)), mode: entry.mode, initialMessageCount: 1,
+                        workspaceDirectory: workspace)
+                    guard preferences.claimSessionScope(sessionID: ownerID, scope: entry.scope) else {
+                        throw ProjectRepositoryError.conflictingSessionScope
+                    }
+                } catch {
+                    if entry.recordedFirstMessageID == first.id { entry.recordedFirstMessageID = nil }
+                    entry.source.model.error = ConversationError(kind: .host,
+                        message: String(localized: "session_index_save_new_failed \(error.localizedDescription)"))
+                }
+            }
+        }
+        _sessionHost = State(initialValue: sessionHost)
+        _activeScope = State(initialValue: initialScope)
+        _activeMode = State(initialValue: initialMode)
+        _workspacePinnedAt = State(initialValue: preferences.workspacePinnedAt())
+        _sessionPinnedAt = State(initialValue: preferences.sessionPinnedAt())
+        _cronResultsSeenAt = State(initialValue: preferences.cronResultsSeenAt())
+        _pendingSessionFork = State(initialValue: nil)
+        _activeSession = State(initialValue: storedSessionID)
+        _confirmedSession = State(initialValue: storedSessionID)
+        _draftOwnerSessionID = State(initialValue: storedSessionID)
+        _pendingSessionRestoreID = State(initialValue: storedSessionID.isEmpty ? nil : storedSessionID)
+        let initialDraft = ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1"
+            ? ""
+            : preferences.draft(scope: initialScope, mode: initialMode, ownerSessionID: storedSessionID)
+        _draft = State(initialValue: initialDraft)
+        _voiceInteraction = State(initialValue: initialEntry.voice)
         appSandboxRoot = root
         scopedPreferences = preferences
     }
@@ -529,90 +608,35 @@ struct RootView: View {
         let backgroundLifecycle = content
             .environment(\.locale, localization.effectiveLocale())
             .onChange(of: scenePhase, handleScenePhase)
-            .onReceive(source.model.backgroundExecutionActivity) { active in
-                conversationBackgroundExecution.setTurnActive(
-                    active,
-                    turnID: source.model.activeTurnToken?.clientTurnId
-                )
-                syncConversationBackgroundSurfaces()
-            }
-            .onChange(of: source.model.turnCompletion) { _, _ in
-                syncConversationBackgroundSurfaces()
-                if cronRepository.state.history.contains(where: { $0.status == .queued }) {
-                    Task { await cronRepository.reconcile(reason: "chat-idle") }
-                }
-            }
-            .onChange(of: source.model.pendingQuestions) { _, _ in
-                syncConversationBackgroundSurfaces()
-            }
-            .onChange(of: source.model.pendingPermissions) { _, _ in
-                syncConversationBackgroundSurfaces()
-            }
             .onChange(of: settingsStore.notifs) { _, config in
-                conversationBackgroundAlerts.setPreferences(config)
+                sessionHost.setPreferences(config)
             }
-            .onChange(of: source.model.backgroundTasks) { _, _ in
-                syncConversationBackgroundSurfaces()
-            }
-            .onChange(of: source.model.activeTurnToken) { _, token in
-                conversationBackgroundExecution.setTurnActive(
-                    source.model.requiresBackgroundExecution,
-                    turnID: token?.clientTurnId
-                )
-                syncConversationBackgroundSurfaces()
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(
-                    for: .lingxiConversationContinuedProcessingLeaseChanged
-                )
-            ) { notification in
+            .onReceive(NotificationCenter.default.publisher(for: .lingxiConversationContinuedProcessingLeaseChanged)) { notification in
                 let attached = notification.userInfo?["attached"] as? Bool ?? false
-                let turnID = (notification.userInfo?[ConversationContinuedProcessingExpiration.turnIDKey] as? String)
-                    .flatMap(UInt64.init)
-                conversationBackgroundExecution.setContinuedProcessingLeaseAttached(
-                    attached,
-                    turnID: turnID
-                )
+                let identifier = notification.userInfo?[ConversationContinuedProcessingExpiration.identifierKey] as? String
+                let turnID = (notification.userInfo?[ConversationContinuedProcessingExpiration.turnIDKey] as? String).flatMap(UInt64.init)
+                sessionHost.continuedProcessingLease(attached: attached, identifier: identifier, turnID: turnID)
             }
-            .onReceive(
-                NotificationCenter.default.publisher(
-                    for: .lingxiConversationContinuedProcessingExpired
-                )
-            ) { notification in
-                let expiration = ConversationContinuedProcessingExpiration(
-                    userInfo: notification.userInfo
-                )
-                conversationBackgroundExecution.setContinuedProcessingLeaseAttached(
-                    false,
-                    turnID: expiration?.turnID
-                )
-                let turnToken = source.model.activeTurnToken
-                if let expiredTurnID = expiration?.turnID,
-                   expiredTurnID != turnToken?.clientTurnId
-                {
-                    return
-                }
-                requestRecoverablePause(
-                    sessionID: source.model.activeSessionId,
-                    turnToken: turnToken
-                )
-                syncConversationBackgroundSurfaces()
+            .onReceive(NotificationCenter.default.publisher(for: .lingxiConversationContinuedProcessingExpired)) { notification in
+                guard let expiration = ConversationContinuedProcessingExpiration(userInfo: notification.userInfo) else { return }
+                sessionHost.continuedProcessingExpired(identifier: expiration.identifier, turnID: expiration.turnID)
             }
         let stateLifecycle = backgroundLifecycle
             .onChange(of: draft) { _, value in
                 // A queued callback from the outgoing owner must not replace
                 // the draft just restored for a different conversation.
                 guard value == draft else { return }
+                sessionHost.entry(for: source)?.draft = value
                 scopedPreferences.setDraft(value, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
-                if !source.model.sessionTransitionPending,
-                   let pending = source.model.pendingSessionMode, pending != activeMode {
-                    scopedPreferences.setDraft(value, scope: activeScope, mode: pending, ownerSessionID: draftOwnerSessionID)
-                }
             }
             .onChange(of: providerRepository.syncRevision) { _, _ in
                 settingsStore.llmProviders = providerRepository.legacyProviders()
             }
         let presentationLifecycle = stateLifecycle
+            .onChange(of: navigation.path) { _, _ in markHandoffNavigationChanged() }
+            .onChange(of: navigation.settingsOpen) { _, _ in markHandoffNavigationChanged() }
+            .onChange(of: navigation.runningAppID) { _, _ in markHandoffNavigationChanged() }
+            .onChange(of: remoteDestination?.id) { _, _ in markHandoffNavigationChanged() }
             .onChange(of: externalEngineReady) { _, ready in if ready { retryDeferredAppActions() } }
             .onChange(of: app.setupDone) { _, ready in if ready { retryDeferredAppActions() } }
             .onChange(of: source.model.sessionTransitionPending) { _, pending in
@@ -665,52 +689,22 @@ struct RootView: View {
             .task(id: sourceGeneration) {
                 externalEngineReady = false
                 let generation = sourceGeneration
-                let sessionToRestore = pendingSessionRestoreID ?? activeSession
-                // `providerCatalogBootstrapped` flips true exactly once, on
-                // this task's very first run, and never resets — so reading
-                // it BEFORE that flip is a reliable "is this the app's first
-                // ever bootstrap, not a rebind" signal. The very first run
-                // has no prior engine session to disown a create FROM: a
-                // create started during this same task's async gap (the UI
-                // is already interactive while `prepare()`/catalog refresh
-                // are in flight) must not be mistaken for one that predates
-                // a rebind and discarded.
-                let isInitialBootstrap = !providerCatalogBootstrapped
-                var current = source
+                let current = source
                 wireCurrentSource(preserveCatalog: providerCatalogBootstrapped)
                 do {
-                    var preparedByCatalogRebuild = false
                     if !providerCatalogBootstrapped {
                         providerCatalogBootstrapped = true
-                        var catalogLoaded = false
                         #if DEBUG
-                            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_FILES"] == nil {
-                                catalogLoaded = await providerRepository.refreshCatalog()
-                            }
-                        #else
-                            catalogLoaded = await providerRepository.refreshCatalog()
-                        #endif
-                        if catalogLoaded, generation == sourceGeneration {
-                            try await rebuildSource(
-                                snapshot: providerRepository.makeLaunchSnapshot(),
-                                preserveSourceGeneration: true
-                            )
-                            current = source
-                            preparedByCatalogRebuild = true
+                        if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_FILES"] == nil {
+                            _ = await providerRepository.refreshCatalog()
                         }
+                        #else
+                        _ = await providerRepository.refreshCatalog()
+                        #endif
                     }
-                    if !preparedByCatalogRebuild {
-                        try await current.prepare()
-                    }
+                    try await current.prepare()
                     guard generation == sourceGeneration else { return }
                     current.listSessions()
-                    if !sessionToRestore.isEmpty, !current.model.sessionTransitionPending {
-                        requestSessionResume(
-                            sessionToRestore,
-                            scope: activeScope,
-                            using: current
-                        )
-                    }
                     externalEngineReady = true
                     retryDeferredAppActions()
                     await providerRepository.refreshCredentialStatus()
@@ -872,11 +866,13 @@ struct RootView: View {
         return Drawer(
             projectStore: projectStore,
             activeScope: activeScope,
+            activeMode: activeMode,
             activeSession: $activeSession,
             source: source,
             cronState: cronRepository.state,
             filter: $navigation.drawerFilter,
             sessionPinnedAt: sessionPinnedAt,
+            statusForSession: { sessionHost.status(sessionID: $0) },
             newCronResults: newCronResultCount,
             account: account,
             openSettings: { navigation.showSettings() },
@@ -903,18 +899,48 @@ struct RootView: View {
     }
 
     private var detailSurface: some View {
-        ZStack {
+        let owner = sessionHost.entry(for: source)
+        return ZStack {
             theme.windowBg.ignoresSafeArea()
             ChatView(
                 session: session,
-                draft: $draft,
+                draft: Binding(
+                    get: { owner?.draft ?? draft },
+                    set: { value in
+                        owner?.draft = value
+                        if let owner {
+                            scopedPreferences.setDraft(value, scope: owner.scope, mode: owner.mode,
+                                                       ownerSessionID: owner.sessionID)
+                        }
+                        if owner == nil || owner?.source === source { draft = value }
+                    }
+                ),
                 voiceInteraction: voiceInteraction,
                 source: source,
+                draftSourceCodeUnits: Binding(
+                    get: { owner?.draftSourceCodeUnits },
+                    set: { units in
+                        guard let owner else { return }
+                        owner.draftSourceCodeUnits = units
+                        scopedPreferences.setDraft(owner.draft, scope: owner.scope, mode: owner.mode,
+                                                   ownerSessionID: owner.sessionID)
+                        scopedPreferences.setDraftSourceCodeUnits(units, scope: owner.scope, mode: owner.mode,
+                                                                  ownerSessionID: owner.sessionID)
+                    }
+                ),
+                attachmentBinding: Binding(
+                    get: { owner?.attachment },
+                    set: { owner?.attachment = $0 }
+                ),
                 projectName: projectStore.activeProject?.record.name,
                 sessionMode: activeMode,
                 workspaceName: currentWorkspaceName,
                 workspaceKey: activeScope.workspaceKey,
-                onDraftMediaChanged: { hasUnsavedConversationMedia = $0 },
+                voiceEventsManagedByHost: true,
+                onDraftMediaChanged: { value in
+                    guard let owner, owner.source === source else { return }
+                    hasUnsavedConversationMedia = value
+                },
                 isPinned: !activeSession.isEmpty && sessionPinnedAt[activeSession] != nil,
                 canArchive: !activeSession.isEmpty && activeScope != .scheduled,
                 onSelectNewChatMode: selectSessionMode,
@@ -933,8 +959,7 @@ struct RootView: View {
                 // A scheduled run's workspace never indexes its sessions, so a
                 // chat started there would be missing from the drawer.
                 onNewChat: {
-                    startNewChat(in: activeScope == .scheduled ? .global : activeScope,
-                                 mode: scopedPreferences.lastMode())
+                    startNewChat(in: .global, mode: activeMode)
                 },
                 onOpenVoiceSettings: { navigation.showSettings(.voice) },
                 onOpenSessionDetails: {
@@ -965,13 +990,44 @@ struct RootView: View {
                 sessionMode: activeMode,
                 pendingRestoreID: pendingSessionRestoreID,
                 onSessionChanged: adoptEngineSession,
-                onUnavailableSession: clearUnavailableSession,
                 onSessionTransitionFailed: rollbackFailedSession,
                 onModeChanged: adoptSessionMode,
                 onRefreshSessions: { source.listSessions() },
                 onWorkspaceChanged: { liveWorkspaceState = $0 }
             )
             .id(sourceGeneration)
+
+            if pendingSessionFork != nil {
+                VStack {
+                    HStack(spacing: 12) {
+                        ProgressView().accessibilityLabel(String(localized: "chat_working"))
+                        Button("common_cancel", action: cancelPendingHandoff)
+                    }
+                    .padding(12)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    Spacer()
+                }
+                .padding(.top, 60)
+                .accessibilityIdentifier("conversation.handoff-progress")
+                .zIndex(91)
+            }
+
+            if let handoff = pendingHandoffDrafts.first {
+                VStack {
+                    HStack(spacing: 12) {
+                        Text("conversation_handoff_ready")
+                        Button("common_open") { activatePendingHandoffDraft(handoff) }
+                            .disabled(projectSwitching)
+                        Button("common_close") { pendingHandoffDrafts.removeAll { $0.id == handoff.id } }
+                    }
+                    .padding(12)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    Spacer()
+                }
+                .padding(.top, pendingSessionFork == nil ? 60 : 120)
+                .accessibilityIdentifier("conversation.handoff-ready")
+                .zIndex(91)
+            }
 
             if projectSwitching {
                 ProgressView(String(localized: "project_switching_message"))
@@ -1028,7 +1084,7 @@ struct RootView: View {
                 protectedPaths: { workspaceProtectedDirectories },
                 canMutate: { !source.model.requiresBackgroundExecution && !source.model.isCancelling && !source.model.sessionTransitionPending },
                 runtimeStatus: settingsStore.linuxRuntime.rootfsState.label,
-                onSelectScope: { scope in startNewChat(in: scope, mode: scopedPreferences.lastMode()) },
+                onSelectScope: { scope in startNewChat(in: scope, mode: activeMode) },
                 onPickDirectory: { path in
                     guard let pickerSource = workspacePickerSource, pickerSource === source else {
                         throw WorkspaceDirectoryError.sessionChanged
@@ -1071,44 +1127,43 @@ struct RootView: View {
         switchScope(to: scope, mode: mode, startNew: true)
     }
 
-    private func adoptSessionMode(_ mode: SessionMode, pending: SessionMode?) {
-        if case .remote = activeScope { return }
-        guard !source.model.sessionTransitionPending else { return }
+    private func adoptSessionMode(_ mode: SessionMode) {
+        // The mode belongs to the session and can never rewrite another space's slot.
+        guard !source.model.sessionTransitionPending, mode == activeMode else { return }
         let owner = source.model.activeSessionId
         if let pendingSessionRestoreID, owner != pendingSessionRestoreID { return }
+        if !owner.isEmpty, draftOwnerSessionID != owner {
+            scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: owner)
+            scopedPreferences.setDraftSourceCodeUnits(sessionHost.entry(for: source)?.draftSourceCodeUnits,
+                                                       scope: activeScope, mode: activeMode, ownerSessionID: owner)
+            if draftOwnerSessionID.isEmpty {
+                scopedPreferences.setDraft("", scope: activeScope, mode: activeMode, ownerSessionID: "")
+                scopedPreferences.setDraftSourceCodeUnits(nil, scope: activeScope, mode: activeMode, ownerSessionID: "")
+                scopedPreferences.setHandoffReference(nil, sessionID: "", scope: activeScope, mode: activeMode)
+            }
+            draftOwnerSessionID = owner
+        }
         scopedPreferences.setCurrentMode(mode)
-        let restoresOwner = !owner.isEmpty && pendingDraftRestoreSessionID == owner
-        let destinationOwner = owner.isEmpty ? draftOwnerSessionID : owner
-        let nextDraft = scopedPreferences.draftForSessionTransition(
-            draft, scope: activeScope, from: activeMode, to: mode,
-            fromOwner: draftOwnerSessionID, toOwner: destinationOwner, restoring: restoresOwner
-        )
-        draftOwnerSessionID = destinationOwner
-        if draft != nextDraft { draft = nextDraft }
-        if activeMode != mode {
-            activeMode = mode
-            source.listSessions()
-        }
-        if restoresOwner { pendingDraftRestoreSessionID = nil }
-        let adoptedOwner = owner.isEmpty ? confirmedSession : owner
-        scopedPreferences.setActiveSessionID(adoptedOwner, scope: activeScope, mode: mode)
-        if let pending {
-            scopedPreferences.setDraft(draft, scope: activeScope, mode: pending, ownerSessionID: draftOwnerSessionID)
-            scopedPreferences.setActiveSessionID(adoptedOwner, scope: activeScope, mode: pending)
-        }
-        triggerPendingForkIfReady(for: confirmedSession)
+        scopedPreferences.setActiveSessionID(owner.isEmpty ? confirmedSession : owner, scope: activeScope, mode: mode)
     }
 
     private func selectSessionMode(_ mode: SessionMode) {
+        if projectSwitching {
+            pendingModeSelection = mode
+            scopedPreferences.setLastMode(mode)
+            markHandoffNavigationChanged()
+            return
+        }
+        guard mode != activeMode else { return }
         scopedPreferences.setLastMode(mode)
-        source.setSessionMode(mode)
+        _ = switchMode(to: mode)
     }
 
     private func continueCurrentSessionInOtherMode() {
         let target: SessionMode = activeMode == .chat ? .code : .chat
         let sessionID = confirmedSession.isEmpty ? activeSession : confirmedSession
         if sessionID.isEmpty {
-            startNewChat(in: activeScope, mode: target)
+            startNewChat(in: .global, mode: target)
         } else {
             requestContinueInMode(
                 scope: activeScope,
@@ -1137,7 +1192,7 @@ struct RootView: View {
                     sessionId: sessionID,
                     archived: true
                 )
-                switchScope(to: activeScope, mode: scopedPreferences.lastMode(), startNew: true)
+                switchScope(to: .global, mode: activeMode, startNew: true)
             } catch {
                 projectStore.errorMessage = error.localizedDescription
             }
@@ -1217,6 +1272,7 @@ struct RootView: View {
             ProjectsPage(
                 projectStore: projectStore,
                 workspacePinnedAt: workspacePinnedAt,
+                mode: activeMode,
                 onOpenProject: { navigation.openProject($0) }
             )
         case .project(let projectID):
@@ -1224,6 +1280,7 @@ struct RootView: View {
                 projectStore: projectStore,
                 projectID: projectID,
                 activeScope: activeScope,
+                mode: activeMode,
                 source: source,
                 cronState: cronRepository.state,
                 isPinned: workspacePinnedAt[ConversationScope.project(projectID).workspaceKey] != nil,
@@ -1303,32 +1360,45 @@ struct RootView: View {
         private func installExternalEventHandler(on conversation: any ConversationSource) {
             conversation.setExternalEventHandler { [weak conversation] event in
                 Task { @MainActor in
-                    guard let conversation, source === conversation else { return }
+                    guard let conversation else { return }
                     clientEventCenter.publish(event)
-                    handleExternalEvent(event)
+                    handleExternalEvent(event, owner: conversation)
                 }
             }
         }
 
-        private func handleExternalEvent(_ event: ClientEvent) {
+        private func handleExternalEvent(_ event: ClientEvent, owner: any ConversationSource) {
             providerRepository.handle(event: event)
             switch event {
             case let .sessionStarted(sessionId, _):
                 triggerPendingForkIfReady(for: sessionId)
             case let .sessionResumed(sessionId, _, _):
                 triggerPendingForkIfReady(for: sessionId)
-            case let .sessionForked(sourceSessionId, sessionId, mode):
-                let targetMode = SessionMode(dto: mode)
-                guard let pending = pendingSessionFork,
-                      pending.sourceSessionID == sourceSessionId,
-                      pending.targetMode == targetMode
-                else { return }
+            case let .sessionHandoffPrepared(requestId, sourceSessionId, sourceMode, targetMode, cutoff, summary):
+                guard let pending = pendingSessionFork, pending.requestID == requestId,
+                      pending.ownerEntryID == sessionHost.entry(for: owner)?.id,
+                      canonicalSessionID(pending.sourceSessionID) == canonicalSessionID(sourceSessionId),
+                      pending.sourceMode == SessionMode(dto: sourceMode),
+                      pending.targetMode == SessionMode(dto: targetMode) else { return }
                 pendingSessionFork = nil
-                _ = switchScope(
-                    to: pending.sourceScope,
-                    mode: targetMode,
-                    resumeSessionID: sessionId
-                )
+                let reference = SessionHandoffReference(sourceScopeKey: pending.sourceScope.workspaceKey,
+                    sourceSessionID: sourceSessionId, sourceMode: pending.sourceMode,
+                    targetMode: pending.targetMode, cutoff: cutoff, requestID: requestId)
+                let handoff = SessionHandoffDraft(mode: pending.targetMode, sourceCodeUnits: summary.codeUnits,
+                                                  reference: reference)
+                pendingHandoffDrafts.append(handoff)
+                if SessionHandoffPresentationPolicy.mayOpenAutomatically(
+                    requestRevision: pending.navigationRevision, currentRevision: handoffNavigationRevision,
+                    ownerMatches: sessionHost.entry(for: source)?.id == pending.ownerEntryID,
+                    conversationVisible: isConversationSurfaceVisible, switching: projectSwitching
+                ) {
+                    activatePendingHandoffDraft(handoff)
+                }
+            case let .sessionHandoffFailed(requestId, message):
+                guard let pending = pendingSessionFork, pending.requestID == requestId,
+                      pending.ownerEntryID == sessionHost.entry(for: owner)?.id else { return }
+                pendingSessionFork = nil
+                projectStore.errorMessage = message
             default:
                 break
             }
@@ -1353,9 +1423,13 @@ struct RootView: View {
             }
         }
         cronRepository.onOpenSession = { projectID, sessionID in
-            let mode = projectStore.projects.first(where: { $0.record.id == projectID })?
-                .sessions.first(where: { $0.sessionId == sessionID })?.mode ?? .code
-            switchScope(to: projectID.map(ConversationScope.project) ?? .scheduled, mode: mode, resumeSessionID: sessionID)
+            if let projectID {
+                guard let mode = projectStore.projects.first(where: { $0.record.id == projectID })?
+                    .sessions.first(where: { $0.sessionId == sessionID })?.mode else { return }
+                switchScope(to: .project(projectID), mode: mode, resumeSessionID: sessionID)
+            } else {
+                switchScope(to: .scheduled, mode: .code, resumeSessionID: sessionID)
+            }
         }
     }
 
@@ -1414,20 +1488,16 @@ struct RootView: View {
         let projectCwd: String?
         let project: ProjectSnapshot?
         switch scope {
-        case let .remote(hostID, sessionID):
-            #if canImport(harness_runtimeFFI)
-            return RemoteConversationSource(hostID: hostID, sessionID: sessionID,
-                uid: FirebaseAccount.shared.user?.uid ?? "",
-                mediaHostComposition: mediaHostComposition,
-                mediaHostInitializationError: mediaHostInitializationError)
-            #else
-            return MockConversationSource()
-            #endif
+        case .remote:
+            throw NSError(domain: "ConversationSource", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Remote sessions use their dedicated view."])
         case .global, .project:
             project = scope.projectID.flatMap { id in
                 projectStore.projects.first(where: { $0.record.id == id })
             }
-            projectCwd = project?.workspace.hostURL.path
+            let rows = project?.sessions ?? projectStore.globalSessions
+            projectCwd = rows.first(where: { canonicalSessionID($0.sessionId) == canonicalSessionID(sessionID ?? "") })?.workspaceDirectory
+                ?? project?.record.activeDirectory ?? LXISHGuestPaths.workspaceRoot
         case .scheduled:
             project = nil
             projectCwd = try MobileUserStorage.scheduledWorkspace(sessionID: sessionID)
@@ -1450,7 +1520,8 @@ struct RootView: View {
             defaultModelID: snapshot.defaultModelID,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
             mobileLinux: runtime,
-            projectMountGrants: projectMountGrants
+            projectMountGrants: projectMountGrants,
+            initialSessionId: sessionID.flatMap { $0.isEmpty ? nil : $0 }
         )
         #if canImport(harness_runtimeFFI)
         launchOptions.mediaHostComposition = mediaHostComposition
@@ -1462,6 +1533,15 @@ struct RootView: View {
         snapshot: ProviderLaunchSnapshot,
         preserveSourceGeneration: Bool = false
     ) async throws {
+        guard !projectSwitching else { throw CancellationError() }
+        projectSwitching = true
+        defer {
+            projectSwitching = false
+            if let requestedMode = pendingModeSelection {
+                pendingModeSelection = nil
+                if requestedMode != activeMode { _ = switchMode(to: requestedMode) }
+            }
+        }
         persistConversationScope()
         let old = source
         try requireSourceReplacementAllowed(old)
@@ -1469,16 +1549,44 @@ struct RootView: View {
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: replacement)
         #endif
-        // Prepare the replacement before cancelling the current source. A
-        // failed provider/catalog rebuild must leave the live conversation
-        // usable instead of parking a cancelled source in the root view.
-        try await replacement.prepare()
-        try requireSourceReplacementAllowed(old)
-        try await old.cancelAndWait()
-        try requireSourceReplacementAllowed(old)
+        do {
+            #if canImport(harness_runtimeFFI)
+            if let engine = old as? EngineConversationSource {
+                try await engine.retireForReconnect()
+                let ownerID = canonicalSessionID(engine.model.activeSessionId)
+                if !ownerID.isEmpty {
+                    let released = await waitForMobileSessionRelease(
+                        lingxiHome: MobileUserStorage.directories().configHome,
+                        sessionId: ownerID, timeoutMs: 8_000)
+                    guard released else {
+                        throw NSError(domain: "ConversationSourceReplacement", code: 3,
+                            userInfo: [NSLocalizedDescriptionKey: String(localized: "conversation_reconnect_release_pending")])
+                    }
+                }
+            }
+            #endif
+            try requireSourceReplacementAllowed(old)
+            try await replacement.prepare()
+            try requireSourceReplacementAllowed(old)
+        } catch {
+            if !old.isAvailableForPrompts {
+                old.model.error = ConversationError(kind: .host,
+                    message: String(localized: "conversation_reconnect_disconnected"))
+            }
+            throw error
+        }
         activeSession = confirmedSession
         pendingSessionRestoreID = confirmedSession.isEmpty ? nil : confirmedSession
         source.setSettingsActive(false)
+        let oldEntry = sessionHost.entry(for: old)
+        sessionHost.releaseIdleSource(old)
+        let entry = try sessionHost.retain(source: replacement, scope: activeScope, mode: activeMode,
+                                           sessionID: confirmedSession,
+                                           workspace: oldEntry?.workspace ?? currentWorkspaceGuestPath, draft: draft,
+                                           voice: oldEntry?.voice)
+        entry.attachment = oldEntry?.attachment
+        entry.draftSourceCodeUnits = oldEntry?.draftSourceCodeUnits
+        entry.handoffReference = oldEntry?.handoffReference
         source = replacement
         source.setSettingsActive(true)
         // The catalog belongs to the engine build, not to a single source
@@ -1488,29 +1596,23 @@ struct RootView: View {
         if !preserveSourceGeneration {
             sourceGeneration = UUID()
         }
-        if !confirmedSession.isEmpty {
-            requestSessionResume(
-                confirmedSession,
-                scope: activeScope,
-                using: replacement
-            )
-        }
-        old.handleBackground()
     }
 
     @MainActor
     private func requireSourceReplacementAllowed(
-        _ previous: any ConversationSource,
-        allowInactiveRecovery: Bool = false
+        _ previous: any ConversationSource
     ) throws {
         guard source === previous else { throw CancellationError() }
+        guard sessionHost.entry(for: previous)?.voice.hasOwnedAudio != true else {
+            throw NSError(domain: "ConversationSourceReplacement", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: String(localized: "chat_error_finish_background_turn_first")])
+        }
         guard !previous.hasLiveSideChats else {
             throw NSError(domain: "ConversationSourceReplacement", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: String(localized: "side_chat_end_before_restart")])
         }
         guard ConversationSourceReplacementPolicy.allowsReplacement(
-            of: previous.model,
-            allowInactiveRecovery: allowInactiveRecovery
+            of: previous.model, hasActiveRealtimeAudio: previous.hasActiveRealtimeAudio
         ) else {
             throw NSError(
                 domain: "ConversationSourceReplacement", code: 1,
@@ -1527,7 +1629,7 @@ struct RootView: View {
             cronRepository.state.generatedSessions.contains { $0.projectID == nil && $0.id == id }
         } == true
         switchScope(
-            to: scheduled ? .scheduled : ConversationScope(projectID: projectID),
+            to: scheduled ? .scheduled : (projectID.map(ConversationScope.project) ?? .global),
             mode: scheduled ? .code : nil,
             resumeSessionID: resumeSessionID,
             startNew: startNew
@@ -1578,6 +1680,9 @@ struct RootView: View {
         let sourceMode: SessionMode
         let targetMode: SessionMode
         let origin: ConversationSelectionSnapshot
+        let requestID: String
+        var navigationRevision: UUID
+        var ownerEntryID: UUID? = nil
         var submitted = false
 
         var rollbackRequest: SessionForkRollbackRequest? {
@@ -1600,7 +1705,15 @@ struct RootView: View {
     /// landing) must retry rather than drop it.
     @discardableResult
     private func switchMode(to mode: SessionMode) -> Bool {
-        switchScope(to: activeScope, mode: mode)
+        let remembered = scopedPreferences.lastScope(mode: mode) ?? .global
+        let destination: ConversationScope
+        if let projectID = remembered.projectID,
+           !projectStore.projects.contains(where: { $0.id == projectID && $0.record.visibleModes.contains(mode) }) {
+            destination = .global
+        } else {
+            destination = remembered
+        }
+        return switchScope(to: destination, mode: mode)
     }
 
     @discardableResult
@@ -1609,171 +1722,120 @@ struct RootView: View {
         mode: SessionMode? = nil,
         resumeSessionID: String? = nil,
         startNew: Bool = false,
-        allowRecoveryRouting: Bool = false
+        handoffDraft: SessionHandoffDraft? = nil
     ) -> Bool {
+        guard !projectSwitching else { return false }
+        if case .remote = scope { return false }
         let targetMode = mode ?? activeMode
-        guard !projectSwitching,
-              allowRecoveryRouting || ConversationSessionMutationPolicy.allowsCallerMutation(
-                  hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
-                  hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
-                  isCancelling: source.model.isCancelling
-              )
-        else { return false }
-        let reusesSource = reusesConversationSource(currentScope: activeScope, targetScope: scope,
-                                                    currentMode: activeMode, targetMode: targetMode,
-                                                    startsNew: startNew, resumesSession: resumeSessionID != nil)
-            && !(scope == .scheduled && resumeSessionID != nil && resumeSessionID != activeSession)
-        if !reusesSource {
-            guard !source.hasLiveSideChats else {
-                projectStore.errorMessage = String(localized: "side_chat_end_before_restart")
-                return false
-            }
-            guard ConversationSourceReplacementPolicy.allowsReplacement(
-                of: source.model,
-                allowInactiveRecovery: allowRecoveryRouting
-            ) else {
-                projectStore.errorMessage = String(localized: "chat_error_finish_background_turn_first")
-                return false
-            }
+        let targetID = startNew ? "" : canonicalSessionID(resumeSessionID ?? restoredSessionID(scope: scope, mode: targetMode))
+        let existing: SessionHost.Entry?
+        do {
+            existing = try sessionHost.entryForClaim(sessionID: targetID, scope: scope, mode: targetMode)
+        } catch {
+            projectStore.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
+            return false
         }
-        voiceInteraction.handleContextChange()
-        // Pushed pages (scheduled tasks, projects) sit above the chat; picking a
-        // conversation must land on it.
-        navigation.path.removeAll()
-        if reusesSource {
+        guard existing != nil || targetID.isEmpty || projectStore.admitsSessionIdentity(targetID, in: scope, mode: targetMode) else {
+            return false
+        }
+        markHandoffNavigationChanged()
+        if !startNew, scope == activeScope, targetMode == activeMode,
+           (targetID.isEmpty || canonicalSessionID(targetID) == canonicalSessionID(source.model.activeSessionId)) {
+            navigation.path.removeAll()
             navigation.closeSidebar()
-            if let resumeSessionID {
-                if resumeSessionID != confirmedSession {
-                    scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
-                    pendingDraftRestoreSessionID = resumeSessionID
-                } else {
-                    pendingDraftRestoreSessionID = nil
-                }
-                pendingSessionRestoreID = resumeSessionID
-                activeSession = resumeSessionID
-                requestSessionResume(
-                    resumeSessionID,
-                    scope: scope,
-                    using: source,
-                    allowRecoveryRouting: allowRecoveryRouting
-                )
-            } else if startNew {
-                scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
-                let freshDraft = draft
-                draftOwnerSessionID = ""
-                draft = freshDraft
-                scopedPreferences.setDraft(freshDraft, scope: scope, mode: targetMode, ownerSessionID: "")
-                pendingDraftRestoreSessionID = nil
-                pendingSessionRestoreID = nil
-                activeSession = ""
-                confirmedSession = ""
-                scopedPreferences.setActiveSessionID("", scope: scope, mode: targetMode)
-                source.startNewConversation(mode: targetMode)
-                if let pendingDraft = pendingBeginActionDraft {
-                    pendingBeginActionDraft = nil
-                    draft = pendingDraft
-                }
-            }
             return true
         }
-
-        persistConversationScope()
-        let previousSource = source
-        projectSwitching = true
+        navigation.path.removeAll()
         navigation.closeSidebar()
+        scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
+        sessionHost.entry(for: source)?.draft = draft
+        let previousSource = source
+        let rows = scope.projectID.flatMap { id in projectStore.projects.first(where: { $0.id == id })?.sessions }
+            ?? projectStore.globalSessions
+        let workspace = rows.first(where: { canonicalSessionID($0.sessionId) == targetID })?.workspaceDirectory
+            ?? scope.projectID.flatMap { id in projectStore.projects.first(where: { $0.id == id })?.record.activeDirectory }
+            ?? (scope == .scheduled ? ((try? MobileUserStorage.scheduledWorkspace(sessionID: targetID)) ?? LXISHGuestPaths.workspaceRoot) : LXISHGuestPaths.workspaceRoot)
+        projectSwitching = true
         Task { @MainActor in
             var rollback: ProjectActiveSelectionRollback?
             do {
-                try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
-                if allowRecoveryRouting && previousSource.model.hasInactiveDurableRecovery {
-                    previousSource.handleBackground()
-                } else {
-                    try await previousSource.cancelAndWait()
+                if startNew, let projectID = scope.projectID {
+                    try await projectStore.addMode(targetMode, projectID: projectID)
                 }
-                try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
                 if scope != activeScope {
                     rollback = try await projectStore.persistActiveForSwitch(projectId: scope.projectID)
                 }
-                try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
-                let replacement = try makeSource(
-                    scope: scope,
-                    snapshot: providerRepository.makeLaunchSnapshot(),
-                    mode: targetMode,
-                    sessionID: startNew ? nil : resumeSessionID ?? restoredSessionID(scope: scope, mode: targetMode)
-                )
-                #if canImport(harness_runtimeFFI)
+                let entry: SessionHost.Entry
+                if let existing {
+                    entry = existing
+                } else {
+                    let replacement = try makeSource(scope: scope, snapshot: providerRepository.makeLaunchSnapshot(),
+                                                     mode: targetMode, sessionID: targetID.isEmpty ? nil : targetID)
+                    sessionHost.protectIdentity(of: replacement, scope: scope, mode: targetMode,
+                                                sessionID: targetID)
+                    #if canImport(harness_runtimeFFI)
                     installExternalEventHandler(on: replacement)
-                #endif
-                try await replacement.prepare()
-                try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
-                // The old source remains editable while the replacement is
-                // prepared, so persist its latest draft before changing scope.
+                    #endif
+                    let restoredDraft = startNew ? "" : scopedPreferences.draft(scope: scope, mode: targetMode, ownerSessionID: targetID)
+                    // An unprepared source must never be published for reuse.
+                    // Keep the old owner current if preparation fails.
+                    try await replacement.prepare()
+                    entry = try sessionHost.retain(source: replacement, scope: scope, mode: targetMode,
+                                                   sessionID: targetID, workspace: workspace, draft: restoredDraft)
+                    if !startNew {
+                        entry.draftSourceCodeUnits = scopedPreferences.draftSourceCodeUnits(
+                            scope: scope, mode: targetMode, ownerSessionID: targetID)
+                        entry.handoffReference = scopedPreferences.handoffReference(sessionID: targetID, scope: scope, mode: targetMode)
+                    }
+                }
                 scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
-                let freshDraft = draft
-                let restoredSession = restoredSessionID(scope: scope, mode: targetMode)
-                let targetOwner = startNew ? "" : (resumeSessionID ?? restoredSession)
+                sessionHost.entry(for: previousSource)?.draft = draft
+                voiceInteraction.handleContextChange()
                 activeScope = scope
                 activeMode = targetMode
-                draftOwnerSessionID = targetOwner
-                pendingDraftRestoreSessionID = nil
                 scopedPreferences.setCurrentMode(targetMode)
-                draft = startNew ? freshDraft : scopedPreferences.draft(scope: scope, mode: targetMode, ownerSessionID: targetOwner)
-                if startNew {
-                    scopedPreferences.setDraft(draft, scope: scope, mode: targetMode, ownerSessionID: targetOwner)
+                scopedPreferences.setLastScope(scope, mode: targetMode)
+                activeSession = entry.sessionID
+                confirmedSession = entry.source.model.sessionTransitionPending ? "" : entry.sessionID
+                pendingSessionRestoreID = entry.source.model.sessionTransitionPending ? targetID : nil
+                draftOwnerSessionID = entry.sessionID
+                draft = handoffDraft?.displayText ?? pendingBeginActionDraft ?? entry.draft
+                pendingBeginActionDraft = nil
+                entry.draft = draft
+                if let handoffDraft {
+                    entry.draftSourceCodeUnits = handoffDraft.sourceCodeUnits
+                    entry.handoffReference = handoffDraft.reference
+                    scopedPreferences.setDraft(draft, scope: scope, mode: targetMode, ownerSessionID: entry.sessionID)
+                    scopedPreferences.setDraftSourceCodeUnits(handoffDraft.sourceCodeUnits, scope: scope,
+                                                               mode: targetMode, ownerSessionID: entry.sessionID)
+                    scopedPreferences.setHandoffReference(handoffDraft.reference, sessionID: entry.sessionID, scope: scope, mode: targetMode)
+                    pendingHandoffDrafts.removeAll { $0.id == handoffDraft.id }
+                } else if startNew {
+                    scopedPreferences.setDraft("", scope: scope, mode: targetMode, ownerSessionID: "")
+                    scopedPreferences.setDraftSourceCodeUnits(nil, scope: scope, mode: targetMode, ownerSessionID: "")
+                    scopedPreferences.setHandoffReference(nil, sessionID: "", scope: scope, mode: targetMode)
                 }
-                confirmedSession = restoredSession
-                activeSession = resumeSessionID ?? restoredSession
-                pendingSessionRestoreID = activeSession.isEmpty ? nil : activeSession
-                pendingDraftRestoreSessionID = activeSession.isEmpty ? nil : activeSession
-                source.setSettingsActive(false)
-                source = replacement
+                scopedPreferences.setActiveSessionID(confirmedSession, scope: scope, mode: targetMode)
+                previousSource.setSettingsActive(false)
+                source = entry.source
+                voiceInteraction = entry.voice
                 source.setSettingsActive(true)
-                sourceGeneration = UUID()
-                if startNew {
-                    pendingSessionRestoreID = nil
-                    activeSession = ""
-                    confirmedSession = ""
-                    scopedPreferences.setActiveSessionID("", scope: scope, mode: targetMode)
-                    replacement.startNewConversation(mode: targetMode)
-                    if let pendingDraft = pendingBeginActionDraft {
-                        pendingBeginActionDraft = nil
-                        draft = pendingDraft
-                    }
-                } else if !activeSession.isEmpty {
-                    requestSessionResume(
-                        activeSession,
-                        scope: scope,
-                        using: replacement,
-                        allowRecoveryRouting: allowRecoveryRouting
-                    )
-                }
-                previousSource.handleBackground()
+                hasUnsavedConversationMedia = entry.attachment != nil
+                liveWorkspaceState = source.model.workspaceState
+                sourceGeneration = entry.id
                 await cronRepository.refresh()
             } catch {
-                if let rollback,
-                   ConversationSourceReplacementPolicy.shouldRollbackSelection(
-                       previousSourceIsCurrent: source === previousSource,
-                       currentProjectID: projectStore.activeProjectId,
-                       requestedProjectID: scope.projectID
-                   ) {
+                if let rollback, source === previousSource {
                     _ = try? await projectStore.rollbackActiveSwitch(rollback)
                 }
                 projectStore.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
-                // The mode-pinning switch this armed for never landed either
-                // — drop it rather than leave it to load into some LATER
-                // unrelated `startNew`.
                 pendingBeginActionDraft = nil
-                if let pending = pendingSessionFork,
-                   pending.sourceScope == scope,
-                   pending.sourceMode == targetMode {
-                    rollbackPendingSessionFork(pending, message: nil)
-                }
-                if source === previousSource {
-                    previousSource.handleForeground()
-                    previousSource.warmUp()
-                }
             }
             projectSwitching = false
+            if let requestedMode = pendingModeSelection {
+                pendingModeSelection = nil
+                if requestedMode != activeMode { _ = switchMode(to: requestedMode) }
+            }
             applyPendingConversationSelectionRestoreIfPossible()
         }
         return true
@@ -1789,45 +1851,17 @@ struct RootView: View {
         }
         // SwiftUI may observe the owner and mode in either order. Reconcile
         // them together before either callback persists the destination slot.
-        adoptSessionMode(source.model.sessionMode, pending: source.model.pendingSessionMode)
+        adoptSessionMode(source.model.sessionMode)
         activeSession = sessionID
         confirmedSession = sessionID
-        scopedPreferences.setActiveSessionID(sessionID, scope: activeScope, mode: activeMode)
-        if let pending = source.model.pendingSessionMode {
-            scopedPreferences.setActiveSessionID(sessionID, scope: activeScope, mode: pending)
-            scopedPreferences.setDraft(draft, scope: activeScope, mode: pending, ownerSessionID: draftOwnerSessionID)
+        if let reference = sessionHost.entry(for: source)?.handoffReference {
+            scopedPreferences.setHandoffReference(reference, sessionID: sessionID, scope: activeScope, mode: activeMode)
         }
+        scopedPreferences.setActiveSessionID(sessionID, scope: activeScope, mode: activeMode)
         if pendingSessionRestoreID == sessionID {
             pendingSessionRestoreID = nil
         }
         triggerPendingForkIfReady(for: sessionID)
-        return true
-    }
-
-    @discardableResult
-    private func clearUnavailableSession(_ sessionID: String) -> Bool {
-        guard ConversationSessionRestorePolicy.shouldClearUnavailableSession(
-            unavailableSessionID: sessionID,
-            pendingRestoreID: pendingSessionRestoreID,
-            activeSessionID: activeSession
-        ) else {
-            return false
-        }
-        if confirmedSession == sessionID {
-            confirmedSession = ""
-        }
-        if pendingDraftRestoreSessionID == sessionID { pendingDraftRestoreSessionID = nil }
-        pendingSessionRestoreID = nil
-        if pendingLinkedSessionID == sessionID {
-            pendingLinkedSessionID = nil; pendingMessageLink = nil
-            externalLinkError = String(localized: "deep_link_conversation_workspace_missing")
-        }
-        activeSession = confirmedSession
-        scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
-        if let pending = pendingSessionFork,
-           pending.sourceSessionID == sessionID {
-            rollbackPendingSessionFork(pending, message: nil)
-        }
         return true
     }
 
@@ -1841,12 +1875,11 @@ struct RootView: View {
         ) else {
             return false
         }
-        if pendingDraftRestoreSessionID == sessionID { pendingDraftRestoreSessionID = nil }
         pendingSessionRestoreID = nil
         if draftOwnerSessionID != rollbackSelection {
-            let restoredDraft = scopedPreferences.draftForSessionTransition(
-                draft, scope: activeScope, from: activeMode, to: activeMode,
-                fromOwner: draftOwnerSessionID, toOwner: rollbackSelection, restoring: true
+            let restoredDraft = scopedPreferences.draftForFailedSelection(
+                draft, scope: activeScope, mode: activeMode,
+                fromOwner: draftOwnerSessionID, toOwner: rollbackSelection
             )
             draftOwnerSessionID = rollbackSelection
             draft = restoredDraft
@@ -1915,6 +1948,7 @@ struct RootView: View {
         targetMode: SessionMode
     ) {
         guard !sessionID.isEmpty, sourceMode != targetMode else { return }
+        cancelPendingHandoff()
         let origin = ConversationSelectionSnapshot(
             scope: activeScope,
             mode: activeMode,
@@ -1928,7 +1962,9 @@ struct RootView: View {
             sourceSessionID: sessionID,
             sourceMode: sourceMode,
             targetMode: targetMode,
-            origin: origin
+            origin: origin,
+            requestID: UUID().uuidString,
+            navigationRevision: handoffNavigationRevision
         )
         if scope == activeScope, activeMode == sourceMode, confirmedSession == sessionID {
             triggerPendingForkIfReady(for: sessionID)
@@ -1938,6 +1974,7 @@ struct RootView: View {
             pendingSessionFork = nil
             return
         }
+        pendingSessionFork?.navigationRevision = handoffNavigationRevision
     }
 
     private func triggerPendingForkIfReady(for sessionID: String) {
@@ -1950,19 +1987,45 @@ struct RootView: View {
                   confirmedSession == sessionID,
                   !source.model.sessionTransitionPending
             else { return }
+            guard let entry = sessionHost.entry(for: source) else { return }
             pending.submitted = true
+            pending.ownerEntryID = entry.id
             pendingSessionFork = pending
+            let owner = entry.source
             Task { @MainActor in
                 do {
-                    try await source.forkSession(
-                        pending.sourceSessionID,
-                        targetMode: pending.targetMode
-                    )
+                    try await owner.submitEngineCommand(.prepareSessionHandoff(requestId: pending.requestID, targetMode: pending.targetMode.dto))
                 } catch {
                     rollbackPendingSessionFork(pending, message: error.localizedDescription)
                 }
             }
         #endif
+    }
+
+    private func cancelPendingHandoff() {
+        guard let pending = pendingSessionFork else { return }
+        pendingSessionFork = nil
+        #if canImport(harness_runtimeFFI)
+        guard pending.submitted, let ownerID = pending.ownerEntryID,
+              let owner = sessionHost.entries.first(where: { $0.id == ownerID })?.source else { return }
+        Task { @MainActor in
+            try? await owner.submitEngineCommand(.cancelSessionHandoff(requestId: pending.requestID))
+        }
+        #endif
+    }
+
+    private var isConversationSurfaceVisible: Bool {
+        navigation.path.isEmpty && !navigation.settingsOpen && navigation.runningAppID == nil
+            && remoteDestination == nil && externalImport == nil && externalActionApproval == nil
+    }
+
+    private func markHandoffNavigationChanged() {
+        handoffNavigationRevision = UUID()
+    }
+
+    private func activatePendingHandoffDraft(_ handoff: SessionHandoffDraft) {
+        guard !projectSwitching, pendingHandoffDrafts.contains(where: { $0.id == handoff.id }) else { return }
+        _ = switchScope(to: .global, mode: handoff.mode, startNew: true, handoffDraft: handoff)
     }
 
     private func rollbackPendingSessionFork(
@@ -1974,7 +2037,9 @@ struct RootView: View {
             return
         }
         pendingSessionFork = nil
-        if let request = pending.rollbackRequest {
+        if let request = pending.rollbackRequest,
+           pending.navigationRevision == handoffNavigationRevision,
+           isConversationSurfaceVisible {
             restoreConversationSelection(request.snapshot, message: message)
         } else if let message {
             projectStore.errorMessage = message
@@ -1993,168 +2058,51 @@ struct RootView: View {
     }
 
     private func applyPendingConversationSelectionRestoreIfPossible() {
-        guard let pending = pendingConversationSelectionRestore else { return }
-        if let message = pending.message {
-            projectStore.errorMessage = message
-        }
-
+        guard !projectSwitching, let pending = pendingConversationSelectionRestore else { return }
+        if let message = pending.message { projectStore.errorMessage = message }
         let snapshot = pending.snapshot
-        let mutationAllowed = ConversationSessionMutationPolicy.allowsCallerMutation(
-            hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
-            hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
-            isCancelling: source.model.isCancelling
-        )
-
-        if activeScope == snapshot.scope, activeMode == snapshot.mode {
-            let snapshotOwner = snapshot.resumeSessionID ?? ""
-            scopedPreferences.setDraft(snapshot.draft, scope: snapshot.scope, mode: snapshot.mode, ownerSessionID: snapshotOwner)
-            if draftOwnerSessionID == snapshotOwner, draft != snapshot.draft {
-                draft = snapshot.draft
-            }
-
-            if let resumeSessionID = snapshot.resumeSessionID {
-                let sessionAlreadySelected =
-                    pendingSessionRestoreID == resumeSessionID
-                    || activeSession == resumeSessionID
-                    || confirmedSession == resumeSessionID
-                if sessionAlreadySelected {
-                    if draftOwnerSessionID != resumeSessionID {
-                        pendingDraftRestoreSessionID = resumeSessionID
-                    }
-                    pendingConversationSelectionRestore = nil
-                    return
-                }
-                guard mutationAllowed else { return }
-                pendingConversationSelectionRestore = nil
-                pendingSessionRestoreID = resumeSessionID
-                pendingDraftRestoreSessionID = resumeSessionID
-                activeSession = resumeSessionID
-                requestSessionResume(resumeSessionID, scope: snapshot.scope, using: source)
-                return
-            }
-
-            let alreadyAtFreshConversation =
-                pendingSessionRestoreID == nil
-                && activeSession.isEmpty
-                && confirmedSession.isEmpty
-            if alreadyAtFreshConversation {
-                draftOwnerSessionID = ""
-                draft = snapshot.draft
-                pendingConversationSelectionRestore = nil
-                return
-            }
-            guard mutationAllowed else { return }
-            pendingConversationSelectionRestore = nil
-            pendingSessionRestoreID = nil
-            draftOwnerSessionID = ""
+        let ownerID = snapshot.resumeSessionID ?? ""
+        scopedPreferences.setDraft(snapshot.draft, scope: snapshot.scope, mode: snapshot.mode, ownerSessionID: ownerID)
+        if activeScope == snapshot.scope, activeMode == snapshot.mode,
+           canonicalSessionID(source.model.activeSessionId) == canonicalSessionID(ownerID) {
             draft = snapshot.draft
-            activeSession = ""
-            confirmedSession = ""
-            scopedPreferences.setActiveSessionID("", scope: snapshot.scope, mode: snapshot.mode)
-            source.startNewConversation(mode: snapshot.mode)
+            pendingConversationSelectionRestore = nil
             return
         }
-
-        guard !projectSwitching, mutationAllowed else { return }
-        _ = switchScope(
-            to: snapshot.scope,
-            mode: snapshot.mode,
-            resumeSessionID: snapshot.resumeSessionID,
-            startNew: snapshot.startsNewConversation
-        )
+        pendingConversationSelectionRestore = nil
+        if snapshot.startsNewConversation { pendingBeginActionDraft = snapshot.draft }
+        _ = switchScope(to: snapshot.scope, mode: snapshot.mode,
+                        resumeSessionID: snapshot.resumeSessionID, startNew: snapshot.startsNewConversation)
     }
 
     private func restoredSessionID(scope: ConversationScope, mode: SessionMode) -> String {
-        let projectLastActive = scope.projectID.flatMap { id in
-            projectStore.projects.first(where: { $0.record.id == id })?.record.lastActiveSessionId
-        }
         return ConversationModeRestorePolicy.sessionID(
             mode: mode,
             scoped: scopedPreferences.storedActiveSessionID(scope: scope, mode: mode),
-            projectLastActive: projectLastActive,
-            activeDirectory: scope.projectID.flatMap { id in projectStore.projects.first(where: { $0.id == id })?.record.activeDirectory },
-            sessions: scope.projectID.flatMap { id in projectStore.projects.first(where: { $0.id == id })?.sessions } ?? []
+            sessions: scope.projectID.flatMap { id in projectStore.projects.first(where: { $0.id == id })?.sessions } ?? projectStore.globalSessions
         )
     }
 
-    /// A zero message count in the durable project index is the proof required
-    /// by the migration-safe engine entrypoint. If a live catalog row is
-    /// available it wins over the cache; otherwise startup/project switching can
-    /// still restore legacy empty sessions before ListSessions replies.
-    private func requestSessionResume(
-        _ sessionID: String,
-        scope: ConversationScope,
-        using conversation: any ConversationSource,
-        allowRecoveryRouting: Bool = false
-    ) {
-        guard allowRecoveryRouting || ConversationSessionMutationPolicy.allowsCallerMutation(
-            hasInactiveDurableRecovery: conversation.model.hasInactiveDurableRecovery,
-            hasUnresolvedTurnRecovery: conversation.model.hasUnresolvedTurnRecovery,
-            isCancelling: conversation.model.isCancelling
-        ) else { return }
-        let emptyTitle: String?
-        if let live = conversation.model.engineSessions.first(where: { $0.id == sessionID }) {
-            emptyTitle = live.messageCount == 0 ? live.title : nil
-        } else {
-            let cachedRows = scope.projectID.flatMap { id in
-                projectStore.projects.first(where: { $0.record.id == id })?.sessions
-            } ?? projectStore.globalSessions
-            if let cached = cachedRows.first(where: { $0.sessionId == sessionID }),
-               cached.messageCount == 0 {
-                emptyTitle = cached.title
-            } else {
-                emptyTitle = nil
-            }
-        }
-        conversation.setSessionRestoreFallbackMode(scopedPreferences.lastMode())
-        conversation.resumeSession(sessionID, emptySessionTitle: emptyTitle)
-    }
-
     private func persistConversationScope() {
-        guard ConversationSessionMutationPolicy.allowsCallerMutation(
-            hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
-            hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
-            isCancelling: source.model.isCancelling
-        ) else { return }
         scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
         scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
     }
 
     private func handleScenePhase(_ oldPhase: ScenePhase, _ phase: ScenePhase) {
-        conversationBackgroundAlerts.setScenePhase(phase)
+        sessionHost.setScenePhase(phase)
         switch phase {
         case .background:
-            #if canImport(harness_runtimeFFI)
-            (source as? EngineConversationSource)?.sideChats.cancelCurrentTurns()
-            #endif
             persistConversationScope()
-            voiceInteraction.handleBackground()
-            conversationBackgroundExecution.setTurnActive(
-                source.model.requiresBackgroundExecution,
-                turnID: source.model.activeTurnToken?.clientTurnId
-            )
-            source.handleBackground()
-            syncConversationBackgroundSurfaces()
             Task {
                 await VoicePreviewPlayback.shared.stop()
                 await VoiceAudioSessionCoordinator.shared.suspendForBackground()
             }
             Task { await cronRepository.handleSceneDidEnterBackground() }
         case .active:
-            #if canImport(harness_runtimeFFI)
-            (source as? EngineConversationSource)?.sideChats.handleForeground()
-            #endif
-            conversationBackgroundExecution.setTurnActive(
-                source.model.requiresBackgroundExecution,
-                turnID: source.model.activeTurnToken?.clientTurnId
-            )
-            source.handleForeground()
-            syncConversationBackgroundSurfaces()
             Task { await VoiceAudioSessionCoordinator.shared.resumeAfterForeground() }
             Task { await cronRepository.handleSceneBecameActive() }
             Task { await consumePendingAppActions() }
-        default:
-            break
+        default: break
         }
     }
 
@@ -2207,6 +2155,12 @@ struct RootView: View {
             return true
         }
 
+        // Resolve a session's fixed owner before dismissing the current
+        // navigation. A conflicting link must not move the user's view.
+        if case let .canonical(target) = action, target.parts.first == "session" {
+            return applyCanonicalLink(target)
+        }
+
         externalAsyncRouteID = UUID()
         navigation.closeSidebar()
         navigation.closeSettings()
@@ -2247,18 +2201,12 @@ struct RootView: View {
                 let currentSessionID = source.model.activeSessionId.isEmpty
                     ? confirmedSession
                     : source.model.activeSessionId
-                if currentSessionID == sessionID { return true }
+                if canonicalSessionID(currentSessionID) == canonicalSessionID(sessionID), activeMode == mode { return true }
             }
-            guard ConversationSessionMutationPolicy.allowsCallerMutation(
-                hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
-                hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
-                isCancelling: source.model.isCancelling
-            ) || targetScope != activeScope || mode != activeMode else { return false }
             return switchScope(
                 to: targetScope,
                 mode: mode,
-                resumeSessionID: sessionID,
-                allowRecoveryRouting: true
+                resumeSessionID: sessionID
             )
         case let .openTerminal(sessionID, initialCommand):
             navigation.openTerminal(
@@ -2290,7 +2238,25 @@ struct RootView: View {
         }
         switch parts[0] {
         case "session":
-            let mode = target.params["mode"].flatMap(SessionMode.init(rawValue:)) ?? .code
+            let indexedRows = requestedScope.projectID.flatMap { projectID in
+                projectStore.projects.first(where: { $0.id == projectID })?.sessions
+            } ?? (requestedScope == .global ? projectStore.globalSessions : [])
+            let indexedMode = indexedRows.first(where: {
+                canonicalSessionID($0.sessionId) == canonicalSessionID(id)
+            })?.mode
+            let liveMode = requestedScope == activeScope
+                ? source.model.engineSessions.first(where: { canonicalSessionID($0.id) == canonicalSessionID(id) })?.mode
+                : nil
+            let currentMode = requestedScope == activeScope && canonicalSessionID(source.model.activeSessionId) == canonicalSessionID(id)
+                ? activeMode : nil
+            guard let mode = target.params["mode"].flatMap(SessionMode.init(rawValue:)) else {
+                externalLinkError = String(localized: "deep_link_conversation_workspace_missing")
+                return true
+            }
+            if let knownMode = indexedMode ?? liveMode ?? currentMode, knownMode != mode {
+                externalLinkError = String(localized: "deep_link_conversation_workspace_missing")
+                return true
+            }
             if target.params["workspace"] == nil || target.params["workspace"] == activeScope.workspaceKey {
                 guard source.model.engineSessionsLoaded else { return false }
                 guard source.model.engineSessions.contains(where: { $0.id == id }) || source.model.activeSessionId == id else {
@@ -2306,14 +2272,12 @@ struct RootView: View {
             return applied
         case "new":
             let text = target.payload["prompt"] as? String ?? ""
-            let newMode = target.newConversationMode(defaultMode: scopedPreferences.lastMode())
-            if let workspace = target.params["workspace"], let scope = ConversationScope(workspaceKey: workspace), scope != activeScope {
+            let newMode = target.newConversationMode(defaultMode: activeMode)
+            if let workspace = target.params["workspace"], let scope = ConversationScope(workspaceKey: workspace) {
                 pendingBeginActionDraft = text
-                return switchScope(to: scope, mode: newMode, startNew: true)
-            }
-            if target.params["mode"] != nil, newMode != activeMode {
-                pendingBeginActionDraft = text
-                return switchScope(to: activeScope, mode: newMode, startNew: true)
+                let accepted = switchScope(to: scope, mode: newMode, startNew: true)
+                if !accepted { pendingBeginActionDraft = nil }
+                return accepted
             }
             return beginAppIntegratedConversation(draftText: text, mode: newMode)
         case "project":
@@ -2434,24 +2398,10 @@ struct RootView: View {
 
     @discardableResult
     private func beginAppIntegratedConversation(draftText: String, mode: SessionMode? = nil) -> Bool {
-        guard ConversationSessionMutationPolicy.allowsCallerMutation(
-            hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
-            hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
-            isCancelling: source.model.isCancelling
-        ) else { return false }
-        voiceInteraction.handleContextChange()
-        scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
-        draftOwnerSessionID = ""
-        pendingDraftRestoreSessionID = nil
-        pendingSessionRestoreID = nil
-        activeSession = ""
-        confirmedSession = ""
-        let newMode = mode ?? scopedPreferences.lastMode()
-        scopedPreferences.setActiveSessionID("", scope: activeScope, mode: newMode)
-        draft = draftText
-        scopedPreferences.setDraft(draftText, scope: activeScope, mode: newMode, ownerSessionID: "")
-        source.startNewConversation(mode: newMode)
-        return true
+        pendingBeginActionDraft = draftText
+        let accepted = switchScope(to: .global, mode: mode ?? activeMode, startNew: true)
+        if !accepted { pendingBeginActionDraft = nil }
+        return accepted
     }
 
     private func continueLocalAppDevelopment(_ app: UnifiedAppRecord) {
@@ -2482,7 +2432,7 @@ struct RootView: View {
 
     private func beginLocalAppDevelopment(_ request: LocalAppDevelopmentRequest) {
         guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !hasUnsavedConversationMedia,
-              !projectSwitching, !source.model.streaming, !source.model.sessionTransitionPending else {
+              !projectSwitching else {
             externalLinkError = "Finish or save the current conversation draft before opening app development."; return
         }
         Task { @MainActor in
@@ -2514,7 +2464,7 @@ struct RootView: View {
                     }?.sessionId
                 }
                 let scope = ConversationScope.project(project.record.id)
-                guard switchScope(to: scope, mode: .code, resumeSessionID: existingSession) else {
+                guard switchScope(to: scope, mode: .code, resumeSessionID: existingSession, startNew: existingSession == nil) else {
                     throw LocalAppServiceFailure("CONVERSATION_BUSY", "The conversation cannot switch to the app source project right now.")
                 }
                 for _ in 0..<400 {
@@ -2529,7 +2479,12 @@ struct RootView: View {
                 if let existing = existingSession {
                     guard engine.model.activeSessionId == existing, engine.model.workspaceState?.cwd == request.sourceDirectory else { throw LocalAppServiceFailure("AUTHORING_MOVED", "The source session moved. Refresh the app details before continuing.") }
                     sessionID = existing
-                } else { sessionID = try await engine.startLocalAppAuthoringSession(cwd: request.sourceDirectory) }
+                } else {
+                    guard !engine.model.activeSessionId.isEmpty, engine.model.workspaceState?.cwd == request.sourceDirectory else {
+                        throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring workspace did not start at its source directory.")
+                    }
+                    sessionID = engine.model.activeSessionId
+                }
                 guard source === engine, engine.model.activeSessionId == sessionID,
                       engine.model.workspaceState?.cwd == request.sourceDirectory,
                       activeMode == .code, activeScope == scope else { throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.") }
@@ -2574,85 +2529,9 @@ struct RootView: View {
     }
 
     private func syncConversationBackgroundSurfaces() {
-        let sessionID = source.model.activeSessionId.isEmpty
-            ? confirmedSession
-            : source.model.activeSessionId
-        let turnToken = source.model.activeTurnToken
-        conversationBackgroundExecution.setExpirationObserver {
-            self.requestRecoverablePause(
-                sessionID: sessionID,
-                turnToken: turnToken
-            )
-        }
-        conversationBackgroundAlerts.sync(ConversationBackgroundSnapshot(
-            sessionID: sessionID,
-            turnToken: turnToken,
-            turnCompletion: source.model.turnCompletion,
-            pendingQuestions: source.model.pendingQuestions,
-            // The tool name is carried, not re-derived: the prompt's own title
-            // has already been through a localized format string.
-            // A kind other than `toolUseConfirm` (`exitPlanMode`,
-            // `bypassPermissionsMode`) has no tool to name, so the body renders
-            // without one rather than inventing a label nobody would recognize.
-            pendingPermissions: source.model.pendingPermissions.map { pending -> ConversationPendingPermission in
-                var toolName = ""
-                if case let .toolUseConfirm(name, _, _) = pending.kind { toolName = name }
-                return ConversationPendingPermission(requestId: pending.requestId, toolName: toolName)
-            },
-            backgroundTasks: source.model.backgroundTasks,
-            requiresExecutionLease: source.model.requiresBackgroundExecution,
-            workspaceKey: activeScope.workspaceKey,
-            sessionMode: activeMode
-        ))
+        if let entry = sessionHost.entry(for: source) { sessionHost.sync(entry) }
     }
 
-    /// A lease expiration is only a platform signal. Keep the turn owned and
-    /// non-sendable until the engine confirms `PausedRecoverable`; a rejected
-    /// pause remains visible as a host error and never becomes a fake cancel.
-    private func requestRecoverablePause(
-        sessionID: String,
-        turnToken: ConversationTurnToken?
-    ) {
-        #if canImport(harness_runtimeFFI)
-        (source as? EngineConversationSource)?.sideChats.cancelCurrentTurns()
-        #endif
-        guard let turnToken else { return }
-        Task { @MainActor in
-            do {
-                try await source.markActiveTurnPausedRecoverable(turnToken)
-                guard source.model.activeTurnToken == turnToken,
-                      !source.model.streaming,
-                      source.model.statusLine == String(localized: "chat_background_paused_text")
-                else { return }
-                conversationBackgroundAlerts.markRecoverablePause(
-                    sessionID: sessionID,
-                    turnToken: turnToken,
-                    workspaceKey: activeScope.workspaceKey,
-                    sessionMode: activeMode
-                )
-                syncConversationBackgroundSurfaces()
-            } catch {
-                // The source retains ownership and publishes the host error;
-                // syncing here keeps activity/notification state from claiming
-                // that the turn paused when the command was rejected.
-                syncConversationBackgroundSurfaces()
-            }
-        }
-    }
-}
-
-enum ConversationModeRestorePolicy {
-    static func sessionID(
-        mode: SessionMode,
-        scoped: String?,
-        projectLastActive: String?,
-        activeDirectory: String? = nil,
-        sessions: [ProjectSessionSummary] = []
-    ) -> String {
-        let selected = scoped ?? (mode == .code ? projectLastActive : nil) ?? ""
-        guard !selected.isEmpty, let activeDirectory else { return selected }
-        return sessions.contains(where: { canonicalSessionID($0.sessionId) == canonicalSessionID(selected) && $0.workspaceDirectory == activeDirectory }) ? selected : ""
-    }
 }
 
 enum ConversationSessionIndexPolicy {
@@ -2686,9 +2565,8 @@ enum ConversationSessionMutationPolicy {
     }
 }
 
-/// Replacing a native engine discards its connection-scoped callbacks. A
-/// foreground turn can be explicitly cancelled first, but detached work and
-/// its interactive requests must keep their original source until settled.
+/// Replacing an engine discards its connection-scoped callbacks. The owner
+/// remains intact while any admitted turn or interactive request is live.
 enum ConversationSourceReplacementPolicy {
     static func shouldRollbackSelection(
         previousSourceIsCurrent: Bool,
@@ -2699,10 +2577,10 @@ enum ConversationSourceReplacementPolicy {
     }
 
     @MainActor
-    static func allowsReplacement(
-        of model: ConversationModel,
-        allowInactiveRecovery: Bool = false
-    ) -> Bool {
+    static func allowsReplacement(of model: ConversationModel, hasActiveRealtimeAudio: Bool = false) -> Bool {
+        guard !hasActiveRealtimeAudio, !model.streaming, !model.isCancelling, !model.sessionTransitionPending,
+              !model.slashCommandPending,
+              !model.hasUnresolvedTurnRecovery, !model.hasInactiveDurableRecovery else { return false }
         if model.backgroundTasks.contains(where: { $0.status.requiresExecutionLease }) {
             return false
         }
@@ -2720,19 +2598,9 @@ enum ConversationSourceReplacementPolicy {
         }) {
             return false
         }
-        // Includes idle shell/tool/compaction activity after the main stream
-        // ended. A live main stream is handled by the cancellation barrier.
-        if !model.streaming && model.requiresBackgroundExecution { return false }
-        let mayRouteInactiveRecovery = allowInactiveRecovery && model.hasInactiveDurableRecovery
-        if !model.streaming && !mayRouteInactiveRecovery && !model.pendingQuestions.isEmpty {
-            return false
-        }
+        if model.requiresBackgroundExecution || !model.pendingQuestions.isEmpty { return false }
         #if canImport(harness_runtimeFFI)
-            if model.pendingPermissions.contains(where: {
-                $0.worker != nil || (!model.streaming && !mayRouteInactiveRecovery)
-            }) {
-                return false
-            }
+            if !model.pendingPermissions.isEmpty { return false }
         #endif
         return true
     }
@@ -2744,27 +2612,14 @@ enum ConversationSessionRestorePolicy {
         return pendingRestoreID == nil || pendingRestoreID == candidateSessionID
     }
 
-    static func shouldClearUnavailableSession(
-        unavailableSessionID: String,
-        pendingRestoreID: String?,
-        activeSessionID: String
-    ) -> Bool {
-        guard !unavailableSessionID.isEmpty else { return false }
-        return pendingRestoreID == unavailableSessionID
-            || activeSessionID == unavailableSessionID
-    }
-
     static func rollbackSelection(
         failedSessionID: String,
         pendingRestoreID: String?,
         activeSessionID: String,
         confirmedSessionID: String
     ) -> String? {
-        guard shouldClearUnavailableSession(
-            unavailableSessionID: failedSessionID,
-            pendingRestoreID: pendingRestoreID,
-            activeSessionID: activeSessionID
-        ) else {
+        guard !failedSessionID.isEmpty,
+              pendingRestoreID == failedSessionID || activeSessionID == failedSessionID else {
             return nil
         }
         return confirmedSessionID
@@ -2783,9 +2638,8 @@ private struct ConversationProjectBridge: View {
     let sessionMode: SessionMode
     let pendingRestoreID: String?
     let onSessionChanged: (String) -> Bool
-    let onUnavailableSession: (String) -> Bool
     let onSessionTransitionFailed: (String) -> Bool
-    let onModeChanged: (SessionMode, SessionMode?) -> Void
+    let onModeChanged: (SessionMode) -> Void
     let onRefreshSessions: () -> Void
     var onWorkspaceChanged: (SessionWorkspaceState?) -> Void = { _ in }
     @State private var sessionSyncTask: Task<Void, Never>?
@@ -2797,8 +2651,7 @@ private struct ConversationProjectBridge: View {
         Color.clear
             .frame(width: 0, height: 0)
             .onAppear {
-                onModeChanged(model.sessionMode, model.pendingSessionMode)
-                consumeRestoreRecovery(model.sessionRestoreRecovery)
+                onModeChanged(model.sessionMode)
                 consumeSessionTransitionFailure(model.sessionTransitionFailure)
                 handleActiveSession(model.activeSessionId)
                 synchronizeWorkspace()
@@ -2809,13 +2662,7 @@ private struct ConversationProjectBridge: View {
                 synchronizeWorkspace()
             }
             .onChange(of: model.sessionMode) { _, mode in
-                onModeChanged(mode, model.pendingSessionMode)
-            }
-            .onChange(of: model.pendingSessionMode) { _, pending in
-                onModeChanged(model.sessionMode, pending)
-            }
-            .onChange(of: model.sessionRestoreRecovery) { _, recovery in
-                consumeRestoreRecovery(recovery)
+                onModeChanged(mode)
             }
             .onChange(of: model.sessionTransitionFailure) { _, failure in
                 consumeSessionTransitionFailure(failure)
@@ -2830,7 +2677,7 @@ private struct ConversationProjectBridge: View {
             }
             .onChange(of: model.sessionTransitionPending) { _, pending in
                 guard !pending else { return }
-                onModeChanged(model.sessionMode, model.pendingSessionMode)
+                onModeChanged(model.sessionMode)
                 handleActiveSession(model.activeSessionId)
                 if model.engineSessionsLoaded { synchronizeSessions(model.engineSessions) }
             }
@@ -2868,7 +2715,6 @@ private struct ConversationProjectBridge: View {
     }
 
     private func handleActiveSession(_ sessionID: String) {
-        consumeRestoreRecovery(model.sessionRestoreRecovery)
         // A replacement engine can emit its bootstrap SessionStarted before an
         // explicit New/Resume command confirms. Never persist that transient id.
         guard !model.sessionTransitionPending,
@@ -2895,7 +2741,8 @@ private struct ConversationProjectBridge: View {
                         sessionId: sessionID,
                         title: String(firstMessage.text.prefix(120)),
                         mode: sessionMode,
-                        initialMessageCount: 1
+                        initialMessageCount: 1,
+                        workspaceDirectory: model.workspaceState?.cwd
                     )
                 } catch {
                     if model.activeSessionId == sessionID {
@@ -2909,16 +2756,8 @@ private struct ConversationProjectBridge: View {
                 if let workspace = model.workspaceState, workspace.sessionId == sessionID {
                     try? await projectStore.recordWorkspace(projectId: projectID, state: workspace)
                 }
-                try? await projectStore.markActiveSession(projectId: projectID, sessionId: sessionID)
             }
         }
-    }
-
-    private func consumeRestoreRecovery(_ recovery: SessionRestoreRecovery?) {
-        guard let recovery,
-              onUnavailableSession(recovery.unavailableSessionID)
-        else { return }
-        model.sessionRestoreRecovery = nil
     }
 
     private func consumeSessionTransitionFailure(_ failure: SessionTransitionFailure?) {
@@ -2937,7 +2776,7 @@ private struct ConversationProjectBridge: View {
             activeSessionID: model.activeSessionId,
             listedSessionIDs: Set(rows.map(\.id))
         ) else { return }
-        let summaries = rows.map {
+        let summaries = rows.filter { projectStore.allowsSession($0.id, in: scope) }.map {
             ProjectSessionSummary(
                 sessionId: $0.id,
                 title: $0.title,
@@ -2952,7 +2791,8 @@ private struct ConversationProjectBridge: View {
         sessionSyncTask?.cancel()
         sessionSyncTask = Task { @MainActor in
             guard !Task.isCancelled else { return }
-            try? await projectStore.syncEngineSessions(projectId: projectID, rows: summaries)
+            do { try await projectStore.syncEngineSessions(projectId: projectID, rows: summaries) }
+            catch { if !Task.isCancelled { model.error = ConversationError(kind: .host, message: error.localizedDescription) } }
         }
     }
 }

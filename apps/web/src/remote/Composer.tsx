@@ -11,7 +11,7 @@ interface ComposerProps {
   running: boolean;
   disabled: boolean;
   hasFiles?: boolean;
-  onSend(text: string, images: ImageRefDto[]): void;
+  onSend(text: string, images: ImageRefDto[]): boolean;
   onStop(): void;
 }
 
@@ -27,11 +27,14 @@ export function Composer({ locale, running, disabled, hasFiles, onSend, onStop }
   const [problem, setProblem] = useState<string | null>(null);
   const [shrinking, setShrinking] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
-  const canSend = !disabled && !shrinking && (text.trim().length > 0 || hasFiles || (!running && images.length > 0));
+  const canSend = !disabled && !shrinking && (text.trim().length > 0 || (!running && (hasFiles || images.length > 0)));
 
   const send = (): void => {
     if (!canSend) return;
-    onSend(text, running ? [] : images);
+    if (!onSend(text, running ? [] : images)) {
+      setProblem(t(locale, 'sendFailed'));
+      return;
+    }
     setText('');
     // A text follow-up cannot carry images. Keep the unsent draft until idle.
     if (!running) setImages([]);
@@ -109,7 +112,7 @@ export function Composer({ locale, running, disabled, hasFiles, onSend, onStop }
           }}
         />
         {running ? (
-          <button type="button" className="button secondary" onClick={onStop}>
+          <button type="button" className="button secondary" disabled={disabled} onClick={onStop}>
             {t(locale, 'stop')}
           </button>
         ) : null}

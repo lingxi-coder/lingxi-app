@@ -22,7 +22,6 @@ struct SessionPanelSheet: View {
     @Environment(\.theme) private var t
     let title: String
     let mode: SessionMode
-    let pendingMode: SessionMode?
     let canSwitchMode: Bool
     let workspaceName: String
     let messageCount: Int
@@ -72,8 +71,7 @@ struct SessionPanelSheet: View {
                                 Text(mode.title).foregroundStyle(t.text3)
                                 LXIcon(name: .chevronR, size: 12, color: t.text4, stroke: 1.7)
                             }
-                            Text(pendingMode.map { String(localized: "session_mode_pending \($0.title)") }
-                                 ?? mode.modeDescription)
+                            Text(mode.modeDescription)
                                 .font(.caption2).foregroundStyle(t.text4)
                         }
                         .contentShape(Rectangle())

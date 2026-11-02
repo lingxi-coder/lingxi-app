@@ -988,12 +988,12 @@ fn rig() -> Rig {
         IdentityKey::generate(),
     );
     host.configure(|config| {
-        config.respond = Some(Arc::new(|method: &str, _params: &Value| match method {
+        config.respond = Some(Arc::new(|method: &str, params: &Value| match method {
             "sessions.watch" => Some(Ok(json!({ "sessions": [{
                 "session_id": "s1", "title": "Fix bug", "project_label": "app",
                 "status": "running", "viewers": 0,
             }] }))),
-            "session.attach" => Some(Ok(json!({ "mode": "snapshot", "epoch": "e1" }))),
+            "session.attach" => Some(Ok(json!({ "mode": "snapshot", "epoch": if params["session_id"].as_str().is_some_and(|id| id.starts_with("team-approval:")) { "team" } else { "e1" } }))),
             "prompt.send" => Some(Ok(json!({ "turn_id": 7 }))),
             "models.list" => Some(Ok(json!({ "models": ["a", "b"], "current": "a" }))),
             _ => None,
@@ -1367,6 +1367,18 @@ async fn pairing_attach_prompt_and_commands_over_the_tunnel() {
     assert_eq!(sessions[0].title, "Fix bug");
     assert_eq!(sessions[0].status, RemoteSessionStatusFfi::Running);
 
+    // A stale UI cannot silently lose a draft before its mode is confirmed.
+    assert!(matches!(
+        client.send_prompt("s1".into(), "keep this draft".into(), vec![]).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed"
+    ));
+    assert!(matches!(
+        client.list_files("s1".into()).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed"
+    ));
+    assert!(requests_of(&rig.host, "prompt.send").is_empty());
+    assert!(requests_of(&rig.host, "file.list").is_empty());
+
     // Attach: the first update is the empty loading state, then the snapshot replaces.
     client.attach_session("s1".into()).await.unwrap();
     until("the attach", || {
@@ -1378,11 +1390,11 @@ async fn pairing_attach_prompt_and_commands_over_the_tunnel() {
         json!({ "session_id": "s1" })
     );
     for part in [
-        json!({ "phase": "begin", "session_id": "s1", "epoch": "e1", "first_message_index": 0 }),
+        json!({ "phase": "begin", "session_id": "s1", "epoch": "e1", "first_message_index": 0, "session_mode": "code" }),
         json!({ "phase": "messages", "session_id": "s1", "messages": [{ "role": "user", "blocks": [] }] }),
         json!({ "phase": "records", "session_id": "s1", "records": [
             { "seq": 1, "record": { "type": "prompt", "turn_id": 1, "text": "hi",
-                "images": [{ "ref": "r1", "media_type": "image/png" }],
+                "images": [{ "ref": "s1:p:1:0", "media_type": "image/png" }],
                 "origin": "device", "device_name": "Pixel" } },
             { "seq": 2, "record": { "type": "event", "event": { "type": "hologram" } } },
         ] }),
@@ -1416,6 +1428,22 @@ async fn pairing_attach_prompt_and_commands_over_the_tunnel() {
             type_name: "hologram".into()
         }
     );
+
+    // Once the mode is confirmed, ordinary conversations can prepare files.
+    let prepared = client
+        .prepare_file(
+            "s1".into(),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into(),
+            "Cargo.toml".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(prepared.session_id, "s1");
+    assert!(matches!(
+        client.fetch_image("s1".into(), "s2:m:0:0".into()).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "forbidden"
+    ));
+    assert!(requests_of(&rig.host, "image.get").is_empty());
 
     // A prompt with an image reaches the desktop as base64 and shows as outgoing.
     client
@@ -1489,16 +1517,19 @@ async fn pairing_attach_prompt_and_commands_over_the_tunnel() {
     ));
     assert!(live.turn.running);
 
-    // While the turn runs the desktop takes plain text only: images are left out.
+    // A stale idle composer keeps its image if the turn began before admission.
+    let image = RemotePromptImageFfi {
+        media_type: "image/png".into(),
+        bytes: vec![9],
+    };
+    assert!(matches!(
+        client.send_prompt("s1".into(), "more".into(), vec![image.clone()]).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "forbidden"
+    ));
+    assert_eq!(image.bytes, vec![9]);
+    assert_eq!(requests_of(&rig.host, "prompt.send").len(), 1);
     client
-        .send_prompt(
-            "s1".into(),
-            "more".into(),
-            vec![RemotePromptImageFfi {
-                media_type: "image/png".into(),
-                bytes: vec![9],
-            }],
-        )
+        .send_prompt("s1".into(), "more".into(), vec![])
         .await
         .unwrap();
     let second = requests_of(&rig.host, "prompt.send")[1].clone();
@@ -1561,10 +1592,105 @@ async fn pairing_attach_prompt_and_commands_over_the_tunnel() {
     let models = client.list_models().await.unwrap();
     assert_eq!((models.models.len(), models.current.as_str()), (2, "a"));
 
+    // A conflicting lifecycle event blocks each prompt API and surfaces a
+    // failure to the UI instead of acknowledging a prompt never sent.
+    rig.host.notify(&conn_id, "session.event", json!({ "session_id": "s1", "seq": 4,
+        "record": { "type": "event", "event": { "type": "session_started", "session_id": "s1", "mode": "chat" } } })).await;
+    until("the conflicting mode", || {
+        rig.recorder
+            .session_updates()
+            .iter()
+            .any(|u| u.phase == RemoteSessionPhaseFfi::Error)
+    })
+    .await;
+    let calls_before = requests_of(&rig.host, "prompt.send").len();
+    assert!(
+        matches!(client.send_prompt("s1".into(), "preserve me".into(), vec![]).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed")
+    );
+    assert!(
+        matches!(client.send_prompt_with_files("s1".into(), "and files".into(), vec![], vec!["receipt".into()]).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed")
+    );
+    assert!(
+        matches!(client.retry_prompt("s1".into(), "id".into()).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed")
+    );
+    assert!(matches!(
+        client.list_files("s1".into()).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed"
+    ));
+    assert_eq!(requests_of(&rig.host, "prompt.send").len(), calls_before);
+
+    // Team owner approvals use a reserved capability without a conversation
+    // mode. The actual FFI update carries the pending permission and only its
+    // allow-once/deny response is admitted.
+    let approval = "team-approval:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+    client.attach_session(approval.into()).await.unwrap();
+    until("the team attach", || {
+        requests_of(&rig.host, "session.attach")
+            .iter()
+            .any(|p| p["session_id"] == approval)
+    })
+    .await;
+    rig.host.notify(&conn_id, "session.snapshot", json!({"phase":"begin", "session_id":approval, "epoch":"team", "first_message_index":0})).await;
+    rig.host.notify(&conn_id, "session.snapshot", json!({"phase":"end", "session_id":approval,
+        "cursor":{"epoch":"team", "seq":0}, "pending":{"permissions":[{"request_id":1, "suppress_always_allow_rule":true,
+        "kind":{"type":"tool_use_confirm", "tool_name":"Bash", "tool_input_json":"{}", "default_allow":false}}],
+        "questions":[], "computer_access":[]}, "turn":{"running":false}})).await;
+    until("the team permission", || {
+        rig.recorder.session_updates().iter().any(|u| {
+            u.session_id == approval
+                && u.phase == RemoteSessionPhaseFfi::Live
+                && u.session_mode.is_none()
+                && u.pending.permissions.len() == 1
+        })
+    })
+    .await;
+    client
+        .respond_permission(approval.into(), 1, true)
+        .await
+        .unwrap();
+    assert!(requests_of(&rig.host, "permission.respond")
+        .iter()
+        .any(|p| p["session_id"] == approval && p["decision"]["type"] == "allow_once"));
+    assert!(
+        matches!(client.send_prompt(approval.into(), "forbidden".into(), vec![]).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed")
+    );
+    assert!(
+        matches!(client.set_model(approval.into(), "forbidden".into()).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed")
+    );
+    let approval_file = RemoteFileFfi {
+        session_id: approval.into(),
+        ..prepared
+    };
+    assert!(matches!(
+        client.prepare_file(approval.into(), "unused".into(), "unused".into()).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed"
+    ));
+    assert!(matches!(
+        client.list_files(approval.into()).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed"
+    ));
+    assert!(matches!(
+        client.upload_file(approval_file.clone(), "unused".into()).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed"
+    ));
+    assert!(matches!(
+        client.download_file(approval_file, "unused".into()).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed"
+    ));
+    assert!(requests_of(&rig.host, "file.list").is_empty());
+    client.detach_session(approval.into()).await.unwrap();
+
     // Detaching tells the desktop; the position is kept.
     client.detach_session("s1".into()).await.unwrap();
     until("the detach", || {
-        !requests_of(&rig.host, "session.detach").is_empty()
+        requests_of(&rig.host, "session.detach")
+            .iter()
+            .any(|p| p["session_id"] == "s1")
     })
     .await;
 
@@ -1784,7 +1910,7 @@ async fn bots_their_chats_and_the_bot_of_a_prompt_over_the_tunnel() {
     })
     .await;
     for part in [
-        json!({ "phase": "begin", "session_id": "t1", "epoch": "e1", "first_message_index": 0 }),
+        json!({ "phase": "begin", "session_id": "t1", "epoch": "e1", "first_message_index": 0, "session_mode": "code" }),
         json!({ "phase": "records", "session_id": "t1", "records": [
             { "seq": 1, "record": { "type": "prompt", "turn_id": 1, "text": "summarise",
                 "origin": "bot", "from_bot_name": "Re\u{202e}searcher" } },

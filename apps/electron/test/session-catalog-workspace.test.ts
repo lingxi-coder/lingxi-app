@@ -10,7 +10,7 @@ import { SettingsStore } from '../src/main/settings.js';
 import { DiagnosticBuffer } from '../src/main/host-utils.js';
 
 const id = '11111111-2222-4333-8444-555555555555';
-const row = { uuid: id, title: 'Session', modified_rfc3339: '', message_count: 1,
+const row = { uuid: id, title: 'Session', modified_rfc3339: '', message_count: 1, mode: 'code' as const,
   path: '/store/session.jsonl', workspace_path: '/source', empty_session: false };
 function child() {
   const process = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill(): boolean };

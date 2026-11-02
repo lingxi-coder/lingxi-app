@@ -189,6 +189,8 @@ pub struct AndroidEngineLaunchConfigFfi {
     pub api_key: String,
     pub model: String,
     pub session_mode: SessionModeDto,
+    /// Restore this exact session during construction; None creates a new one.
+    pub initial_session_id: Option<String>,
     pub vision_delegation_enabled: bool,
     pub app_files_root: String,
     /// Optional Android Project workspace. When present it must resolve to

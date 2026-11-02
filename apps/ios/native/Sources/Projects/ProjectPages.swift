@@ -8,6 +8,7 @@ struct ProjectsPage: View {
     @Bindable var projectStore: ProjectStore
     /// Pin time per workspace key (`project.<id>`).
     let workspacePinnedAt: [String: Date]
+    let mode: SessionMode
     let onOpenProject: (String) -> Void
 
     @State private var createName = ""
@@ -15,7 +16,7 @@ struct ProjectsPage: View {
     @State private var showFolderPicker = false
 
     private var projects: [ProjectSnapshot] {
-        RecentSessionsBuilder.sortedProjects(projectStore.projects, pinnedAt: workspacePinnedAt)
+        RecentSessionsBuilder.sortedProjects(projectStore.projects.filter { $0.record.visibleModes.contains(mode) }, pinnedAt: workspacePinnedAt)
     }
 
     var body: some View {
@@ -43,7 +44,7 @@ struct ProjectsPage: View {
                                         .foregroundStyle(t.text4)
                                 }
                             }
-                            Text("\(project.record.syncState.label) · \(project.sessions.filter { !$0.isArchived }.count)")
+                            Text("\(project.record.syncState.label) · \(project.sessions.filter { !$0.isArchived && $0.mode == mode }.count)")
                                 .font(.caption)
                                 .foregroundStyle(t.text4)
                                 .lineLimit(1)
@@ -98,7 +99,7 @@ struct ProjectsPage: View {
         let name = createName
         Task { @MainActor in
             do {
-                let project = try await projectStore.createInternal(name: name)
+                let project = try await projectStore.createInternal(name: name, mode: mode)
                 onOpenProject(project.id)
             } catch {
                 projectStore.errorMessage = error.localizedDescription
@@ -112,7 +113,7 @@ struct ProjectsPage: View {
             guard let url = urls.first else { return }
             Task { @MainActor in
                 do {
-                    let project = try await projectStore.importExternal(name: url.lastPathComponent, directoryURL: url)
+                    let project = try await projectStore.importExternal(name: url.lastPathComponent, directoryURL: url, mode: mode)
                     onOpenProject(project.id)
                 } catch {
                     projectStore.errorMessage = error.localizedDescription
@@ -132,6 +133,7 @@ struct ProjectPage: View {
     @Bindable var projectStore: ProjectStore
     let projectID: String
     let activeScope: ConversationScope
+    let mode: SessionMode
     let cronState: CronRepositoryState
     let isPinned: Bool
     let activeSession: String
@@ -144,13 +146,13 @@ struct ProjectPage: View {
     let onOpenTerminal: () -> Void
 
     @ObservedObject private var convo: ConversationModel
-    @State private var filter: RecentsFilter = .all
     @State private var showFolderPicker = false
 
     init(
         projectStore: ProjectStore,
         projectID: String,
         activeScope: ConversationScope,
+        mode: SessionMode,
         source: any ConversationSource,
         cronState: CronRepositoryState,
         isPinned: Bool,
@@ -164,6 +166,7 @@ struct ProjectPage: View {
         self.projectStore = projectStore
         self.projectID = projectID
         self.activeScope = activeScope
+        self.mode = mode
         self.cronState = cronState
         self.isPinned = isPinned
         self.activeSession = activeSession
@@ -219,14 +222,16 @@ struct ProjectPage: View {
     @ViewBuilder
     private func content(_ project: ProjectSnapshot) -> some View {
         // The bound project's live catalog is fresher than the cached index.
-        let live = activeScope == .project(projectID) ? convo.engineSessions : []
-        let scopeRows = WorkspaceGroupBuilder.mergedSessionRows(live: live, cached: project.sessions)
-        let rows = RecentSessionsBuilder.sessions(in: scopeRows, filter: filter)
+        let scope = ConversationScope.project(projectID)
+        let live = activeScope == scope ? convo.engineSessions.filter { projectStore.allowsSession($0.id, in: scope) } : []
+        let cached = project.sessions.filter { projectStore.allowsSession($0.sessionId, in: scope) }
+        let scopeRows = WorkspaceGroupBuilder.mergedSessionRows(live: live, cached: cached)
+        let rows = RecentSessionsBuilder.sessions(in: scopeRows, filter: mode == .chat ? .chat : .code)
         let tasks = cronState.tasks.filter { $0.scope.projectID == projectID }
         List {
             Section {
                 HStack(spacing: 8) {
-                    Button { onNewSession(filter.mode) } label: {
+                    Button { onNewSession(mode) } label: {
                         Label("chat_new_chat", systemImage: "square.and.pencil")
                             .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity)
@@ -257,12 +262,6 @@ struct ProjectPage: View {
             }
 
             Section {
-                Picker("", selection: $filter) {
-                    ForEach(RecentsFilter.allCases, id: \.self) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .listRowBackground(Color.clear)
-                .accessibilityIdentifier("project.filter")
                 if rows.isEmpty {
                     Text("drawer_no_sessions")
                         .font(.footnote)

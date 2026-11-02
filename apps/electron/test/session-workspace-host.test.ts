@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import type { SessionWorkspaceState, SetWorkingDirectoryRequest, SetWorkingDirectoryResult } from '@lingxi/bridge-client';
 
-import { HostController, type WorkspaceDialogs } from '../src/main/host';
+import { HostController, resolveSavedConversationTranscript, type WorkspaceDialogs } from '../src/main/host';
+import { SessionRuntime } from '../src/main/bridge';
+import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import type { SessionRef } from '../src/main/bridgeTypes';
 import type { ProjectSessionCatalogRow } from '../src/main/session-catalog';
@@ -18,6 +20,7 @@ const otherId = '22222222-3333-4444-8555-666666666666';
 
 class WorkspaceRuntime {
   connectionState = { status: 'connected' as const };
+  sessionMode = 'code' as const;
   cwd: string;
   initialProjectRoot: string;
   transcriptPath: string;
@@ -82,6 +85,7 @@ function hostFixture(t: TestContext) {
   mkdirSync(source); mkdirSync(target);
   const settings = new SettingsStore(userData);
   const ref = { projectPath: source, sessionId };
+  settings.conversationSpaces.setMode('code');
   settings.addProject(source); settings.activateProject(source); settings.setActiveSession(ref);
   const original = new WorkspaceRuntime(source, sessionId);
   const runtimes = new Map<string, WorkspaceRuntime>([[sessionId, original]]);
@@ -116,7 +120,7 @@ function hostFixture(t: TestContext) {
     },
     openSession: async (...args: [requested: SessionRef, empty?: boolean, model?: string, activate?: boolean, transcriptPath?: string, remountControls?: string]) => {
       const [requested, empty = false, model, , transcriptPath] = args;
-      calls.open.push({ ref: { ...requested }, empty, model });
+      calls.open.push({ ref: { projectPath: requested.projectPath, sessionId: requested.sessionId }, empty, model });
       calls.openArguments.push(args);
       const existing = runtimes.get(requested.sessionId);
       if (existing) {
@@ -179,14 +183,16 @@ test('opening a pasted uppercase UUID retains the canonical runtime and persiste
 
 test('/cd remounts the same UUID in its new cwd and carries pin, model, order and explicit grants', async (t) => {
   const f = hostFixture(t), moved = { projectPath: f.target, sessionId };
+  const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(owner);
   f.original.directories = [f.root];
   f.settings.setSessionModel(f.ref, 'anthropic/session-model');
   f.settings.setSessionPinned({ ...f.ref, title: 'Pinned chat', pinnedAt: '2026-10-21T00:00:00Z' }, true);
   f.settings.update({ sidebar: { organization: 'project', chatSort: 'manual', manualSessionOrder: { [f.source]: [otherId, sessionId] } } });
   (f.host as any).catalogs.set(f.source, { sessions: [f.row(f.source)] });
   const snapshot = await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
-  assert.deepEqual(snapshot?.activeSession, moved);
-  assert.deepEqual(f.calls.close, [f.ref]);
+  assert.deepEqual(snapshot?.activeSession, { ...moved, mode: 'code', projectId: f.source });
+  assert.deepEqual(f.calls.close, [owner]);
   assert.deepEqual(f.calls.open, [{ ref: moved, empty: false, model: 'anthropic/session-model' }]);
   assert.notEqual(f.runtimes.get(sessionId), f.original);
   assert.equal(f.runtimes.get(sessionId)?.projectPath, f.target);
@@ -196,17 +202,17 @@ test('/cd remounts the same UUID in its new cwd and carries pin, model, order an
   assert.deepEqual(f.runtimes.get(sessionId)?.promptDirectories, [f.target]);
   assert.equal(f.calls.openArguments[0]?.[4], f.row(f.target).path, 'the post-cd native transcript path must replace the old copy');
   assert.deepEqual(f.runtimes.get(sessionId)?.directories, [f.root]);
-  assert.deepEqual(f.calls.terminals, [{ before: f.ref, after: moved }]);
+  assert.deepEqual(f.calls.terminals, [{ before: owner, after: moved }]);
   assert.equal((f.host as any).catalogs.has(f.source), false);
   assert.equal((f.host as any).catalogs.get(f.target).sessions[0].uuid, sessionId);
   const saved = new SettingsStore(f.userData);
-  assert.deepEqual(saved.getPublic().activeSession, moved);
+  assert.deepEqual(saved.getPublic().activeSession, { ...moved, mode: 'code', projectId: f.source });
   assert.equal(saved.getPublic().pinnedSessions[0]?.projectPath, f.target);
   assert.equal(saved.getSessionModel(moved), 'anthropic/session-model');
   assert.deepEqual(saved.getSessionTranscriptSelection(moved), {
     ...moved, catalogProjectPath: f.target, scope: 'current', transcriptPath: f.row(f.target).path,
   });
-  assert.deepEqual(saved.getPublic().sidebar?.manualSessionOrder, { [f.source]: [otherId], [f.target]: [sessionId] });
+  assert.deepEqual(saved.getPublic().sidebar?.manualSessionOrder, { [f.source]: [otherId, sessionId] });
   assert.equal(f.original.releases, 1);
 });
 
@@ -220,12 +226,12 @@ test('startup restores the displayed Current alias path in its authoritative wor
     return selected;
   };
   const restored = await f.host.restoreProjectSession(f.source);
-  assert.deepEqual(restored, moved);
-  assert.deepEqual(f.settings.getPublic().activeSession, moved);
+  assert.deepEqual(restored, { ...moved, mode: 'code', projectId: f.source });
+  assert.deepEqual(f.settings.getPublic().activeSession, { ...moved, mode: 'code', projectId: f.source });
   assert.deepEqual(f.calls.select, [{ ref: f.ref,
     selection: { scope: 'current', transcriptPath: selected.path } }]);
-  assert.deepEqual(f.calls.openArguments, [[moved, false, undefined, true, selected.path]]);
-  assert.deepEqual(f.calls.terminals, [{ before: { projectPath: f.source, sessionId: '__draft__' }, after: moved }]);
+  assert.deepEqual(f.calls.openArguments, [[{ ...moved, mode: 'code', projectId: f.source }, false, undefined, true, selected.path]]);
+  assert.deepEqual(f.calls.terminals, [{ before: { projectPath: f.source, sessionId: '__draft__' }, after: { ...moved, mode: 'code', projectId: f.source } }]);
   assert.deepEqual(f.calls.find, [], 'a displayed Current row must not use the CLI UUID resolver');
   assert.equal((f.host as any).catalogs.get(f.source).sessions[0].workspace_path, undefined);
 });
@@ -248,7 +254,7 @@ test('a slow startup restore cannot overwrite a newer queued navigation', async 
   await startup;
   await navigation;
   assert.deepEqual(f.calls.open.map(call => call.ref), [f.ref, newer]);
-  assert.deepEqual(f.settings.getPublic().activeSession, newer);
+  assert.deepEqual(f.settings.getPublic().activeSession, { ...newer, mode: 'code', projectId: f.target });
 });
 
 test('/cd opens an unsent draft without resuming its computed but unwritten transcript path', async (t) => {
@@ -415,8 +421,10 @@ test('an engine that asks to trust a folder of the app\'s own data is not asked 
 test('a session whose folder lies in the app\'s own data is not added as a project by opening it', async (t) => {
   const f = hostFixture(t), inside = join(f.userData, 'bots', 'someone', 'workspace'), id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
   mkdirSync(inside, { recursive: true });
-  f.catalog.find = async () => ({ ...f.row(inside, id), workspace_path: inside });
-  await assert.rejects(f.host.openSessionAndActivate({ projectPath: f.source, sessionId: id }), /belongs to the app's own data/);
+  const selected = { ...f.row(inside, id), workspace_path: inside };
+  f.catalog.find = async () => selected;
+  f.catalog.select = async () => selected;
+  await assert.rejects(f.host.openSessionAndActivate({ projectPath: f.source, sessionId: id }, { scope: 'current', transcriptPath: selected.path }), /belongs to the app's own data/);
   assert.deepEqual(f.calls.trust, []);
   assert.deepEqual(f.settings.getPublic().projects, [f.source]);
 });
@@ -501,22 +509,311 @@ test('repository/all discoveries and their failures do not overwrite the current
 test('resuming a source workspace hint uses its real directory and asks for trust before activation', async (t) => {
   const f = hostFixture(t);
   f.runtimes.clear();
-  f.catalog.find = async () => ({ ...f.row(f.source), workspace_path: f.target, resume_model: 'anthropic/history-model' });
-  await f.host.openSessionAndActivate(f.ref);
+  const selected = { ...f.row(f.source), workspace_path: f.target, resume_model: 'anthropic/history-model' };
+  f.catalog.find = async () => selected;
+  f.catalog.select = async () => selected;
+  await f.host.openSessionAndActivate(f.ref, { scope: 'current', transcriptPath: selected.path });
   const moved = { projectPath: f.target, sessionId };
   assert.deepEqual(f.calls.trust, [f.target]);
   assert.deepEqual(f.calls.open, [{ ref: moved, empty: false, model: 'anthropic/history-model' }]);
-  assert.deepEqual(new SettingsStore(f.userData).getPublic().activeSession, moved);
+  assert.deepEqual(new SettingsStore(f.userData).getPublic().activeSession, { ...moved, mode: 'code', projectId: f.source });
 });
 
 test('a missing source workspace hint resumes the same UUID from the chosen existing directory', async (t) => {
   const f = hostFixture(t);
   f.runtimes.clear();
-  f.catalog.find = async () => ({ ...f.row(f.source), workspace_path: join(f.root, 'removed-worktree') });
-  await f.host.openSessionAndActivate(f.ref);
+  const selected = { ...f.row(f.source), workspace_path: join(f.root, 'removed-worktree') };
+  f.catalog.find = async () => selected;
+  f.catalog.select = async () => selected;
+  await f.host.openSessionAndActivate(f.ref, { scope: 'current', transcriptPath: selected.path });
   assert.deepEqual(f.calls.open, [{ ref: f.ref, empty: false, model: undefined }]);
   assert.deepEqual(f.calls.trust, []);
-  assert.deepEqual(f.settings.getPublic().activeSession, f.ref);
+  assert.deepEqual(f.settings.getPublic().activeSession, { ...f.ref, mode: 'code', projectId: f.source });
+});
+
+test('an exact cold selection pins its copy for engine startup and subsequent restoration', async t => {
+  const f = hostFixture(t);
+  const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
+  const other = { ...f.row(f.source), path: join(f.source, 'other-copy', `${sessionId}.jsonl`) };
+  f.runtimes.clear();
+  f.catalog.find = async () => selected;
+  f.catalog.select = async (path, id, selection) => {
+    f.calls.select.push({ ref: { projectPath: path, sessionId: id }, selection: { ...selection } });
+    return selected;
+  };
+  await f.host.openSessionAndActivate(f.ref, { scope: 'current', transcriptPath: selected.path });
+  assert.equal(f.calls.openArguments[0]?.[4], selected.path);
+  assert.deepEqual(new SettingsStore(f.userData).getSessionTranscriptSelection(f.ref), {
+    ...f.ref, catalogProjectPath: f.source, scope: 'current', transcriptPath: selected.path,
+  });
+
+  f.runtimes.clear();
+  f.calls.openArguments.length = 0;
+  f.calls.select.length = 0;
+  let uuidLookups = 0;
+  f.catalog.find = async () => { uuidLookups++; return other; };
+  const settings = new SettingsStore(f.userData);
+  const host = new HostController(settings, f.bridge as any, new DiagnosticBuffer(), f.catalog as any,
+    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, undefined, f.dialogs);
+  (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
+  t.after(() => host.dispose());
+  await host.openSessionAndActivate(f.ref);
+  assert.equal(uuidLookups, 0, 'cold restoration must not fall back to a different UUID copy');
+  assert.equal(f.calls.openArguments[0]?.[4], selected.path);
+  assert.deepEqual(f.calls.select, [{ ref: f.ref, selection: { scope: 'current', transcriptPath: selected.path } }]);
+});
+
+test('a disconnected writer can reconnect without consulting unavailable catalog metadata', async t => {
+  const f = hostFixture(t);
+  (f.original as any).connectionState = { status: 'disconnected' };
+  f.settings.conversationSpaces.register({ ...f.ref, mode: 'code', projectId: f.source });
+  f.catalog.find = async () => { throw new Error('catalog unavailable'); };
+  f.catalog.select = async () => { throw new Error('catalog unavailable'); };
+  await f.host.openSessionAndActivate(f.ref);
+  assert.equal(f.calls.open.length, 1);
+  assert.strictEqual(f.runtimes.get(sessionId), f.original);
+});
+
+test('a cold open without a selected source rejects before resolving a UUID copy', async t => {
+  const f = hostFixture(t);
+  const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
+  const other = { ...f.row(f.source), path: join(f.source, 'other-copy', `${sessionId}.jsonl`) };
+  f.runtimes.clear();
+  f.catalog.find = async () => selected;
+  f.catalog.select = async () => other;
+  const before = readFileSync(f.settings.settingsPath, 'utf8');
+  await assert.rejects(f.host.openSessionAndActivate(f.ref), /source is unavailable/i);
+  assert.deepEqual(f.calls.openArguments, []);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
+  assert.equal(f.settings.conversationSpaces.find(f.ref), undefined);
+});
+
+test('a saved source whose workspace changes cannot relocate the owner on cold reopen', async t => {
+  const f = hostFixture(t);
+  const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(owner);
+  f.settings.rememberSessionTranscriptSelection(owner, {
+    catalogProjectPath: f.source, scope: 'current', transcriptPath: f.row(f.source).path,
+  });
+  const before = readFileSync(f.settings.settingsPath, 'utf8');
+  f.runtimes.clear();
+  f.catalog.select = async () => ({ ...f.row(f.source), workspace_path: f.target });
+  await assert.rejects(f.host.openSessionAndActivate(f.ref), /saved session workspace changed/);
+  assert.deepEqual(f.calls.open, []);
+  assert.deepEqual(f.settings.conversationSpaces.findBySessionId(sessionId), owner);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
+});
+
+test('remote cold attach validates the saved copy and reuses the live writer on later attaches', async t => {
+  const f = hostFixture(t);
+  const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
+  const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(owner);
+  f.settings.relocateSession(f.ref, f.source, { catalogProjectPath: f.source, scope: 'current', transcriptPath: selected.path });
+  const settings = new SettingsStore(f.userData);
+  let checks = 0;
+  f.catalog.select = async (_path, _id, selection) => {
+    checks++;
+    assert.deepEqual(selection, { scope: 'current', transcriptPath: selected.path });
+    return selected;
+  };
+  const starts: Array<string | undefined> = [], resumes: Array<string | undefined> = [];
+  const originalStart = SessionRuntime.prototype.start, originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () {
+    starts.push((this as any).opts.resumeTranscriptPath);
+    (this as any).setState({ status: 'connected' });
+  };
+  SessionRuntime.prototype.resumeOwnedSession = async function (path) { resumes.push(path); };
+  const manager = new SessionRuntimeManager({
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    resolveSavedTranscript: ref => resolveSavedConversationTranscript(settings, f.catalog as any, ref),
+  });
+  t.after(async () => {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  });
+  const first = await manager.openForRemote(owner);
+  assert.deepEqual(starts, [selected.path]);
+  assert.deepEqual(resumes, [selected.path]);
+  const second = await manager.openForRemote(owner);
+  assert.equal(second.runtime, first.runtime);
+  assert.equal(checks, 1, 'an already connected owner retains its writer');
+  first.release(); second.release();
+});
+
+test('a first durable prompt records the live writer source without changing another selected session', async t => {
+  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  f.settings.conversationSpaces.register(owner);
+  const other = { projectPath: f.source, sessionId: otherId, projectId: f.source, mode: 'code' as const };
+  f.settings.conversationSpaces.register(other); f.settings.setActiveSession(other);
+  writeFileSync(f.original.transcriptPath, '{}\n');
+  assert.equal(await f.host.rememberCreatedSessionSource(owner, f.original as any, false), f.original.transcriptPath);
+  const saved = new SettingsStore(f.userData);
+  assert.deepEqual(saved.getSessionTranscriptSelection(owner), { projectPath: f.source, sessionId,
+    catalogProjectPath: f.source, scope: 'current', transcriptPath: f.original.transcriptPath });
+  assert.deepEqual(saved.getPublic().activeSession, other);
+  assert.deepEqual(await resolveSavedConversationTranscript(saved, f.catalog as any, owner), { path: f.original.transcriptPath, mode: 'code' });
+});
+
+test('source capture rejects mismatched mode, workspace or writer and preserves the prior source', async t => {
+  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  f.settings.conversationSpaces.register(owner); writeFileSync(f.original.transcriptPath, '{}\n');
+  const prior = { catalogProjectPath: f.source, scope: 'current' as const, transcriptPath: f.original.transcriptPath };
+  f.settings.rememberSessionTranscriptSelection(owner, prior);
+  const before = readFileSync(f.settings.settingsPath, 'utf8');
+  for (const conflict of [
+    { ...f.row(f.source), mode: 'chat' as const },
+    { ...f.row(f.source), uuid: otherId },
+    { ...f.row(f.source), workspace_path: f.target },
+  ]) {
+    f.catalog.select = async () => conflict;
+    await assert.rejects(f.host.rememberCreatedSessionSource(owner, f.original as any, false));
+    assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
+  }
+  f.catalog.select = async () => f.row(f.source);
+  f.original.cwd = f.target;
+  await assert.rejects(f.host.rememberCreatedSessionSource(owner, f.original as any, false), /verified transcript source/);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
+});
+
+test('a cold background or remote open without an exact saved source fails before starting an engine', async t => {
+  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  f.settings.conversationSpaces.register(owner);
+  let started = 0;
+  const originalStart = SessionRuntime.prototype.start;
+  SessionRuntime.prototype.start = async function (options) {
+    if (options?.reconnectOnly) throw new Error('The session source is unavailable.');
+    started++;
+  };
+  const manager = new SessionRuntimeManager({
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    resolveSavedTranscript: ref => resolveSavedConversationTranscript(f.settings, f.catalog as any, ref),
+  });
+  t.after(async () => { SessionRuntime.prototype.start = originalStart; await manager.dispose(); });
+  await assert.rejects(manager.openForRemote(owner), /source is unavailable/i);
+  await assert.rejects(manager.withBackgroundSession(owner, false, undefined, async () => undefined), /source is unavailable/i);
+  const disconnected = new SessionRuntime({ sessionId, projectPath: f.source,
+    launchConfig: () => ({ workspace: f.source, sessionId, trusted: true }) }, 'code');
+  (manager as any).runtimes.set(sessionId, disconnected);
+  await assert.rejects(manager.openForRemote(owner), /source is unavailable/i);
+  assert.equal(started, 0);
+});
+
+test('a new scheduled anchor records its confirmed source before the binding operation proceeds', async t => {
+  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  let finish!: (path: string) => void, entered!: () => void;
+  const waiting = new Promise<string>(resolve => { finish = resolve; });
+  const captureEntered = new Promise<void>(resolve => { entered = resolve; });
+  let executed = false;
+  const originalStart = SessionRuntime.prototype.start;
+  SessionRuntime.prototype.start = async function () {};
+  const manager = new SessionRuntimeManager({
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    captureSessionSource: async (_ref, _runtime, scheduled) => { assert.equal(scheduled, true); entered(); return waiting; },
+  });
+  t.after(async () => { SessionRuntime.prototype.start = originalStart; await manager.dispose(); });
+  const run = manager.withBackgroundSession(owner, true, undefined, async () => { executed = true; }, undefined, true);
+  await captureEntered; assert.equal(executed, false);
+  finish(join(f.source, `${sessionId}.jsonl`)); await run;
+  assert.equal(executed, true);
+});
+
+test('a managed scheduled anchor records its exact source and Global ownership across restart', async t => {
+  const f = hostFixture(t), workspace = join(f.root, 'scheduled-run'); mkdirSync(workspace);
+  const ref = { projectPath: workspace, sessionId: otherId, mode: 'code' as const };
+  f.settings.registerScheduledSession(ref, 'task', join(workspace, 'memory.md'));
+  const runtime = new WorkspaceRuntime(workspace, otherId);
+  f.runtimes.set(otherId, runtime); writeFileSync(runtime.transcriptPath, '{}\n');
+  await f.host.rememberCreatedSessionSource(ref, runtime as any, true);
+  const saved = new SettingsStore(f.userData);
+  assert.deepEqual(saved.conversationSpaces.find(ref), { ...ref, projectId: null });
+  assert.deepEqual(saved.getSessionTranscriptSelection(ref), { projectPath: workspace, sessionId: otherId,
+    catalogProjectPath: workspace, scope: 'current', transcriptPath: runtime.transcriptPath });
+  assert.deepEqual(await resolveSavedConversationTranscript(saved, f.catalog as any, ref), { path: runtime.transcriptPath, mode: 'code' });
+});
+
+test('a transient source recording failure does not interrupt an admitted prompt and is retried', async t => {
+  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  let attempts = 0, commits = 0;
+  const manager = new SessionRuntimeManager({
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    onFirstPromptSent: () => { commits++; },
+    captureSessionSource: async () => {
+      if (++attempts === 1) throw new Error('catalog not visible yet');
+      return join(f.source, `${sessionId}.jsonl`);
+    },
+  });
+  (manager as any).runtimes.set(sessionId, f.original);
+  t.after(async () => { (manager as any).runtimes.delete(sessionId); await manager.dispose(); });
+  const callbacks = (manager as any).runtimeOptions(owner);
+  assert.equal(callbacks.onFirstPromptSent(), true);
+  assert.equal(commits, 1);
+  await (manager as any).sourceCapturePending.get(sessionId);
+  assert.equal(attempts, 2);
+  assert.equal((manager as any).sessionTranscriptPaths.get(sessionId), join(f.source, `${sessionId}.jsonl`));
+  assert.equal(f.original.busy, false);
+});
+
+test('a saved remote source rejects a conflicting catalog owner before starting an engine', async t => {
+  const f = hostFixture(t);
+  const selected = f.row(f.source);
+  const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(owner);
+  f.settings.relocateSession(f.ref, f.source, { catalogProjectPath: f.source, scope: 'current', transcriptPath: selected.path });
+  const settings = new SettingsStore(f.userData);
+  let started = 0;
+  const originalStart = SessionRuntime.prototype.start;
+  SessionRuntime.prototype.start = async function () { started++; };
+  const manager = new SessionRuntimeManager({
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    resolveSavedTranscript: ref => resolveSavedConversationTranscript(settings, f.catalog as any, ref),
+  });
+  t.after(async () => { SessionRuntime.prototype.start = originalStart; await manager.dispose(); });
+  for (const conflict of [
+    { ...selected, mode: 'chat' as const },
+    { ...selected, uuid: otherId },
+    { ...selected, path: join(f.source, 'other-copy', `${sessionId}.jsonl`) },
+    { ...selected, workspace_path: f.target },
+  ]) {
+    f.catalog.select = async () => conflict;
+    await assert.rejects(manager.openForRemote(owner), /saved session (selection|workspace)/i);
+  }
+  f.catalog.select = async () => selected;
+  await assert.rejects(manager.openForRemote({ ...owner, projectPath: f.target }), /saved session owner/i);
+  await assert.rejects(manager.openForRemote({ ...owner, projectId: f.target }), /saved session owner/i);
+  await assert.rejects(manager.openForRemote({ ...owner, mode: 'chat' }), /saved session owner/i);
+  assert.equal(started, 0);
+});
+
+test('background cold opens use the saved source while new anchors do not consult it', async t => {
+  const f = hostFixture(t);
+  const selected = f.row(f.source);
+  const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(owner);
+  f.settings.relocateSession(f.ref, f.source, { catalogProjectPath: f.source, scope: 'current', transcriptPath: selected.path });
+  const settings = new SettingsStore(f.userData);
+  let checks = 0;
+  f.catalog.select = async () => { checks++; return selected; };
+  const starts: Array<string | undefined> = [], resumes: Array<string | undefined> = [];
+  const originalStart = SessionRuntime.prototype.start, originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () { starts.push((this as any).opts.resumeTranscriptPath); };
+  SessionRuntime.prototype.resumeOwnedSession = async function (path) { resumes.push(path); };
+  const manager = new SessionRuntimeManager({
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    resolveSavedTranscript: ref => resolveSavedConversationTranscript(settings, f.catalog as any, ref),
+  });
+  t.after(async () => {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  });
+  await manager.withBackgroundSession(owner, false, undefined, async () => undefined);
+  await manager.withBackgroundSession({ ...owner, sessionId: otherId }, true, undefined, async () => undefined,
+    undefined, true);
+  assert.equal(checks, 1);
+  assert.deepEqual(starts, [selected.path, undefined]);
+  assert.deepEqual(resumes, [selected.path]);
 });
 
 test('an old project reference still opens an already-remounted UUID in its authoritative runtime directory', async (t) => {
@@ -526,7 +823,7 @@ test('an old project reference still opens an already-remounted UUID in its auth
   await f.host.openSessionAndActivate(f.ref);
   assert.deepEqual(f.calls.open, [{ ref: moved, empty: false, model: undefined }]);
   assert.deepEqual(f.calls.find, []);
-  assert.deepEqual(f.settings.getPublic().activeSession, moved);
+  assert.deepEqual(f.settings.getPublic().activeSession, { ...moved, mode: 'code', projectId: f.source });
 });
 
 for (const scope of ['repository', 'all'] as const) {
@@ -546,7 +843,7 @@ for (const scope of ['repository', 'all'] as const) {
     assert.equal(f.calls.openArguments[0]?.[4], selected.path);
     assert.notEqual(f.runtimes.get(sessionId), f.original);
     assert.equal(f.runtimes.get(sessionId)?.transcriptPath, selected.path);
-    assert.deepEqual(snapshot.activeSession, restored);
+    assert.deepEqual(snapshot.activeSession, { ...restored, mode: 'code', projectId: f.source });
     assert.deepEqual(f.calls.trust, [f.target]);
   });
 }
@@ -582,7 +879,7 @@ test('an exact selection already open at the same source and transcript reuses i
   assert.deepEqual(f.calls.select, [{ ref: f.ref, selection }]);
   assert.deepEqual(f.calls.close, []);
   assert.equal(f.runtimes.get(sessionId), f.original);
-  assert.deepEqual(snapshot.activeSession, f.ref);
+  assert.deepEqual(snapshot.activeSession, { ...f.ref, mode: 'code', projectId: f.source });
   assert.deepEqual(f.calls.trust, []);
 });
 
@@ -606,7 +903,7 @@ test('a selected transcript keeps its exact path when its missing source directo
   assert.deepEqual(f.calls.close, []);
   assert.deepEqual(f.calls.open, [{ ref: f.ref, empty: false, model: undefined }]);
   assert.equal(f.calls.openArguments[0]?.[4], selected.path);
-  assert.deepEqual(f.settings.getPublic().activeSession, f.ref);
+  assert.deepEqual(f.settings.getPublic().activeSession, { ...f.ref, mode: 'code', projectId: f.source });
   assert.deepEqual(f.calls.trust, []);
 });
 
@@ -647,7 +944,7 @@ for (const coldStart of [false, true]) {
       'a plain UUID resume must not replace the exact picker selection after its engine is gone');
     assert.deepEqual(f.calls.find, []);
     assert.deepEqual(f.calls.select, [{ ref: f.ref, selection: { scope: 'all', transcriptPath: selected.path } }]);
-    assert.deepEqual(settings.getPublic().activeSession, f.ref, 'transcript selection must not change SessionRef identity');
+    assert.deepEqual(settings.getPublic().activeSession, { ...f.ref, mode: 'code', projectId: f.source }, 'transcript selection must not change SessionRef identity');
   });
 }
 
@@ -668,7 +965,7 @@ test('a missing saved selected transcript cannot silently resume another copy af
   await assert.rejects(host.restoreProjectSession(f.source, settings.getPublic().activeSession), /session.*(changed|project)|selection/i);
   assert.deepEqual(f.calls.openArguments, []);
   assert.deepEqual(f.calls.find, [], 'the UUID resolver has a different copy and must never be used as a fallback');
-  assert.deepEqual(settings.getPublic().activeSession, f.ref);
+  assert.deepEqual(settings.getPublic().activeSession, { ...f.ref, mode: 'code', projectId: f.source });
 });
 
 test('a cold public open through a symlink revalidates the canonical owner\'s saved transcript', { skip: process.platform === 'win32' }, async (t) => {
@@ -693,7 +990,7 @@ test('a cold public open through a symlink revalidates the canonical owner\'s sa
   assert.deepEqual(f.calls.select, [{ ref: f.ref, selection: { scope: 'all', transcriptPath: selected.path } }]);
   assert.deepEqual(f.calls.find, [], 'the raw alias must not miss the canonical source selection and enter UUID lookup');
   assert.equal(f.calls.openArguments[0]?.[4], selected.path);
-  assert.deepEqual(settings.getPublic().activeSession, f.ref);
+  assert.deepEqual(settings.getPublic().activeSession, { ...f.ref, mode: 'code', projectId: f.source });
 });
 
 test('cold restore revalidates the original picker scope after the selected source moves navigation to another directory', async (t) => {
@@ -716,7 +1013,7 @@ test('cold restore revalidates the original picker scope after the selected sour
   await host.restoreProjectSession(f.target, settings.getPublic().activeSession);
   assert.deepEqual(f.calls.select, [{ ref: f.ref, selection: { scope: 'repository', transcriptPath: selected.path } }]);
   assert.equal(f.calls.openArguments[0]?.[4], selected.path);
-  assert.deepEqual(settings.getPublic().activeSession, moved);
+  assert.deepEqual(settings.getPublic().activeSession, { ...moved, mode: 'code', projectId: f.source });
   assert.equal(settings.hasProject(f.source), false, 'read-only discovery context does not re-trust or register the removed directory');
 });
 
@@ -727,4 +1024,52 @@ test('/cd carries only the current runtime controls to its same-UUID replacement
   await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
   assert.equal(f.calls.openArguments[0]?.[5], f.original.runtimeControls);
   assert.equal(readFileSync(f.settings.settingsPath, 'utf8').includes('source-runtime-controls'), false);
+});
+
+test('a failed selected remount leaves the confirmed conversation owner and navigation unchanged', async t => {
+  const f = hostFixture(t);
+  const owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  f.settings.conversationSpaces.register(owner);
+  f.settings.conversationSpaces.setNavigation('code', f.source, owner);
+  const selected = f.row(f.target);
+  f.catalog.select = async () => selected;
+  f.bridge.openSession = async () => { throw new Error('selected mount failed'); };
+  await assert.rejects(f.host.openSessionAndActivate(f.ref, { scope: 'all', transcriptPath: selected.path }), /selected mount failed/);
+  const reopened = new SettingsStore(f.userData).conversationSpaces.snapshot();
+  assert.deepEqual(reopened.sessions.find((item) => item.sessionId === sessionId), owner);
+  assert.deepEqual(reopened.navigation.code, { projectId: f.source, session: owner });
+  assert.equal(reopened.sessions.some((item) => item.projectPath === f.target && item.sessionId === sessionId), false);
+});
+
+test('a failed first mount does not persist a new conversation owner', async t => {
+  const f = hostFixture(t); f.runtimes.clear();
+  f.bridge.openSession = async () => { throw new Error('first mount failed'); };
+  await assert.rejects(f.host.openSessionAndActivate(f.ref, { scope: 'current', transcriptPath: f.row(f.source).path }), /first mount failed/);
+  assert.equal(new SettingsStore(f.userData).conversationSpaces.find(f.ref), undefined);
+});
+
+test('/cd keeps the visible draft selection attached to its relocated owner', async t => {
+  const f = hostFixture(t);
+  const draft = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(draft); f.settings.conversationSpaces.setMode('code');
+  f.settings.setActiveSession(undefined); f.settings.setActiveSessionDraft(draft);
+  (f.host as any).draftSelections.set('code', draft);
+  f.original.hasConversation = false;
+  f.catalog.find = async () => undefined;
+  await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
+  const moved = { ...draft, projectPath: f.target };
+  assert.deepEqual((f.host as any).draftSelections.get('code'), moved);
+  assert.deepEqual((f.host as any).conversationSpacesSnapshot().navigation.code.session, moved);
+  assert.deepEqual(f.settings.getPublic().activeSession, moved);
+});
+
+test('a cold copy in another directory preserves the session UUID owner and project', async t => {
+  const f = hostFixture(t);
+  const owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  f.settings.conversationSpaces.register(owner); f.settings.conversationSpaces.setNavigation('code', f.source, owner);
+  f.settings.addProject(f.target); f.runtimes.clear();
+  await f.host.openSessionAndActivate({ projectPath: f.target, sessionId }, { scope: 'current', transcriptPath: f.row(f.target).path });
+  const moved = f.settings.conversationSpaces.find({ projectPath: f.target, sessionId });
+  assert.deepEqual(moved, { ...owner, projectPath: f.target });
+  assert.equal(f.settings.conversationSpaces.snapshot().sessions.filter((entry) => entry.sessionId === sessionId).length, 1);
 });

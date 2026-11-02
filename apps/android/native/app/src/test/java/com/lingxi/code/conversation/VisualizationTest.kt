@@ -66,7 +66,7 @@ class VisualizationTest {
         runCurrent()
         val before = vm.state.value
 
-        vm.applyActivatedSession(ActivatedSession("first-session", emptyList(), SessionActivationKind.Started))
+        vm.applyActivatedSession(ActivatedSession("first-session", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code))
 
         assertEquals("first-session", vm.state.value.session.id)
         assertEquals(before.messages, vm.state.value.messages)
@@ -83,7 +83,7 @@ class VisualizationTest {
     @Test fun repeatedOrForeignBootstrapCannotInvalidateTheLiveWidget() = runTest(dispatcher) {
         val source = FollowupSource()
         val vm = ChatViewModel(source)
-        vm.applyActivatedSession(ActivatedSession("active", emptyList(), SessionActivationKind.Started))
+        vm.applyActivatedSession(ActivatedSession("active", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code))
         vm.send("Draw a bicycle")
         runCurrent()
         source.emit(ReplyEvent.Visualization(VisualizationBlockStatus.Ready, chart))
@@ -91,7 +91,7 @@ class VisualizationTest {
         val before = vm.state.value
 
         for (id in listOf("active", "delayed-bootstrap")) {
-            vm.applyActivatedSession(ActivatedSession(id, emptyList(), SessionActivationKind.Started))
+            vm.applyActivatedSession(ActivatedSession(id, emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code))
             assertEquals(before, vm.state.value)
         }
         source.emit(ReplyEvent.Delta("Still streaming"))

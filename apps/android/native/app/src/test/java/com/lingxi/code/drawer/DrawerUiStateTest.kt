@@ -9,7 +9,7 @@ import org.junit.Test
 class DrawerUiStateTest {
 
     @Test
-    fun `collapsed stays isolated per mode while pinned state is shared`() {
+    fun `collapsed and pinned state stay isolated per mode`() {
         val state = DrawerUiState(
             activeWs = "global",
             activeSession = "",
@@ -25,7 +25,7 @@ class DrawerUiStateTest {
         assertTrue(state.isWorkspaceCollapsed(SessionMode.Chat, "app.notes"))
         assertFalse(state.isWorkspaceCollapsed(SessionMode.Code, "app.notes"))
         assertEquals(11L, state.pinnedAt(SessionMode.Chat, "app.notes"))
-        assertEquals(11L, state.pinnedAt(SessionMode.Code, "app.notes"))
+        assertEquals(null, state.pinnedAt(SessionMode.Code, "app.notes"))
         assertEquals(22L, state.pinnedAt(SessionMode.Code, "project.demo"))
     }
 
@@ -41,13 +41,13 @@ class DrawerUiStateTest {
 
         state.replaceWorkspacePresentation(
             collapsed = setOf("code:project.demo"),
-            pinned = mapOf("project.demo" to 42L),
+            pinned = mapOf("code:project.demo" to 42L),
         )
 
         assertFalse(state.isWorkspaceCollapsed(SessionMode.Chat, "global"))
         assertTrue(state.isWorkspaceCollapsed(SessionMode.Code, "project.demo"))
         assertEquals(42L, state.pinnedAt(SessionMode.Code, "project.demo"))
-        assertEquals(42L, state.pinnedAt(SessionMode.Chat, "project.demo"))
+        assertEquals(null, state.pinnedAt(SessionMode.Chat, "project.demo"))
     }
 
     @Test
@@ -57,7 +57,7 @@ class DrawerUiStateTest {
             activeSession = "",
             filter = RecentsFilter.All,
             collapsedWorkspaces = emptySet(),
-            pinnedWorkspaces = mapOf("global" to 1L),
+            pinnedWorkspaces = mapOf("chat:global" to 1L),
         )
 
         state.toggleSessionPinned("s1", nowEpochMillis = 50L)

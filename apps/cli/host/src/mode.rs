@@ -1915,6 +1915,9 @@ pub(crate) struct RemountState {
     pub transcript_path: Option<std::path::PathBuf>,
     /// Only a mounted persistent writer may mutate its source on rewind.
     pub transcript_persistent: bool,
+    /// Fixed ownership of the outgoing runtime, used only for an authenticated
+    /// background worker remounting its originally admitted UUID.
+    pub conversation_mode: lingxi_core::host::session_context::ConversationMode,
     /// Active `(request_model, provider_profile)` — `None` resolves the model
     /// by-id (no profile). Applied via `switch_model`.
     pub model: Option<(String, Option<String>)>,
@@ -4002,6 +4005,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             draft_store,
             transcript_path,
             transcript_persistent: transcript_writer.is_some(),
+            conversation_mode: summary_orch.conversation_mode().await.mode,
             model: Some((status.model, status.model_profile)),
             user_model_setting,
             fast_mode: summary_orch.fast_mode().await,

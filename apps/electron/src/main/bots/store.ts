@@ -338,6 +338,33 @@ export class BotStore {
     return join(this.homeDir(botId), 'projects', projectDirName(this.workspaceDir(botId)));
   }
 
+  /** Private exact-source record; Bot sessions never enter the owner's space store. */
+  sessionSource(botId: string, sessionId: string): { path: string; mode: 'chat' | 'code' } | undefined {
+    this.get(botId);
+    if (!isSessionId(sessionId)) throw new Error('invalid session id');
+    const file = join(this.botDir(botId), 'session-sources', `${sessionId.toLowerCase()}.json`);
+    let value: unknown;
+    try {
+      const stat = lstatSync(file);
+      if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) throw new Error('invalid Bot session source');
+      value = JSON.parse(readFileSync(file, 'utf8'));
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid Bot session source');
+    const row = value as Record<string, unknown>;
+    if (typeof row['path'] !== 'string' || row['path'].length > 32_768 || !isAbsolute(row['path']) || row['path'].includes('\0')
+      || basename(row['path']).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`
+      || (row['mode'] !== 'chat' && row['mode'] !== 'code')) throw new Error('invalid Bot session source');
+    return { path: row['path'], mode: row['mode'] };
+  }
+
+  rememberSessionSource(botId: string, sessionId: string, source: { path: string; mode: 'chat' | 'code' }): void {
+    const previous = this.sessionSource(botId, sessionId);
+    if (!isAbsolute(source.path) || source.path.length > 32_768 || source.path.includes('\0') || basename(source.path).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`
+      || (source.mode !== 'chat' && source.mode !== 'code')) throw new Error('invalid Bot session source');
+    if (previous && (previous.path !== source.path || previous.mode !== source.mode)) throw new Error('The Bot session already has a different saved source.');
+    if (!previous) writeFileAtomic(join(this.botDir(botId), 'session-sources', `${sessionId.toLowerCase()}.json`), JSON.stringify(source));
+  }
+
   /** `<transcripts>/memdir`: where the engine keeps what this Bot remembers. */
   memoryDir(botId: string): string {
     return join(this.transcriptsDir(botId), 'memdir');

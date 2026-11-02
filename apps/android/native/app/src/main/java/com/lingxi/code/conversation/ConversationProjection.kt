@@ -116,8 +116,6 @@ fun reduceSessionEvent(
  * rehydration is unit-testable on the plain JVM.
  */
 enum class SessionActivationKind {
-    /** Current owner reported by a listing, never a New/Resume confirmation. */
-    Bootstrap,
     Started,
     Resumed,
 }
@@ -126,17 +124,11 @@ data class ActivatedSession(
     val sessionId: String,
     val transcript: List<Message>,
     val kind: SessionActivationKind,
-    val mode: SessionMode = SessionMode.Code,
+    val mode: SessionMode,
     /** False when the active turn must still be rebuilt from its replay. */
     val transcriptComplete: Boolean = true,
     val retainedProjection: RetainedConversationTranscript? = null,
 )
-
-/** A retained activation can predate a later mode snapshot for the same session. */
-internal fun ActivatedSession.withLatestMode(snapshot: SessionModeSnapshot?): ActivatedSession =
-    if (snapshot != null && canonicalSessionId(sessionId) == canonicalSessionId(snapshot.sessionId)) {
-        copy(mode = snapshot.mode)
-    } else this
 
 /**
  * Lower one [McpServerDto] to the UI [MCPServer] model. The DTO is thinner than
@@ -180,23 +172,6 @@ fun sessionActivationFrom(
         transcript = transcriptFromDtos(event.messages, strings),
         kind = SessionActivationKind.Resumed,
     )
-    else -> null
-}
-
-/**
- * Bind a cold engine's already-created session from its authoritative agent
- * listing. Construction does not emit SessionStarted; only an explicit
- * NewSession does. A late listing must never replace a confirmed owner.
- */
-internal fun reduceActivatedSession(
-    current: ActivatedSession?,
-    event: ClientEvent,
-    bootstrapMode: SessionMode,
-    strings: ConversationStrings = DefaultConversationStrings,
-): ActivatedSession? = sessionActivationFrom(event, strings) ?: current ?: when (event) {
-    is ClientEvent.SessionAgentList -> canonicalSessionId(event.sessionId)
-        .takeIf { it.isNotBlank() && it != "new" }
-        ?.let { ActivatedSession(it, emptyList(), SessionActivationKind.Bootstrap, bootstrapMode) }
     else -> null
 }
 

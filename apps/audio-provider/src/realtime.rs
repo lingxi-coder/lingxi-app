@@ -5,12 +5,13 @@ use bytes::Bytes;
 use llm_runtime::services::sdk::{self, realtime::*};
 use orchestrator::{
     ConversationOrchestrator, RealtimeAgentContext, RealtimeAgentInput, RealtimeAgentLimits,
+    RealtimeAgentOutput, RealtimeCompletionBoundary,
 };
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -43,6 +44,19 @@ impl Drop for Registration {
     }
 }
 
+struct RegistrationCompletion {
+    registration: Arc<Registration>,
+    remaining: AtomicUsize,
+}
+struct RegistrationPart(Arc<RegistrationCompletion>);
+impl Drop for RegistrationPart {
+    fn drop(&mut self) {
+        if self.0.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.registration.unregister();
+        }
+    }
+}
+
 /// A connected provider conversation whose Agent loop remains owned by the
 /// caller. The media attachment consumes this without starting a second Agent.
 pub(crate) struct PreparedRealtimeProvider {
@@ -57,6 +71,7 @@ pub(crate) struct PreparedRealtimeProvider {
     pub(crate) output_format: RealtimeAudioFormat,
     pub(crate) max_chunk_bytes: usize,
     pub(crate) image_input_supported: bool,
+    pub(crate) completion_boundary: RealtimeCompletionBoundary,
     pub(crate) session_ready: Value,
     pub(crate) usage_context: Value,
     pub(crate) cancel: CancellationToken,
@@ -74,7 +89,7 @@ pub struct NativeRealtimeRun {
     /// Host-supplied audio, commit, interruption, and playback-completion inputs for the Agent.
     pub inputs: mpsc::Receiver<RealtimeAgentInput>,
     /// Agent-produced realtime events returned to the host for client delivery.
-    pub output: mpsc::Sender<RealtimeEvent>,
+    pub output: mpsc::Sender<RealtimeAgentOutput>,
     /// Per-session limits applied to Agent tool execution.
     pub limits: RealtimeAgentLimits,
     /// Whether the selected provider codec accepts typed image inputs.
@@ -117,7 +132,7 @@ pub struct NativeRealtimeSession {
     input: mpsc::Sender<RealtimeAgentInput>,
     control: RealtimeControl,
     cancel: CancellationToken,
-    registration: Arc<Registration>,
+    forward_cancel: CancellationToken,
     input_format: RealtimeAudioFormat,
     max_chunk_bytes: usize,
     closing: AtomicBool,
@@ -255,6 +270,16 @@ pub(crate) async fn prepare_provider_realtime(
     let input_format_json = format_json(&connected.input_format)?;
     let output_format_json = format_json(&connected.output_format)?;
     let model_id = connected.model.clone();
+    let completion_boundary = match (caps.provider_id.as_str(), model_id.as_str()) {
+        ("openai", _) => RealtimeCompletionBoundary::ExplicitResponse,
+        ("google", "gemini-3.8-live") => RealtimeCompletionBoundary::Gemini38,
+        _ => {
+            return Err(failure(
+                "unsupported",
+                "this realtime provider or model has no verified Agent completion contract",
+            ));
+        }
+    };
     let session_ready = json!({
         "type":"session_ready",
         "model":model_id,
@@ -287,6 +312,7 @@ pub(crate) async fn prepare_provider_realtime(
         output_format,
         max_chunk_bytes,
         image_input_supported,
+        completion_boundary,
         session_ready,
         usage_context,
         cancel,
@@ -353,6 +379,7 @@ impl NativeRealtimeSession {
             output_format: _,
             max_chunk_bytes,
             image_input_supported,
+            completion_boundary,
             session_ready,
             usage_context,
             cancel,
@@ -360,15 +387,27 @@ impl NativeRealtimeSession {
         } = provider;
         let session_id = prepared.session_id.clone();
         let operation_id = request.operation_id.clone();
-        let (events_tx, mut events_rx) = mpsc::channel(EVENT_CAPACITY);
+        let (events_tx, events_rx) = mpsc::channel(EVENT_CAPACITY);
         let (json_tx, json_rx) = mpsc::channel(EVENT_CAPACITY);
+        // The operation token is held by AudioProviderHost for explicit
+        // cancellation. Its children separate Agent cleanup from forwarding:
+        // ordinary Agent shutdown cancels only its child, while an operation
+        // cancellation stops both.
+        let agent_cancel = cancel.child_token();
+        let forward_cancel = cancel.child_token();
+        let registration_completion = Arc::new(RegistrationCompletion {
+            registration,
+            remaining: AtomicUsize::new(2),
+        });
+        let agent_registration = RegistrationPart(registration_completion.clone());
+        let forward_registration = RegistrationPart(registration_completion);
         let completion = Arc::new(Completion::default());
         let task_completion = completion.clone();
         let session = Arc::new(Self {
             input,
             control: provider_control.clone(),
-            cancel: cancel.clone(),
-            registration: registration.clone(),
+            cancel: agent_cancel.clone(),
+            forward_cancel: forward_cancel.clone(),
             input_format,
             max_chunk_bytes,
             closing: AtomicBool::new(false),
@@ -376,16 +415,20 @@ impl NativeRealtimeSession {
         });
         let control = provider_control.clone();
         let driver = tokio::spawn(driver.run());
-        let task_cancel = cancel.clone();
+        let task_cancel = agent_cancel.clone();
         let agent = tokio::spawn(async move {
             let _completion = CompletionGuard(task_completion);
+            let _registration = agent_registration;
             let result = runner(NativeRealtimeRun {
                 prepared,
                 control: provider_control,
                 events: provider_events,
                 inputs: input_rx,
                 output: events_tx,
-                limits: RealtimeAgentLimits::default(),
+                limits: RealtimeAgentLimits {
+                    completion_boundary,
+                    ..Default::default()
+                },
                 image_input_supported,
                 cancel: task_cancel.clone(),
             })
@@ -395,49 +438,31 @@ impl NativeRealtimeSession {
                 .abort(RealtimeClose::normal("native Agent session ended"))
                 .await;
             let driver = driver.await;
-            registration.unregister();
             match (result, driver) {
+                (Err(error), _)
+                    if error
+                        .to_string()
+                        .contains("Gemini completion cannot confirm interactionStatus IDLE") =>
+                {
+                    Err("native realtime provider did not confirm the Agent turn completed")
+                }
                 (Err(_), _) => Err("native Agent session failed"),
                 (_, Ok(Err(_))) | (_, Err(_)) => Err("native realtime transport failed"),
                 (Ok(end), _) => Ok(format!("{end:?}")),
             }
         });
-        tokio::spawn(async move {
-            while let Some(event) = events_rx.recv().await {
-                let event = canonical_event(event, &session_ready);
-                let mut event = match event {
-                    Ok(Some(event)) => event,
-                    Ok(None) => continue,
-                    Err(error) => {
-                        cancel.cancel();
-                        error
-                    }
-                };
-                if event["type"] == "usage" {
-                    event["usageContext"] = usage_context.clone();
-                }
-                if json_tx
-                    .try_send(stamp(event, &session_id, &operation_id))
-                    .is_err()
-                {
-                    cancel.cancel();
-                    break;
-                }
-            }
-            let result = agent.await;
-            if !matches!(result, Ok(Ok(_))) {
-                let _=json_tx.try_send(stamp(json!({"type":"error","kind":"provider_error","message":"native realtime session ended with an error"}),&session_id,&operation_id));
-            }
-            let reason = match result {
-                Ok(Ok(reason)) => reason,
-                _ => "failed".into(),
-            };
-            let _ = json_tx.try_send(stamp(
-                json!({"type":"closed","reason":reason}),
-                &session_id,
-                &operation_id,
-            ));
-        });
+        tokio::spawn(forward_realtime_events(
+            events_rx,
+            agent,
+            json_tx,
+            session_ready,
+            usage_context,
+            session_id,
+            operation_id,
+            agent_cancel,
+            forward_cancel,
+            forward_registration,
+        ));
         Ok((session, json_rx))
     }
     fn active(&self) -> Result<(), Value> {
@@ -578,12 +603,14 @@ impl NativeRealtimeSession {
     /// Cancel immediately; the owner remains reserved until protected tools drain.
     pub fn cancel_now(&self) {
         self.closing.store(true, Ordering::Release);
+        self.forward_cancel.cancel();
         self.cancel.cancel();
     }
 
     /// Cancel the Agent immediately, abort the provider conversation, and await cleanup.
     pub async fn abort(&self) {
         self.closing.store(true, Ordering::Release);
+        self.forward_cancel.cancel();
         self.cancel.cancel();
         let _ = self
             .control
@@ -594,8 +621,8 @@ impl NativeRealtimeSession {
 }
 impl Drop for NativeRealtimeSession {
     fn drop(&mut self) {
+        self.forward_cancel.cancel();
         self.cancel.cancel();
-        self.registration.unregister();
     }
 }
 fn tool_spec(value: &Value) -> Result<sdk::protocol::ToolSpec, Value> {
@@ -641,6 +668,122 @@ fn stamp(mut event: Value, session_id: &str, operation_id: &str) -> String {
         object.insert("operationId".into(), json!(operation_id));
     }
     event.to_string()
+}
+async fn send_realtime_json(
+    output: &mpsc::Sender<String>,
+    value: String,
+    cancel: &CancellationToken,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => false,
+        result = output.send(value) => result.is_ok(),
+    }
+}
+
+/// Deliver every accepted Agent event and its terminal result in order. The
+/// Agent's cleanup token is intentionally separate from explicit forwarding
+/// cancellation: normal Agent completion also cancels the cleanup token.
+async fn forward_realtime_events(
+    mut events: mpsc::Receiver<RealtimeAgentOutput>,
+    agent: tokio::task::JoinHandle<Result<String, &'static str>>,
+    output: mpsc::Sender<String>,
+    session_ready: Value,
+    usage_context: Value,
+    session_id: String,
+    operation_id: String,
+    agent_cancel: CancellationToken,
+    forward_cancel: CancellationToken,
+    registration: RegistrationPart,
+) {
+    // Keep operation-id cancellation available while terminal output drains.
+    let _registration = registration;
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = forward_cancel.cancelled() => { agent_cancel.cancel(); return; },
+            _ = output.closed() => { agent_cancel.cancel(); return; },
+            event = events.recv() => event,
+        };
+        let Some(event) = event else { break };
+        let mut event = match canonical_agent_event(event, &session_ready) {
+            Ok(Some(event)) => event,
+            Ok(None) => continue,
+            Err(error) => {
+                agent_cancel.cancel();
+                error
+            }
+        };
+        if event["type"] == "usage" {
+            event["usageContext"] = usage_context.clone();
+        }
+        if !send_realtime_json(
+            &output,
+            stamp(event, &session_id, &operation_id),
+            &forward_cancel,
+        )
+        .await
+        {
+            agent_cancel.cancel();
+            return;
+        }
+    }
+    // A closed/cancelled consumer must never make this task join protected
+    // tool cleanup. Dropping the join handle detaches that cleanup owner.
+    let result = tokio::select! {
+        biased;
+        _ = forward_cancel.cancelled() => { agent_cancel.cancel(); return; },
+        _ = output.closed() => { agent_cancel.cancel(); return; },
+        result = agent => result,
+    };
+    if !matches!(result, Ok(Ok(_))) {
+        let message = match &result {
+            Ok(Err(message)) => *message,
+            _ => "native realtime session ended with an error",
+        };
+        if !send_realtime_json(
+            &output,
+            stamp(
+                json!({"type":"error","kind":"provider_error","message":message}),
+                &session_id,
+                &operation_id,
+            ),
+            &forward_cancel,
+        )
+        .await
+        {
+            return;
+        }
+    }
+    let reason = match result {
+        Ok(Ok(reason)) => reason,
+        _ => "failed".into(),
+    };
+    let _ = send_realtime_json(
+        &output,
+        stamp(
+            json!({"type":"closed","reason":reason}),
+            &session_id,
+            &operation_id,
+        ),
+        &forward_cancel,
+    )
+    .await;
+}
+
+fn canonical_agent_event(
+    event: RealtimeAgentOutput,
+    ready: &Value,
+) -> Result<Option<Value>, Value> {
+    match event {
+        RealtimeAgentOutput::Provider(event) => canonical_event(event, ready),
+        RealtimeAgentOutput::AgentResponseStarted { turn_id } => Ok(Some(
+            json!({"type":"agent_response_started","turnId":turn_id}),
+        )),
+        RealtimeAgentOutput::AgentTurnCompleted { turn_id } => Ok(Some(
+            json!({"type":"agent_turn_completed","turnId":turn_id}),
+        )),
+    }
 }
 fn canonical_event(event: RealtimeEvent, ready: &Value) -> Result<Option<Value>, Value> {
     let event = match event {
@@ -707,6 +850,328 @@ fn canonical_event(event: RealtimeEvent, ready: &Value) -> Result<Option<Value>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_registration(
+        cancel: &CancellationToken,
+    ) -> (Arc<Registration>, RegistrationPart, RegistrationPart) {
+        let registration = Arc::new(Registration {
+            pending: Arc::new(Mutex::new(BTreeMap::from([(
+                "operation".into(),
+                cancel.clone(),
+            )]))),
+            id: "operation".into(),
+            removed: AtomicBool::new(false),
+        });
+        let completion = Arc::new(RegistrationCompletion {
+            registration: registration.clone(),
+            remaining: AtomicUsize::new(2),
+        });
+        (
+            registration,
+            RegistrationPart(completion.clone()),
+            RegistrationPart(completion),
+        )
+    }
+
+    #[tokio::test]
+    async fn forwarder_drains_events_and_terminal_after_agent_cleanup_cancels_its_token() {
+        for failed in [false, true] {
+            let (events_tx, events_rx) = mpsc::channel(4);
+            let (json_tx, mut json_rx) = mpsc::channel(1);
+            json_tx.send("occupied".into()).await.unwrap();
+            let operation_cancel = CancellationToken::new();
+            let agent_cancel = operation_cancel.child_token();
+            let forward_cancel = operation_cancel.child_token();
+            let (registration, agent_registration, forward_registration) =
+                test_registration(&operation_cancel);
+            let runner_cancel = agent_cancel.clone();
+            let agent = tokio::spawn(async move {
+                let _registration = agent_registration;
+                events_tx
+                    .send(RealtimeAgentOutput::AgentResponseStarted {
+                        turn_id: "turn".into(),
+                    })
+                    .await
+                    .unwrap();
+                events_tx
+                    .send(RealtimeAgentOutput::AgentTurnCompleted {
+                        turn_id: "turn".into(),
+                    })
+                    .await
+                    .unwrap();
+                // Harness cancels this token on both successful and failed
+                // exits, even while the consumer's bounded queue is full.
+                runner_cancel.cancel();
+                drop(events_tx);
+                if failed {
+                    Err("fixture failed")
+                } else {
+                    Ok("completed".into())
+                }
+            });
+            let forwarder = tokio::spawn(forward_realtime_events(
+                events_rx,
+                agent,
+                json_tx,
+                json!({"type":"session_ready"}),
+                json!({}),
+                "session".into(),
+                "operation".into(),
+                agent_cancel.clone(),
+                forward_cancel.clone(),
+                forward_registration,
+            ));
+            tokio::time::timeout(Duration::from_secs(2), agent_cancel.cancelled())
+                .await
+                .unwrap();
+            assert!(!forward_cancel.is_cancelled());
+            assert!(registration
+                .pending
+                .lock()
+                .unwrap()
+                .contains_key("operation"));
+            assert_eq!(json_rx.recv().await.as_deref(), Some("occupied"));
+            let mut delivered = Vec::new();
+            while let Some(raw) = tokio::time::timeout(Duration::from_secs(2), json_rx.recv())
+                .await
+                .unwrap()
+            {
+                let event: Value = serde_json::from_str(&raw).unwrap();
+                assert_eq!(event["sessionId"], "session");
+                assert_eq!(event["operationId"], "operation");
+                delivered.push(event);
+            }
+            forwarder.await.unwrap();
+            assert!(!registration
+                .pending
+                .lock()
+                .unwrap()
+                .contains_key("operation"));
+            let kinds: Vec<_> = delivered
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .collect();
+            if failed {
+                assert_eq!(
+                    kinds,
+                    [
+                        "agent_response_started",
+                        "agent_turn_completed",
+                        "error",
+                        "closed"
+                    ]
+                );
+                assert_eq!(delivered[2]["message"], "fixture failed");
+                assert_eq!(delivered[3]["reason"], "failed");
+            } else {
+                assert_eq!(
+                    kinds,
+                    ["agent_response_started", "agent_turn_completed", "closed"]
+                );
+                assert_eq!(delivered[2]["reason"], "completed");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_dropped_consumer_never_waits_for_agent_cleanup() {
+        for cause in ["explicit", "consumer", "operation"] {
+            let (events_tx, events_rx) = mpsc::channel(2);
+            let (json_tx, json_rx) = mpsc::channel(1);
+            json_tx.send("occupied".into()).await.unwrap();
+            events_tx
+                .send(RealtimeAgentOutput::AgentResponseStarted {
+                    turn_id: "turn".into(),
+                })
+                .await
+                .unwrap();
+            drop(events_tx);
+            let operation_cancel = CancellationToken::new();
+            let agent_cancel = operation_cancel.child_token();
+            let forward_cancel = operation_cancel.child_token();
+            let (registration, agent_registration, forward_registration) =
+                test_registration(&operation_cancel);
+            let (release, cleanup) = tokio::sync::oneshot::channel::<()>();
+            let agent = tokio::spawn(async move {
+                let _registration = agent_registration;
+                let _ = cleanup.await;
+                Ok("completed".into())
+            });
+            let forwarder = tokio::spawn(forward_realtime_events(
+                events_rx,
+                agent,
+                json_tx,
+                json!({}),
+                json!({}),
+                "session".into(),
+                "operation".into(),
+                agent_cancel.clone(),
+                forward_cancel.clone(),
+                forward_registration,
+            ));
+            tokio::task::yield_now().await;
+            assert!(!forwarder.is_finished());
+            match cause {
+                "consumer" => drop(json_rx),
+                "operation" => operation_cancel.cancel(),
+                _ => forward_cancel.cancel(),
+            }
+            tokio::time::timeout(Duration::from_secs(2), forwarder)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(agent_cancel.is_cancelled());
+            assert!(
+                registration
+                    .pending
+                    .lock()
+                    .unwrap()
+                    .contains_key("operation"),
+                "protected Agent cleanup still owns the operation"
+            );
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let still_registered = registration
+                        .pending
+                        .lock()
+                        .unwrap()
+                        .contains_key("operation");
+                    if !still_registered {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_can_cancel_a_full_forwarder_after_agent_cleanup_finishes() {
+        let (events_tx, events_rx) = mpsc::channel(1);
+        let (json_tx, _json_rx) = mpsc::channel(1);
+        json_tx.send("occupied".into()).await.unwrap();
+        events_tx
+            .send(RealtimeAgentOutput::AgentTurnCompleted {
+                turn_id: "turn".into(),
+            })
+            .await
+            .unwrap();
+        let operation_cancel = CancellationToken::new();
+        let agent_cancel = operation_cancel.child_token();
+        let forward_cancel = operation_cancel.child_token();
+        let (registration, agent_registration, forward_registration) =
+            test_registration(&operation_cancel);
+        let completed = Arc::new(Completion::default());
+        let completed_by_agent = completed.clone();
+        let agent = tokio::spawn(async move {
+            let _completion = CompletionGuard(completed_by_agent);
+            let _registration = agent_registration;
+            drop(events_tx);
+            Ok("completed".into())
+        });
+        let forwarder = tokio::spawn(forward_realtime_events(
+            events_rx,
+            agent,
+            json_tx,
+            json!({}),
+            json!({}),
+            "session".into(),
+            "operation".into(),
+            agent_cancel,
+            forward_cancel,
+            forward_registration,
+        ));
+        tokio::time::timeout(Duration::from_secs(2), completed.wait())
+            .await
+            .unwrap();
+        assert!(!forwarder.is_finished());
+        let registered_cancel = registration
+            .pending
+            .lock()
+            .unwrap()
+            .get("operation")
+            .unwrap()
+            .clone();
+        registered_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), forwarder)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!registration
+            .pending
+            .lock()
+            .unwrap()
+            .contains_key("operation"));
+    }
+
+    #[tokio::test]
+    async fn slow_realtime_json_consumer_keeps_event_order() {
+        let (output, mut input) = mpsc::channel(1);
+        output.send("first".into()).await.unwrap();
+        let cancel = CancellationToken::new();
+        let producer =
+            tokio::spawn(
+                async move { send_realtime_json(&output, "second".into(), &cancel).await },
+            );
+        tokio::task::yield_now().await;
+        assert!(!producer.is_finished());
+        assert_eq!(input.recv().await.as_deref(), Some("first"));
+        assert_eq!(input.recv().await.as_deref(), Some("second"));
+        assert!(producer.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn blocked_realtime_json_producer_is_cancellable() {
+        let (output, mut input) = mpsc::channel(1);
+        output.send("first".into()).await.unwrap();
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let producer = tokio::spawn(async move {
+            send_realtime_json(&output, "second".into(), &task_cancel).await
+        });
+        tokio::task::yield_now().await;
+        assert!(!producer.is_finished());
+        cancel.cancel();
+        assert!(
+            !tokio::time::timeout(std::time::Duration::from_secs(2), producer)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(input.recv().await.as_deref(), Some("first"));
+        assert!(input.recv().await.is_none());
+    }
+
+    #[test]
+    fn only_local_agent_output_can_emit_agent_lifecycle_events() {
+        let ready = json!({"type":"session_ready"});
+        for name in ["agent_response_started", "agent_turn_completed"] {
+            assert_eq!(
+                canonical_agent_event(
+                    RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent {
+                        name: name.into(),
+                        native: json!({"type":name,"turnId":"forged"}),
+                    }),
+                    &ready
+                )
+                .unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            canonical_agent_event(
+                RealtimeAgentOutput::AgentTurnCompleted {
+                    turn_id: "agent-1".into()
+                },
+                &ready
+            )
+            .unwrap(),
+            Some(json!({"type":"agent_turn_completed","turnId":"agent-1"}))
+        );
+    }
     fn request(session_id: &str, profile_id: &str) -> AudioRequest {
         serde_json::from_value(json!({"operationId":"op","kind":"realtime","cloud":{"binding":"follow_session"},"session":{"sessionId":session_id,"profileId":profile_id,"accountScope":format!("profile:{profile_id}")}})).unwrap()
     }

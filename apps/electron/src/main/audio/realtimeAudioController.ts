@@ -24,6 +24,7 @@ interface InputCloseFlight {
   attempt?: CaptureAttempt;
   observed: Promise<void>;
   observers: number;
+  onClosed: Set<() => void>;
 }
 const INPUT_CLOSE_OBSERVER_MS = 30_000;
 const INPUT_CLOSE_MAX_OBSERVERS = 64;
@@ -32,6 +33,7 @@ const INPUT_CLOSE_MAX_OBSERVERS = 64;
 export class RealtimeAudioController {
   private generation = 0;
   private runtime?: RealtimeAudioRuntime;
+  private releaseRuntime?: () => void;
   private operationId?: string;
   private offRuntime?: () => void;
   private offDevice?: () => void;
@@ -52,42 +54,59 @@ export class RealtimeAudioController {
   constructor(private readonly options: {
     audio: Pick<NativeAudioManager, 'onEvent' | 'startRealtimeCapture' | 'stopRealtimeCapture' | 'playRealtimeAudio'>;
     currentRuntime(): RealtimeAudioRuntime | undefined;
+    retainRuntime?(runtime: RealtimeAudioRuntime): () => void;
     publish(state: NativeRealtimeAudioState): void;
     recordUsage?(metadata: Omit<AudioUsageRecord, 'sequence' | 'usage'>, usage: unknown): void;
     inputCloseObserverMs?: number;
   }) {}
 
-  private current(generation: number): boolean { return this.generation === generation && this.runtime === this.options.currentRuntime(); }
-  private publish(phase: NativeRealtimeAudioState['phase'], detail: string) {
-    this.options.publish({ phase, detail, generation: this.generation, ...(this.runtime ? { sessionId: this.runtime.sessionId } : {}) });
+  get sessionId(): string | undefined { return this.runtime?.sessionId; }
+
+  private current(generation: number): boolean { return this.generation === generation && this.runtime !== undefined; }
+  private publish(phase: NativeRealtimeAudioState['phase'], detail: string, sessionId = this.runtime?.sessionId) {
+    this.options.publish({ phase, detail, generation: this.generation, ...(sessionId ? { sessionId } : {}) });
   }
 
-  async start(configuration: AudioConfigurationV4, usageContext?: Omit<AudioUsageRecord, 'sequence' | 'usage' | 'operationId' | 'modelId'>): Promise<void> {
+  async start(configuration: AudioConfigurationV4, usageContext?: Omit<AudioUsageRecord, 'sequence' | 'usage' | 'operationId' | 'modelId'>,
+    runtime = this.options.currentRuntime()): Promise<void> {
+    if (!runtime?.realtimeAudioSupported) throw new Error('当前 Agent 宿主尚未提供已验证的实时会话契约。');
+    if (configuration.conversation.interaction !== 'turn_based') throw new Error('此设备尚未验证回声消除。请使用轮流说话模式。');
+    // Pin the captured owner before awaiting teardown of any previous lane.
+    const release = this.options.retainRuntime?.(runtime);
+    let adopted = false;
+    try {
     const stopping = this.stop();
     const stoppedGeneration = this.generation;
     await stopping;
     if (this.generation !== stoppedGeneration) return;
-    const runtime = this.options.currentRuntime();
-    if (!runtime?.realtimeAudioSupported) throw new Error('当前 Agent 宿主尚未提供已验证的实时会话契约。');
-    if (configuration.conversation.interaction !== 'turn_based') throw new Error('此设备尚未验证回声消除。请使用轮流说话模式。');
     this.runtime = runtime;
+    this.releaseRuntime = release;
+    adopted = true;
     const generation = ++this.generation;
     const frozen = structuredClone(configuration);
     this.operationId = randomUUID();
     this.usageContext = usageContext;
     this.offRuntime = runtime.onRealtimeAudioEvent((eventJson) => {
-      if (!this.current(generation)) { if (generation === this.generation) void this.stop().catch(() => undefined); return; }
+      if (!this.current(generation)) return;
       try { this.receive(JSON.parse(eventJson), generation); }
       catch (error) { void this.fail(error instanceof Error ? error.message : '实时事件无效'); }
     });
     this.offDevice = this.options.audio.onEvent((event) => this.deviceEvent(event, generation));
     this.publish('requestingPermission', '连接当前 Agent 的实时音频服务…');
-    runtime.startRealtimeAudio(JSON.stringify({ operationId: this.operationId, kind: 'realtime', cloud: frozen.conversation.cloud,
-      language: frozen.language, rate: frozen.rate, interaction: frozen.conversation.interaction, ...(frozen.conversation.voice ? { voice: frozen.conversation.voice.id } : {}), maxPayloadBytes: 8 * 1024 * 1024, timeoutMs: 120_000 }));
+    try {
+      runtime.startRealtimeAudio(JSON.stringify({ operationId: this.operationId, kind: 'realtime', cloud: frozen.conversation.cloud,
+        language: frozen.language, rate: frozen.rate, interaction: frozen.conversation.interaction, ...(frozen.conversation.voice ? { voice: frozen.conversation.voice.id } : {}), maxPayloadBytes: 8 * 1024 * 1024, timeoutMs: 120_000 }));
+    } catch (error) {
+      await this.stop().catch(() => undefined);
+      throw error;
+    }
+    } finally {
+      if (!adopted) release?.();
+    }
   }
 
   private deviceEvent(event: NativeAudioEvent, generation: number) {
-    if (!this.current(generation)) { if (generation === this.generation) void this.stop().catch(() => undefined); return; }
+    if (!this.current(generation)) return;
     if (event.type !== 'capture_chunk' || !this.capturing || event.owner.kind !== 'session' || event.owner.id !== this.runtime?.sessionId) return;
     if (event.sampleRateHz !== this.inputRate) { void this.fail('麦克风采样率与实时会话输入格式不一致。'); return; }
     const identity = `${event.identity.service_epoch}:${event.identity.generation}:${event.identity.id}`;
@@ -190,13 +209,15 @@ export class RealtimeAudioController {
       timer = setTimeout(() => reject(new Error('audio capture stop remains unconfirmed')), budget);
       cleanup.then(() => { clearTimeout(timer); resolve(); }, (error: unknown) => { clearTimeout(timer); reject(error); });
     });
-    const flight: InputCloseFlight = { attempt, observed, observers: 0 };
+    const flight: InputCloseFlight = { attempt, observed, observers: 0, onClosed: new Set() };
     this.inputClose = flight;
     // Exactly one continuation is installed on the close flight, regardless of
     // how many callers observe it. Failed/expired flights remain fenced.
     const retireConfirmed = () => {
       if (this.inputClose === flight) { this.inputClose = undefined; this.inputFault = undefined; }
       if (this.captureAttempt === attempt) this.captureAttempt = undefined;
+      for (const callback of flight.onClosed) callback();
+      flight.onClosed.clear();
     };
     void observed.then(retireConfirmed, (error: unknown) => {
       if (this.inputClose === flight) this.inputFault = error instanceof Error ? error : new Error(String(error));
@@ -268,9 +289,10 @@ export class RealtimeAudioController {
   }
 
   private async fail(message: string) {
+    const sessionId = this.runtime?.sessionId;
     const stoppedGeneration = this.generation + 1;
     try { await this.stop(); } catch { /* The close flight remains fenced. */ }
-    if (this.generation === stoppedGeneration) this.publish('failed', message);
+    if (this.generation === stoppedGeneration) this.publish('failed', message, sessionId);
   }
 
   async stop(): Promise<void> {
@@ -278,6 +300,7 @@ export class RealtimeAudioController {
     const attempt = this.captureAttempt;
     const playbackActive = this.playback !== undefined;
     const runtime = this.runtime; this.runtime = undefined; this.operationId = undefined;
+    const release = this.releaseRuntime; this.releaseRuntime = undefined;
     this.offRuntime?.(); this.offRuntime = undefined; this.offDevice?.(); this.offDevice = undefined;
     this.capturing = false; this.queue = []; this.queuedBytes = 0; this.completedTurn = false; this.playedItems.clear(); this.playback = undefined;
     if (runtime) {
@@ -289,9 +312,13 @@ export class RealtimeAudioController {
       else if (this.inputFault) throw this.inputFault;
       else if (runtime && playbackActive) await this.closeInput(runtime);
     } catch (error) {
-      if (generation === this.generation) this.publish('failed', error instanceof Error ? error.message : '麦克风停止未确认');
+      // A timed-out stop is not proof that native capture has closed. Keep the
+      // owner pinned until the exact outstanding close eventually confirms it.
+      if (release && this.inputClose) this.inputClose.onClosed.add(release);
+      if (generation === this.generation) this.publish('failed', error instanceof Error ? error.message : '麦克风停止未确认', runtime?.sessionId);
       throw error;
     }
-    if (generation === this.generation) this.publish('paused', '实时会话已停止');
+    release?.();
+    if (generation === this.generation) this.publish('paused', '实时会话已停止', runtime?.sessionId);
   }
 }

@@ -523,7 +523,7 @@ export class NativeAudioManager {
     return sessionKey === JSON.stringify(this.opts.getAudioSessionContext?.()) ? snapshot : {};
   }
 
-  private async executeHostedRequest(request: AudioOperationRequestDto, configuration: AudioConfigurationV4, revision: number, onAdmission?: () => void | Promise<void>, shouldContinue?: () => boolean, onExactClose?: () => void): Promise<AudioOperationResultDto> {
+  private async executeHostedRequest(request: AudioOperationRequestDto, configuration: AudioConfigurationV4, revision: number, onAdmission?: () => void | Promise<void>, shouldContinue?: () => boolean, onExactClose?: () => void, capturedSession?: { session?: ProviderAudioSession }): Promise<AudioOperationResultDto> {
     const key = audioIdentityKey(request.identity);
     this.rememberAudioIdentity(key);
     const controller = new AbortController();
@@ -533,7 +533,10 @@ export class NativeAudioManager {
     this.hostedOperations.set(key, hosted);
     controller.signal.addEventListener('abort', () => this.uncertainAudioRequests.set(key, request), { once: true });
     const frozen = structuredClone(configuration);
-    const session = this.opts.getAudioSessionContext?.(request.owner);
+    // UI operations use a window owner for device cleanup. Their provider
+    // session is captured separately at admission, before navigation can
+    // change the selected conversation (including an explicitly absent one).
+    const session = capturedSession ? capturedSession.session : this.opts.getAudioSessionContext?.(request.owner);
     const resolvedRoute = (kind: 'recognition' | 'speech') => (route: { profileId: string; providerId: string; modelId: string | null; voiceId?: string }) => {
       if (!controller.signal.aborted && (!shouldContinue || shouldContinue())) this.executedRoute = { ...route, kind, source: 'provider', operationId: request.identity.id, configurationRevision: revision, ...(session ? { sessionId: session.sessionId } : {}) };
     };
@@ -932,6 +935,7 @@ export class NativeAudioManager {
     onNativeClose?: () => void,
     onExactClose?: () => void,
     admissionToken?: object,
+    capturedSession?: { session?: ProviderAudioSession },
   ): Promise<AudioOperationResultDto> {
     const request = validateNativeAudioOperationRequest(value);
     const key = audioIdentityKey(request.identity);
@@ -962,7 +966,7 @@ export class NativeAudioManager {
     this.preparingAudioIdentities.set(key, preparing);
     const stillCurrent = () => (this.audioOwnerEpochs.get(ownerKey) ?? 0) === ownerEpoch && (!shouldContinue || shouldContinue());
     try {
-      const result = await this.executeReservedAudioRequest(request, configurationSnapshot, onNativeAdmission, stillCurrent, onNeverAdmitted, onNativeClose, onExactClose);
+      const result = await this.executeReservedAudioRequest(request, configurationSnapshot, onNativeAdmission, stillCurrent, onNeverAdmitted, onNativeClose, onExactClose, capturedSession);
       if (result.type === 'failed_without_resource') this.rememberAudioIdentity(key);
       return result;
     } finally {
@@ -981,6 +985,7 @@ export class NativeAudioManager {
     onNeverAdmitted?: () => void,
     onNativeClose?: () => void,
     onExactClose?: () => void,
+    capturedSession?: { session?: ProviderAudioSession },
   ): Promise<AudioOperationResultDto> {
     const suspensionRevision = this.suspensionRevision;
     const identityKey = audioIdentityKey(request.identity);
@@ -1034,7 +1039,7 @@ export class NativeAudioManager {
       }
       if (request.identity.service_epoch !== this.getCapabilities().service_epoch) return failedWithoutResource('cancelled', 'the audio service changed before this request started');
       const work = this.executeHostedRequest(request, earlyConfiguration ?? audioConfigurationDefaults(), configurationSnapshot?.revision ?? this.opts.getAudioConfigurationRevision?.() ?? 0, onNativeAdmission,
-        () => !ownerCleanupUncertain() && (!shouldContinue || shouldContinue()), onExactClose);
+        () => !ownerCleanupUncertain() && (!shouldContinue || shouldContinue()), onExactClose, capturedSession);
       const operation = this.hostedOperations.get(identityKey);
       if (operation) {
         const settled = () => {
@@ -1373,6 +1378,7 @@ export class NativeAudioManager {
     instanceId: string,
     requestedConfigurationRevision?: number,
     configurationOverride?: unknown,
+    capturedSession?: { session?: ProviderAudioSession },
   ): Promise<{ snapshot: NativeAudioSnapshot; result: AudioOperationResultDto }> {
     const operation: AudioOperationDto = validateNativeAudioOperation(value);
     const suspensionRevision = this.suspensionRevision;
@@ -1484,7 +1490,7 @@ export class NativeAudioManager {
             this.opts.diagnostics.add('warn', 'host', `UI listen finish request failed: ${String(error)}`);
           });
         }
-      } : undefined, () => !cancellation.cancelled);
+      } : undefined, () => !cancellation.cancelled, undefined, undefined, undefined, undefined, capturedSession);
       return { snapshot: this.getSnapshot(), result };
     } finally {
       if (listenOperation) {

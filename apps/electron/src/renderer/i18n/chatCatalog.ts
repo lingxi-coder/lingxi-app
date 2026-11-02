@@ -1,4 +1,19 @@
 export const chatCatalog: Record<string, Record<string, string>> = {
+  "desktop_chat_drafts": {
+    "zh-Hans": "草稿", "zh-Hant": "草稿", "en": "Drafts", "ja": "下書き", "ko": "초안"
+  },
+  "desktop_handoff_continue": {
+    "zh-Hans": "交接到 %1$s", "zh-Hant": "交接至 %1$s", "en": "Continue in %1$s", "ja": "%1$s に引き継ぐ", "ko": "%1$s에서 계속"
+  },
+  "desktop_handoff_retry": {
+    "zh-Hans": "重试交接摘要", "zh-Hant": "重試交接摘要", "en": "Retry handoff summary", "ja": "引き継ぎ要約を再試行", "ko": "인계 요약 다시 시도"
+  },
+  "desktop_handoff_cancel": {
+    "zh-Hans": "取消交接摘要", "zh-Hant": "取消交接摘要", "en": "Cancel handoff summary", "ja": "引き継ぎ要約をキャンセル", "ko": "인계 요약 취소"
+  },
+  "desktop_handoff_source": {
+    "zh-Hans": "交接来源：%1$s · %2$s", "zh-Hant": "交接來源：%1$s · %2$s", "en": "Handoff from %1$s · %2$s", "ja": "%1$s から引き継ぎ · %2$s", "ko": "%1$s에서 인계 · %2$s"
+  },
   "desktop_chat_no_project": {
     "zh-Hans": "未选择项目",
     "zh-Hant": "未選擇專案",

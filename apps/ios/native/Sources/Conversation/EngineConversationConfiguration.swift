@@ -55,6 +55,7 @@ struct EngineConfig {
     /// Linux bind mounts. This is separate from the file-tool trust catalog in
     /// `additionalWorkspaceDirectories`.
     var projectMountGrants: [String] = []
+    var initialSessionId: String? = nil
 
     /// Persisted API keys are resolved per request from native secure storage.
     /// An explicit environment override remains available for development/CI.

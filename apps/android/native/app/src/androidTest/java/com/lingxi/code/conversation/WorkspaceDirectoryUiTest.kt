@@ -32,12 +32,12 @@ class WorkspaceDirectoryUiTest {
     @After fun cleanup() { root.deleteRecursively() }
     private fun text(resource: Int) = context.getString(resource)
 
-    @Test fun pendingModeKeepsTheActiveModeCheckedAndAllowsCancellingIt() {
+    @Test fun selectingAnotherModeRequestsThatSpace() {
         var selected: SessionMode? = null
         rule.setContent { LingXiTheme(darkTheme = false) {
             SessionPanel(
                 model = SessionPanelModel(
-                    title = "Conversation", mode = SessionMode.Code, pendingMode = SessionMode.Chat,
+                    title = "Conversation", mode = SessionMode.Code,
                     workspaceName = "Workspace", modelName = "Model", permissionLabel = null, pinned = false,
                 ),
                 onDismiss = {}, onSelectMode = { selected = it }, onContinueInOtherMode = {},
@@ -45,13 +45,11 @@ class WorkspaceDirectoryUiTest {
                 onOpenTerminal = {}, onArchive = {},
             )
         } }
-        rule.onNodeWithText(context.getString(R.string.session_mode_pending, text(R.string.session_mode_chat)))
-            .assertExists()
         rule.onNodeWithTag(UiTags.SESSION_PANEL_MODE).performClick()
         rule.onNodeWithTag(UiTags.sessionPanelModeOption("code")).assertIsSelected()
         rule.onNodeWithTag(UiTags.sessionPanelModeOption("chat")).assertIsNotSelected()
-        rule.onNodeWithTag(UiTags.sessionPanelModeOption("code")).performClick()
-        rule.runOnIdle { assertEquals(SessionMode.Code, selected) }
+        rule.onNodeWithTag(UiTags.sessionPanelModeOption("chat")).performClick()
+        rule.runOnIdle { assertEquals(SessionMode.Chat, selected) }
     }
 
     @Test fun narrowToolbarAtLargeFontKeepsControlsOnOneRow() {

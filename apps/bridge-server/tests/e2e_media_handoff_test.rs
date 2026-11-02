@@ -219,7 +219,7 @@ struct AttachmentState {
     audio_channel_ptr: AtomicUsize,
     peer: Mutex<Option<mpsc::UnboundedSender<Result<RealtimeFrame, RealtimeError>>>>,
     input_tx: Mutex<Option<mpsc::Sender<RealtimeAgentInput>>>,
-    output_rx: Mutex<Option<mpsc::Receiver<RealtimeEvent>>>,
+    output_rx: Mutex<Option<mpsc::Receiver<orchestrator::RealtimeAgentOutput>>>,
     realtime_driver: Mutex<Option<tokio::task::JoinHandle<Result<(), RealtimeError>>>>,
 }
 
@@ -829,18 +829,38 @@ async fn conversation_continues_in_the_same_turn_until_realtime_cancel() {
         "handoff receives the service's already-open audio channel"
     );
     drop(audio_requests);
-    let _realtime_inputs = attachment
+    let realtime_inputs = attachment
         .input_tx
         .lock()
         .unwrap()
         .take()
         .expect("realtime input pump stays connected");
-    let _realtime_output = attachment
+    let mut realtime_output = attachment
         .output_rx
         .lock()
         .unwrap()
         .take()
         .expect("realtime output pump stays connected");
+
+    // Admit a local input before the provider can request work. Waiting for the
+    // owned start event prevents the independent input and peer channels from
+    // racing and falsely turning this into an unsolicited provider call.
+    realtime_inputs
+        .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .await
+        .expect("commit the local audio input");
+    let turn_id = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = realtime_output.recv().await {
+            if let orchestrator::RealtimeAgentOutput::AgentResponseStarted { turn_id } = event {
+                return Some(turn_id);
+            }
+        }
+        None
+    })
+    .await
+    .expect("local realtime turn must be admitted")
+    .expect("realtime output closed before admission");
+    assert!(!turn_id.is_empty());
 
     let peer = attachment
         .peer

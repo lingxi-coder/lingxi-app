@@ -477,6 +477,9 @@
     <string name="drawer_clear_search_a11y">検索をクリア</string>
     <string name="drawer_close_a11y">ドロワーを閉じる</string>
     <string name="drawer_close_sidebar_a11y">サイドバーを閉じる</string>
+    <string name="session_handoff_preparing">会話の要約を準備しています…</string>
+    <string name="session_handoff_open_source">引き継ぎ元の %1$s 会話を開く</string>
+    <string name="session_reconnect_still_releasing">前の会話を終了しています。しばらくしてから再試行してください。</string>
     <string name="drawer_continue_session_in_progress">現在の続行処理が終わるまで待ってください。</string>
     <string name="drawer_continue_session_timeout">セッションの続行がタイムアウトしました。再試行してください。</string>
     <string name="drawer_cron_new_results_fmt">新着 %1$d 件</string>
@@ -742,15 +745,13 @@
     <string name="session_details_tasks_subtitle">ツール呼び出しとシェルコマンド</string>
     <string name="session_details_title">セッションの詳細</string>
     <string name="session_details_workspace">ワークスペース</string>
+    <string name="conversation_state_unavailable">会話の状態を読み込めません。形式がサポートされていないか、データが破損しています。</string>
     <string name="session_index_save_failed_fmt">会話インデックスの保存に失敗しました：%1$s</string>
     <string name="session_index_save_new_failed_fmt">新しい会話インデックスの保存に失敗しました：%1$s</string>
     <string name="session_mode_chat">Chat</string>
     <string name="session_mode_code">Code</string>
     <string name="session_mode_chat_description">汎用アシスタント</string>
     <string name="session_mode_code_description">ソフトウェア開発アシスタント</string>
-    <string name="session_mode_pending">現在の応答後に %1$s に切り替えます</string>
-    <string name="session_mode_setting">会話モードを設定しています…</string>
-    <string name="session_mode_retry">モードを設定できませんでした。選び直して再試行してください。</string>
     <string name="session_panel_make_scheduled">定時タスクにする</string>
     <string name="session_panel_mode_hint">モードを変えると新しい会話に分岐して続けます</string>
     <string name="session_relative_days_ago_fmt">%1$d 日前</string>
@@ -2101,6 +2102,7 @@
     <string name="remote_needs_permission">許可待ち</string>
     <string name="remote_needs_question">回答待ち</string>
     <string name="remote_needs_computer_access">パソコンでの許可待ち</string>
+    <string name="remote_session_reload_required">会話データが多すぎます。会話を開き直して読み込んでください。</string>
     <string name="remote_session_loading">セッションを読み込み中…</string>
     <string name="remote_session_offline">オフラインです。最後に受信した内容を表示しています。</string>
     <string name="remote_session_closed">このセッションは共有されなくなりました。</string>

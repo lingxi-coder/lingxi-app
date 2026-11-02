@@ -147,8 +147,12 @@ pub struct BridgeArgs {
     pub session_transcript_path: Option<PathBuf>,
     /// Restore an owned, unsent desktop draft from its canonical metadata source.
     pub restore_draft: bool,
+    /// Retain a newly created scheduled task session before accepting a run.
+    pub scheduled_durable_anchor: bool,
     /// Device default for an uninitialized draft, applied before startup hooks.
     pub initial_conversation_mode: Option<ConversationMode>,
+    /// Required ownership for an explicitly selected persisted transcript.
+    pub expected_conversation_mode: Option<ConversationMode>,
     /// `--list-sessions-json`: read the session catalog and exit without building an engine.
     pub list_sessions_json: bool,
     /// Read the merged workspace environment without building an engine.
@@ -313,6 +317,7 @@ impl BridgeArgs {
                     out.session_transcript_path = Some(path);
                 }
                 "--restore-draft" => out.restore_draft = true,
+                "--scheduled-durable-anchor" => out.scheduled_durable_anchor = true,
                 "--initial-conversation-mode" => {
                     let value = it
                         .next()
@@ -320,6 +325,15 @@ impl BridgeArgs {
                     out.initial_conversation_mode = Some(
                         ConversationMode::from_str(value.as_ref())
                             .ok_or("--initial-conversation-mode requires chat or code")?,
+                    );
+                }
+                "--expected-conversation-mode" => {
+                    let value = it
+                        .next()
+                        .ok_or("--expected-conversation-mode requires chat or code")?;
+                    out.expected_conversation_mode = Some(
+                        ConversationMode::from_str(value.as_ref())
+                            .ok_or("--expected-conversation-mode requires chat or code")?,
                     );
                 }
                 "--model" => {
@@ -414,6 +428,28 @@ impl BridgeArgs {
         }
         if out.initial_conversation_mode.is_some() && !out.restore_draft {
             return Err("--initial-conversation-mode requires --restore-draft".into());
+        }
+        if out.restore_draft && out.initial_conversation_mode.is_none() {
+            return Err("--restore-draft requires --initial-conversation-mode".into());
+        }
+        if let (Some(initial), Some(expected)) = (
+            out.initial_conversation_mode,
+            out.expected_conversation_mode,
+        ) {
+            if initial != expected {
+                return Err("initial and expected conversation modes must match".into());
+            }
+        }
+        if out.scheduled_durable_anchor
+            && (!out.restore_draft || out.expected_conversation_mode.is_some())
+        {
+            return Err("--scheduled-durable-anchor requires a new owned draft".into());
+        }
+        if out.expected_conversation_mode.is_some() && out.session_id.is_none() {
+            return Err("--expected-conversation-mode requires --session-id".into());
+        }
+        if out.session_transcript_path.is_some() && out.expected_conversation_mode.is_none() {
+            return Err("--session-transcript-path requires --expected-conversation-mode".into());
         }
         if let Some(path) = &out.session_transcript_path {
             let id = out
@@ -945,13 +981,16 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         __desktop_config.ask_user_question_timeout_override = args.ask_user_question_timeout;
         __desktop_config.composition = None;
         __desktop_config.defer_session_start = false;
-        __desktop_config.initial_conversation_mode = args.initial_conversation_mode;
+        __desktop_config.initial_conversation_mode = args
+            .expected_conversation_mode
+            .or(args.initial_conversation_mode);
         // The desktop opens a session while its startup MCP servers connect;
         // `spawn_mcp_startup_publisher` re-publishes the listings as each
         // settles.
         __desktop_config.connect_mcp_in_background = true;
         __desktop_config.session_transcript_path = args.session_transcript_path.clone();
         __desktop_config.restore_draft = args.restore_draft;
+        __desktop_config.scheduled_durable_anchor = args.scheduled_durable_anchor;
         __desktop_config.session_resume_snapshot = None;
         __desktop_config.session_resume_cost = None;
         __desktop_config.max_structured_output_retries = 5;
@@ -1423,6 +1462,22 @@ fn validate_selected_transcript_identity(path: &Path, id: &str) -> Result<uuid::
     Ok(expected)
 }
 
+fn validate_selected_session_mode(
+    content: &str,
+    uuid: uuid::Uuid,
+    expected: ConversationMode,
+) -> Result<(), String> {
+    let actual = session::JsonlWriter::fixed_session_mode_from_source(content, &uuid.to_string())
+        .map_err(|error| format!("invalid session mode: {error}"))?;
+    if actual != expected {
+        return Err(format!(
+            "session_mode_mismatch: session {uuid} belongs to {}",
+            actual.as_str()
+        ));
+    }
+    Ok(())
+}
+
 /// Bind a selected transcript under its writer authority before configuration,
 /// provider assembly, or lifecycle hooks can write a default transcript.
 async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), String> {
@@ -1434,10 +1489,13 @@ async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), St
         .as_deref()
         .ok_or("selected transcript requires a session UUID")?;
     let uuid = validate_selected_transcript_identity(&path, id)?;
+    let expected = cfg
+        .initial_conversation_mode
+        .ok_or("selected transcript requires an expected conversation mode")?;
     // A caller-provided leased snapshot may target a lazy new fork file. Keep
     // its captured revision; the private launch flag supplies no snapshot.
-    if cfg.session_resume_snapshot.is_some() {
-        return Ok(());
+    if let Some(snapshot) = &cfg.session_resume_snapshot {
+        return validate_selected_session_mode(&snapshot.content, uuid, expected);
     }
     let metadata = tokio::fs::metadata(&path)
         .await
@@ -1445,6 +1503,10 @@ async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), St
     if !metadata.is_file() || metadata.len() == 0 {
         return Err("selected transcript must be a nonempty JSONL file".into());
     }
+    let preflight = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|error| format!("selected transcript is unavailable: {error}"))?;
+    validate_selected_session_mode(&preflight, uuid, expected)?;
     let lease = if let Some(lease) = cfg.session_writer_lease.as_ref() {
         if lease.canonical_session_id().map(|id| id.as_uuid()) != Some(uuid) {
             return Err(
@@ -1486,6 +1548,8 @@ async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), St
                 .map_err(|error| format!("selected transcript is not resumable: {error}"))?;
         (content, loaded)
     };
+    // The source can change between the preflight and the writer claim.
+    validate_selected_session_mode(&content, uuid, expected)?;
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &uuid.to_string());
     if cfg.restore_draft
         && !harness_runtime::desktop::session_state::is_mode_only_draft(&content, &uuid.to_string())
@@ -1530,9 +1594,8 @@ async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), St
     Ok(())
 }
 
-/// Claim the draft UUID before checking for its canonical transcript. A missing
-/// file means the draft has never selected a mode; any existing file must be
-/// validated and captured under that same writer authority before build hooks.
+/// Existing drafts are checked before taking writer authority. A missing file
+/// is a new draft and its requested mode is established during assembly.
 async fn prepare_draft_boot_session(cfg: &mut DesktopConfig) -> Result<(), String> {
     if !cfg.restore_draft {
         return Ok(());
@@ -1540,12 +1603,30 @@ async fn prepare_draft_boot_session(cfg: &mut DesktopConfig) -> Result<(), Strin
     if cfg.session_transcript_path.is_some() || cfg.session_resume_snapshot.is_some() {
         return Err("draft restore cannot override a selected transcript".into());
     }
+    // DesktopConfig uses the same explicit mode for creation and resume
+    // admission. Keep it intact for prepare_selected_boot_session and SDK
+    // assembly to verify against an existing draft before any startup effects.
+    cfg.initial_conversation_mode
+        .ok_or("draft restore requires an explicit creation mode")?;
     let uuid = uuid::Uuid::parse_str(
         cfg.session_id_override
             .as_deref()
             .ok_or("draft restore requires a session UUID")?,
     )
     .map_err(|_| "draft restore requires a valid session UUID")?;
+    let path = session::jsonl::session_path(
+        &cfg.lingxi_home,
+        &cfg.cwd.to_string_lossy(),
+        &uuid.to_string(),
+    );
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => {
+            cfg.session_transcript_path = Some(path);
+            return prepare_selected_boot_session(cfg).await;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("draft transcript is unavailable".into()),
+    }
     let lease = if let Some(lease) = cfg.session_writer_lease.as_ref() {
         if lease.canonical_session_id().map(|id| id.as_uuid()) != Some(uuid) {
             return Err("draft writer authority does not match the session UUID".into());
@@ -1563,11 +1644,8 @@ async fn prepare_draft_boot_session(cfg: &mut DesktopConfig) -> Result<(), Strin
             .into_shared()
     };
     cfg.session_writer_lease = Some(lease);
-    let path = session::jsonl::session_path(
-        &cfg.lingxi_home,
-        &cfg.cwd.to_string_lossy(),
-        &uuid.to_string(),
-    );
+    // Recheck after the claim in case another owner published this draft
+    // between the existence check and acquiring authority.
     match tokio::fs::metadata(&path).await {
         Ok(_) => {
             cfg.session_transcript_path = Some(path);
@@ -3083,8 +3161,15 @@ mod tests {
     fn selected_workspace_boot_path_is_private_absolute_and_matches_the_stable_uuid() {
         let id = "11111111-2222-4333-8444-555555abcdef";
         let source = format!("/persisted source/{}.jsonl", id.to_uppercase());
-        let args =
-            BridgeArgs::parse(["--session-id", id, "--session-transcript-path", &source]).unwrap();
+        let args = BridgeArgs::parse([
+            "--session-id",
+            id,
+            "--session-transcript-path",
+            &source,
+            "--expected-conversation-mode",
+            "code",
+        ])
+        .unwrap();
         assert_eq!(args.session_transcript_path, Some(PathBuf::from(&source)));
         for flags in [
             vec!["--session-transcript-path", source.as_str()],
@@ -3115,7 +3200,14 @@ mod tests {
     #[test]
     fn draft_restore_flag_requires_an_owned_runtime_session() {
         let id = "11111111-2222-4333-8444-555555abcdef";
-        let parsed = BridgeArgs::parse(["--session-id", id, "--restore-draft"]).unwrap();
+        let parsed = BridgeArgs::parse([
+            "--session-id",
+            id,
+            "--restore-draft",
+            "--initial-conversation-mode",
+            "code",
+        ])
+        .unwrap();
         assert!(parsed.restore_draft);
         assert!(resolve_desktop_config(&parsed).restore_draft);
         assert!(BridgeArgs::parse(["--restore-draft"]).is_err());
@@ -3134,6 +3226,62 @@ mod tests {
             &format!("/tmp/{id}.jsonl")
         ])
         .is_err());
+    }
+
+    #[test]
+    fn scheduled_durable_anchor_requires_a_new_owned_draft() {
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        for mode in ["chat", "code"] {
+            let args = BridgeArgs::parse([
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                mode,
+                "--scheduled-durable-anchor",
+            ])
+            .unwrap();
+            assert!(args.scheduled_durable_anchor);
+            assert!(resolve_desktop_config(&args).scheduled_durable_anchor);
+        }
+        for flags in [
+            vec!["--scheduled-durable-anchor"],
+            vec!["--session-id", id, "--scheduled-durable-anchor"],
+            vec![
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "code",
+                "--scheduled-durable-anchor",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--scheduled-durable-anchor",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "code",
+                "--expected-conversation-mode",
+                "chat",
+                "--scheduled-durable-anchor",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "chat",
+                "--list-sessions-json",
+                "--scheduled-durable-anchor",
+            ],
+        ] {
+            assert!(BridgeArgs::parse(flags).is_err());
+        }
+        assert!(!resolve_desktop_config(&BridgeArgs::default()).scheduled_durable_anchor);
     }
 
     #[test]
@@ -3190,6 +3338,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn draft_initial_and_expected_modes_must_agree() {
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        for (initial, expected) in [("code", "chat"), ("chat", "code")] {
+            let error = BridgeArgs::parse([
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                initial,
+                "--expected-conversation-mode",
+                expected,
+            ])
+            .unwrap_err();
+            assert!(error.contains("initial and expected conversation modes must match"));
+        }
+        for (value, mode) in [
+            ("chat", ConversationMode::Chat),
+            ("code", ConversationMode::Code),
+        ] {
+            let parsed = BridgeArgs::parse([
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                value,
+                "--expected-conversation-mode",
+                value,
+            ])
+            .unwrap();
+            assert_eq!(parsed.initial_conversation_mode, Some(mode));
+            assert_eq!(parsed.expected_conversation_mode, Some(mode));
+            assert_eq!(
+                resolve_desktop_config(&parsed).initial_conversation_mode,
+                Some(mode)
+            );
+        }
+    }
+
     #[tokio::test]
     async fn draft_boot_captures_valid_metadata_under_the_session_writer_lease() {
         let root = tempfile::tempdir().unwrap();
@@ -3201,9 +3388,8 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let content = format!(
             "{}\n",
-            serde_json::json!({"type":"session-mode", "sessionId":id,
-            "sessionMode":"chat", "contextRevision":3, "profileEpoch":3,
-            "admittedMode":"chat", "admittedEpoch":3, "pending":false})
+            serde_json::json!({"type":"fixed-session-mode", "sessionId":id,
+            "sessionMode":"chat", "instructionEpoch":3})
         );
         std::fs::write(&path, &content).unwrap();
         let mut cfg = DesktopConfig::default();
@@ -3211,6 +3397,7 @@ mod tests {
         cfg.lingxi_home = home.clone();
         cfg.session_id_override = Some(id.into());
         cfg.restore_draft = true;
+        cfg.initial_conversation_mode = Some(ConversationMode::Chat);
         prepare_draft_boot_session(&mut cfg).await.unwrap();
         assert_eq!(cfg.session_transcript_path.as_ref(), Some(&path));
         assert_eq!(
@@ -3238,9 +3425,8 @@ mod tests {
         let id = "11111111-2222-4333-8444-555555abcdef";
         let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), id);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mode = serde_json::json!({"type":"session-mode", "sessionId":id,
-            "sessionMode":"chat", "contextRevision":3, "profileEpoch":3,
-            "admittedMode":"chat", "admittedEpoch":3, "pending":false});
+        let mode = serde_json::json!({"type":"fixed-session-mode", "sessionId":id,
+            "sessionMode":"chat", "instructionEpoch":3});
         for content in [
             format!("{mode}\n{{broken\n"),
             format!(
@@ -3254,6 +3440,7 @@ mod tests {
             cfg.lingxi_home = home.clone();
             cfg.session_id_override = Some(id.into());
             cfg.restore_draft = true;
+            cfg.initial_conversation_mode = Some(ConversationMode::Chat);
             assert!(prepare_draft_boot_session(&mut cfg).await.is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
         }
@@ -3267,6 +3454,7 @@ mod tests {
         cfg.lingxi_home = root.path().join("home");
         cfg.session_id_override = Some("11111111-2222-4333-8444-555555abcdef".into());
         cfg.restore_draft = true;
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
         prepare_draft_boot_session(&mut cfg).await.unwrap();
         assert!(cfg.session_transcript_path.is_none());
         assert!(cfg.session_resume_snapshot.is_none());
@@ -3380,12 +3568,16 @@ mod tests {
     fn write_workspace_catalog_row(home: &Path, cwd: &Path, id: &str) -> PathBuf {
         let path = session::jsonl::session_path(home, &cwd.to_string_lossy(), id);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let header = serde_json::json!({
+            "type":"fixed-session-mode", "sessionId":id,
+            "sessionMode":"code", "instructionEpoch":0,
+        });
         let row = serde_json::json!({
             "type":"user", "uuid":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "parentUuid":null,
             "sessionId":id, "timestamp":"2026-10-21T00:00:00.000Z", "cwd":cwd,
             "isSidechain":false, "message":{"role":"user","content":"workspace catalog"},
         });
-        std::fs::write(&path, format!("{row}\n")).unwrap();
+        std::fs::write(&path, format!("{header}\n{row}\n")).unwrap();
         path
     }
 
@@ -3411,6 +3603,7 @@ mod tests {
         cfg.lingxi_home = home.clone();
         cfg.session_id_override = Some(id.into());
         cfg.session_transcript_path = Some(selected.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
         prepare_selected_boot_session(&mut cfg).await.unwrap();
         assert_eq!(cfg.cwd, cwd);
         assert_eq!(cfg.session_transcript_path.as_ref(), Some(&selected));
@@ -3433,6 +3626,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_boot_rejects_mode_mismatch_before_writer_claim() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let path = write_workspace_catalog_row(&home, &cwd, id);
+        let original = std::fs::read(&path).unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = cwd;
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.session_transcript_path = Some(path.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Chat);
+        let error = prepare_selected_boot_session(&mut cfg).await.unwrap_err();
+        assert!(error.contains("session_mode_mismatch"));
+        assert!(cfg.session_writer_lease.is_none());
+        assert!(!home.join("sessions").exists());
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[tokio::test]
     async fn selected_boot_workspace_rejects_missing_empty_and_wrong_uuid_before_registry() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
@@ -3443,6 +3658,7 @@ mod tests {
         cfg.lingxi_home = home.clone();
         cfg.session_id_override = Some(id.into());
         cfg.session_transcript_path = Some(selected.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
         assert!(prepare_selected_boot_session(&mut cfg).await.is_err());
         assert!(!home.exists());
         std::fs::write(&selected, "").unwrap();
@@ -3474,6 +3690,7 @@ mod tests {
         cfg.lingxi_home = home.clone();
         cfg.session_id_override = Some(id.into());
         cfg.session_transcript_path = Some(selected.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
         let error = prepare_selected_boot_session(&mut cfg).await.unwrap_err();
         assert!(error.contains("refresh its metadata and trust"));
         assert!(cfg.session_writer_lease.is_none());

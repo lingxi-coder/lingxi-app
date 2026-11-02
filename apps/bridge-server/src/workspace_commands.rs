@@ -56,7 +56,6 @@ pub(crate) struct ColdBootResume {
 pub(crate) struct ColdResumeProof {
     pub(crate) messages: Vec<client::protocol::message::MessageDto>,
     pub(crate) current_usage: Option<lingxi_core::host::CurrentUsageSnapshot>,
-    pub(crate) mode: lingxi_core::host::session_context::ConversationMode,
 }
 
 impl ColdBootResume {
@@ -78,11 +77,9 @@ impl ColdBootResume {
             return Err("cold resume snapshot does not match the active session".into());
         }
         let loaded = session::jsonl::route_lines(&snapshot.content);
-        let mode = loaded
-            .session_modes
-            .get(&session_id.to_string())
-            .and_then(|value| lingxi_core::host::session_context::ConversationMode::from_str(value))
-            .unwrap_or_default();
+        let mode = session::JsonlWriter::fixed_session_mode_from_source(
+            &snapshot.content, &session_id.to_string(),
+        )?;
         let (messages, _) =
             session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
         // Explicit mobile draft anchors are allowed by the cold loader and
@@ -206,6 +203,24 @@ impl WorkspaceSessionFacts {
 }
 
 impl WorkspaceCommands {
+    pub(crate) fn orchestrator(&self) -> Result<Arc<orchestrator::ConversationOrchestrator>, String> {
+        Ok(self.host.runtime()?.orchestrator.clone())
+    }
+
+    pub(crate) async fn current_writer_lease(
+        &self,
+        expected: lingxi_core::types::SessionId,
+    ) -> Result<lingxi_core::host::live_sessions::SharedSessionWriterLease, String> {
+        self.host.runtime()?.current_session_writer_lease(expected).await
+    }
+
+    pub(crate) async fn capture_current_transcript(
+        &self,
+        expected: lingxi_core::types::SessionId,
+    ) -> Result<session::jsonl::writer::CommittedTranscript, String> {
+        self.host.runtime()?.capture_current_session_transcript(expected).await
+    }
+
     pub(crate) fn bind_cold_resume(&self, captured: Option<ColdBootResume>) {
         *self
             .cold_resume
@@ -239,6 +254,7 @@ impl WorkspaceCommands {
         &self,
         session_id: uuid::Uuid,
         path: &Path,
+        expected_mode: lingxi_core::host::session_context::ConversationMode,
     ) -> Result<Option<ColdResumeProof>, String> {
         // Any selected resume consumes the startup opportunity. A later
         // same-path request must be an ordinary owned resume, not a permanent
@@ -253,6 +269,9 @@ impl WorkspaceCommands {
         }) else {
             return Ok(None);
         };
+        if captured.mode != expected_mode {
+            return Err("session_mode_mismatch: selected session mode differs from the expected mode".into());
+        }
         let runtime = self.host.runtime()?;
         if runtime.orchestrator.current_session_id().await.as_uuid() != session_id
             || runtime
@@ -288,7 +307,6 @@ impl WorkspaceCommands {
         Ok(Some(ColdResumeProof {
             messages,
             current_usage: runtime.orchestrator.snapshot_cost().await.current_usage,
-            mode: captured.mode,
         }))
     }
 

@@ -11,7 +11,8 @@ data class ConversationLaunchRequest(
     val sessionId: String,
     val turnId: Long?,
     val workspaceKey: String? = null,
-    val sessionMode: SessionMode = SessionMode.Code,
+    val sessionMode: SessionMode,
+    val runtimeGeneration: String? = null,
 )
 
 internal data class ConversationCancelRouteSpec(
@@ -22,6 +23,7 @@ internal data class ConversationCancelRouteSpec(
 )
 
 object ConversationNotificationRoute {
+    const val EXTRA_NOTIFICATION_OWNER = "conversation_notification_owner"
     fun parse(intent: Intent?): ConversationLaunchRequest? {
         return parse(intent?.dataString)
     }
@@ -29,31 +31,37 @@ object ConversationNotificationRoute {
     internal fun parse(route: String?): ConversationLaunchRequest? {
         val link = com.lingxi.code.navigation.DeepLink.parse(route) ?: return null
         if (!link.route.startsWith("session/")) return null
+        val mode = link.params["mode"]?.let { runCatching { sessionModeFromWireValue(it) }.getOrNull() } ?: return null
+        val workspace = link.params["workspace"] ?: return null
+        val generation = link.params["generation"] ?: return null
         return ConversationLaunchRequest(
             sessionId = link.route.substringAfter('/'),
-            turnId = null,
-            workspaceKey = link.params["workspace"],
-            sessionMode = sessionModeFromWireValue(link.params["mode"]),
+            turnId = link.params["turn"]?.toLongOrNull(),
+            workspaceKey = workspace,
+            sessionMode = mode,
+            runtimeGeneration = generation,
         )
     }
 
     fun uri(
         sessionId: String,
         turnId: Long? = null,
-        recoverySpec: ConversationRecoverySpec? = null,
-    ): Uri = Uri.parse(canonicalUrl(sessionId, recoverySpec))
+        recoverySpec: ConversationRecoverySpec,
+    ): Uri = Uri.parse(canonicalUrl(sessionId, recoverySpec, turnId))
 
-    internal fun canonicalUrl(sessionId: String, recoverySpec: ConversationRecoverySpec? = null): String =
+    internal fun canonicalUrl(sessionId: String, recoverySpec: ConversationRecoverySpec, turnId: Long? = null): String =
         com.lingxi.code.navigation.DeepLink.build("session/${sessionId.removePrefix("sess:")}", buildMap {
-            recoverySpec?.workspaceKey?.let { put("workspace", it) }
-            recoverySpec?.sessionMode?.let { put("mode", it.wireValue) }
+            put("workspace", requireNotNull(recoverySpec.workspaceKey) { "Notification owner has no workspace" })
+            put("mode", recoverySpec.sessionMode.wireValue)
+            put("generation", recoverySpec.runtimeGeneration)
+            turnId?.let { put("turn", it.toString()) }
         })
 
     fun openIntent(
         context: Context,
         sessionId: String,
         turnId: Long? = null,
-        recoverySpec: ConversationRecoverySpec? = null,
+        recoverySpec: ConversationRecoverySpec,
     ): Intent =
         Intent(
             Intent.ACTION_VIEW,
@@ -63,6 +71,7 @@ object ConversationNotificationRoute {
         )
             .addCategory(Intent.CATEGORY_BROWSABLE)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            .putExtra(EXTRA_NOTIFICATION_OWNER, true)
 
     fun cancelIntent(
         context: Context,
@@ -73,6 +82,9 @@ object ConversationNotificationRoute {
         val route = cancelRouteSpec(sessionId, turnId)
         return Intent(context, ConversationTurnService::class.java)
             .setAction(route.action)
+            .setData(Uri.Builder().scheme("lingxi-internal").authority("conversation-stop")
+                .appendPath(sessionId).appendPath(turnId?.toString().orEmpty())
+                .appendPath(recoverySpec?.runtimeGeneration.orEmpty()).build())
             .putExtra(ConversationTurnService.EXTRA_SESSION_ID, route.sessionId)
             .apply {
                 if (route.turnId != null) {
@@ -84,6 +96,7 @@ object ConversationNotificationRoute {
                     putExtra(ConversationTurnService.EXTRA_GUEST_PATH, spec.guestPath)
                     putExtra(ConversationTurnService.EXTRA_ADDITIONAL_DIRECTORIES, spec.additionalDirectories.toTypedArray())
                     putExtra(ConversationTurnService.EXTRA_SESSION_MODE, spec.sessionMode.wireValue)
+                    putExtra(ConversationTurnService.EXTRA_RUNTIME_GENERATION, spec.runtimeGeneration)
                     putExtra(ConversationTurnService.EXTRA_LINUX_RUNTIME_MODE, spec.linuxRuntimeMode.name)
                     putExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY, spec.workspaceKey)
                 }

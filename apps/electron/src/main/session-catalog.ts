@@ -72,6 +72,7 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
     || typeof row['modified_rfc3339'] !== 'string'
     || typeof messageCount !== 'number'
     || !Number.isSafeInteger(messageCount)
+    || (row['mode'] !== 'chat' && row['mode'] !== 'code')
     || typeof row['path'] !== 'string'
     || typeof row['empty_session'] !== 'boolean'
     || (resumeTitle !== undefined && (typeof resumeTitle !== 'string' || resumeTitle.includes('\0')))
@@ -89,7 +90,7 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
     title: row['title'],
     modified_rfc3339: row['modified_rfc3339'],
     message_count: messageCount,
-    mode: row['mode'] === 'chat' ? 'chat' : 'code',
+    mode: row['mode'],
     path: row['path'],
     empty_session: row['empty_session'],
     ...(typeof resumeModel === 'string' ? { resume_model: resumeModel } : {}),
@@ -160,13 +161,32 @@ export class ProjectSessionCatalog {
       ...(typeof input.global_config_path === 'string' ? { globalConfigPath: input.global_config_path } : {}) };
   }
 
-  async list(projectPath: string, scope: SessionCatalogScope = 'current'): Promise<ProjectSessionCatalogResult> {
+  async list(
+    projectPath: string,
+    scope: SessionCatalogScope = 'current',
+    include: (session: ProjectSessionCatalogRow) => boolean = () => true,
+    limitKey: (session: ProjectSessionCatalogRow) => string = (session) => session.mode,
+  ): Promise<ProjectSessionCatalogResult> {
     const result = await this.load(projectPath, sessionCatalogScope(scope));
+    const count = new Map<string, number>();
     return {
-      // Never hand callers the cached array itself: restore/archive code filters
-      // its local result and must not mutate the shared project snapshot.
-      sessions: result.sessions.slice(0, scope === 'current' ? MAX_SESSIONS : undefined).map((session) => ({ ...session })),
+      // Exclude hidden/archived rows before applying a separate bound to each
+      // space. A busy Code space must not hide older Chat history (or vice versa).
+      sessions: result.sessions.filter((session) => {
+        if (!include(session)) return false;
+        if (scope !== 'current') return true;
+        const key = limitKey(session), previous = count.get(key) ?? 0;
+        count.set(key, previous + 1);
+        return previous < MAX_SESSIONS;
+      })
+        .map((session) => ({ ...session })),
     };
+  }
+
+  /** Complete authenticated catalog for persistent space membership, before UI truncation. */
+  async listComplete(projectPath: string, scope: SessionCatalogScope = 'current'): Promise<ProjectSessionCatalogResult> {
+    const result = await this.load(projectPath, sessionCatalogScope(scope));
+    return { sessions: result.sessions.map((session) => ({ ...session })) };
   }
 
   /**

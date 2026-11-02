@@ -2610,6 +2610,25 @@ test('cloud synthesis pins config and exact session without calling the device s
   assert.equal((await promise).type, 'synthesized'); assert.equal(received?.speech.cloud.modelId, 'audio-model');
 });
 
+test('window audio uses its captured provider session after the selected conversation changes', async () => {
+  const config = audioConfigurationDefaults(); config.speech.source = 'provider';
+  const received: unknown[] = [];
+  const manager = new NativeAudioManager({
+    isPackaged: false, resourcesPath: '/unused', userDataPath: '/tmp', diagnostics: new DiagnosticBuffer(), helperPath: '/unused-helper',
+    spawnHelper: () => { assert.fail('cloud synthesis must not start the local synthesizer'); },
+    getAudioConfiguration: () => config,
+    getAudioSessionContext: () => ({ sessionId: 'new-selection', profileId: 'new-profile' }),
+    providerAudio: { execute: async (_kind: unknown, _config: unknown, _payload: unknown, session: unknown) => {
+      received.push(session); return { type: 'synthesized', pcm_base64: 'AAAA', sample_rate_hz: 24_000 };
+    } } as any,
+  });
+  const request = (id: string) => ({ identity: { id, generation: 1, service_epoch: 0 }, owner: { type: 'ui', instance_id: 'window' }, operation: { type: 'synthesize', text: 'hello' }, max_payload_bytes: 1024 });
+  const original = { sessionId: 'original', profileId: 'original-profile', accountScope: 'account-a' };
+  assert.equal((await manager.executeAudioRequest(request('00000000-0000-4000-8000-000000000091'), undefined, undefined, undefined, undefined, undefined, undefined, undefined, { session: original })).type, 'synthesized');
+  assert.equal((await manager.executeAudioRequest(request('00000000-0000-4000-8000-000000000092'), undefined, undefined, undefined, undefined, undefined, undefined, undefined, {})).type, 'synthesized');
+  assert.deepEqual(received, [original, undefined]);
+});
+
 test('host-local policy rejects Provider and Automatic-plus-Provider-voice snapshots before dispatch', async () => {
   for (const configuration of [
     { ...audioConfigurationDefaults(), speech: { ...audioConfigurationDefaults().speech, source: 'provider' } },

@@ -77,6 +77,7 @@ import {
   resolveModelSelection,
 } from '../bridge/modelCatalog';
 import { formatSessionMetadata } from '../bridge/sessionPresentation';
+import { sessionsInLogicalScope } from '../bridge/conversationCatalog';
 import { ALL_DESKTOP_COMMANDS } from '../bridge/desktopCommands';
 import {
   isSessionRemote,
@@ -460,17 +461,34 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const toolbarRef = useRef<HTMLDivElement>(null);
   const resizingPointerRef = useRef<number | null>(null);
   const settings = bridge.bootstrap?.settings;
+  const spaces = bridge.bootstrap?.conversationSpaces;
+  const currentSpace = spaces?.activeMode ?? 'chat';
   const scheduledWorkspace = bridge.bootstrap?.scheduledWorkspace;
+  const globalWorkspace = spaces?.globalWorkspace;
   const projects = useMemo(
-    () => (settings?.projects ?? []).filter((path) => path !== scheduledWorkspace),
-    [scheduledWorkspace, settings?.projects],
+    () => (settings?.projects ?? []).filter((path) => path !== scheduledWorkspace && spaces?.projects[path]?.includes(currentSpace)),
+    [scheduledWorkspace, settings?.projects, spaces?.projects, currentSpace],
   );
-  const generalCatalog = scheduledWorkspace ? bridge.bootstrap?.projectCatalogs?.[scheduledWorkspace] : undefined;
-  const pinnedSessions = settings?.pinnedSessions ?? [];
+  const visibleDrafts = (spaces?.drafts ?? []).filter((draft) => draft.mode === currentSpace
+    && (draft.projectId === null || projects.includes(draft.projectId)));
+  const generalPaths = useMemo(() => [...new Set([globalWorkspace, scheduledWorkspace].filter((path): path is string => Boolean(path)))], [globalWorkspace, scheduledWorkspace]);
+  const ownedPaths = useMemo(() => [...new Set((spaces?.sessions ?? []).filter((owner) => owner.mode === currentSpace
+    && (owner.projectId === null || projects.includes(owner.projectId))).map((owner) => owner.projectPath))], [spaces?.sessions, currentSpace, projects]);
+  const allPinnedSessions = settings?.pinnedSessions ?? [];
+  const pinnedSessions = allPinnedSessions.filter((pin) => {
+    const owner = spaces?.sessions.find((entry) => entry.projectPath === pin.projectPath && entry.sessionId === pin.sessionId);
+    const row = bridge.bootstrap?.projectCatalogs?.[pin.projectPath]?.sessions.find((entry) => entry.uuid === pin.sessionId);
+    return (owner?.mode ?? row?.mode) === currentSpace
+      && (!owner || owner.projectId === null || projects.includes(owner.projectId));
+  });
+  const archivedSessions = (settings?.archivedSessions ?? []).filter((session) => session.mode === currentSpace
+    && (session.projectId == null || projects.includes(session.projectId)));
   // A Bot's folder is not a project: new chats started from the sidebar go to the selected project instead.
   const selectedProject = bridge.activeBotId !== undefined
-    ? settings?.activeProject ?? projects[0]
-    : bridge.activeSession?.projectPath ?? settings?.activeProject ?? bridge.bootstrap?.workspace.path;
+    ? spaces?.navigation[currentSpace].projectId ?? undefined
+    : bridge.activeSession?.projectId !== undefined
+      ? bridge.activeSession.projectId ?? undefined
+      : spaces?.navigation[currentSpace].projectId ?? undefined;
   const visibleSession = bridge.activeSession ?? bridge.bootstrap?.activeSession ?? settings?.activeSession;
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
     () => new Set(selectedProject ? [selectedProject] : []),
@@ -486,10 +504,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   useLayoutEffect(() => {
     asideRef.current?.toggleAttribute('inert', sidebarCollapsed || bridge.sessionLoading);
     railRef.current?.toggleAttribute('inert', bridge.sessionLoading);
-    toolbarRef.current?.toggleAttribute('inert', bridge.sessionLoading);
   }, [bridge.sessionLoading, sidebarCollapsed]);
-  const blockNavigation = useCallback((event: { preventDefault(): void; stopPropagation(): void }) => {
+  const blockNavigation = useCallback((event: { target: EventTarget | null; preventDefault(): void; stopPropagation(): void }) => {
     if (!bridge.sessionLoading) return;
+    if (event.target instanceof Element && event.target.closest('[data-conversation-space]')) return;
     event.preventDefault();
     event.stopPropagation();
   }, [bridge.sessionLoading]);
@@ -643,15 +661,17 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   }, [bridge.bootstrap?.projectCatalogs, bridge.listProjectSessions, expandedProjects, normalizedSearch, projects, sidebarOrganization]);
 
   useEffect(() => {
-    if (scheduledWorkspace && !generalCatalog) void bridge.listProjectSessions(scheduledWorkspace).catch(() => undefined);
-  }, [scheduledWorkspace, generalCatalog, bridge.listProjectSessions]);
+    for (const path of new Set([...generalPaths, ...ownedPaths])) {
+      if (!bridge.bootstrap?.projectCatalogs?.[path]) void bridge.listProjectSessions(path).catch(() => undefined);
+    }
+  }, [generalPaths, ownedPaths, bridge.bootstrap?.projectCatalogs, bridge.listProjectSessions]);
 
   useEffect(() => {
-    const pinnedProjects = new Set(pinnedSessions.map((session) => session.projectPath));
+    const pinnedProjects = new Set(allPinnedSessions.map((session) => session.projectPath));
     for (const projectPath of pinnedProjects) {
       if (!bridge.bootstrap?.projectCatalogs?.[projectPath]) void bridge.listProjectSessions(projectPath).catch(() => undefined);
     }
-  }, [bridge.bootstrap?.projectCatalogs, bridge.listProjectSessions, pinnedSessions]);
+  }, [bridge.bootstrap?.projectCatalogs, bridge.listProjectSessions, allPinnedSessions]);
 
   const pinnedKeys = useMemo(
     () => new Set(pinnedSessions.map((session) => `${session.projectPath}\0${session.sessionId}`)),
@@ -682,6 +702,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const pinInput = (projectPath: string, sessionId: string, title: string) => ({ projectPath, sessionId, title });
   const manualSessionOrder = settings?.sidebar?.manualSessionOrder ?? {};
   const sortedSessions = useCallback((projectPath: string, sessions: readonly SessionRowDto[]) => {
+    sessions = sessions.filter((session) => session.mode === currentSpace);
     if (chatSort === 'manual') {
       const order = new Map((manualSessionOrder[projectPath] ?? []).map((sessionId, index) => [sessionId, index]));
       return [...sessions].sort((left, right) => {
@@ -706,10 +727,18 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       }
       return sidebarSessionTimestamp(right) - sidebarSessionTimestamp(left);
     });
-  }, [chatSort, manualSessionOrder, visibleSession]);
+  }, [chatSort, currentSpace, manualSessionOrder, visibleSession]);
+  const rowsForProject = useCallback((projectId: string) => {
+    const rows = sessionsInLogicalScope(bridge.bootstrap?.projectCatalogs, spaces?.sessions ?? [], currentSpace, projectId, generalPaths);
+    const paths = new Map(rows.map((row) => [row.session.uuid, row.projectPath]));
+    return sortedSessions(projectId, rows.map((row) => row.session))
+      .map((session) => ({ projectPath: paths.get(session.uuid)!, projectId, session }));
+  }, [bridge.bootstrap?.projectCatalogs, spaces?.sessions, currentSpace, generalPaths, sortedSessions]);
+  const globalSessions = useMemo(() => sessionsInLogicalScope(bridge.bootstrap?.projectCatalogs, spaces?.sessions ?? [],
+    currentSpace, null, generalPaths).sort((left, right) => sidebarSessionTimestamp(right.session) - sidebarSessionTimestamp(left.session)),
+  [bridge.bootstrap?.projectCatalogs, spaces?.sessions, currentSpace, generalPaths]);
   const allProjectSessions = useMemo(() => projects.flatMap((projectPath) => (
-    sortedSessions(projectPath, bridge.bootstrap?.projectCatalogs?.[projectPath]?.sessions ?? [])
-      .map((session) => ({ projectPath, session }))
+    rowsForProject(projectPath)
   )).sort((left, right) => {
     const newSessionOrder = compareNewSidebarSessions(left.session, right.session);
     if (newSessionOrder !== 0) return newSessionOrder;
@@ -720,22 +749,22 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       if (leftActive !== rightActive) return leftActive ? -1 : 1;
     }
     return sidebarSessionTimestamp(right.session) - sidebarSessionTimestamp(left.session);
-  }), [bridge.bootstrap?.projectCatalogs, chatSort, projects, sortedSessions, visibleSession]);
+  }), [chatSort, projects, rowsForProject, visibleSession]);
   const searchedProjectSessions = normalizedSearch
-    ? allProjectSessions.filter(({ projectPath, session }) => matchesSearch(basename(projectPath)) || matchesSearch(session.title || tr('remote_untitled')))
+    ? allProjectSessions.filter(({ projectId, session }) => matchesSearch(basename(projectId)) || matchesSearch(session.title || tr('remote_untitled')))
     : allProjectSessions;
   const visibleProjects = normalizedSearch
     ? projects.filter((path) => matchesSearch(basename(path)) ||
-      bridge.bootstrap?.projectCatalogs?.[path]?.sessions.some((session) => matchesSearch(session.title || tr('remote_untitled'))))
+      rowsForProject(path).some(({ session }) => matchesSearch(session.title || tr('remote_untitled'))))
     : projects;
   const projectSessionIndices = useMemo(() => {
     const nextIndexByProject = new Map<string, number>();
     const indexBySession = new Map<string, number>();
-    for (const { projectPath, session } of allProjectSessions) {
+    for (const { projectPath, projectId, session } of allProjectSessions) {
       const key = `${projectPath}\0${session.uuid}`;
-      const index = nextIndexByProject.get(projectPath) ?? 0;
+      const index = nextIndexByProject.get(projectId) ?? 0;
       indexBySession.set(key, index);
-      nextIndexByProject.set(projectPath, index + 1);
+      nextIndexByProject.set(projectId, index + 1);
     }
     return indexBySession;
   }, [allProjectSessions]);
@@ -815,6 +844,13 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           <button type="button" className="sidebar-header-icon" aria-label={activityView ? tr('desktop_chat_activity_off') : tr('desktop_chat_activity_on')} title={`${tr(activityView ? 'desktop_chat_activity_off' : 'desktop_chat_activity_on')} (⌥⌘U)`} aria-pressed={activityView} onClick={onToggleActivityView ?? (() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); })} style={{ color: activityView ? t.accent : t.text3, background: activityView ? t.accentBg : undefined }}><DesktopIcon name="bell" size={18} /></button>
           <button type="button" className="sidebar-header-icon" aria-label={tr('desktop_search_chats')} title={tr('desktop_search_chats')} aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><DesktopIcon name="search" size={18} /></button>
         </div>
+        <div className="no-drag" data-conversation-space role="tablist" aria-label={tr('desktop_chat_conversation_mode')} style={{ display: 'flex', gap: 2, padding: '4px 8px' }}>
+          {(['chat', 'code'] as const).map((mode) => <button key={mode} type="button" role="tab" aria-selected={currentSpace === mode}
+            onClick={() => { onOpenChat?.(); void bridge.switchConversationSpace(mode); }}
+            style={{ border: 0, borderRadius: 7, padding: '6px 11px', background: currentSpace === mode ? t.surfaceActive : 'transparent', color: currentSpace === mode ? t.text : t.text3, cursor: 'pointer' }}>
+            {mode === 'chat' ? 'Chat' : 'Code'}
+          </button>)}
+        </div>
         {topbar}
       </div>
       <div className="desktop-body">
@@ -847,7 +883,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           className="sidebar-primary-action sidebar-new-chat"
           type="button"
           disabled={bridge.sessionLoading || editingProject !== null}
-          onClick={() => { onOpenChat?.(); selectedProject ? editProject(selectedProject) : invoke(bridge.addProject); }}
+          onClick={() => { onOpenChat?.(); invoke(() => bridge.newSession()); }}
           style={{
             width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
             padding: '8px 10px', borderRadius: 10, border: 0, background: 'transparent',
@@ -924,21 +960,32 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           </section>
         ) : null}
 
-        {scheduledWorkspace && generalCatalog && generalCatalog.sessions.length > 0 && <section aria-labelledby="general-chats-heading">
-          <h2 id="general-chats-heading" style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>{tr('drawer_search_section_sessions')}</h2>
-          {(normalizedSearch ? generalCatalog.sessions.filter((session) => matchesSearch(session.title || tr('remote_untitled'))) : showAllSessions[scheduledWorkspace] ? generalCatalog.sessions : generalCatalog.sessions.slice(0, 5)).map((session) => {
-            const pinned = pinnedKeys.has(`${scheduledWorkspace}\0${session.uuid}`);
-            return <SessionRow key={session.uuid} projectPath={scheduledWorkspace} session={session}
-              active={!scheduled && visibleSession?.projectPath === scheduledWorkspace && visibleSession?.sessionId === session.uuid}
-              pinned={pinned} opening={openingSessionKey === `${scheduledWorkspace}\0${session.uuid}`}
+        {visibleDrafts.length > 0 && <section aria-label={tr('desktop_chat_drafts')} style={{ marginBottom: 12 }}>
+          <h2 style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600 }}>{tr('desktop_chat_drafts')}</h2>
+          {visibleDrafts.filter((draft) => matchesSearch(draft.sessionId) || matchesSearch(tr('desktop_chat_drafts'))).map((draft) =>
+            <button key={draft.sessionId} type="button" data-session-id={draft.sessionId}
+              aria-current={!scheduled && visibleSession?.sessionId === draft.sessionId ? 'page' : undefined}
+              onClick={() => openSidebarSession(draft.projectPath, draft.sessionId)}
+              style={{ display: 'block', width: '100%', padding: '7px 9px', border: 0, borderRadius: 7, textAlign: 'left',
+                background: visibleSession?.sessionId === draft.sessionId ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer' }}>
+              {draft.handoff ? tr('desktop_handoff_source', draft.handoff.sourceMode === 'chat' ? 'Chat' : 'Code', draft.handoff.sourceSessionId.slice(0, 8)) : tr('desktop_chat_drafts')}
+            </button>)}
+        </section>}
+        {globalSessions.length > 0 && <section aria-label={tr('drawer_search_section_sessions')}>
+          <h2 style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>{tr('drawer_search_section_sessions')}</h2>
+          {(normalizedSearch ? globalSessions.filter(({ session }) => matchesSearch(session.title || tr('remote_untitled'))) : showAllSessions['global'] ? globalSessions : globalSessions.slice(0, 5)).map(({ projectPath: workspace, session }) => {
+            const pinned = pinnedKeys.has(`${workspace}\0${session.uuid}`);
+            return <SessionRow key={session.uuid} projectPath={workspace} session={session}
+              active={!scheduled && visibleSession?.projectPath === workspace && visibleSession?.sessionId === session.uuid}
+              pinned={pinned} opening={openingSessionKey === `${workspace}\0${session.uuid}`}
               status={bridge.sessionRuntimeStatus(session.uuid)}
-              onClick={() => openSidebarSession(scheduledWorkspace, session.uuid)}
-              onArchive={() => void prepareArchive(scheduledWorkspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
-              onRename={() => prepareRename(scheduledWorkspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
-              onPin={() => invoke(() => bridge.setSessionPinned(pinInput(scheduledWorkspace, session.uuid, session.title || tr('remote_untitled')), !pinned))} />;
+              onClick={() => openSidebarSession(workspace, session.uuid)}
+              onArchive={() => void prepareArchive(workspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+              onRename={() => prepareRename(workspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+              onPin={() => invoke(() => bridge.setSessionPinned(pinInput(workspace, session.uuid, session.title || tr('remote_untitled')), !pinned))} />;
           })}
-          {!normalizedSearch && generalCatalog.sessions.length > 5 && <button type="button" onClick={() => setShowAllSessions((current) => ({ ...current, [scheduledWorkspace]: !current[scheduledWorkspace] }))} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
-            {showAllSessions[scheduledWorkspace] ? tr('chat_tool_show_less') : tr('desktop_chat_show_more', generalCatalog.sessions.length - 5)}
+          {!normalizedSearch && globalSessions.length > 5 && <button type="button" onClick={() => setShowAllSessions((current) => ({ ...current, global: !current.global }))} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
+            {showAllSessions.global ? tr('chat_tool_show_less') : tr('desktop_chat_show_more', globalSessions.length - 5)}
           </button>}
         </section>}
 
@@ -1033,7 +1080,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
             <div className="projects-one-list" aria-label={tr('desktop_chat_all_chats')}>
               {searchedProjectSessions.length === 0 ? (
                 <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>{normalizedSearch ? tr('desktop_chat_no_chats') : tr('desktop_chat_loading_chats')}</div>
-              ) : searchedProjectSessions.map(({ projectPath, session }) => {
+              ) : searchedProjectSessions.map(({ projectPath, projectId, session }) => {
                 const pinned = pinnedKeys.has(`${projectPath}\0${session.uuid}`);
                 const opening = openingSessionKey === `${projectPath}\0${session.uuid}`;
               return <SessionRow key={`${projectPath}\0${session.uuid}`} projectPath={projectPath} session={session}
@@ -1043,7 +1090,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                 onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
                 onRename={() => prepareRename(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
                 onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || tr('remote_untitled')), !pinned))}
-                reorderable={!opening}
+                reorderable={!opening && projectPath === projectId}
                 sortableIndex={projectSessionIndices.get(`${projectPath}\0${session.uuid}`) ?? 0} />;
               })}
             </div>
@@ -1053,9 +1100,9 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
             const active = projectPath === selectedProject;
             const open = Boolean(normalizedSearch) || expandedProjects.has(projectPath);
             const catalog = bridge.bootstrap?.projectCatalogs?.[projectPath];
-            const allSessions = sortedSessions(projectPath, catalog?.sessions ?? []);
+            const allSessions = rowsForProject(projectPath);
             const visibleSessions = normalizedSearch
-              ? allSessions.filter((session) => matchesSearch(basename(projectPath)) || matchesSearch(session.title || tr('remote_untitled')))
+              ? allSessions.filter(({ session }) => matchesSearch(basename(projectPath)) || matchesSearch(session.title || tr('remote_untitled')))
               : showAllSessions[projectPath] ? allSessions : allSessions.slice(0, 5);
             const projectHasActiveWork = (bridge.bootstrap?.runtimes ?? []).some((runtime) => {
               if (runtime.projectPath !== projectPath) return false;
@@ -1132,23 +1179,23 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                       <div style={{ padding: '8px 10px 8px 30px', color: t.text4, fontSize: 10.5 }}>{tr('drawer_sessions_loading')}</div>
                     ) : allSessions.length === 0 ? (
                       <div style={{ padding: '8px 10px 8px 30px', color: t.text4, fontSize: 10.5 }}>{tr('desktop_chat_no_saved_sessions')}</div>
-                    ) : visibleSessions.map((session, sortableIndex) => {
-                      const pinned = pinnedKeys.has(`${projectPath}\0${session.uuid}`);
-                      const opening = openingSessionKey === `${projectPath}\0${session.uuid}`;
+                    ) : visibleSessions.map(({ projectPath: sessionPath, session }, sortableIndex) => {
+                      const pinned = pinnedKeys.has(`${sessionPath}\0${session.uuid}`);
+                      const opening = openingSessionKey === `${sessionPath}\0${session.uuid}`;
                       return (
                         <SessionRow
                           key={session.uuid}
-                          projectPath={projectPath}
+                          projectPath={sessionPath}
                           session={session}
-                          active={!scheduled && visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
+                          active={!scheduled && visibleSession?.projectPath === sessionPath && visibleSession.sessionId === session.uuid}
                           pinned={pinned}
                           opening={opening}
                           status={bridge.sessionRuntimeStatus(session.uuid)}
-                          onClick={() => openSidebarSession(projectPath, session.uuid)}
-                          onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
-                          onRename={() => prepareRename(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
-                          onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || tr('remote_untitled')), !pinned))}
-                          reorderable={!opening}
+                          onClick={() => openSidebarSession(sessionPath, session.uuid)}
+                          onArchive={() => void prepareArchive(sessionPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+                          onRename={() => prepareRename(sessionPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+                          onPin={() => invoke(() => bridge.setSessionPinned(pinInput(sessionPath, session.uuid, session.title || tr('remote_untitled')), !pinned))}
+                          reorderable={!opening && sessionPath === projectPath}
                           sortableIndex={sortableIndex}
                         />
                       );
@@ -1164,9 +1211,9 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
             );
           })}
         </section>
-        {!!settings?.archivedSessions?.length && <details style={{ marginTop: 16, padding: '0 8px', color: t.text3 }}>
-          <summary style={{ cursor: 'pointer', fontSize: 12 }}>{tr('desktop_chat_archived_count', settings.archivedSessions.length)}</summary>
-          {settings.archivedSessions.map((session) => <button key={`${session.projectPath}-${session.sessionId}`} type="button" title={tr('desktop_chat_restore_open')} onClick={() => openSidebarSession(session.projectPath, session.sessionId)}
+        {archivedSessions.length > 0 && <details style={{ marginTop: 16, padding: '0 8px', color: t.text3 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 12 }}>{tr('desktop_chat_archived_count', archivedSessions.length)}</summary>
+          {archivedSessions.map((session) => <button key={`${session.projectPath}-${session.sessionId}`} type="button" title={tr('desktop_chat_restore_open')} onClick={() => openSidebarSession(session.projectPath, session.sessionId)}
             style={{ display: 'flex', width: '100%', gap: 8, padding: '10px 0', border: 0, background: 'transparent', color: t.text2, textAlign: 'left', cursor: 'pointer' }}>
             <Icon name="archive" size={14} /><span>{session.title || tr('desktop_chat_archived_chat')}</span>
           </button>)}
@@ -1413,9 +1460,15 @@ export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCent
 }) {
   const t = useT();
   const inspectorOpen = bridge.runtimeCenter.inspectorOpen;
-  const projectPath = bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path;
+  const projectPath = bridge.activeSession?.projectId !== undefined
+    ? bridge.activeSession.projectId ?? undefined
+    : bridge.bootstrap?.conversationSpaces.navigation[bridge.bootstrap.conversationSpaces.activeMode].projectId ?? undefined;
   const remoteState = useRemoteControl();
   const remote = remoteIndicator(remoteState.sessions, bridge.activeSession?.sessionId);
+  const owner = bridge.bootstrap?.conversationSpaces.sessions.find((entry) => entry.sessionId === bridge.activeSession?.sessionId);
+  const sourceLabel = owner?.handoff && tr('desktop_handoff_source', owner.handoff.sourceMode === 'chat' ? 'Chat' : 'Code', owner.handoff.sourceSessionId);
+  const targetMode = owner?.mode === 'chat' ? 'Code' : 'Chat';
+  const handoffLabel = bridge.handoffPending ? tr('desktop_handoff_cancel') : bridge.handoffRetryAvailable ? tr('desktop_handoff_retry') : tr('desktop_handoff_continue', targetMode);
 
   const topbarActionTokens = {
     '--topbar-action-focus': t.surfaceHover,
@@ -1440,11 +1493,20 @@ export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCent
           <span className="desktop-topbar-project-icon" aria-hidden="true"><DesktopIcon name="folder" size={17} /></span>
           <div style={{ minWidth: 0 }}>
             <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(projectPath)}</div>
-            <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{projectPath ?? tr('desktop_chat_add_project_begin')}</div>
+            <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{projectPath ?? tr('desktop_chat_no_project')}</div>
           </div>
         </div>
       )}
       {bot && <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('bots_chat_open_bot')} title={tr('bots_chat_open_bot')} onClick={bot.onOpen} style={topbarActionTokens}><Icon name="bot" size={20} stroke={1.75} /></button>}
+      {sourceLabel && owner?.handoff && <button type="button" className="no-drag desktop-topbar-action" title={sourceLabel} disabled={bridge.sessionLoading} onClick={() => { void bridge.openHandoffSource(owner.handoff!); }} style={{ ...topbarActionTokens, width: 'auto', maxWidth: 220, minWidth: 0, padding: '0 8px', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sourceLabel}</button>}
+      {!bot && owner && <button type="button" className="no-drag desktop-topbar-action"
+        disabled={bridge.sessionLoading || (!bridge.connected && !bridge.handoffPending)}
+        title={handoffLabel}
+        onClick={() => { void (bridge.handoffPending ? bridge.cancelSessionHandoff() : bridge.prepareSessionHandoff()); }}
+        style={{ ...topbarActionTokens, width: 'auto', padding: '0 8px', whiteSpace: 'nowrap', fontSize: 11 }}>
+        {handoffLabel}
+      </button>}
+      {!bot && bridge.handoffRetryAvailable && <button type="button" className="no-drag desktop-topbar-action" title={tr('desktop_handoff_cancel')} aria-label={tr('desktop_handoff_cancel')} onClick={() => { void bridge.cancelSessionHandoff(); }} style={topbarActionTokens}>×</button>}
       {remote && (
         <span className="no-drag desktop-topbar-remote" role="status" data-remote-viewers={remote.viewers}
           aria-label={remote.viewers > 0 ? tr('desktop_chat_remote_viewers', remote.viewers) : tr('desktop_chat_remote_enabled')}
@@ -1772,7 +1834,6 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const [modelQuery, setModelQuery] = useState('');
   const [submenuBounds, setSubmenuBounds] = useState<ModelPickerSubmenuBounds | null>(null);
   const [permissionOpen, setPermissionOpen] = useState(false);
-  const [modeOpen, setModeOpen] = useState(false);
   const [fusionChoice, setFusionChoice] = useState<{ sessionId: string | null; reference: FusionStrategyRefDto | null } | null>(null);
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null);
@@ -1798,8 +1859,6 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const fileButton = useRef<HTMLButtonElement>(null);
   const fileSearchInput = useRef<HTMLInputElement>(null);
   const imageFileInput = useRef<HTMLInputElement>(null);
-  const modeControl = useRef<HTMLDivElement>(null);
-  const modeButton = useRef<HTMLButtonElement>(null);
   const permissionControl = useRef<HTMLDivElement>(null);
   const permissionButton = useRef<HTMLButtonElement>(null);
   const modelControl = useRef<HTMLDivElement>(null);
@@ -1808,6 +1867,10 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const slashControl = useRef<HTMLDivElement>(null);
   const dictationInsertionRange = useRef<Range | null>(null);
   const flowControllerRef = useRef<VoiceFlowController | null>(null);
+  const flowOwnerSessionId = useRef<string | null>(null);
+  const flowOwnerMode = useRef<'realtime' | 'standard' | null>(null);
+  const flowLeaseId = useRef<string | null>(null);
+  const flowStartGeneration = useRef(0);
   const fileSearchRequest = useRef(0);
   const savedEditorSelection = useRef<Range | null>(null);
   const activeMentionRange = useRef<Range | null>(null);
@@ -1846,6 +1909,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   useEffect(() => { setAudioGuidance(null); }, [bridge.bootstrap?.settings.voiceRevision, activeSessionId]);
   const modelPickerVisibility = bridge.bootstrap?.settings.modelPickerVisibility;
   const dictationOwner = useRef<NativeAudioOwner | null>(null);
+  const dictationSessionId = useRef<string | null>(null);
   const autoplayOwner = useRef<NativeAudioOwner | null>(null);
   const autoplaySubscription = useRef<(() => void) | null>(null);
   const activeAudioSessionId = useRef(activeSessionId);
@@ -1979,26 +2043,6 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
    * switch would actually land.
    */
   const modelControlReady = Boolean(bridge.hosted && !bridge.loading && bridge.connected && activeSessionId);
-  const sessionMode = bridge.desktop.sessionMode?.sessionId === activeSessionId ? bridge.desktop.sessionMode : null;
-  const modeControlReady = modelControlReady && !bridge.sessionLoading && sessionMode !== null;
-
-  useEffect(() => { if (!modeControlReady) setModeOpen(false); }, [modeControlReady]);
-  useEffect(() => {
-    if (!modeOpen) return;
-    const pointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Node && !modeControl.current?.contains(event.target)) setModeOpen(false);
-    };
-    const keyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      setModeOpen(false);
-      modeButton.current?.focus();
-    };
-    document.addEventListener('pointerdown', pointerDown);
-    document.addEventListener('keydown', keyDown);
-    return () => { document.removeEventListener('pointerdown', pointerDown); document.removeEventListener('keydown', keyDown); };
-  }, [modeOpen]);
-
   useEffect(() => {
     if (ready) return;
     setPermissionOpen(false);
@@ -2454,6 +2498,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     const owner = dictationOwner.current;
     standardListeningRef.current = false;
     dictationOwner.current = null;
+    dictationSessionId.current = null;
     dictationInsertionRange.current = null;
     setVoiceState('idle');
     if (!audio || !owner) return;
@@ -2482,7 +2527,10 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     const editor = input.current;
     dictationInsertionRange.current = editor ? editorSelection(editor).cloneRange() : savedEditorSelection.current?.cloneRange() ?? null;
     const owner = audioOwner('dictation');
+    const ownerSessionId = activeAudioSessionId.current;
+    const ownerDraftGeneration = imageDraftGeneration.current;
     dictationOwner.current = owner;
+    dictationSessionId.current = ownerSessionId;
     const generation = ++dictationGeneration.current;
     standardListeningRef.current = true;
     setVoiceState('listening');
@@ -2495,13 +2543,33 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         language: resolveAudioLanguage(voicePrefs.language, typeof navigator !== 'undefined' ? navigator.language : 'en-US'),
       }, bridge.bootstrap?.settings.voiceRevision ?? 0);
       if (generation !== dictationGeneration.current) return;
+      if ((response.result.type === 'failed' || response.result.type === 'failed_without_resource')
+        && ownerSessionId !== activeAudioSessionId.current) return;
       if (reportNativeAudioFailure(response.result)) {
         preserveFailureState = true;
         return;
       }
       if (response.result.type === 'transcript') {
         const transcript = response.result.text.trim();
-        if (transcript) insertVoiceTextAtSelection(transcript);
+        if (transcript && ownerSessionId === draftSessionId.current) {
+          const selection = ownerDraftGeneration === imageDraftGeneration.current ? dictationInsertionRange.current : null;
+          if (selection) insertVoiceTextAtSelection(transcript, selection);
+          else {
+            const editor = input.current;
+            if (editor) {
+              const end = document.createRange(); end.selectNodeContents(editor); end.collapse(false);
+              insertVoiceTextAtSelection(transcript, end);
+            }
+          }
+        } else if (transcript && ownerSessionId) {
+          const draft = draftsBySession.current.get(ownerSessionId);
+          const editor = document.createElement('div');
+          editor.innerHTML = draft?.html ?? '';
+          if (editor.textContent) editor.append(document.createTextNode(' '));
+          editor.append(document.createTextNode(transcript));
+          draftsBySession.current.set(ownerSessionId, { ...richPromptSnapshot(editor), html: editor.innerHTML, images: draft?.images ?? [] });
+          bumpDraftGeneration(ownerSessionId);
+        }
       }
     } catch (cause) {
       if (generation === dictationGeneration.current) setAudioGuidance(audioSetupGuidance('unavailable', cause instanceof Error ? cause.message : ''));
@@ -2509,8 +2577,9 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       if (generation === dictationGeneration.current) {
         standardListeningRef.current = false;
         dictationOwner.current = null;
+        dictationSessionId.current = null;
         dictationInsertionRange.current = null;
-        if (!preserveFailureState) setVoiceState('idle');
+        if (!preserveFailureState && ownerSessionId === activeAudioSessionId.current) setVoiceState('idle');
       }
     }
   };
@@ -2525,16 +2594,62 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   };
 
   const stopFlowMode = useCallback(async () => {
+    flowStartGeneration.current += 1;
     setFlowMode(false);
-    if (voicePrefsRef.current.configuration.conversation.mode === 'realtime') await bridge.audioRealtimeCommand('stop');
-    else await flowControllerRef.current?.stop();
-  }, [bridge.audioRealtimeCommand]);
+    const ownerMode = flowOwnerMode.current;
+    const ownerSessionId = flowOwnerSessionId.current;
+    const leaseId = flowLeaseId.current;
+    try {
+      if (ownerMode === 'realtime') await bridge.audioRealtimeCommand('stop');
+      else if (ownerMode === 'standard') await flowControllerRef.current?.stop();
+    } finally {
+      try { if (ownerMode === 'standard' && ownerSessionId && leaseId) await bridge.audioRetainFlow(ownerSessionId, leaseId, false); }
+      finally {
+        if (flowOwnerSessionId.current === ownerSessionId && flowLeaseId.current === leaseId) {
+          flowOwnerSessionId.current = null;
+          flowOwnerMode.current = null;
+          flowLeaseId.current = null;
+        }
+      }
+    }
+  }, [bridge.audioRealtimeCommand, bridge.audioRetainFlow]);
+
+  const startFlowMode = useCallback(async () => {
+    const sessionId = activeAudioSessionId.current;
+    if (!sessionId) return;
+    if (flowOwnerSessionId.current || standardListeningRef.current || autoplayOwner.current) {
+      setAudioGuidance(audioSetupGuidance('unavailable', 'Another conversation owns the audio session.'));
+      return;
+    }
+    const generation = ++flowStartGeneration.current;
+    const realtime = voicePrefsRef.current.configuration.conversation.mode === 'realtime';
+    const leaseId = crypto.randomUUID();
+    let retained = false;
+    flowOwnerSessionId.current = sessionId;
+    flowOwnerMode.current = realtime ? 'realtime' : 'standard';
+    flowLeaseId.current = realtime ? null : leaseId;
+    setFlowMode(true);
+    try {
+      if (realtime) await bridge.audioRealtimeCommand('start');
+      else {
+        await bridge.audioRetainFlow(sessionId, leaseId, true);
+        retained = true;
+        if (flowStartGeneration.current !== generation) { await bridge.audioRetainFlow(sessionId, leaseId, false); return; }
+        await flowControllerRef.current?.start();
+      }
+    } catch (error) {
+      if (flowStartGeneration.current === generation) {
+        if (!realtime && !retained) { flowOwnerSessionId.current = null; flowOwnerMode.current = null; flowLeaseId.current = null; setFlowMode(false); }
+        setAudioGuidance(audioSetupGuidance('unavailable', error instanceof Error ? error.message : ''));
+      }
+    }
+  }, [bridge.audioRealtimeCommand, bridge.audioRetainFlow]);
 
   const retryFlowMode = useCallback(() => {
-    if (!flowModeRef.current) { setFlowMode(true); return; }
-    if (voicePrefsRef.current.configuration.conversation.mode === 'realtime') void bridge.audioRealtimeCommand('start').catch(() => undefined);
+    if (!flowModeRef.current) { void startFlowMode(); return; }
+    if (flowOwnerMode.current === 'realtime') void bridge.audioRealtimeCommand('start').catch(() => undefined);
     else void flowControllerRef.current?.retry();
-  }, [bridge.audioRealtimeCommand]);
+  }, [bridge.audioRealtimeCommand, startFlowMode]);
 
   useEffect(() => {
     if (!audio) {
@@ -2547,14 +2662,20 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       });
       return;
     }
+    const flowLease = () => flowOwnerMode.current === 'standard' && flowOwnerSessionId.current && flowLeaseId.current
+      ? { sessionId: flowOwnerSessionId.current, leaseId: flowLeaseId.current } : undefined;
     const controller = new VoiceFlowController({
       audio: {
-        execute: (operation, revision) => bridge.audioExecute(operation, revision),
-        cancel: bridge.audioCancel,
-        finishListen: bridge.audioFinishListen,
+        execute: (operation, revision) => {
+          const owner = flowLease();
+          return owner ? bridge.audioExecute(operation, revision, undefined, owner) : Promise.reject(new Error('The audio flow owner is unavailable.'));
+        },
+        cancel: async () => { const owner = flowLease(); if (owner) await bridge.audioCancel(owner); },
+        finishListen: async () => { const owner = flowLease(); if (owner) await bridge.audioFinishListen(owner); },
       },
       bridge: {
-        sendTrackedPrompt: bridge.sendTrackedPrompt,
+        sendTrackedPrompt: (text, images, imageNames, filePaths, options) => bridge.sendTrackedPrompt(text, images, imageNames, filePaths,
+          { ...options, sessionId: flowOwnerSessionId.current ?? undefined }),
         subscribeTrackedSpeech: bridge.subscribeTrackedSpeech,
         cancelTrackedPrompt: bridge.cancelTrackedPrompt,
       },
@@ -2579,20 +2700,6 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   }, [audio, bridge.audioCancel, bridge.audioExecute, bridge.audioFinishListen, bridge.cancelTrackedPrompt, bridge.sendTrackedPrompt, bridge.subscribeTrackedSpeech]);
 
   useEffect(() => {
-    if (voicePrefs.conversation.mode === 'realtime') {
-      void bridge.audioRealtimeCommand(flowMode ? 'start' : 'stop').catch(() => undefined);
-      return;
-    }
-    const controller = flowControllerRef.current;
-    if (!controller) return;
-    if (flowMode) {
-      void controller.start();
-      return;
-    }
-    void controller.stop();
-  }, [flowMode, voicePrefs.conversation.mode, bridge.audioRealtimeCommand]);
-
-  useEffect(() => {
     const state = bridge.audioRealtimeState;
     if (flowMode && voicePrefs.conversation.mode === 'realtime'
       && (state.phase === 'failed' || state.phase === 'configurationRequired')) {
@@ -2612,21 +2719,20 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   useEffect(() => {
     if (previousAudioSessionId.current === activeSessionId) return;
     previousAudioSessionId.current = activeSessionId;
-    if (standardListeningRef.current) void cancelStandardListening();
-    void cancelAutoplay();
-    if (flowModeRef.current) setFlowMode(false);
-  }, [activeSessionId, cancelAutoplay, cancelStandardListening]);
+    setVoiceState(standardListeningRef.current && dictationSessionId.current === activeSessionId ? 'listening' : 'idle');
+    setFlowMode(activeSessionId !== null && flowOwnerSessionId.current === activeSessionId);
+  }, [activeSessionId]);
 
   useEffect(() => {
     const handleHidden = () => {
       if (!document.hidden) return;
       if (standardListeningRef.current) void cancelStandardListening();
       void cancelAutoplay();
-      if (flowModeRef.current) setFlowMode(false);
+      if (flowModeRef.current) void stopFlowMode();
     };
     document.addEventListener('visibilitychange', handleHidden);
     return () => document.removeEventListener('visibilitychange', handleHidden);
-  }, [cancelAutoplay, cancelStandardListening]);
+  }, [cancelAutoplay, cancelStandardListening, stopFlowMode]);
 
   useEffect(() => () => {
     if (standardListeningRef.current) void cancelStandardListening();
@@ -2655,6 +2761,10 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       setAudioGuidance(audioSetupGuidance('permission_denied'));
       return;
     }
+    if (standardListeningRef.current && dictationSessionId.current !== activeAudioSessionId.current) {
+      setAudioGuidance(audioSetupGuidance('unavailable', 'Another conversation owns the audio session.'));
+      return;
+    }
     if (standardListeningRef.current) {
       void finishStandardListening();
       return;
@@ -2672,7 +2782,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       return;
     }
     setAudioGuidance(null);
-    setFlowMode(true);
+    void startFlowMode();
   };
 
   const addImageFiles = async (files: File[]) => {
@@ -3655,38 +3765,6 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           <input ref={imageFileInput} type="file" multiple onChange={(event) => { void addFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
           <button type="button" disabled={!ready} className="composer-icon-action" aria-label={tr('desktop_attach_files')} title={tr('desktop_attach_files_images')} onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
           <button ref={fileButton} type="button" disabled={!ready} className="composer-icon-action" aria-label={tr('desktop_add_context')} aria-expanded={fileMenuOpen} title={tr('desktop_add_context_shortcut')} onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
-          <div ref={modeControl} style={{ position: 'relative' }}>
-            <button ref={modeButton} type="button" disabled={!modeControlReady} aria-haspopup="menu" aria-expanded={modeOpen}
-              aria-label={`${tr('desktop_chat_conversation_mode')}: ${sessionMode?.active === 'chat' ? 'Chat' : sessionMode?.active === 'code' ? 'Code' : ''}${sessionMode?.pending ? ` · ${tr('desktop_chat_mode_next_turn', sessionMode.pending === 'chat' ? 'Chat' : 'Code')}` : ''}`}
-              onClick={() => { setModeOpen((open) => !open); setPermissionOpen(false); setModelOpen(false); setModelSubmenu(null); }}
-              style={{ ...composerPillStyle(t, modeOpen), color: modeOpen ? t.accent : t.text2 }}>
-              <span>{sessionMode ? (sessionMode.active === 'chat' ? 'Chat' : 'Code') : tr('desktop_chat_conversation_mode')}</span>
-              {sessionMode?.pending && <span style={{ color: t.text3, fontSize: 11 }}>· {tr('desktop_chat_mode_next_short', sessionMode.pending === 'chat' ? 'Chat' : 'Code')}</span>}
-              <Icon name="chevron" size={12} color="currentColor" stroke={1.8} />
-            </button>
-            {modeControlReady && modeOpen && sessionMode && (
-              <div role="menu" aria-label={tr('desktop_chat_conversation_mode')} style={{ ...composerMenuStyle(t, 'left'), width: 330, maxWidth: 'calc(100vw - 44px)' }}>
-                {(['chat', 'code'] as const).map((mode) => {
-                  const active = mode === sessionMode.active;
-                  const name = mode === 'chat' ? 'Chat' : 'Code';
-                  return <button key={mode} type="button" role="menuitemradio" aria-checked={active}
-                    onClick={() => { invoke(() => bridge.setSessionMode(mode)); setModeOpen(false); }}
-                    style={{ width: '100%', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 18px', alignItems: 'center', gap: 8,
-                      padding: '9px 10px', border: 0, borderRadius: 9, background: active ? t.accentBg : 'transparent', color: t.text,
-                      textAlign: 'left', cursor: 'pointer', font: 'inherit' }}>
-                    <span><span style={{ display: 'block', fontSize: 13, fontWeight: 600 }}>{name}</span>
-                      <span style={{ display: 'block', marginTop: 3, color: t.text3, fontSize: 11, lineHeight: 1.35 }}>
-                        {tr(mode === 'chat' ? 'desktop_chat_mode_chat_description' : 'desktop_chat_mode_code_description')}
-                      </span></span>
-                    {active && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
-                  </button>;
-                })}
-                {sessionMode.pending && <div role="status" style={{ padding: '8px 10px 4px', color: t.text3, fontSize: 11 }}>
-                  {tr('desktop_chat_mode_next_turn', sessionMode.pending === 'chat' ? 'Chat' : 'Code')}
-                </div>}
-              </div>
-            )}
-          </div>
           <div ref={permissionControl} style={{ position: 'relative' }}>
             <button
               ref={permissionButton}
@@ -3697,7 +3775,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               aria-label={tr('desktop_chat_permission_label', permissionMode.label)}
               title={tr('desktop_change_permissions')}
               onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
-              onClick={() => { setPermissionOpen((open) => !open); setModeOpen(false); setModelOpen(false); setModelSubmenu(null); }}
+              onClick={() => { setPermissionOpen((open) => !open); setModelOpen(false); setModelSubmenu(null); }}
               style={{
                 ...composerPillStyle(t, permissionOpen),
                 color: permissionMode.danger ? t.danger : permissionOpen ? t.accent : t.text2,
@@ -3824,7 +3902,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               aria-expanded={modelOpen}
               aria-label={tr(fastModeAvailable && bridge.desktop.fastMode ? 'desktop_chat_fast_model_label' : 'desktop_chat_model_label', activeModelLabel(bridge.desktop.currentModel, bridge.desktop.currentModelSource), reasoningSelectionLabel(selectedReasoning))}
               onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
-              onClick={() => { setModelOpen((open) => !open); setModelSubmenu(null); setPermissionOpen(false); setModeOpen(false); }}
+              onClick={() => { setModelOpen((open) => !open); setModelSubmenu(null); setPermissionOpen(false); }}
               style={{ ...composerPillStyle(t, modelOpen), maxWidth: '100%', width: '100%', color: t.text }}
             >
               {fastModeAvailable && <Icon name="bolt" size={18} color={t.text} stroke={2.1} />}

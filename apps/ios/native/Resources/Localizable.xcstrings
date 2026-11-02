@@ -28200,6 +28200,33 @@
         }
       }
     },
+    "conversation_reconnect_release_pending": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "旧会话仍在关闭，请稍后重试。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "舊對話仍在關閉，請稍後重試。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "The previous session is still closing. Try again shortly." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "以前のセッションを終了中です。しばらくしてから再試行してください。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "이전 세션을 종료하는 중입니다. 잠시 후 다시 시도하세요." } }
+      }
+    },
+    "conversation_reconnect_disconnected": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "会话暂未连接，请在设置中重试连接。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "對話暫未連線，請在設定中重試連線。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "The session is disconnected. Retry the connection in Settings." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "セッションは未接続です。設定で再接続してください。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "세션이 연결되지 않았습니다. 설정에서 다시 연결하세요." } }
+      }
+    },
+    "conversation_handoff_ready": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "交接草稿已准备好" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "交接草稿已準備好" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Handoff draft is ready" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "引き継ぎの下書きができました" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "이어가기 초안이 준비되었습니다" } }
+      }
+    },
     "drawer_session_continue_chat": {
       "localizations": {
         "zh-Hans": {
@@ -46659,6 +46686,44 @@
             "state": "translated",
             "value": "%1$d초 후 다시 시도"
           }
+        }
+      }
+    },
+    "remote_restore_unsent": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": { "state": "translated", "value": "恢复未发送的消息" }
+        },
+        "zh-Hant": {
+          "stringUnit": { "state": "translated", "value": "恢復未傳送的訊息" }
+        },
+        "en": {
+          "stringUnit": { "state": "translated", "value": "Restore unsent message" }
+        },
+        "ja": {
+          "stringUnit": { "state": "translated", "value": "未送信のメッセージを復元" }
+        },
+        "ko": {
+          "stringUnit": { "state": "translated", "value": "보내지 않은 메시지 복원" }
+        }
+      }
+    },
+    "remote_team_approval": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": { "state": "translated", "value": "团队工具审批" }
+        },
+        "zh-Hant": {
+          "stringUnit": { "state": "translated", "value": "團隊工具審批" }
+        },
+        "en": {
+          "stringUnit": { "state": "translated", "value": "Team tool approval" }
+        },
+        "ja": {
+          "stringUnit": { "state": "translated", "value": "チームツールの承認" }
+        },
+        "ko": {
+          "stringUnit": { "state": "translated", "value": "팀 도구 승인" }
         }
       }
     },

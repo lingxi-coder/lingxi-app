@@ -4053,6 +4053,21 @@ impl BridgeConnection {
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner()) = Some(task);
             }
+            command @ ClientCommand::ForkSession { .. } => {
+                let _handoff = self.turn_handoff.lock().await;
+                if self.turn_running.load(Ordering::SeqCst) {
+                    self.unscoped_event_sink()
+                        .emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Rejected,
+                            message: "cannot fork a session while a turn is in flight".into(),
+                        })
+                        .await;
+                    return;
+                }
+                if let Some(router) = &self.router {
+                    router.route(command, self.unscoped_event_sink()).await;
+                }
+            }
             command @ (ClientCommand::ClearSession
             | ClientCommand::NewSession { .. }
             | ClientCommand::ResumeSession { .. }) => {
@@ -4068,6 +4083,19 @@ impl BridgeConnection {
                         })
                         .await;
                     return;
+                }
+                if let Some(router) = &self.router {
+                    if let Err((kind, message)) =
+                        router.preflight_session_transition(&command).await
+                    {
+                        self.unscoped_event_sink()
+                            .emit(ClientEvent::Error {
+                                kind,
+                                message: message.into(),
+                            })
+                            .await;
+                        return;
+                    }
                 }
                 let _transition = TransitionScope::begin(&self.transition_active);
                 // Close media admission before the router can change sessions.

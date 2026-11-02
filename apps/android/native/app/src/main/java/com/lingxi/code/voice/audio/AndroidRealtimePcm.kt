@@ -40,10 +40,12 @@ internal data class RealtimePcmCaptureFrame(
 )
 
 internal class AndroidRealtimePcmCapture {
-    val paused = AtomicBoolean(false)
+    private val admission = RealtimeCaptureAdmission()
     val nativeAllocationAttempted = AtomicBoolean(false)
     private val stopped = AtomicBoolean(false)
     @Volatile private var recorder: AudioRecord? = null
+    fun setPaused(paused: Boolean) = admission.setPaused(paused)
+    suspend fun drainCallbacks() = admission.drain()
     fun stop() { stopped.set(true); recorder?.let { runCatching { it.stop() } } }
     suspend fun run(
         format: RealtimePcmFormat,
@@ -81,19 +83,20 @@ internal class AndroidRealtimePcmCapture {
             onReady()
             while (!stopped.get()) {
                 currentCoroutineContext().ensureActive()
+                val token = admission.snapshot()
                 val count = native.read(frames, 0, frames.size)
                 if (count < 0) {
                     if (stopped.get()) break
                     throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "Realtime microphone read failed.")
                 }
-                if (count > 0 && !paused.get()) {
+                if (count > 0 && admission.isCurrent(token)) {
                     if (count % 2 != 0) {
                         throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "Realtime microphone returned an unaligned PCM16 frame.")
                     }
                     val pcm = frames.copyOf(count)
                     val capturedDurationMs = count.toLong() * 500L / format.sampleRateHz
                     val capturedAt = (System.currentTimeMillis() - capturedDurationMs).coerceAtLeast(0L)
-                    onChunk(RealtimePcmCaptureFrame(pcm, capturedAt))
+                    admission.deliver(token) { onChunk(RealtimePcmCaptureFrame(pcm, capturedAt)) }
                 }
             }
         } finally {

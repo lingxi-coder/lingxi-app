@@ -208,7 +208,9 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: {
   const query = search.trim().toLocaleLowerCase();
   const filtered = jobs.filter(({ job, scopeId }) => (filter === 'all' || (job.automation?.status ?? 'active') === filter)
     && `${job.prompt} ${job.cron} ${scopeLabel(scopeId)}`.toLocaleLowerCase().includes(query));
-  const sessions = Object.entries(bridge.bootstrap?.projectCatalogs ?? {}).flatMap(([scopeId, catalog]) => catalog.sessions.map((session) => ({ id: session.uuid, title: session.title || `${tr('drawer_tab_chat')} ${session.uuid.slice(0, 8)}`, scopeId })));
+  const sessions = Object.entries(bridge.bootstrap?.projectCatalogs ?? {}).flatMap(([scopeId, catalog]) => catalog.sessions
+    .filter((session) => session.mode === bridge.bootstrap?.conversationSpaces.activeMode)
+    .map((session) => ({ id: session.uuid, title: session.title || `${tr('drawer_tab_chat')} ${session.uuid.slice(0, 8)}`, scopeId })));
   const suggestions = SUGGESTIONS.map(item => ({ ...item, title: tr(`desktop_scheduled_${item.key}_title`), description: tr(`desktop_scheduled_${item.key}_description`), preset: { frequency: item.frequency, day: item.day, time: item.time } }));
   const editing = Boolean(selected || initial);
   return <section className={`scheduled-tasks${editing ? ' scheduled-has-detail' : ''}`} style={variables} aria-label={tr('settings_title_cron')}>

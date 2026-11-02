@@ -8,11 +8,14 @@ import com.lingxi.code.voice.audio.DeviceAudioOperation
 import com.lingxi.code.voice.audio.DeviceAudioResult
 import com.lingxi.code.voice.audio.RealtimeSpeechCallbacks
 import com.lingxi.code.voice.audio.RealtimeSpeechSession
+import com.lingxi.code.voice.audio.NavigationDrainingRealtimeSession
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -66,6 +69,22 @@ class FlowVoiceControllerTest {
         assertTrue(sent.isEmpty())
         assertTrue(service.listenOperations.isEmpty())
         assertEquals(OrbPhase.Idle, controller.state.value.phase)
+        controller.dispose()
+    }
+
+    @Test
+    fun restoringOverlayDoesNotCancelTheOwnersAdmittedTurnAfterPermission() = runTest {
+        var permissionGranted = false
+        var cancellations = 0
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV4(), 40L))
+        service.onListenOpened = { it.ready() }
+        val controller = FlowVoiceController(service, { permissionGranted }, {}, UnconfinedTestDispatcher(testScheduler))
+        controller.ensureListening({}, { cancellations++ })
+        permissionGranted = true
+        controller.onMicrophonePermissionResult(true)
+        runCurrent()
+        assertEquals(0, cancellations)
+        assertEquals(1, service.sessions.size)
         controller.dispose()
     }
 
@@ -295,19 +314,132 @@ class FlowVoiceControllerTest {
         controller.dispose()
     }
 
+    @Test
+    fun changingProfileDrainsAlreadyAdmittedRealtimeWork() = runTest {
+        val config = AudioConfigurationV4(conversation = com.lingxi.code.voice.audio.AudioConversationPreference(mode = "realtime"))
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(config, 51L))
+        service.onListenOpened = { it.ready() }
+        val controller = FlowVoiceController(service, { true }, {}, UnconfinedTestDispatcher(testScheduler))
+        controller.updateSessionBinding("model", "profile-a")
+        controller.listen({}) {}
+        runCurrent()
+        val session = service.sessions.single()
+        checkNotNull(service.agentCallbacks).onAgentTurnStarted()
+        controller.updateSessionBinding("model", "profile-b")
+        assertTrue(session.navigationRequested)
+        assertFalse(session.cancelled)
+        session.finish("completed")
+        controller.dispose()
+    }
+
+    @Test
+    fun navigationPreservesFinalizingOrdinaryVoiceAndItsReply() = runTest {
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV4(), 52L))
+        service.onListenOpened = { it.ready() }
+        val controller = FlowVoiceController(service, { true }, {}, UnconfinedTestDispatcher(testScheduler))
+        val sent = mutableListOf<String>()
+        controller.listen(sent::add) {}
+        runCurrent()
+        val session = service.sessions.single()
+        controller.stopListening()
+        controller.navigationAway()
+        assertFalse(session.cancelled)
+        session.finish("finish on original owner")
+        runCurrent()
+        assertEquals(listOf("finish on original owner"), sent)
+        controller.updateReply("original reply", streaming = false)
+        runCurrent()
+        assertEquals("original reply", service.operations.filterIsInstance<DeviceAudioOperation.Speak>().single().text)
+        controller.dispose()
+    }
+
+    @Test
+    fun realtimeNavigationHoldsDeviceAdmissionUntilOldOwnerCloses() = runTest {
+        val config = AudioConfigurationV4(conversation = com.lingxi.code.voice.audio.AudioConversationPreference(mode = "realtime"))
+        val firstService = FakeFlowAudioService(VersionedAudioConfiguration(config, 53L))
+        val secondService = FakeFlowAudioService(VersionedAudioConfiguration(config, 53L))
+        firstService.onListenOpened = { it.ready() }
+        secondService.onListenOpened = { it.ready() }
+        val admission = Mutex()
+        val first = FlowVoiceController(firstService, { true }, {}, UnconfinedTestDispatcher(testScheduler), admission)
+        val second = FlowVoiceController(secondService, { true }, {}, UnconfinedTestDispatcher(testScheduler), admission)
+        first.listen({}) {}
+        runCurrent()
+        val firstSession = firstService.sessions.single()
+        first.navigationAway()
+        second.listen({}) {}
+        runCurrent()
+        assertTrue(firstSession.navigationRequested)
+        assertFalse(firstSession.cancelled)
+        assertTrue(secondService.sessions.isEmpty())
+
+        firstSession.finish("old owner turn")
+        runCurrent()
+        assertEquals(1, secondService.sessions.size)
+        first.dispose()
+        second.dispose()
+    }
+
+    @Test
+    fun navigationBeforeRealtimeAdmissionDrainsTheReturnedSession() = runTest {
+        val config = AudioConfigurationV4(conversation = com.lingxi.code.voice.audio.AudioConversationPreference(mode = "realtime"))
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(config, 54L))
+        val admission = CompletableDeferred<RealtimeSpeechSession>()
+        service.pendingAdmission = admission
+        service.onListenOpened = { it.ready() }
+        val controller = FlowVoiceController(service, { true }, {}, UnconfinedTestDispatcher(testScheduler))
+        controller.listen({}) {}
+        runCurrent()
+        controller.navigationAway()
+        val session = service.sessions.single()
+        admission.complete(session)
+        runCurrent()
+        assertTrue(session.navigationRequested)
+        assertFalse(session.cancelled)
+        session.finish("completed")
+        controller.dispose()
+    }
+
+    @Test
+    fun realtimeDoesNotListenAgainUntilTheAgentTerminal() = runTest {
+        val config = AudioConfigurationV4(conversation = com.lingxi.code.voice.audio.AudioConversationPreference(mode = "realtime"))
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(config, 55L))
+        service.onListenOpened = { it.ready() }
+        val controller = FlowVoiceController(service, { true }, {}, UnconfinedTestDispatcher(testScheduler))
+        controller.listen({}) {}
+        runCurrent()
+        val callbacks = checkNotNull(service.agentCallbacks)
+        callbacks.onAgentTurnStarted()
+        assertEquals(OrbPhase.Thinking, controller.state.value.phase)
+        callbacks.onPlayback(true)
+        callbacks.onPlayback(false)
+        assertEquals(OrbPhase.Thinking, controller.state.value.phase)
+        callbacks.onAgentTurnCompleted()
+        assertEquals(OrbPhase.Listening, controller.state.value.phase)
+        callbacks.onTranscript("late user transcript", assistant = false, final = true)
+        assertEquals("late user transcript", controller.state.value.userCaption)
+        assertEquals(OrbPhase.Listening, controller.state.value.phase)
+        callbacks.onPlayback(false)
+        assertEquals(OrbPhase.Listening, controller.state.value.phase)
+        controller.dispose()
+    }
+
     private class FakeFlowAudioService(var snapshot: VersionedAudioConfiguration) : FlowVoiceAudioService {
         val operations = mutableListOf<DeviceAudioOperation>()
         val owners = mutableListOf<AudioOwnerKey>()
         val listenOperations = mutableListOf<DeviceAudioOperation.Listen>()
         val sessions = mutableListOf<FakeRealtimeListenSession>()
         var pendingAdmission: CompletableDeferred<RealtimeSpeechSession>? = null
+        var agentCallbacks: com.lingxi.code.voice.audio.RealtimeAgentCallbacks? = null
         var onListenOpened: (FakeRealtimeListenSession) -> Unit = { session ->
             session.ready()
             session.finish("recognized")
         }
 
         override suspend fun openRealtimeAgent(owner: AudioOwnerKey, configuration: AudioConfigurationV4,
-            callbacks: com.lingxi.code.voice.audio.RealtimeAgentCallbacks): RealtimeSpeechSession = openRealtimeListen(
+            callbacks: com.lingxi.code.voice.audio.RealtimeAgentCallbacks): RealtimeSpeechSession {
+            agentCallbacks = callbacks
+            return openRealtimeListen(
                 owner, DeviceAudioOperation.Listen(null, configuration), object : RealtimeSpeechCallbacks {
                     override fun onReady() = callbacks.onReady()
                     override fun onPartial(text: String) = callbacks.onTranscript(text, false, false)
@@ -315,6 +447,7 @@ class FlowVoiceControllerTest {
                     override fun onError(code: String, message: String, retriable: Boolean) = callbacks.onError(message)
                     override fun onClosed() = callbacks.onClosed()
                 })
+        }
 
         override fun configurationSnapshot() = snapshot
 
@@ -346,9 +479,10 @@ class FlowVoiceControllerTest {
 
     private class FakeRealtimeListenSession(
         private val callbacks: RealtimeSpeechCallbacks,
-    ) : RealtimeSpeechSession {
+    ) : NavigationDrainingRealtimeSession {
         var stopRequested = false
         var cancelled = false
+        var navigationRequested = false
         var onStop: () -> Unit = {}
 
         override fun stop() {
@@ -360,6 +494,8 @@ class FlowVoiceControllerTest {
             cancelled = true
             callbacks.onClosed()
         }
+
+        override fun finishForNavigation() { navigationRequested = true }
 
         override fun close() = cancel()
 

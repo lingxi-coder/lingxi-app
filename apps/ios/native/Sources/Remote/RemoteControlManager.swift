@@ -21,11 +21,20 @@ final class RemoteControlManager {
     @ObservationIgnored private var client: IosRemoteControlClient?
     @ObservationIgnored private var generation: UInt64 = 0
     @ObservationIgnored private let connectionEpoch = RemoteAppRequestEpoch()
+    private var connectionFence = RemoteConnectionFence()
+    @ObservationIgnored private let sessionRequestDrain = RemoteRequestDrain()
+    @ObservationIgnored private let connectionSerial = RemoteConnectSerial()
     private final class SourceReference {
         weak var value: RemoteConversationSource?
         init(_ value: RemoteConversationSource) { self.value = value }
     }
     @ObservationIgnored private var sources: [String: SourceReference] = [:]
+    private struct DraftKey: Hashable {
+        let uid: String
+        let hostID: String
+        let sessionID: String
+    }
+    @ObservationIgnored private var draftOwners: [DraftKey: RemoteDraftOwner] = [:]
     /// The Bots whose chats a screen has had listed on this connection (see `showBot`).
     @ObservationIgnored private var shownBots: Set<RemoteBotKey> = []
 
@@ -40,11 +49,13 @@ final class RemoteControlManager {
     func configure(uid: String?) async {
         guard uid != self.uid || client == nil else { return }
         generation &+= 1
+        connectionFence.reset()
         connectionEpoch.reset()
         let mine = generation
         let previous = client
         client = nil
         self.uid = uid
+        draftOwners = draftOwners.filter { $0.key.uid == uid }
         hosts = []
         hostsLoaded = false
         connection = nil
@@ -92,17 +103,75 @@ final class RemoteControlManager {
         return client
     }
 
+    func connectionTicket(hostID: String, uid: String) -> UInt64? {
+        guard !connectionFence.admissionClosed, self.uid == uid, connectionFence.requestedHostID == hostID,
+              connection?.hostId == hostID, connection?.phase == .ready,
+              connectionEpoch.permits(hostID: hostID) else { return nil }
+        return connectionEpoch.value
+    }
+
+    func admitSessionRequest(hostID: String, uid: String, ticket: UInt64) throws -> IosRemoteControlClient {
+        guard connectionTicket(hostID: hostID, uid: uid) == ticket else { throw RemoteFfiError.NotConnected }
+        let client = try activeClient()
+        sessionRequestDrain.begin()
+        return client
+    }
+
+    func finishSessionRequest() { sessionRequestDrain.end() }
+
+    func withSessionClient<T>(hostID: String, uid: String, ticket: UInt64,
+                              operation: (IosRemoteControlClient) async throws -> T) async throws -> T {
+        let client = try admitSessionRequest(hostID: hostID, uid: uid, ticket: ticket)
+        defer { finishSessionRequest() }
+        return try await operation(client)
+    }
+
+    func draftOwner(hostID: String, sessionID: String, uid: String) -> RemoteDraftOwner {
+        let key = DraftKey(uid: uid, hostID: hostID, sessionID: canonicalSessionID(sessionID))
+        if let existing = draftOwners[key] { return existing }
+        let owner = RemoteDraftOwner()
+        draftOwners[key] = owner
+        return owner
+    }
+
+    func needsSessionReconnect(hostID: String) -> Bool {
+        connectionFence.requestedHostID == hostID && connectionFence.needsRetry
+    }
+
     func connect(_ hostID: String) async throws {
         let client = try activeClient()
+        let intent = connectionFence.begin(hostID)
+        connectionEpoch.advance()
         if connection?.hostId != hostID {
-            connectionEpoch.advance()
             sessions = []
             botDirectory.removeAll()
             shownBots.removeAll()
             for source in sources.values { source.value?.invalidate() }
             sources.removeAll()
         }
-        try await client.connect(hostId: hostID)
+        // Serialize native connects as well as calls: an older connect must
+        // never replace the host after a newer selection has become usable.
+        await connectionSerial.acquire()
+        defer { connectionSerial.release() }
+        do {
+            guard !Task.isCancelled, intent == connectionFence.intent,
+                  (try? activeClient()) === client else { throw CancellationError() }
+            await sessionRequestDrain.waitUntilEmpty()
+            guard !Task.isCancelled, intent == connectionFence.intent,
+                  (try? activeClient()) === client else { throw CancellationError() }
+            connectionFence.nativeCallStarted()
+            try await client.connect(hostId: hostID)
+            guard (try? activeClient()) === client else { throw CancellationError() }
+            connectionFence.nativeCallSucceeded(hostID)
+            guard !Task.isCancelled, intent == connectionFence.intent else { throw CancellationError() }
+            connectionFence.finishSuccess(intent)
+        } catch {
+            if (try? activeClient()) === client {
+                let readyHost = connection?.phase == .ready ? connection?.hostId : nil
+                connectionFence.finishFailure(intent, readyHostID: readyHost)
+            }
+            throw error
+        }
     }
 
     private func appRequestContext(hostID: String) throws -> (IosRemoteControlClient, UInt64, UInt64) {
@@ -144,7 +213,13 @@ final class RemoteControlManager {
         await client.watchHosts()
     }
 
-    func retry() async { await client?.retry() }
+    func retry() async {
+        if connectionFence.needsRetry, let hostID = connectionFence.requestedHostID {
+            try? await connect(hostID)
+        } else {
+            await client?.retry()
+        }
+    }
     func repair(_ hostID: String) async throws { try await activeClient().repairHost(hostId: hostID) }
     func forget(_ hostID: String) async {
         let client = client
@@ -162,16 +237,37 @@ final class RemoteControlManager {
         let client = try activeClient()
         let mine = generation
         try await connect(source.hostID)
-        guard mine == generation, !Task.isCancelled else { throw CancellationError() }
+        // Attachment and detachment must not race a host switch or each other.
+        await connectionSerial.acquire()
+        defer { connectionSerial.release() }
+        guard mine == generation, !Task.isCancelled, (try? activeClient()) === client,
+              connectionFence.requestedHostID == source.hostID, !connectionFence.admissionClosed else { throw CancellationError() }
         sources[source.sessionID] = SourceReference(source)
-        try await client.attachSession(sessionId: source.sessionID)
-        guard sources[source.sessionID]?.value === source, mine == generation else { throw CancellationError() }
-        try await client.setSessionForeground(sessionId: source.sessionID, foreground: true)
+        do {
+            try await client.attachSession(sessionId: source.sessionID)
+            guard sources[source.sessionID]?.value === source, mine == generation, !Task.isCancelled else { throw CancellationError() }
+            try await client.setSessionForeground(sessionId: source.sessionID, foreground: true)
+        } catch {
+            if sources[source.sessionID]?.value === source {
+                sources.removeValue(forKey: source.sessionID)
+                try? await client.detachSession(sessionId: source.sessionID)
+            }
+            throw error
+        }
     }
 
     func unfollow(_ source: RemoteConversationSource) async {
         guard sources[source.sessionID]?.value === source else { return }
         sources.removeValue(forKey: source.sessionID)
+        let mine = generation
+        let client = self.client
+        await connectionSerial.acquire()
+        defer { connectionSerial.release() }
+        // A send or permission decision accepted before navigation still owns
+        // its attachment. A newly followed source also supersedes this detach.
+        await sessionRequestDrain.waitUntilEmpty()
+        guard mine == generation, sources[source.sessionID]?.value == nil,
+              connectionFence.requestedHostID == source.hostID, self.client === client else { return }
         try? await client?.detachSession(sessionId: source.sessionID)
     }
 
@@ -224,10 +320,12 @@ final class RemoteControlManager {
 
     func close() async {
         generation &+= 1
+        connectionFence.reset()
         connectionEpoch.reset()
         let previous = client
         client = nil
         uid = nil
+        draftOwners.removeAll()
         for source in sources.values { source.value?.invalidate() }
         sources.removeAll()
         hosts = []
@@ -242,6 +340,7 @@ final class RemoteControlManager {
 
     fileprivate func receive(_ state: RemoteConnectionStateFfi, generation: UInt64) {
         guard generation == self.generation else { return }
+        if state.phase == .ready { connectionFence.observeReadyHost(state.hostId) }
         connectionEpoch.observe(hostID: state.hostId, ready: state.phase == .ready)
         if state.hostId != connection?.hostId || state.phase != .ready || connection?.phase != .ready {
             connectionEpoch.advance()

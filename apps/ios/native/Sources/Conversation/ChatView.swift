@@ -97,6 +97,7 @@ struct ChatView: View {
 
     /// Root-owned state machine shared by ordinary dictation and Flow Mode.
     let voiceInteraction: VoiceInteractionController
+    private let voiceEventsManagedByHost: Bool
     var onOpenVoiceSettings: () -> Void = {}
     private let cameraCapture = CameraCapture()
     @State private var composerFocused = false
@@ -117,6 +118,7 @@ struct ChatView: View {
          sessionMode: SessionMode = .code,
          workspaceName: String = "",
          workspaceKey: String = "global",
+         voiceEventsManagedByHost: Bool = false,
          onDraftMediaChanged: @escaping (Bool) -> Void = { _ in },
          isPinned: Bool = false,
          canArchive: Bool = false,
@@ -154,6 +156,7 @@ struct ChatView: View {
         self.onNewChat = onNewChat
         self._draft = draft
         self.voiceInteraction = voiceInteraction
+        self.voiceEventsManagedByHost = voiceEventsManagedByHost
         self.source = source
         self.attachmentBinding = attachmentBinding
         self.onOpenVoiceSettings = onOpenVoiceSettings
@@ -197,57 +200,25 @@ struct ChatView: View {
                         controller: voiceInteraction,
                         onConfigure: onOpenVoiceSettings
                     )
+                } else if source.hasActiveRealtimeAudio {
+                    HStack {
+                        ProgressView()
+                        Text("voice_status_thinking")
+                        Spacer()
+                        Button("composer_stop", action: stop)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .accessibilityIdentifier("voice.retained-turn")
                 }
                 if showsNewChatBar {
                     NewChatBar(
-                        mode: convo.requestedNewSessionMode ?? displayedSessionMode,
+                        mode: displayedSessionMode,
                         workspaceName: workspaceName,
                         modeSelectionDisabled: convo.sessionTransitionPending,
                         onSelectMode: onSelectNewChatMode,
                         onPickWorkspace: onPickWorkspace
                     )
-                }
-                if let pending = convo.pendingSessionMode {
-                    Text(String(localized: "session_mode_pending \(pending.title)"))
-                        .font(.caption)
-                        .foregroundStyle(t.text3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 4)
-                }
-                if convo.awaitingNewSessionMode {
-                    Group {
-                        if convo.newSessionModeFailed, let mode = convo.requestedNewSessionMode {
-                            Button(String(localized: "session_mode_retry")) {
-                                onSelectNewChatMode(mode)
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            Text(String(localized: "session_mode_setting"))
-                        }
-                    }
-                        .font(.caption)
-                        .foregroundStyle(t.text3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 4)
-                }
-                if !convo.awaitingNewSessionMode, let mode = convo.requestedSessionMode {
-                    Group {
-                        if convo.sessionModeSubmissionFailed {
-                            Button(String(localized: "session_mode_retry")) {
-                                onSelectSessionMode(mode)
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            Text(String(localized: "session_mode_setting"))
-                        }
-                    }
-                        .font(.caption)
-                        .foregroundStyle(t.text3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 4)
                 }
                 Group {
                     Composer(model: $convo.model,
@@ -307,13 +278,13 @@ struct ChatView: View {
                          slashCommands: convo.slashCommands,
                          slashCommandsLoaded: convo.slashCommandsLoaded,
                          slashCommandPending: convo.slashCommandPending,
-                         streaming: convo.streaming,
+                         streaming: convo.streaming || source.hasActiveRealtimeAudio,
                          showDiscardRecovery: convo.hasInactiveDurableRecovery,
                          isCancelling: convo.isCancelling,
                          sendEnabled: !convo.sessionTransitionPending
-                             && !convo.awaitingNewSessionMode
-                             && convo.requestedSessionMode == nil
                              && !convo.slashCommandPending
+                             && !source.hasActiveRealtimeAudio
+                             && source.isAvailableForPrompts
                              && voiceInteraction.mode != .flow,
                          onStop: stop,
                          onCameraClick: captureFromCamera,
@@ -377,6 +348,7 @@ struct ChatView: View {
         .animation(.easeOut(duration: 0.25), value: connectivity.isOffline)
         .animation(.spring(response: 0.3, dampingFraction: 0.86), value: voiceInteraction.isPresented)
         .onAppear {
+            voiceInteraction.handleContextRestored()
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
@@ -420,7 +392,7 @@ struct ChatView: View {
             voiceInteraction.handleContextChange()
         }
         .onReceive(convo.turnSpeechUpdates) { update in
-            voiceInteraction.handleTurnSpeechUpdate(update)
+            if !voiceEventsManagedByHost { voiceInteraction.handleTurnSpeechUpdate(update) }
         }
         .onChange(of: convo.visualizationFollowup) { _, followup in
             // A widget's "ask about this": seed the draft and carry its chip
@@ -434,7 +406,7 @@ struct ChatView: View {
         }
         .onChange(of: convo.turnCompletion) { _, completion in
             guard let completion else { return }
-            voiceInteraction.handleTurnCompletion(completion)
+            if !voiceEventsManagedByHost { voiceInteraction.handleTurnCompletion(completion) }
         }
         .sheet(item: pendingQuestion) { question in
             AskUserQuestionCard(
@@ -456,7 +428,6 @@ struct ChatView: View {
             SessionPanelSheet(
                 title: sessionTitle,
                 mode: displayedSessionMode,
-                pendingMode: convo.pendingSessionMode,
                 canSwitchMode: !source.isTemporaryConversation && !convo.sessionTransitionPending,
                 workspaceName: workspaceName,
                 messageCount: convo.messages.count,
@@ -1007,10 +978,10 @@ struct ChatView: View {
     }
 
     private func newChat() {
-        voiceInteraction.handleContextChange()
         if let onNewChat {
             onNewChat()
         } else {
+            voiceInteraction.handleContextChange()
             source.startNewConversation()
         }
     }
@@ -1073,7 +1044,17 @@ struct ChatView: View {
     }
 
     // PR-4 item 2: interrupt the in-flight turn.
-    private func stop() { source.cancel() }
+    private func stop() {
+        if source.hasActiveRealtimeAudio {
+            if voiceInteraction.mode == .flow {
+                voiceInteraction.close()
+            } else {
+                Task { await IOSRealtimeAudioService.shared.stop(abort: true) }
+            }
+        } else {
+            source.cancel()
+        }
+    }
 
     // MARK: capability affordances (mirror Android RootScreen)
 
@@ -1109,7 +1090,7 @@ struct ChatView: View {
         guard !convo.sessionTransitionPending else { return }
         cancelVoiceHold()
         composerFocused = false
-        voiceInteraction.startFlow(source: source)
+        voiceInteraction.startFlow(source: source, onRejectedTranscript: appendVoiceTranscript)
     }
 
     private func cancelVoiceHold() {
@@ -1117,8 +1098,10 @@ struct ChatView: View {
     }
 
     private func appendVoiceTranscript(_ text: String) {
-        draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? text : "\(draft) \(text)"
+        let updated = PromptSuggestionDraftSource.appendingTranscript(
+            text, to: draft, sourceCodeUnits: draftSourceCodeUnitsBinding.wrappedValue)
+        draft = updated.text
+        draftSourceCodeUnitsBinding.wrappedValue = updated.sourceCodeUnits
     }
 
     /// Attach button: drive an on-device camera capture (falling back to the

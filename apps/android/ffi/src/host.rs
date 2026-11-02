@@ -817,6 +817,7 @@ pub fn build_android_engine(
         api_key,
         model,
         session_mode,
+        initial_session_id,
         vision_delegation_enabled,
         app_files_root,
         project_cwd,
@@ -838,6 +839,7 @@ pub fn build_android_engine(
         project_cwd,
         device_control,
         session_mode,
+        initial_session_id,
         vision_delegation_enabled,
         physical_memory_bytes,
         media_host.clone(),
@@ -911,6 +913,7 @@ pub fn build_android_engine(
                 SessionModeDto::Chat => MobileSessionMode::Chat,
                 SessionModeDto::Code => MobileSessionMode::Code,
             },
+            initial_session_id,
             physical_memory_bytes,
             vision_delegation_enabled,
             host_environment: Some(host_environment.map_or_else(

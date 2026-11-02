@@ -4,6 +4,22 @@ import Foundation
 /// `String` replaces isolated surrogates when displaying them, but an edit to a
 /// different range must not erase those untouched source units.
 enum PromptSuggestionDraftSource {
+    /// Voice capture can finish after the composer disappears, when its edit
+    /// observer is no longer available to update the original UTF-16 units.
+    static func appendingTranscript(
+        _ transcript: String, to draft: String, sourceCodeUnits: [UInt16]?
+    ) -> (text: String, sourceCodeUnits: [UInt16]?) {
+        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (transcript, nil)
+        }
+        let text = "\(draft) \(transcript)"
+        guard let sourceCodeUnits,
+              displayCodeUnits(for: sourceCodeUnits) == Array(draft.utf16) else {
+            return (text, nil)
+        }
+        return (text, sourceCodeUnits + [0x20] + Array(transcript.utf16))
+    }
+
     static func applyingEdit(
         sourceCodeUnits: [UInt16],
         previousDisplayCodeUnits: [UInt16],

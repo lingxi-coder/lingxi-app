@@ -482,23 +482,6 @@ fun ChatScreen(
                     modeSelectionEnabled = modeSelectionEnabled,
                 )
             }
-            state.pendingSessionMode?.let { pending ->
-                Text(
-                    text = stringResource(R.string.session_mode_pending, sessionModeLabel(pending)),
-                    color = t.text3,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                )
-            }
-            if (state.awaitingNewSessionMode || state.modeSubmissionState != null) {
-                Text(
-                    text = stringResource(
-                        if (state.newSessionModeFailed || state.modeSubmissionState == ModeSubmissionState.Failed)
-                            R.string.session_mode_retry else R.string.session_mode_setting,
-                    ),
-                    color = t.text3,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                )
-            }
             Composer(
                 text = draft,
                 slashCommands = state.slashCommands,
@@ -520,7 +503,7 @@ fun ChatScreen(
                 onSend = {
                     if (modelSetupRequired) {
                         onOpenModelSettings()
-                    } else if (state.sessionReady && !state.sessionTransitioning && state.modeSubmissionState == null) {
+                    } else if (state.sessionReady && !state.sessionTransitioning) {
                         sendComposerIfAdmitted(
                             admitted = onSendPreflight(draft, attachment),
                             send = { onSendWithAttachment(draft, attachment) },
@@ -547,7 +530,7 @@ fun ChatScreen(
                 isStreaming = state.isStreaming && sideChatInput(draft) == null,
                 showDiscardRecovery = state.durableRecoveryBlocked,
                 enabled = (sideChatInput(draft) != null || !state.durableRecoveryBlocked) &&
-                    (modelSetupRequired || (state.sessionReady && !state.sessionTransitioning && state.modeSubmissionState == null)),
+                    (modelSetupRequired || (state.sessionReady && !state.sessionTransitioning)),
                 // Loading preserves the live editor's selection and IME composition.
                 inputEnabled = !state.durableRecoveryBlocked,
                 modelSetupRequired = modelSetupRequired,

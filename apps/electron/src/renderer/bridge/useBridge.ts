@@ -32,6 +32,7 @@ import type {
 import { defaultNativeAudioSnapshot } from '../../shared/nativeAudio.js';
 import type {
   NativeAudioCommand,
+  NativeAudioFlowLease,
   NativeAudioOperationResponse,
   NativeAudioResponse,
   NativeAudioSnapshot,
@@ -204,6 +205,7 @@ export function useBridge(): UseBridge {
   if (uiSurfaceClientId.current === null) uiSurfaceClientId.current = createUiSurfaceClientId();
   const stableUiSurfaceClientId = uiSurfaceClientId.current;
   const uiSurfaceLifecycle = useRef<UiSurfaceLifecycleQueue | null>(null);
+  const attachedUiSurfaces = useRef(new Set<string>());
   if (uiSurfaceLifecycle.current === null) {
     uiSurfaceLifecycle.current = new UiSurfaceLifecycleQueue((sessionId) => (
       !removedRuntimeIds.current.has(sessionId)
@@ -238,11 +240,14 @@ export function useBridge(): UseBridge {
   // that disposes and rebuilds the voice-flow controller.
   const runtimeStatesRef = useRef(runtimeStates);
   runtimeStatesRef.current = runtimeStates;
+  const [handoffPending, setHandoffPending] = useState(false);
+  const handoffRef = useRef<{ requestId: string; sourceId: string; target: 'chat' | 'code'; failed: boolean } | null>(null);
+  const [handoffRetrySource, setHandoffRetrySource] = useState<string | null>(null);
   const [linkDraft, setLinkDraft] = useState<{ sessionId: string; text: string; requestId: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [visualizationOffer, setVisualizationOffer] = useState<(VisualizationFollowup & { readonly sessionId: string }) | null>(null);
   const clearError = useCallback(() => setError(null), []);
-  const [audioRealtimeState, setAudioRealtimeState] = useState<NativeRealtimeAudioState>({ phase: 'paused', detail: '实时会话已停止', generation: 0 });
+  const [audioRealtimeStates, setAudioRealtimeStates] = useState<Map<string, NativeRealtimeAudioState>>(new Map());
   const [audioSnapshot, setAudioSnapshot] = useState<NativeAudioSnapshot>(defaultNativeAudioSnapshot());
   // Settings are file-layer state, not per-conversation state, so this is
   // one value for the whole app rather than something keyed into `runtimeStates`.
@@ -274,6 +279,8 @@ export function useBridge(): UseBridge {
   const latestBootstrapRevisionRef = useRef<number | null>(null);
   const latestBootstrapProjectPathsRef = useRef(new Set<string>());
   const navigationOperationRef = useRef(0);
+  const requestedSpaceRef = useRef<'chat' | 'code' | null>(null);
+  const confirmedSpaceRef = useRef<'chat' | 'code' | null>(null);
   const pinOperationRef = useRef(0);
   const restartOperationsRef = useRef(new Map<string, Promise<void>>());
   const catalogRefreshTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -314,6 +321,8 @@ export function useBridge(): UseBridge {
   const activeSession = displayedSession(persistedActiveSession, pendingSession);
   const sessionLoading = pendingSession !== null && !sessionReady;
   const activeSessionId = activeSession?.sessionId ?? null;
+  const audioRealtimeState = (activeSessionId && audioRealtimeStates.get(activeSessionId)) ||
+    { phase: 'paused' as const, detail: '实时会话已停止', generation: 0 };
   // A Bot's chat is shown in the chat view but is not a project's: the project-only parts of the window leave it alone.
   const activeBotId = useMemo(() => botIdOfSession(bootstrap?.runtimes ?? [], activeSession), [bootstrap?.runtimes, activeSession]);
   const providerSettingsSaves = useRef(new Set<AbortController>());
@@ -345,7 +354,14 @@ export function useBridge(): UseBridge {
     }).catch(() => {
       if (!cancelled) setAudioSnapshot(defaultNativeAudioSnapshot());
     });
-    const offRealtime = host.audio.onRealtimeState((state) => { if (!cancelled && (!state.sessionId || state.sessionId === activeSessionIdRef.current)) setAudioRealtimeState((current) => state.generation >= current.generation ? state : current); });
+    const offRealtime = host.audio.onRealtimeState((state) => {
+      if (cancelled || !state.sessionId) return;
+      const sessionId = state.sessionId;
+      setAudioRealtimeStates((current) => {
+        if (state.generation < (current.get(sessionId)?.generation ?? 0)) return current;
+        return new Map(current).set(sessionId, state);
+      });
+    });
     const offAudio = host.audio.onEvent((event) => {
       if (!cancelled && event.type !== 'input_level' && event.type !== 'capture_chunk') setAudioSnapshot(event.snapshot);
     });
@@ -354,7 +370,7 @@ export function useBridge(): UseBridge {
       offAudio();
       offRealtime();
     };
-  }, [host, activeSessionId, sessionReady]);
+  }, [host]);
 
   // Settings are captured per-CONNECTION on the engine side (`SettingsContext`
   // is built once per `assemble_with_provider_keys` call), so a snapshot from
@@ -422,16 +438,32 @@ export function useBridge(): UseBridge {
   const isCancelling = runtime?.isCancelling ?? false;
 
   useEffect(() => {
-    if (sessionLoading || !host || !activeSessionId || connection.status !== 'connected') return;
+    if (!host || !activeSessionId || connection.status !== 'connected') return;
     const clientId = stableUiSurfaceClientId;
     const lifecycle = uiSurfaceLifecycle.current;
-    if (!clientId || !lifecycle) return;
-
-    void lifecycle.attach(host, activeSessionId, clientId).catch(() => undefined);
-    return () => {
-      void lifecycle.detach(host, activeSessionId, clientId).catch(() => undefined);
-    };
+    if (sessionLoading || !clientId || !lifecycle || attachedUiSurfaces.current.has(activeSessionId)) return;
+    attachedUiSurfaces.current.add(activeSessionId);
+    void lifecycle.attach(host, activeSessionId, clientId).catch(() => {
+      attachedUiSurfaces.current.delete(activeSessionId);
+    });
   }, [activeSessionId, connection.status, host, sessionLoading, stableUiSurfaceClientId]);
+
+  // A hidden conversation still owns its desktop surface. Switching views
+  // must not detach it; only a real disconnect or window teardown releases it.
+  useEffect(() => {
+    for (const sessionId of attachedUiSurfaces.current) {
+      if (runtimeStates.get(sessionId)?.connection.status !== 'connected') attachedUiSurfaces.current.delete(sessionId);
+    }
+  }, [runtimeStates]);
+  useEffect(() => () => {
+    const lifecycle = uiSurfaceLifecycle.current;
+    if (host && lifecycle && stableUiSurfaceClientId) {
+      for (const sessionId of attachedUiSurfaces.current) {
+        void lifecycle.detach(host, sessionId, stableUiSurfaceClientId).catch(() => undefined);
+      }
+    }
+    attachedUiSurfaces.current.clear();
+  }, [host, stableUiSurfaceClientId]);
 
   const updateRuntime = useCallback((sessionId: string, updater: (state: RuntimeState) => RuntimeState): void => {
     setRuntimeStates((previous) => {
@@ -526,8 +558,11 @@ export function useBridge(): UseBridge {
   const applyBootstrap = useCallback((snapshot: BootstrapState): void => {
     if (!shouldApplyBootstrapSnapshot(latestBootstrapRevisionRef.current, snapshot.revision)) return;
     latestBootstrapRevisionRef.current = Number.isFinite(snapshot.revision) ? snapshot.revision : 0;
+    confirmedSpaceRef.current = snapshot.conversationSpaces.activeMode;
+    if (!pendingSessionRef.current) requestedSpaceRef.current = snapshot.conversationSpaces.activeMode;
     latestBootstrapProjectPathsRef.current = new Set(snapshot.settings.projects);
     if (snapshot.scheduledWorkspace) latestBootstrapProjectPathsRef.current.add(snapshot.scheduledWorkspace);
+    latestBootstrapProjectPathsRef.current.add(snapshot.conversationSpaces.globalWorkspace);
     const pending = pendingSessionRef.current;
     setRuntimeStates((previous) => {
       const next = new Map(previous);
@@ -617,7 +652,7 @@ export function useBridge(): UseBridge {
     const bootstrapRevision = latestBootstrapRevisionRef.current;
     const requestKey = `${scope}\0${projectPath}`;
     const generation = beginProjectCatalogRequest(catalogRequestGenerations.current, requestKey);
-    const updateCatalog = (catalog: ProjectSessionCatalogState): void => {
+    const updateCatalog = (catalog: ProjectSessionCatalogState, spaces?: BootstrapState['conversationSpaces']): void => {
       if (scope !== 'current') return;
       // Settings and sidebar rows retain their requested directory key, even
       // when the host resolves it to a canonical path. Recheck at React commit
@@ -625,6 +660,7 @@ export function useBridge(): UseBridge {
       setBootstrap((previous) => previous && latestBootstrapRevisionRef.current === bootstrapRevision
         && isLatestProjectCatalogRequest(catalogRequestGenerations.current, requestKey, generation) ? {
           ...previous,
+          ...(spaces ? { conversationSpaces: spaces } : {}),
           projectCatalogs: { ...previous.projectCatalogs, [projectPath]: catalog },
         } : previous);
     };
@@ -640,7 +676,7 @@ export function useBridge(): UseBridge {
       sessions: result.sessions.map((session) => ({ ...session })),
       ...(result.error ? { error: result.error } : {}),
     };
-    updateCatalog(catalog);
+    updateCatalog(catalog, result.conversationSpaces);
     return { ...catalog, projectPath: result.projectPath };
   }, [host]);
 
@@ -1136,7 +1172,10 @@ export function useBridge(): UseBridge {
           // actions can use the live bridge while catalog and diagnostics
           // metadata continue to arrive in the background.
           const pending = pendingSessionRef.current;
-          const connectedRuntime = pending?.sessionId.startsWith('pending-new:')
+          // A normal draft has an operation-specific owner, which cannot be
+          // inferred from a connected runtime's cwd. Only the newSession IPC
+          // response can promote it. Bot drafts retain their separate path.
+          const connectedRuntime = pending?.mode === undefined && pending?.sessionId.startsWith('pending-new:')
             ? snapshot.runtimes.find((runtime) => runtime.sessionId === sessionId
               && runtime.projectPath === pending.projectPath
               && runtime.connection.status === 'connected')
@@ -1171,6 +1210,14 @@ export function useBridge(): UseBridge {
             : {}),
         };
       });
+    });
+    const offConversationShown = host.onConversationShown?.((snapshot) => {
+      navigationOperationRef.current = nextOperationId(navigationOperationRef.current);
+      pendingSessionRef.current = null;
+      sessionLoadingRef.current = false;
+      setPendingSession(null);
+      setSessionReady(false);
+      applyBootstrap(snapshot);
     });
     const offComputerAccess = host.onComputerAccess((envelope) => {
       if (removedRuntimeIds.current.has(envelope.sessionId)) return;
@@ -1216,6 +1263,7 @@ export function useBridge(): UseBridge {
       offState();
       offPermission();
       offComputerAccess();
+      offConversationShown?.();
     };
   }, [applyBootstrap, capture, completeTrackedSpeech, host, scheduleProjectCatalogRefresh, updateRuntime]);
 
@@ -1253,7 +1301,10 @@ export function useBridge(): UseBridge {
   const submittedSessionFor = useCallback((sessionId: string, text: string): SubmittedSession | undefined => {
     // A Bot's chats never get a row in a project's catalog.
     if (isBotSession(bootstrapRef.current?.runtimes ?? [], sessionId)) return undefined;
-    const ref = bootstrapRef.current?.runtimes.find((entry) => entry.sessionId === sessionId)
+    const spaces = bootstrapRef.current?.conversationSpaces;
+    const ref = spaces?.drafts?.find((entry) => entry.sessionId === sessionId)
+      ?? spaces?.sessions.find((entry) => entry.sessionId === sessionId)
+      ?? bootstrapRef.current?.runtimes.find((entry) => entry.sessionId === sessionId)
       ?? (activeSessionIdRef.current === sessionId
         ? pendingSessionRef.current ?? bootstrapRef.current?.activeSession ?? bootstrapRef.current?.settings.activeSession : undefined);
     const saved = ref && bootstrapRef.current?.projectCatalogs[ref.projectPath]?.sessions.find((entry) => entry.uuid === sessionId);
@@ -1265,11 +1316,13 @@ export function useBridge(): UseBridge {
     images: ImageRefDto[] = [],
     imageNames: string[] = [],
     filePaths: string[] = [],
-    options: { purpose?: TrackedPromptPurpose; visualizationContext?: VisualizationContextChip } = {},
+    options: { purpose?: TrackedPromptPurpose; visualizationContext?: VisualizationContextChip; sessionId?: string } = {},
   ): { token: DesktopTurnToken; queued: Promise<void> } | null => {
     const trimmed = text.trim();
-    const sessionId = activeSessionIdRef.current;
-    if (sessionLoadingRef.current || !trimmed || !host || !sessionId) return null;
+    const boundFlow = options.purpose === 'flow' && Boolean(options.sessionId);
+    const sessionId = boundFlow ? options.sessionId : activeSessionIdRef.current;
+    if ((!boundFlow && sessionLoadingRef.current) || !trimmed || !host || !sessionId
+      || removedRuntimeIds.current.has(sessionId)) return null;
     turnActiveRefs.current.set(sessionId, true);
     runtimeResourceSendSequence.current += 1;
     trackedTurnSequence.current += 1;
@@ -1818,7 +1871,8 @@ export function useBridge(): UseBridge {
     }
   }, [capture, host, mutateSessionCatalog]);
 
-  const openSession = useCallback(async (projectPath: string, sessionId: string, selection?: SessionOpenSelection) => {
+  const openSession = useCallback(async (projectPath: string, sessionId: string, selection?: SessionOpenSelection,
+    linkedMode?: import('../../shared/conversationSpaces').ConversationSpace) => {
     if (!host) throw new Error('Desktop host unavailable.');
     const operationId = beginNavigationOperation();
     const target = { projectPath, sessionId } satisfies SessionRef;
@@ -1828,7 +1882,9 @@ export function useBridge(): UseBridge {
     setPendingSession(target);
     removedRuntimeIds.current.delete(sessionId);
     try {
-      const snapshot = selection === undefined
+      const snapshot = linkedMode !== undefined
+        ? await host.openSession(projectPath, sessionId, selection, linkedMode)
+        : selection === undefined
         ? await host.openSession(projectPath, sessionId)
         : await host.openSession(projectPath, sessionId, selection);
       if (isCurrentNavigationOperation(operationId)) {
@@ -1909,10 +1965,10 @@ export function useBridge(): UseBridge {
   }, [applyBootstrap, beginNavigationOperation, host, isCurrentNavigationOperation]);
 
   /** Show a chat of a Bot in the chat view: a new one, or the one named. */
-  const openBotSession = useCallback(async (botId: string, sessionId?: string): Promise<BotSessionRefUi> => {
+  const openBotSession = useCallback(async (botId: string, sessionId?: string, transcriptPath?: string): Promise<BotSessionRefUi> => {
     const bots = host?.bots;
     if (!bots) throw new Error('Desktop host unavailable.');
-    return followBotSession(botId, sessionId, () => bots.openSession(botId, sessionId));
+    return followBotSession(botId, sessionId, () => bots.openSession(botId, sessionId, transcriptPath));
   }, [followBotSession, host]);
 
   /** The host opened a chat of a Bot on its own: show it, and say so in the error banner if the window cannot. */
@@ -2141,27 +2197,39 @@ export function useBridge(): UseBridge {
     operation: AudioOperationDto,
     configurationRevision?: number,
     configurationOverride?: AudioConfigurationV4,
+    flow?: NativeAudioFlowLease,
   ): Promise<NativeAudioOperationResponse> => {
     if (!host?.audio) throw new Error('native audio is unavailable on this host');
-    const sessionId = activeSessionIdRef.current;
-    const response = await host.audio.execute(operation, configurationRevision, configurationOverride);
+    const sessionId = flow?.sessionId ?? activeSessionIdRef.current;
+    const response = await host.audio.execute(operation, configurationRevision, configurationOverride, flow);
     if (sessionId === activeSessionIdRef.current) setAudioSnapshot(response.snapshot);
     return response;
   }, [host]);
 
   const audioRealtimeCommand = useCallback(async (command: NativeRealtimeAudioCommand) => {
+    const sessionId = activeSessionIdRef.current;
     try { if (!host?.audio) throw new Error('native realtime audio is unavailable'); await host.audio.realtime(command); }
-    catch (error) { setAudioRealtimeState((current) => ({ ...current, phase: 'configurationRequired', detail: messageFrom(error) })); throw error; }
+    catch (error) {
+      if (sessionId) setAudioRealtimeStates((current) => new Map(current).set(sessionId, {
+        ...(current.get(sessionId) ?? { generation: 0 }), sessionId, phase: 'configurationRequired', detail: messageFrom(error),
+      }));
+      throw error;
+    }
   }, [host]);
 
-  const audioCancel = useCallback(async () => {
+  const audioCancel = useCallback(async (flow?: NativeAudioFlowLease) => {
     if (!host?.audio) throw new Error('native audio is unavailable on this host');
-    await host.audio.cancel();
+    await host.audio.cancel(flow);
   }, [host]);
 
-  const audioFinishListen = useCallback(async () => {
+  const audioRetainFlow = useCallback(async (sessionId: string, leaseId: string, retain: boolean) => {
     if (!host?.audio) throw new Error('native audio is unavailable on this host');
-    await host.audio.finishListen();
+    await host.audio.retainFlow(sessionId, leaseId, retain);
+  }, [host]);
+
+  const audioFinishListen = useCallback(async (flow?: NativeAudioFlowLease) => {
+    if (!host?.audio) throw new Error('native audio is unavailable on this host');
+    await host.audio.finishListen(flow);
   }, [host]);
 
   const command = useCallback(async (value: Parameters<NonNullable<typeof host>['command']>[1]) => {
@@ -2193,21 +2261,20 @@ export function useBridge(): UseBridge {
 
   const newSession = useCallback(async (requestedProjectPath?: string) => {
     if (sessionLoadingRef.current) return;
-    const projectPath = requestedProjectPath ?? bootstrap?.settings.activeProject;
-    if (!host || !projectPath) {
-      await addProject();
-      return;
-    }
+    if (!host || !bootstrap) return;
+    const projectId = requestedProjectPath ?? null;
+    const projectPath = projectId ?? bootstrap.conversationSpaces.globalWorkspace;
+    const mode = bootstrap.conversationSpaces.activeMode;
     const operationId = beginNavigationOperation();
     // Reserve a local draft while the host creates the real session and starts its engine.
-    const target = { projectPath, sessionId: `pending-new:${operationId}` };
+    const target = { projectPath, projectId, mode, sessionId: `pending-new:${operationId}` };
     pendingSessionRef.current = target;
     setSessionReady(false);
     sessionLoadingRef.current = true;
     setPendingSession(target);
     setError(null);
     try {
-      const snapshot = await host.newSession(projectPath, desktop.currentModelSource ?? desktop.currentModel ?? undefined);
+      const snapshot = await host.newSession(projectId, desktop.currentModelSource ?? desktop.currentModel ?? undefined);
       if (isCurrentNavigationOperation(operationId)) {
         pendingSessionRef.current = null;
         setSessionReady(false);
@@ -2225,7 +2292,7 @@ export function useBridge(): UseBridge {
       setPendingSession(null);
       capture(cause);
     }
-  }, [addProject, applyBootstrap, beginNavigationOperation, bootstrap?.settings.activeProject, capture, desktop.currentModel, desktop.currentModelSource, host, isCurrentNavigationOperation]);
+  }, [applyBootstrap, beginNavigationOperation, bootstrap, capture, desktop.currentModel, desktop.currentModelSource, host, isCurrentNavigationOperation]);
 
   const resumeSession = useCallback(async (sessionId: string) => {
     const projectPath = activeSession?.projectPath ?? bootstrap?.settings.activeProject;
@@ -2233,7 +2300,133 @@ export function useBridge(): UseBridge {
     await openSession(projectPath, sessionId);
   }, [activeSession?.projectPath, bootstrap?.settings.activeProject, host, openSession]);
 
-  const setSessionMode = useCallback((mode: 'chat' | 'code') => command({ type: 'set_session_mode', mode }), [command]);
+  const switchConversationSpace = useCallback(async (mode: 'chat' | 'code') => {
+    if (!host || !bootstrap || requestedSpaceRef.current === mode) return;
+    requestedSpaceRef.current = mode;
+    const operationId = nextOperationId(navigationOperationRef.current);
+    navigationOperationRef.current = operationId;
+    const target = bootstrap.conversationSpaces.navigation[mode].session ?? {
+      projectPath: bootstrap.conversationSpaces.globalWorkspace, projectId: null, mode,
+      sessionId: `pending-space:${operationId}`,
+    };
+    pendingSessionRef.current = target;
+    setPendingSession(target);
+    setSessionReady(false);
+    sessionLoadingRef.current = true;
+    patchBootstrap({ conversationSpaces: { ...bootstrap.conversationSpaces, activeMode: mode } });
+    try {
+      const snapshot = await host.switchConversationSpace(mode);
+      if (isCurrentNavigationOperation(operationId)) {
+        pendingSessionRef.current = null;
+        setPendingSession(null);
+        applyBootstrap(snapshot);
+      }
+    } catch (cause) {
+      if (isCurrentNavigationOperation(operationId)) {
+        pendingSessionRef.current = null;
+        setPendingSession(null);
+        // The optimistic tab is not a confirmed owner. Restore the latest
+        // accepted host mode before recovery, even if bootstrap also fails or
+        // returns an already-seen revision. A later navigation owns its state.
+        const confirmedMode = confirmedSpaceRef.current;
+        if (confirmedMode) {
+          requestedSpaceRef.current = confirmedMode;
+          setBootstrap((previous) => previous ? {
+            ...previous,
+            conversationSpaces: { ...previous.conversationSpaces, activeMode: confirmedMode },
+          } : previous);
+        }
+        try {
+          const snapshot = await host.bootstrap();
+          if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot);
+        } catch { /* Keep the original navigation error. */ }
+        if (isCurrentNavigationOperation(operationId)) capture(cause);
+      }
+    } finally {
+      if (isCurrentNavigationOperation(operationId)) sessionLoadingRef.current = false;
+    }
+  }, [applyBootstrap, bootstrap, capture, host, isCurrentNavigationOperation, patchBootstrap]);
+  const prepareSessionHandoff = useCallback(async () => {
+    const sourceId = activeSessionIdRef.current;
+    const snapshot = bootstrapRef.current;
+    if (!host || !sourceId || !snapshot || sessionLoadingRef.current || handoffPending
+      || (handoffRef.current && !handoffRef.current.failed)) return;
+    const source = snapshot.conversationSpaces.sessions.find((entry) => entry.sessionId === sourceId);
+    if (!source || source.mode !== snapshot.conversationSpaces.activeMode) return;
+    const target = source.mode === 'chat' ? 'code' : 'chat';
+    const prior = handoffRef.current;
+    const retry = !!prior?.failed && prior.sourceId === sourceId && prior.target === target;
+    if (prior && !retry) void host.cancelSessionHandoff(prior.requestId).catch(() => undefined);
+    const requestId = retry ? prior!.requestId : crypto.randomUUID();
+    const operation = navigationOperationRef.current;
+    handoffRef.current = { requestId, sourceId, target, failed: false };
+    setHandoffRetrySource(null);
+    setHandoffPending(true);
+    let failed = false;
+    try {
+      const result = await host.prepareSessionHandoff(sourceId, target, requestId, retry);
+      if (!result || handoffRef.current?.requestId !== requestId || !isCurrentNavigationOperation(operation)
+        || activeSessionIdRef.current !== sourceId) return;
+      const draft = result.snapshot.activeSession ?? result.snapshot.settings.activeSession;
+      if (!draft || draft.mode !== target || draft.projectId !== null) throw new Error('The handoff draft is unavailable.');
+      applyBootstrap(result.snapshot);
+      setLinkDraft({ sessionId: draft.sessionId, text: result.summary, requestId });
+    } catch (cause) {
+      if (handoffRef.current?.requestId === requestId && isCurrentNavigationOperation(operation)
+        && activeSessionIdRef.current === sourceId) {
+        failed = true;
+        handoffRef.current = { requestId, sourceId, target, failed: true };
+        setHandoffRetrySource(sourceId);
+        capture(cause);
+      }
+    } finally {
+      if (handoffRef.current?.requestId === requestId) {
+        if (!failed) handoffRef.current = null;
+        setHandoffPending(false);
+      }
+    }
+  }, [applyBootstrap, capture, handoffPending, host, isCurrentNavigationOperation]);
+
+  const cancelSessionHandoff = useCallback(async () => {
+    const pending = handoffRef.current;
+    if (!host || !pending) return;
+    handoffRef.current = null;
+    setHandoffRetrySource(null);
+    setHandoffPending(false);
+    await host.cancelSessionHandoff(pending.requestId).catch(capture);
+  }, [capture, host]);
+
+  const openHandoffSource = useCallback(async (source: import('../../shared/conversationSpaces').HandoffBacklink) => {
+    if (!host || sessionLoadingRef.current) return;
+    const operation = beginNavigationOperation();
+    const owner = bootstrapRef.current?.conversationSpaces.sessions.find((entry) => entry.sessionId === source.sourceSessionId
+      && entry.mode === source.sourceMode);
+    const projectPath = owner?.projectPath ?? source.sourceProjectPath;
+    const pending = { projectPath, sessionId: source.sourceSessionId, mode: source.sourceMode };
+    pendingSessionRef.current = pending;
+    setPendingSession(pending);
+    setSessionReady(false);
+    sessionLoadingRef.current = true;
+    try {
+      await host.switchConversationSpace(source.sourceMode);
+      if (!isCurrentNavigationOperation(operation)) return;
+      const snapshot = await host.openSession(projectPath, source.sourceSessionId);
+      if (!isCurrentNavigationOperation(operation)) return;
+      pendingSessionRef.current = null;
+      setPendingSession(null);
+      applyBootstrap(snapshot);
+    } catch (cause) {
+      if (isCurrentNavigationOperation(operation)) {
+        pendingSessionRef.current = null;
+        setPendingSession(null);
+        try { const snapshot = await host.bootstrap(); if (isCurrentNavigationOperation(operation)) applyBootstrap(snapshot); } catch { /* retain navigation error */ }
+        if (isCurrentNavigationOperation(operation)) capture(cause);
+      }
+    } finally {
+      if (isCurrentNavigationOperation(operation)) sessionLoadingRef.current = false;
+    }
+  }, [applyBootstrap, beginNavigationOperation, capture, host, isCurrentNavigationOperation]);
+
   const setModel = useCallback((model: string) => command({ type: 'set_model', model }), [command]);
   const setReasoningSelection = useCallback((selection: ReasoningSelectionDto) => command({ type: 'set_reasoning_selection', selection }), [command]);
   const setFastMode = useCallback((enabled: boolean) => command({ type: 'set_fast_mode', enabled }), [command]);
@@ -2491,15 +2684,19 @@ export function useBridge(): UseBridge {
     let cancelled = false;
     void host?.scheduled?.scopes().then((scopes) => { if (!cancelled) setRemoteScheduledScopes(scopes); }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [host, bootstrap?.settings.projects, scheduledScopesRevision]);
-  const scheduledScopes = useMemo<ScheduledScope[]>(() => remoteScheduledScopes ?? [
-    { id: 'global', label: 'No project' },
-    ...(bootstrap?.settings.projects ?? []).map((path) => ({ id: path, projectPath: path, label: path.split('/').filter(Boolean).pop() ?? path })),
-  ], [bootstrap?.settings.projects, remoteScheduledScopes]);
+  }, [host, bootstrap?.settings.projects, bootstrap?.conversationSpaces.activeMode, scheduledScopesRevision]);
+  const scheduledScopes = useMemo<ScheduledScope[]>(() => {
+    const spaces = bootstrap?.conversationSpaces;
+    const scopes: ScheduledScope[] = remoteScheduledScopes ?? [
+      { id: 'global', label: 'No project' },
+      ...(bootstrap?.settings.projects ?? []).map((path) => ({ id: path, projectPath: path, label: path.split('/').filter(Boolean).pop() ?? path })),
+    ];
+    return scopes.filter((scope) => !scope.projectPath || (spaces && spaces.projects[scope.projectPath]?.includes(spaces.activeMode)));
+  }, [bootstrap?.settings.projects, bootstrap?.conversationSpaces, remoteScheduledScopes]);
   const scheduledContext = useCallback(async (scopeId: string): Promise<ScheduledContext> => {
     if (!host?.scheduled) throw new Error('Scheduled task service unavailable.');
     return host.scheduled.context(scopeId);
-  }, [host]);
+  }, [host, bootstrap?.conversationSpaces.activeMode]);
   const manageScheduled = useCallback(async (scopeId: string, request: CronRequestDto) => {
     if (!host?.scheduled) throw new Error('Scheduled task service unavailable.');
     return host.scheduled.manage(scopeId, request);
@@ -2592,6 +2789,7 @@ export function useBridge(): UseBridge {
     audioSnapshot,
     audioRealtimeState,
     audioRealtimeCommand,
+    audioRetainFlow,
     mcpServersEvent,
     skillsEvent,
     skillCatalogEvent,
@@ -2709,7 +2907,8 @@ export function useBridge(): UseBridge {
     refresh,
     newSession,
     resumeSession,
-    setSessionMode,
+    switchConversationSpace,
+    handoffPending, handoffRetryAvailable: handoffRetrySource === activeSessionId, prepareSessionHandoff, cancelSessionHandoff, openHandoffSource,
     setModel,
     setReasoningSelection,
     setFastMode,

@@ -3,6 +3,8 @@ package com.lingxi.code.model
 import com.lingxi.code.isBoundToScope
 import com.lingxi.code.isRestorableSession
 import com.lingxi.code.shouldAttemptModeRestore
+import com.lingxi.code.shouldPersistActiveSession
+import com.lingxi.code.sessionLinkModeMatchesOwner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -35,8 +37,7 @@ class SessionModeRoutingTest {
             uuid = sessionId, title = "Chat", messageCount = 1,
             relativeTime = "", mode = SessionMode.Chat,
         )
-        // The saved current mode may still be Code while the catalog already
-        // shows the pending Chat selection. Mode must not disqualify the row.
+        // Restoration uses the exact session identity and its workspace.
         assertTrue(isRestorableSession("sess:$sessionId", row.uuid, "/work/project", "/work/project"))
         assertFalse(isRestorableSession(sessionId, row.uuid, "/work/other", "/work/project"))
         assertFalse(isRestorableSession("session-b", row.uuid, "/work/project", "/work/project"))
@@ -52,34 +53,20 @@ class SessionModeRoutingTest {
     }
 
     @Test
-    fun `persisted session stays resumable before its catalog row arrives`() {
-        val target = persistedSessionTarget(
-            sessionId = "session-chat",
-            catalogRow = null,
-        ) ?: throw AssertionError("a stored session id must remain a resume target")
-
-        assertEquals("session-chat", target.ref.id)
-        assertEquals("", target.ref.title)
-        assertTrue(
-            "resume-empty is safe for both empty and populated transcripts and avoids guessing",
-            target.resumeEmpty,
-        )
+    fun `an unknown owner mode cannot be persisted as code`() {
+        val key = "global#code"
+        assertFalse(shouldPersistActiveSession(true, "session", null, SessionMode.Code, key, key))
+        assertTrue(shouldPersistActiveSession(true, "session", SessionMode.Code, SessionMode.Code, key, key))
     }
 
     @Test
-    fun `catalog metadata enriches a persisted session target`() {
-        val target = persistedSessionTarget(
-            sessionId = "session-code",
-            catalogRow = SessionRow(
-                uuid = "session-code",
-                title = "Build release",
-                messageCount = 4,
-                relativeTime = "刚刚",
-                mode = SessionMode.Code,
-            ),
-        ) ?: throw AssertionError("expected a resume target")
-
-        assertEquals(SessionRef("session-code", "Build release"), target.ref)
-        assertFalse(target.resumeEmpty)
+    fun `session links require a mode matching their known owner`() {
+        assertFalse(sessionLinkModeMatchesOwner(null, SessionMode.Chat, SessionMode.Chat, true))
+        assertFalse(sessionLinkModeMatchesOwner(SessionMode.Code, SessionMode.Chat, null, false))
+        assertFalse(sessionLinkModeMatchesOwner(SessionMode.Chat, null, null, true))
+        assertTrue(sessionLinkModeMatchesOwner(SessionMode.Chat, SessionMode.Chat, SessionMode.Chat, true))
+        // Scheduled sessions without a UI index are checked by expectedMode on engine resume.
+        assertTrue(sessionLinkModeMatchesOwner(SessionMode.Chat, null, null, false))
     }
+
 }

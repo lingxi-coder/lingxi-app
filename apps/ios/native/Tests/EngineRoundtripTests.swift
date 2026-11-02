@@ -197,7 +197,7 @@ import XCTest
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: snapshot.defaultModelID ?? "",
-                sessionMode: .code,
+                sessionMode: .code, initialSessionId: nil,
                 visionDelegationEnabled: snapshot.visionDelegationEnabled,
                 appSandboxRoot: sandbox.path,
                 projectCwd: nil,
@@ -416,6 +416,7 @@ import XCTest
             let userUUID = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
             let assistantUUID = "cccccccc-3333-4333-8333-cccccccccccc"
             let rows: [[String: Any]] = [
+                ["type": "fixed-session-mode", "sessionId": sessionID, "sessionMode": "code"],
                 ["type": "user", "uuid": userUUID, "parentUuid": NSNull(),
                  "sessionId": sessionID, "timestamp": "2026-05-25T12:00:00.000Z",
                  "cwd": cwd, "version": "0.6.0", "isSidechain": false, "userType": "external",
@@ -439,7 +440,7 @@ import XCTest
                 share: ShareImpl(), notifications: NotificationImpl(),
                 clipboard: ClipboardImpl(), permissions: NoopPermissionSink(), mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
                 secureStorage: nil, deviceControl: nil)
-            try await handle.submit(command: .resumeSession(sessionId: sessionID, cwd: nil))
+            try await handle.submit(command: .resumeSession(sessionId: sessionID, cwd: nil, expectedMode: .code))
             var restoredMessages: [MessageDto]?
             for _ in 0..<200 {
                 restoredMessages = listener.events.compactMap { event -> [MessageDto]? in

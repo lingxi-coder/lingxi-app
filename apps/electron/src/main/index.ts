@@ -9,7 +9,8 @@ import { LocalAppAgentError } from './local-apps/agentPolicy.js';
 import { configureNativeLocale, nativeTr, onNativeLocaleChange } from '../shared/nativeLocale.js';
 import { persistInterfaceLocale, restoreInterfaceLocale } from './localePreferences.js';
 import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
-import { installDeepLinks } from './deepLinks.js';
+import { installDeepLinks, workspaceLinkKey, type SessionLinkOwner } from './deepLinks.js';
+import { isSessionId } from './sessionIdentity.js';
 import { installCrashReporting } from './crashReporting.js';
 import { AccountService } from './account.js';
 import { TeamsService } from './teams/service.js';
@@ -73,7 +74,7 @@ import { ProviderAudioHost } from './audio/providerAudioHost.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { audioConfigurationDefaults } from '../shared/generatedAudioConfiguration.js';
 import { TerminalManager } from './terminal.js';
-import { HostController } from './host.js';
+import { HostController, resolveSavedConversationTranscript } from './host.js';
 import { HostNotifier } from './notifications.js';
 import { notificationPresentation } from './notificationPresentation.js';
 import { BOT_PERMISSION_TIMEOUT_SECS, DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic, resolveModBunExecutable } from './host-utils.js';
@@ -158,13 +159,14 @@ function quitIfNothingNeedsTheApp(): void {
 }
 function getMainWindow(): BrowserWindow | undefined { return [...mainWindows].find(window => !window.isDestroyed()); }
 let deepLinkProjects: () => string[] = () => [];
+let resolveDeepLinkSession: (sessionId: string, projectPath?: string, workspaceKey?: string) => Promise<SessionLinkOwner | undefined> = async () => undefined;
 let resolveDeepLinkReady: () => void;
 const deepLinkReady = new Promise<void>(resolve => { resolveDeepLinkReady = resolve; });
 const deepLinks = installDeepLinks(() => deepLinkProjects(), () => {
   let window = getMainWindow();
   if (!window && host) { createWindow(); window = getMainWindow(); }
   if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); }
-}, () => deepLinkReady);
+}, () => deepLinkReady, (...args) => resolveDeepLinkSession(...args));
 
 
 /**
@@ -520,11 +522,18 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       ? bots.launchSettings(projectPath, ref.sessionId) : sessionCatalog.workspaceSettings(projectPath),
     appVersion: app.getVersion(),
     ...ownerPreferenceHooks(settings, (ref) => bots?.ownsWorkspace(ref.projectPath) === true),
-    getSavedSessionMode: (ref) => bots?.ownsWorkspace(ref.projectPath) ? 'code' : settings.getLastSessionMode(),
-    onSessionModeSelected: (mode, ref) => {
-      if (bots?.ownsWorkspace(ref.projectPath)) return false;
-      settings.setLastSessionMode(mode);
-      return true;
+    resolveSessionMode: async (ref) => {
+      const owner = settings.conversationSpaces.find(ref);
+      if (owner) return owner.mode;
+      const bot = bots?.routineBotFor(ref.projectPath);
+      return (await (bot ? bot.catalog() : sessionCatalog).find(ref.projectPath, ref.sessionId))?.mode;
+    },
+    resolveSavedTranscript: (ref) => bots?.ownsWorkspace(ref.projectPath)
+      ? bots.resolveSavedTranscript(ref) : resolveSavedConversationTranscript(settings, sessionCatalog, ref),
+    captureSessionSource: async (ref, runtime, scheduled) => {
+      if (bots?.ownsWorkspace(ref.projectPath)) return bots.captureSessionSource(ref, runtime);
+      if (!host) throw new Error('Desktop host is unavailable.');
+      return host.rememberCreatedSessionSource(ref, runtime, scheduled);
     },
     notifier,
     onCronRunRequested: (runtime, event) => scheduled ? scheduled.run(runtime, event.run_id, event.task) : Promise.reject(new Error('Scheduled task service unavailable')),
@@ -558,10 +567,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
     codexTokens,
     invalidateLaunchConfigCache: () => launchCache.invalidate(),
-    onFirstPromptSent: (ref) => {
+    onFirstPromptSent: (ref, isActive) => {
       // A Bot's session is not one of the owner's: it is neither the one to restore at startup nor one to share.
       if (bots?.ownsWorkspace(ref.projectPath)) return;
-      settings.setActiveSession(ref);
+      if (isActive) settings.setActiveSession(ref);
+      host?.commitConversationDraft(ref);
       // `remoteControlAtStartup`: a new chat starts shared with the user's other devices.
       try { remotePolicy?.sessionCreated(ref); } catch (error) { diagnostics.add('warn', 'host', `remote control: ${sanitizeDiagnostic(error)}`); }
     },
@@ -995,6 +1005,24 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     diagnostics.add('warn', 'host', `inline visualizations unavailable: ${sanitizeDiagnostic(error)}`);
   }
   deepLinkProjects = () => settings.getPublic().projects;
+  resolveDeepLinkSession = async (sessionId, requestedPath, requestedKey) => {
+    if (!isSessionId(sessionId)) return undefined;
+    sessionId = sessionId.toLowerCase();
+    const owner = settings.conversationSpaces.findBySessionId(sessionId);
+    const scheduledOwner = settings.scheduledSessionWorkspace(sessionId);
+    let projectPath = owner?.projectPath ?? scheduledOwner?.projectPath ?? requestedPath;
+    if (!projectPath && requestedKey === 'global') projectPath = settings.conversationSpaces.globalWorkspace;
+    if (!projectPath && requestedKey) projectPath = settings.getPublic().projects.find((path) => {
+      try { return workspaceLinkKey(path) === requestedKey; } catch { return false; }
+    });
+    if (!projectPath || (requestedPath && requestedPath !== projectPath)) return undefined;
+    if (!owner && !scheduledOwner && projectPath !== settings.conversationSpaces.globalWorkspace && !settings.hasProject(projectPath)) return undefined;
+    const workspaceKey = scheduledOwner ? 'scheduled' : owner?.projectId === null || projectPath === settings.conversationSpaces.globalWorkspace
+      ? 'global' : workspaceLinkKey(owner?.projectId ?? projectPath);
+    if (requestedKey && requestedKey !== workspaceKey) return undefined;
+    const mode = owner?.mode ?? bridge?.get(sessionId)?.sessionMode ?? (await sessionCatalog.find(projectPath, sessionId))?.mode;
+    return mode ? { projectPath, workspaceKey, mode } : undefined;
+  };
   deepLinks.register();
   desktopUpdates = installDesktopUpdates({
     currentVersion: app.getVersion(),
@@ -1009,13 +1037,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     powerMonitor.on('resume', () => { void desktopUpdates?.check(); });
   }
 
-  const publicSettings = settings.getPublic();
-  const activeProject = publicSettings.activeProject;
-  const foregroundRestore = activeProject
-    ? host.restoreProjectSession(activeProject, publicSettings.activeSession).then(() => undefined, (error: unknown) => {
-        diagnostics.add('error', 'host', sanitizeDiagnostic(error));
-      })
-    : Promise.resolve();
+  const foregroundRestore = host.restoreConversationNavigation().catch((error: unknown) => {
+    diagnostics.add('error', 'host', sanitizeDiagnostic(error));
+  });
   // Scheduled-task controllers are engine sessions too. Started beside the
   // restored chat, every runtime contended for CPU, disk and the credential
   // broker; start them once the foreground chat is up, or after a bound so a

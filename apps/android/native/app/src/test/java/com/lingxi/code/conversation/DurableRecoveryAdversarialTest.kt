@@ -128,37 +128,25 @@ class DurableRecoveryAdversarialTest {
         )
     }
 
-    /**
-     * The same reconnect path that has always been allowed to cross the parked
-     * guard (`switchWorkspaceSource`'s inner transition / provider reconnect)
-     * must also stay silent. This pins the `!allowInactiveWaitingRecovery &&`
-     * short-circuit rather than the notification caller.
-     */
     @Test
-    fun aRecoveryAllowedTransitionDoesNotResolveTheRefusalCopy() = runTest(dispatcher) {
+    fun aParkedRecoveryKeepsItsOwnerDuringReconnect() = runTest(dispatcher) {
         val ids = mutableListOf<Int>()
         val source = FakeSource()
         val vm = parkedViewModel(source, ids)
 
-        // The engine reconnect path (`ensureSource`) re-establishes the visible
-        // session with allowInactiveWaitingRecovery = true precisely BECAUSE a
-        // parked checkpoint must not block it. The refusal must stay behind
-        // that flag's short-circuit: evaluating it first still routes, but
-        // paints "finish the background turn first" over a reconnect the user
-        // never asked for.
+        // Rebuilding a parked owner could abandon its admitted turn. The
+        // reconnect therefore waits instead of constructing another engine.
         val replacement = FakeSource()
-        vm.ensureSource(generation = 1) { replacement }
+        var constructed = false
+        vm.ensureSource(generation = 1) { constructed = true; replacement }
         runCurrent()
 
         assertFalse(
             "the reconnect resolved the parked-refusal copy: $ids",
             ids.contains(R.string.chat_error_finish_background_turn_first),
         )
-        assertEquals(
-            "the reconnect must still re-establish the visible session",
-            listOf("resume-empty:session-a"),
-            replacement.sessionOperations,
-        )
+        assertFalse("a parked owner must not be rebuilt", constructed)
+        assertTrue(replacement.sessionOperations.isEmpty())
         assertTrue(
             "the announced session's own checkpoint must survive its own resume",
             vm.state.value.durableRecoveryBlocked,
@@ -203,7 +191,7 @@ class DurableRecoveryAdversarialTest {
     private fun parkedViewModel(source: FakeSource, ids: MutableList<Int>): ChatViewModel {
         val vm = ChatViewModel(source, strings = recordingStrings(ids))
         vm.applyActivatedSession(
-            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
         )
         vm.reduceClientEvent(
             ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.WAITING_FOR_USER)),
@@ -244,10 +232,6 @@ class DurableRecoveryAdversarialTest {
 
         override suspend fun resumeSession(uuid: String) {
             sessionOperations += "resume:$uuid"
-        }
-
-        override suspend fun resumeEmptySession(uuid: String, title: String) {
-            sessionOperations += "resume-empty:$uuid"
         }
 
         override suspend fun newSession() {

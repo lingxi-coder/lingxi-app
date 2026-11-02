@@ -1,647 +1,399 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionRuntime } from '../src/main/bridge.js';
 import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
-import { CH_COMMAND, ipcMain } from '../src/main/bridgeIpc.js';
 import { SettingsStore } from '../src/main/settings.js';
+import { CH_SESSION_NEW, CH_SESSION_OPEN, HostController } from '../src/main/host.js';
+import { CH_CONVERSATION_SPACE } from '../src/shared/conversationSpaces.js';
+import { CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_FINISH_LISTEN, CH_NATIVE_AUDIO_FLOW_LEASE, CH_NATIVE_AUDIO_OPERATION } from '../src/shared/nativeAudio.js';
+import { DiagnosticBuffer } from '../src/main/host-utils.js';
 import { validateClientCommand } from '../src/main/validation.js';
 
 const sessionId = '11111111-2222-4333-8444-555555555555';
-const tick = () => new Promise(resolve => setImmediate(resolve));
+const targetId = '22222222-3333-4444-8555-666666666666';
+function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes; }); return { promise, resolve }; }
 
-test('the bridge launch passes the device mode only for an uninitialized draft', { skip: process.platform === 'win32' }, async t => {
+test('draft launch always carries its fixed owner mode', { skip: process.platform === 'win32' }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'lingxi-draft-mode-'));
-  const serverBin = join(root, 'capture-arguments');
-  writeFileSync(serverBin, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)));\n');
-  chmodSync(serverBin, 0o700);
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const [mode, initialized] of [['chat', false], ['code', false], ['chat', true], [undefined, false]] as const) {
-    const runtime = new SessionRuntime({ sessionId, projectPath: root, serverBin,
-      launchConfig: () => ({ workspace: root, trusted: true }) }, mode, initialized);
-    try {
-      const child = (runtime as any).spawnServer({ workspace: root, trusted: true }, join(root, 'bridge'));
-      let output = '', errors = '';
-      child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); });
-      child.stderr.on('data', (chunk: Buffer) => { errors += chunk.toString(); });
-      const [code] = await once(child, 'close');
-      assert.equal(code, 0, errors);
-      const args = JSON.parse(output) as string[];
-      const initial = args.indexOf('--initial-conversation-mode');
-      assert.equal(args.includes('--restore-draft'), mode !== undefined);
-      if (mode && !initialized) {
-        assert.ok(initial >= 0);
-        assert.equal(args[initial + 1], mode);
-      } else {
-        assert.equal(initial, -1, 'restored and historical sessions retain their own mode');
-      }
-    } finally { await runtime.dispose(); }
+  const serverBin = join(root, 'capture-arguments');
+  writeFileSync(serverBin, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)));\n'); chmodSync(serverBin, 0o700);
+  for (const [mode, durableAnchor] of [['chat', true], ['chat', false], ['code', false], [undefined, false]] as const) {
+    const runtime = new SessionRuntime({ sessionId, projectPath: root, serverBin, launchConfig: () => ({ workspace: root, trusted: true }) }, mode, durableAnchor);
+    const child = (runtime as any).spawnServer({ workspace: root, trusted: true }, join(root, 'bridge'));
+    let output = ''; child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+    assert.equal((await once(child, 'close'))[0], 0);
+    const args = JSON.parse(output) as string[], initial = args.indexOf('--initial-conversation-mode');
+    assert.equal(args.includes('--restore-draft'), mode !== undefined);
+    assert.equal(args.includes('--scheduled-durable-anchor'), durableAnchor);
+    if (mode) { assert.ok(initial >= 0); assert.equal(args[initial + 1], mode); } else assert.equal(initial, -1);
+    await runtime.dispose();
   }
 });
 
-test('mode commands persist the device preference only after the same session confirms', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'lingxi-session-mode-'));
+test('a new scheduled owner is not handed to binding until runtime readiness', async () => {
+  const ready = deferred<void>();
+  const originalStart = SessionRuntime.prototype.start;
+  SessionRuntime.prototype.start = async function () { await ready.promise; };
+  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, trusted: true }) });
+  let bound = false;
   try {
-    const store = new SettingsStore(dir);
-    const sent: unknown[] = [];
-    const client = Object.assign(new EventEmitter(), { sendCommand: (command: unknown) => sent.push(command) });
-    const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
-      launchConfig: () => ({ workspace: '/workspace', trusted: true }),
-      onSessionModeSelected: mode => store.setLastSessionMode(mode) });
-    runtime.sessionMode = 'code';
-    Object.assign(runtime, { client, activeWorkspace: '/workspace', activeWorkspaceTrusted: true, activeTurn: true });
-    (runtime as any).wireClient(client, 0);
-    const switching = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-    await tick();
-    assert.deepEqual(sent, [{ type: 'set_session_mode', mode: 'chat' }]);
-    assert.equal(store.getLastSessionMode(), 'code');
-    client.emit('event', { type: 'session_mode_changed', session_id: 'other', mode: 'chat', revision: 1 });
-    assert.equal(store.getLastSessionMode(), 'code');
-    client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'code', pending_mode: 'chat', revision: 1 });
-    await switching;
-    assert.equal(runtime.sessionMode, 'code');
-    assert.deepEqual(runtime.replaySnapshot().map(({ event }) => event), [{ type: 'session_mode_changed', session_id: sessionId, mode: 'code', pending_mode: 'chat', revision: 1 }]);
-    assert.equal(new SettingsStore(dir).getLastSessionMode(), 'chat');
-    client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'chat', revision: 1 });
-    assert.equal(runtime.sessionMode, 'chat');
-    client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'code', pending_mode: 'chat', revision: 1 });
-    assert.equal(runtime.sessionMode, 'chat', 'a delayed pending echo cannot undo an applied boundary');
-    assert.deepEqual(runtime.replaySnapshot().map(({ event }) => event), [{ type: 'session_mode_changed', session_id: sessionId, mode: 'chat', revision: 1 }]);
-    const failing = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
-    await tick();
-    client.emit('event', { type: 'error', kind: { type: 'internal' }, message: 'set_session_mode failed: disk error' });
-    await assert.rejects(failing, /disk error/);
-    assert.equal(new SettingsStore(dir).getLastSessionMode(), 'chat');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test('overlapping mode choices serialize without interrupting the running turn', async () => {
-  const commands: unknown[] = [];
-  const client = Object.assign(new EventEmitter(), {
-    sendCommand: (command: unknown) => commands.push(command),
-    cancel: () => commands.push('cancel'),
-  });
-  let preference: Mode = 'code';
-  const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
-    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
-    onSessionModeSelected: mode => { preference = mode; } });
-  Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true, activeTurn: true });
-  (runtime as any).wireClient(client, 0);
-
-  const chat = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-  const code = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
-  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }]);
-  assert.throws(() => runtime.sendPrompt('next'), /conversation mode/);
-  assert.equal(runtime.turnActive, true);
-
-  client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'code', pending_mode: 'chat', revision: 1 });
-  assert.equal(runtime.hasActiveWork, true, 'the queued choice pins the runtime between acknowledgements');
-  assert.throws(() => runtime.sendPrompt('next'), /conversation mode/);
-  await chat;
-  await tick();
-  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }, { type: 'set_session_mode', mode: 'code' }]);
-  client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'code', revision: 2 });
-  await code;
-  client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'code', pending_mode: 'chat', revision: 1 });
-  assert.equal(preference, 'code');
-  assert.equal(runtime.sessionMode, 'code');
-  assert.deepEqual(runtime.replaySnapshot().map(({ event }) => event), [
-    { type: 'session_mode_changed', session_id: sessionId, mode: 'code', revision: 2 },
-  ]);
-  assert.equal(runtime.turnActive, true);
-  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }, { type: 'set_session_mode', mode: 'code' }]);
-  client.emit('event', { type: 'text_delta', text: 'The original turn continues.' });
-  assert.equal(runtime.turnActive, true);
-  client.emit('event', { type: 'turn_ended', outcome: 'end_turn', stop_reason: 'end_turn',
-    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '$0' } });
-  assert.equal(runtime.turnActive, false, 'the original turn reaches its own terminal event');
-});
-
-test('a failed mode choice rejects its caller and does not discard the next choice', async () => {
-  const commands: unknown[] = [];
-  const client = Object.assign(new EventEmitter(), { sendCommand: (command: unknown) => commands.push(command) });
-  let preference: Mode = 'code';
-  const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
-    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
-    onSessionModeSelected: mode => { preference = mode; } });
-  Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true });
-  (runtime as any).wireClient(client, 0);
-
-  const failed = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-  const latest = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
-  const failedAssertion = assert.rejects(failed, /disk error/);
-  client.emit('event', { type: 'error', kind: { type: 'internal' }, message: 'set_session_mode failed: disk error' });
-  assert.equal(runtime.hasActiveWork, true, 'a queued choice remains active after the preceding failure');
-  assert.throws(() => runtime.sendPrompt('next'), /conversation mode/);
-  await failedAssertion;
-  await tick();
-  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }, { type: 'set_session_mode', mode: 'code' }]);
-  client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'code', revision: 0 });
-  await latest;
-  assert.equal(preference, 'code');
-});
-
-test('connection loss rejects both active and queued mode choices without sending the queued command', async () => {
-  const commands: unknown[] = [];
-  const client = Object.assign(new EventEmitter(), { sendCommand: (command: unknown) => commands.push(command) });
-  const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
-    launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
-  Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true });
-  (runtime as any).wireClient(client, 0);
-
-  const first = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-  const second = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
-  const firstAssertion = assert.rejects(first, /interrupted/);
-  const secondAssertion = assert.rejects(second, /interrupted/);
-  (runtime as any).setState({ status: 'disconnected' });
-  await Promise.all([firstAssertion, secondAssertion]);
-  await tick();
-  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }]);
-  assert.equal(runtime.hasActiveWork, false);
-});
-
-test('a Skill or MCP slash command cannot pass a mode selection during credential loading', async t => {
-  for (const raw of ['/review inspect this file', '/mcp__server__prompt summarize']) {
-    await t.test(raw, async () => {
-      const commands: unknown[] = [];
-      const client = Object.assign(new EventEmitter(), {
-        sendCommand: (command: unknown) => commands.push(command),
-        cancel: () => commands.push('cancel'),
-      });
-      const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
-        launchConfig: () => ({ workspace: '/workspace', trusted: true }),
-        resolveOpenAiOAuth: async () => undefined });
-      Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true,
-        selectedModelReference: 'openai-chatgpt/test' });
-      (runtime as any).wireClient(client, 0);
-      let release!: () => void;
-      const credentials = new Promise<void>(resolve => { release = resolve; });
-      (runtime as any).ensureCodexToken = () => credentials;
-
-      const slash = runtime.dispatchCommand({ type: 'run_slash_command', raw, images: [] });
-      const selecting = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-      release();
-      await assert.rejects(slash, /conversation mode/);
-      assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }]);
-
-      client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'chat', revision: 1 });
-      await selecting;
-      await runtime.dispatchCommand({ type: 'run_slash_command', raw, images: [] });
-      assert.deepEqual(commands, [
-        { type: 'set_session_mode', mode: 'chat' },
-        { type: 'run_slash_command', raw, images: [] },
-      ]);
-    });
-  }
-});
-
-test('Fusion cannot dispatch or record an asynchronous preparation failure while mode selection is outstanding', async t => {
-  for (const failCredentials of [false, true]) {
-    await t.test(failCredentials ? 'credentials fail' : 'credentials succeed', async () => {
-      const commands: any[] = [];
-      let identityCommits = 0;
-      const client = Object.assign(new EventEmitter(), {
-        sendCommand: (command: unknown) => commands.push(command),
-        cancel: () => commands.push('cancel'),
-      });
-      const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
-        launchConfig: () => ({ workspace: '/workspace', trusted: true }),
-        resolveOpenAiOAuth: async () => undefined,
-        onFirstPromptSent: () => { identityCommits++; } });
-      Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true });
-      (runtime as any).wireClient(client, 0);
-      (runtime as any).resolveFusionStrategy = async () => ({
-        reference: { scope: 'user', id: 'review' }, name: 'Review', revision: 'aabb', config: {},
-      });
-      let finish!: () => void;
-      const credentials = new Promise<void>((resolve, reject) => {
-        finish = () => failCredentials ? reject(new Error('credential unavailable')) : resolve();
-      });
-      (runtime as any).ensureFusionCodexToken = () => credentials;
-      const slash = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion inspect', images: [] });
-      await tick();
-      const selecting = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-      finish();
-      await assert.rejects(slash, /conversation mode/);
-      assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }]);
-      assert.equal(identityCommits, 0);
-      assert.equal((runtime as any).pendingPromptHydrations.size, 0);
-      client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'chat', revision: 1 });
-      await selecting;
-      (runtime as any).ensureFusionCodexToken = async () => undefined;
-      await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion inspect', images: [] });
-      assert.deepEqual(commands, [
-        { type: 'set_session_mode', mode: 'chat' },
-        { type: 'run_slash_command', raw: '/fusion --strategy-revision aabb inspect', images: [] },
-      ]);
-      assert.equal(identityCommits, 1);
-    });
-  }
-});
-
-test('an asynchronously prepared slash model selection also waits for the mode boundary', async () => {
-  const commands: unknown[] = [];
-  const client = Object.assign(new EventEmitter(), { sendCommand: (command: unknown) => commands.push(command) });
-  const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
-    launchConfig: () => ({ workspace: '/workspace', trusted: true }), onModelSelected: () => undefined });
-  Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true });
-  (runtime as any).wireClient(client, 0);
-  let release!: () => void;
-  const credentials = new Promise<void>(resolve => { release = resolve; });
-  (runtime as any).ensureModelProviderCredential = () => credentials;
-  const slash = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/model example', images: [] });
-  const selecting = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-  release();
-  await assert.rejects(slash, /conversation mode/);
-  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }]);
-  assert.equal((runtime as any).pendingModelSwitch, undefined);
-  client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'chat', revision: 1 });
-  await selecting;
-  const retry = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/model example', images: [] });
-  await tick();
-  assert.deepEqual(commands, [
-    { type: 'set_session_mode', mode: 'chat' },
-    { type: 'run_slash_command', raw: '/model example', images: [] },
-  ]);
-  client.emit('event', { type: 'slash_command_result', display: 'Switched', is_error: false });
-  client.emit('event', { type: 'model_list', current: 'example', models: ['example'] });
-  await retry;
-});
-
-test('desktop command validation restricts the mode vocabulary and rejects extra fields', () => {
-  assert.deepEqual(validateClientCommand({ type: 'set_session_mode', mode: 'chat' }), { type: 'set_session_mode', mode: 'chat' });
-  assert.throws(() => validateClientCommand({ type: 'set_session_mode', mode: 'admin' }));
-  assert.throws(() => validateClientCommand({ type: 'set_session_mode', mode: 'chat', session_id: 'other' }));
-});
-
-
-type Mode = 'chat' | 'code';
-type ModeSnapshot = { mode: Mode; revision: number; pending_mode?: Mode };
-
-/** Exercise the real start/restart and manager logic with a persistent fake engine. */
-function installDraftEngines() {
-  const prototype = SessionRuntime.prototype as any;
-  const previousStart = prototype.startInternal;
-  const previousStop = prototype.stopBridge;
-  const durable = new Map<string, ModeSnapshot>();
-  const engines = new Map<string, { client: EventEmitter; commands: any[]; prompts: ModeSnapshot[] }[]>();
-  let holdSnapshots = false;
-  const held: (() => void)[] = [];
-  prototype.startInternal = async function () {
-    this.generation++;
-    this.draftModeRestorationRequired = this.draftSessionMode !== undefined;
-    const session = this.sessionId as string;
-    let snapshot = { ...(durable.get(session) ?? { mode: 'code', revision: 0 }) } as ModeSnapshot;
-    const commands: any[] = [];
-    const prompts: ModeSnapshot[] = [];
-    const client = Object.assign(new EventEmitter(), {
-      sendCommand: (command: any) => {
-        commands.push(command);
-        if (command.type === 'set_session_mode') {
-          if (command.mode !== (snapshot.pending_mode ?? snapshot.mode)) {
-            snapshot = { mode: snapshot.mode, revision: snapshot.revision + 1,
-              ...(command.mode !== snapshot.mode ? { pending_mode: command.mode } : {}) };
-            durable.set(session, { ...snapshot });
-          }
-          queueMicrotask(() => client.emit('event', { type: 'session_mode_changed', session_id: session, ...snapshot }));
-        } else if (command.type === 'get_context_manifest') {
-          const publish = () => client.emit('event', { type: 'session_mode_changed', session_id: session, ...snapshot });
-          if (holdSnapshots) held.push(publish); else queueMicrotask(publish);
-        }
-      },
-      sendPrompt: () => { prompts.push({ mode: snapshot.pending_mode ?? snapshot.mode, revision: snapshot.revision }); },
-      close: () => undefined,
-    });
-    const entries = engines.get(session) ?? [];
-    entries.push({ client, commands, prompts });
-    engines.set(session, entries);
-    this.activeWorkspace = this.projectPath;
-    this.activeWorkspaceTrusted = true;
-    this.wireClient(client, this.generation);
-    this.setState({ status: 'connected' });
-  };
-  prototype.stopBridge = async function () { this.generation++; this.client = null; };
-  return {
-    durable,
-    engines,
-    hold: () => { holdSnapshots = true; },
-    release: () => { holdSnapshots = false; for (const publish of held.splice(0)) publish(); },
-    restore: () => { prototype.startInternal = previousStart; prototype.stopBridge = previousStop; },
-  };
-}
-
-test('an evicted draft and the same runtime after restart recover their own durable profile before prompts', async () => {
-  const fake = installDraftEngines();
-  let preference: Mode = 'chat';
-  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
-    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
-    getSavedSessionMode: () => preference, onSessionModeSelected: mode => { preference = mode; } });
-  try {
-    const draft = await manager.newSession('/a');
-    const first = manager.require(draft);
-    await first.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
-    await first.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-    assert.deepEqual(fake.durable.get(draft.sessionId), { mode: 'code', pending_mode: 'chat', revision: 3 });
-    preference = 'code';
-    await manager.newSession('/b');
-    assert.equal(manager.get(draft.sessionId), undefined);
-
-    fake.hold();
-    const reopening = manager.newSession('/a');
-    await tick();
-    const reopened = manager.require(draft);
-    assert.throws(() => reopened.sendPrompt('too early'), /conversation mode/);
-    assert.deepEqual(fake.engines.get(draft.sessionId)!.at(-1)!.prompts, []);
-    fake.release();
-    assert.deepEqual(await reopening, draft);
-    const secondEngine = fake.engines.get(draft.sessionId)!.at(-1)!;
-    assert.deepEqual(secondEngine.commands, [{ type: 'get_context_manifest' }], 'restoring a draft must not write a new mode revision');
-    assert.equal(reopened.sessionMode, 'code');
-    assert.deepEqual(reopened.replaySnapshot().map(({ event }) => event), [
-      { type: 'session_mode_changed', session_id: draft.sessionId, mode: 'code', pending_mode: 'chat', revision: 3 },
-    ]);
-    assert.equal(preference, 'code', 'restoration must not change the last explicit device selection');
-
-    fake.hold();
-    const restarting = manager.restart(draft);
-    await tick();
-    assert.throws(() => reopened.sendPrompt('during restart'), /conversation mode/);
-    fake.release();
-    await restarting;
-    assert.strictEqual(manager.require(draft), reopened);
-    const thirdEngine = fake.engines.get(draft.sessionId)!.at(-1)!;
-    assert.deepEqual(thirdEngine.commands, [{ type: 'get_context_manifest' }]);
-    assert.deepEqual(reopened.replaySnapshot().map(({ event }) => event), [
-      { type: 'session_mode_changed', session_id: draft.sessionId, mode: 'code', pending_mode: 'chat', revision: 3 },
-    ]);
-    await reopened.sendPrompt('hello');
-    assert.deepEqual(thirdEngine.prompts, [{ mode: 'chat', revision: 3 }]);
-  } finally { await manager.dispose(); fake.restore(); }
-});
-
-test('a missing or regressed restored profile cannot admit a draft prompt', async () => {
-  const fake = installDraftEngines();
-  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
-    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
-    getSavedSessionMode: () => 'chat' });
-  try {
-    const draft = await manager.newSession('/a');
-    await manager.newSession('/b');
-    fake.durable.delete(draft.sessionId);
-    await assert.rejects(manager.newSession('/a'), /restored draft conversation mode/);
-    assert.deepEqual(fake.engines.get(draft.sessionId)!.at(-1)!.prompts, []);
-  } finally { await manager.dispose(); fake.restore(); }
-});
-
-test('a newer durable draft selection survives a lost acknowledgement without changing the device default', async () => {
-  const fake = installDraftEngines();
-  let preference: Mode = 'chat';
-  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
-    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
-    getSavedSessionMode: () => preference, onSessionModeSelected: mode => { preference = mode; } });
-  try {
-    const draft = await manager.newSession('/a');
-    await manager.newSession('/b');
-    // The engine persisted this selection after the connection was interrupted,
-    // so no successful explicit acknowledgement reached the device store.
-    fake.durable.set(draft.sessionId, { mode: 'code', revision: 2 });
-    await manager.newSession('/a');
-    const runtime = manager.require(draft);
-    assert.equal(runtime.sessionMode, 'code');
-    assert.equal(preference, 'chat');
-    assert.deepEqual(fake.engines.get(draft.sessionId)!.at(-1)!.commands, [{ type: 'get_context_manifest' }]);
-    await runtime.sendPrompt('hello');
-    assert.deepEqual(fake.engines.get(draft.sessionId)!.at(-1)!.prompts, [{ mode: 'code', revision: 2 }]);
-  } finally { await manager.dispose(); fake.restore(); }
-});
-
-test('same-UUID workspace remount carries an unsent draft and its durable mode revision', async () => {
-  const fake = installDraftEngines();
-  let preference: Mode = 'chat';
-  const manager = new SessionRuntimeManager({
-    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
-    getSavedSessionMode: () => preference, onSessionModeSelected: mode => { preference = mode; } });
-  try {
-    const source = await manager.newSession('/a');
-    const original = manager.require(source);
-    await original.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
-    await original.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-    preference = 'code';
-    const moved = { ...source, projectPath: '/b' };
-    const relocate = manager.prepareDraftRelocation(source, moved.projectPath);
-    relocate();
-    await manager.closeSession(source, { replacing: true });
-    const replacement = await manager.openSession(moved, true);
-    assert.notStrictEqual(replacement, original);
-    assert.deepEqual(await manager.newSession('/b'), moved);
-    assert.deepEqual(replacement.replaySnapshot().map(({ event }) => event), [
-      { type: 'session_mode_changed', session_id: source.sessionId, mode: 'code', pending_mode: 'chat', revision: 3 },
-    ]);
-    assert.deepEqual(fake.engines.get(source.sessionId)!.at(-1)!.commands, [{ type: 'get_context_manifest' }]);
-    assert.equal(preference, 'code');
-    await replacement.sendPrompt('continue');
-    assert.deepEqual(fake.engines.get(source.sessionId)!.at(-1)!.prompts, [{ mode: 'chat', revision: 3 }]);
-  } finally { await manager.dispose(); fake.restore(); }
-});
-
-test('a workspace remount cannot replace another project’s unsent draft', async () => {
-  const fake = installDraftEngines();
-  const manager = new SessionRuntimeManager({
-    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
-    getSavedSessionMode: () => 'chat' });
-  try {
-    const source = await manager.newSession('/a');
-    const target = await manager.newSession('/b');
-    assert.throws(() => manager.prepareDraftRelocation(source, '/b'), /already has an unsent draft/);
-    assert.deepEqual(await manager.newSession('/a'), source);
-    assert.deepEqual(await manager.newSession('/b'), target);
-  } finally { await manager.dispose(); fake.restore(); }
-});
-
-test('last explicit device mode follows selection order across runtimes and ignores failed choices', async () => {
-  let preference: Mode = 'code';
-  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
-    onSessionModeSelected: (mode, ref) => {
-      if (ref.projectPath === '/bot') return false;
-      preference = mode;
-    } });
-  const aRef = { projectPath: '/a', sessionId };
-  const bRef = { projectPath: '/b', sessionId: '22222222-3333-4444-8555-666666666666' };
-  const botRef = { projectPath: '/bot', sessionId: '33333333-3333-4444-8555-666666666666' };
-  const a = await manager.ensure(aRef, false);
-  const b = await manager.ensure(bRef, false);
-  const bot = await manager.ensure(botRef, false);
-  function connect(runtime: SessionRuntime) {
-    const client = Object.assign(new EventEmitter(), { sendCommand: () => undefined, close: () => undefined });
-    Object.assign(runtime, { activeWorkspace: runtime.projectPath, activeWorkspaceTrusted: true });
-    (runtime as any).wireClient(client, 0);
-    (runtime as any).setState({ status: 'connected' });
-    return client;
-  }
-  const ac = connect(a);
-  const bc = connect(b);
-  const botClient = connect(bot);
-  const ack = (client: EventEmitter, ref: typeof aRef, mode: Mode, revision: number) =>
-    client.emit('event', { type: 'session_mode_changed', session_id: ref.sessionId, mode, revision });
-  try {
-    const older = a.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-    const newer = b.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
-    ack(bc, bRef, 'code', 1);
-    await newer;
-    ack(ac, aRef, 'chat', 1);
-    await older;
-    assert.equal(preference, 'code', 'the earlier selection cannot overwrite a later successful one');
-
-    const earlierSuccess = a.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-    const laterFailure = b.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-    bc.emit('event', { type: 'error', kind: { type: 'internal' }, message: 'set_session_mode failed: disk error' });
-    await assert.rejects(laterFailure, /disk error/);
-    ack(ac, aRef, 'chat', 2);
-    await earlierSuccess;
-    assert.equal(preference, 'chat', 'a failed later intent does not suppress an earlier successful one');
-
-    const ownerSelection = a.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
-    const botSelection = bot.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-    ack(botClient, botRef, 'chat', 1);
-    await botSelection;
-    ack(ac, aRef, 'code', 3);
-    await ownerSelection;
-    assert.equal(preference, 'code', 'a later Bot selection cannot suppress the owner’s successful selection');
-  } finally { await manager.dispose(); }
-});
-
-test('a queued choice keeps its admission order against a later choice in another runtime', async () => {
-  let preference: Mode = 'code';
-  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
-    onSessionModeSelected: mode => { preference = mode; } });
-  const aRef = { projectPath: '/a', sessionId };
-  const bRef = { projectPath: '/b', sessionId: '22222222-3333-4444-8555-666666666666' };
-  const a = await manager.ensure(aRef, false);
-  const b = await manager.ensure(bRef, false);
-  function connect(runtime: SessionRuntime) {
-    const client = Object.assign(new EventEmitter(), { sendCommand: () => undefined, close: () => undefined });
-    Object.assign(runtime, { activeWorkspace: runtime.projectPath, activeWorkspaceTrusted: true });
-    (runtime as any).wireClient(client, 0);
-    (runtime as any).setState({ status: 'connected' });
-    return client;
-  }
-  const ac = connect(a), bc = connect(b);
-  try {
-    const first = a.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-    const queued = a.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
-    const latest = b.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-    bc.emit('event', { type: 'session_mode_changed', session_id: bRef.sessionId, mode: 'chat', revision: 1 });
-    await latest;
-    ac.emit('event', { type: 'session_mode_changed', session_id: aRef.sessionId, mode: 'chat', revision: 1 });
-    await first;
-    await tick();
-    ac.emit('event', { type: 'session_mode_changed', session_id: aRef.sessionId, mode: 'code', revision: 2 });
-    await queued;
-    assert.equal(preference, 'chat', 'a delayed acknowledgement cannot replace the later cross-runtime choice');
-  } finally { await manager.dispose(); }
-});
-
-test('IPC records selection order before waiting for another runtime to finish opening', async () => {
-  const handles = new Map<string, (...args: any[]) => any>();
-  const previousHandle = ipcMain.handle;
-  const previousRemove = ipcMain.removeHandler;
-  ipcMain.handle = ((channel: string, handler: (...args: any[]) => any) => { handles.set(channel, handler); }) as any;
-  ipcMain.removeHandler = ((channel: string) => { handles.delete(channel); }) as any;
-  let preference: Mode = 'chat';
-  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
-    onSessionModeSelected: mode => { preference = mode; } });
-  let release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  const aRef = { projectPath: '/a', sessionId };
-  const bRef = { projectPath: '/b', sessionId: '22222222-3333-4444-8555-666666666666' };
-  const a = await manager.ensure(aRef, false);
-  const b = await manager.ensure(bRef, false);
-  function connect(runtime: SessionRuntime) {
-    const client = Object.assign(new EventEmitter(), { sendCommand: () => undefined, close: () => undefined });
-    Object.assign(runtime, { activeWorkspace: runtime.projectPath, activeWorkspaceTrusted: true });
-    (runtime as any).wireClient(client, 0);
-    (runtime as any).setState({ status: 'connected' });
-    return client;
-  }
-  const ac = connect(a), bc = connect(b);
-  a.waitForLifecycle = () => gate;
-  const sender = Object.assign(new EventEmitter(), { mainFrame: { url: 'app://desktop/index.html' },
-    isDestroyed: () => false, send: () => undefined });
-  manager.registerWindow(sender as any, sender.mainFrame.url);
-  manager.registerIpc();
-  const event = { sender, senderFrame: sender.mainFrame };
-  try {
-    const earlier = handles.get(CH_COMMAND)!(event, aRef.sessionId, { type: 'set_session_mode', mode: 'chat' });
-    const later = handles.get(CH_COMMAND)!(event, bRef.sessionId, { type: 'set_session_mode', mode: 'code' });
-    await tick();
-    bc.emit('event', { type: 'session_mode_changed', session_id: bRef.sessionId, mode: 'code', revision: 1 });
-    await later;
-    release();
-    await tick();
-    ac.emit('event', { type: 'session_mode_changed', session_id: aRef.sessionId, mode: 'chat', revision: 1 });
-    await earlier;
-    assert.equal(preference, 'code');
+    const ref = { projectPath: '/workspace', sessionId, mode: 'chat' as const };
+    const work = manager.withBackgroundSession(ref, true, undefined, async runtime => {
+      assert.equal((runtime as any).scheduledDurableAnchor, true);
+      bound = true;
+    }, undefined, true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(bound, false);
+    ready.resolve(undefined);
+    await work;
+    assert.equal(bound, true);
+    await assert.rejects(manager.withBackgroundSession(ref, true, undefined, async () => {}, undefined, true), /already has a runtime owner/);
   } finally {
-    release();
+    ready.resolve(undefined);
+    SessionRuntime.prototype.start = originalStart;
     await manager.dispose();
-    ipcMain.handle = previousHandle;
-    ipcMain.removeHandler = previousRemove;
   }
 });
 
-test('an in-flight mode selection pins its session until the acknowledgement triggers cache trimming', async () => {
-  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
-    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
-  const aRef = { projectPath: '/a', sessionId };
-  const bRef = { projectPath: '/b', sessionId: '22222222-3333-4444-8555-666666666666' };
-  const a = await manager.ensure(aRef, false);
-  const client = Object.assign(new EventEmitter(), { sendCommand: () => undefined, close: () => undefined });
-  Object.assign(a, { activeWorkspace: '/a', activeWorkspaceTrusted: true });
-  (a as any).wireClient(client, 0);
-  (a as any).setState({ status: 'connected' });
-  await manager.openSession(aRef, true);
-  const selection = a.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
-  void selection.catch(() => undefined);
-  const release = manager.retainBackgroundSession(bRef);
-  const b = await manager.ensure(bRef, false);
-  (b as any).setState({ status: 'connected' });
-  try {
-    await manager.openSession(bRef, true);
-    release();
-    assert.strictEqual(manager.get(aRef.sessionId), a);
-    assert.equal(a.hasActiveWork, true);
-    await assert.rejects(manager.restart(aRef), /active work/);
-    await assert.rejects(manager.closeSession(aRef), /active work/);
-    client.emit('event', { type: 'session_mode_changed', session_id: aRef.sessionId, mode: 'chat', revision: 1 });
-    await selection;
-    await tick();
-    assert.equal(manager.get(aRef.sessionId), undefined, 'settlement schedules another cache trim');
-    assert.strictEqual(manager.get(bRef.sessionId), b);
-  } finally { release(); await manager.dispose(); }
+test('draft mode admission waits for a matching context manifest', async t => {
+  for (const [reportedId, reportedMode, succeeds] of [
+    [sessionId, 'chat', true], [targetId, 'chat', false], [sessionId, 'code', false],
+  ] as const) {
+    const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
+      launchConfig: () => ({ workspace: '/workspace', trusted: true, sessionId }) }, 'chat');
+    const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void; close(): void };
+    const commands: unknown[] = [];
+    client.sendCommand = command => { commands.push(command); };
+    client.close = () => {};
+    const internal = runtime as any;
+    internal.client = client;
+    internal.activeWorkspace = '/workspace';
+    internal.activeWorkspaceTrusted = true;
+    internal.wireClient(client, internal.generation);
+    internal.setState({ status: 'connected' });
+    let settled = false;
+    const restoring = internal.restoreDraftSessionModeIfNeeded().finally(() => { settled = true; });
+    assert.deepEqual(commands, [{ type: 'get_context_manifest' }]);
+    assert.equal(runtime.remoteView().sessionMode, undefined, 'a draft mode is not exposed before admission');
+    await Promise.resolve();
+    assert.equal(settled, false);
+    const rejected = succeeds ? undefined : assert.rejects(restoring, /does not match its owner/);
+    client.emit('event', { type: 'context_manifest', manifest_json: JSON.stringify({
+      session: { session_id: reportedId, mode: reportedMode }, projected: false, blocks: [],
+    }) });
+    if (rejected) await rejected; else await restoring;
+    assert.equal(internal.draftModeRestorationRequired, !succeeds);
+    assert.equal(runtime.remoteView().sessionMode, succeeds ? 'chat' : undefined);
+    await runtime.dispose();
+  }
 });
 
-test('restoring a historical chat updates only that session, not the default for new drafts', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'lingxi-session-mode-resume-'));
+test('a foreign session_started event cannot replace the runtime owner mode', async () => {
+  const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace', expectedSessionMode: 'chat',
+    launchConfig: () => ({ workspace: '/workspace', trusted: true, sessionId }) });
+  const client = Object.assign(new EventEmitter(), { close() {}, sendCommand() {} });
+  const internal = runtime as any;
+  internal.client = client;
+  internal.wireClient(client, internal.generation);
+  internal.setState({ status: 'connected' });
+  client.emit('event', { type: 'session_started', session_id: targetId, mode: 'code' });
+  assert.equal(runtime.sessionMode, 'chat');
+  assert.equal(runtime.connectionState.status, 'error');
+  await runtime.dispose();
+});
+
+test('scoped listing and handoff commands are bounded and session mode cannot be changed', () => {
+  assert.deepEqual(validateClientCommand({ type: 'list_sessions', limit: 10, mode: 'chat' }), { type: 'list_sessions', limit: 10, mode: 'chat' });
+  assert.deepEqual(validateClientCommand({ type: 'prepare_session_handoff', request_id: 'op', target_mode: 'code' }), { type: 'prepare_session_handoff', request_id: 'op', target_mode: 'code' });
+  assert.deepEqual(validateClientCommand({ type: 'cancel_session_handoff', request_id: 'op' }), { type: 'cancel_session_handoff', request_id: 'op' });
+  assert.throws(() => validateClientCommand({ type: 'list_sessions', mode: 'invalid' }));
+  assert.throws(() => validateClientCommand({ type: 'prepare_session_handoff', request_id: 'op', target_mode: 'code', extra: true }));
+  assert.throws(() => validateClientCommand({ type: 'set_session_mode', mode: 'code' }), /not allowed/);
+});
+
+test('new sessions require an explicit mode and project owner', async () => {
+  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, trusted: true }) });
+  await assert.rejects((manager as any).newSession('/workspace'), /creation mode is unavailable/);
+  await assert.rejects((manager as any).newSession('/workspace', undefined, { mode: 'chat' }), /project owner is unavailable/);
+  await manager.dispose();
+});
+
+test('a background-created session starts with its explicit creation mode', async () => {
+  const originalStart = SessionRuntime.prototype.start;
+  SessionRuntime.prototype.start = async function () {};
+  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, trusted: true }) });
   try {
-    const store = new SettingsStore(dir);
-    store.setLastSessionMode('chat');
-    const client = Object.assign(new EventEmitter(), { sendCommand: () => undefined });
-    const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
-      launchConfig: () => ({ workspace: '/workspace', trusted: true }),
-      onSessionModeSelected: mode => store.setLastSessionMode(mode) });
-    Object.assign(runtime, { client, activeWorkspace: '/workspace', activeWorkspaceTrusted: true });
-    (runtime as any).wireClient(client, 0);
-    client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'chat', revision: 7 });
-    client.emit('event', { type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] });
-    client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'code', pending_mode: 'chat', revision: 7 });
-    assert.equal(runtime.sessionMode, 'code');
-    assert.deepEqual(runtime.replaySnapshot().map(({ event }) => event), [
-      { type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] },
-      { type: 'session_mode_changed', session_id: sessionId, mode: 'code', pending_mode: 'chat', revision: 7 },
-    ]);
-    assert.equal(new SettingsStore(dir).getLastSessionMode(), 'chat');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+    const runtime = await manager.openSession({ projectPath: '/workspace', sessionId, mode: 'chat' }, true, undefined, false);
+    assert.equal(runtime.sessionMode, 'chat');
+    assert.equal((runtime as any).draftSessionMode, 'chat');
+    await assert.rejects(manager.openSession({ projectPath: '/other', sessionId: targetId }, true), /creation mode is unavailable/);
+    const selected = await manager.openSession({ projectPath: '/other', sessionId: targetId, mode: 'code' }, true,
+      undefined, false, '/saved/selected.jsonl');
+    assert.equal(selected.sessionMode, 'code');
+    assert.equal((selected as any).draftSessionMode, undefined, 'a selected anchor uses selected-transcript launch');
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    await manager.dispose();
+  }
+});
+
+test('handoff is correlated with its source and leaves a running turn intact, including cancellation', async () => {
+  const sent: unknown[] = [];
+  const client = Object.assign(new EventEmitter(), { sendCommand: (value: unknown) => sent.push(value) });
+  const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace', launchConfig: () => ({ workspace: '/workspace', trusted: true }) }); runtime.sessionMode = 'chat';
+  Object.assign(runtime as any, { client, activeWorkspace: '/workspace', activeWorkspaceTrusted: true, activeTurn: true });
+  const abort = new AbortController(), pending = runtime.prepareSessionHandoff('op', 'code', abort.signal);
+  client.emit('event', { type: 'session_handoff_prepared', request_id: 'other', source_session_id: sessionId, source_mode: 'chat', target_mode: 'code', cutoff: '1', summary: 'ignored' });
+  client.emit('event', { type: 'session_handoff_prepared', request_id: 'op', source_session_id: sessionId, source_mode: 'chat', target_mode: 'code', cutoff: '2', summary: 'Progress' });
+  assert.equal((await pending).summary, 'Progress'); assert.equal(runtime.turnActive, true);
+  const cancelled = runtime.prepareSessionHandoff('cancel', 'code', abort.signal); abort.abort();
+  await assert.rejects(cancelled, /cancelled/);
+  assert.deepEqual(sent.at(-1), { type: 'cancel_session_handoff', request_id: 'cancel' });
+  assert.equal(runtime.turnActive, true);
+  const interrupted = runtime.prepareSessionHandoff('interrupted', 'code', new AbortController().signal);
+  (runtime as any).clearPendingConnectionOperations();
+  await assert.rejects(interrupted, /connection interrupted/i);
+});
+
+test('handoff creates a global draft and records a durable source backlink; stale completion cannot navigate', async t => {
+  for (const stale of [false, true]) {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-handoff-')));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const settings = new SettingsStore(root);
+    const source = { projectPath: settings.conversationSpaces.globalWorkspace, projectId: null, sessionId, mode: 'chat' as const };
+    settings.conversationSpaces.register(source); settings.setActiveSession(source);
+    const result = deferred<any>(); let creates = 0, released = 0, ownership: any;
+    const bridge = { get: () => ({ prepareSessionHandoff: () => result.promise }), retainBackgroundSession: () => () => { released++; },
+      newSession: async (path: string, _model: unknown, owner: unknown) => { creates++; ownership = owner; return { projectPath: path, sessionId: targetId }; },
+      activateSession() {}, closeSession: async () => {} };
+    const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any);
+    (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession, conversationSpaces: settings.conversationSpaces.snapshot() });
+    const pending = (host as any).prepareHandoff(sessionId, 'code', 'op');
+    if (stale) (host as any).navigationGeneration++;
+    result.resolve({ cutoff: 'persisted:42', summary: 'Completed work' });
+    const output = await pending; assert.equal(released, 1);
+    if (stale) { assert.equal(output, null); assert.equal(creates, 0); assert.equal(settings.conversationSpaces.snapshot().activeMode, 'chat'); continue; }
+    assert.equal(output.summary, 'Completed work'); assert.equal(ownership.forceNew, true); assert.equal(ownership.projectId, null);
+    assert.deepEqual(new SettingsStore(root).conversationSpaces.find({ projectPath: source.projectPath, sessionId: targetId }),
+      { projectPath: source.projectPath, projectId: null, sessionId: targetId, mode: 'code', handoff: { sourceSessionId: sessionId,
+        sourceProjectPath: source.projectPath, sourceMode: 'chat', cutoff: 'persisted:42', requestId: 'op' } });
+  }
+});
+
+test('fresh handoff allocation preserves an existing unsent draft in the same scope', async () => {
+  const manager = new SessionRuntimeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  (manager as any).ensure = async (ref: any) => ({ sessionId: ref.sessionId, projectPath: ref.projectPath });
+  (manager as any).activate = () => {};
+  const first = await manager.newSession('/workspace', undefined, { mode: 'code', projectId: null });
+  const second = await manager.newSession('/workspace', undefined, { mode: 'code', projectId: null, forceNew: true });
+  assert.notEqual(first.sessionId, second.sessionId);
+  assert.equal((await manager.newSession('/workspace', undefined, { mode: 'code', projectId: null })).sessionId, first.sessionId);
+  assert.equal((await manager.reopenOwnedDraft(second)).sessionId, second.sessionId);
+  await manager.dispose();
+});
+
+test('explicit retry reuses the same operation and source instead of charging for a new capture', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-handoff-retry-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root);
+  const source = { projectPath: settings.conversationSpaces.globalWorkspace, projectId: null, sessionId, mode: 'chat' as const };
+  settings.conversationSpaces.register(source); settings.setActiveSession(source);
+  const calls: unknown[] = []; let released = 0;
+  const runtime = { prepareSessionHandoff: async (id: string, target: string, _signal: AbortSignal, retry: boolean) => {
+    calls.push([id, target, retry]); if (!retry) throw new Error('temporary'); return { cutoff: 'same-capture', summary: 'Progress' };
+  } };
+  const bridge = { get: () => runtime, retainBackgroundSession: () => () => { released++; },
+    newSession: async (path: string) => ({ projectPath: path, sessionId: targetId }), activateSession() {} };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any);
+  (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
+  await assert.rejects((host as any).prepareHandoff(sessionId, 'code', 'same-op'), /temporary/);
+  assert.equal(released, 0, 'retry capture must keep its source runtime alive');
+  await assert.rejects((host as any).prepareHandoff(sessionId, 'code', 'same-op'), /Use retry/);
+  const output = await (host as any).prepareHandoff(sessionId, 'code', 'same-op', true);
+  assert.equal(output.summary, 'Progress');
+  assert.equal(released, 1);
+  assert.deepEqual(calls, [['same-op', 'code', false], ['same-op', 'code', true]]);
+  assert.equal(settings.conversationSpaces.find({ projectPath: source.projectPath, sessionId: targetId })?.handoff?.cutoff, 'same-capture');
+});
+
+test('navigation while a target draft is starting cannot activate the late draft', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-handoff-start-race-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root);
+  const source = { projectPath: settings.conversationSpaces.globalWorkspace, projectId: null, sessionId, mode: 'chat' as const };
+  settings.conversationSpaces.register(source); settings.setActiveSession(source);
+  const started = deferred<any>(), closed: unknown[] = [], activated: unknown[] = [];
+  const bridge = { get: () => ({ prepareSessionHandoff: async () => ({ cutoff: '1', summary: 'Progress' }) }),
+    retainBackgroundSession: () => () => {}, newSession: async () => started.promise,
+    closeSession: async (ref: unknown) => closed.push(ref), activateSession: (ref: unknown) => activated.push(ref) };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any);
+  const pending = (host as any).prepareHandoff(sessionId, 'code', 'op');
+  await new Promise<void>(resolve => setImmediate(resolve));
+  (host as any).navigationGeneration++;
+  const target = { projectPath: source.projectPath, sessionId: targetId };
+  started.resolve(target);
+  assert.equal(await pending, null); assert.deepEqual(closed, [target]); assert.deepEqual(activated, []);
+  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'chat');
+});
+
+test('switching spaces keeps the source turn, listener and pending permission owned by its runtime', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-space-switch-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
+  const target = { projectPath: path, projectId: null, sessionId: targetId, mode: 'code' as const };
+  settings.conversationSpaces.register(source); settings.conversationSpaces.register(target); settings.setActiveSession(source);
+  const sourceRuntime = new EventEmitter(); let events = 0, closes = 0, cancels = 0;
+  sourceRuntime.on('permission', () => { events++; });
+  Object.assign(sourceRuntime, { activeTurn: true, pendingPermission: 7, cancel: () => { cancels++; } });
+  const bridge = { reopenOwnedDraft: async () => target, activateSession() {}, closeSession: () => { closes++; } };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any);
+  (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
+  (host as any).draftSelections.set('code', target);
+  settings.conversationSpaces.setMode('code');
+  await (host as any).switchConversationSpace('code', 0);
+  sourceRuntime.emit('permission');
+  assert.equal(events, 1); assert.equal((sourceRuntime as any).pendingPermission, 7);
+  assert.equal((sourceRuntime as any).activeTurn, true); assert.equal(closes, 0); assert.equal(cancels, 0);
+  assert.equal(settings.getPublic().activeSession?.sessionId, targetId);
+});
+
+test('New Chat remains global when a project is selected', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-global-new-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const project = join(root, 'project'); mkdirSync(project);
+  const settings = new SettingsStore(join(root, 'settings'));
+  settings.addProject(project); settings.conversationSpaces.addProject(project, 'chat');
+  settings.activateProject(project); settings.conversationSpaces.setNavigation('chat', project);
+  let created: any;
+  const bridge = { registerWindow() {}, registerIpc() {}, newSession: async (path: string, _model: unknown, owner: any) => {
+    created = { path, owner }; return { projectPath: path, sessionId: targetId };
+  }, activateSession() {} };
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+    { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any);
+  (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  await handlers.get(CH_SESSION_NEW)!({ sender, senderFrame: frame }, null, undefined);
+  assert.equal(created.path, settings.conversationSpaces.globalWorkspace);
+  assert.equal(created.owner.projectId, null); assert.equal(created.owner.mode, 'chat');
+  assert.equal(settings.getPublic().activeSession?.projectId, null);
+});
+
+test('a linked session checks its fixed mode before switching spaces and rolls back failed opens', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-linked-mode-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId: targetId, mode: 'code' });
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const bridge = { registerWindow() {}, registerIpc() {} };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+    { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any);
+  const frame = { url: 'http://127.0.0.1:4242' }, sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  const event = { sender, senderFrame: frame };
+  let opens = 0;
+  (host as any).openSessionAndActivateInternal = async (_ref: unknown, _selection: unknown, _generation: unknown, mode: unknown) => {
+    opens++; assert.equal(mode, 'code'); throw new Error('open failed');
+  };
+  await assert.rejects(handlers.get(CH_SESSION_OPEN)!(event, path, targetId, undefined, 'chat'), /different conversation space/);
+  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'chat'); assert.equal(opens, 0);
+  await assert.rejects(handlers.get(CH_SESSION_OPEN)!(event, path, targetId, undefined, 'code'), /open failed/);
+  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'chat'); assert.equal(opens, 1);
+});
+
+test('voice flow retains its owner and provider context across navigation and rejects another lane', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-audio-flow-owner-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
+  const target = { projectPath: path, projectId: null, sessionId: targetId, mode: 'code' as const };
+  settings.conversationSpaces.register(source); settings.conversationSpaces.register(target); settings.setActiveSession(source);
+  const handlers = new Map<string, (...args: any[]) => any>(), released: string[] = [], contexts: unknown[] = [];
+  let cancels = 0, finishes = 0;
+  const bridge = { registerWindow() {}, registerIpc() {}, get: (id: string) => ({ projectPath: path, sessionId: id,
+    audioSessionContext: { sessionId: id, profileId: `profile-${id}` } }),
+    retainBackgroundSession: (ref: { sessionId: string }) => () => released.push(ref.sessionId) };
+  const audio = { onEvent: () => () => {}, executeUiAudioOperation: async (_operation: unknown, _window: unknown, _revision: unknown, _override: unknown, context: unknown) => { contexts.push(context); return {}; },
+    cancelUiAudioOperations: async () => { cancels++; }, finishUiAudioListen: async () => { finishes++; } };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+    { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any, undefined, undefined, audio as any);
+  const frame = { url: 'http://127.0.0.1:4242' }, sender = { id: 7, mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  const event = { sender, senderFrame: frame }, lease = handlers.get(CH_NATIVE_AUDIO_FLOW_LEASE)!;
+  const first = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', second = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  lease(event, sessionId, first, true);
+  settings.setActiveSession(target);
+  const execute = handlers.get(CH_NATIVE_AUDIO_OPERATION)!, cancel = handlers.get(CH_NATIVE_AUDIO_CANCEL)!, finish = handlers.get(CH_NATIVE_AUDIO_FINISH_LISTEN)!;
+  const owner = { sessionId, leaseId: first }, other = { sessionId: targetId, leaseId: second };
+  await assert.rejects(execute(event, { type: 'speak', text: 'other' }), /another conversation/);
+  await assert.rejects(execute(event, { type: 'speak', text: 'other' }, undefined, undefined, other), /another conversation/);
+  await assert.rejects(cancel(event), /another conversation/);
+  await assert.rejects(finish(event, other), /another conversation/);
+  await execute(event, { type: 'speak', text: 'original' }, undefined, undefined, owner);
+  await cancel(event, owner); await finish(event, owner);
+  assert.deepEqual(contexts, [{ session: { sessionId, profileId: `profile-${sessionId}` } }]);
+  assert.equal(cancels, 1); assert.equal(finishes, 1);
+  lease(event, sessionId, second, false);
+  assert.deepEqual(released, []);
+  assert.throws(() => lease(event, targetId, second, true), /another conversation/);
+  lease(event, sessionId, first, false);
+  lease(event, targetId, second, true);
+  lease(event, sessionId, first, false);
+  assert.deepEqual(released, [sessionId]);
+  lease(event, targetId, second, false);
+  assert.deepEqual(released, [sessionId, targetId]);
+  await execute(event, { type: 'speak', text: 'current' });
+  assert.deepEqual(contexts[1], { session: { sessionId: targetId, profileId: `profile-${targetId}` } });
+});
+
+test('a failed latest switch restores the confirmed space after rapid opposing choices', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-space-failure-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
+  settings.conversationSpaces.register(source); settings.setActiveSession(source);
+  const first = deferred<void>(), handlers = new Map<string, (...args: any[]) => any>();
+  const bridge = { registerWindow() {}, registerIpc() {} };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+    { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any);
+  (host as any).bootstrap = () => ({});
+  (host as any).switchConversationSpace = async (mode: string) => {
+    if (mode === 'code') { await first.promise; return {}; }
+    throw new Error('target unavailable');
+  };
+  const frame = { url: 'http://127.0.0.1:4242' }, sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  const event = { sender, senderFrame: frame };
+  const code = handlers.get(CH_CONVERSATION_SPACE)!(event, 'code');
+  const chat = handlers.get(CH_CONVERSATION_SPACE)!(event, 'chat');
+  const failure = assert.rejects(chat, /target unavailable/);
+  first.resolve(); await code; await failure;
+  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'chat');
+  assert.equal(settings.getPublic().activeSession?.sessionId, sessionId);
+});
+
+test('failed captures keep one bounded lease until retry is discarded', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-retry-lease-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
+  settings.conversationSpaces.register(source); settings.setActiveSession(source);
+  let released = 0;
+  const bridge = { get: () => ({ prepareSessionHandoff: async () => { throw new Error('model failed'); } }),
+    retainBackgroundSession: () => () => { released++; } };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any);
+  await assert.rejects((host as any).prepareHandoff(sessionId, 'code', 'op'), /model failed/);
+  const retained = (host as any).handoffRetries.get('op');
+  assert.ok(retained.expires > Date.now() && retained.expires <= Date.now() + 5 * 60_000);
+  assert.equal(released, 0);
+  (host as any).discardHandoff('op'); (host as any).discardHandoff('op');
+  assert.equal(released, 1);
 });

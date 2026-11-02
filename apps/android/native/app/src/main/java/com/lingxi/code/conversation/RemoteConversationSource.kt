@@ -24,6 +24,8 @@ import com.lingxi.code.model.toUi
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.ReasoningControl
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +34,7 @@ import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** The calls a followed session makes on the Remote Control client; tests substitute it. */
 interface RemoteSessionPort {
@@ -73,6 +76,14 @@ data class RemoteSessionMeta(
 internal const val REMOTE_MAX_PROMPT_IMAGES = 4
 internal const val REMOTE_MAX_PROMPT_IMAGE_BYTES = 2 * 1024 * 1024
 
+/** The desktop's single-use Team approval capability is not a conversation. */
+internal fun isTeamApprovalSessionId(sessionId: String): Boolean {
+    val prefix = "team-approval:"
+    if (!sessionId.startsWith(prefix)) return false
+    val nonce = sessionId.substring(prefix.length)
+    return nonce.length == 32 && nonce.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '_' || it == '-' }
+}
+
 /**
  * A desktop session followed from the phone. It lowers the session's
  * [RemoteSessionUpdateFfi] deltas to [ExternalFeedItem]s, which [ChatViewModel]
@@ -84,12 +95,16 @@ internal const val REMOTE_MAX_PROMPT_IMAGE_BYTES = 2 * 1024 * 1024
  */
 class RemoteConversationSource(
     private val port: RemoteSessionPort,
+    private val sessionId: String,
     private val thisDeviceName: String,
     private val strings: ConversationStrings = DefaultConversationStrings,
 ) : ConversationSource, ExternalTurnConversationSource {
+    private val approvalOnly = isTeamApprovalSessionId(sessionId)
     private val mutableMeta = MutableStateFlow(RemoteSessionMeta())
     private val mutablePermission = MutableStateFlow<PermissionPromptState?>(null)
     private val mutableModels = MutableStateFlow(EngineModelState())
+    private val approvalConsumed = AtomicBoolean(false)
+    @Volatile private var approvalDelivered = false
 
     /** Images already fetched, by reference: a new snapshot re-lists the prompts that carry them. */
     private val fetchedImages = ConcurrentHashMap<String, ImageRefDto>()
@@ -103,41 +118,137 @@ class RemoteConversationSource(
     override val modelState: StateFlow<EngineModelState> = mutableModels.asStateFlow()
 
     override val externalFeed: Flow<ExternalFeedItem> = channelFlow {
-        val mapper = RemoteFeedMapper(strings, thisDeviceName) { port.promptOriginBotName(it) }
+        val feedScope = this
+        val mapper = RemoteFeedMapper(strings, thisDeviceName, expectedSessionId = sessionId) { port.promptOriginBotName(it) }
         var modelsRequested = false
-        port.follow().collect { incoming ->
-            if (incoming.phase == RemoteSessionPhaseFfi.LOADING) synchronized(imageLock) {
-                imageGeneration++
-                fetchedImages.clear()
+        val projectionLock = Any()
+        val pendingProjections = mutableMapOf<Job, ULong>()
+        var pendingProjectionBytes = 0uL
+        var projectionTail: Job? = null
+        fun cancelProjections() {
+            val jobs = synchronized(projectionLock) {
+                pendingProjections.keys.toList().also {
+                    pendingProjections.clear()
+                    pendingProjectionBytes = 0uL
+                    projectionTail = null
+                }
             }
-            val update = hydrateMessageImages(incoming)
-            mutableMeta.value = RemoteSessionMeta(
-                phase = update.phase,
-                error = update.error,
-                hasOlder = update.hasOlder,
-                loadingOlder = update.loadingOlder,
-                controls = update.controls,
-                sessionMode = update.sessionMode?.toUi(),
-            )
-            mutablePermission.value = mapper.permissionPrompt(update)
-            applyModelEvents(update)
-            mapper.map(update).forEach { send(it) }
-            if (update.phase == RemoteSessionPhaseFfi.LIVE && !modelsRequested) {
+            jobs.forEach { it.cancel() }
+        }
+        port.follow().collect { incoming ->
+            if (incoming.sessionId != sessionId) return@collect
+            if (incoming.phase != RemoteSessionPhaseFfi.LIVE) {
+                invalidateImages()
+                cancelProjections()
+            }
+            // Establish the owner before requesting any of the update's image refs.
+            // Otherwise an unconfirmed or conflicting snapshot can trigger I/O.
+            var projected = mapper.map(incoming, project = approvalOnly || incoming.phase != RemoteSessionPhaseFfi.LIVE)
+            var accepted = mapper.takeAcceptedUpdates()
+            var projectionBytes = 0uL
+            if (!approvalOnly && incoming.phase == RemoteSessionPhaseFfi.LIVE && accepted.isNotEmpty()) {
+                val sizes = runCatching {
+                    accepted.map { com.lingxi.code.bindings.android.FfiConverterTypeRemoteSessionUpdateFfi.allocationSize(it) }
+                }.getOrNull()
+                val fits = sizes != null && sizes.all { size ->
+                    if (size > MAX_PENDING_PROJECTION_BYTES - projectionBytes) false
+                    else { projectionBytes += size; true }
+                } && synchronized(projectionLock) {
+                    pendingProjections.size < MAX_PENDING_PROJECTIONS &&
+                        projectionBytes <= MAX_PENDING_PROJECTION_BYTES - pendingProjectionBytes
+                }
+                if (!fits) {
+                    projected = mapper.rejectProjectionOverflow()
+                    accepted = emptyList()
+                }
+            }
+            val lastAccepted = accepted.lastOrNull()
+            val failure = mapper.failure
+            if (failure != null) {
+                invalidateImages()
+                cancelProjections()
+            }
+            mutableMeta.value = if (failure != null) {
+                mutableMeta.value.copy(
+                    phase = RemoteSessionPhaseFfi.ERROR,
+                    error = failure,
+                    hasOlder = false,
+                    loadingOlder = false,
+                    controls = null,
+                    sessionMode = mapper.ownerMode,
+                )
+            } else if (lastAccepted != null) {
+                RemoteSessionMeta(
+                    phase = lastAccepted.phase,
+                    error = lastAccepted.error,
+                    hasOlder = lastAccepted.hasOlder,
+                    loadingOlder = lastAccepted.loadingOlder,
+                    controls = lastAccepted.controls,
+                    sessionMode = mapper.ownerMode,
+                )
+            } else {
+                mutableMeta.value.copy(
+                    phase = if (mapper.ownerMode == null && !approvalOnly) {
+                        if (incoming.phase == RemoteSessionPhaseFfi.LIVE) RemoteSessionPhaseFfi.LOADING else incoming.phase
+                    } else RemoteSessionPhaseFfi.OFFLINE,
+                    error = if (mapper.ownerMode == null && !approvalOnly) incoming.error else null,
+                    sessionMode = mapper.ownerMode,
+                )
+            }
+            accepted.forEach { acceptedUpdate ->
+                mutablePermission.value = if (acceptedUpdate.phase == RemoteSessionPhaseFfi.LIVE && (!approvalOnly || !approvalDelivered)) {
+                    mapper.permissionPrompt(acceptedUpdate)
+                } else null
+                if (!approvalOnly) applyModelEvents(acceptedUpdate)
+            }
+            if (failure != null || (approvalOnly && accepted.isEmpty())) mutablePermission.value = null
+            if (approvalOnly || accepted.isEmpty() || incoming.phase != RemoteSessionPhaseFfi.LIVE) {
+                projected.forEach { send(it) }
+            } else {
+                val generation = synchronized(imageLock) { imageGeneration }
+                val predecessor = synchronized(projectionLock) { projectionTail }
+                val updates = accepted
+                val task = launch(start = CoroutineStart.LAZY) {
+                    predecessor?.join()
+                    val items = updates.flatMap { update ->
+                        mapper.projectAccepted(if (update.phase == RemoteSessionPhaseFfi.LIVE) hydrateMessageImages(update) else update)
+                    }
+                    for (item in items) {
+                        if (synchronized(imageLock) { generation != imageGeneration }) return@launch
+                        send(item)
+                    }
+                    for ((turnId, images) in updates.filter { it.phase == RemoteSessionPhaseFfi.LIVE }.flatMap(mapper::imageRefs)) {
+                        feedScope.launch {
+                            val fetched = images.mapNotNull { ref -> fetchImage(ref) }
+                            if (fetched.isNotEmpty() && synchronized(imageLock) { generation == imageGeneration }) {
+                                send(ExternalFeedItem.PromptImages(turnId, fetched))
+                            }
+                        }
+                    }
+                }
+                synchronized(projectionLock) {
+                    pendingProjections[task] = projectionBytes
+                    pendingProjectionBytes += projectionBytes
+                    projectionTail = task
+                }
+                task.invokeOnCompletion {
+                    synchronized(projectionLock) {
+                        pendingProjections.remove(task)?.let { pendingProjectionBytes -= it }
+                        if (projectionTail === task) projectionTail = null
+                    }
+                }
+                task.start()
+            }
+            if (!approvalOnly && lastAccepted?.phase == RemoteSessionPhaseFfi.LIVE && !modelsRequested) {
                 modelsRequested = true
                 launch { runCatching { port.listModels() }.getOrNull()?.let(::applyModelList) }
             }
-            for ((turnId, images) in mapper.imageRefs(update)) {
-                val generation = synchronized(imageLock) { imageGeneration }
-                launch {
-                    val fetched = images.mapNotNull { ref ->
-                        fetchImage(ref)
-                    }
-                    if (fetched.isNotEmpty() && synchronized(imageLock) { generation == imageGeneration }) {
-                        send(ExternalFeedItem.PromptImages(turnId, fetched))
-                    }
-                }
-            }
         }
+    }
+
+    private fun invalidateImages() = synchronized(imageLock) {
+        imageGeneration++
+        fetchedImages.clear()
     }
 
     /** Snapshot/history/message-complete URLs are opaque image.get references, not data URLs. */
@@ -199,6 +310,7 @@ class RemoteConversationSource(
     }
 
     override suspend fun sendExternalPrompt(text: String, images: List<ImageRefDto>) {
+        requireConversation()
         require(images.size <= REMOTE_MAX_PROMPT_IMAGES) { "at most $REMOTE_MAX_PROMPT_IMAGES images" }
         port.sendPrompt(
             text,
@@ -210,21 +322,24 @@ class RemoteConversationSource(
         )
     }
 
-    override suspend fun retryExternalPrompt(promptId: String) = port.retryPrompt(promptId)
+    override suspend fun retryExternalPrompt(promptId: String) { requireConversation(); port.retryPrompt(promptId) }
 
-    override suspend fun dismissExternalPrompt(promptId: String) = port.dismissPrompt(promptId)
+    override suspend fun dismissExternalPrompt(promptId: String) { requireConversation(); port.dismissPrompt(promptId) }
 
-    override suspend fun cancel() = port.cancelTurn()
+    override suspend fun cancel() { requireConversation(); port.cancelTurn() }
 
     override suspend fun approvePermission(requestId: ULong, response: PermissionResponseDto) {
         // The desktop turns "always allow" down; never ask it to.
         require(response == PermissionResponseDto.ALLOW_ONCE) { "only allow once is available remotely" }
-        port.respondPermission(requestId, allow = true)
+        respondPermission(requestId, allow = true)
     }
 
-    override suspend fun denyPermission(requestId: ULong) = port.respondPermission(requestId, allow = false)
+    override suspend fun denyPermission(requestId: ULong) {
+        respondPermission(requestId, allow = false)
+    }
 
     override suspend fun submitClientCommand(command: ClientCommand) {
+        requireConversation()
         when (command) {
             is ClientCommand.AnswerAskUserQuestion -> port.answerQuestion(
                 command.requestId,
@@ -236,18 +351,60 @@ class RemoteConversationSource(
         }
     }
 
-    override suspend fun setModel(id: String) = port.setModel(id)
+    override suspend fun setModel(id: String) { requireConversation(); port.setModel(id) }
 
-    override suspend fun setReasoningSelection(id: String) = port.setReasoning(ReasoningControl.selection(id))
+    override suspend fun setReasoningSelection(id: String) { requireConversation(); port.setReasoning(ReasoningControl.selection(id)) }
 
     /** [mode] is a permission mode id (`default`, `acceptEdits`, `plan`, `auto`, `dontAsk`). */
     override suspend fun setPermissionMode(mode: String) {
+        requireConversation()
         port.setPermissionMode(remotePermissionMode(mode) ?: throw IllegalArgumentException("mode $mode is not available remotely"))
     }
 
-    suspend fun loadOlder() = port.loadOlder()
+    suspend fun loadOlder() { requireConversation(); port.loadOlder() }
 
     suspend fun setForeground(foreground: Boolean) = port.setForeground(foreground)
+
+    internal fun prepareForReattach() {
+        mutablePermission.value = null
+        mutableMeta.value = mutableMeta.value.copy(phase = RemoteSessionPhaseFfi.LOADING, error = null)
+    }
+
+    private fun requireConversation() {
+        check(!approvalOnly) { "Team approval only supports permission responses" }
+        val meta = mutableMeta.value
+        check(meta.sessionMode != null && meta.phase == RemoteSessionPhaseFfi.LIVE) {
+            "Remote session is not ready"
+        }
+    }
+
+    private fun requirePermissionResponse(requestId: ULong) {
+        if (approvalOnly) {
+            check(mutableMeta.value.phase == RemoteSessionPhaseFfi.LIVE) { "Remote approval is not ready" }
+            check(mutablePermission.value?.requestId == requestId) { "Remote approval is no longer pending" }
+        } else {
+            requireConversation()
+        }
+    }
+
+    private suspend fun respondPermission(requestId: ULong, allow: Boolean) {
+        requirePermissionResponse(requestId)
+        if (!approvalOnly) return port.respondPermission(requestId, allow)
+        check(approvalConsumed.compareAndSet(false, true)) { "Remote approval has already been answered" }
+        try {
+            port.respondPermission(requestId, allow)
+            approvalDelivered = true
+            mutablePermission.value = null
+        } catch (failure: Throwable) {
+            approvalConsumed.set(false)
+            throw failure
+        }
+    }
+
+    private companion object {
+        const val MAX_PENDING_PROJECTIONS = 128
+        const val MAX_PENDING_PROJECTION_BYTES = 16_777_216uL
+    }
 }
 
 /** The permission modes a remote device may select; bypass is never one of them. */
@@ -270,10 +427,106 @@ internal fun remotePermissionMode(id: String): RemotePermissionModeFfi? = when (
 class RemoteFeedMapper(
     private val strings: ConversationStrings,
     private val thisDeviceName: String,
+    private val expectedSessionId: String? = null,
     /** Names the Bot that handed over the prompt of a turn, if one did: its prompts still arrive as scheduled ones. */
     private val botNameOf: (turnId: ULong) -> String? = { null },
 ) {
-    fun map(update: RemoteSessionUpdateFfi): List<ExternalFeedItem> {
+    private var ownerSessionId: String? = null
+    var ownerMode: SessionMode? = null
+        private set
+    var failure: RemoteSessionErrorFfi? = null
+        private set
+    private val waitingForMode = mutableListOf<RemoteSessionUpdateFfi>()
+    private var waitingBytes = 0uL
+    private val accepted = mutableListOf<RemoteSessionUpdateFfi>()
+
+    fun takeAcceptedUpdates(): List<RemoteSessionUpdateFfi> = accepted.toList().also { accepted.clear() }
+
+    internal fun rejectProjectionOverflow(): List<ExternalFeedItem> =
+        fail("SESSION_PROJECTION_OVERFLOW", "Remote session updates exceeded the pending image limit.")
+
+    fun map(update: RemoteSessionUpdateFfi, project: Boolean = true): List<ExternalFeedItem> {
+        failure?.let { return failed(it) }
+        if (expectedSessionId != null && update.sessionId != expectedSessionId) return waitingForOwner()
+        val sessionId = com.lingxi.code.model.canonicalSessionId(update.sessionId)
+        if (ownerSessionId != null && ownerSessionId != sessionId) return waitingForOwner()
+        ownerSessionId = sessionId
+        if (isTeamApprovalSessionId(update.sessionId)) {
+            // This capability has no transcript or mode. Never interpret it as a Chat or Code owner.
+            if (update.sessionMode != null || update.messages.isNotEmpty() ||
+                update.olderMessages.isNotEmpty() || update.records.isNotEmpty() ||
+                update.controls != null || update.outgoing.isNotEmpty() ||
+                update.pending.questions.isNotEmpty() || update.pending.computerAccess.isNotEmpty() ||
+                update.turn.running || update.turn.turnId != null || update.firstMessageIndex != 0uL ||
+                update.hasOlder || update.loadingOlder
+            ) return waitingForOwner()
+            accepted += update
+            val status = if (update.phase == RemoteSessionPhaseFfi.LIVE) {
+                strings.resolve(R.string.remote_needs_permission, "等待授权")
+            } else readiness(update).statusLine
+            return listOf(ExternalFeedItem.Readiness(false, status))
+        }
+        if (update.error?.code.equals("SESSION_MODE_OVERFLOW", ignoreCase = true)) {
+            return fail("SESSION_MODE_OVERFLOW", "Remote session data exceeded the mode confirmation limit.")
+        }
+        val announced = buildList<SessionMode> {
+            update.sessionMode?.toUi()?.let { add(it) }
+            update.records.forEach { item ->
+                val event = (item.record as? RemoteRecordFfi.Event)?.event
+                when (event) {
+                    is ClientEvent.SessionStarted -> if (com.lingxi.code.model.canonicalSessionId(event.sessionId) == sessionId) add(event.mode.toUi())
+                    is ClientEvent.SessionResumed -> if (com.lingxi.code.model.canonicalSessionId(event.sessionId) == sessionId) add(event.mode.toUi())
+                    else -> Unit
+                }
+            }
+        }.distinct()
+        if (update.error?.code.equals("SESSION_MODE_MISMATCH", ignoreCase = true) ||
+            announced.size > 1 || (ownerMode != null && announced.any { it != ownerMode })) {
+            return fail("SESSION_MODE_MISMATCH", "The remote session reported a different fixed mode.")
+        }
+        if (ownerMode == null) ownerMode = announced.singleOrNull()
+        if (ownerMode == null) {
+            val size = runCatching {
+                com.lingxi.code.bindings.android.FfiConverterTypeRemoteSessionUpdateFfi.allocationSize(update)
+            }.getOrNull()
+            if (waitingForMode.size >= MAX_MODE_WAIT_UPDATES || size == null || size > MAX_MODE_WAIT_BYTES - waitingBytes) {
+                return fail("SESSION_MODE_OVERFLOW", "Remote session data exceeded the mode confirmation limit.")
+            }
+            waitingForMode += update
+            waitingBytes += size
+            return if (update.phase == RemoteSessionPhaseFfi.LIVE || update.phase == RemoteSessionPhaseFfi.LOADING) {
+                waitingForOwner()
+            } else listOf(readiness(update))
+        }
+        val ready = waitingForMode.toList() + update
+        waitingForMode.clear()
+        waitingBytes = 0uL
+        accepted += ready
+        return if (project) ready.flatMap(::projectAccepted) else emptyList()
+    }
+
+    private fun waitingForOwner(): List<ExternalFeedItem> = listOf(
+        ExternalFeedItem.Readiness(false, strings.resolve(R.string.remote_session_loading, "正在加载会话…")),
+    )
+
+    private fun fail(code: String, message: String): List<ExternalFeedItem> {
+        waitingForMode.clear()
+        waitingBytes = 0uL
+        return failed(RemoteSessionErrorFfi(code, message).also { failure = it })
+    }
+
+    private fun failed(error: RemoteSessionErrorFfi): List<ExternalFeedItem> = listOf(
+        ExternalFeedItem.Readiness(false, if (error.code.endsWith("_OVERFLOW")) {
+            strings.resolve(R.string.remote_session_reload_required, "会话数据过多，请重新打开会话以加载。")
+        } else error.message),
+    )
+
+    private companion object {
+        const val MAX_MODE_WAIT_UPDATES = 128
+        const val MAX_MODE_WAIT_BYTES = 4_194_304uL
+    }
+
+    internal fun projectAccepted(update: RemoteSessionUpdateFfi): List<ExternalFeedItem> {
         val items = mutableListOf<ExternalFeedItem>()
         // A load may end in a new base: until it does, what is held stays as it is.
         if (update.phase == RemoteSessionPhaseFfi.LOADING) {
@@ -286,7 +539,7 @@ class RemoteFeedMapper(
                     sessionId = update.sessionId,
                     transcript = transcriptFromDtos(update.messages, strings),
                     kind = SessionActivationKind.Resumed,
-                    mode = update.sessionMode?.toUi() ?: SessionMode.Code,
+                    mode = checkNotNull(ownerMode),
                 ),
                 title = null,
             )
@@ -389,10 +642,13 @@ class RemoteFeedMapper(
 }
 
 /**
- * Events the meta fields speak for: questions and permissions are the complete
- * pending set of every update, and the model state is folded from controls.
+ * Lifecycle reports establish the owner, while snapshots provide the base.
+ * Questions and permissions come from the complete pending set, and model
+ * state is folded from controls.
  */
 private fun ClientEvent.isHandledByMeta(): Boolean = when (this) {
+    is ClientEvent.SessionStarted,
+    is ClientEvent.SessionResumed,
     is ClientEvent.AskUserQuestion,
     is ClientEvent.AskUserQuestionResolved,
     is ClientEvent.ModelList,

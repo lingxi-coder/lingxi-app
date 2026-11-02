@@ -183,6 +183,10 @@ pub struct MediaAudioSessionBindingFfi {
     pub attachment_generation: u64,
     pub session_id: String,
     pub generation: u64,
+    /// Exact non-secret context registered for this attachment and generation.
+    pub profile_id: String,
+    pub account_scope: String,
+    pub region: String,
 }
 
 fn replace_attached_audio_session_binding(
@@ -445,6 +449,9 @@ impl IosNativeMediaHost {
             attachment_generation,
             session_id,
             generation,
+            profile_id: context.profile_id,
+            account_scope: context.account_scope,
+            region: context.region,
         };
         if !guard.update(binding.clone()) {
             guard.registry.unregister_attached_session_if_generation(
@@ -1071,6 +1078,7 @@ pub fn build_ios_engine(
             api_key,
             model,
             session_mode: SessionModeDto::Code,
+            initial_session_id: None,
             app_sandbox_root,
             project_cwd: None,
             project_additional_directories: Vec::new(),
@@ -1242,6 +1250,9 @@ mod tests {
                 attachment_generation: 1,
                 session_id: "session".into(),
                 generation: first,
+                profile_id: "first".into(),
+                account_scope: "profile:first".into(),
+                region: "international".into(),
             },
         );
         clear_audio_session_binding(&registry, &current);
@@ -1258,6 +1269,9 @@ mod tests {
                 attachment_generation: 1,
                 session_id: "session".into(),
                 generation: old,
+                profile_id: "old".into(),
+                account_scope: "profile:old".into(),
+                region: "international".into(),
             },
         );
         registry

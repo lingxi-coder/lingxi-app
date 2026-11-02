@@ -15,6 +15,7 @@ test('archive persists metadata and unpins without touching the transcript; rest
     const settings = new SettingsStore(dir);
     const ref = { projectPath, sessionId };
     settings.addProject(projectPath);
+    settings.conversationSpaces.register({ ...ref, projectId: projectPath, mode: 'code' });
     settings.setActiveSession(ref);
     settings.setSessionPinned({ ...ref, title: 'Saved chat', pinnedAt: new Date().toISOString() }, true);
     const transcript = join(dir, 'transcript.jsonl');
@@ -42,7 +43,7 @@ test('archive pauses only execution-dependent schedules before persistence, and 
       const ref = { projectPath, sessionId };
       const calls: string[] = [];
       const runtime = {
-        projectPath, connectionState: { status: 'connected' },
+        projectPath, sessionMode: 'code', connectionState: { status: 'connected' },
         beginArchive: () => { calls.push('lock'); return () => { calls.push('unlock'); }; },
         manageCron: async (request: { action: string; id?: string; automation?: { statusReason?: string } }) => {
           if (request.action !== 'list') {
@@ -111,14 +112,14 @@ test('opening an archived chat restores it only after the existing session resum
     settings.addProject(projectPath);
     settings.setSessionArchived(ref, true, 'Saved chat');
     let fail = true;
-    const row = { uuid: sessionId, empty_session: false };
+    const row = { uuid: sessionId, mode: 'code', path: join(projectPath, `${sessionId}.jsonl`), empty_session: false };
     const bridge = { get: () => undefined, isProjectClosing: () => false, openSession: async () => { if (fail) throw new Error('resume failed'); } };
-    const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { find: async () => row, list: async () => ({ sessions: [row] }), invalidate: () => undefined } as any);
+    const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { find: async () => row, select: async () => row, list: async () => ({ sessions: [row] }), invalidate: () => undefined } as any);
     (host as any).bootstrap = () => ({ settings: settings.getPublic() });
-    await assert.rejects((host as any).openSessionAndActivateInternal(ref), /resume failed/);
+    await assert.rejects((host as any).openSessionAndActivateInternal(ref, { scope: 'current', transcriptPath: row.path }), /resume failed/);
     assert.equal(settings.isSessionArchived(ref), true);
     fail = false;
-    await (host as any).openSessionAndActivateInternal(ref);
+    await (host as any).openSessionAndActivateInternal(ref, { scope: 'current', transcriptPath: row.path });
     assert.equal(new SettingsStore(dir).isSessionArchived(ref), false);
     assert.equal(settings.getPublic().activeSession?.sessionId, sessionId);
     assert.equal((host as any).catalogs.get(projectPath).sessions[0].uuid, sessionId);
@@ -133,7 +134,8 @@ test('failure to create the replacement keeps the durable archive and cleared ac
     const ref = { projectPath, sessionId };
     settings.addProject(projectPath);
     settings.setActiveSession(ref);
-    const runtime = { projectPath, connectionState: { status: 'connected' }, beginArchive: () => () => {}, manageCron: async () => [] };
+    settings.conversationSpaces.setMode('code');
+    const runtime = { projectPath, sessionMode: 'code', connectionState: { status: 'connected' }, beginArchive: () => () => {}, manageCron: async () => [] };
     const bridge = { get: () => runtime, isProjectClosing: () => false, withBackgroundSession: async (_ref: unknown, _empty: unknown, _model: unknown, operation: (runtime: any) => Promise<unknown>) => operation(runtime), closeSession: async () => {}, newSession: async () => { throw new Error('fixture launch failure'); } };
     const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { list: async () => ({ sessions: [] }), invalidate: () => undefined } as any);
     await assert.rejects((host as any).archiveSessionInternal(ref), /Chat was archived.*fixture launch failure/);

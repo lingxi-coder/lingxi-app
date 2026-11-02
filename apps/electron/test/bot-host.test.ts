@@ -1,6 +1,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { BotContent } from '../src/main/bots/content.js';
@@ -26,9 +26,11 @@ function hostFixture(t: TestContext) {
   rmSync(join(f.userData, 'settings.v1.json'));
   const settings = new SettingsStore(f.userData);
   const project = f.folder('project');
-  const ownerRef = { projectPath: project, sessionId: OWNER_SESSION };
+  const ownerRef = { projectPath: project, sessionId: OWNER_SESSION, mode: 'code' as const, projectId: project };
   settings.addProject(project);
   settings.activateProject(project);
+  settings.conversationSpaces.setMode('code');
+  settings.conversationSpaces.register(ownerRef);
   settings.setActiveSession(ownerRef);
   const picks: string[] = [];
   let pickResult: string | undefined;
@@ -37,11 +39,11 @@ function hostFixture(t: TestContext) {
   let summaries: any[] = [];
   const sent: Array<[string, unknown]> = [];
   /** The sessions the Bots' own catalog has, by id. */
-  const botSessions = new Map<string, { uuid: string; empty_session: boolean; resume_model?: string }>();
+  const botSessions = new Map<string, { uuid: string; path: string; mode: 'code'; workspace_path: string; empty_session: boolean; resume_model?: string }>();
   const bridge = {
     registerIpc() {}, registerWindow() {},
     get runtimeSummaries() { return summaries; },
-    get: () => undefined,
+    get: (id: string) => id === SESSION ? { sessionMode: 'code', pendingInteractions: 0, pendingAskUserQuestions: [] } : undefined,
     isProjectClosing: () => false,
     hasActiveWork: () => false,
     closeSession: async (ref: { sessionId: string }) => { closed.push(ref.sessionId); },
@@ -58,7 +60,12 @@ function hostFixture(t: TestContext) {
       closeProject: async (projectPath) => { closed.push(projectPath); },
     },
     catalogFor: () => ({
-      list: async () => ({ sessions: [] }), find: async (_path, sessionId) => botSessions.get(sessionId.toLowerCase()) as any, invalidate: () => undefined,
+      list: async () => ({ sessions: [] }), find: async (_path, sessionId) => botSessions.get(sessionId.toLowerCase()) as any,
+      select: async (_path, sessionId, selection) => {
+        const row = botSessions.get(sessionId.toLowerCase());
+        return row?.path === selection.transcriptPath ? row as any : undefined;
+      },
+      invalidate: () => undefined,
       workspaceSettings: async () => ({ environment: {}, configHome: '/unused' }),
     }),
     routines: {
@@ -254,7 +261,14 @@ test('the app data is recognised when it is reached through a link', (t) => {
 // The routines of a Bot
 
 function runSession(f: ReturnType<typeof hostFixture>) {
-  f.botSessions.set(RUN_SESSION, { uuid: RUN_SESSION, empty_session: false });
+  const bot = f.service.list()[0]!;
+  const workspace = f.store.workspaceDir(bot.bot_id);
+  const directory = f.store.transcriptsDir(bot.bot_id);
+  mkdirSync(directory, { recursive: true });
+  const path = join(directory, `${RUN_SESSION}.jsonl`);
+  writeFileSync(path, '{}\n');
+  f.botSessions.set(RUN_SESSION, { uuid: RUN_SESSION, path, mode: 'code', workspace_path: workspace, empty_session: false });
+  f.store.rememberSessionSource(bot.bot_id, RUN_SESSION, { path, mode: 'code' });
 }
 
 test('the chat of a routine\'s run opens as a chat of the Bot, not of a project', async (t) => {
@@ -272,7 +286,7 @@ test('the chat of a routine\'s run opens as a chat of the Bot, not of a project'
 test('a routine\'s chat is not opened through a Bot that does not have it, or that is gone', async (t) => {
   const f = hostFixture(t);
   const { bot, workspace } = await newBot(f);
-  await assert.rejects(f.call(CH_SCHEDULED, { action: 'open', scopeId: workspace, sessionId: RUN_SESSION }), /does not belong to this Bot/);
+  await assert.rejects(f.call(CH_SCHEDULED, { action: 'open', scopeId: workspace, sessionId: RUN_SESSION }), /source is unavailable/);
   await assert.rejects(f.call(CH_SCHEDULED, { action: 'open', scopeId: workspace, sessionId: 'not-a-session' }), /Invalid scheduled session/);
   assert.deepEqual(f.settings.getPublic().activeSession, f.ownerRef, 'the window keeps what it showed');
   runSession(f);
@@ -303,18 +317,44 @@ test('clicking the notification of a Bot\'s routine shows its chat and tells the
 test('a notification that names a chat the Bot no longer has shows nothing and tells the window nothing', async (t) => {
   const f = hostFixture(t);
   const { workspace } = await newBot(f);
-  await assert.rejects(f.host.showNotifiedSession({ projectPath: workspace, sessionId: RUN_SESSION }), /does not belong to this Bot/);
+  await assert.rejects(f.host.showNotifiedSession({ projectPath: workspace, sessionId: RUN_SESSION }), /source is unavailable/);
   assert.deepEqual(f.sent.filter(([channel]) => channel === CH_BOTS_SESSION_SHOWN), []);
   assert.deepEqual(f.settings.getPublic().activeSession, f.ownerRef);
 });
 
-test('a notification of a project restores the project\'s session as it did, and the window is not told of a Bot', async (t) => {
+test('a project notification validates its saved source before showing the session', async (t) => {
   const f = hostFixture(t);
   await newBot(f);
-  const restored: unknown[][] = [];
-  (f.host as any).restoreProjectSession = async (...args: unknown[]) => { restored.push(args); return f.ownerRef; };
+  const path = join(f.project, `${OWNER_SESSION}.jsonl`);
+  f.settings.rememberSessionTranscriptSelection(f.ownerRef, { catalogProjectPath: f.project, scope: 'current', transcriptPath: path });
+  (f.host as any).sessionCatalog.select = async (_project: string, _id: string, selection: { transcriptPath: string }) =>
+    selection.transcriptPath === path ? { uuid: OWNER_SESSION, mode: 'code', path, workspace_path: f.project } : undefined;
+  const opened: unknown[][] = [];
+  (f.host as any).openSessionAndActivateInternal = async (...args: unknown[]) => { opened.push(args); return { activeSession: f.ownerRef }; };
   await f.host.showNotifiedSession(f.ownerRef);
-  assert.deepEqual(restored, [[f.project, f.ownerRef]]);
+  assert.deepEqual(opened.map(([ref, selection, , mode]) => [ref, selection, mode]), [[f.ownerRef, undefined, 'code']]);
+  assert.deepEqual(f.sent.filter(([channel]) => channel === CH_BOTS_SESSION_SHOWN), []);
+});
+
+test('a project notification with no saved source keeps the current space and view', async (t) => {
+  const f = hostFixture(t);
+  f.settings.conversationSpaces.setMode('chat');
+  const before = f.settings.getPublic().activeSession;
+  await assert.rejects(f.host.showNotifiedSession(f.ownerRef), /source is unavailable/);
+  assert.equal(f.settings.conversationSpaces.snapshot().activeMode, 'chat');
+  assert.deepEqual(f.settings.getPublic().activeSession, before);
+  assert.deepEqual(f.sent, []);
+});
+
+test('a failed notification open restores the previously selected space', async (t) => {
+  const f = hostFixture(t);
+  const path = join(f.project, `${OWNER_SESSION}.jsonl`);
+  f.settings.rememberSessionTranscriptSelection(f.ownerRef, { catalogProjectPath: f.project, scope: 'current', transcriptPath: path });
+  (f.host as any).sessionCatalog.select = async () => ({ uuid: OWNER_SESSION, mode: 'code', path, workspace_path: f.project });
+  (f.host as any).openSessionAndActivateInternal = async () => { throw new Error('engine failed'); };
+  f.settings.conversationSpaces.setMode('chat');
+  await assert.rejects(f.host.showNotifiedSession(f.ownerRef), /engine failed/);
+  assert.equal(f.settings.conversationSpaces.snapshot().activeMode, 'chat');
   assert.deepEqual(f.sent, []);
 });
 

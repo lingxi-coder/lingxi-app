@@ -880,19 +880,28 @@ function validateCommand(name: string, v: unknown): void {
       assert.ok(isString(o['agent_id']));
       break;
     case 'new_session':
+      assert.ok(['chat', 'code'].includes(String(o['mode'])));
       if ('cwd' in o) assert.ok(isString(o['cwd']));
       if ('model' in o) assert.ok(isString(o['model']));
       break;
     case 'resume_session':
+      assert.ok(['chat', 'code'].includes(String(o['expected_mode'])));
       assert.ok(isString(o['session_id']));
       if ('cwd' in o) assert.ok(isString(o['cwd']));
       break;
     case 'list_sessions':
+      if (o['mode'] != null) assert.ok(['chat', 'code'].includes(String(o['mode'])));
       if ('limit' in o) assert.ok(isNumber(o['limit']));
       break;
-    case 'set_session_mode':
-      exactObjectKeys(o, ['type', 'mode']);
-      assert.ok(['chat', 'code'].includes(String(o['mode'])));
+    case 'prepare_session_handoff':
+      exactObjectKeys(o, ['type', 'request_id', 'target_mode']);
+      assert.ok(isString(o['request_id']));
+      assert.ok(['chat', 'code'].includes(String(o['target_mode'])));
+      break;
+    case 'cancel_session_handoff':
+    case 'retry_session_handoff':
+      exactObjectKeys(o, ['type', 'request_id']);
+      assert.ok(isString(o['request_id']));
       break;
     case 'get_context_manifest':
       exactObjectKeys(o, ['type']);
@@ -1265,7 +1274,8 @@ function validateEvent(name: string, v: unknown): void {
           isString(o['summary']),
       );
       break;
-    case 'session_mode_changed':
+    case 'session_handoff_prepared':
+    case 'session_handoff_failed':
     case 'context_manifest':
       assert.deepEqual(validateClientEvent(v), v);
       break;

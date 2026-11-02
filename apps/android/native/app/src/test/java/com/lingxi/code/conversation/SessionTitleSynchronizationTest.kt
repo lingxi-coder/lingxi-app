@@ -21,13 +21,13 @@ class SessionTitleSynchronizationTest {
     @After fun teardown() = Dispatchers.resetMain()
     @Test fun catalogArrivingBeforeBootstrapStillNamesTheHeader() {
         val rows = MutableStateFlow(EngineSessionState.ready(listOf(
-            SessionRow(uuid = "bootstrap", title = "Existing session", messageCount = 1, relativeTime = ""))))
+            SessionRow(uuid = "bootstrap", title = "Existing session", messageCount = 1, relativeTime = "", mode = com.lingxi.code.model.SessionMode.Code))))
         val source = object : ConversationSource {
             override val sessionState = rows
             override fun submit(text: String) = emptyFlow<ReplyEvent>()
         }
         val vm = ChatViewModel(source)
-        vm.applyActivatedSession(ActivatedSession("bootstrap", emptyList(), SessionActivationKind.Bootstrap))
+        vm.applyActivatedSession(ActivatedSession("bootstrap", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code))
         assertEquals("Existing session", vm.state.value.session.title)
     }
     @Test fun catalogRenameUpdatesActiveHeaderWithoutApplyingAnotherSessionTitle() {
@@ -37,7 +37,7 @@ class SessionTitleSynchronizationTest {
             override fun submit(text: String) = emptyFlow<ReplyEvent>()
         }
         val vm = ChatViewModel(source, SavedStateHandle(mapOf("chat.session.id" to "active", "chat.session.title" to "Old")))
-        fun row(id: String, title: String) = SessionRow(uuid = id, title = title, messageCount = 1, relativeTime = "")
+        fun row(id: String, title: String) = SessionRow(uuid = id, title = title, messageCount = 1, relativeTime = "", mode = com.lingxi.code.model.SessionMode.Code)
         rows.value = EngineSessionState.ready(listOf(row("active", "Custom session name"), row("other", "Other")))
         assertEquals("Custom session name", vm.state.value.session.title)
         rows.value = EngineSessionState.ready(listOf(row("other", "Changed elsewhere")))

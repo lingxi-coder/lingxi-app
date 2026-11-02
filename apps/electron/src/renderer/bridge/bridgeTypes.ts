@@ -33,6 +33,7 @@ import type {
   NativeAudioCommand,
   NativeAudioCommandResult,
   NativeAudioOperationResponse,
+  NativeAudioFlowLease,
   NativeAudioSnapshot,
 } from '../../shared/nativeAudio.js';
 import type { NotificationPreferences } from '../../shared/notificationPreferences.js';
@@ -166,7 +167,7 @@ export interface UseBridge {
     images?: ImageRefDto[],
     imageNames?: string[],
     filePaths?: string[],
-    options?: { purpose?: TrackedPromptPurpose; visualizationContext?: VisualizationContextChip },
+    options?: { purpose?: TrackedPromptPurpose; visualizationContext?: VisualizationContextChip; sessionId?: string },
   ): { token: DesktopTurnToken; queued: Promise<void> } | null;
   /** A follow-up a widget in the active session drafted, until the composer takes it. */
   readonly visualizationFollowup: VisualizationFollowup | null;
@@ -216,9 +217,9 @@ export interface UseBridge {
   touchSession(projectPath: string, sessionId: string): Promise<void>;
   renameSession(projectPath: string, sessionId: string, title: string): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
-  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionRef | false>;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace): Promise<SessionRef | false>;
   /** Show a chat of a Bot in the chat view; a new one when `sessionId` is absent. Rejects with the reason it could not start. */
-  openBotSession(botId: string, sessionId?: string): Promise<import('../../shared/bots').BotSessionRefUi>;
+  openBotSession(botId: string, sessionId?: string, transcriptPath?: string): Promise<import('../../shared/bots').BotSessionRefUi>;
   /** Follow the host, which made a chat of a Bot the displayed one on its own (the owner clicked a notification). */
   showBotSession(session: import('../../shared/bots').BotSessionRefUi): Promise<void>;
   deleteBot(botId: string): Promise<void>;
@@ -332,13 +333,19 @@ export interface UseBridge {
   copyText(text: string): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
   audioRequest(command: NativeAudioCommand): Promise<NativeAudioCommandResult>;
-  audioExecute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV4): Promise<NativeAudioOperationResponse>;
-  audioCancel(): Promise<void>;
-  audioFinishListen(): Promise<void>;
+  audioExecute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV4, flow?: NativeAudioFlowLease): Promise<NativeAudioOperationResponse>;
+  audioCancel(flow?: NativeAudioFlowLease): Promise<void>;
+  audioRetainFlow(sessionId: string, leaseId: string, retain: boolean): Promise<void>;
+  audioFinishListen(flow?: NativeAudioFlowLease): Promise<void>;
   refresh(): Promise<void>;
   newSession(projectPath?: string): Promise<import("../../shared/settings").SessionRef | undefined>;
   resumeSession(sessionId: string): Promise<void>;
-  setSessionMode(mode: 'chat' | 'code'): Promise<void>;
+  switchConversationSpace(mode: 'chat' | 'code'): Promise<void>;
+  readonly handoffPending: boolean;
+  readonly handoffRetryAvailable: boolean;
+  prepareSessionHandoff(): Promise<void>;
+  cancelSessionHandoff(): Promise<void>;
+  openHandoffSource(source: import('../../shared/conversationSpaces').HandoffBacklink): Promise<void>;
   setModel(model: string): Promise<void>;
   setReasoningSelection(selection: ReasoningSelectionDto): Promise<void>;
   setFastMode(enabled: boolean): Promise<void>;

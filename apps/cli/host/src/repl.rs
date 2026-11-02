@@ -473,7 +473,11 @@ async fn run_repl_with_resume(
         cfg.permission_mode_cli_explicit = argv.permission_mode.is_some()
             || argv.dangerously_skip_permissions
             || crate::permission_mode_preference::load(argv).is_some();
-        match crate::init::capture_tui_resume(&mut cfg, session_id).await {
+        match crate::init::capture_tui_resume(
+            &mut cfg,
+            session_id,
+            Some(lingxi_core::host::session_context::ConversationMode::Code),
+        ).await {
             Ok(captured) => {
                 if cfg.initial_effort.is_none() {
                     cfg.initial_effort = orchestrator::runtime_metadata_from_messages(&captured.messages).effort;
@@ -510,12 +514,6 @@ async fn run_repl_with_resume(
             orchestrator::deferred_tool_replays_from_messages(&captured.entries),
         ).await {
             eprintln!("lingxi-cli: resume deferred tools failed: {error}");
-            return exit_codes::RUNTIME_ERROR;
-        }
-        if let Err(error) = runtime.orchestrator.set_conversation_mode(
-            lingxi_core::host::session_context::ConversationMode::Code,
-        ).await {
-            eprintln!("lingxi-cli: cannot resume in Code mode: {error}");
             return exit_codes::RUNTIME_ERROR;
         }
     }

@@ -75,9 +75,9 @@ function harness(t: TestContext) {
   let execute = async (_ref: SessionRef, _runId: string, _task: CronJobDto) => 'Completed summary';
   let openRuntime = async (ref: SessionRef) => runtime(ref);
   let beforeBinding = async () => undefined;
-  let listCatalog = async (_path: string) => ({ sessions: [{ uuid: targetSessionId }] });
+  let listCatalog = async (_path: string) => ({ sessions: [{ uuid: targetSessionId, mode: 'code' as const }] });
   const runtime = (ref: SessionRef) => ({
-    projectPath: ref.projectPath,
+    projectPath: ref.projectPath, sessionMode: ref.mode ?? 'code',
     markCronRunStarted: async (runId: string, sessionId: string) => {
       bindings.push({ projectPath: ref.projectPath, runId, sessionId });
     },
@@ -96,6 +96,12 @@ function harness(t: TestContext) {
     isSessionArchived: () => false,
   } as unknown as SettingsStore;
   const manager = {
+    get: () => undefined,
+    requireSavedSessionSource: async (ref: SessionRef) => {
+      const row = (await listCatalog(ref.projectPath)).sessions.find(item => item.uuid === ref.sessionId);
+      if (!row) throw new Error('The target chat is unavailable.');
+      return { path: `${ref.projectPath}/${ref.sessionId}.jsonl`, mode: row.mode };
+    },
     withBackgroundSession: async <T>(ref: SessionRef, _empty: boolean, _model: string | undefined, operation: (target: SessionRuntime) => Promise<T>) => {
       background.push(ref);
       return operation(await openRuntime(ref));
@@ -442,13 +448,13 @@ test('shutdown prevents a selected-session run from starting after its queue dra
 test('shutdown during target validation does not acquire an execution runtime', async (t) => {
   const h = harness(t);
   const entered = deferred();
-  const finish = deferred<{ sessions: { uuid: string }[] }>();
+  const finish = deferred<{ sessions: { uuid: string; mode: 'code' }[] }>();
   h.setListCatalog(async () => { entered.resolve(); return finish.promise; });
   const run = runClaim(h, h.source, 'validating', task({ runMode: 'selected_session', targetSessionId: targetSessionId }));
   const rejected = assert.rejects(run, /^Error: cancelled:/);
   await entered.promise;
   h.service.dispose();
-  finish.resolve({ sessions: [{ uuid: targetSessionId }] });
+  finish.resolve({ sessions: [{ uuid: targetSessionId, mode: 'code' }] });
   await rejected;
   assert.equal(h.background.length, 0);
   assert.equal(h.bindings.length, 0);
@@ -458,18 +464,18 @@ test('shutdown during target validation does not acquire an execution runtime', 
 test('shutdown during queued target revalidation does not acquire an execution runtime', async (t) => {
   const h = harness(t);
   const entered = deferred();
-  const finish = deferred<{ sessions: { uuid: string }[] }>();
+  const finish = deferred<{ sessions: { uuid: string; mode: 'code' }[] }>();
   let validations = 0;
   h.setListCatalog(async () => {
     validations += 1;
     if (validations === 2) { entered.resolve(); return finish.promise; }
-    return { sessions: [{ uuid: targetSessionId }] };
+    return { sessions: [{ uuid: targetSessionId, mode: 'code' }] };
   });
   const run = runClaim(h, h.source, 'revalidating', task({ runMode: 'selected_session', targetSessionId: targetSessionId }));
   const rejected = assert.rejects(run, /^Error: cancelled:/);
   await entered.promise;
   h.service.dispose();
-  finish.resolve({ sessions: [{ uuid: targetSessionId }] });
+  finish.resolve({ sessions: [{ uuid: targetSessionId, mode: 'code' }] });
   await rejected;
   assert.equal(validations, 2);
   assert.equal(h.background.length, 0);

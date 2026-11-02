@@ -504,6 +504,51 @@ struct TransitionDriver {
     session: Arc<tokio::sync::Mutex<String>>,
 }
 
+#[derive(Default)]
+struct RejectingTransitionDriver {
+    loop_stops: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::server::TurnDriver for RejectingTransitionDriver {
+    async fn run_turn(&self, _: Utf16JsonProjection) {}
+    async fn stop_dynamic_loop(&self) {
+        self.loop_stops.fetch_add(1, Ordering::SeqCst);
+    }
+    async fn current_session_id(&self) -> Option<String> {
+        Some("old-session".into())
+    }
+}
+
+#[derive(Default)]
+struct RejectingTransitionRouter {
+    routes: std::sync::atomic::AtomicUsize,
+    audio_stops: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::router::CommandRouter for RejectingTransitionRouter {
+    async fn preflight_session_transition(
+        &self,
+        command: &ClientCommand,
+    ) -> Result<(), (client::protocol::events::ErrorKindDto, String)> {
+        assert!(matches!(
+            command,
+            ClientCommand::NewSession { .. } | ClientCommand::ResumeSession { .. }
+        ));
+        Err((
+            client::protocol::events::ErrorKindDto::Rejected,
+            "session_mode_mismatch".into(),
+        ))
+    }
+    async fn stop_realtime_audio(&self) {
+        self.audio_stops.fetch_add(1, Ordering::SeqCst);
+    }
+    async fn route(&self, _: ClientCommand, _: Arc<dyn client::adapter::ClientEventSink>) {
+        self.routes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::server::TurnDriver for TransitionDriver {
     async fn run_turn(&self, _: Utf16JsonProjection) {}
@@ -654,6 +699,73 @@ async fn socket_context_without_session_cannot_install_binding() {
 }
 
 #[tokio::test]
+async fn mode_mismatch_does_not_stop_audio_loop_or_revoke_media_attachment() {
+    use client::protocol::events::ErrorKindDto;
+    use client::protocol::listings::SessionModeDto;
+
+    let service: Arc<dyn MediaService> = media_runtime::MediaRuntimeBuilder::new(Arc::new(
+        audio_provider::media_store::BoundedMediaResourceStore::default(),
+    ))
+    .service_epoch(7)
+    .build();
+    let rpc = MediaServiceRpc::new(
+        service,
+        MediaOwner::Session {
+            session_id: "old-session".into(),
+        },
+    )
+    .unwrap();
+    let old = rpc.current_attachment().unwrap();
+    let driver = Arc::new(RejectingTransitionDriver::default());
+    let router = Arc::new(RejectingTransitionRouter::default());
+    let connection = BridgeConnection::new();
+    let gate = Arc::new(client::adapter::AdapterPermissionGate::new(
+        connection.permission_sink(),
+    ));
+    let connection = Arc::new(
+        connection
+            .bind(gate, driver.clone())
+            .bind_router(router.clone())
+            .bind_media_service(rpc.clone()),
+    );
+    let endpoint = McpEndpoint::start_on_ephemeral_port_with_pump(connection)
+        .await
+        .unwrap();
+    endpoint.set_auth_token("teardown-test-token".into());
+    let mut socket = connect(&endpoint).await;
+    for (id, command) in [
+        (
+            21,
+            ClientCommand::NewSession {
+                cwd: None,
+                model: None,
+                mode: SessionModeDto::Chat,
+            },
+        ),
+        (
+            22,
+            ClientCommand::ResumeSession {
+                session_id: "11111111-2222-4333-8444-555555555555".into(),
+                cwd: None,
+                expected_mode: SessionModeDto::Chat,
+            },
+        ),
+    ] {
+        send(&mut socket, wire_request(id, "command", &command)).await;
+        assert!(matches!(next_frame(&mut socket).await,
+            Frame::Event(ClientEvent::Error { kind: ErrorKindDto::Rejected, message })
+                if message.display().contains("session_mode_mismatch")));
+        assert_eq!(old.phase(), MediaAttachmentPhase::Active);
+        assert_eq!(rpc.current_attachment().unwrap().id(), old.id());
+    }
+    assert_eq!(driver.loop_stops.load(Ordering::SeqCst), 0);
+    assert_eq!(router.audio_stops.load(Ordering::SeqCst), 0);
+    assert_eq!(router.routes.load(Ordering::SeqCst), 0);
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+}
+
+#[tokio::test]
 async fn socket_new_and_resume_prepare_attachment_before_publishing_it() {
     let service: Arc<dyn MediaService> = media_runtime::MediaRuntimeBuilder::new(Arc::new(
         audio_provider::media_store::BoundedMediaResourceStore::default(),
@@ -699,6 +811,7 @@ async fn socket_new_and_resume_prepare_attachment_before_publishing_it() {
             &ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             },
         ),
     )
@@ -714,6 +827,7 @@ async fn socket_new_and_resume_prepare_attachment_before_publishing_it() {
             &ClientCommand::ResumeSession {
                 session_id: "resume-session".into(),
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
         ),
     )
@@ -729,6 +843,7 @@ async fn socket_new_and_resume_prepare_attachment_before_publishing_it() {
             &ClientCommand::ResumeSession {
                 session_id: "missing-session".into(),
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
         ),
     )
@@ -916,6 +1031,7 @@ async fn socket_queued_old_route_cannot_register_in_new_session() {
             &ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             },
         ),
     )
@@ -1055,6 +1171,7 @@ async fn socket_audio_receipt_bypasses_a_blocked_session_command() {
             &ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             },
         ),
     )

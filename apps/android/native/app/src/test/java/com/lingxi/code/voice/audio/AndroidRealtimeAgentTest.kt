@@ -5,6 +5,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -26,6 +27,25 @@ class AndroidRealtimeAgentTest {
         } catch (error: AudioOperationException) { assertEquals(DeviceAudioErrorKind.Unsupported, error.kind) }
         assertEquals(0, cloud.opened)
         assertEquals(0, driver.captures)
+    }
+
+    @Test
+    fun commitWaitsForAnAdmittedCaptureWriteBeforeEnteringProviderQueue() = runTest {
+        val cloud = Cloud()
+        val gate = CompletableDeferred<Unit>()
+        cloud.audioSendGate = gate
+        val driver = Driver()
+        val callbacks = Callbacks()
+        val core = AndroidAudioServiceCore(Runtime(), driver, 64, provider = cloud)
+        val session = core.openRealtimeAgent(request, config, callbacks) as NavigationDrainingRealtimeSession
+        cloud.audioSendStarted.await()
+        session.stop()
+        runCurrent()
+        assertFalse(cloud.committed.isCompleted)
+        gate.complete(Unit)
+        cloud.committed.await()
+        assertEquals(listOf("audio-start", "audio-finished", "commit"), cloud.inputOrder.toList())
+        core.cancel(request.identity)
     }
 
     @Test
@@ -73,12 +93,103 @@ class AndroidRealtimeAgentTest {
         assertEquals(0, core.diagnostics().activeLeaseCount)
     }
 
+    @Test
+    fun navigationKeepsCommittedTurnUntilPlaybackAndProviderReceiptDrain() = runTest {
+        val cloud = Cloud()
+        val driver = Driver()
+        val callbacks = Callbacks()
+        val core = AndroidAudioServiceCore(Runtime(), driver, 64, provider = cloud)
+        val session = core.openRealtimeAgent(request, config, callbacks) as NavigationDrainingRealtimeSession
+        driver.captureStarted.await()
+        session.stop()
+        cloud.event("""{"type":"agent_response_started","turnId":"native-terminal","operationId":"realtime-operation","sessionId":"old-session"}""")
+        cloud.event("""{"type":"audio_delta","audioBase64":"AQACAA==","itemId":"old-owner-item","sampleRateHz":24000,"channels":1,"encoding":"pcm16"}""")
+        driver.playbackStarted.await()
+        session.finishForNavigation()
+        cloud.event("""{"type":"tool_call","callId":"pending-tool"}""")
+        cloud.event("""{"type":"turn_completed"}""")
+        assertFalse(callbacks.closed.isCompleted)
+        assertFalse(cloud.acknowledged.isCompleted)
+        assertFalse(cloud.aborted)
+
+        driver.playbackGate.complete(Unit)
+        assertEquals("old-owner-item", cloud.acknowledged.await())
+        assertFalse(callbacks.closed.isCompleted)
+        cloud.event("""{"type":"agent_turn_completed","turnId":"stale-other-turn","operationId":"realtime-operation","sessionId":"old-session"}""")
+        cloud.event("""{"type":"agent_turn_completed","turnId":"native-terminal","operationId":"stale-operation","sessionId":"old-session"}""")
+        cloud.event("""{"type":"agent_turn_completed","turnId":"native-terminal","operationId":"realtime-operation","sessionId":"other-session"}""")
+        cloud.event("""{"type":"agent_response_started","turnId":"newer-turn","operationId":"realtime-operation","sessionId":"old-session"}""")
+        assertFalse(callbacks.closed.isCompleted)
+        cloud.event("""{"type":"agent_turn_completed","turnId":"native-terminal","operationId":"realtime-operation","sessionId":"old-session"}""")
+        assertFalse(callbacks.closed.isCompleted)
+        cloud.event("""{"type":"agent_turn_completed","turnId":"newer-turn","operationId":"realtime-operation","sessionId":"old-session"}""")
+        callbacks.closed.await()
+        assertTrue(cloud.closed)
+        assertFalse(cloud.aborted)
+        assertEquals(0, core.diagnostics().activeLeaseCount)
+    }
+
+    @Test
+    fun lateUserTranscriptDoesNotReopenCompletedTurnAndDuplicateReadyDoesNotRestartCapture() = runTest {
+        val cloud = Cloud()
+        val driver = Driver()
+        val callbacks = Callbacks()
+        val core = AndroidAudioServiceCore(Runtime(), driver, 64, provider = cloud)
+        val session = core.openRealtimeAgent(request, config, callbacks) as NavigationDrainingRealtimeSession
+        driver.captureStarted.await()
+        cloud.event("""{"type":"session_ready","inputFormat":{"sampleRateHz":24000,"channels":1,"encoding":"pcm16"},"outputFormat":{"sampleRateHz":24000,"channels":1,"encoding":"pcm16"}}""")
+        runCurrent()
+        assertEquals(1, driver.captures)
+
+        session.stop()
+        cloud.event("""{"type":"agent_response_started","turnId":"done","operationId":"realtime-operation","sessionId":"old-session"}""")
+        cloud.event("""{"type":"agent_turn_completed","turnId":"done","operationId":"realtime-operation","sessionId":"old-session"}""")
+        callbacks.turnCompleted.await()
+        cloud.event("""{"type":"transcript","role":"user","text":"late transcription","final":true}""")
+        session.finishForNavigation()
+        callbacks.closed.await()
+        assertTrue(cloud.closed)
+        assertFalse(cloud.aborted)
+        assertEquals(1, driver.captures)
+    }
+
+    @Test
+    fun navigationWaitsForNewCommitWhoseNativeStartIsStillInFlight() = runTest {
+        val cloud = Cloud()
+        val driver = Driver()
+        val callbacks = Callbacks()
+        val core = AndroidAudioServiceCore(Runtime(), driver, 64, provider = cloud)
+        val session = core.openRealtimeAgent(request, config, callbacks) as NavigationDrainingRealtimeSession
+        driver.captureStarted.await()
+        session.stop()
+        cloud.event("""{"type":"agent_response_started","turnId":"first","operationId":"realtime-operation","sessionId":"old-session"}""")
+        cloud.event("""{"type":"audio_delta","audioBase64":"AQACAA==","itemId":"first-audio","sampleRateHz":24000,"channels":1,"encoding":"pcm16"}""")
+        driver.playbackStarted.await()
+        cloud.event("""{"type":"turn_completed"}""")
+        cloud.event("""{"type":"agent_turn_completed","turnId":"first","operationId":"realtime-operation","sessionId":"old-session"}""")
+
+        // The second input is admitted before its native start can reach this lane.
+        session.stop()
+        session.finishForNavigation()
+        driver.playbackGate.complete(Unit)
+        runCurrent()
+        assertFalse(callbacks.closed.isCompleted)
+        assertFalse(cloud.aborted)
+        cloud.event("""{"type":"agent_response_started","turnId":"second","operationId":"realtime-operation","sessionId":"old-session"}""")
+        cloud.event("""{"type":"agent_turn_completed","turnId":"second","operationId":"realtime-operation","sessionId":"old-session"}""")
+        callbacks.closed.await()
+        assertTrue(cloud.closed)
+        assertFalse(cloud.aborted)
+    }
+
     private class Callbacks : RealtimeAgentCallbacks {
         val transcripts = mutableListOf<String>()
         val closed = CompletableDeferred<Unit>()
+        val turnCompleted = CompletableDeferred<Unit>()
         override fun onReady() = Unit
         override fun onTranscript(text: String, assistant: Boolean, final: Boolean) { transcripts += text }
         override fun onPlayback(playing: Boolean) = Unit
+        override fun onAgentTurnCompleted() { turnCompleted.complete(Unit) }
         override fun onError(message: String) = Unit
         override fun onClosed() { closed.complete(Unit) }
     }
@@ -88,6 +199,11 @@ class AndroidRealtimeAgentTest {
         var opened = 0
         var sentChunks = 0
         var aborted = false
+        var closed = false
+        var audioSendGate: CompletableDeferred<Unit>? = null
+        val audioSendStarted = CompletableDeferred<Unit>()
+        val committed = CompletableDeferred<Unit>()
+        val inputOrder = java.util.Collections.synchronizedList(mutableListOf<String>())
         val acknowledged = CompletableDeferred<String?>()
         val allItemsAcknowledged = CompletableDeferred<Unit>()
         val acknowledgementIds = mutableListOf<String?>()
@@ -101,15 +217,21 @@ class AndroidRealtimeAgentTest {
         override suspend fun transcribe(request: DeviceAudioRequest, configuration: AudioConfigurationV4, capture: DeviceAudioCapture): SttResult = error("unexpected file STT")
         override suspend fun synthesize(request: DeviceAudioRequest, configuration: AudioConfigurationV4, text: String): Pair<ByteArray, Int> = error("unexpected TTS")
         override suspend fun cancel(operationId: String) = Unit
-        override suspend fun sendAudio(pcm: ByteArray) { sentChunks++ }
-        override suspend fun commitInput() = Unit
+        override suspend fun sendAudio(pcm: ByteArray) {
+            inputOrder += "audio-start"
+            audioSendStarted.complete(Unit)
+            audioSendGate?.await()
+            sentChunks++
+            inputOrder += "audio-finished"
+        }
+        override suspend fun commitInput() { inputOrder += "commit"; committed.complete(Unit) }
         override suspend fun interrupt(itemId: String?, audioEndMs: UInt?) = Unit
         override suspend fun playbackCompleted(itemId: String?) {
             acknowledgementIds += itemId
             acknowledged.complete(itemId)
             if (acknowledgementIds.size == 2) allItemsAcknowledged.complete(Unit)
         }
-        override suspend fun close() = Unit
+        override suspend fun close() { closed = true }
         override suspend fun abort() { aborted = true }
     }
 
@@ -118,9 +240,15 @@ class AndroidRealtimeAgentTest {
         val captureStarted = CompletableDeferred<Unit>()
         val playbackStarted = CompletableDeferred<Unit>()
         val playbackGate = CompletableDeferred<Unit>()
+        private val admission = RealtimeCaptureAdmission()
         override suspend fun streamCapture(lease: AudioLease, format: RealtimePcmFormat, onChunk: suspend (ByteArray) -> Unit) {
-            captures++; onChunk(byteArrayOf(1, 0)); captureStarted.complete(Unit); awaitCancellation()
+            captures++
+            admission.deliver(admission.snapshot()) { onChunk(byteArrayOf(1, 0)) }
+            captureStarted.complete(Unit)
+            awaitCancellation()
         }
+        override fun pauseStreamCapture(lease: AudioLease, paused: Boolean) = admission.setPaused(paused)
+        override suspend fun drainStreamCapture(lease: AudioLease) = admission.drain()
         override suspend fun streamPlayback(lease: AudioLease, format: RealtimePcmFormat, chunks: ReceiveChannel<ByteArray>) {
             playbackStarted.complete(Unit)
             for (chunk in chunks) assertEquals(4, chunk.size)

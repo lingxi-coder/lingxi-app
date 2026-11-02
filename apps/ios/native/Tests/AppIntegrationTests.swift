@@ -44,6 +44,8 @@ final class AppIntegrationTests: XCTestCase {
         XCTAssertFalse(both.needsContextRebind(workspace: "global", mode: "chat"))
         let session = try XCTUnwrap(CanonicalDeepLink.parse("lingxi://session/Session-A?mode=chat"))
         XCTAssertFalse(session.needsContextRebind(workspace: "global", mode: "code"))
+        XCTAssertNil(CanonicalDeepLink.parse("lingxi://session/Session-A?workspace=global"))
+        XCTAssertEqual(CanonicalDeepLink.parse("lingxi://session/Session-A?workspace=global&mode=code")?.params["mode"], "code")
         let new = try XCTUnwrap(CanonicalDeepLink.parse("lingxi://new?workspace=global&mode=chat"))
         XCTAssertFalse(new.needsContextRebind(workspace: "project.A", mode: "code"))
     }
@@ -162,44 +164,14 @@ final class AppIntegrationTests: XCTestCase {
         XCTAssertNil(LingxiDeepLink.action(from: URL(string: "lingxi://unknown")!))
     }
 
-    func testConversationDeepLinkParsesSessionAndOptionalTurn() {
+    func testConversationDeepLinkUsesCurrentCanonicalRoute() {
+        XCTAssertNil(LingxiDeepLink.action(from: URL(string: "lingxi://open_conversation?sessionId=session-a&turnId=42")!))
         XCTAssertEqual(
-            LingxiDeepLink.action(
-                from: URL(string: "lingxi://open_conversation?sessionId=session-a&turnId=42")!
-            ),
-            .openConversation(
-                sessionID: "session-a",
-                turnID: 42,
-                workspaceKey: nil,
-                mode: .code
-            )
-        )
-        XCTAssertEqual(
-            LingxiDeepLink.action(
-                from: URL(string: "lingxi://open_conversation?sessionId=session-a")!
-            ),
-            .openConversation(
-                sessionID: "session-a",
-                turnID: nil,
-                workspaceKey: nil,
-                mode: .code
-            )
-        )
-        XCTAssertEqual(
-            LingxiDeepLink.conversationURL(sessionID: "session-a", turnID: 42)?.absoluteString,
+            LingxiDeepLink.conversationURL(sessionID: "session-a", turnID: 42, mode: .code)?.absoluteString,
             "https://lingxios.net/open/session/session-a?mode=code"
         )
-        XCTAssertEqual(
-            LingxiDeepLink.action(from: URL(
-                string: "lingxi://open_conversation?sessionId=chat-a&workspaceKey=app.weather&sessionMode=chat"
-            )!),
-            .openConversation(
-                sessionID: "chat-a",
-                turnID: nil,
-                workspaceKey: "app.weather",
-                mode: .chat
-            )
-        )
+        let current = URL(string: "https://lingxios.net/open/session/chat-a?workspace=project.weather&mode=chat")!
+        XCTAssertEqual(LingxiDeepLink.action(from: current), CanonicalDeepLink.parse(current).map(LingxiAppAction.canonical))
     }
 
     func testDeviceControlCalendarQueryDecodesHostSnakeCase() throws {

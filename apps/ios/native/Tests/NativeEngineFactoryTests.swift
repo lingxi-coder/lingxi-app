@@ -31,6 +31,7 @@ final class NativeEngineFactoryTests: XCTestCase {
         )
         config.additionalWorkspaceDirectories = ["/home/lingxi/trusted"]
         config.projectMountGrants = ["/home/lingxi/trusted/project"]
+        config.initialSessionId = "8b625566-3a09-4d32-88f5-785e2ca97b2f"
         let launch = try NativeEngineFactory.prepare(.interactive(
             config: config, listener: FactoryTestListener(), permissions: FactoryTestPermissions()
         )).configuration
@@ -38,6 +39,7 @@ final class NativeEngineFactoryTests: XCTestCase {
         XCTAssertFalse(launch.appAgentHost)
         XCTAssertEqual(launch.apiKey, "development-override")
         XCTAssertEqual(launch.sessionMode, .chat)
+        XCTAssertEqual(launch.initialSessionId, config.initialSessionId)
         XCTAssertEqual(launch.projectCwd, "/workspace")
         XCTAssertEqual(launch.projectAdditionalDirectories, config.additionalWorkspaceDirectories)
         XCTAssertEqual(launch.projectMountGrants, config.projectMountGrants)
@@ -62,6 +64,7 @@ final class NativeEngineFactoryTests: XCTestCase {
         )).configuration
 
         XCTAssertFalse(launch.appAgentHost)
+        XCTAssertNil(launch.initialSessionId)
         XCTAssertEqual(launch.apiKey, "")
         XCTAssertEqual(launch.model, "task-model")
         XCTAssertEqual(launch.projectCwd, MobileUserStorage.directories().scheduledCwd)

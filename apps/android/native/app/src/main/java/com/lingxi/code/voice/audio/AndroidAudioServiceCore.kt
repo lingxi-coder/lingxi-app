@@ -4,6 +4,7 @@ import com.lingxi.code.voice.AndroidVoiceRuntime
 import com.lingxi.code.settings.VersionedAudioConfiguration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
@@ -151,6 +152,9 @@ internal interface AndroidAudioDeviceDriver {
         streamCaptureTimestamped(lease, format, onChunk, onReady)
     }
     fun pauseStreamCapture(lease: AudioLease, paused: Boolean) = Unit
+    /** Wait until any callback admitted before pause has finished its provider write. */
+    suspend fun drainStreamCapture(lease: AudioLease): Unit =
+        throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Capture admission draining is unsupported")
     fun setStreamPlaybackGain(lease: AudioLease, gain: Float): Unit =
         throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Realtime playback gain control is unsupported")
     fun streamingPlaybackPositionMs(lease: AudioLease): Long? = null
@@ -307,6 +311,7 @@ internal class AndroidAudioServiceCore(
     private val maxPayloadBytes: Long,
     private val initialEpoch: Long = 1L,
     private val provider: ProviderAudioBridge? = null,
+    serviceDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     private data class OperationState(
         val request: DeviceAudioRequest,
@@ -358,7 +363,7 @@ internal class AndroidAudioServiceCore(
     private val operationMutex = Mutex()
     private val mediaPortOpenMutex = Mutex()
     private val pendingMediaPortCleanups = AndroidMediaOpenCleanupRegistry()
-    private val serviceOperationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val serviceOperationScope = CoroutineScope(SupervisorJob() + serviceDispatcher)
     private val coordinator = AudioResourceCoordinator(initialEpoch)
     private val mediaOpenAdmission = AudioOwnerMediaOpenAdmission()
     private val mediaPortGeneration = AtomicLong(0L)
@@ -581,7 +586,9 @@ internal class AndroidAudioServiceCore(
                     } catch (error: Throwable) {
                         createdInput.close(error)
                         captureReady.completeExceptionally(error)
-                        throw error
+                        // Startup failures reach the opener; later failures reach
+                        // the input consumer. Do not also crash the supervisor.
+                        if (error is CancellationException || error !is Exception) throw error
                     }
                 }
             }
@@ -600,7 +607,8 @@ internal class AndroidAudioServiceCore(
                             pending.completion.completeExceptionally(error)
                         }
                         playbackReady.completeExceptionally(error)
-                        throw error
+                        // The opener or pending write receipts carry this error.
+                        if (error is CancellationException || error !is Exception) throw error
                     }
                 }
             }
@@ -1096,6 +1104,8 @@ internal class AndroidAudioServiceCore(
                     override fun onReady() { if (state.isLive()) callbacks.onReady() }
                     override fun onTranscript(text: String, assistant: Boolean, final: Boolean) { if (state.isLive()) callbacks.onTranscript(text, assistant, final) }
                     override fun onPlayback(playing: Boolean) { if (state.isLive()) callbacks.onPlayback(playing) }
+                    override fun onAgentTurnStarted() { if (state.isLive()) callbacks.onAgentTurnStarted() }
+                    override fun onAgentTurnCompleted() { if (state.isLive()) callbacks.onAgentTurnCompleted() }
                     override fun onError(message: String) { if (state.isLive()) callbacks.onError(message) }
                     override fun onClosed() = callbacks.onClosed()
                 }
@@ -1113,10 +1123,11 @@ internal class AndroidAudioServiceCore(
                         releaseAfterStop(lease)
                     }, isLive = { state.isLive() && coordinator.isActive(capture) }, callbacks = guarded)
                 lane.run {
-                    ready.complete(object : RealtimeSpeechSession {
+                    ready.complete(object : NavigationDrainingRealtimeSession {
                         override fun stop() = lane.commitInput()
                         override fun cancel() = state.cancel()
                         override fun close() = cancel()
+                        override fun finishForNavigation() = lane.finishForNavigation()
                     })
                 }
             } catch (error: Throwable) {

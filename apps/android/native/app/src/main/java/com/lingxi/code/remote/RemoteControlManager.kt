@@ -206,6 +206,7 @@ class RemoteControlManager(
     private val generation = AtomicInteger()
     private val screenGeneration = AtomicInteger()
     private val sessionLifecycle = Mutex()
+    private val sessionOperations = MutableStateFlow(0)
 
     val hosts: StateFlow<RemoteHostsState> = mutableHosts.asStateFlow()
     val connection: StateFlow<RemoteConnectionStateFfi?> = mutableConnection.asStateFlow()
@@ -300,11 +301,17 @@ class RemoteControlManager(
     suspend fun connect(hostId: String) {
         connectionEpoch.incrementAndGet()
         screenGeneration.incrementAndGet()
-        sessionLifecycle.withLock { client().connect(hostId) }
+        sessionLifecycle.withLock {
+            awaitSessionOperations()
+            client().connect(hostId)
+        }
     }
 
     /** Pair again after the computer removed this device. */
-    suspend fun repair(hostId: String) = client().repairHost(hostId)
+    suspend fun repair(hostId: String) = sessionLifecycle.withLock {
+        awaitSessionOperations()
+        client().repairHost(hostId)
+    }
 
     suspend fun retry() = client().retry()
 
@@ -358,6 +365,8 @@ class RemoteControlManager(
         scope.launch {
             sessionLifecycle.withLock {
                 if (mine != screenGeneration.get() || mutableClient.value !== binding) return@withLock
+                awaitSessionOperations()
+                if (mine != screenGeneration.get() || mutableClient.value !== binding) return@withLock
                 binding.client.stopWatchingHosts()
                 // A new screen may have requested this client while cleanup
                 // suspended. Its connect/watch runs after this lock is released.
@@ -379,6 +388,20 @@ class RemoteControlManager(
     fun followSession(hostId: String, sessionId: String): Flow<RemoteSessionUpdateFfi> =
         followSession(hostId, sessionId, account.uid.value)
 
+    /** A retained UI owner already has a collector; reconnect and attach it after reopening. */
+    internal suspend fun reattachSession(hostId: String, sessionId: String, ownerUid: String?) {
+        screenGeneration.incrementAndGet()
+        sessionLifecycle.withLock {
+            val client = client(ownerUid)
+            val state = client.connectionState() ?: mutableConnection.value
+            if (state?.hostId != hostId || state.phase == RemoteConnectionPhaseFfi.IDLE) {
+                awaitSessionOperations()
+                client.connect(hostId)
+            }
+            client.attachSession(sessionId)
+        }
+    }
+
     internal fun followSession(hostId: String, sessionId: String, ownerUid: String?): Flow<RemoteSessionUpdateFfi> = channelFlow {
         screenGeneration.incrementAndGet()
         val key = SessionKey(checkNotNull(ownerUid) { "not signed in" }, hostId, sessionId)
@@ -392,6 +415,7 @@ class RemoteControlManager(
                 bound = client
                 val state = client.connectionState() ?: mutableConnection.value
                 if (state?.hostId != hostId || state.phase == RemoteConnectionPhaseFfi.IDLE) {
+                    awaitSessionOperations()
                     client.connect(hostId)
                 }
                 client.attachSession(sessionId)
@@ -404,10 +428,14 @@ class RemoteControlManager(
                 sessionLifecycle.withLock {
                     // A replacement collector may already own this attachment.
                     if (sinks[key]?.isNotEmpty() != true) {
-                        sinks.remove(key, channels)
-                        bound?.let { client ->
-                            if (client.connectionState()?.hostId?.let { it == hostId } != false) {
-                                runCatching { client.detachSession(sessionId) }
+                        awaitSessionOperations()
+                        // A replacement may have registered while the old requests drained.
+                        if (sinks[key]?.isNotEmpty() != true) {
+                            sinks.remove(key, channels)
+                            bound?.let { client ->
+                                if (client.connectionState()?.hostId?.let { it == hostId } != false) {
+                                    runCatching { client.detachSession(sessionId) }
+                                }
                             }
                         }
                     }
@@ -463,7 +491,10 @@ class RemoteControlManager(
     private suspend fun askForBotChats(client: RemoteClientPort, hostId: String, botId: String) {
         try {
             val state = client.connectionState() ?: mutableConnection.value
-            if (state?.hostId != hostId || state.phase == RemoteConnectionPhaseFfi.IDLE) client.connect(hostId)
+            if (state?.hostId != hostId || state.phase == RemoteConnectionPhaseFfi.IDLE) {
+                awaitSessionOperations()
+                client.connect(hostId)
+            }
             client.activateBotThreads(botId)
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -509,6 +540,29 @@ class RemoteControlManager(
         val activeHost = client.connectionState()?.hostId ?: mutableConnection.value?.hostId
         check(activeHost == null || activeHost == hostId) { "remote computer changed" }
         return client
+    }
+
+    private suspend fun awaitSessionOperations() {
+        sessionOperations.first { it == 0 }
+    }
+
+    /** Hold a host lease through the FFI call, including cancellation of its caller. */
+    internal suspend fun <T> sessionOperation(
+        ownerUid: String?, hostId: String, action: suspend (RemoteClientPort) -> T,
+    ): T = withContext(NonCancellable) {
+        val bound = sessionLifecycle.withLock {
+            val owner = checkNotNull(ownerUid) { "not signed in" }
+            check(account.uid.value == owner) { "remote account changed" }
+            val client = checkNotNull(mutableClient.value?.takeIf { it.uid == owner }?.client) { "remote client unavailable" }
+            check(client.connectionState()?.hostId == hostId) { "remote computer disconnected or changed" }
+            sessionOperations.update { it + 1 }
+            client
+        }
+        try {
+            action(bound)
+        } finally {
+            sessionOperations.update { it - 1 }
+        }
     }
 
     /** Bind each request to the account, host, and connection attempt that started it. */
@@ -682,26 +736,27 @@ private class ManagerSessionPort(
     private val sessionId: String,
     private val ownerUid: String?,
 ) : RemoteSessionPort {
-    private suspend fun client() = manager.port(ownerUid, hostId)
+    private suspend fun <T> operation(action: suspend (RemoteClientPort) -> T): T =
+        manager.sessionOperation(ownerUid, hostId, action)
     override fun follow() = manager.followSession(hostId, sessionId, ownerUid)
-    override suspend fun setForeground(foreground: Boolean) = client().setSessionForeground(sessionId, foreground)
-    override suspend fun loadOlder() = client().loadOlderMessages(sessionId)
-    override suspend fun fetchImage(imageRef: String) = client().fetchImage(sessionId, imageRef)
+    override suspend fun setForeground(foreground: Boolean) = operation { it.setSessionForeground(sessionId, foreground) }
+    override suspend fun loadOlder() = operation { it.loadOlderMessages(sessionId) }
+    override suspend fun fetchImage(imageRef: String) = operation { it.fetchImage(sessionId, imageRef) }
     override suspend fun sendPrompt(text: String, images: List<RemotePromptImageFfi>) =
-        client().sendPrompt(sessionId, text, images)
-    override suspend fun retryPrompt(promptId: String) = client().retryPrompt(sessionId, promptId)
-    override suspend fun dismissPrompt(promptId: String) = client().dismissPrompt(sessionId, promptId)
-    override suspend fun cancelTurn() = client().cancelTurn(sessionId)
+        operation { it.sendPrompt(sessionId, text, images) }
+    override suspend fun retryPrompt(promptId: String) = operation { it.retryPrompt(sessionId, promptId) }
+    override suspend fun dismissPrompt(promptId: String) = operation { it.dismissPrompt(sessionId, promptId) }
+    override suspend fun cancelTurn() = operation { it.cancelTurn(sessionId) }
     override suspend fun respondPermission(requestId: ULong, allow: Boolean) =
-        client().respondPermission(sessionId, requestId, allow)
+        operation { it.respondPermission(sessionId, requestId, allow) }
     override suspend fun answerQuestion(requestId: ULong, answers: Map<String, String>) =
-        client().answerQuestion(sessionId, requestId, answers)
-    override suspend fun cancelQuestion(requestId: ULong) = client().cancelQuestion(sessionId, requestId)
-    override suspend fun setModel(model: String) = client().setModel(sessionId, model)
-    override suspend fun setReasoning(selection: ReasoningSelectionDto) = client().setReasoning(sessionId, selection)
+        operation { it.answerQuestion(sessionId, requestId, answers) }
+    override suspend fun cancelQuestion(requestId: ULong) = operation { it.cancelQuestion(sessionId, requestId) }
+    override suspend fun setModel(model: String) = operation { it.setModel(sessionId, model) }
+    override suspend fun setReasoning(selection: ReasoningSelectionDto) = operation { it.setReasoning(sessionId, selection) }
     override suspend fun setPermissionMode(mode: RemotePermissionModeFfi) =
-        client().setPermissionMode(sessionId, mode)
-    override suspend fun listModels() = client().listModels()
+        operation { it.setPermissionMode(sessionId, mode) }
+    override suspend fun listModels() = operation { it.listModels() }
     override fun promptOriginBotName(turnId: ULong) = manager.promptOriginBotName(ownerUid, hostId, sessionId, turnId)
 }
 

@@ -6,12 +6,17 @@ const row = { uuid: 'new', title: 'First message', modified_rfc3339: '2026-09-11
 const submitted = [{ projectPath: '/project', row }];
 
 test('first message creates a sidebar row before the transcript catalog is saved', () => {
-  const ref = { projectPath: '/project', sessionId: 'new' };
+  const ref = { projectPath: '/project', sessionId: 'new', mode: 'chat' as const };
   const first = firstSubmittedSession(ref, '  /plan   describe the change  ', undefined);
   assert.equal(first?.row.title, '/plan describe the change');
   assert.equal(first?.row.message_count, 1);
+  assert.equal(first?.row.mode, 'chat');
   assert.deepEqual(submittedSessionCatalogs({}, first ? [first] : [], [])['/project'].sessions, [first?.row]);
   assert.equal(firstSubmittedSession(ref, 'another message', { ...row, message_count: 2 }), undefined);
+});
+
+test('a provisional row is not assigned a guessed mode', () => {
+  assert.equal(firstSubmittedSession({ projectPath: '/project', sessionId: 'new' }, 'hello', undefined), undefined);
 });
 
 test('first submission is visible before the saved catalog exists and survives stale refreshes', () => {

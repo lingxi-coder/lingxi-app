@@ -98,7 +98,7 @@ internal fun NewChatBar(
                         .clip(shape)
                         .background(if (active) tint.copy(alpha = 0.16f) else t.surface)
                         .border(0.5.dp, if (active) tint.copy(alpha = 0.45f) else t.border, shape)
-                        .testTag(UiTags.newChatMode(option.wireKey))
+                        .testTag(UiTags.newChatMode(option.wireValue))
                         .clickable(enabled = modeSelectionEnabled) { onSelectMode(option) }
                         .padding(horizontal = 14.dp, vertical = 8.dp),
                 ) {

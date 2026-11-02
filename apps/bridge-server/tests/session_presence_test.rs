@@ -44,18 +44,6 @@ impl OrchestratorHandle for SwitchHandle {
         *self.current.lock().await
     }
 
-    async fn restore_conversation_mode(
-        &self,
-        mode: lingxi_core::host::session_context::ConversationMode,
-    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
-        Ok(lingxi_core::host::session_context::SessionModeSnapshot {
-            session_id: self.current_session_id().await.as_uuid().to_string(),
-            active: mode,
-            selected: mode,
-            ..Default::default()
-        })
-    }
-
     async fn clear_session(&self) -> Result<(), HandleError> {
         if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(HandleError::ActionFailed(
@@ -353,6 +341,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
             ClientCommand::ResumeSession {
                 session_id: session_c_text.clone(),
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
             resumed_sink.clone(),
         )

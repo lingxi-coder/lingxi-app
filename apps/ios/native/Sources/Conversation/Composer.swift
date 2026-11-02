@@ -300,7 +300,7 @@ struct Composer: View {
                         recordSuggestionPresentation()
                     }
                     .onChange(of: suggestionTurnKey) { _, _ in
-                        clearDraftSourceCodeUnits()
+                        if draft.isEmpty { clearDraftSourceCodeUnits() }
                         recordSuggestionPresentation()
                     }
                     .onChange(of: draftSourceCodeUnits) { _, _ in
@@ -804,6 +804,12 @@ struct Composer: View {
     private func updateDraftSourceCodeUnits(forDisplayCodeUnits newDisplayCodeUnits: [UInt16]) {
         guard let sourceCodeUnits = draftSourceCodeUnits,
               let previousDisplayCodeUnits = draftSourceDisplayCodeUnits else { return }
+        // An external edit (for example, a completed voice capture) may have
+        // updated the source and display together before this observer runs.
+        if PromptSuggestionDraftSource.displayCodeUnits(for: sourceCodeUnits) == newDisplayCodeUnits {
+            draftSourceDisplayCodeUnits = newDisplayCodeUnits
+            return
+        }
         guard let updatedSourceCodeUnits = PromptSuggestionDraftSource.applyingEdit(
             sourceCodeUnits: sourceCodeUnits,
             previousDisplayCodeUnits: previousDisplayCodeUnits,

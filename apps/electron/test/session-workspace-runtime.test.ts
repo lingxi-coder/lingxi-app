@@ -112,6 +112,7 @@ function selectedResumeRuntime(t: TestContext, timeoutMs = 1500) {
       return acknowledgement.promise;
     },
   });
+  runtime.sessionMode = 'code';
   const internal = runtime as any;
   Object.assign(internal, { client, activeWorkspace: '/project', activeWorkspaceTrusted: true, generation: 1,
     ensureModelProviderCredential: async () => {},
@@ -126,16 +127,16 @@ function selectedResumeRuntime(t: TestContext, timeoutMs = 1500) {
 }
 
 function resumeProof(client: WorkspaceClient, id = sessionId) {
-  client.emit('event', { type: 'session_resumed', session_id: id, messages: [] });
+  client.emit('event', { type: 'session_resumed', mode: 'code', session_id: id, messages: [] });
   client.emit('event', { type: 'model_changed', model: 'anthropic/restored-model' });
 }
 
 test('a failed owned restore cannot be reused as ready and retries require full engine proof', async t => {
   for (const firstOperation of ['open', 'restart'] as const) {
     await t.test(firstOperation, async t => {
-      const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, trusted: true, sessionId: ref.sessionId }) });
+      const manager = new SessionRuntimeManager({ resolveSavedTranscript: async () => ({ path: '/saved/session.jsonl', mode: 'code' as const }), launchConfig: ref => ({ workspace: ref.projectPath, trusted: true, sessionId: ref.sessionId }) });
       t.after(() => manager.dispose());
-      const ref = { projectPath: '/project', sessionId }, runtime = await manager.ensure(ref, false), internal = runtime as any;
+      const ref = { projectPath: '/project', sessionId }, runtime = await manager.ensure({ ...ref, mode: 'code' }, false), internal = runtime as any;
       let requests = 0;
       const acknowledgement = deferred<void>();
       const client = Object.assign(new WorkspaceClient(), {
@@ -179,7 +180,7 @@ test('a failed owned restore cannot be reused as ready and retries require full 
 test('opening during a restart waits for its real resume without issuing a second restore', async t => {
   const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, trusted: true, sessionId: ref.sessionId }) });
   t.after(() => manager.dispose());
-  const ref = { projectPath: '/project', sessionId }, runtime = await manager.ensure(ref, false), internal = runtime as any;
+  const ref = { projectPath: '/project', sessionId }, runtime = await manager.ensure({ ...ref, mode: 'code' }, false), internal = runtime as any;
   let requests = 0;
   const acknowledgement = deferred<void>();
   const client = Object.assign(new WorkspaceClient(), { resumeSessionFromTranscript: () => { requests++; return acknowledgement.promise; } });
@@ -202,9 +203,9 @@ test('opening during a restart waits for its real resume without issuing a secon
 });
 
 test('a restart arriving during a cold open joins its owned restore without a second resume or process', async t => {
-  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, trusted: true, sessionId: ref.sessionId }) });
+  const manager = new SessionRuntimeManager({ resolveSavedTranscript: async () => ({ path: '/saved/session.jsonl', mode: 'code' as const }), launchConfig: ref => ({ workspace: ref.projectPath, trusted: true, sessionId: ref.sessionId }) });
   t.after(() => manager.dispose());
-  const ref = { projectPath: '/project', sessionId }, runtime = await manager.ensure(ref, false), internal = runtime as any;
+  const ref = { projectPath: '/project', sessionId }, runtime = await manager.ensure({ ...ref, mode: 'code' }, false), internal = runtime as any;
   const start = deferred<void>(), acknowledgement = deferred<void>();
   let requests = 0, restarts = 0;
   const client = Object.assign(new WorkspaceClient(), { resumeSessionFromTranscript: () => {
@@ -542,7 +543,7 @@ test('a workspace lease prevents runtime disposal and cache eviction until it is
   const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
     launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
   t.after(() => manager.dispose());
-  const ref = { projectPath: '/project', sessionId };
+  const ref = { projectPath: '/project', sessionId, mode: 'code' as const };
   const runtime = await manager.ensure(ref, false);
   const release = runtime.beginWorkspaceChange();
   await assert.rejects(manager.closeSession(ref), /active work/);
@@ -556,6 +557,211 @@ test('a workspace lease prevents runtime disposal and cache eviction until it is
   assert.equal(manager.get(secondId), newer);
 });
 
+test('a dispatched slash keeps its source through a space switch until its turn ends', async (t) => {
+  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
+  t.after(() => manager.dispose());
+  const source = { projectPath: '/project', sessionId }, target = { projectPath: '/next', sessionId: secondId };
+  const runtime = await manager.ensure(source, false);
+  const client = new WorkspaceClient();
+  const internal = runtime as any;
+  internal.activeWorkspace = source.projectPath;
+  internal.activeWorkspaceTrusted = true;
+  internal.wireClient(client, internal.generation);
+  internal.setState({ status: 'connected' });
+  manager.activateSession(source);
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/loop 5m /babysit-prs', images: [], turn_id: 71 });
+  assert.equal(runtime.hasActiveWork, true);
+  const newer = await manager.ensure(target, false);
+  manager.activateSession(target);
+  assert.equal(manager.get(sessionId), runtime, 'the admitted slash cannot be evicted before its first event');
+  assert.equal(manager.size, 2);
+  client.emit('event', { type: 'slash_command_result', turn_id: 72, display: 'another command' });
+  await nextTurn();
+  assert.equal(manager.get(sessionId), runtime, 'an unrelated result cannot settle this command');
+  client.emit('event', { type: 'turn_started', turn_id: 71 });
+  await nextTurn();
+  assert.equal(manager.get(sessionId), runtime, 'the actual turn takes ownership without a gap');
+  client.emit('event', { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: { total_usd: 0 } });
+  await nextTurn();
+  assert.equal(manager.get(sessionId), undefined);
+  assert.equal(manager.get(secondId), newer);
+  assert.equal(client.closes, 1);
+});
+
+test('display-only slash results settle only their matching cache leases', async (t) => {
+  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
+  t.after(() => manager.dispose());
+  const source = { projectPath: '/project', sessionId }, target = { projectPath: '/next', sessionId: secondId };
+  const runtime = await manager.ensure(source, false);
+  const client = new WorkspaceClient();
+  const internal = runtime as any;
+  internal.activeWorkspace = source.projectPath;
+  internal.activeWorkspaceTrusted = true;
+  internal.wireClient(client, internal.generation);
+  internal.setState({ status: 'connected' });
+  manager.activateSession(source);
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/status', images: [] });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/help', images: [], turn_id: 82 });
+  const first = (client.calls[0] as any[])[1].turn_id;
+  assert.equal(typeof first, 'number', 'an omitted turn id gets a correlatable identity');
+  await manager.ensure(target, false);
+  manager.activateSession(target);
+  client.emit('event', { type: 'slash_command_result', turn_id: first, display: 'status' });
+  await nextTurn();
+  assert.equal(manager.get(sessionId), runtime, 'the other pending command still owns the session');
+  client.emit('event', { type: 'slash_command_result', turn_id: 82, display: 'help' });
+  await nextTurn();
+  assert.equal(manager.get(sessionId), undefined);
+});
+
+test('a slash that cannot be sent releases its cache lease', async (t) => {
+  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
+  t.after(() => manager.dispose());
+  const source = { projectPath: '/project', sessionId }, target = { projectPath: '/next', sessionId: secondId };
+  const runtime = await manager.ensure(source, false);
+  const client = new WorkspaceClient();
+  client.sendCommand = () => { throw new Error('connection closed before send'); };
+  const internal = runtime as any;
+  Object.assign(internal, { activeWorkspace: source.projectPath, activeWorkspaceTrusted: true });
+  internal.wireClient(client, internal.generation);
+  internal.setState({ status: 'connected' });
+  manager.activateSession(source);
+  await assert.rejects(runtime.dispatchCommand({ type: 'run_slash_command', raw: '/status', images: [], turn_id: 89 }), /before send/);
+  assert.equal(runtime.hasActiveWork, false);
+  await manager.ensure(target, false);
+  manager.activateSession(target);
+  assert.equal(manager.get(sessionId), undefined);
+});
+
+test('raw session replacement slashes cannot change a runtime UUID', async (t) => {
+  const { runtime, client } = connectedRuntime(t);
+  for (const raw of ['/clear', '/reset', '/new title']) {
+    await assert.rejects(runtime.dispatchCommand({ type: 'run_slash_command', raw, images: [] }), /desktop session controls/);
+  }
+  assert.deepEqual(client.calls, []);
+  assert.equal(runtime.hasActiveWork, false);
+});
+
+test('a wrong-session reconnect roster cannot release an admitted slash lease', async (t) => {
+  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
+  const directory = mkdtempSync(join(tmpdir(), 'lingxi-slash-reconnect-'));
+  const lockfile = join(directory, 'bridge.lock');
+  writeFileSync(lockfile, JSON.stringify({ pid: process.pid, workspaceFolders: ['/project'],
+    ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef' }));
+  const source = { projectPath: '/project', sessionId }, target = { projectPath: '/next', sessionId: secondId };
+  const runtime = await manager.ensure(source, false);
+  const internal = runtime as any;
+  t.after(async () => { internal.adoptedPid = undefined; await manager.dispose(); rmSync(directory, { recursive: true, force: true }); });
+  const client = new WorkspaceClient();
+  Object.assign(internal, { activeWorkspace: source.projectPath, activeWorkspaceTrusted: true,
+    adoptedPid: process.pid, connectionLockfilePath: lockfile, processIsAlive: () => true });
+  internal.wireClient(client, internal.generation);
+  internal.setState({ status: 'connected' });
+  manager.activateSession(source);
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/status', images: [], turn_id: 90 });
+  const recovered = Object.assign(new WorkspaceClient(), {
+    requestRuntimeSnapshot: async (accept: (events: any[]) => void) => {
+      const events = [
+        { type: 'session_agent_list', session_id: secondId, agents: [] },
+        { type: 'coordinator_status', active_workers: 0 },
+        { type: 'task_list_complete', request_id: 'desktop-runtime-snapshot' },
+      ];
+      accept(events);
+      return events;
+    },
+  });
+  internal.connectBridgeClient = async (_lockfile: string, generation: number) => internal.wireClient(recovered, generation);
+  internal.setState({ status: 'disconnected' });
+  await assert.rejects(runtime.start(), /snapshot belongs to another session/);
+  await manager.ensure(target, false);
+  manager.activateSession(target);
+  await nextTurn();
+  assert.equal(manager.get(sessionId), runtime, 'failed reconnect must preserve the original admission lease');
+  assert.equal(manager.size, 2);
+});
+
+test('Fusion transfers its slash lease to the authoritative background roster', async (t) => {
+  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
+  t.after(() => manager.dispose());
+  const source = { projectPath: '/project', sessionId }, target = { projectPath: '/next', sessionId: secondId };
+  const runtime = await manager.ensure(source, false);
+  const snapshot = deferred<any[]>();
+  const client = Object.assign(new WorkspaceClient(), {
+    requestRuntimeSnapshot: (accept: (events: any[]) => void) => snapshot.promise.then(events => { accept(events); return events; }),
+  });
+  const internal = runtime as any;
+  internal.activeWorkspace = source.projectPath;
+  internal.activeWorkspaceTrusted = true;
+  internal.opts.resolveProviderCredential = async () => undefined;
+  internal.resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'default' }, revision: 'aabb', config: {} });
+  internal.ensureFusionCodexToken = async () => {};
+  internal.ensureFusionProviderCredentials = async () => {};
+  internal.wireClient(client, internal.generation);
+  internal.setState({ status: 'connected' });
+  manager.activateSession(source);
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion compare approaches', images: [], turn_id: 91 });
+  await manager.ensure(target, false);
+  manager.activateSession(target);
+  assert.equal(manager.get(sessionId), runtime, 'credential hydration handed ownership to the sent slash');
+  client.emit('event', { type: 'slash_command_result', turn_id: 91, display: 'Fusion started: task-1 quality cross-provider' });
+  await nextTurn();
+  assert.equal(manager.get(sessionId), runtime, 'a delayed task event cannot leave an unpinned gap');
+  snapshot.resolve([
+    { type: 'session_agent_list', session_id: sessionId, agents: [] },
+    { type: 'coordinator_status', active_workers: 0 },
+    { type: 'task_row', task: { task_id: 'task-1', status: { type: 'running' } } },
+    { type: 'task_list_complete', request_id: 'desktop-runtime-snapshot' },
+  ]);
+  await nextTurn();
+  assert.equal(manager.get(sessionId), runtime, 'the snapshot transfers the lease to the running task');
+  client.emit('event', { type: 'task_lifecycle', event_json: JSON.stringify({
+    type: 'system', subtype: 'task_notification', task_id: 'task-1', status: 'completed',
+  }) });
+  await nextTurn();
+  assert.equal(manager.get(sessionId), undefined, 'a finished task releases the cache lease');
+});
+
+test('Fusion retains its lease after a failed roster and releases it after a successful retry', async (t) => {
+  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
+  t.after(() => manager.dispose());
+  const source = { projectPath: '/project', sessionId }, target = { projectPath: '/next', sessionId: secondId };
+  const runtime = await manager.ensure(source, false);
+  let attempts = 0;
+  const client = Object.assign(new WorkspaceClient(), {
+    requestRuntimeSnapshot: async (accept: (events: any[]) => void) => {
+      if (++attempts === 1) throw new Error('temporary roster failure');
+      const events = [
+        { type: 'session_agent_list', session_id: sessionId, agents: [] },
+        { type: 'coordinator_status', active_workers: 0 },
+        { type: 'task_list_complete', request_id: 'desktop-runtime-snapshot' },
+      ];
+      accept(events);
+      return events;
+    },
+  });
+  const internal = runtime as any;
+  Object.assign(internal, { activeWorkspace: source.projectPath, activeWorkspaceTrusted: true });
+  internal.wireClient(client, internal.generation);
+  internal.setState({ status: 'connected' });
+  manager.activateSession(source);
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion setup', images: [], turn_id: 92 });
+  await manager.ensure(target, false);
+  manager.activateSession(target);
+  client.emit('event', { type: 'slash_command_result', turn_id: 92, display: 'Fusion setup' });
+  await nextTurn();
+  assert.equal(manager.get(sessionId), runtime, 'an unconfirmed background roster must stay pinned');
+  await new Promise(resolve => setTimeout(resolve, 1_100));
+  assert.equal(attempts, 2);
+  assert.equal(manager.get(sessionId), undefined, 'a confirmed idle roster releases the lease');
+});
+
 test('selected transcript restoration waits for both its RPC acknowledgement and matching resume/model proof', async (t) => {
   for (const first of ['acknowledgement', 'proof']) {
     const f = selectedResumeRuntime(t), path = '/saved/selected-copy.jsonl';
@@ -567,9 +773,9 @@ test('selected transcript restoration waits for both its RPC acknowledgement and
       assert.equal(settled, false); assert.deepEqual(f.restored, []);
       f.client.emit('event', { type: 'model_changed', model: 'anthropic/restored-model' }); await nextTurn();
       assert.equal(settled, false); assert.deepEqual(f.restored, [], 'a model event alone does not prove that the owned UUID resumed');
-      f.client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] });
+      f.client.emit('event', { type: 'session_resumed', mode: 'code', session_id: sessionId, messages: [] });
     } else {
-      f.client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] }); await nextTurn();
+      f.client.emit('event', { type: 'session_resumed', mode: 'code', session_id: sessionId, messages: [] }); await nextTurn();
       assert.equal(settled, false); assert.deepEqual(f.restored, [], 'session_resumed alone does not prove the restored model');
       f.client.emit('event', { type: 'model_changed', model: 'anthropic/restored-model' }); await nextTurn();
       assert.equal(settled, false); assert.deepEqual(f.restored, [], 'matching events must not outrun a rejected or missing RPC acknowledgement');
@@ -596,7 +802,7 @@ test('selected transcript rejection, RPC timeout, missing model proof and wrong 
         f.acknowledgement.reject(new Error('selected transcript RPC timed out'));
       } else {
         f.acknowledgement.resolve(undefined);
-        f.client.emit('event', { type: 'session_resumed', session_id: failure === 'wrong-session' ? secondId : sessionId, messages: [] });
+        f.client.emit('event', { type: 'session_resumed', mode: 'code', session_id: failure === 'wrong-session' ? secondId : sessionId, messages: [] });
       }
       await rejected;
       assert.deepEqual(f.restored, []);
@@ -637,14 +843,14 @@ test('a selected transcript survives a real runtime restart and manager eviction
   };
   SessionRuntime.prototype.start = async function () { await (this as any).opts.launchConfig(); connect(this); };
   t.after(async () => { SessionRuntime.prototype.start = originalStart; await manager.dispose(); });
-  const ref = { projectPath: '/project', sessionId };
+  const ref = { projectPath: '/project', sessionId, mode: 'code' as const };
   const original = await manager.openSession(ref, false, undefined, true, selectedPath);
   assert.deepEqual(selectedCalls, [selectedPath]);
   const firstClient = clients[0]!;
   await manager.restart(ref);
   assert.equal(firstClient.closes, 1, 'restart must actually tear down the old transport');
   assert.deepEqual(selectedCalls, [selectedPath, selectedPath]);
-  await manager.openSession({ projectPath: '/other', sessionId: secondId }, true);
+  await manager.openSession({ projectPath: '/other', sessionId: secondId, mode: 'code' }, true);
   await nextTurn();
   assert.equal(manager.get(sessionId), undefined, 'activating another runtime must evict the idle selected one');
   const reopened = await manager.openSession(ref);
@@ -693,7 +899,7 @@ test('a cold selected open exposes its exact transcript before the first start a
     SessionRuntime.prototype.start = originalStart; SessionRuntime.prototype.resumeOwnedSession = originalResume;
     await manager.dispose();
   });
-  const ref = { projectPath: '/project', sessionId };
+  const ref = { projectPath: '/project', sessionId, mode: 'code' as const };
   const opening = manager.openSession(ref, false, undefined, true, selectedPath);
   await admitted.promise;
   assert.deepEqual(starts, [{ startup: selectedPath, remembered: selectedPath }]);
@@ -718,14 +924,19 @@ test('a failed selected open never replaces the last successfully remembered sta
     SessionRuntime.prototype.resumeOwnedSession = async function () {
       if (rejectResume) throw new Error('selected transcript rejected');
     };
-    const ref = { projectPath: '/project', sessionId };
+    const ref = { projectPath: '/project', sessionId, mode: 'code' as const };
     if (previousPath) { await manager.openSession(ref, false, undefined, true, previousPath); await manager.closeSession(ref); }
     rejectResume = true;
     await assert.rejects(manager.openSession(ref, false, undefined, true, '/saved/unverified-copy-B.jsonl'), /selected transcript rejected/);
     assert.equal(manager.get(sessionId), undefined);
     rejectResume = false;
-    await manager.openSession(ref);
-    assert.equal(starts.at(-1), previousPath, 'the next ordinary open must not inherit a path from a rejected selection');
+    if (previousPath) {
+      await manager.openSession(ref);
+      assert.equal(starts.at(-1), previousPath, 'the next ordinary open must not inherit a path from a rejected selection');
+    } else {
+      await assert.rejects(manager.openSession(ref), /session source is unavailable/);
+      assert.equal(starts.length, 1, 'without a proven source no replacement engine starts');
+    }
   }
 });
 

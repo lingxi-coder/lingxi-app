@@ -39,7 +39,7 @@ class MobileLinuxProductAcceptanceTest {
                 userHome = File(fixture, "home"),
                 projectsGuestRoot = directories.projectsGuestPath,
                 userHomeGuestPath = directories.guestHome,
-            ).createInternal("Runtime acceptance")
+            ).createInternal("Runtime acceptance", com.lingxi.code.model.SessionMode.Code)
             val config = LinuxRuntimeBridge.configForWorkspace(context, mode, project.workspace)
             val runtime = buildAndroidMobileLinuxRuntimeHandle(config)
             val marker = "product-acceptance-${UUID.randomUUID()}"

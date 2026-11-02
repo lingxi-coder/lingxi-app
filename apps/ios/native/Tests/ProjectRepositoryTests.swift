@@ -18,6 +18,198 @@ final class ProjectRepositoryTests: XCTestCase {
         }
     }
 
+    func testModeMembershipSurvivesAnEmptyCatalog() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Code")
+        XCTAssertEqual(try repository.project(projectId: project.id).record.visibleModes, [.code])
+        let row = ProjectSessionSummary(sessionId: "chat", title: "Chat", messageCount: 1,
+                                        relativeTime: "Now", updatedAt: Date(), mode: .chat)
+        _ = try repository.updateSessions(projectId: project.id, sessions: [row])
+        _ = try repository.updateSessions(projectId: project.id, sessions: [])
+        XCTAssertEqual(try repository.project(projectId: project.id).record.visibleModes, [.chat, .code])
+        let newChat = try repository.createInternal(name: "Chat only", mode: .chat)
+        XCTAssertEqual(try repository.project(projectId: newChat.id).record.visibleModes, [.chat])
+    }
+
+    func testProjectWithoutExplicitModeMembershipIsRejected() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Code")
+        let data = try JSONEncoder().encode(project.record)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "modeMembership")
+        let oldRecord = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertThrowsError(try JSONDecoder().decode(ProjectRecord.self, from: oldRecord))
+        let manifest = root.appendingPathComponent(project.id).appendingPathComponent(projectManifestFileName)
+        let index = root.appendingPathComponent(projectIndexFileName)
+        try oldRecord.write(to: manifest)
+        let originalIndex = try Data(contentsOf: index)
+        XCTAssertTrue(repository.load().projects.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: manifest), oldRecord)
+        XCTAssertEqual(try Data(contentsOf: index), originalIndex)
+        object["modeMembership"] = NSNull()
+        let nullRecord = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertThrowsError(try JSONDecoder().decode(ProjectRecord.self, from: nullRecord))
+    }
+
+    func testOldSessionIndexIsIgnoredAndNeverOverwritten() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let oldURL = root.appendingPathComponent("global-session-index.json")
+        let oldData = Data(#"{"version":1,"sessions":[]}"#.utf8)
+        try oldData.write(to: oldURL)
+        XCTAssertTrue(repository.load().globalSessions.isEmpty)
+        _ = try repository.updateSessions(projectId: nil, sessions: [session("current", at: Date())])
+        XCTAssertEqual(try Data(contentsOf: oldURL), oldData)
+        XCTAssertEqual(repository.load().globalSessions.map(\.sessionId), ["current"])
+
+        let currentURL = root.appendingPathComponent(globalSessionIndexFileName)
+        try oldData.write(to: currentURL)
+        XCTAssertTrue(repository.load().errorMessage?.contains("global") == true)
+        XCTAssertThrowsError(try repository.updateSessions(projectId: nil, sessions: []))
+        XCTAssertEqual(try Data(contentsOf: currentURL), oldData)
+    }
+
+    func testCorruptProjectIndexIsReportedAndNeverOverwrittenOrDeleted() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Keep")
+        let index = root.appendingPathComponent(projectIndexFileName)
+        for bytes in [Data("{".utf8),
+                      Data(#"{"version":1,"version":1,"projectIds":[]}"#.utf8),
+                      Data(#"{"version":1,"projectIds":[],"\u0070rojectIds":[]}"#.utf8)] {
+            try bytes.write(to: index)
+            XCTAssertTrue(repository.load().errorMessage?.contains("projects-index") == true)
+            XCTAssertThrowsError(try repository.createInternal(name: "Must fail"))
+            XCTAssertThrowsError(try repository.setActiveProject(project.id))
+            XCTAssertThrowsError(try repository.deleteProject(projectId: project.id))
+            XCTAssertEqual(try Data(contentsOf: index), bytes)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(project.id).path))
+        }
+    }
+
+    func testMissingOrMalformedProjectSessionsAreNotRecreated() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Keep")
+        let projectIndex = root.appendingPathComponent(projectIndexFileName)
+        let originalIndex = try Data(contentsOf: projectIndex)
+        let sessions = root.appendingPathComponent(project.id).appendingPathComponent(projectSessionIndexFileName)
+        try FileManager.default.removeItem(at: sessions)
+        XCTAssertTrue(repository.load().errorMessage?.contains("project.\(project.id)") == true)
+        XCTAssertThrowsError(try repository.project(projectId: project.id))
+        XCTAssertThrowsError(try repository.updateSessions(projectId: project.id, sessions: []))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sessions.path))
+        XCTAssertEqual(try Data(contentsOf: projectIndex), originalIndex)
+
+        let malformed = Data(#"{"version":2,"sessions":[{"sessionId":"x"}]}"#.utf8)
+        try malformed.write(to: sessions)
+        XCTAssertNotNil(repository.load().errorMessage)
+        XCTAssertThrowsError(try repository.updateSessions(projectId: project.id, sessions: []))
+        XCTAssertEqual(try Data(contentsOf: sessions), malformed)
+        XCTAssertEqual(try Data(contentsOf: projectIndex), originalIndex)
+    }
+
+    func testUUIDNamedProjectEntryThatCannotBeScannedFreezesNewClaims() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        _ = try repository.createInternal(name: "Existing")
+        let id = UUID().uuidString.lowercased()
+        let invalid = root.appendingPathComponent(id)
+        let bytes = Data("keep original".utf8)
+        try bytes.write(to: invalid)
+        XCTAssertTrue(repository.load().errorMessage?.contains("project.\(id)") == true)
+        XCTAssertThrowsError(try repository.recordStartedSession(projectId: nil, sessionId: "new", title: "New"))
+        XCTAssertEqual(try Data(contentsOf: invalid), bytes)
+    }
+
+    func testMissingProjectIndexAndDuplicateSessionRowsFailClosed() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Keep")
+        let projectIndex = root.appendingPathComponent(projectIndexFileName)
+        let savedIndex = try Data(contentsOf: projectIndex)
+        try FileManager.default.removeItem(at: projectIndex)
+        XCTAssertNotNil(repository.load().errorMessage)
+        XCTAssertThrowsError(try repository.createInternal(name: "Must fail"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: projectIndex.path))
+        try savedIndex.write(to: projectIndex)
+
+        _ = try repository.updateSessions(projectId: project.id, sessions: [session("a", at: Date())])
+        let sessions = root.appendingPathComponent(project.id).appendingPathComponent(projectSessionIndexFileName)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: sessions)) as? [String: Any])
+        let rows = try XCTUnwrap(object["sessions"] as? [[String: Any]])
+        object["sessions"] = rows + rows
+        let duplicateRows = try JSONSerialization.data(withJSONObject: object)
+        try duplicateRows.write(to: sessions)
+        XCTAssertNotNil(repository.load().errorMessage)
+        XCTAssertThrowsError(try repository.updateSessions(projectId: project.id, sessions: []))
+        XCTAssertEqual(try Data(contentsOf: sessions), duplicateRows)
+    }
+
+    func testConflictingSessionModeNeverRewritesExistingIndex() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let original = ProjectSessionSummary(sessionId: "same", title: "A", messageCount: 1,
+                                             relativeTime: "Now", updatedAt: Date(), mode: .chat)
+        _ = try repository.updateSessions(projectId: nil, sessions: [original])
+        let index = root.appendingPathComponent(globalSessionIndexFileName)
+        let bytes = try Data(contentsOf: index)
+        var conflicting = original
+        conflicting.mode = .code
+        XCTAssertThrowsError(try repository.updateSessions(projectId: nil, sessions: [conflicting]))
+        XCTAssertThrowsError(try repository.recordStartedSession(projectId: nil, sessionId: "same", title: "A", mode: .code))
+        XCTAssertEqual(try Data(contentsOf: index), bytes)
+    }
+
+    func testCrossScopeSessionWritesAreRejectedBeforeEitherIndexChanges() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Project")
+        let id = "11111111-1111-4111-8111-111111111111"
+        let row = session(id, at: Date())
+        _ = try repository.updateSessions(projectId: nil, sessions: [row])
+        let globalURL = root.appendingPathComponent(globalSessionIndexFileName)
+        let projectURL = root.appendingPathComponent(project.id).appendingPathComponent(projectSessionIndexFileName)
+        let global = try Data(contentsOf: globalURL)
+        let projectIndex = try Data(contentsOf: projectURL)
+        var alias = row
+        alias.sessionId = "sess:" + id.uppercased()
+        XCTAssertThrowsError(try repository.updateSessions(projectId: project.id, sessions: [alias]))
+        XCTAssertThrowsError(try repository.recordStartedSession(projectId: project.id, sessionId: alias.sessionId, title: "wrong"))
+        XCTAssertEqual(try Data(contentsOf: globalURL), global)
+        XCTAssertEqual(try Data(contentsOf: projectURL), projectIndex)
+    }
+
+    func testColdConflictingCatalogDoesNotSelectAnOwnerOrOverwriteFiles() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Project")
+        let id = "11111111-1111-4111-8111-111111111111"
+        _ = try repository.updateSessions(projectId: nil, sessions: [session(id, at: Date())])
+        let globalURL = root.appendingPathComponent(globalSessionIndexFileName)
+        let projectURL = root.appendingPathComponent(project.id).appendingPathComponent(projectSessionIndexFileName)
+        let duplicate = try Data(contentsOf: globalURL)
+        try duplicate.write(to: projectURL)
+        let state = ProjectRepository(projectsRoot: root).load()
+        XCTAssertNotNil(state.errorMessage)
+        XCTAssertTrue(state.errorMessage?.contains("global") == true)
+        XCTAssertTrue(state.errorMessage?.contains("project.\(project.id)") == true)
+        for scope: ConversationScope in [.global, .project(project.id)] {
+            XCTAssertFalse(SessionCatalogOwnership.allows(sessionID: id, scope: scope, mode: .code,
+                projects: state.projects, globalSessions: state.globalSessions, claimedScope: scope))
+        }
+        XCTAssertThrowsError(try repository.updateSessions(projectId: nil, sessions: []))
+        XCTAssertThrowsError(try repository.recordStartedSession(projectId: project.id, sessionId: id, title: "wrong"))
+        XCTAssertEqual(try Data(contentsOf: globalURL), duplicate)
+        XCTAssertEqual(try Data(contentsOf: projectURL), duplicate)
+    }
+
+    func testPersistedClaimCannotOverrideAnIndexedScopeOrMode() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let id = "11111111-1111-4111-8111-111111111111"
+        let row = ProjectSessionSummary(sessionId: id, title: "Chat", messageCount: 1,
+                                        relativeTime: "Now", updatedAt: Date(), mode: .chat)
+        let state = try repository.updateSessions(projectId: nil, sessions: [row])
+        XCTAssertFalse(SessionCatalogOwnership.allows(sessionID: id, scope: .project("p"), mode: .chat,
+            projects: state.projects, globalSessions: state.globalSessions, claimedScope: .project("p")))
+        XCTAssertFalse(SessionCatalogOwnership.allows(sessionID: id, scope: .global, mode: .code,
+            projects: state.projects, globalSessions: state.globalSessions, claimedScope: .global))
+        XCTAssertTrue(SessionCatalogOwnership.allows(sessionID: id, scope: .global, mode: .chat,
+            projects: state.projects, globalSessions: state.globalSessions, claimedScope: nil))
+    }
+
     func testCatalogPreservesConfirmedSessionsFromOtherWorkspaces() throws {
         let repository = ProjectRepository(projectsRoot: root)
         let project = try repository.createInternal(name: "Linked directories")
@@ -49,13 +241,9 @@ final class ProjectRepositoryTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("deleted").path))
     }
 
-    func testSyncStateUpdatesPreserveTheLastSessionAndExplicitNilClearsIt() throws {
-        let project = try ProjectRepository(projectsRoot: root).createInternal(name: "Session owner")
-        var record = project.record
-        record.lastActiveSessionId = "retained-session"
-        XCTAssertEqual(record.with(syncState: .authorizationLost).lastActiveSessionId, "retained-session")
-        let cleared: String? = nil
-        XCTAssertNil(record.with(lastActiveSessionId: cleared).lastActiveSessionId)
+    func testSyncStateUpdatesPreserveModeMembership() throws {
+        let project = try ProjectRepository(projectsRoot: root).createInternal(name: "Session owner", mode: .chat)
+        XCTAssertEqual(project.record.with(syncState: .authorizationLost).modeMembership, [.chat])
     }
 
     func testUserHomeCanBeSelectedAsWorkspaceWithoutChangingSource() throws {
@@ -162,7 +350,6 @@ final class ProjectRepositoryTests: XCTestCase {
         _ = try repository.updateSessions(projectId: project.record.id, sessions: [])
         let restored = try ProjectRepository(projectsRoot: root).project(projectId: project.record.id)
         XCTAssertEqual(restored.sessions.map(\.sessionId), ["20000000-0000-4000-8000-0000000000aa"])
-        XCTAssertEqual(restored.record.lastActiveSessionId, "20000000-0000-4000-8000-0000000000aa")
         XCTAssertTrue(restored.sessions[0].pendingCatalogConfirmation)
         var confirmed = restored.sessions[0]
         confirmed.messageCount = 2
@@ -190,8 +377,8 @@ final class ProjectRepositoryTests: XCTestCase {
     func testArchiveIsIsolatedByProjectAndPreservedWhenSessionStartsAgain() throws {
         let repository = ProjectRepository(projectsRoot: root)
         let project = try repository.createInternal(name: "Project")
-        let row = session("same-id", at: Date())
-        _ = try repository.updateSessions(projectId: nil, sessions: [row])
+        let row = session("project-id", at: Date())
+        _ = try repository.updateSessions(projectId: nil, sessions: [session("global-id", at: Date())])
         _ = try repository.updateSessions(projectId: project.record.id, sessions: [row])
         _ = try repository.setSessionArchived(projectId: project.record.id, sessionId: row.sessionId, archived: true)
         XCTAssertFalse(repository.load().globalSessions[0].isArchived)

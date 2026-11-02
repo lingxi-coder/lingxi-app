@@ -3,10 +3,24 @@ package com.lingxi.code.conversation
 import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ConversationBackgroundExecutionTest {
+
+    @Test
+    fun cancellationRequiresItsOwnCorrelatedOwnerAndTurn() {
+        val owner = ConversationRecoverySpec(null, null, com.lingxi.code.model.SessionMode.Chat,
+            com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux, workspaceKey = "global")
+        val target = ConversationBackgroundSnapshot("session-a", 7L, "Working", owner)
+        assertNull(cancellationTarget(null))
+        assertNull(cancellationTarget(target.copy(turnId = null)))
+        assertNull(cancellationTarget(target.copy(turnId = 0L)))
+        assertNull(cancellationTarget(target.copy(recoverySpec = null)))
+        assertSame(target, cancellationTarget(target))
+    }
 
     @Test
     fun promotionFailureClearsActiveStateAndRetries() {

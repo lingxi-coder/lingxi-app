@@ -577,7 +577,7 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     func cancelCloudOperation(
         _ cloud: IOSAudioProviderService.PinnedOperation
     ) async -> IOSAudioError? {
-        let task = Task { @MainActor in
+        let task: Task<IOSAudioError?, Never> = Task { @MainActor in
             do {
                 try await cloud.host.cancel(operationId: cloud.id)
                 return nil
@@ -1106,13 +1106,30 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         publishCapabilitySnapshot()
     }
 
+    func stopAndWait() async {
+        let clouds = activeCloudOperations.filter { $0.key != .ui(instanceID: "voice-capture") }.map(\.value)
+        for cloud in clouds {
+            try? await cloud.host.cancel(operationId: cloud.id)
+        }
+        if let identity = activePlaybackIdentity {
+            await requestPlaybackStop(identity).value
+        } else {
+            pcmPlayback.stop()
+            await speechImplementation.stopAndWait()
+        }
+        publishCapabilitySnapshot()
+    }
+
     func openStream(
         configuration: VoiceSpeechConfiguration,
         managesAudioSession: Bool
     ) async throws -> any VoiceSpeechStreamingSession {
-        if configuration.route?.effective?.source == .provider || configurationStore.configuration.speech.source == .provider {
-            let snapshot = Self.cloudSnapshot(configurationStore.snapshot, route: configuration.route, language: configuration.languageIdentifier, rate: configuration.speed)
-            let cloud = try await providerService.pin(kind: .speech, snapshot: snapshot, voice: snapshot.configuration.speech.voice?.id)
+        let capturedSnapshot = configuration.configurationSnapshot ?? configurationStore.snapshot
+        if configuration.route?.effective?.source == .provider || capturedSnapshot.configuration.speech.source == .provider {
+            let snapshot = Self.cloudSnapshot(capturedSnapshot, route: configuration.route, language: configuration.languageIdentifier, rate: configuration.speed)
+            let cloud = try await providerService.pin(kind: .speech, snapshot: snapshot,
+                                                      voice: snapshot.configuration.speech.voice?.id,
+                                                      owner: configuration.audioOwner)
             let identity = Self.newIdentity(epoch: serviceEpoch, generation: 1)
             let owner = IOSAudioOwner.ui(instanceID: "flow-speech")
             guard activePlaybackOwner == nil, !speechImplementation.hasActivePlayback else { throw AudioServiceFailure.busy }
@@ -1174,7 +1191,8 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
 
     private static func cloudSnapshot(_ snapshot: AudioConfigurationSnapshot, route: AudioRouteResolution?, language: String?, rate: Double) -> AudioConfigurationSnapshot {
         var configuration = snapshot.configuration
-        if let effective = route?.effective, effective.source == .provider, let profileID = effective.profileId {
+        if configuration.speech.cloud.binding != "follow_session",
+           let effective = route?.effective, effective.source == .provider, let profileID = effective.profileId {
             configuration.speech.source = .provider
             configuration.speech.cloud = AudioCloudBinding(binding: "explicit_profile", profileId: profileID, modelId: effective.modelId)
             configuration.speech.voice = nil

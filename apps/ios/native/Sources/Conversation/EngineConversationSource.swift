@@ -32,13 +32,6 @@ final class EngineConversationSource: ConversationSource {
 
     let model: ConversationModel
     var sessionMode: SessionMode { model.sessionMode }
-    private var bufferedModeEvent: (sessionID: String, mode: SessionMode, pending: SessionMode?, revision: UInt64)?
-    private var modeOwnerSessionID = ""
-    private var modeRequestTask: Task<Void, Never>?
-    private var modeRequestSequence: UInt64 = 0
-    private var pendingNewConversationMode: SessionMode?
-    private var sessionRestoreFallbackMode: SessionMode
-    private var newSessionModeReadiness = NewSessionModeReadiness()
 
     private let isRemoteProjection: Bool
     private let config: EngineConfig
@@ -46,12 +39,14 @@ final class EngineConversationSource: ConversationSource {
     private let mediaHostComposition: IOSNativeMediaHostComposition?
     private let permissionModeRepository: PermissionModeConfigurationRepository
     private var handle: MobileEngineHandle?
+    private var isRetiredForReconnect = false
+    private var sessionOwnerAdmission: ((String) -> Bool)?
+    private var sessionStartupAdmission: (() -> Bool)?
+    private var sessionOwnerRejected = false
     private let audioContextOwnerID = UUID().uuidString
     private var audioContextGeneration: UInt64 = 0
     private var audioContextTask: Task<Void, Never>?
     private var audioSourceActive = false
-    private var mediaHostContextGeneration: UInt64 = 0
-    private var mediaHostContextTask: Task<Void, Never>?
     private var mediaHostSessionBinding: MediaAudioSessionBindingFfi?
     /// One shared bootstrap attempt for every entry point that needs the
     /// engine. Access to this property remains main-actor-confined, which
@@ -114,7 +109,6 @@ final class EngineConversationSource: ConversationSource {
     private var pendingSlashRaw: String?
     private var testCommandSubmitter: ((ClientCommand) async throws -> Void)?
     private var testBypassPermissionsConfirmer: (() async throws -> Void)?
-    private var testEmptySessionResumer: ((String, String) async throws -> Void)?
     private var cancellationOperation: CancellationOperation?
     private var nextCancellationOperationID: UInt64 = 1
     private var activeSessionTransitionOperationID: UInt64?
@@ -129,6 +123,52 @@ final class EngineConversationSource: ConversationSource {
         didSet { deliverFailedSideSubmission() }
     }
     var isSideChat: Bool { durableTurns == nil }
+    var hasActiveRealtimeAudio: Bool {
+        IOSRealtimeAudioService.shared.isActive(ownerID: audioContextOwnerID)
+    }
+    var voiceAudioOwner: IOSAudioOwner? {
+        guard let binding = mediaHostSessionBinding,
+              let attachment = IOSAudioProviderService.trustedAttachmentIdentity(
+                routeSessionID: binding.sessionId, ownerSessionID: model.activeSessionId,
+                attachmentHostID: binding.attachmentHostId,
+                attachmentGeneration: binding.attachmentGeneration) else { return nil }
+        return .attached(attachment: attachment, logicalOwner: .session(sessionID: model.activeSessionId))
+    }
+    var isAvailableForPrompts: Bool { !isRetiredForReconnect && !sessionOwnerRejected }
+
+    func setSessionOwnerAdmission(_ admission: @escaping (String) -> Bool) {
+        sessionOwnerAdmission = admission
+    }
+
+    func setSessionStartupAdmission(_ admission: @escaping () -> Bool) {
+        sessionStartupAdmission = admission
+    }
+
+    private func admitSessionStartup() -> Bool {
+        guard sessionStartupAdmission?() ?? true else {
+            model.error = ConversationError(kind: .host, message: SessionHost.OwnershipError.conflictingOwner.localizedDescription)
+            return false
+        }
+        return true
+    }
+
+    private func admitSessionOwner(_ sessionID: String) -> Bool {
+        guard !sessionOwnerRejected else { return false }
+        guard sessionOwnerAdmission?(sessionID) ?? true else {
+            rejectSessionOwner(SessionHost.OwnershipError.conflictingOwner.localizedDescription)
+            return false
+        }
+        return true
+    }
+
+    private func rejectSessionOwner(_ message: String) {
+        sessionOwnerRejected = true
+        if case let .resume(requestedID) = pendingSessionTransition {
+            model.sessionTransitionFailure = SessionTransitionFailure(requestedSessionID: requestedID)
+        }
+        setPendingSessionTransition(nil)
+        model.error = ConversationError(kind: .host, message: message)
+    }
     var isTemporaryConversation: Bool { isSideChat }
     lazy var sideChats = SideChatCollection(parent: self)
     var hasLiveSideChats: Bool { !sideChats.entries.isEmpty || sideChats.creating }
@@ -174,7 +214,6 @@ final class EngineConversationSource: ConversationSource {
 
     private enum SessionTransitionSubmission {
         case command(ClientCommand)
-        case resumeEmpty(sessionID: String, title: String)
         case resumeSelected(sessionID: String, transcriptPath: String)
     }
 
@@ -210,7 +249,6 @@ final class EngineConversationSource: ConversationSource {
     ) {
         self.isRemoteProjection = remoteProjection
         self.config = config
-        self.sessionRestoreFallbackMode = config.sessionMode
         self.mediaHostComposition = mediaHostComposition
         self.durableTurns = (memoryOnly || remoteProjection) ? nil : DurableConversationTurnClientStore(config: config)
         self.handleBuilder = handleBuilder
@@ -224,6 +262,10 @@ final class EngineConversationSource: ConversationSource {
             messages: [],
             model: MockData.models.first(where: { $0.id == config.model })
                 ?? MockData.models[0], persistDisclosures: !(memoryOnly || remoteProjection))
+        if let sessionID = config.initialSessionId, !sessionID.isEmpty {
+            pendingSessionTransition = .resume(sessionID)
+            self.model.sessionTransitionPending = true
+        }
         self.model.sessionMode = config.sessionMode
         self.model.sessionModeKnown = !remoteProjection
         // Out-of-band model state: the configured id (empty ⇒ engine default,
@@ -235,19 +277,10 @@ final class EngineConversationSource: ConversationSource {
 
     deinit {
         audioContextTask?.cancel()
-        mediaHostContextTask?.cancel()
         let ownerID = audioContextOwnerID
-        let mediaHostComposition = mediaHostComposition
-        let mediaHostSessionBinding = mediaHostSessionBinding
         Task { @MainActor in
-            IOSAudioProviderService.shared.clearSessionContext(ownerID: ownerID)
+            IOSAudioProviderService.shared.releaseSessionContextSelection(ownerID: ownerID)
             IOSRealtimeAudioService.shared.detach(ownerID: ownerID)
-            if let mediaHostSessionBinding {
-                mediaHostComposition?.removeAudioSessionContext(
-                    sessionID: mediaHostSessionBinding.sessionId,
-                    generation: mediaHostSessionBinding.generation
-                )
-            }
         }
     }
 
@@ -275,15 +308,23 @@ final class EngineConversationSource: ConversationSource {
         model.isNew = false
     }
 
+    @discardableResult
+    func confirmRemoteSessionMode(_ mode: SessionMode, sessionID: String) -> Bool {
+        precondition(isRemoteProjection)
+        guard canonicalSessionID(sessionID) == canonicalSessionID(model.activeSessionId),
+              !model.sessionModeKnown || model.sessionMode == mode else { return false }
+        model.sessionMode = mode
+        model.sessionModeKnown = true
+        return true
+    }
+
     func applyRemoteEvent(_ event: ClientEvent) {
         precondition(isRemoteProjection)
         // Desktop lifecycle is already represented by the snapshot. Never let
         // its local session IDs/configuration drive the phone's engine.
         switch event {
         case let .sessionStarted(sessionId, mode), let .sessionResumed(sessionId, mode, _):
-            guard sessionId == model.activeSessionId else { return }
-            if model.sessionModeRevision == nil { model.sessionMode = SessionMode(dto: mode) }
-            model.sessionModeKnown = true
+            confirmRemoteSessionMode(SessionMode(dto: mode), sessionID: sessionId)
             return
         case .sessionEnded, .turnRecoveryState:
             return
@@ -303,9 +344,9 @@ final class EngineConversationSource: ConversationSource {
 
     func reconcileRemoteState(_ update: RemoteSessionUpdateFfi) {
         precondition(isRemoteProjection)
-        if update.sessionId == model.activeSessionId, let mode = update.sessionMode {
-            model.sessionMode = SessionMode(dto: mode)
-            model.sessionModeKnown = true
+        guard canonicalSessionID(update.sessionId) == canonicalSessionID(model.activeSessionId) else { return }
+        if let mode = update.sessionMode {
+            guard confirmRemoteSessionMode(SessionMode(dto: mode), sessionID: update.sessionId) else { return }
         }
         model.pendingPermissions = update.pending.permissions.map { request in
             var request = request
@@ -365,9 +406,7 @@ final class EngineConversationSource: ConversationSource {
         guard unresolvedRecoveryTurnID == nil,
               pauseAcknowledgements.isEmpty
         else { return }
-        durableTurns?.clear()
         let turnIdToCancel = inFlightTurnForSessionSwitch()
-        model.sessionRestoreRecovery = nil
         model.sessionTransitionFailure = nil
         let transitionOperationID = beginSessionTransition(.new)
         prepareSessionTransition(cancelling: turnIdToCancel, isNew: true)
@@ -376,17 +415,11 @@ final class EngineConversationSource: ConversationSource {
         // out-of-band via `SessionStarted`.
         submitSessionTransition(
             cancelling: turnIdToCancel,
-            submission: .command(.newSession(cwd: nil, model: nil)),
+            submission: .command(.newSession(cwd: config.projectCwd ?? LXISHGuestPaths.workspaceRoot, model: nil, mode: config.sessionMode.dto)),
             failurePrefix: String(localized: "chat_new_session_failed"),
             transitionOperationID: transitionOperationID,
             isNew: true
         )
-    }
-
-    func startNewConversation(mode: SessionMode) {
-        pendingNewConversationMode = mode
-        startNewConversation()
-        if pendingSessionTransition != .new { pendingNewConversationMode = nil }
     }
 
     /// Creates an ordinary authoring session with an explicit guest cwd. The
@@ -398,10 +431,10 @@ final class EngineConversationSource: ConversationSource {
         }
         _ = try await ensureHandle()
         let prior = model.activeSessionId
-        model.sessionRestoreRecovery = nil; model.sessionTransitionFailure = nil
+        model.sessionTransitionFailure = nil
         let operation = beginSessionTransition(.new)
         prepareSessionTransition(cancelling: nil, isNew: true)
-        submitSessionTransition(cancelling: nil, submission: .command(.newSession(cwd: cwd, model: nil)),
+        submitSessionTransition(cancelling: nil, submission: .command(.newSession(cwd: cwd, model: nil, mode: config.sessionMode.dto)),
             failurePrefix: String(localized: "chat_new_session_failed"), transitionOperationID: operation, isNew: true)
         for _ in 0..<400 {
             try Task.checkCancellation()
@@ -438,7 +471,6 @@ final class EngineConversationSource: ConversationSource {
         failurePrefix: String,
         transitionOperationID: UInt64,
         resumeTargetID: String? = nil,
-        allowsMissingSessionReplacement: Bool = false,
         isNew: Bool
     ) {
         Task { [weak self] in
@@ -473,9 +505,6 @@ final class EngineConversationSource: ConversationSource {
                 }
                 self.resetTranscriptForSessionSwitch(isNew: isNew)
             }
-            // A mode command targets the engine's current session. Let an
-            // already-submitted request finish before replacing that owner.
-            await self.modeRequestTask?.value
             guard self.activeSessionTransitionOperationID == transitionOperationID else {
                 return
             }
@@ -489,11 +518,6 @@ final class EngineConversationSource: ConversationSource {
                     // A slower failed restore must not clobber a newer drawer
                     // selection that has already replaced the pending target.
                     guard self.pendingSessionTransition == .resume(resumeTargetID) else {
-                        return
-                    }
-                    if allowsMissingSessionReplacement,
-                       Self.isMissingSessionResumeError(error) {
-                        await self.replaceUnavailableSession(resumeTargetID)
                         return
                     }
                     self.model.sessionTransitionFailure = SessionTransitionFailure(
@@ -515,53 +539,6 @@ final class EngineConversationSource: ConversationSource {
         case let .resumeSelected(sessionID, transcriptPath):
             let handle = try await ensureHandle()
             try await handle.resumeWorkspaceSession(sessionId: sessionID, transcriptPath: transcriptPath)
-        case let .resumeEmpty(sessionID, title):
-            if let testEmptySessionResumer {
-                try await testEmptySessionResumer(sessionID, title)
-                return
-            }
-            let handle = try await ensureHandle()
-            try await handle.resumeEmptySession(sessionId: sessionID, title: title)
-        }
-    }
-
-    /// A missing on-disk session is recoverable startup state, not an engine
-    /// outage. Keep the transition pending while a replacement is created so
-    /// an older SessionList cannot erase the cached drawer index in between.
-    private func replaceUnavailableSession(_ unavailableSessionID: String) async {
-        model.sessionRestoreRecovery = SessionRestoreRecovery(
-            unavailableSessionID: unavailableSessionID
-        )
-        pendingNewConversationMode = sessionRestoreFallbackMode
-        setPendingSessionTransition(.new)
-        resetTranscriptForSessionSwitch(isNew: true)
-        do {
-            try await submitCommand(.newSession(cwd: nil, model: nil))
-            model.statusLine = String(localized: "chat_session_replaced")
-        } catch {
-            setPendingSessionTransition(nil)
-            fail(.host, String(localized: "chat_session_replaced_failed \(error)"))
-        }
-    }
-
-    /// Branch on the generated protocol error first. Older hosts may still
-    /// report a missing resume target as Rejected, whose message is matched
-    /// narrowly; unrelated transport/protocol failures stay visible.
-    private static func isMissingSessionResumeError(_ error: Error) -> Bool {
-        guard let clientError = error as? ClientError else { return false }
-        switch clientError {
-        case .NotFound:
-            return true
-        case let .Rejected(message):
-            let normalized = message.lowercased()
-            guard normalized.contains("not resumable") else { return false }
-            return normalized.contains("was not found")
-                || normalized.contains("session not found")
-                || normalized.contains("sessionnotfound")
-        case .Transport, .Protocol, .Internal:
-            return false
-        @unknown default:
-            return false
         }
     }
 
@@ -570,19 +547,12 @@ final class EngineConversationSource: ConversationSource {
         model.sessionTransitionPending = transition != nil
         if transition == nil {
             activeSessionTransitionOperationID = nil
-            pendingNewConversationMode = nil
         }
     }
 
     private func beginSessionTransition(
         _ transition: PendingSessionTransition
     ) -> UInt64 {
-        newSessionModeReadiness.reset()
-        model.requestedSessionMode = nil
-        model.sessionModeSubmissionFailed = false
-        model.awaitingNewSessionMode = false
-        model.newSessionModeFailed = false
-        model.requestedNewSessionMode = nil
         let operationID = nextSessionTransitionOperationID
         nextSessionTransitionOperationID &+= 1
         activeSessionTransitionOperationID = operationID
@@ -679,12 +649,6 @@ final class EngineConversationSource: ConversationSource {
             }
         }
         sessionEpoch &+= 1
-        newSessionModeReadiness.reset()
-        model.requestedSessionMode = nil
-        model.sessionModeSubmissionFailed = false
-        model.awaitingNewSessionMode = false
-        model.newSessionModeFailed = false
-        model.requestedNewSessionMode = nil
         streamingIndex = nil
         streamingItemIndex = nil
         currentResponseMessageIDs = []
@@ -1366,7 +1330,8 @@ final class EngineConversationSource: ConversationSource {
             sessionEpoch: sessionEpoch
         )
         model.activeTurnToken = token
-        durableTurns?.begin(sessionID: model.activeSessionId, turnID: prompt.turnId)
+        let needsInitialOwnerCheckpoint = model.activeSessionId.isEmpty && durableTurns != nil
+        durableTurns?.begin(sessionID: model.activeSessionId, turnID: prompt.turnId, workspace: model.workspaceState?.cwd)
         Self.turnLog.debug(
             "prompt submit turn=\(prompt.turnId, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
         )
@@ -1374,6 +1339,26 @@ final class EngineConversationSource: ConversationSource {
         Task { [weak self] in
             guard let self else { return }
             do {
+                if needsInitialOwnerCheckpoint, self.testCommandSubmitter == nil {
+                    // The first prompt may arrive before SessionStarted. Ask
+                    // the just-built handle for its owner and persist it
+                    // before admitting the turn to the engine.
+                    let handle = try await self.ensureHandle()
+                    let workspace = await handle.workspaceState()
+                    guard self.activeConversationTurnToken == token, !self.model.isCancelling else { return }
+                    guard !workspace.sessionId.isEmpty,
+                          self.model.activeSessionId.isEmpty
+                            || canonicalSessionID(self.model.activeSessionId) == canonicalSessionID(workspace.sessionId)
+                    else {
+                        throw NSError(domain: "ConversationSessionOwner", code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "The engine did not confirm the expected session owner."])
+                    }
+                    guard self.admitSessionOwner(workspace.sessionId) else {
+                        throw SessionHost.OwnershipError.conflictingOwner
+                    }
+                    self.durableTurns?.begin(sessionID: workspace.sessionId, turnID: prompt.turnId,
+                                             workspace: workspace.cwd)
+                }
                 try await self.submitCommand(.sendPrompt(
                     text: ClientTextDto(codeUnits: prompt.sourceCodeUnits),
                     promptMode: prompt.promptMode,
@@ -1381,7 +1366,7 @@ final class EngineConversationSource: ConversationSource {
                     turnId: prompt.turnId,
                     visualizationContext: prompt.visualizationContext.map {
                         VisualizationRefDto(id: $0.id, revision: $0.revision)
-                    }))
+                    }), expectedSessionEpoch: token.sessionEpoch)
             } catch {
                 guard self.activeConversationTurnToken == token else { return }
                 self.fail(.host, "\(error)")
@@ -1466,17 +1451,20 @@ final class EngineConversationSource: ConversationSource {
             return nil
         }
         guard
+            !isRetiredForReconnect,
+            !sessionOwnerRejected,
             !sideEnded,
             !sideClosing,
             !model.isCancelling,
             !model.slashCommandPending,
             !model.sessionTransitionPending,
-            !model.awaitingNewSessionMode,
-            model.requestedSessionMode == nil,
             pauseAcknowledgements.isEmpty,
             unresolvedRecoveryTurnID == nil,
             !model.isSelectedAgentReadOnly
         else { return nil }
+        // Keep the composer's draft when the catalog cannot authorize any
+        // new owner, even before an engine has produced its initial UUID.
+        guard admitSessionStartup() else { return nil }
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let sourceUnits = sourceCodeUnits ?? Array(text.utf16)
@@ -1965,19 +1953,16 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func invalidateAudioSessionContext() {
-        audioContextGeneration &+= 1
-        audioContextTask?.cancel()
-        audioContextTask = nil
-        IOSAudioProviderService.shared.clearSessionContext(ownerID: audioContextOwnerID)
+        // Deselecting the visible session must not revoke the native route
+        // used by this owner's already admitted background work.
+        IOSAudioProviderService.shared.releaseSessionContextSelection(ownerID: audioContextOwnerID)
         IOSRealtimeAudioService.shared.detach(ownerID: audioContextOwnerID)
     }
 
     /// Query the already connected engine. Opening audio settings never builds
     /// an engine merely to discover a cloud route.
     private func refreshAudioSessionContext() {
-        guard !isSideChat else { return }
-        refreshMediaHostAudioContext()
-        guard audioSourceActive, hasConfirmedSessionState, !model.sessionTransitionPending,
+        guard !isSideChat, !isRetiredForReconnect, hasConfirmedSessionState, !model.sessionTransitionPending,
               let handle, !model.activeSessionId.isEmpty else { return }
         audioContextGeneration &+= 1
         let generation = audioContextGeneration
@@ -1985,73 +1970,50 @@ final class EngineConversationSource: ConversationSource {
         let modelID = model.activeModelId
         audioContextTask?.cancel()
         audioContextTask = Task { @MainActor [weak self, handle] in
-            let json = await handle.audioSessionContext()
-            guard !Task.isCancelled, let self, self.audioSourceActive,
+            guard !Task.isCancelled, let self,
                   self.audioContextGeneration == generation, self.handle === handle,
                   self.model.activeSessionId == sessionID, self.model.activeModelId == modelID,
                   !self.model.sessionTransitionPending else { return }
-            guard let data = json.data(using: .utf8),
-                  let context = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                  context["sessionId"] as? String == sessionID,
-                  let profileID = context["profileId"] as? String, !profileID.isEmpty,
-                  let accountScope = context["accountScope"] as? String, !accountScope.isEmpty else {
-                self.invalidateAudioSessionContext()
-                return
-            }
-            IOSAudioProviderService.shared.attach(engine: handle, ownerID: self.audioContextOwnerID)
-            IOSRealtimeAudioService.shared.attach(engine: handle, ownerID: self.audioContextOwnerID)
-            IOSAudioProviderService.shared.setSessionContext(
-                sessionID: sessionID, profileID: profileID, accountScope: accountScope,
-                region: context["region"] as? String, ownerID: self.audioContextOwnerID
-            )
-            await IOSAudioProviderService.shared.refresh(snapshot: AudioConfigurationStore.shared.snapshot)
-        }
-    }
-
-    private func refreshMediaHostAudioContext() {
-        guard hasConfirmedSessionState, !model.sessionTransitionPending,
-              let handle, !model.activeSessionId.isEmpty else { return }
-        mediaHostContextGeneration &+= 1
-        let generation = mediaHostContextGeneration
-        let sessionID = model.activeSessionId
-        mediaHostContextTask?.cancel()
-        mediaHostContextTask = Task { @MainActor [weak self, handle] in
-            guard let self, self.mediaHostContextGeneration == generation else { return }
-            if let previous = self.mediaHostSessionBinding {
-                self.mediaHostComposition?.removeAudioSessionContext(
-                    sessionID: previous.sessionId,
-                    generation: previous.generation
-                )
-                self.mediaHostSessionBinding = nil
-            }
             let routeBinding: MediaAudioSessionBindingFfi?
             do {
                 routeBinding = try await self.mediaHostComposition?.updateAudioSessionContext(for: handle)
             } catch {
-                guard self.handle === handle,
-                      self.mediaHostContextGeneration == generation else { return }
+                guard !Task.isCancelled, self.handle === handle,
+                      self.audioContextGeneration == generation else { return }
                 if self.model.error == nil {
-                    self.model.error = ConversationError(
-                        kind: .host,
-                        message: "Media provider routes could not be refreshed for this conversation: \(error.localizedDescription)"
-                    )
+                    self.model.error = ConversationError(kind: .host,
+                        message: "Media provider routes could not be refreshed for this conversation: \(error.localizedDescription)")
                 }
                 return
             }
-            guard !Task.isCancelled,
-                  self.mediaHostContextGeneration == generation,
+            guard !Task.isCancelled, self.audioContextGeneration == generation,
                   self.handle === handle, self.model.activeSessionId == sessionID,
-                  routeBinding?.sessionId == nil || routeBinding?.sessionId == sessionID,
-                  !self.model.sessionTransitionPending else {
-                if let routeBinding {
-                    self.mediaHostComposition?.removeAudioSessionContext(
-                        sessionID: routeBinding.sessionId,
-                        generation: routeBinding.generation
-                    )
+                  self.model.activeModelId == modelID, !self.model.sessionTransitionPending else { return }
+            guard let routeBinding, !routeBinding.profileId.isEmpty, !routeBinding.accountScope.isEmpty,
+                  let attachment = IOSAudioProviderService.trustedAttachmentIdentity(
+                    routeSessionID: routeBinding.sessionId, ownerSessionID: sessionID,
+                    attachmentHostID: routeBinding.attachmentHostId,
+                    attachmentGeneration: routeBinding.attachmentGeneration) else {
+                if let prior = self.mediaHostSessionBinding,
+                   let identity = IOSMediaAttachmentIdentity(hostID: prior.attachmentHostId,
+                                                             generation: prior.attachmentGeneration) {
+                    _ = IOSAudioProviderService.shared.clearSessionRouteContext(
+                        attachment: identity, ownerID: self.audioContextOwnerID, engine: handle)
                 }
+                self.mediaHostSessionBinding = nil
                 return
             }
+            guard IOSAudioProviderService.shared.attach(engine: handle, ownerID: self.audioContextOwnerID,
+                                                         engineAttachmentIdentity: attachment),
+                  IOSAudioProviderService.shared.setSessionContext(
+                sessionID: sessionID, profileID: routeBinding.profileId, accountScope: routeBinding.accountScope,
+                region: routeBinding.region, ownerID: self.audioContextOwnerID,
+                engineAttachmentIdentity: attachment, engine: handle
+            ) else { return }
             self.mediaHostSessionBinding = routeBinding
+            guard self.audioSourceActive else { return }
+            IOSRealtimeAudioService.shared.attach(engine: handle, ownerID: self.audioContextOwnerID)
+            await IOSAudioProviderService.shared.refresh(snapshot: AudioConfigurationStore.shared.snapshot)
         }
     }
 
@@ -2060,11 +2022,17 @@ final class EngineConversationSource: ConversationSource {
     /// Build the engine handle once (lazily). Registers the listener so the
     /// adapter can stream events the moment the first turn runs.
     private func ensureHandle() async throws -> MobileEngineHandle {
+        guard !isRetiredForReconnect else { throw CancellationError() }
         guard !isRemoteProjection else { throw RemoteFfiError.NotConnected }
         if let handle { return handle }
         if let handleBuildTask {
-            return try await handleBuildTask.value
+            let builtHandle = try await handleBuildTask.value
+            guard !isRetiredForReconnect else { throw CancellationError() }
+            return builtHandle
         }
+        // Unknown UUIDs cannot be checked for uniqueness when any catalog is
+        // unreadable. Refuse before native construction or bootstrap commands.
+        guard admitSessionStartup() else { throw SessionHost.OwnershipError.conflictingOwner }
 
         let listener = EngineListener(source: self)
         // SHIP-BLOCKER #3: register a real permission sink so a tool that needs
@@ -2072,8 +2040,7 @@ final class EngineConversationSource: ConversationSource {
         let permissionSink = EnginePermissionSink(listener: listener)
         let userDirectories = MobileUserStorage.directories()
         // Capture a mode selected before the lazy build in the startup profile.
-        var launchConfig = config
-        launchConfig.sessionMode = model.requestedSessionMode ?? config.sessionMode
+        let launchConfig = config
         let prepared = try NativeEngineFactory.prepare(.interactive(
             config: launchConfig, listener: listener, permissions: permissionSink
         ))
@@ -2103,7 +2070,7 @@ final class EngineConversationSource: ConversationSource {
             try await handle.submit(command: .listModels)
             try await handle.submit(command: .getConversationControls)
             try await handle.submit(
-                command: .listSessions(limit: EngineConversationSource.completeSessionListLimit)
+                command: .listSessions(limit: EngineConversationSource.completeSessionListLimit, mode: nil)
             )
             // The composer has no static fallback: populate its command
             // palette from the same dynamic registry used for execution.
@@ -2124,9 +2091,11 @@ final class EngineConversationSource: ConversationSource {
 
         do {
             let builtHandle = try await buildTask.value
+            guard !isRetiredForReconnect, handleBuildAttemptID == attemptID else { throw CancellationError() }
             if handleBuildAttemptID == attemptID {
-                handle = builtHandle
                 let workspace = await builtHandle.workspaceState()
+                guard !isRetiredForReconnect, handleBuildAttemptID == attemptID else { throw CancellationError() }
+                handle = builtHandle
                 model.workspaceState = SessionWorkspaceState(sessionId: workspace.sessionId, cwd: workspace.cwd,
                     projectRoot: workspace.projectRoot, additionalDirectories: workspace.additionalDirectories, transcriptPath: workspace.transcriptPath)
                 refreshAudioSessionContext()
@@ -2150,7 +2119,7 @@ final class EngineConversationSource: ConversationSource {
     /// surfaced as a host error banner; a later `send` will retry via the same
     /// `ensureHandle`.
     func warmUp() {
-        guard handle == nil else { return }
+        guard !isRetiredForReconnect, handle == nil else { return }
         Task { [weak self] in
             guard let self else { return }
             do { _ = try await self.ensureHandle() }
@@ -2160,6 +2129,38 @@ final class EngineConversationSource: ConversationSource {
 
     func prepare() async throws {
         _ = try await ensureHandle()
+        if sessionOwnerRejected { throw SessionHost.OwnershipError.conflictingOwner }
+    }
+
+    /// Retire only an idle owner. The native engine's UUID claim is released
+    /// asynchronously after all strong handles and native work have drained.
+    func retireForReconnect() async throws {
+        if isRetiredForReconnect { return }
+        await listener?.waitUntilIdle()
+        guard !hasLiveSideChats,
+              ConversationSourceReplacementPolicy.allowsReplacement(
+                of: model, hasActiveRealtimeAudio: hasActiveRealtimeAudio) else {
+            throw NSError(domain: "ConversationSourceReplacement", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: String(localized: "chat_error_finish_background_turn_first")])
+        }
+        isRetiredForReconnect = true
+        let audioTask = audioContextTask
+        let buildTask = handleBuildTask
+        handleBuildAttemptID &+= 1
+        handleBuildTask = nil
+        buildTask?.cancel()
+        audioContextGeneration &+= 1
+        audioContextTask?.cancel()
+        audioContextTask = nil
+        setSettingsActive(false)
+        mediaHostSessionBinding = nil
+        listener?.detachSource()
+        listener = nil
+        permissionSink = nil
+        externalEventHandler = nil
+        handle = nil
+        await audioTask?.value
+        if let buildTask { _ = try? await buildTask.value }
     }
 
     /// Refresh the real session catalog (drawer-open). Builds the handle if
@@ -2169,13 +2170,13 @@ final class EngineConversationSource: ConversationSource {
     /// created since the handle was built. A build/submit failure surfaces as
     /// a host error banner.
     func listSessions() {
-        guard !isSideChat else { return }
+        guard !isSideChat, !isRetiredForReconnect else { return }
         Task { [weak self] in
             guard let self else { return }
             do {
                 let handle = try await self.ensureHandle()
                 try await handle.submit(
-                    command: .listSessions(limit: Self.completeSessionListLimit)
+                    command: .listSessions(limit: Self.completeSessionListLimit, mode: nil)
                 )
             } catch {
                 self.fail(.host, "\(error)")
@@ -3217,43 +3218,6 @@ final class EngineConversationSource: ConversationSource {
         model.permissionOptions = snapshot.permissionOptions
         model.controlsPending = false
         model.controlsError = nil
-    }
-
-    private func applySessionMode(_ value: (sessionID: String, mode: SessionMode, pending: SessionMode?, revision: UInt64)) {
-        guard acceptsSessionModeRevision(previous: model.sessionModeRevision, previousPending: model.pendingSessionMode,
-                                         incoming: value.revision, incomingPending: value.pending) else { return }
-        model.sessionModeRevision = value.revision
-        model.sessionMode = value.mode
-        model.sessionModeKnown = true
-        model.pendingSessionMode = value.pending
-        newSessionModeReadiness.observe(
-            sessionID: value.sessionID, mode: value.mode, pending: value.pending, epoch: sessionEpoch
-        )
-        completeRequiredNewSessionModeIfReady()
-    }
-
-    private func completeRequiredNewSessionModeIfReady() {
-        guard newSessionModeReadiness.takeReady(
-            sessionID: model.activeSessionId, mode: model.sessionMode, pending: model.pendingSessionMode
-        ) else { return }
-        model.awaitingNewSessionMode = false
-        model.newSessionModeFailed = false
-        model.requestedNewSessionMode = nil
-    }
-
-    private func confirmSessionMode(sessionId: String, mode: SessionMode) {
-        if modeOwnerSessionID != sessionId {
-            modeOwnerSessionID = sessionId
-            model.sessionModeRevision = nil
-            model.pendingSessionMode = nil
-            model.sessionMode = mode
-        } else if model.sessionModeRevision == nil {
-            model.sessionMode = mode
-        }
-        if let value = bufferedModeEvent, value.sessionID == sessionId {
-            bufferedModeEvent = nil
-            applySessionMode(value)
-        }
     }
 
     /// Map one inbound `ClientEvent` onto the published state.
@@ -4335,33 +4299,15 @@ final class EngineConversationSource: ConversationSource {
                 messageIndex: row.messageIndex
             )
 
-        case let .sessionModeChanged(sessionId, mode, pendingMode, revision):
-            let value = (sessionID: sessionId, mode: SessionMode(dto: mode),
-                         pending: pendingMode.map(SessionMode.init(dto:)), revision: revision)
-            if model.activeSessionId.isEmpty && !model.sessionTransitionPending {
-                // A fresh engine has an owner before it emits SessionStarted.
-                // This event identifies it without replacing any transcript.
-                if !hasConfirmedSessionState, model.messages.isEmpty, !model.streaming {
-                    model.isNew = true
-                }
-                model.activeSessionId = sessionId
-                hasConfirmedSessionState = true
-                confirmSessionMode(sessionId: sessionId, mode: value.mode)
-                applySessionMode(value)
-            } else if sessionId == model.activeSessionId && !model.sessionTransitionPending {
-                applySessionMode(value)
-            } else if model.activeSessionId.isEmpty || model.sessionTransitionPending {
-                if case let .resume(expected) = pendingSessionTransition, expected != sessionId { break }
-                if pendingSessionTransition == .new, !model.activeSessionId.isEmpty, model.activeSessionId == sessionId { break }
-                if let current = bufferedModeEvent, current.sessionID == sessionId,
-                   !acceptsSessionModeRevision(previous: current.revision, previousPending: current.pending,
-                                               incoming: revision, incomingPending: value.pending) {
-                    break
-                }
-                bufferedModeEvent = value
-            }
-
         case let .sessionStarted(sessionId, mode):
+            if !isRemoteProjection, SessionMode(dto: mode) != config.sessionMode {
+                if case let .resume(expected) = pendingSessionTransition,
+                   canonicalSessionID(expected) != canonicalSessionID(sessionId) { return }
+                if pendingSessionTransition == nil, !model.activeSessionId.isEmpty,
+                   canonicalSessionID(model.activeSessionId) != canonicalSessionID(sessionId) { return }
+                rejectSessionOwner("The session reported a conflicting fixed mode.")
+                return
+            }
             if isSideChat {
                 model.activeSessionId = sessionId
                 hasConfirmedSessionState = true
@@ -4379,7 +4325,6 @@ final class EngineConversationSource: ConversationSource {
             // case; this confirms + adopts the engine-assigned id.
             let isSwitch = !sessionId.isEmpty && sessionId != model.activeSessionId
             let confirmedNewSession = pendingSessionTransition == .new
-            let requestedNewMode = confirmedNewSession ? pendingNewConversationMode : nil
             let hadVisibleTranscript = !model.items.isEmpty || !model.messages.isEmpty
             // Resume is confirmed only by SessionResumed, because that event
             // atomically carries the replacement transcript. A bootstrap
@@ -4400,6 +4345,7 @@ final class EngineConversationSource: ConversationSource {
             if isSwitch && hadVisibleTranscript && !confirmedNewSession && !adoptingInitialSession {
                 return
             }
+            guard admitSessionOwner(sessionId) else { return }
             if isSwitch && !model.streaming
                 && (confirmedNewSession || (!hadVisibleTranscript && !adoptingInitialSession)) {
                 resetTranscriptForSessionSwitch(isNew: true)
@@ -4408,7 +4354,9 @@ final class EngineConversationSource: ConversationSource {
                 model.isNew = true
             }
             model.activeSessionId = sessionId
-            confirmSessionMode(sessionId: sessionId, mode: SessionMode(dto: mode))
+            durableTurns?.bind(sessionID: sessionId)
+            model.sessionMode = SessionMode(dto: mode)
+            model.sessionModeKnown = true
             hasConfirmedSessionState = true
             setPendingSessionTransition(nil)
             refreshAudioSessionContext()
@@ -4416,11 +4364,14 @@ final class EngineConversationSource: ConversationSource {
                 model.sessionRefreshRevision &+= 1
             }
             refreshSessionAgentsAfterTransition()
-            if let requestedNewMode, requestedNewMode != model.sessionMode {
-                setSessionMode(requestedNewMode)
-            }
+
 
         case let .sessionResumed(sessionId, mode, messages):
+            guard pendingSessionTransition == .resume(sessionId) else { return }
+            guard isRemoteProjection || SessionMode(dto: mode) == config.sessionMode else {
+                rejectSessionOwner("The session reported a conflicting fixed mode.")
+                return
+            }
             model.promptSuggestion = nil
             model.promptSuggestionSourceCodeUnits = nil
             model.promptSuggestionUuid = nil
@@ -4434,12 +4385,14 @@ final class EngineConversationSource: ConversationSource {
             // placeholder transcript `resumeSession` left in place and append
             // each restored message as a completed bubble — the out-of-band
             // session-state sibling of `SessionList` / `SessionStarted`.
-            guard pendingSessionTransition == .resume(sessionId) else { return }
+            guard admitSessionOwner(sessionId) else { return }
             invalidateTurnContext()
             replayProjectionState = nil
             model.clearAgentState()
             model.activeSessionId = sessionId
-            confirmSessionMode(sessionId: sessionId, mode: SessionMode(dto: mode))
+            durableTurns?.bind(sessionID: sessionId)
+            model.sessionMode = SessionMode(dto: mode)
+            model.sessionModeKnown = true
             hasConfirmedSessionState = true
             setPendingSessionTransition(nil)
             refreshAudioSessionContext()
@@ -4469,9 +4422,7 @@ final class EngineConversationSource: ConversationSource {
             model.turnCompletion = nil
             model.statusLine = nil
             model.notice = nil
-            // A migration-safe empty resume may have just created its JSONL
-            // anchor. Refresh so the full catalog and persisted project index
-            // immediately include that preserved UUID.
+            // Refresh the catalog after confirming the resumed session.
             model.sessionRefreshRevision &+= 1
             refreshSessionAgentsAfterTransition()
             refreshBackgroundTasks()
@@ -4484,9 +4435,6 @@ final class EngineConversationSource: ConversationSource {
             // The current session ended (e.g. cleared). Drop the active id;
             // the next `SessionStarted`/`SessionResumed` re-establishes one.
             model.activeSessionId = ""
-            modeOwnerSessionID = ""
-            model.sessionModeRevision = nil
-            model.pendingSessionMode = nil
             hasConfirmedSessionState = false
             model.clearAgentState()
             model.backgroundTasks = []
@@ -4645,7 +4593,7 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func beginDurableTurnForTesting(turnId: UInt64, sessionId: String) {
-        durableTurns?.begin(sessionID: sessionId, turnID: turnId)
+        durableTurns?.begin(sessionID: sessionId, turnID: turnId, workspace: model.workspaceState?.cwd)
     }
 
     func recordDurableSequenceForTesting(turnId: UInt64, sequence: UInt64) {
@@ -4670,12 +4618,6 @@ final class EngineConversationSource: ConversationSource {
         _ confirmer: (() async throws -> Void)?
     ) {
         testBypassPermissionsConfirmer = confirmer
-    }
-
-    func setEmptySessionResumerForTesting(
-        _ resumer: ((String, String) async throws -> Void)?
-    ) {
-        testEmptySessionResumer = resumer
     }
 
     /// Append streamed text into the in-flight assistant message, creating it
@@ -5700,59 +5642,6 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
-    func setSessionMode(_ mode: SessionMode) {
-        guard !isSideChat, !isRemoteProjection, !model.sessionTransitionPending else { return }
-        sessionRestoreFallbackMode = mode
-        modeRequestSequence &+= 1
-        let requestSequence = modeRequestSequence
-        model.requestedSessionMode = mode
-        model.sessionModeSubmissionFailed = false
-        var requiredRequestID: UInt64?
-        if (model.isNew || (!hasConfirmedSessionState && model.activeSessionId.isEmpty)),
-           !model.streaming, model.messages.isEmpty {
-            requiredRequestID = newSessionModeReadiness.request(mode, sessionID: model.activeSessionId)
-            model.awaitingNewSessionMode = true
-            model.newSessionModeFailed = false
-            model.requestedNewSessionMode = mode
-        }
-        let previous = modeRequestTask
-        let requestedEpoch = sessionEpoch
-        modeRequestTask = Task { [weak self] in
-            await previous?.value
-            guard let self, self.sessionEpoch == requestedEpoch, !self.model.sessionTransitionPending else { return }
-            if let requiredRequestID {
-                // Only the newest queued choice needs to reach the engine.
-                guard self.newSessionModeReadiness.beginSubmission(requiredRequestID, epoch: requestedEpoch) else { return }
-            }
-            do {
-                try await self.submitCommand(.setSessionMode(mode: mode.dto), expectedSessionEpoch: requestedEpoch)
-                guard self.sessionEpoch == requestedEpoch, !self.model.sessionTransitionPending else { return }
-                if let requiredRequestID {
-                    self.newSessionModeReadiness.submitted(requiredRequestID)
-                    self.completeRequiredNewSessionModeIfReady()
-                }
-                if self.modeRequestSequence == requestSequence {
-                    self.model.requestedSessionMode = nil
-                    self.model.sessionModeSubmissionFailed = false
-                }
-            } catch {
-                guard self.sessionEpoch == requestedEpoch, !self.model.sessionTransitionPending else { return }
-                let isCurrentRequest = requiredRequestID.map { self.newSessionModeReadiness.failed($0) } ?? true
-                if requiredRequestID != nil && isCurrentRequest {
-                    self.model.newSessionModeFailed = true
-                }
-                if isCurrentRequest && self.modeRequestSequence == requestSequence {
-                    self.model.sessionModeSubmissionFailed = true
-                    self.model.error = ConversationError(kind: .host, message: error.localizedDescription)
-                }
-            }
-        }
-    }
-
-    func setSessionRestoreFallbackMode(_ mode: SessionMode) {
-        sessionRestoreFallbackMode = mode
-    }
-
     func setPermissionMode(_ mode: String) {
         guard mode != "bypassPermissions" else {
             model.controlsError = "Confirm Full Access from the conversation controls."
@@ -5858,27 +5747,7 @@ final class EngineConversationSource: ConversationSource {
         submitSessionCancellation(turnIdToCancel, isNew: false)
     }
 
-    func forkSession(_ sessionID: String, targetMode: SessionMode) async throws {
-        guard !sessionID.isEmpty, targetMode != sessionMode else { return }
-        try await submitCommand(
-            .forkSession(sessionId: sessionID, targetMode: targetMode.dto)
-        )
-    }
 
-    /// Resume a prior engine session by UUID (the drawer-tap path for a REAL
-    /// history row). Cancels any in-flight turn first, resets the transcript
-    /// only after the safe owner slot is released, then submits
-    /// `ResumeSession`. The drawer owns the
-    /// optimistic selection; the model changes only when the engine confirms
-    /// the transition, preventing a stale SessionList from winning the race. The
-    /// engine hot-restores the prior transcript into the running orchestrator
-    /// and confirms with `SessionResumed{session_id, messages}`, which
-    /// re-adopts the id AND replaces the placeholder with the real restored
-    /// conversation (oldest-first) so the next turn continues with full prior
-    /// context visible. An already-presented active session is a no-op (for
-    /// example when SwiftUI restarts a lifecycle task after dismissing an
-    /// overlay). Process restoration still re-requests the active id when the
-    /// model has no committed transcript to display.
     func changeWorkspace(_ path: String, expectedSessionID: String) {
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -5905,32 +5774,27 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
-    func resumeSession(_ uuid: String, emptySessionTitle: String?) {
+    func resumeSession(_ uuid: String) {
         guard !isSideChat else { return }
         guard !uuid.isEmpty,
               unresolvedRecoveryTurnID == nil,
               pauseAcknowledgements.isEmpty
         else { return }
-        if let record = durableTurns?.load(), record.sessionID != uuid {
-            durableTurns?.clear()
-        }
+        durableTurns?.bind(sessionID: uuid)
         if uuid == model.activeSessionId,
            pendingSessionTransition == nil,
            (!model.items.isEmpty || !model.messages.isEmpty || hasConfirmedSessionState) {
             return
         }
         let turnIdToCancel = inFlightTurnForSessionSwitch()
-        model.sessionRestoreRecovery = nil
         model.sessionTransitionFailure = nil
         let transitionOperationID = beginSessionTransition(.resume(uuid))
         prepareSessionTransition(cancelling: turnIdToCancel, isNew: false)
         let submission: SessionTransitionSubmission
-        if let emptySessionTitle {
-            submission = .resumeEmpty(sessionID: uuid, title: emptySessionTitle)
-        } else if let path = model.engineSessions.first(where: { $0.id == uuid })?.transcriptPath {
+        if let path = model.engineSessions.first(where: { $0.id == uuid })?.transcriptPath {
             submission = .resumeSelected(sessionID: uuid, transcriptPath: path)
         } else {
-            submission = .command(.resumeSession(sessionId: uuid, cwd: nil))
+            submission = .command(.resumeSession(sessionId: uuid, cwd: nil, expectedMode: config.sessionMode.dto))
         }
         submitSessionTransition(
             cancelling: turnIdToCancel,
@@ -5938,7 +5802,6 @@ final class EngineConversationSource: ConversationSource {
             failurePrefix: String(localized: "chat_resume_session_failed"),
             transitionOperationID: transitionOperationID,
             resumeTargetID: uuid,
-            allowsMissingSessionReplacement: emptySessionTitle == nil,
             isNew: false
         )
     }
@@ -5947,7 +5810,7 @@ final class EngineConversationSource: ConversationSource {
         guard
             durableRecoveryTask == nil,
             let record = durableTurns?.load(),
-            record.sessionID == sessionID,
+            canonicalSessionID(record.sessionID) == canonicalSessionID(sessionID),
             reattachedTurnIDs.insert(record.turnID).inserted
         else { return }
         currentTurnId = record.turnID

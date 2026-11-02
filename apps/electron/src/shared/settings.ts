@@ -25,20 +25,23 @@ import type { VoicePreferences } from './voicePreferences.js';
 export type { VoicePreferences } from './voicePreferences.js';
 import type { NotificationPreferences } from './notificationPreferences.js';
 export type { NotificationPreferences } from './notificationPreferences.js';
+import type { ConversationSpace } from './conversationSpaces.js';
 
 /** Schema version of the persisted device settings file. */
 export const SETTINGS_VERSION = 1 as const;
 
 /** A session identified by the project it belongs to. */
 export interface SessionRef {
+  /** The engine's real workspace, independent of logical project ownership. */
   projectPath: string;
   sessionId: string;
+  /** Desktop-owned conversations carry their fixed logical owner explicitly. */
+  projectId?: string | null;
+  mode?: ConversationSpace;
 }
 
 /** A session the user pinned, as persisted (the pin time is assigned by the main process). */
-export interface PinnedSessionRecord {
-  projectPath: string;
-  sessionId: string;
+export interface PinnedSessionRecord extends SessionRef {
   title: string;
   pinnedAt: string;
 }

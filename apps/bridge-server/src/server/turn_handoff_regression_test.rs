@@ -9,6 +9,121 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
+#[derive(Default)]
+struct HandoffRouteProbe {
+    prepared_sink: std::sync::Mutex<Option<Arc<dyn ClientEventSink>>>,
+    commands: std::sync::Mutex<Vec<(String, bool)>>,
+    retries: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl CommandRouter for HandoffRouteProbe {
+    async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
+        match command {
+            ClientCommand::PrepareSessionHandoff { request_id, .. } => {
+                self.commands.lock().unwrap().push((request_id, false));
+                *self.prepared_sink.lock().unwrap() = Some(sink);
+            }
+            ClientCommand::CancelSessionHandoff { request_id } => {
+                self.commands
+                    .lock()
+                    .unwrap()
+                    .push((request_id.clone(), true));
+                sink.emit(ClientEvent::SessionHandoffFailed {
+                    request_id,
+                    message: "handoff cancelled".into(),
+                })
+                .await;
+            }
+            ClientCommand::RetrySessionHandoff { request_id } => {
+                self.retries.lock().unwrap().push(request_id);
+            }
+            other => panic!("unexpected handoff command: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn handoff_routes_while_busy_and_is_independent_of_turn_lifecycle() {
+    use client::protocol::listings::SessionModeDto;
+    use client::protocol::text::ClientTextDto;
+
+    let (endpoint, mut socket, sink) = captured_sink().await;
+    let router = Arc::new(HandoffRouteProbe::default());
+    let connection = BridgeConnection::new().bind_router(router.clone());
+    assert!(connection.claim_outbound(&sink).await);
+    connection.handshaken.store(true, Ordering::SeqCst);
+    connection.turn_running.store(true, Ordering::SeqCst);
+    let (generation, source_cancel) = connection.active_turn.begin(Some(41));
+    connection
+        .dispatch(ClientCommand::PrepareSessionHandoff {
+            request_id: "ready".into(),
+            target_mode: SessionModeDto::Chat,
+        })
+        .await;
+    assert!(!source_cancel.is_cancelled());
+    assert_eq!(
+        *router.commands.lock().unwrap(),
+        vec![("ready".into(), false)]
+    );
+
+    // A summary has its own owner and remains deliverable if the source turn
+    // finishes before the read-only model response arrives.
+    connection.active_turn.finish(generation);
+    connection.turn_running.store(false, Ordering::SeqCst);
+    let prepared_sink = router.prepared_sink.lock().unwrap().take().unwrap();
+    let units = vec![0xd800, 0x0061, 0xd83d, 0xde80];
+    prepared_sink
+        .emit(ClientEvent::SessionHandoffPrepared {
+            request_id: "ready".into(),
+            source_session_id: "11111111-2222-4333-8444-555555555555".into(),
+            source_mode: SessionModeDto::Code,
+            target_mode: SessionModeDto::Chat,
+            cutoff: "cutoff-1".into(),
+            summary: ClientTextDto::from_code_units(units.clone()),
+        })
+        .await;
+    assert!(matches!(next_frame(&mut socket).await,
+        Frame::Event(ClientEvent::SessionHandoffPrepared { request_id, source_session_id, summary, .. })
+            if request_id == "ready" && source_session_id == "11111111-2222-4333-8444-555555555555"
+                && summary.code_units == units));
+
+    connection.turn_running.store(true, Ordering::SeqCst);
+    let (generation, source_cancel) = connection.active_turn.begin(Some(42));
+    connection
+        .dispatch(ClientCommand::PrepareSessionHandoff {
+            request_id: "cancel".into(),
+            target_mode: SessionModeDto::Chat,
+        })
+        .await;
+    connection
+        .dispatch(ClientCommand::RetrySessionHandoff {
+            request_id: "retry".into(),
+        })
+        .await;
+    connection
+        .dispatch(ClientCommand::CancelSessionHandoff {
+            request_id: "cancel".into(),
+        })
+        .await;
+    assert!(matches!(next_frame(&mut socket).await,
+        Frame::Event(ClientEvent::SessionHandoffFailed { request_id, .. }) if request_id == "cancel"));
+    assert!(!source_cancel.is_cancelled());
+    assert!(connection.turn_running.load(Ordering::SeqCst));
+    assert_eq!(*router.retries.lock().unwrap(), vec!["retry"]);
+    assert_eq!(
+        *router.commands.lock().unwrap(),
+        vec![
+            ("ready".into(), false),
+            ("cancel".into(), false),
+            ("cancel".into(), true)
+        ]
+    );
+    connection.active_turn.finish(generation);
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+}
+
 #[tokio::test]
 async fn idle_coordinator_transitions_remain_visible_without_a_foreground_turn() {
     use lingxi_core::host::OutputStream;
@@ -541,10 +656,12 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
         ClientCommand::NewSession {
             cwd: None,
             model: None,
+            mode: client::protocol::listings::SessionModeDto::Code,
         },
         ClientCommand::ResumeSession {
             session_id: uuid::Uuid::new_v4().to_string(),
             cwd: None,
+            expected_mode: client::protocol::listings::SessionModeDto::Code,
         },
         ClientCommand::RunSlashCommand {
             raw: "/clear".into(),
@@ -605,10 +722,12 @@ async fn session_replacement_waits_for_settled_turn_handoff() {
         ClientCommand::NewSession {
             cwd: None,
             model: None,
+            mode: client::protocol::listings::SessionModeDto::Code,
         },
         ClientCommand::ResumeSession {
             session_id: uuid::Uuid::new_v4().to_string(),
             cwd: None,
+            expected_mode: client::protocol::listings::SessionModeDto::Code,
         },
         ClientCommand::RunSlashCommand {
             raw: "/reset".into(),

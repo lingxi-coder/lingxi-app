@@ -87,7 +87,7 @@ use command_api::registry::CommandRegistry;
 use lingxi_core::host::auth::{AuthHandle, LoginInfo};
 use lingxi_core::host::orchestrator::HandleError;
 use lingxi_core::host::orchestrator::OrchestratorHandle;
-use lingxi_core::host::session_context::{ConversationMode, SessionModeSnapshot};
+use lingxi_core::host::session_context::ConversationMode;
 use lingxi_core::host::task_registry::{TaskListFilter, TaskRegistryHandle};
 use lingxi_core::host::SlashCommandDispatcher;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -106,25 +106,24 @@ fn lower_conversation_mode(mode: ConversationMode) -> SessionModeDto {
     }
 }
 
-fn conversation_mode_event(snapshot: SessionModeSnapshot) -> ClientEvent {
-    ClientEvent::SessionModeChanged {
-        session_id: snapshot.session_id,
-        mode: lower_conversation_mode(snapshot.active),
-        pending_mode: snapshot
-            .pending
-            .then(|| lower_conversation_mode(snapshot.selected)),
-        revision: snapshot.revision,
+fn conversation_mode_from_dto(mode: SessionModeDto) -> ConversationMode {
+    match mode {
+        SessionModeDto::Chat => ConversationMode::Chat,
+        SessionModeDto::Code => ConversationMode::Code,
     }
 }
 
-fn replayed_conversation_mode(replayed: &orchestrator::ReplayedSession) -> ConversationMode {
-    replayed
+fn replayed_conversation_mode(
+    replayed: &orchestrator::ReplayedSession,
+    session_id: uuid::Uuid,
+) -> Result<ConversationMode, String> {
+    let source = replayed
         .transcript_metadata
         .iter()
-        .find(|row| row.string_at("/type") == Some("session-mode"))
-        .and_then(|row| row.string_at("/sessionMode"))
-        .and_then(ConversationMode::from_str)
-        .unwrap_or_default()
+        .map(|row| row.to_json_string().map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    session::JsonlWriter::fixed_session_mode_from_source(&source, &session_id.to_string())
 }
 
 /// Default number of recent sessions returned when `ListSessions` omits its
@@ -321,6 +320,14 @@ pub trait CommandRouter: Send + Sync + 'static {
     /// Drain connection-owned in-memory child conversations before their event
     /// sink is released. Routers without such state need no close hook.
     async fn connection_closed(&self) {}
+    /// Validate a proposed replacement before the connection pauses any
+    /// session-owned resources. This query must not mutate the runtime.
+    async fn preflight_session_transition(
+        &self,
+        _command: &ClientCommand,
+    ) -> Result<(), (ErrorKindDto, String)> {
+        Ok(())
+    }
     /// Route one decoded [`ClientCommand`], emitting any reply event(s) through
     /// `sink`. Pure side-effecting: it never blocks the caller for a turn (the
     /// turn path lives on [`crate::server::TurnDriver`]).
@@ -600,6 +607,7 @@ fn provider_model_catalog_from_listings(
 /// each reply with the pure `client::adapter::lowering` parity fns.
 pub struct EngineCommandRouter {
     workspace_commands: Option<Arc<crate::workspace_commands::WorkspaceCommands>>,
+    handoff_manager: Arc<harness_runtime::handoff::SessionHandoffManager>,
     session_cron: Option<Arc<cron::CronScheduler>>,
     cron_firer: Option<Arc<crate::cron_host::HostCronFirer>>,
     handle: Arc<dyn OrchestratorHandle>,
@@ -783,13 +791,22 @@ impl EngineCommandRouter {
         &self,
         uuid: uuid::Uuid,
         mut replayed: orchestrator::ReplayedSession,
+        expected_mode: ConversationMode,
         sink: Arc<dyn ClientEventSink>,
     ) -> Result<(), String> {
+        let resumed_mode = replayed_conversation_mode(&replayed, uuid)?;
+        if resumed_mode != expected_mode
+            || self.handle.conversation_mode().await.mode != expected_mode
+        {
+            return Err(
+                "session_mode_mismatch: expected mode does not match the session and runtime"
+                    .into(),
+            );
+        }
         if let Some(workspace) = &self.workspace_commands {
             workspace.discard_cold_resume();
         }
         let resume_plan_mode = replayed.state.plan_mode;
-        let resumed_mode = replayed_conversation_mode(&replayed);
         let previous_session_id = self.handle.current_session_id().await;
         let previous_permission_mode = self
             .handle
@@ -840,10 +857,6 @@ impl EngineCommandRouter {
             }
             return Err(format!("resume_session failed: {error}"));
         }
-        self.handle
-            .restore_conversation_mode(resumed_mode)
-            .await
-            .map_err(|error| format!("restore conversation mode failed: {error}"))?;
         if let Some(workspace) = &self.workspace_commands {
             workspace.session_facts().reset(true);
             // Owned resume may append deferred tool results. Publish them with
@@ -871,6 +884,155 @@ impl EngineCommandRouter {
         Ok(())
     }
 
+    async fn fork_session(
+        &self,
+        source_id: uuid::Uuid,
+        target_mode: ConversationMode,
+    ) -> Result<uuid::Uuid, String> {
+        if self.is_turn_active() {
+            return Err("cannot fork a session while a turn is in flight".into());
+        }
+        let store = self
+            .session_store
+            .as_ref()
+            .ok_or("fork: persisted session store is unavailable")?;
+        let cwd = store.current_cwd();
+        let current = self.handle.current_session_id().await.as_uuid();
+        let path = if source_id == current {
+            store
+                .transcript_writer
+                .as_ref()
+                .map(|writer| writer.active_path())
+                .ok_or("fork: active transcript is unavailable")?
+        } else {
+            session::jsonl::resolve_session_path_across_worktrees(
+                &store.lingxi_home,
+                &cwd,
+                source_id,
+            )
+            .await
+            .map_err(|error| format!("fork: {error}"))?
+        };
+        let preflight = if source_id == current {
+            let capture = self
+                .workspace_commands
+                .as_ref()
+                .ok_or("fork: active writer authority is unavailable")?
+                .capture_current_transcript(lingxi_core::types::SessionId::from_uuid(source_id))
+                .await?;
+            if capture.transcript_path != path {
+                return Err("fork: active transcript changed during capture".into());
+            }
+            capture.source
+        } else {
+            session::jsonl::load_routed_session_from_path_with_source(
+                &path,
+                source_id,
+                store.fs.clone(),
+            )
+            .await
+            .map_err(|error| format!("fork: {error}"))?
+            .1
+        };
+        let source_mode = session::JsonlWriter::fixed_session_mode_from_source(
+            &preflight,
+            &source_id.to_string(),
+        )
+        .map_err(|error| format!("fork: invalid source mode: {error}"))?;
+        if source_mode != target_mode {
+            return Err("session_mode_mismatch: fork must preserve the source session mode".into());
+        }
+        let live = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
+            store.lingxi_home.join("sessions"),
+        );
+        let source_lease = if source_id == current {
+            let lease = self
+                .workspace_commands
+                .as_ref()
+                .ok_or("fork: active writer authority is unavailable")?
+                .current_writer_lease(lingxi_core::types::SessionId::from_uuid(source_id))
+                .await?;
+            if lease.canonical_session_id().map(|id| id.as_uuid()) != Some(source_id) {
+                return Err(
+                    "fork: active writer authority does not match the source session".into(),
+                );
+            }
+            lease
+        } else {
+            live.claim_session_id(&source_id.to_string(), std::process::id())
+                .map_err(|error| format!("fork: source session is in use: {error}"))?
+                .into_shared()
+        };
+        let (content, loaded) = if source_id == current {
+            let capture = self
+                .workspace_commands
+                .as_ref()
+                .ok_or("fork: active writer authority is unavailable")?
+                .capture_current_transcript(lingxi_core::types::SessionId::from_uuid(source_id))
+                .await?;
+            if capture.transcript_path != path {
+                return Err("fork: active transcript changed during capture".into());
+            }
+            let loaded = session::jsonl::route_lines(&capture.source);
+            (capture.source, loaded)
+        } else {
+            let (_, content, loaded) = session::jsonl::load_routed_session_from_path_with_source(
+                &path,
+                source_id,
+                store.fs.clone(),
+            )
+            .await
+            .map_err(|error| format!("fork: {error}"))?;
+            (content, loaded)
+        };
+        let confirmed =
+            session::JsonlWriter::fixed_session_mode_from_source(&content, &source_id.to_string())
+                .map_err(|error| format!("fork: invalid source mode: {error}"))?;
+        if confirmed != source_mode {
+            return Err("session_mode_mismatch: fork source mode changed during capture".into());
+        }
+        let target_id = uuid::Uuid::new_v4();
+        let _target_lease = live
+            .claim_session_id(&target_id.to_string(), std::process::id())
+            .map_err(|error| format!("fork: target writer claim failed: {error}"))?
+            .into_shared();
+        let (messages, _) =
+            session::jsonl::build_conversation_chain(&loaded, &source_id.to_string());
+        let recovery = harness_runtime::desktop::session_state::capture_branch_recovery(
+            &store.lingxi_home,
+            source_id,
+            source_lease,
+        )
+        .await
+        .map_err(|error| format!("fork: resume the original session first: {error}"))?;
+        orchestrator::native_computer::validate_independent_branch(
+            source_id,
+            &content,
+            &messages,
+            recovery.as_ref(),
+        )
+        .map_err(|error| format!("fork: resume the original session first: {error}"))?;
+        let source_cwd = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
+            .unwrap_or_else(|| cwd.clone());
+        let result = session::branch::create_branch_from_captured(
+            session::branch::CapturedBranch {
+                lingxi_home: &store.lingxi_home,
+                source_cwd: &source_cwd,
+                target_cwd: &cwd,
+                source_session_id: source_id,
+                target_session_id: target_id,
+                source_content: &content,
+                messages: &messages,
+                custom_title: None,
+                mode: Some(target_mode),
+            },
+            store.fs.clone(),
+        )
+        .await
+        .map_err(|error| format!("fork: {error}"))?;
+        Ok(result.new_session_id)
+    }
+
     async fn emit_resumed_session(
         &self,
         uuid: uuid::Uuid,
@@ -883,11 +1045,10 @@ impl EngineCommandRouter {
         let mode = self.handle.conversation_mode().await;
         sink.emit(ClientEvent::SessionResumed {
             session_id: uuid.to_string(),
-            mode: lower_conversation_mode(mode.active),
+            mode: lower_conversation_mode(mode.mode),
             messages,
         })
         .await;
-        sink.emit(conversation_mode_event(mode)).await;
         if let Some(usage) = restored_usage {
             sink.emit(client::adapter::lowering::lower_current_usage(usage))
                 .await;
@@ -987,6 +1148,7 @@ impl EngineCommandRouter {
     ) -> Self {
         Self {
             workspace_commands: None,
+            handoff_manager: Arc::new(harness_runtime::handoff::SessionHandoffManager::default()),
             cron_firer: None,
             session_cron: None,
             handle,
@@ -1481,6 +1643,72 @@ impl EngineCommandRouter {
 
 #[async_trait]
 impl CommandRouter for EngineCommandRouter {
+    async fn preflight_session_transition(
+        &self,
+        command: &ClientCommand,
+    ) -> Result<(), (ErrorKindDto, String)> {
+        match command {
+            ClientCommand::NewSession { mode, .. } => {
+                if self.handle.conversation_mode().await.mode != conversation_mode_from_dto(*mode)
+                {
+                    return Err((
+                        ErrorKindDto::Rejected,
+                        "session_mode_mismatch: create this mode in its own runtime".into(),
+                    ));
+                }
+            }
+            ClientCommand::ResumeSession {
+                session_id,
+                cwd,
+                expected_mode,
+            } => {
+                let expected = conversation_mode_from_dto(*expected_mode);
+                if self.handle.conversation_mode().await.mode != expected {
+                    return Err((
+                        ErrorKindDto::Rejected,
+                        "session_mode_mismatch: expected mode does not match the runtime".into(),
+                    ));
+                }
+                let uuid = uuid::Uuid::parse_str(session_id).map_err(|error| {
+                    (
+                        ErrorKindDto::Protocol,
+                        format!("resume: malformed session id {session_id:?}: {error}"),
+                    )
+                })?;
+                let store = self.session_store.as_ref().ok_or_else(|| {
+                    (
+                        ErrorKindDto::Internal,
+                        "resume: persisted session store is unavailable".into(),
+                    )
+                })?;
+                let cwd = cwd.clone().unwrap_or_else(|| store.current_cwd());
+                let replayed = orchestrator::replay_session_state(
+                    &store.lingxi_home,
+                    &cwd,
+                    uuid,
+                    store.fs.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    (
+                        ErrorKindDto::Protocol,
+                        format!("resume: session {session_id} not resumable: {error}"),
+                    )
+                })?;
+                let actual = replayed_conversation_mode(&replayed, uuid)
+                    .map_err(|error| (ErrorKindDto::Rejected, error))?;
+                if actual != expected {
+                    return Err((
+                        ErrorKindDto::Rejected,
+                        "session_mode_mismatch: expected mode does not match the session".into(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     async fn resume_selected_session(
         &self,
         request: Utf16JsonProjection,
@@ -1501,12 +1729,18 @@ impl CommandRouter for EngineCommandRouter {
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
             .ok_or("resume_selected_session requires an absolute transcript_path")?;
+        let expected_mode = request
+            .string_at("/expected_mode")
+            .and_then(ConversationMode::from_str)
+            .ok_or("resume_selected_session requires expected_mode chat or code")?;
+        if self.handle.conversation_mode().await.mode != expected_mode {
+            return Err("session_mode_mismatch: expected mode differs from the runtime".into());
+        }
         if let Some(workspace) = &self.workspace_commands {
-            if let Some(proof) = workspace.complete_cold_resume(id, &path).await? {
-                self.handle
-                    .restore_conversation_mode(proof.mode)
-                    .await
-                    .map_err(|error| format!("restore conversation mode failed: {error}"))?;
+            if let Some(proof) = workspace
+                .complete_cold_resume(id, &path, expected_mode)
+                .await?
+            {
                 self.emit_resumed_session(id, proof.messages, proof.current_usage, None, sink)
                     .await;
                 return Utf16JsonProjection::parse(r#"{"status":"ok"}"#)
@@ -1521,7 +1755,8 @@ impl CommandRouter for EngineCommandRouter {
             orchestrator::resume::replay_session_state_from_path(&path, id, store.fs.clone())
                 .await
                 .map_err(|error| format!("resume: selected session is not resumable: {error}"))?;
-        self.resume_replayed_session(id, replayed, sink).await?;
+        self.resume_replayed_session(id, replayed, expected_mode, sink)
+            .await?;
         Utf16JsonProjection::parse(r#"{"status":"ok"}"#).map_err(|error| error.to_string())
     }
 
@@ -2420,27 +2655,10 @@ impl CommandRouter for EngineCommandRouter {
             }
 
             // ── Permission mode ────────────────────────────────────────────
-            ClientCommand::SetSessionMode { mode } => {
-                let mode = match mode {
-                    SessionModeDto::Chat => ConversationMode::Chat,
-                    SessionModeDto::Code => ConversationMode::Code,
-                };
-                match self.handle.set_conversation_mode(mode).await {
-                    Ok(snapshot) => sink.emit(conversation_mode_event(snapshot)).await,
-                    Err(error) => {
-                        sink.emit(ClientEvent::Error {
-                            kind: ErrorKindDto::Internal,
-                            message: format!("set_session_mode failed: {error}").into(),
-                        })
-                        .await
-                    }
-                }
-            }
             ClientCommand::GetContextManifest => {
                 let manifest = self.handle.context_manifest().await;
                 match serde_json::to_string(&manifest) {
                     Ok(manifest_json) => {
-                        sink.emit(conversation_mode_event(manifest.session)).await;
                         sink.emit(ClientEvent::ContextManifest { manifest_json })
                             .await;
                     }
@@ -2924,15 +3142,137 @@ impl CommandRouter for EngineCommandRouter {
                     }
                 }
             }
-            ClientCommand::ListSessions { limit } => {
+            ClientCommand::ListSessions { limit, mode } => {
                 let limit = limit.map_or(DEFAULT_SESSION_LIST_LIMIT, |value| value as usize);
-                self.emit_session_list(limit, &*sink).await;
+                self.emit_session_list(limit, mode, &*sink).await;
             }
-            ClientCommand::NewSession { cwd: _, model } => {
+            ClientCommand::PrepareSessionHandoff {
+                request_id,
+                target_mode,
+            } => {
+                let orchestrator = self
+                    .workspace_commands
+                    .as_ref()
+                    .ok_or_else(|| "handoff runtime is unavailable".to_string())
+                    .and_then(|workspace| workspace.orchestrator());
+                match orchestrator {
+                    Ok(orchestrator) => {
+                        let event_sink = sink.clone();
+                        let result = self
+                            .handoff_manager
+                            .prepare(
+                                orchestrator,
+                                request_id.clone(),
+                                target_mode,
+                                move |event| {
+                                    let event_sink = event_sink.clone();
+                                    async move { event_sink.emit(event).await }
+                                },
+                            )
+                            .await;
+                        if let Err(message) = result {
+                            sink.emit(ClientEvent::SessionHandoffFailed {
+                                request_id,
+                                message,
+                            })
+                            .await;
+                        }
+                    }
+                    Err(message) => {
+                        sink.emit(ClientEvent::SessionHandoffFailed {
+                            request_id,
+                            message,
+                        })
+                        .await
+                    }
+                }
+            }
+            ClientCommand::CancelSessionHandoff { request_id } => {
+                self.handoff_manager.cancel(&request_id);
+            }
+            ClientCommand::RetrySessionHandoff { request_id } => {
+                let orchestrator = self
+                    .workspace_commands
+                    .as_ref()
+                    .ok_or_else(|| "handoff runtime is unavailable".to_string())
+                    .and_then(|workspace| workspace.orchestrator());
+                match orchestrator {
+                    Ok(orchestrator) => {
+                        let event_sink = sink.clone();
+                        let result = self
+                            .handoff_manager
+                            .retry(orchestrator, request_id.clone(), move |event| {
+                                let event_sink = event_sink.clone();
+                                async move { event_sink.emit(event).await }
+                            })
+                            .await;
+                        if let Err(message) = result {
+                            sink.emit(ClientEvent::SessionHandoffFailed {
+                                request_id,
+                                message,
+                            })
+                            .await;
+                        }
+                    }
+                    Err(message) => {
+                        sink.emit(ClientEvent::SessionHandoffFailed {
+                            request_id,
+                            message,
+                        })
+                        .await
+                    }
+                }
+            }
+            ClientCommand::ForkSession {
+                session_id,
+                target_mode,
+            } => {
+                let result = match uuid::Uuid::parse_str(
+                    session_id.strip_prefix("sess:").unwrap_or(&session_id),
+                ) {
+                    Ok(id) => self
+                        .fork_session(id, conversation_mode_from_dto(target_mode))
+                        .await
+                        .map(|target| (id, target)),
+                    Err(error) => Err(format!("fork: malformed session id: {error}")),
+                };
+                match result {
+                    Ok((source, target)) => {
+                        sink.emit(ClientEvent::SessionForked {
+                            source_session_id: source.to_string(),
+                            session_id: target.to_string(),
+                            mode: target_mode,
+                        })
+                        .await
+                    }
+                    Err(message) => {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Rejected,
+                            message: message.into(),
+                        })
+                        .await
+                    }
+                }
+            }
+            ClientCommand::NewSession {
+                cwd: _,
+                model,
+                mode,
+            } => {
                 if self.is_turn_active() {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
                         message: "cannot start a new session while a turn is in flight".into(),
+                    })
+                    .await;
+                    return;
+                }
+                if self.handle.conversation_mode().await.mode != conversation_mode_from_dto(mode)
+                {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: "session_mode_mismatch: create this mode in its own runtime"
+                            .into(),
                     })
                     .await;
                     return;
@@ -2997,10 +3337,9 @@ impl CommandRouter for EngineCommandRouter {
                 let mode = self.handle.conversation_mode().await;
                 sink.emit(ClientEvent::SessionStarted {
                     session_id: mode.session_id.clone(),
-                    mode: lower_conversation_mode(mode.active),
+                    mode: lower_conversation_mode(mode.mode),
                 })
                 .await;
-                sink.emit(conversation_mode_event(mode)).await;
                 if let Some(message) = presence_warning {
                     sink.emit(ClientEvent::SystemNotice {
                         message: message.into(),
@@ -3009,7 +3348,11 @@ impl CommandRouter for EngineCommandRouter {
                     .await;
                 }
             }
-            ClientCommand::ResumeSession { session_id, cwd } => {
+            ClientCommand::ResumeSession {
+                session_id,
+                cwd,
+                expected_mode,
+            } => {
                 if self.is_turn_active() {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
@@ -3064,11 +3407,16 @@ impl CommandRouter for EngineCommandRouter {
                 };
 
                 if let Err(message) = self
-                    .resume_replayed_session(uuid, replayed, sink.clone())
+                    .resume_replayed_session(
+                        uuid,
+                        replayed,
+                        conversation_mode_from_dto(expected_mode),
+                        sink.clone(),
+                    )
                     .await
                 {
                     sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Internal,
+                        kind: ErrorKindDto::Rejected,
                         message: message.into(),
                     })
                     .await;

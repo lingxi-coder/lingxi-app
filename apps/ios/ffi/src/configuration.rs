@@ -87,6 +87,8 @@ pub struct IosEngineLaunchConfigFfi {
     pub api_key: String,
     pub model: String,
     pub session_mode: SessionModeDto,
+    /// Restore this exact owner before any session lifecycle hooks run.
+    pub initial_session_id: Option<String>,
     pub vision_delegation_enabled: bool,
     pub app_sandbox_root: String,
     /// Optional cwd inside the Linux user HOME, in guest or native coordinates.
@@ -315,6 +317,7 @@ pub(super) fn ios_mobile_config_from_launch_config(
         ),
         cwd,
         logical_cwd,
+        initial_session_id: config.initial_session_id.clone(),
         lingxi_home: config_home,
         session_mode: match config.session_mode {
             SessionModeDto::Chat => MobileSessionMode::Chat,

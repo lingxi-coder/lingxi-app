@@ -83,6 +83,7 @@ import {
   CH_NATIVE_AUDIO_CANCEL,
   CH_NATIVE_AUDIO_EVENT,
   CH_NATIVE_AUDIO_FINISH_LISTEN,
+  CH_NATIVE_AUDIO_FLOW_LEASE,
   CH_NATIVE_AUDIO_OPERATION,
   CH_NATIVE_AUDIO_REQUEST,
 } from '../shared/nativeAudio.js';
@@ -90,6 +91,7 @@ import type {
   NativeAudioCommand,
   NativeAudioCommandResult,
   NativeAudioEvent,
+  NativeAudioFlowLease,
   NativeAudioOperationResponse,
   NativeAudioResponse,
 } from '../shared/nativeAudio.js';
@@ -97,6 +99,7 @@ import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/sett
 import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
 import type { AudioConfigurationV4 } from '../shared/generatedAudioConfiguration.js';
 import { CH_SESSION_WORKSPACE, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
+import { CH_CONVERSATION_SHOWN, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, type ConversationSpace, type ConversationSpacesSnapshot } from '../shared/conversationSpaces.js';
 import type { PluginSecretCleanupResult, PluginSecretMetadata, WorkspaceFilePreview } from '../main/host.js';
 
 export type { AllowedClientCommand } from '../shared/clientCommands.js';
@@ -212,6 +215,7 @@ export interface DiagnosticEntry {
 }
 export interface BootstrapState {
   scheduledWorkspace?: string;
+  conversationSpaces: ConversationSpacesSnapshot;
   settings: PublicSettings;
   workspace: WorkspaceMetadata;
   activeSession?: SessionRef;
@@ -226,12 +230,13 @@ export interface WorkspaceFileSearchResult { files: string[]; directories?: stri
 
 export type Unsubscribe = () => void;
 export interface NativeAudioApi {
+  retainFlow(sessionId: string, leaseId: string, retain: boolean): Promise<void>;
   realtime(command: NativeRealtimeAudioCommand): Promise<void>;
   onRealtimeState(callback: (state: NativeRealtimeAudioState) => void): () => void;
   request(command: NativeAudioCommand): Promise<NativeAudioCommandResult>;
-  execute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV4): Promise<NativeAudioOperationResponse>;
-  cancel(): Promise<void>;
-  finishListen(): Promise<void>;
+  execute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV4, flow?: NativeAudioFlowLease): Promise<NativeAudioOperationResponse>;
+  cancel(flow?: NativeAudioFlowLease): Promise<void>;
+  finishListen(flow?: NativeAudioFlowLease): Promise<void>;
   onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
 }
 
@@ -315,10 +320,14 @@ export interface LingxiApi {
   copyText(text: string): Promise<void>;
   setInterfaceLocale(locale: string, followSystem: boolean): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
-  listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string; conversationSpaces: ConversationSpacesSnapshot }>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
-  newSession(projectPath: string, model?: string): Promise<BootstrapState>;
-  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<BootstrapState>;
+  newSession(projectPath: string | null, model?: string): Promise<BootstrapState>;
+  switchConversationSpace(mode: ConversationSpace): Promise<BootstrapState>;
+  prepareSessionHandoff(sourceId: string, target: ConversationSpace, requestId: string, retry?: boolean): Promise<{ snapshot: BootstrapState; summary: string; requestId: string } | null>;
+  cancelSessionHandoff(requestId: string): Promise<void>;
+  onConversationShown(callback: (snapshot: BootstrapState) => void): Unsubscribe;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: ConversationSpace): Promise<BootstrapState>;
   preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
   archiveSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
   touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
@@ -502,9 +511,9 @@ const api: LingxiApi = {
     create: request => ipcRenderer.invoke(CH_BOTS_CREATE, request),
     update: (botId, expectedRevision, patch) => ipcRenderer.invoke(CH_BOTS_UPDATE, botId, expectedRevision, patch),
     delete: botId => ipcRenderer.invoke(CH_BOTS_DELETE, botId),
-    openSession: (botId, sessionId) => (sessionId === undefined
+    openSession: (botId, sessionId, transcriptPath) => (sessionId === undefined
       ? ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId)
-      : ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId, sessionId)),
+      : ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId, sessionId, transcriptPath)),
     onSessionShown: callback => subscribe(CH_BOTS_SESSION_SHOWN, callback),
     listSessions: botId => ipcRenderer.invoke(CH_BOTS_SESSIONS_LIST, botId),
     persona: {
@@ -564,10 +573,16 @@ const api: LingxiApi = {
   copyText: (text) => ipcRenderer.invoke(CH_CLIPBOARD_WRITE_TEXT, text) as Promise<void>,
   setInterfaceLocale: (locale, followSystem) => ipcRenderer.invoke(CH_INTERFACE_LOCALE, locale, followSystem) as Promise<void>,
   exportDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_EXPORT) as Promise<string | null>,
-  listProjectSessions: (projectPath, scope) => ipcRenderer.invoke(CH_PROJECT_SESSIONS_LIST, projectPath, scope) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
+  listProjectSessions: (projectPath, scope) => ipcRenderer.invoke(CH_PROJECT_SESSIONS_LIST, projectPath, scope) as Promise<ProjectSessionCatalogState & { projectPath: string; conversationSpaces: ConversationSpacesSnapshot }>,
   updateSessionWorkspace: (sessionId, operation) => ipcRenderer.invoke(CH_SESSION_WORKSPACE, sessionId, operation) as Promise<BootstrapState | null>,
   newSession: (projectPath, model) => ipcRenderer.invoke(CH_SESSION_NEW, projectPath, model) as Promise<BootstrapState>,
-  openSession: (projectPath, sessionId, selection) => (selection === undefined
+  switchConversationSpace: (mode) => ipcRenderer.invoke(CH_CONVERSATION_SPACE, mode) as Promise<BootstrapState>,
+  prepareSessionHandoff: (sourceId, target, requestId, retry) => ipcRenderer.invoke(CH_SESSION_HANDOFF, sourceId, target, requestId, retry) as Promise<{ snapshot: BootstrapState; summary: string; requestId: string } | null>,
+  cancelSessionHandoff: (requestId) => ipcRenderer.invoke(CH_SESSION_HANDOFF_CANCEL, requestId) as Promise<void>,
+  onConversationShown: (callback) => subscribe(CH_CONVERSATION_SHOWN, callback),
+  openSession: (projectPath, sessionId, selection, linkedMode) => (linkedMode !== undefined
+    ? ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId, selection, linkedMode)
+    : selection === undefined
     ? ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId)
     : ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId, selection)) as Promise<BootstrapState>,
   preflightSessionArchive: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_ARCHIVE_PREFLIGHT, projectPath, sessionId) as Promise<CronJobDto[]>,
@@ -624,11 +639,12 @@ const api: LingxiApi = {
     onGuestEvent: (callback) => subscribe('lingxi:visualization:guestEvent', callback),
   },
   audio: {
+    retainFlow: (sessionId, leaseId, retain) => ipcRenderer.invoke(CH_NATIVE_AUDIO_FLOW_LEASE, sessionId, leaseId, retain) as Promise<void>,
     realtime: (command) => ipcRenderer.invoke(CH_REALTIME_AUDIO_COMMAND, command) as Promise<void>,
     onRealtimeState: (callback) => subscribe(CH_REALTIME_AUDIO_STATE, callback),    request: (command) => ipcRenderer.invoke(CH_NATIVE_AUDIO_REQUEST, command) as Promise<NativeAudioCommandResult>,
-    execute: (operation, configurationRevision, configurationOverride) => ipcRenderer.invoke(CH_NATIVE_AUDIO_OPERATION, operation, configurationRevision, configurationOverride) as Promise<NativeAudioOperationResponse>,
-    cancel: () => ipcRenderer.invoke(CH_NATIVE_AUDIO_CANCEL) as Promise<void>,
-    finishListen: () => ipcRenderer.invoke(CH_NATIVE_AUDIO_FINISH_LISTEN) as Promise<void>,
+    execute: (operation, configurationRevision, configurationOverride, flow) => ipcRenderer.invoke(CH_NATIVE_AUDIO_OPERATION, operation, configurationRevision, configurationOverride, flow) as Promise<NativeAudioOperationResponse>,
+    cancel: (flow) => ipcRenderer.invoke(CH_NATIVE_AUDIO_CANCEL, flow) as Promise<void>,
+    finishListen: (flow) => ipcRenderer.invoke(CH_NATIVE_AUDIO_FINISH_LISTEN, flow) as Promise<void>,
     onEvent: (callback) => subscribe(CH_NATIVE_AUDIO_EVENT, callback),
   },
 };

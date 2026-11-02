@@ -15,6 +15,7 @@ import com.lingxi.code.bindings.client.ProviderCredentialSecretDto
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.runtime.VisualizationHost
 import com.lingxi.code.bindings.android.AndroidNativeMediaHost
+import com.lingxi.code.bindings.android.MediaAudioSessionBindingFfi
 import com.lingxi.code.bindings.client.PermissionResponseDto
 import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.model.EngineModelState
@@ -24,6 +25,7 @@ import com.lingxi.code.model.Message
 import com.lingxi.code.model.ReasoningControl
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.canonicalSessionId
+import com.lingxi.code.model.toDto
 import com.lingxi.code.model.toUi
 import com.lingxi.code.model.sessionCatalogStrings
 import com.lingxi.code.project.ProjectWorkspace
@@ -40,6 +42,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -74,38 +77,46 @@ import kotlinx.coroutines.sync.withLock
  * exercised by JVM unit tests. The pure [clientEventToReply] mapper carries the
  * mapping coverage; this wiring is covered by the on-device integration build.
  */
-internal class MediaAudioSessionContextBindings(
-    private val mediaHost: AndroidNativeMediaHost,
+internal class MediaAudioSessionContextBindings internal constructor(
+    private val removeBinding: (MediaAudioSessionBindingFfi) -> Unit,
 ) {
+    constructor(mediaHost: AndroidNativeMediaHost) : this({ binding -> mediaHost.removeAudioSessionContext(binding) })
     private val lock = Any()
-    private val generations = mutableMapOf<String, ULong>()
+    private val bindings = mutableMapOf<String, MediaAudioSessionBindingFfi>()
     private var closed = false
 
-    fun register(sessionId: String, generation: ULong) {
+    fun register(binding: MediaAudioSessionBindingFfi) {
         val removeImmediately = synchronized(lock) {
             if (closed) true else {
-                generations[sessionId] = generation
+                bindings[binding.sessionId] = binding
                 false
             }
         }
         if (removeImmediately) {
-            runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
+            runCatching { removeBinding(binding) }
         }
     }
 
     fun remove(sessionId: String) {
-        val generation = synchronized(lock) { generations.remove(sessionId) } ?: return
-        runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
+        val binding = synchronized(lock) { bindings.remove(sessionId) } ?: return
+        runCatching { removeBinding(binding) }
     }
 
     fun close() {
         val registrations = synchronized(lock) {
             closed = true
-            generations.toList().also { generations.clear() }
+            bindings.values.toList().also { bindings.clear() }
         }
-        registrations.forEach { (sessionId, generation) ->
-            runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
+        registrations.forEach { binding ->
+            runCatching { removeBinding(binding) }
         }
+    }
+}
+
+internal fun ConversationSource.bindAudioOwner(owner: com.lingxi.code.voice.audio.AudioOwnerKey) {
+    when (this) {
+        is EngineConversationSource -> bindAudioOwner(owner)
+        is RecoveringConversationSource -> bindAudioOwner(owner)
     }
 }
 
@@ -124,7 +135,6 @@ class EngineConversationSource internal constructor(
     private val sessions: MutableStateFlow<EngineSessionState>,
     private val workspace: MutableStateFlow<com.lingxi.code.project.SessionWorkspaceState?>,
     private val activeSession: MutableStateFlow<ActivatedSession?>,
-    private val modeState: MutableStateFlow<SessionModeSnapshot?>,
     private val mcp: MutableStateFlow<List<MCPServer>>,
     private val strings: ConversationStrings,
     private val durableTurns: DurableConversationTurnClientStore,
@@ -146,8 +156,6 @@ class EngineConversationSource internal constructor(
         }
 
     override val workspaceState = workspace.asStateFlow()
-    override val supportsSessionModeChanges = true
-    override val sessionModeState = modeState.asStateFlow()
 
     internal fun newSideChatSource() = SideChatSource(handle)
 
@@ -155,34 +163,53 @@ class EngineConversationSource internal constructor(
     private val durableAttachCoordinator = DurableAttachCoordinator()
     private val retainedUiTranscript = RetainedConversationTranscriptStore()
 
+    internal fun ownsDurableTurn(sessionId: String, turnId: Long, generation: String): Boolean {
+        val record = durableTurns.load() ?: return false
+        return recoverySpec.runtimeGeneration == generation &&
+            canonicalSessionId(record.sessionId) == canonicalSessionId(sessionId) &&
+            record.turnId == turnId &&
+            activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(sessionId)
+    }
+
     override fun retainUiTranscript(snapshot: RetainedConversationTranscript) {
         retainedUiTranscript.save(snapshot)
     }
 
-    override suspend fun restoreInitialSession(uuid: String, title: String, empty: Boolean): ActivatedSession? {
-        val existing = activeSession.value
-        if (existing != null && existing.kind != SessionActivationKind.Bootstrap &&
-            canonicalSessionId(existing.sessionId) == canonicalSessionId(uuid)
-        ) {
-            return retainedUiTranscript.activation(existing.withLatestMode(modeState.value))
-                .copy(kind = SessionActivationKind.Resumed)
-        }
-        return super<ConversationSource>.restoreInitialSession(uuid, title, empty)
-    }
+    override fun retainedUiActivation(activation: ActivatedSession): ActivatedSession =
+        retainedUiTranscript.activation(activation)
+
+    private var headlessRecoveryJob: kotlinx.coroutines.Job? = null
+    private val headlessRecoveryWake = MutableStateFlow(0L)
 
     init {
-        if (autoAttachDurableTurns) {
-            eventScope.launch {
-                activeSession.collect { activated ->
+        com.lingxi.code.voice.audio.AndroidAudioSessionContext.bind(
+            com.lingxi.code.voice.audio.AudioOwnerKey.computerUse(initialRecoverySpec.ownerKey), handle,
+        )
+        if (autoAttachDurableTurns) startHeadlessRecovery()
+    }
+
+    /** Called after the service monitor has subscribed to recovery events. */
+    @Synchronized internal fun startHeadlessRecovery() {
+        if (headlessRecoveryJob?.isActive != true) {
+            headlessRecoveryJob = eventScope.launch {
+                combine(activeSession, headlessRecoveryWake) { activated, _ -> activated }.collect { activated ->
                     val record = durableTurns.load() ?: return@collect
                     if (
                         activated != null &&
                         canonicalSessionId(activated.sessionId) == canonicalSessionId(record.sessionId)
                     ) {
-                        attachAndResume(record, forceAttach = false)
+                        try {
+                            attachAndResume(record, forceAttach = false)
+                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                            throw cancelled
+                        } catch (failure: Exception) {
+                            android.util.Log.w("ConversationRecovery", "Headless attach failed; it can be retried", failure)
+                        }
                     }
                 }
             }
+        } else {
+            headlessRecoveryWake.value++
         }
     }
 
@@ -276,27 +303,24 @@ class EngineConversationSource internal constructor(
         } catch (error: Throwable) {
             durableReplayGate.cancelAttach(latest.turnId)
             durableAttachCoordinator.rollback(request, owner)
-            ConversationHeadlessRecovery.markDurableAttachFailed(recoverySpec.scopeKey, this)
+            ConversationHeadlessRecovery.markDurableAttachFailed(recoverySpec.ownerKey, this)
             throw DurableAttachFailure(latest.turnId, "attach", error)
         }
         // Cold-process recovery needs ResumeTurn. A UI takeover resumes only
         // when the process coordinator reports that no headless/UI executor is
         // already attached to this source; retained-live sources only Attach.
-        if (shouldResumeDurableTurn(forceAttach, resumeForThisAttach)) {
+        val needsResume = if (forceAttach) shouldResumeDurableTurn(true, resumeForThisAttach)
+            else !ConversationHeadlessRecovery.hasLiveExecutor(recoverySpec.ownerKey, this)
+        if (needsResume) {
             try {
                 handle.submit(ClientCommand.ResumeTurn(latest.turnId.toULong()))
             } catch (error: Throwable) {
                 durableReplayGate.cancelAttach(latest.turnId)
                 durableAttachCoordinator.rollback(request, owner)
-                ConversationHeadlessRecovery.markDurableAttachFailed(recoverySpec.scopeKey, this)
+                ConversationHeadlessRecovery.markDurableAttachFailed(recoverySpec.ownerKey, this)
                 throw DurableAttachFailure(latest.turnId, "resume", error)
             }
-            if (forceAttach) {
-                ConversationHeadlessRecovery.markDurableUiExecutorActive(
-                    recoverySpec.scopeKey,
-                    this,
-                )
-            }
+            ConversationHeadlessRecovery.markDurableExecutorActive(recoverySpec.ownerKey, this)
         }
     }
 
@@ -325,8 +349,8 @@ class EngineConversationSource internal constructor(
 
     /**
      * The engine's most recent active-session transition, driven OUT-OF-BAND by
-     * the listener folding the initial agent listing and New/Resume events
-     * through [reduceActivatedSession] (see [create]). The ViewModel observes this to
+     * the listener folding New/Resume events through [sessionActivationFrom]
+     * (see [create]). The ViewModel observes this to
      * adopt the real session id and, on resume, replace the transcript with the
      * rehydrated conversation. Sibling of [sessionState] (the catalog); both
      * ride the same listener, neither the per-turn stream.
@@ -389,31 +413,21 @@ class EngineConversationSource internal constructor(
             ClientCommand.ResumeSession(
                 sessionId = canonicalSessionId(uuid),
                 cwd = null,
+                expectedMode = initialRecoverySpec.sessionMode.toDto(),
             ),
-        )
-    }
-
-    override suspend fun resumeEmptySession(uuid: String, title: String) {
-        if (uuid.isBlank()) return
-        if (activeSession.value?.sessionId?.let(::canonicalSessionId) != canonicalSessionId(uuid)) {
-            retainedUiTranscript.clear()
-        }
-        handle.resumeEmptySession(
-            sessionId = canonicalSessionId(uuid),
-            title = title.ifBlank { strings.resolve(R.string.chat_new_conversation, "新对话") },
         )
     }
 
     override suspend fun newSession() {
         retainedUiTranscript.clear()
         durableTurns.clear()
-        handle.submit(ClientCommand.NewSession(cwd = null, model = null))
+        handle.submit(ClientCommand.NewSession(cwd = null, model = null, mode = initialRecoverySpec.sessionMode.toDto()))
     }
 
     override suspend fun newSession(cwd: String) {
         retainedUiTranscript.clear()
         durableTurns.clear()
-        handle.submit(ClientCommand.NewSession(cwd = cwd, model = null))
+        handle.submit(ClientCommand.NewSession(cwd = cwd, model = null, mode = initialRecoverySpec.sessionMode.toDto()))
     }
 
     override suspend fun setModel(id: String) {
@@ -590,9 +604,12 @@ class EngineConversationSource internal constructor(
     }
 
     override fun close() {
+        com.lingxi.code.voice.audio.AndroidAudioSessionContext.releaseIfBound(
+            com.lingxi.code.voice.audio.AudioOwnerKey.computerUse(initialRecoverySpec.ownerKey), handle,
+        )
         com.lingxi.code.voice.audio.AndroidAudioSessionContext.detach(handle)
         mediaContextBindings.close()
-        ConversationHeadlessRecovery.unregister(recoverySpec.scopeKey, this)
+        ConversationHeadlessRecovery.unregister(recoverySpec.ownerKey, this)
         eventRelay.close()
         workflowRelay.close()
         eventScope.cancel()
@@ -600,6 +617,10 @@ class EngineConversationSource internal constructor(
     }
 
     fun activateAudioContext() { com.lingxi.code.voice.audio.AndroidAudioSessionContext.attach(handle) }
+
+    internal fun bindAudioOwner(owner: com.lingxi.code.voice.audio.AudioOwnerKey) {
+        com.lingxi.code.voice.audio.AndroidAudioSessionContext.bind(owner, handle)
+    }
 
     override fun engineSourceForBackgroundRetention(): EngineConversationSource = this
 
@@ -617,12 +638,26 @@ class EngineConversationSource internal constructor(
             context: Context,
             projectWorkspace: ProjectWorkspace? = null,
             workspaceKey: String? = null,
-            sessionMode: SessionMode = SessionMode.Code,
+            sessionMode: SessionMode,
             linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
             reuseProcessSource: Boolean = true,
             currentSource: ConversationSource? = null,
             expectedSessionId: String? = null,
+            runtimeGeneration: String = java.util.UUID.randomUUID().toString(),
+            strictRuntimeGeneration: Boolean = false,
         ): ConversationSource {
+            if (reuseProcessSource && expectedSessionId != null) {
+                ConversationServiceOwners.initialize(context.applicationContext)
+                ConversationServiceOwners.persisted(context.applicationContext).firstOrNull { snapshot ->
+                    val saved = snapshot.recoverySpec
+                    saved != null && matchesRetainedConversationOwner(saved, snapshot.sessionId,
+                        ConversationRecoverySpec(
+                            projectId = if (workspaceKey == "global" || workspaceKey == "scheduled") null else projectWorkspace?.projectId,
+                            hostPath = projectWorkspace?.hostPath, sessionMode = sessionMode, linuxRuntimeMode = linuxRuntimeMode,
+                            workspaceKey = workspaceKey ?: projectWorkspace?.projectId?.let { "project.$it" } ?: "global",
+                        ), expectedSessionId)
+                }?.let { ConversationHeadlessRecovery.recover(context.applicationContext, it) }
+            }
             val spec = ConversationRecoverySpec(
                 projectId = if (workspaceKey == "global" || workspaceKey == "scheduled") null else projectWorkspace?.projectId,
                 hostPath = projectWorkspace?.hostPath,
@@ -631,19 +666,21 @@ class EngineConversationSource internal constructor(
                 workspaceKey = workspaceKey ?: projectWorkspace?.projectId?.let { "project.$it" } ?: "global",
                 guestPath = projectWorkspace?.guestPath,
                 additionalDirectories = projectWorkspace?.additionalDirectories.orEmpty(),
+                runtimeGeneration = runtimeGeneration,
             )
             if (reuseProcessSource) {
                 if (currentSource?.recoverySpec == spec) return currentSource
-                when (val claim = ConversationHeadlessRecovery.acquireForUi(spec, conversationStrings(context), expectedSessionId)) {
+                when (val claim = ConversationHeadlessRecovery.acquireForUi(spec, conversationStrings(context), expectedSessionId, strictRuntimeGeneration)) {
                     is ConversationHeadlessRecovery.UiSourceClaim.Existing -> return claim.source
                     is ConversationHeadlessRecovery.UiSourceClaim.Pending -> return claim.source
                     ConversationHeadlessRecovery.UiSourceClaim.Build -> Unit
+                    ConversationHeadlessRecovery.UiSourceClaim.WrongGeneration -> return UnavailableConversationSource("Conversation owner has changed")
                 }
             }
             return prepareConversationSource {
                 create(context, projectWorkspace, workspaceKey, sessionMode, linuxRuntimeMode,
                     reuseProcessSource = reuseProcessSource, replaceProcessSource = true,
-                    expectedSessionId = expectedSessionId)
+                    expectedSessionId = expectedSessionId, runtimeGeneration = runtimeGeneration)
             }
         }
 
@@ -655,7 +692,7 @@ class EngineConversationSource internal constructor(
             context: Context,
             projectWorkspace: ProjectWorkspace? = null,
             workspaceKey: String? = null,
-            sessionMode: SessionMode = SessionMode.Code,
+            sessionMode: SessionMode,
             linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
             reuseProcessSource: Boolean = true,
             /**
@@ -665,6 +702,9 @@ class EngineConversationSource internal constructor(
              */
             replaceProcessSource: Boolean = false,
             expectedSessionId: String? = null,
+            runtimeGeneration: String = java.util.UUID.randomUUID().toString(),
+            autoAttachDurableTurns: Boolean = !reuseProcessSource,
+            registerOnCreate: Boolean = true,
         ): ConversationSource {
             val recoverySpec = ConversationRecoverySpec(
                 projectId = if (workspaceKey == "global" || workspaceKey == "scheduled") null else projectWorkspace?.projectId,
@@ -674,6 +714,7 @@ class EngineConversationSource internal constructor(
                 workspaceKey = workspaceKey ?: projectWorkspace?.projectId?.let { "project.$it" } ?: "global",
                 guestPath = projectWorkspace?.guestPath,
                 additionalDirectories = projectWorkspace?.additionalDirectories.orEmpty(),
+                runtimeGeneration = runtimeGeneration,
             )
             if (reuseProcessSource && !replaceProcessSource) {
                 when (
@@ -686,6 +727,7 @@ class EngineConversationSource internal constructor(
                     is ConversationHeadlessRecovery.UiSourceClaim.Existing -> return claim.source
                     is ConversationHeadlessRecovery.UiSourceClaim.Pending -> return claim.source
                     ConversationHeadlessRecovery.UiSourceClaim.Build -> Unit
+                    ConversationHeadlessRecovery.UiSourceClaim.WrongGeneration -> return UnavailableConversationSource("Conversation owner has changed")
                 }
             }
             // Callback ingress is non-blocking and lossless. A dedicated pump may
@@ -701,6 +743,7 @@ class EngineConversationSource internal constructor(
             val durableTurns = DurableConversationTurnClientStore(
                 context = context,
                 scope = recoverySpec.scopeKey,
+                initialSessionId = expectedSessionId,
             )
             val durableReplayGate = DurableTurnReplayGate()
             // The head parked permission request. The engine's outbound
@@ -721,13 +764,9 @@ class EngineConversationSource internal constructor(
             // by real history out-of-band from the per-turn stream.
             val sessions = MutableStateFlow(EngineSessionState.loading())
             val workspace = MutableStateFlow<com.lingxi.code.project.SessionWorkspaceState?>(null)
-            // The engine's most recent active-session transition (sibling of
-            // `sessions`). The first agent listing binds the cold engine's
-            // owner; explicit New/Resume events subsequently replace it with
-            // the confirmed session id and any restored transcript.
+            // The lifecycle event emitted by the engine confirms both the UUID
+            // and immutable mode, together with the restored transcript.
             val activeSession = MutableStateFlow<ActivatedSession?>(null)
-            val modeState = MutableStateFlow<SessionModeSnapshot?>(null)
-            val modeSnapshots = SessionModeSnapshotCache()
             // The engine's REAL MCP listing (sibling of `models`). The listener
             // folds every inbound `McpServers` into this StateFlow; empty until a
             // `RefreshListings(Mcp)` reply lands (settings shows the mock list).
@@ -753,7 +792,9 @@ class EngineConversationSource internal constructor(
                 visionDelegationEnabled = providerLaunch.visionDelegationEnabled,
                 projectWorkspace = projectWorkspace,
                 sessionMode = sessionMode,
+                initialSessionId = expectedSessionId?.let(::canonicalSessionId),
                 linuxRuntimeMode = linuxRuntimeMode,
+                computerUseOwnerKey = recoverySpec.ownerKey,
                 mediaHost = mediaHost,
                 scenario = NativeEngineScenario.Interactive(
                     NativeEngineCallbacks(
@@ -769,18 +810,7 @@ class EngineConversationSource internal constructor(
                             sessions.value = reduceSessionEvent(sessions.value, event, strings = sessionCatalogStrings(context))
                             val previousActiveSessionId = activeSession.value?.sessionId
                             activeSession.update { current ->
-                                reduceActivatedSession(current, event, sessionMode, strings)
-                            }
-                            when (event) {
-                                is ClientEvent.SessionModeChanged -> {
-                                    val next = SessionModeSnapshot(canonicalSessionId(event.sessionId), event.mode.toUi(), event.pendingMode?.toUi(), event.revision)
-                                    val latest = modeSnapshots.record(next)
-                                    val active = activeSession.value?.sessionId?.let(::canonicalSessionId)
-                                    if (active == null || active == next.sessionId) modeState.value = latest
-                                }
-                                is ClientEvent.SessionStarted -> modeState.value = modeSnapshots.forSession(canonicalSessionId(event.sessionId))
-                                is ClientEvent.SessionResumed -> modeState.value = modeSnapshots.forSession(canonicalSessionId(event.sessionId))
-                                else -> Unit
+                                sessionActivationFrom(event, strings) ?: current
                             }
                             when (event) {
                                 is ClientEvent.SessionStarted,
@@ -788,7 +818,7 @@ class EngineConversationSource internal constructor(
                                 is ClientEvent.ModelChanged -> runCatching {
                                     mediaContextEngine?.let { engine ->
                                         val binding = mediaHost.updateAudioSessionContext(engine)
-                                        mediaContextBindings.register(binding.sessionId, binding.generation)
+                                        mediaContextBindings.register(binding)
                                     }
                                 }
                                 ClientEvent.SessionEnded -> previousActiveSessionId?.let(mediaContextBindings::remove)
@@ -855,7 +885,7 @@ class EngineConversationSource internal constructor(
                 ),
             ) ?: run {
                 if (reuseProcessSource) {
-                    ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.scopeKey)
+                    ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.ownerKey)
                 }
                 eventRelay.close()
                 workflowRelay.close()
@@ -867,7 +897,7 @@ class EngineConversationSource internal constructor(
             mediaContextEngine = handle
             val workspaceRestore = runCatching { kotlinx.coroutines.runBlocking {
                 val binding = mediaHost.updateAudioSessionContext(handle)
-                mediaContextBindings.register(binding.sessionId, binding.generation)
+                mediaContextBindings.register(binding)
                 val owner = handle.workspaceState().sessionId
                 val userDirectories = com.lingxi.code.project.MobileUserStorage.directories(context)
                 val home = userDirectories.guestHome
@@ -881,7 +911,7 @@ class EngineConversationSource internal constructor(
             workspaceRestore.exceptionOrNull()?.let { failure ->
                 mediaContextBindings.close()
                 runCatching { handle.destroy() }
-                if (reuseProcessSource) ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.scopeKey)
+                if (reuseProcessSource) ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.ownerKey)
                 eventRelay.close()
                 workflowRelay.close()
                 eventScope.cancel()
@@ -948,18 +978,17 @@ class EngineConversationSource internal constructor(
                 sessions = sessions,
                 workspace = workspace,
                 activeSession = activeSession,
-                modeState = modeState,
                 mcp = mcp,
                 strings = strings,
                 durableTurns = durableTurns,
                 durableReplayGate = durableReplayGate,
-                autoAttachDurableTurns = !reuseProcessSource,
+                autoAttachDurableTurns = autoAttachDurableTurns,
                 resumeOnUiAttach = reuseProcessSource,
                 initialRecoverySpec = recoverySpec,
                 userHomePath = com.lingxi.code.project.MobileUserStorage.directories(context).home,
                 userHomeGuestPath = com.lingxi.code.project.MobileUserStorage.directories(context).guestHome,
             )
-            ConversationHeadlessRecovery.register(recoverySpec.scopeKey, source)
+            if (registerOnCreate) ConversationHeadlessRecovery.register(recoverySpec.ownerKey, source)
             return source
         }
     }

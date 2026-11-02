@@ -22,6 +22,8 @@ import com.lingxi.code.voice.audio.DeviceAudioResult
 import com.lingxi.code.voice.audio.RealtimeSpeechCallbacks
 import com.lingxi.code.voice.audio.RealtimeSpeechSession
 import com.lingxi.code.voice.audio.RealtimeAgentCallbacks
+import com.lingxi.code.voice.audio.NavigationDrainingRealtimeSession
+import com.lingxi.code.voice.audio.AndroidAudioSessionContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -34,6 +36,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -96,14 +100,18 @@ internal data class FlowVoiceState(
 internal class FlowVoiceController(
     private val audioService: FlowVoiceAudioService,
     private val hasMicrophonePermission: () -> Boolean,
-    private val requestMicrophonePermission: () -> Unit,
+    private var requestMicrophonePermission: () -> Unit,
     dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
+    private val audioAdmission: Mutex? = null,
 ) {
-    private val owner = AudioOwnerKey.ui("flow-mode-${java.util.UUID.randomUUID()}")
+    internal val audioOwner = AudioOwnerKey.ui("flow-mode-${java.util.UUID.randomUUID()}")
+    private val owner get() = audioOwner
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val generation = AtomicLong(0L)
     private val mutableState = MutableStateFlow(FlowVoiceState())
     val state: StateFlow<FlowVoiceState> = mutableState.asStateFlow()
+    fun hasAudioWork(): Boolean = operation?.isActive == true || pendingPermissionListen != null ||
+        mutableState.value.phase != OrbPhase.Idle
 
     private var operation: Job? = null
     private var listenSession: RealtimeSpeechSession? = null
@@ -112,22 +120,30 @@ internal class FlowVoiceController(
     private var pinnedConfiguration: VersionedAudioConfiguration? = null
     private var sessionBinding: Pair<String, String>? = null
     private var pendingPermissionListen: PendingPermissionListen? = null
+    private var navigationRequested = false
+    private val realtimeAgentActive = AtomicBoolean(false)
 
     private data class PendingPermissionListen(
         val generation: Long,
         val onSend: (String) -> Unit,
         val onCancel: () -> Unit,
+        val cancelCurrentTurn: Boolean,
     )
 
-    fun listen(onSend: (String) -> Unit, onCancel: () -> Unit) {
+    fun listen(onSend: (String) -> Unit, onCancel: () -> Unit) =
+        listenImpl(onSend, onCancel, cancelCurrentTurn = true)
+
+    private fun listenImpl(onSend: (String) -> Unit, onCancel: () -> Unit, cancelCurrentTurn: Boolean) {
         val token = generation.incrementAndGet()
+        navigationRequested = false
+        realtimeAgentActive.set(false)
         cancelListenSession()
         operation?.cancel()
         operation = null
         stopRequestedGeneration = null
         pendingPermissionListen = null
         if (!hasMicrophonePermission()) {
-            pendingPermissionListen = PendingPermissionListen(token, onSend, onCancel)
+            pendingPermissionListen = PendingPermissionListen(token, onSend, onCancel, cancelCurrentTurn)
             requestMicrophonePermission()
             mutableState.value = FlowVoiceState(
                 error = DeviceAudioError(DeviceAudioErrorKind.PermissionDenied, "Microphone permission is required to listen."),
@@ -136,14 +152,22 @@ internal class FlowVoiceController(
         }
 
         mutableState.value = FlowVoiceState(phase = OrbPhase.Listening)
-        onCancel()
+        if (cancelCurrentTurn) onCancel()
         val listenJob = scope.launch(start = CoroutineStart.LAZY) {
+            var admissionHeld = false
             try {
+                audioAdmission?.lock()
+                admissionHeld = audioAdmission != null
                 // Drain prior playback on this stable owner before admitting another listen.
                 audioService.perform(owner, DeviceAudioOperation.EndOwner)
                 if (!isCurrent(token)) return@launch
                 val snapshot = audioService.configurationSnapshot()
                 pinnedConfiguration = snapshot
+                if (navigationRequested && snapshot.configuration.conversation.mode != "realtime" &&
+                    stopRequestedGeneration != token) {
+                    mutableState.value = FlowVoiceState()
+                    return@launch
+                }
                 mutableState.value = FlowVoiceState(
                     phase = OrbPhase.Listening,
                     configurationRevision = snapshot.revision,
@@ -155,23 +179,36 @@ internal class FlowVoiceController(
                         override fun onReady() { if (isCurrent(token)) mutableState.value = mutableState.value.copy(phase = OrbPhase.Listening) }
                         override fun onTranscript(text: String, assistant: Boolean, final: Boolean) {
                             if (!isCurrent(token)) return
-                            mutableState.value = if (assistant) mutableState.value.copy(assistantCaption = text,
-                                phase = OrbPhase.Speaking, isFinalizing = false)
-                            else mutableState.value.copy(userCaption = text, phase = if (final) OrbPhase.Thinking else OrbPhase.Listening,
-                                didSend = final, isFinalizing = false)
+                            // A provider can deliver transcription after the local Agent terminal.
+                            // Captions never change the Agent's authoritative turn state.
+                            mutableState.value = if (assistant) mutableState.value.copy(assistantCaption = text)
+                            else mutableState.value.copy(userCaption = text, didSend = mutableState.value.didSend || final)
                         }
                         override fun onPlayback(playing: Boolean) { if (isCurrent(token)) mutableState.value = mutableState.value.copy(
-                            phase = if (playing) OrbPhase.Speaking else OrbPhase.Listening, isFinalizing = false) }
+                            phase = if (playing) OrbPhase.Speaking else if (realtimeAgentActive.get()) OrbPhase.Thinking else OrbPhase.Listening,
+                            isFinalizing = false) }
+                        override fun onAgentTurnStarted() { if (isCurrent(token)) {
+                            realtimeAgentActive.set(true)
+                            mutableState.value = mutableState.value.copy(phase = OrbPhase.Thinking, isFinalizing = false)
+                        } }
+                        override fun onAgentTurnCompleted() { if (isCurrent(token)) {
+                            realtimeAgentActive.set(false)
+                            mutableState.value = mutableState.value.copy(phase = OrbPhase.Listening, isFinalizing = false)
+                        } }
                         override fun onError(message: String) { if (isCurrent(token)) mutableState.value = mutableState.value.copy(
                             phase = OrbPhase.Idle, error = DeviceAudioError(DeviceAudioErrorKind.Unavailable, message)) }
                         override fun onClosed() {
-                            if (isCurrent(token)) mutableState.value = mutableState.value.copy(phase = OrbPhase.Idle, isFinalizing = false)
+                            if (isCurrent(token)) {
+                                realtimeAgentActive.set(false)
+                                mutableState.value = mutableState.value.copy(phase = OrbPhase.Idle, isFinalizing = false)
+                            }
                             realtimeClosed.complete(Unit)
                         }
                     })
                     if (!isCurrent(token)) { opened.cancel(); return@launch }
                     listenSession = opened; listenSessionGeneration = token
                     if (stopRequestedGeneration == token) opened.stop()
+                    if (navigationRequested) (opened as? NavigationDrainingRealtimeSession)?.finishForNavigation()
                     realtimeClosed.await()
                     return@launch
                 }
@@ -275,6 +312,7 @@ internal class FlowVoiceController(
                     listenSession = null
                     listenSessionGeneration = null
                 }
+                if (admissionHeld) audioAdmission?.unlock()
             }
         }
         operation = listenJob
@@ -291,7 +329,7 @@ internal class FlowVoiceController(
             )
             return
         }
-        listen(pending.onSend, pending.onCancel)
+        listenImpl(pending.onSend, pending.onCancel, pending.cancelCurrentTurn)
     }
 
     fun updateReply(text: String, streaming: Boolean) {
@@ -314,7 +352,7 @@ internal class FlowVoiceController(
         }
         mutableState.value = current.copy(phase = OrbPhase.Speaking)
         operation = scope.launch {
-            when (val result = audioService.perform(
+            suspend fun speak() = audioService.perform(
                 owner,
                 DeviceAudioOperation.Speak(
                     text = text,
@@ -324,7 +362,9 @@ internal class FlowVoiceController(
                     configuration = pinned.configuration,
                     configurationRevision = pinned.revision,
                 ),
-            )) {
+            )
+            val result = if (audioAdmission == null) speak() else audioAdmission.withLock { speak() }
+            when (result) {
                 is DeviceAudioResult.Failed -> if (isCurrent(token)) {
                     mutableState.value = mutableState.value.copy(phase = OrbPhase.Idle, error = result.error)
                 }
@@ -339,6 +379,7 @@ internal class FlowVoiceController(
         val current = mutableState.value
         if (current.phase != OrbPhase.Listening || current.isFinalizing) return
         mutableState.value = current.copy(isFinalizing = true)
+        if (pinnedConfiguration?.configuration?.conversation?.mode == "realtime") realtimeAgentActive.set(true)
         val token = generation.get()
         stopRequestedGeneration = token
         if (listenSessionGeneration == token) listenSession?.stop()
@@ -347,12 +388,39 @@ internal class FlowVoiceController(
     fun updateSessionBinding(modelId: String, profileId: String) {
         val previous = sessionBinding
         sessionBinding = modelId to profileId
-        if (previous != null && previous != sessionBinding) pause()
+        if (previous != null && previous != sessionBinding) {
+            val current = mutableState.value
+            if (current.isFinalizing || current.phase == OrbPhase.Thinking || current.phase == OrbPhase.Speaking) {
+                navigationAway()
+            } else pause()
+        }
+    }
+
+    fun updatePermissionRequest(request: () -> Unit) { requestMicrophonePermission = request }
+
+    /** Hide input for this owner while allowing an admitted reply to finish. */
+    fun navigationAway() {
+        navigationRequested = true
+        if (pendingPermissionListen != null || (pinnedConfiguration == null && !mutableState.value.isFinalizing)) {
+            pause()
+        } else if (pinnedConfiguration?.configuration?.conversation?.mode == "realtime") {
+            (listenSession as? NavigationDrainingRealtimeSession)?.finishForNavigation()
+        } else if (pinnedConfiguration != null && mutableState.value.phase == OrbPhase.Listening &&
+            !mutableState.value.isFinalizing) {
+            pause()
+        }
+    }
+
+    fun ensureListening(onSend: (String) -> Unit, onCancel: () -> Unit) {
+        if (operation?.isActive != true && mutableState.value.phase == OrbPhase.Idle) {
+            listenImpl(onSend, onCancel, cancelCurrentTurn = false)
+        }
     }
 
     /** Backgrounding ends device work. The overlay stays visible and waits for an explicit listen. */
     fun pause() {
         generation.incrementAndGet()
+        realtimeAgentActive.set(false)
         cancelListenSession()
         operation?.cancel()
         operation = null
@@ -372,7 +440,8 @@ internal class FlowVoiceController(
     fun dispose() {
         pause()
         scope.launch {
-            runCatching { audioService.perform(owner, DeviceAudioOperation.EndOwner) }
+            try { runCatching { audioService.perform(owner, DeviceAudioOperation.EndOwner) } }
+            finally { AndroidAudioSessionContext.release(owner) }
             scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
         }
     }
@@ -410,26 +479,35 @@ private fun Throwable.toDeviceAudioError(): DeviceAudioError = when (this) {
 }
 
 @Composable
-internal fun rememberFlowVoiceController(): FlowVoiceController {
+internal fun rememberFlowVoiceController(
+    owner: Any,
+    retained: Boolean,
+    pendingPermissionOwner: AtomicReference<FlowVoiceController?>,
+    audioAdmission: Mutex,
+    obtain: (() -> FlowVoiceController) -> FlowVoiceController,
+): FlowVoiceController {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val controllerRef = remember { AtomicReference<FlowVoiceController?>(null) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        controllerRef.get()?.onMicrophonePermissionResult(granted)
+        pendingPermissionOwner.getAndSet(null)?.onMicrophonePermissionResult(granted)
     }
-    val controller = remember(context, permissionLauncher) {
-        FlowVoiceController(
+    val controller = remember(context, owner) {
+        obtain { FlowVoiceController(
             audioService = AndroidFlowVoiceAudioService(context.applicationContext),
             hasMicrophonePermission = {
                 ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             },
-            requestMicrophonePermission = {
-                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            },
-        )
+            requestMicrophonePermission = {},
+            audioAdmission = audioAdmission,
+        ).also { AndroidAudioSessionContext.reserve(it.audioOwner) } }
     }
-    SideEffect { controllerRef.set(controller) }
+    SideEffect {
+        controller.updatePermissionRequest {
+            pendingPermissionOwner.set(controller)
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
     DisposableEffect(controller) {
-        onDispose { controller.dispose() }
+        onDispose { if (!retained) controller.dispose() }
     }
     return controller
 }

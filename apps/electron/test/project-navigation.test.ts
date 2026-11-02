@@ -42,11 +42,20 @@ function bridgeFixture() {
     uuid: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
     title: `Session ${index + 1}`,
     modified_rfc3339: `2026-08-${String(sessionDays[index]).padStart(2, '0')}T00:00:00Z`,
-    message_count: index + 1,
+    message_count: index + 1, mode: 'code',
     path: `/tmp/session-${index + 1}.jsonl`,
   }));
   return {
     bootstrap: {
+      conversationSpaces: {
+        activeMode: 'code', globalWorkspace: '/tmp/global-chat',
+        projects: { [projectPath]: ['code'], [pinnedProjectPath]: ['code'] },
+        navigation: { chat: { projectId: null }, code: { projectId: projectPath } },
+        sessions: [
+          ...sessions.map(session => ({ projectPath, projectId: projectPath, sessionId: session.uuid, mode: 'code' })),
+          { projectPath: pinnedProjectPath, projectId: pinnedProjectPath, sessionId: '11111111-1111-4111-8111-111111111111', mode: 'code' },
+        ], drafts: [],
+      },
       settings: {
         version: 1,
         activeProject: projectPath,
@@ -624,18 +633,11 @@ test('sidebar uses indeterminate progress for main turns and background agents',
   }
 });
 
-test('the conversation mode control shows the active and next-turn profiles while a turn runs', () => {
-  const bridge = composerBridgeFixture() as any;
-  bridge.hosted = true;
-  bridge.loading = false;
-  bridge.sessionLoading = false;
-  bridge.desktop.sessionMode = { sessionId: bridge.activeSession.sessionId, active: 'code', pending: 'chat', revision: 2 };
+test('space navigation remains available during a turn without changing the conversation mode', () => {
+  const bridge = bridgeFixture() as any;
   const markup = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) },
-    React.createElement(BetaComposer, { bridge, ready: true, onOpenSettings: () => undefined,
-      onOpenSettingsPage: () => undefined, onSetTheme: () => undefined, onOpenProviderSettings: () => undefined })));
-  const marker = 'aria-label="Conversation mode: Code · Chat applies to the next turn"';
-  const button = openingTag(markup, marker);
-  assert.doesNotMatch(button, /\bdisabled\b/);
-  assert.match(button, /aria-haspopup="menu"/);
-  assert.match(markup, /Next: Chat/);
+    React.createElement(BetaSidebar, { bridge, onOpenSettings: () => undefined })));
+  assert.match(markup, /role="tab" aria-selected="true"[^>]*>Code<\/button>/);
+  assert.match(markup, /role="tab" aria-selected="false"[^>]*>Chat<\/button>/);
+  assert.doesNotMatch(markup, /Next: Chat/);
 });

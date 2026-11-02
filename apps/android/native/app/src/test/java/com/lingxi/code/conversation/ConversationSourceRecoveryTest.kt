@@ -62,6 +62,24 @@ class ConversationSourceRecoveryTest {
     }
 
     @Test
+    fun abandoningPendingUiDoesNotCloseTheServiceSourceWhenItArrives() = kotlinx.coroutines.test.runTest {
+        val pending = CompletableDeferred<ConversationSource?>()
+        val spec = ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux)
+        val owner = ConversationHeadlessRecovery.RecoveryOwner(spec)
+        owner.claimForUi()
+        val wrapper = RecoveringConversationSource(pending, DefaultConversationStrings, spec) {
+            owner.releaseToBackground()
+            true
+        }
+        wrapper.close()
+        assertFalse(owner.isClaimedByUi())
+        val delegate = RecordingRecoveredSource()
+        pending.complete(delegate)
+        kotlinx.coroutines.delay(50)
+        assertFalse(delegate.closed)
+    }
+
+    @Test
     fun recoveredSourcePreservesExactSlashIdentityAndResult() = kotlinx.coroutines.test.runTest {
         val delegate = RecordingRecoveredSource()
         val source = RecoveringConversationSource(
@@ -137,17 +155,101 @@ class ConversationSourceRecoveryTest {
     }
 
     @Test
-    fun retainedOwnerMatchesSameSessionAcrossModesButNeverAnotherWorkspace() {
+    fun retainedOwnerRequiresExactSessionSpaceAndModeEvenWhenItsCwdChanges() {
         val code = ConversationRecoverySpec(
             projectId = "weather", hostPath = "/same/path", sessionMode = SessionMode.Code,
             linuxRuntimeMode = LinuxRuntimeMode.MobileLinux, workspaceKey = "project.weather",
         )
         val chat = code.copy(sessionMode = SessionMode.Chat)
         val sessionId = "19587a33-0725-48db-abca-8a2aed345f6b"
-        assertTrue(matchesRetainedConversationOwner(code, "sess:$sessionId", chat, sessionId))
-        assertFalse(matchesRetainedConversationOwner(code, sessionId, chat, "another"))
-        assertFalse(matchesRetainedConversationOwner(code, sessionId, chat.copy(hostPath = "/other/path"), sessionId))
-        assertFalse(matchesRetainedConversationOwner(code, sessionId, chat.copy(workspaceKey = "project.other"), sessionId))
+        assertFalse(matchesRetainedConversationOwner(code, "sess:$sessionId", chat, sessionId))
+        assertTrue(matchesRetainedConversationOwner(code, "sess:$sessionId", code.copy(hostPath = "/other/path"), sessionId))
+        assertFalse(matchesRetainedConversationOwner(code, sessionId, code, "another"))
+        assertFalse(matchesRetainedConversationOwner(code, sessionId, code.copy(workspaceKey = "project.other"), sessionId))
+    }
+
+    @Test
+    fun durableTurnRecordsCoexistAndClearOnlyTheirExactOwner() {
+        val preferences = FakeSharedPreferences()
+        val first = DurableConversationTurnClientStore(preferences, "project.a#code", initialSessionId = "one")
+        val second = DurableConversationTurnClientStore(preferences, "project.a#code", initialSessionId = "two")
+        first.begin("one", 10L)
+        second.begin("two", 10L)
+        first.clear("one", 9L)
+        first.clear("two", 10L)
+        assertEquals(10L, first.load()?.turnId)
+        assertEquals(10L, second.load()?.turnId)
+        first.clear("one", 10L)
+        assertEquals(null, first.load())
+        assertEquals("two", second.load()?.sessionId)
+        assertEquals(10L, second.load()?.turnId)
+    }
+
+    @Test
+    fun conflictingRecoveryModesFailWithoutDeletingEitherCheckpoint() {
+        val preferences = FakeSharedPreferences()
+        val chat = DurableConversationTurnClientStore(preferences, "project.a#chat", initialSessionId = "one")
+        val code = DurableConversationTurnClientStore(preferences, "project.a#code", initialSessionId = "one")
+        chat.begin("one", 10L)
+        assertEquals(SessionMode.Chat, DurableConversationTurnClientStore.ownerModeForSession(preferences, "project.a", "one"))
+        code.begin("one", 20L)
+        try {
+            DurableConversationTurnClientStore.ownerModeForSession(preferences, "project.a", "one")
+            fail("conflicting owner modes")
+        } catch (_: IllegalStateException) {}
+        assertEquals(10L, chat.load()?.turnId)
+        assertEquals(20L, code.load()?.turnId)
+    }
+
+    @Test
+    fun unboundOwnerCannotReadOrClearAnotherSessionsCheckpoint() {
+        val preferences = FakeSharedPreferences()
+        val existing = DurableConversationTurnClientStore(preferences, "project.a#code", initialSessionId = "one")
+        val unbound = DurableConversationTurnClientStore(preferences, "project.a#code")
+        existing.begin("one", 10L)
+
+        assertEquals(null, unbound.load())
+        unbound.clear()
+        unbound.clear("one", 10L)
+        assertEquals(10L, existing.load()?.turnId)
+    }
+
+    @Test
+    fun nextTurnReplacesOnlyItsOwnersCheckpointAndIgnoresLateTerminal() {
+        val preferences = FakeSharedPreferences()
+        val first = DurableConversationTurnClientStore(preferences, "project.a#code", initialSessionId = "one")
+        val second = DurableConversationTurnClientStore(preferences, "project.a#code", initialSessionId = "two")
+        first.begin("one", 10L)
+        second.begin("two", 20L)
+        first.begin("one", 11L)
+
+        assertEquals(11L, first.load()?.turnId)
+        assertEquals(20L, second.load()?.turnId)
+        first.clear("one", 10L)
+        assertEquals(11L, first.load()?.turnId)
+        assertEquals(20L, second.load()?.turnId)
+    }
+
+    @Test
+    fun userStoppedProcessClearsAllOwnersBeforeRecordingTheExit() {
+        val preferences = FakeSharedPreferences()
+        val first = DurableConversationTurnClientStore(preferences, "project.a#code", initialSessionId = "one")
+        val second = DurableConversationTurnClientStore(preferences, "global#chat", initialSessionId = "two")
+        first.begin("one", 10L)
+        second.begin("two", 11L)
+        recordHandledProcessExit(preferences, 1234L, userRequested = true)
+        assertEquals(null, first.load())
+        assertEquals(null, second.load())
+        assertEquals(1234L, preferences.getLong("handled_exit_timestamp", 0L))
+    }
+
+    @Test
+    fun userStoppedProcessAlsoClearsAllServiceSnapshots() {
+        val preferences = FakeSharedPreferences()
+        preferences.edit().putString("snapshots", "[one,two]").commit()
+        recordHandledServiceExit(preferences, 1234L, userRequested = true)
+        assertEquals(null, preferences.getString("snapshots", null))
+        assertEquals(1234L, preferences.getLong("handled_exit_timestamp", 0L))
     }
 
     @Test
@@ -346,7 +448,7 @@ class ConversationSourceRecoveryTest {
         val gate = DurableTurnReplayGate()
         gate.noteAttachRequested(
             turnId = 88L,
-            activation = ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed),
+            activation = ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed, com.lingxi.code.model.SessionMode.Code),
             afterSequence = 0L,
         )
 
@@ -389,7 +491,7 @@ class ConversationSourceRecoveryTest {
         val gate = DurableTurnReplayGate()
         gate.noteAttachRequested(
             turnId = 88L,
-            activation = ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed),
+            activation = ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed, com.lingxi.code.model.SessionMode.Code),
             afterSequence = 0L,
         )
 
@@ -412,7 +514,7 @@ class ConversationSourceRecoveryTest {
         gate.noteAttachRequested(
             turnId = 88L,
             activation = ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed,
-                transcriptComplete = false),
+                com.lingxi.code.model.SessionMode.Code, transcriptComplete = false),
             afterSequence = 0L,
         )
         assertTrue(gate.shouldForward(ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.COMPLETED, 88u, 2u))))
@@ -425,7 +527,7 @@ class ConversationSourceRecoveryTest {
         val gate = DurableTurnReplayGate()
         gate.noteAttachRequested(
             turnId = 88L,
-            activation = ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed),
+            activation = ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed, com.lingxi.code.model.SessionMode.Code),
             afterSequence = 2L,
         )
 
@@ -466,6 +568,7 @@ private data class RecoveredPrompt(
 )
 
 private class RecordingRecoveredSource : ConversationSource, SlashCommandConversationSource {
+    var closed = false
     val prompts = mutableListOf<RecoveredPrompt>()
     val slashCommands = mutableListOf<Triple<ClientTextDto, List<ImageRefDto>, Long>>()
 
@@ -484,6 +587,8 @@ private class RecordingRecoveredSource : ConversationSource, SlashCommandConvers
         slashCommands += Triple(raw, images, turnId)
         return flowOf(ReplyEvent.CommandOutput("done", false, turnId.toULong()))
     }
+
+    override fun close() { closed = true }
 }
 
 internal class FakeSharedPreferences : SharedPreferences {

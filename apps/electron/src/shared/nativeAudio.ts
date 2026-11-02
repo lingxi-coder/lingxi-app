@@ -39,6 +39,10 @@ export const CH_NATIVE_AUDIO_EVENT = 'lingxi:audio:event';
 export const CH_NATIVE_AUDIO_OPERATION = 'lingxi:audio:execute';
 export const CH_NATIVE_AUDIO_CANCEL = 'lingxi:audio:cancel';
 export const CH_NATIVE_AUDIO_FINISH_LISTEN = 'lingxi:audio:finish-listen';
+export const CH_NATIVE_AUDIO_FLOW_LEASE = 'lingxi:audio:flow-lease';
+
+/** Proves which conversation owns a window's active voice Flow. */
+export interface NativeAudioFlowLease { sessionId: string; leaseId: string }
 
 export type SpeechPermissionStatus =
   | 'authorized'

@@ -125,7 +125,7 @@ data class SessionRow(
     val messageCount: Int,
     /** A short, human relative time ("刚刚" / "5 分钟前" / "3 天前" / "5月3日"). */
     val relativeTime: String,
-    val mode: SessionMode = SessionMode.Code,
+    val mode: SessionMode,
     val modifiedAtEpochSeconds: Long? = null,
     val transcriptPath: String? = null,
     val workspaceDirectory: String? = null,
@@ -157,7 +157,7 @@ object SessionCatalog {
         modifiedRfc3339: String,
         nowEpochSeconds: Long = System.currentTimeMillis() / 1000L,
         strings: SessionCatalogStrings = DefaultSessionCatalogStrings,
-        mode: SessionMode = SessionMode.Code,
+        mode: SessionMode,
     ): SessionRow {
         val modifiedAt = parseRfc3339ToEpochSeconds(modifiedRfc3339)
         return SessionRow(

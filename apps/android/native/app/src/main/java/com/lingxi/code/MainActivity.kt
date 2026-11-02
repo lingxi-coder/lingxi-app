@@ -79,6 +79,14 @@ class MainActivity : ComponentActivity() {
     private lateinit var deviceReadPermissions: DeviceReadPermissionController
     private val linkInbox: com.lingxi.code.navigation.DeepLinkInbox by viewModels()
     private fun enqueueCanonicalLink(intent: Intent, restoringActivity: Boolean = false) {
+        if (intent.getBooleanExtra(com.lingxi.code.conversation.ConversationNotificationRoute.EXTRA_NOTIFICATION_OWNER, false)) {
+            if (!restoringActivity) {
+                com.lingxi.code.conversation.ConversationNotificationRoute.parse(intent)?.let {
+                    pendingConversationLaunch.value = it
+                }
+            }
+            return
+        }
         val raw = intent.dataString
         if (raw == null) return
         val notice = when {
@@ -449,16 +457,31 @@ class MainActivity : ComponentActivity() {
                             onDeepLinkImportDismiss = { canonicalLinks.firstOrNull()?.let(linkInbox::complete); pendingImportRaw = null; settingsOpen = false },
                             onOpenScheduledSession = { run ->
                                 run.sessionId?.let { sessionId ->
-                                    pendingConversationLaunch.value = ConversationLaunchRequest(
-                                        sessionId = sessionId,
-                                        turnId = null,
-                                        workspaceKey = run.projectId?.let { "project.$it" } ?: "scheduled",
-                                        sessionMode = desktopProjectStore.state.value.projects
-                                            .firstOrNull { it.record.id == run.projectId }?.sessions
-                                            ?.firstOrNull { it.sessionId == sessionId.removePrefix("sess:") }?.mode
-                                            ?: com.lingxi.code.model.SessionMode.Code,
-                                    )
-                                    settingsOpen = false
+                                    scope.launch {
+                                        val workspace = run.projectId?.let { "project.$it" } ?: "scheduled"
+                                        val id = com.lingxi.code.model.canonicalSessionId(sessionId)
+                                        val owners = runCatching {
+                                            com.lingxi.code.project.ScopeStateStore(applicationContext).readSessionOwners()
+                                        }.getOrElse {
+                                            android.widget.Toast.makeText(applicationContext, getString(R.string.chat_resume_session_failed), android.widget.Toast.LENGTH_LONG).show()
+                                            return@launch
+                                        }
+                                        val owner = owners[id]
+                                        val mode = if (owner != null) owner.takeIf { it.scopeKey == workspace }?.mode else {
+                                            desktopProjectStore.state.value.projects
+                                                .firstOrNull { it.record.id == run.projectId }?.sessions
+                                                ?.firstOrNull { com.lingxi.code.model.canonicalSessionId(it.sessionId) == id }?.mode
+                                        }
+                                        if (mode == null) {
+                                            android.widget.Toast.makeText(applicationContext, getString(R.string.chat_resume_session_failed), android.widget.Toast.LENGTH_LONG).show()
+                                            return@launch
+                                        }
+                                        pendingConversationLaunch.value = ConversationLaunchRequest(
+                                            sessionId = sessionId, turnId = null,
+                                            workspaceKey = workspace, sessionMode = mode,
+                                        )
+                                        settingsOpen = false
+                                    }
                                 }
                             },
                             projectStore = desktopProjectStore,

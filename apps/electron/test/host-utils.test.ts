@@ -510,6 +510,8 @@ test('settings store persists project activation, pins, and recoverable removal'
   store.addProject(second);
   store.activateProject(first);
   store.setTrust(second, true);
+  store.conversationSpaces.addProject(second, 'code');
+  store.conversationSpaces.register({ projectPath: second, projectId: second, mode: 'code', sessionId: '22222222-2222-4222-8222-222222222222' });
   store.setSessionPinned({
     projectPath: second,
     sessionId: '22222222-2222-4222-8222-222222222222',

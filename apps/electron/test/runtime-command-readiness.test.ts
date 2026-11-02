@@ -19,9 +19,9 @@ async function fixture(t: TestContext, maxCachedRuntimes?: number) {
   const previousHandle = ipcMain.handle, previousRemove = ipcMain.removeHandler;
   ipcMain.handle = ((channel: string, handler: (...args: any[]) => any) => { handlers.set(channel, handler); }) as any;
   ipcMain.removeHandler = ((channel: string) => { handlers.delete(channel); }) as any;
-  const manager = new SessionRuntimeManager({ maxCachedRuntimes, launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
+  const manager = new SessionRuntimeManager({ maxCachedRuntimes, resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' }), launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
   t.after(async () => { await manager.dispose(); ipcMain.handle = previousHandle; ipcMain.removeHandler = previousRemove; });
-  const ref = { projectPath: '/command-readiness', sessionId: '11111111-2222-4333-8444-555555555555' };
+  const ref = { projectPath: '/command-readiness', sessionId: '11111111-2222-4333-8444-555555555555', mode: 'code' as const };
   const runtime = await manager.ensure(ref, false);
   const sender = new EventEmitter() as any;
   sender.mainFrame = { url: 'app://desktop/index.html' }; sender.isDestroyed = () => false; sender.send = () => {};
@@ -67,6 +67,7 @@ test('cold-open commands wait past resume events until the real runtime restores
   const commands: unknown[] = [];
   const client = Object.assign(new EventEmitter(), {
     sendCommand: (command: unknown) => { commands.push(command); },
+    resumeSessionFromTranscript: async () => {},
   });
   Object.assign(h.runtime, {
     client, generation: 1, activeWorkspace: h.ref.projectPath, activeWorkspaceTrusted: true,
@@ -80,7 +81,7 @@ test('cold-open commands wait past resume events until the real runtime restores
   const command = h.command();
   await tick();
   assert.equal(commands.some((item: any) => item.type === 'list_models'), false);
-  client.emit('event', { type: 'session_resumed', session_id: h.ref.sessionId, messages: [] });
+  client.emit('event', { type: 'session_resumed', session_id: h.ref.sessionId, mode: h.ref.mode, messages: [] });
   client.emit('event', { type: 'model_changed', model: 'anthropic/test-model' });
   await tick();
   assert.equal(commands.some((item: any) => item.type === 'list_models'), false,
@@ -113,6 +114,7 @@ test('remote approvals, answers and cancel stay available while desktop commands
   const sent: any[] = [], interactions: unknown[] = [];
   const client = Object.assign(new EventEmitter(), {
     sendCommand: (command: unknown) => { sent.push(command); },
+    resumeSessionFromTranscript: async () => {},
     requestPermissionScope: async () => ({ background_owned: false }),
     approvePermission: (id: number, response: unknown) => { interactions.push(['approve', id, response]); },
     answerAskUserQuestion: (id: number, answers: unknown) => { interactions.push(['answer', id, answers]); },
@@ -143,7 +145,7 @@ test('remote approvals, answers and cancel stay available while desktop commands
     ['approve', 41, { type: 'allow_once' }], ['answer', 42, { Choice: 'A' }], ['skip', 43], ['cancel', 7],
   ]);
   assert.equal(sent.some(item => item.type === 'list_models'), false);
-  client.emit('event', { type: 'session_resumed', session_id: h.ref.sessionId, messages: [] });
+  client.emit('event', { type: 'session_resumed', session_id: h.ref.sessionId, mode: h.ref.mode, messages: [] });
   client.emit('event', { type: 'model_changed', model: 'anthropic/test-model' });
   await opening; await command;
   assert.equal(sent.filter(item => item.type === 'list_models').length, 1);

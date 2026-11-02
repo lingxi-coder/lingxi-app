@@ -1525,6 +1525,7 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         None,
         false,
         None,
+        Some(lingxi_core::host::session_context::ConversationMode::Code),
     ))
     .await
 }
@@ -1537,6 +1538,7 @@ pub(crate) async fn build_runtime_for_tui_inner_with_parent_and_native_settings_
     parent_session_id: Option<String>,
     native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext,
     resume_transcript_path: Option<std::path::PathBuf>,
+    expected_mode: Option<lingxi_core::host::session_context::ConversationMode>,
 ) -> Result<TuiBuild, InitError> {
     Box::pin(build_runtime_for_tui_inner_with_parent_impl(
         argv,
@@ -1545,6 +1547,7 @@ pub(crate) async fn build_runtime_for_tui_inner_with_parent_and_native_settings_
         Some(native_settings_agent_context),
         true,
         resume_transcript_path,
+        expected_mode,
     ))
     .await
 }
@@ -1555,19 +1558,8 @@ pub(crate) async fn build_runtime_for_tui_inner_with_parent_and_native_settings_
 pub(crate) async fn capture_tui_resume(
     cfg: &mut DesktopConfig,
     session_id: uuid::Uuid,
+    expected_mode: Option<lingxi_core::host::session_context::ConversationMode>,
 ) -> Result<CapturedTuiResume, InitError> {
-    let lease = if cfg.session_persistence {
-        Some(
-            lingxi_core::host::live_sessions::LiveSessionDir::at_live(
-                cfg.lingxi_home.join("sessions"),
-            )
-            .claim_session_id(&session_id.to_string(), std::process::id())
-            .map_err(|error| InitError::DurableSession(error.to_string()))?
-            .into_shared(),
-        )
-    } else {
-        None
-    };
     #[cfg(unix)]
     let fs = Arc::new(platform_posix::PosixFileSystem::new(cfg.cwd.clone()));
     #[cfg(windows)]
@@ -1587,10 +1579,33 @@ pub(crate) async fn capture_tui_resume(
         }
     };
     let path = validate_exact_tui_resume_path(&cfg.lingxi_home, session_id, &path)?;
-    let (_, content, loaded) =
-        session::jsonl::load_routed_session_from_path_with_source(&path, session_id, fs)
+    let (_, preflight, preflight_loaded) =
+        session::jsonl::load_routed_session_from_path_with_source(&path, session_id, fs.clone())
             .await
             .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    let mode = validate_resume_mode(&preflight, session_id, expected_mode)?;
+    // Inspect the fixed ownership before acquiring any writer authority. Once
+    // claimed, capture and validate again so the mounted revision is the one
+    // checked under that authority.
+    let (content, loaded, lease) = if cfg.session_persistence {
+        let lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
+            cfg.lingxi_home.join("sessions"),
+        )
+        .claim_session_id(&session_id.to_string(), std::process::id())
+        .map_err(|error| InitError::DurableSession(error.to_string()))?
+        .into_shared();
+        let (_, content, loaded) =
+            session::jsonl::load_routed_session_from_path_with_source(&path, session_id, fs)
+                .await
+                .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+        let captured_mode = validate_resume_mode(&content, session_id, expected_mode)?;
+        if captured_mode != mode {
+            return Err(InitError::Orchestrator("session_mode_mismatch: session mode changed during resume".into()));
+        }
+        (content, loaded, Some(lease))
+    } else {
+        (preflight, preflight_loaded, None)
+    };
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
     if messages.is_empty() {
         return Err(InitError::Orchestrator(
@@ -1614,11 +1629,27 @@ pub(crate) async fn capture_tui_resume(
         source_session_id: session_id.to_string(),
         content: content.into(),
     });
+    cfg.initial_conversation_mode = Some(mode);
     cfg.session_writer_lease = lease;
     Ok(CapturedTuiResume {
         messages,
         entries: loaded.messages_in_order,
     })
+}
+
+pub(crate) fn validate_resume_mode(
+    source: &str,
+    session_id: uuid::Uuid,
+    expected: Option<lingxi_core::host::session_context::ConversationMode>,
+) -> Result<lingxi_core::host::session_context::ConversationMode, InitError> {
+    let mode = session::JsonlWriter::fixed_session_mode_from_source(source, &session_id.to_string())
+        .map_err(|error| InitError::Orchestrator(format!("invalid session mode: {error}")))?;
+    if expected.is_some_and(|expected| expected != mode) {
+        return Err(InitError::Orchestrator(format!(
+            "session_mode_mismatch: session {session_id} belongs to {}", mode.as_str()
+        )));
+    }
+    Ok(mode)
 }
 
 #[cfg(test)]
@@ -1674,6 +1705,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     native_settings_agent_context: Option<lingxi_core::host::NativeSettingsAgentContext>,
     capture_resume: bool,
     resume_transcript_path: Option<std::path::PathBuf>,
+    expected_mode: Option<lingxi_core::host::session_context::ConversationMode>,
 ) -> Result<TuiBuild, InitError> {
     crate::startup_trace::mark("tui_runtime_build_start");
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1716,7 +1748,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
             || argv.dangerously_skip_permissions
             || crate::permission_mode_preference::load(argv).is_some();
         cfg.session_transcript_path = resume_transcript_path;
-        Some(capture_tui_resume(&mut cfg, id).await?)
+        Some(capture_tui_resume(&mut cfg, id, expected_mode).await?)
     } else {
         None
     };

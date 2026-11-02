@@ -21,9 +21,11 @@ import com.lingxi.code.model.SessionRef
 import com.lingxi.code.settings.LinuxRuntimeMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -137,6 +139,113 @@ class RetainedConversationTakeoverTest {
     @Test
     fun newUiOwnerReceivesAnAttachSnapshotAtTheUnchangedCursor() = runTest(dispatcher) {
         exerciseTakeover(terminal = false, unchangedCursorTakeover = true)
+    }
+
+    @Test
+    fun pendingUiReceivesResumeDispositionBeforeSourcePublication() = runTest(dispatcher) {
+        val sourceScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val relay = LosslessEventRelay<ClientEvent>(sourceScope)
+        val workflows = LosslessEventRelay<WorkflowProgressUpdate>(sourceScope)
+        val commands = mutableListOf<ClientCommand>()
+        val handle = object : MobileEngineHandle(com.lingxi.code.bindings.runtime.NoHandle) {
+            override suspend fun submit(command: ClientCommand) { commands += command }
+        }
+        val media = AndroidNativeMediaHost(com.lingxi.code.bindings.android.NoHandle)
+        val permissions = MutableStateFlow<PermissionPromptState?>(null)
+        val durable = DurableConversationTurnClientStore(FakeSharedPreferences(), "global#code", initialSessionId = "session-a")
+        durable.begin("session-a", 42L)
+        val spec = ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux)
+        val source = EngineConversationSource(
+            handle = handle, mediaHost = media, mediaContextBindings = MediaAudioSessionContextBindings(media),
+            events = relay.events, eventRelay = relay, workflowEvents = workflows.events, workflowRelay = workflows,
+            eventScope = sourceScope, permissions = permissions, permissionIngress = PermissionIngress(permissions),
+            models = MutableStateFlow(EngineModelState()), sessions = MutableStateFlow(EngineSessionState.loading()),
+            workspace = MutableStateFlow(null),
+            activeSession = MutableStateFlow(ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed, SessionMode.Code)),
+            mcp = MutableStateFlow(emptyList()), strings = DefaultConversationStrings,
+            durableTurns = durable, durableReplayGate = DurableTurnReplayGate(), autoAttachDurableTurns = false,
+            resumeOnUiAttach = false, initialRecoverySpec = spec, userHomePath = "/home", userHomeGuestPath = "/home",
+        )
+        val owner = ConversationHeadlessRecovery.RecoveryOwner(spec)
+        owner.claimForUi()
+        val consumer = async(start = CoroutineStart.UNDISPATCHED) {
+            checkNotNull(owner.pending.await()).attachDurableTurnForUi(0L)
+        }
+        try {
+            owner.complete(source)
+            consumer.await()
+            assertEquals(listOf(ClientCommand.AttachTurn(42uL, 0uL), ClientCommand.ResumeTurn(42uL)), commands)
+        } finally {
+            source.close()
+        }
+    }
+
+    @Test
+    fun releasingPendingUiWakesAHeadlessAttemptThatWasSuppressed() = runTest(dispatcher) {
+        val sourceScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val commands = mutableListOf<ClientCommand>()
+        val handle = object : MobileEngineHandle(com.lingxi.code.bindings.runtime.NoHandle) {
+            override suspend fun submit(command: ClientCommand) { commands += command }
+        }
+        val source = headlessSource(sourceScope, handle)
+        try {
+            source.claimDurableTurnForUi()
+            source.startHeadlessRecovery()
+            runCurrent()
+            assertTrue(commands.isEmpty())
+            source.releaseDurableTurnToHeadless()
+            source.startHeadlessRecovery()
+            runCurrent()
+            assertEquals(listOf(ClientCommand.AttachTurn(42uL, 0uL), ClientCommand.ResumeTurn(42uL)), commands)
+        } finally {
+            source.close()
+        }
+    }
+
+    @Test
+    fun failedHeadlessAttachIsRetriedOnTheNextWake() = runTest(dispatcher) {
+        val sourceScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val commands = mutableListOf<ClientCommand>()
+        var attempts = 0
+        val handle = object : MobileEngineHandle(com.lingxi.code.bindings.runtime.NoHandle) {
+            override suspend fun submit(command: ClientCommand) {
+                commands += command
+                if (command is ClientCommand.AttachTurn && attempts++ == 0) error("transient attach failure")
+            }
+        }
+        val source = headlessSource(sourceScope, handle)
+        try {
+            source.startHeadlessRecovery()
+            runCurrent()
+            source.startHeadlessRecovery()
+            runCurrent()
+            assertEquals(listOf(ClientCommand.AttachTurn(42uL, 0uL), ClientCommand.AttachTurn(42uL, 0uL),
+                ClientCommand.ResumeTurn(42uL)), commands)
+        } finally {
+            source.close()
+        }
+    }
+
+    private fun headlessSource(sourceScope: CoroutineScope, handle: MobileEngineHandle): EngineConversationSource {
+        val relay = LosslessEventRelay<ClientEvent>(sourceScope)
+        val workflows = LosslessEventRelay<WorkflowProgressUpdate>(sourceScope)
+        val media = AndroidNativeMediaHost(com.lingxi.code.bindings.android.NoHandle)
+        val permissions = MutableStateFlow<PermissionPromptState?>(null)
+        val durable = DurableConversationTurnClientStore(FakeSharedPreferences(), "global#code", initialSessionId = "session-a")
+        durable.begin("session-a", 42L)
+        return EngineConversationSource(
+            handle = handle, mediaHost = media, mediaContextBindings = MediaAudioSessionContextBindings(media),
+            events = relay.events, eventRelay = relay, workflowEvents = workflows.events, workflowRelay = workflows,
+            eventScope = sourceScope, permissions = permissions, permissionIngress = PermissionIngress(permissions),
+            models = MutableStateFlow(EngineModelState()), sessions = MutableStateFlow(EngineSessionState.loading()),
+            workspace = MutableStateFlow(null),
+            activeSession = MutableStateFlow(ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed, SessionMode.Code)),
+            mcp = MutableStateFlow(emptyList()), strings = DefaultConversationStrings,
+            durableTurns = durable, durableReplayGate = DurableTurnReplayGate(), autoAttachDurableTurns = false,
+            resumeOnUiAttach = false,
+            initialRecoverySpec = ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux),
+            userHomePath = "/home", userHomeGuestPath = "/home",
+        )
     }
 
     private suspend fun TestScope.exerciseTakeover(
@@ -261,7 +370,6 @@ class RetainedConversationTakeoverTest {
             sessions = MutableStateFlow(EngineSessionState.loading()),
             workspace = MutableStateFlow(null),
             activeSession = MutableStateFlow(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, SessionMode.Code)),
-            modeState = MutableStateFlow(null),
             mcp = MutableStateFlow(emptyList()),
             strings = DefaultConversationStrings,
             durableTurns = durable,

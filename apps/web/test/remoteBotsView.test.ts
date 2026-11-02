@@ -472,6 +472,26 @@ function sessionView(c: Computer, sessionId: string, locale: 'en' | 'zh' = 'en')
   return createElement(SessionView, { locale, client: c.client, sessionId, connection: c.connection.state, deviceName: 'Test Browser', onBack: noop });
 }
 
+test('a Team approval shows only the pending allow-once or deny controls', async () => withDocument(async () => {
+  const c = await computer(withChats);
+  const id = 'team-approval:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef';
+  const page = await Mounted.create(sessionView(c, id), c.wait);
+  try {
+    await page.during(async () => {
+      const controller = c.client.session(id);
+      controller.handleSnapshot({ session_id: id, phase: 'begin', epoch: 'team', first_message_index: 0 });
+      controller.handleSnapshot({ session_id: id, phase: 'end', cursor: { epoch: 'team', seq: 0 },
+        pending: { permissions: [{ request_id: 1, kind: { type: 'tool_use_confirm', tool_name: 'Bash', tool_input_json: '{}', default_allow: false } }], questions: [], computer_access: [] },
+        turn: { running: false } });
+    });
+    assert.equal(page.has('Allow once'), true);
+    assert.equal(page.has('Deny'), true);
+    assert.equal(page.markup.includes('rc-composer'), false);
+    assert.equal(page.markup.includes('rc-files'), false);
+    assert.equal(page.markup.includes('rc-controls'), false);
+  } finally { await page.unmount(); }
+}));
+
 test('a chat opened from its Bot is titled as the Bot lists it, belongs to the Bot, and goes back to it', async () => {
   const c = await computer(withChats);
   await withDocument(async () => {

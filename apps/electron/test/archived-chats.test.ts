@@ -24,7 +24,10 @@ test('search matches title, project or session id', () => {
   assert.equal(searchNav('archived')[0].id, 'archived-chats');
 });
 test('renders full archived list and an honest empty state', () => {
-  const render = (archivedSessions: typeof records) => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, React.createElement(ArchivedChats, { bridge: { bootstrap: { settings: { archivedSessions } } }, onClose() {} } as never)));
+  const render = (archivedSessions: typeof records) => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, React.createElement(ArchivedChats, { bridge: { bootstrap: {
+    settings: { archivedSessions: archivedSessions.map((row) => ({ ...row, mode: 'chat', projectId: row.projectPath })) },
+    conversationSpaces: { activeMode: 'chat', projects: { '/project-one': ['chat'], '/project-two': ['chat'] } },
+  } }, onClose() {} } as never)));
   assert.equal((render(records).match(/<li /g) ?? []).length, 35);
   assert.match(render([]), /No archived conversations/);
 });

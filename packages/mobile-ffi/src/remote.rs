@@ -2330,7 +2330,7 @@ impl RemoteControlCore {
     }
 
     /// Send a prompt. It shows up in `outgoing` until its own record comes back;
-    /// a failure shows there too (see `retry_prompt`). While a turn runs only text is sent.
+    /// a failure shows there too (see `retry_prompt`). While a turn runs only text is accepted.
     pub async fn send_prompt(
         &self,
         session_id: String,
@@ -2340,8 +2340,8 @@ impl RemoteControlCore {
         let images = prompt_images(images)?;
         self.controller(&session_id)?
             .send_prompt(&text, images)
-            .await;
-        Ok(())
+            .await
+            .map_err(rpc_error)
     }
 
     /// Hash an original file without loading it into memory.
@@ -2351,6 +2351,9 @@ impl RemoteControlCore {
         path: String,
         name: String,
     ) -> Result<RemoteFileFfi, RemoteFfiError> {
+        self.controller(&session_id)?
+            .require_conversation_access()
+            .map_err(rpc_error)?;
         let task = self.begin_file_task(&path)?;
         let offer = task
             .run(
@@ -2376,6 +2379,9 @@ impl RemoteControlCore {
         file: RemoteFileFfi,
         path: String,
     ) -> Result<RemoteFileFfi, RemoteFfiError> {
+        self.controller(&file.session_id)?
+            .require_conversation_access()
+            .map_err(rpc_error)?;
         let connection = self.file_connection()?;
         let task = self.begin_file_task(&file.transfer_id)?;
         task.run(
@@ -2397,6 +2403,9 @@ impl RemoteControlCore {
         &self,
         session_id: String,
     ) -> Result<Vec<RemoteFileFfi>, RemoteFfiError> {
+        self.controller(&session_id)?
+            .require_conversation_access()
+            .map_err(rpc_error)?;
         let value = self
             .file_connection()?
             .request(
@@ -2423,6 +2432,9 @@ impl RemoteControlCore {
         file: RemoteFileFfi,
         path: String,
     ) -> Result<RemoteFileFfi, RemoteFfiError> {
+        self.controller(&file.session_id)?
+            .require_conversation_access()
+            .map_err(rpc_error)?;
         let connection = self.file_connection()?;
         let task = self.begin_file_task(&file.transfer_id)?;
         let file_ref = file.file_ref.clone();
@@ -2474,8 +2486,8 @@ impl RemoteControlCore {
     ) -> Result<(), RemoteFfiError> {
         self.controller(&session_id)?
             .send_prompt_with_files(&text, prompt_images(images)?, file_refs)
-            .await;
-        Ok(())
+            .await
+            .map_err(rpc_error)
     }
 
     /// Send a failed prompt again with the same request id.
@@ -2484,8 +2496,10 @@ impl RemoteControlCore {
         session_id: String,
         prompt_id: String,
     ) -> Result<(), RemoteFfiError> {
-        self.controller(&session_id)?.retry_prompt(&prompt_id).await;
-        Ok(())
+        self.controller(&session_id)?
+            .retry_prompt(&prompt_id)
+            .await
+            .map_err(rpc_error)
     }
 
     /// Drop a prompt from the outgoing list.

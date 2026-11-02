@@ -62,6 +62,7 @@ enum NativeEngineFactory {
         let providerConfig: IosProviderConfigFfi?
         let mobileLinux: IosMobileLinuxConfigFfi?
         let hostEnvironment: IosHostEnvironmentFfi?
+        var initialSessionId: String? = nil
     }
 
     /// Configuration is captured on the main actor along with provider and
@@ -93,7 +94,8 @@ enum NativeEngineFactory {
                 mobileLinux: config.mobileLinux.map {
                     mobileLinuxConfiguration($0, appSandboxRoot: config.appSandboxRoot)
                 },
-                hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
+                hostEnvironment: makeIosHostEnvironment(launchMode: .interactive),
+                initialSessionId: config.initialSessionId
             )
             policy = .interactive(listener: listener, permissions: permissions)
 
@@ -186,6 +188,7 @@ enum NativeEngineFactory {
                 apiKey: settings.apiKey,
                 model: settings.model,
                 sessionMode: settings.sessionMode,
+                initialSessionId: settings.initialSessionId,
                 visionDelegationEnabled: settings.visionDelegationEnabled,
                 appSandboxRoot: settings.appSandboxRoot,
                 projectCwd: settings.projectCwd,

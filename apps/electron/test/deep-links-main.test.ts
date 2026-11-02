@@ -30,7 +30,10 @@ function runtime(ready: () => Promise<void> = async () => {}) {
       throw new Error(id);
     },
   });
-  const api = exported.installDeepLinks(() => [tmpdir()], () => state.shown++, ready);
+  const key = `project.${createHash('sha256').update(realpathSync.native(tmpdir())).digest('hex')}`;
+  const api = exported.installDeepLinks(() => [tmpdir()], () => state.shown++, ready,
+    async (_id: string, path?: string, workspace?: string) => path && path !== tmpdir() || workspace && workspace !== key
+      ? undefined : { projectPath: tmpdir(), workspaceKey: key, mode: 'chat' });
   const window = () => {
     const webContents = Object.assign(new EventEmitter(), { mainFrame: {}, send: (...args: any[]) => state.notices.push(args) });
     const value = { webContents };
@@ -61,7 +64,7 @@ test('real main handlers buffer cold launch until restoration and replay after r
   let finish!: () => void;
   const restored = new Promise<void>(resolve => { finish = resolve; });
   const r = runtime(() => restored);
-  r.open('lingxi://session/first');
+  r.open('lingxi://session/first?mode=chat');
   assert.equal(r.api.hasPending(), true);
   assert.equal(r.state.shown, 0);
   r.state.ready = true;
@@ -95,7 +98,7 @@ test('real handlers reject subframes, deduplicate second-instance delivery and r
   const w = r.window();
   const untrusted = { ...w.sender, senderFrame: {} };
   await assert.rejects(r.handlers.get('lingxi:deep-link:next')!(untrusted), /Invalid sender/);
-  r.app.emit('second-instance', {}, ['electron', 'lingxi://session/a', 'https://lingxios.net/open/session/a']);
+  r.app.emit('second-instance', {}, ['electron', 'lingxi://session/a?mode=chat', 'https://lingxios.net/open/session/a?mode=chat']);
   const first = await r.handlers.get('lingxi:deep-link:next')!(w.sender);
   assert.throws(() => r.handlers.get('lingxi:deep-link:ack')!(untrusted, first.id), /Invalid sender/);
   r.handlers.get('lingxi:deep-link:ack')!(w.sender, first.id, 'Session is no longer on this device');
@@ -103,16 +106,27 @@ test('real handlers reject subframes, deduplicate second-instance delivery and r
   assert.equal(await r.handlers.get('lingxi:deep-link:next')!(w.sender), null);
 });
 
-test('main copy API generates stable UUID message links and rejects unknown workspaces and unsaved sessions', () => {
+test('main copy API generates fixed-mode links and rejects unknown workspaces and unsaved sessions', async () => {
   const r = runtime();
-  r.api.copySessionLink(tmpdir(), 'Saved-ID', '123e4567-e89b-12d3-a456-426614174000');
+  const id = '11111111-2222-4333-8444-555555555555';
+  await r.api.copySessionLink(tmpdir(), id, '123e4567-e89b-12d3-a456-426614174000');
   const target = contract.parseDeepLink(r.state.clipboard);
-  assert.equal(target.route, 'session/Saved-ID');
+  assert.equal(target.route, `session/${id}`);
   assert.equal(target.params.message, '123e4567-e89b-12d3-a456-426614174000');
+  assert.equal(target.params.mode, 'chat');
   assert.match(target.params.workspace, /^project\.[0-9a-f]{64}$/);
-  assert.throws(() => r.api.copySessionLink('/unknown', 'Saved-ID'), /Session unavailable/);
-  assert.throws(() => r.api.copySessionLink(tmpdir(), 'pending-123'), /Session unavailable/);
-  assert.throws(() => r.api.copySessionLink(tmpdir(), 'Saved-ID', 'unstable-row-id'), /Invalid message/);
+  await assert.rejects(r.api.copySessionLink('/unknown', id), /Session unavailable/);
+  await assert.rejects(r.api.copySessionLink(tmpdir(), 'pending-123'), /Session unavailable/);
+  await assert.rejects(r.api.copySessionLink(tmpdir(), id, 'unstable-row-id'), /Invalid message/);
+});
+
+test('session delivery rejects a conflicting fixed mode without navigating', async () => {
+  const r = runtime(); r.state.ready = true; r.app.emit('ready');
+  const w = r.window();
+  r.open('lingxi://session/a?mode=code');
+  assert.equal(await r.handlers.get('lingxi:deep-link:next')!(w.sender), null);
+  assert.equal(r.api.hasPending(), false);
+  assert.equal(r.state.dialogs.length, 1);
 });
 
 

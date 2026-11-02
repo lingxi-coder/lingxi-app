@@ -49,8 +49,10 @@ export const CLIENT_COMMAND_DISPOSITIONS = {
   resume_session: 'host_private',
   list_sessions: 'exposed',
   fork_session: 'not_applicable',
-  set_session_mode: 'exposed',
   get_context_manifest: 'host_private',
+  prepare_session_handoff: 'exposed',
+  cancel_session_handoff: 'exposed',
+  retry_session_handoff: 'exposed',
   login: 'exposed',
   logout: 'exposed',
   force_compact: 'exposed',
@@ -175,7 +177,6 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   session_ended: 'exposed',
   session_resumed: 'exposed',
   session_forked: 'not_applicable',
-  session_mode_changed: 'exposed',
   context_manifest: 'host_private',
   session_list: 'exposed',
   session_agent_list: 'exposed',
@@ -233,6 +234,8 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   realtime_audio_event: 'host_private',
   audio_session_context: 'host_private',
   audio_capabilities_changed: 'host_private',
+  session_handoff_prepared: 'exposed',
+  session_handoff_failed: 'exposed',
 } as const satisfies Record<ClientEvent['type'], DesktopDisposition>;
 
 /**
@@ -257,11 +260,13 @@ export const ALLOWED_CLIENT_COMMAND_TYPES = [
   'side_chat_end',
   'side_chat_submit',
   'cron_manage',
-  'set_session_mode',
   'set_model',
   'list_models',
   'refresh_provider_catalog',
   'list_sessions',
+  'prepare_session_handoff',
+  'cancel_session_handoff',
+  'retry_session_handoff',
   'ui_attach',
   'ui_detach',
   'login',
@@ -406,7 +411,6 @@ export const CLIENT_EVENT_REMOTE_DISPOSITIONS = {
   session_storage_state: 'withheld',
   workspace_changed: 'withheld',
   session_forked: 'withheld',
-  session_mode_changed: 'state',
   context_manifest: 'withheld',
   session_list: 'withheld',
   session_agent_list: 'forward',
@@ -464,6 +468,8 @@ export const CLIENT_EVENT_REMOTE_DISPOSITIONS = {
   realtime_audio_event: 'withheld',
   audio_session_context: 'withheld',
   audio_capabilities_changed: 'withheld',
+  session_handoff_prepared: 'withheld',
+  session_handoff_failed: 'withheld',
 } as const satisfies Record<ClientEvent['type'], RemoteEventDisposition>;
 
 /**
@@ -471,7 +477,6 @@ export const CLIENT_EVENT_REMOTE_DISPOSITIONS = {
  * events other than the base events).
  */
 export const REMOTE_STATE_EVENT_TYPES = [
-  'session_mode_changed',
   'model_changed',
   'permission_mode_changed',
   'conversation_controls_changed',
@@ -528,8 +533,10 @@ export const CLIENT_COMMAND_REMOTE_DISPOSITIONS = {
   resume_session: 'host_only',
   list_sessions: 'host_only',
   fork_session: 'host_only',
-  set_session_mode: 'host_only',
   get_context_manifest: 'host_only',
+  prepare_session_handoff: 'host_only',
+  cancel_session_handoff: 'host_only',
+  retry_session_handoff: 'host_only',
   login: 'host_only',
   logout: 'host_only',
   force_compact: 'host_only',

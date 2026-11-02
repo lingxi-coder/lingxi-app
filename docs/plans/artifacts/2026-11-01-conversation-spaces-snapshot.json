@@ -1,0 +1,178 @@
+{
+  "document_date": "2026-11-01",
+  "timezone": "America/Los_Angeles",
+  "purpose": "documentation handoff snapshot; no new runtime acceptance claimed",
+  "repos": {
+    "app": {
+      "root": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app",
+      "branch": "codex/code-chat-context-20261028",
+      "head": "ac968fdcf62ed2dbb4cd565d05394d7fe9675173",
+      "tracked_changed_files": 235,
+      "untracked_entries": 25,
+      "staged_files": [],
+      "changed_code_files_fingerprinted": 257,
+      "changed_code_fingerprint_sha256": "cd99308aa185515bb480df678a747d44529534e42dc6604a30e7e86f9ab3ba91",
+      "fingerprint_method": "sorted changed tracked + untracked file paths and SHA256; excludes docs and task node_modules symlink; HEAD identifies unchanged files",
+      "git_diff_check_exit_code": 0,
+      "git_diff_check_output": ""
+    },
+    "harness": {
+      "root": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/harness-runtime",
+      "branch": "codex/code-chat-context-20261028",
+      "head": "add9f7dfcc10cd523fcdc473ddbd5ad719b57175",
+      "tracked_changed_files": 55,
+      "untracked_entries": 0,
+      "staged_files": [],
+      "changed_code_files_fingerprinted": 55,
+      "changed_code_fingerprint_sha256": "1b0766a5f80a19898215080504c0330b01803a064fd57afb890e09da217155c0",
+      "fingerprint_method": "sorted changed tracked + untracked file paths and SHA256; excludes docs and task node_modules symlink; HEAD identifies unchanged files",
+      "git_diff_check_exit_code": 0,
+      "git_diff_check_output": ""
+    }
+  },
+  "protocol": {
+    "app_cargo_harness_revision": "add9f7dfcc10cd523fcdc473ddbd5ad719b57175",
+    "pinned_harness_protocol": "31.0.0",
+    "harness_working_tree_protocol": "32.0.0",
+    "bridge_client_protocol": "32.0.0",
+    "android_generated_contains_old_event": true,
+    "ios_generated_contains_old_event": true
+  },
+  "critical_files": {
+    "sdk/core-session-context": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/harness-runtime/crates/core/src/host/session_context.rs",
+      "exists": true,
+      "sha256": "939e3d66a6f9da0402da66d90197e3dc501fadb226de8c925ae5985e96e7422a"
+    },
+    "sdk/protocol-version": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/harness-runtime/crates/client/src/protocol/version.rs",
+      "exists": true,
+      "sha256": "e7012d2ddcd3c3f4f3d3924f787f00d240ffbd3b00d0b21a2ebf1f2b8b8113f5"
+    },
+    "sdk/protocol-commands": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/harness-runtime/crates/client/src/protocol/commands.rs",
+      "exists": true,
+      "sha256": "4b789a5eb430231dc22cecd72a7191db494ffd27e05edd080c7d3df6d194c2e0"
+    },
+    "sdk/header-writer": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/harness-runtime/crates/session/src/jsonl/writer.rs",
+      "exists": true,
+      "sha256": "0ab3492ba1e503ec404aed660af49f953f324659f4b45108b018608453dac431"
+    },
+    "sdk/context-projection": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/harness-runtime/crates/orchestrator/src/conversation/context_state.rs",
+      "exists": true,
+      "sha256": "7706053551a3c83cdd61d1a4d60d2222fe2533ef61f29685ff81f1076b7161d9"
+    },
+    "sdk/handoff": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/harness-runtime/crates/runtime/src/handoff.rs",
+      "exists": true,
+      "sha256": "d818afaff747b9e96d5fea44eb4e69db9d7efd5e64192b62d53f03c469ff1091"
+    },
+    "sdk/realtime": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/harness-runtime/crates/orchestrator/src/conversation/drivers/realtime.rs",
+      "exists": true,
+      "sha256": "84f20b03697b33429c4bfc5ed637ef39f7703097d5212ec2f6c110ff2b38a24f"
+    },
+    "app/cargo": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app/Cargo.toml",
+      "exists": true,
+      "sha256": "68576b35521fc1690ebf0b8e1d5d3a63d8fe2abc193441dd73e489cbb434c37b"
+    },
+    "app/lock": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app/Cargo.lock",
+      "exists": true,
+      "sha256": "5b573ec4befc9100f0a57e684941e1980ceb339ac34b36be0cf576cbdbc0a07b"
+    },
+    "app/ts-protocol": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app/packages/bridge-client/src/protocol.ts",
+      "exists": true,
+      "sha256": "c5710568408cce4f220684bc710405d84d4a41a423e5852b2a27adc285feba28"
+    },
+    "app/ts-generated": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app/packages/bridge-client/src/protocol.generated.ts",
+      "exists": true,
+      "sha256": "50c2073e26315ad5bffaa298440a92ab62485802adadb4998b0dd97dc39a5a95"
+    },
+    "app/desktop-store": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app/apps/electron/src/main/conversationSpaceStore.ts",
+      "exists": true,
+      "sha256": "44a9b148ddcc61a2977fd748f76fd12832a98a438f93389c81a7f95f31c4834d"
+    },
+    "app/android-host": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/conversation/SessionHost.kt",
+      "exists": true,
+      "sha256": "7e9bb9ac53e737ee6f39b0d6291628a95e5fe148ce44a3989212d4a96f268933"
+    },
+    "app/ios-host": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app/apps/ios/native/Sources/App/SessionHost.swift",
+      "exists": true,
+      "sha256": "67e1c35bd8d2bdb0b2da111a0be0d7780940b4e60e068ccbc8e9b5bff77682dd"
+    },
+    "app/remote-controller": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app/packages/remote-control-client/src/session.rs",
+      "exists": true,
+      "sha256": "ade5ce5f46f8f1519be2b0c2533b589299b728a0f432882c53a00b9b533b92bb"
+    },
+    "generated/android-client": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/bindings/client/client.kt",
+      "exists": true,
+      "sha256": "988ac28a30f394935204b3ce54854576c935cee6fbbe23df44fb3c9241152e69"
+    },
+    "generated/ios-client": {
+      "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app/apps/ios/native/Generated/client.swift",
+      "exists": true,
+      "sha256": "2bdf802eb64dbbe41cdfd6dadafcb770695d2ad0a0e37da31b1c0309207a4668"
+    }
+  },
+  "historical_logs_present": {
+    "/private/tmp/code-chat-32-session-tests-final.log": false,
+    "/private/tmp/code-chat-32-runtime-build.log": false,
+    "/private/tmp/code-chat-32-runtime-6.log": false,
+    "/private/tmp/code-chat-final-realtime-tests.log": false,
+    "/private/tmp/code-chat-electron-anchor-protocol32.log": false,
+    "/private/tmp/code-chat-electron-fixture-protocol32.log": false,
+    "/private/tmp/code-chat-ios-product-check/product.log": false
+  },
+  "historical_artifact_manifest": {
+    "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/validation-artifacts/artifact-manifest.json",
+    "exists": true,
+    "recorded_harness_head": "3ca6723174263a1e18cac7e2e400747f53a33118",
+    "executables": [
+      {
+        "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/validation-artifacts/commands_test-936ec9c23c280b63",
+        "exists": false
+      },
+      {
+        "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/validation-artifacts/harness_runtime-d1f6757203b29ffb",
+        "exists": false
+      },
+      {
+        "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/validation-artifacts/lingxi_core-266428bee9c0edcb",
+        "exists": false
+      },
+      {
+        "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/validation-artifacts/session-544d8b81dfe7af9d",
+        "exists": false
+      },
+      {
+        "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/validation-artifacts/snapshot_test-8abebfe79a7736b9",
+        "exists": false
+      },
+      {
+        "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/validation-artifacts/variant_ordinal_lock_test-45bc596dd591d0a4",
+        "exists": false
+      },
+      {
+        "path": "/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/validation-artifacts/version_guard_test-d7bd0d5e31d1f83e",
+        "exists": false
+      }
+    ]
+  },
+  "open_items_verified_in_source": [
+    "runtime handoff retry test fixture has no fixed-session-mode header",
+    "remote-control-client tests/e2e.rs snapshot begin has no session_mode",
+    "remote-control-client tests/bots.rs hold_records snapshot begin has no session_mode",
+    "App Cargo pin and both native generated client files predate protocol 32"
+  ]
+}

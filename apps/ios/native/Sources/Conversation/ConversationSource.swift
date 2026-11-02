@@ -31,15 +31,14 @@ protocol ConversationSource: AnyObject {
     var model: ConversationModel { get }
     var isTemporaryConversation: Bool { get }
     var hasLiveSideChats: Bool { get }
+    var hasActiveRealtimeAudio: Bool { get }
+    /// Trusted engine attachment used by this owner's Flow audio operations.
+    var voiceAudioOwner: IOSAudioOwner? { get }
+    var isAvailableForPrompts: Bool { get }
     /// Capability profile for this source instance.
     var sessionMode: SessionMode { get }
-    /// Request a mode for this same conversation; the engine confirms when it applies.
-    func setSessionMode(_ mode: SessionMode)
-    /// Select the device default for a new session created after a missing restore.
-    func setSessionRestoreFallbackMode(_ mode: SessionMode)
     /// Begin a fresh, empty conversation (the "edit / new chat" affordance).
     func startNewConversation()
-    func startNewConversation(mode: SessionMode)
     func updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Bool, pendingPermission: Bool)
     func promptSuggestionFeedback(sessionId: String, uuid: String, action: String)
     /// Submit a user prompt. Appends the user message, flips `streaming`, and
@@ -95,8 +94,6 @@ protocol ConversationSource: AnyObject {
     /// land its deltas / notice in the newly-shown session. A no-op when the id is
     /// already active.
     func openSession(_ session: SessionRef)
-    /// Continue an existing session in another capability profile.
-    func forkSession(_ sessionID: String, targetMode: SessionMode) async throws
     /// Lifecycle: the app moved to the background (`scenePhase == .background`).
     /// This hook may persist state, but MUST NOT cancel an active turn or change
     /// its streaming bookkeeping. UIKit owns suspension; backgrounding is not a
@@ -136,10 +133,7 @@ protocol ConversationSource: AnyObject {
     /// clean. The UI also selects the row locally so the choice reflects
     /// immediately even if engine-side resume is still a follow-up. A no-op on the
     /// mock.
-    /// `emptySessionTitle` is supplied only when the persisted project index
-    /// proves this is a zero-message legacy session. The engine can then restore
-    /// the empty anchor without assigning a different UUID.
-    func resumeSession(_ uuid: String, emptySessionTitle: String?)
+    func resumeSession(_ uuid: String)
     /// Ask the engine for its real MCP server listing (submit
     /// `RefreshListings(.mcp)`). The reply (`McpServers`) lands out-of-band and
     /// populates `model.mcpServers`. A no-op on the mock (keeps the canned list).
@@ -200,15 +194,11 @@ extension ConversationSource {
 
     func updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Bool, pendingPermission: Bool) {}
     func promptSuggestionFeedback(sessionId: String, uuid: String, action: String) {}
-    var sessionMode: SessionMode { .code }
-    func setSessionMode(_ mode: SessionMode) {}
-    func setSessionRestoreFallbackMode(_ mode: SessionMode) {}
-    func startNewConversation(mode: SessionMode) {
-        startNewConversation()
-        setSessionMode(mode)
-    }
     var isTemporaryConversation: Bool { false }
     var hasLiveSideChats: Bool { false }
+    var hasActiveRealtimeAudio: Bool { false }
+    var voiceAudioOwner: IOSAudioOwner? { nil }
+    var isAvailableForPrompts: Bool { true }
 
     @discardableResult
     func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
@@ -222,14 +212,10 @@ extension ConversationSource {
     func handleBackground() {}
     func markActiveTurnPausedRecoverable(_ token: ConversationTurnToken?) async throws {}
     func handleForeground() {}
-    func forkSession(_ sessionID: String, targetMode: SessionMode) async throws {}
     /// Default session ops for sources with no engine catalog (the mock): no-ops,
     /// so the mock keeps its canned drawer lists and ignores resume requests.
     func listSessions() {}
-    func resumeSession(_ uuid: String) {
-        resumeSession(uuid, emptySessionTitle: nil)
-    }
-    func resumeSession(_ uuid: String, emptySessionTitle: String?) {}
+    func resumeSession(_ uuid: String) {}
     func refreshMcpServers() {}
     func listSessionAgents() {}
     func resumeWorkflow(_ taskID: String) {}

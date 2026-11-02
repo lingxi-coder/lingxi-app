@@ -118,6 +118,9 @@ export class TranscriptBuilder {
   }
 
   private applyEvent(event: ClientEvent, truncated: boolean): void {
+    // Snapshot bases already own the transcript. Lifecycle records only
+    // confirm identity/mode and must not replace previously replayed rows.
+    if (event.type === 'session_started' || event.type === 'session_resumed') return;
     if (truncated && event.type === 'tool_use_result') {
       this.truncatedTools = new Set(this.truncatedTools).add(event.id);
     }

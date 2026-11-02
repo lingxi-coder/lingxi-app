@@ -39,7 +39,7 @@ fn resume_with_invalid_uuid_string_exits_1() {
 }
 
 #[test]
-fn stdio_resume_recovers_chat_then_uses_code() {
+fn stdio_resume_rejects_chat_without_mutating_the_transcript() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let cwd = root.path().join("project");
@@ -48,18 +48,19 @@ fn stdio_resume_recovers_chat_then_uses_code() {
     let path = session::jsonl::path::session_path(&home, &cwd.to_string_lossy(), &session_id.to_string());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let rows = [
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":session_id, "sessionMode":"chat", "instructionEpoch":2}),
         serde_json::json!({"type":"user", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
             "sessionId":session_id, "cwd":cwd, "message":{"role":"user","content":"hello"}}),
-        serde_json::json!({"type":"session-mode", "sessionId":session_id, "sessionMode":"chat",
-            "contextRevision":2, "profileEpoch":2, "admittedMode":"chat", "admittedEpoch":2, "pending":false}),
     ];
-    std::fs::write(&path, rows.iter().map(|row| format!("{row}\n")).collect::<String>()).unwrap();
+    let original = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+    std::fs::write(&path, &original).unwrap();
     Command::cargo_bin("lingxi-cli").unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
         .env("LINGXI_CONFIG_DIR", &home)
         .current_dir(&cwd)
         .args(["--no-tui", "--resume", &session_id.to_string()])
-        .write_stdin("/context manifest\n/exit\n")
-        .assert().success()
-        .stdout(predicate::str::contains("\"active\": \"code\""));
+        .assert().code(1)
+        .stderr(predicate::str::contains("session_mode_mismatch"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    assert!(!home.join("sessions").exists());
 }

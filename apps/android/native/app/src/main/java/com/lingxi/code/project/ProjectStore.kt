@@ -9,6 +9,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.R
 import com.lingxi.code.model.SessionRow
+import com.lingxi.code.model.canonicalSessionId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +28,9 @@ class ProjectStore private constructor(
     private val _state = MutableStateFlow(ProjectStoreState())
     val state: StateFlow<ProjectStoreState> = _state.asStateFlow()
     private val repositoryMutex = Mutex()
+    private val ownerStore by lazy { ScopeStateStore(appContext) }
+    private val ownerStateFile = File(appContext.filesDir, ScopeStateStore.SCOPE_STATE_FILE)
+    private var ownerRegistryObserved = false
 
     init {
         reload()
@@ -38,39 +42,43 @@ class ProjectStore private constructor(
                 ProjectOperationKind.RefreshSessions,
                 message = com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_loading_message),
             ) {
-                repository.load()
+                loadValidatedRepository()
             }
         }
     }
 
-    suspend fun createInternal(name: String): ProjectSnapshot =
+    suspend fun createInternal(name: String, mode: com.lingxi.code.model.SessionMode): ProjectSnapshot =
         runSuspendingOperation(
             ProjectOperationKind.Create,
             message = com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_creating_message),
         ) {
-            val created = repository.createInternal(name)
-            _state.value = repository.load()
+            loadValidatedRepository()
+            val created = repository.createInternal(name, mode)
+            _state.value = loadValidatedRepository()
             created
         }
 
-    suspend fun registerAuthoringWorkspace(name: String, directory: String): ProjectSnapshot =
+    suspend fun registerAuthoringWorkspace(name: String, directory: String, mode: com.lingxi.code.model.SessionMode): ProjectSnapshot =
         runSuspendingOperation(ProjectOperationKind.Create, message = appContext.getString(R.string.project_creating_message)) {
-            repository.registerAuthoringWorkspace(name, directory).also { _state.value = repository.load() }
+            loadValidatedRepository()
+            repository.registerAuthoringWorkspace(name, directory, mode).also { _state.value = loadValidatedRepository() }
         }
 
-    suspend fun importSaf(name: String, treeUri: Uri): ProjectSnapshot =
+    suspend fun importSaf(name: String, treeUri: Uri, mode: com.lingxi.code.model.SessionMode): ProjectSnapshot =
         runSuspendingOperation(
             ProjectOperationKind.Import,
             message = com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_importing_message),
         ) {
+            loadValidatedRepository()
             persistTreePermission(treeUri)
             val created = repository.createSafMirror(
                 name = name,
                 sourceTreeUri = treeUri.toString(),
                 sourceDisplayName = treeDisplayName(treeUri),
+                mode = mode,
             )
             val result = synchronizer.importInitial(created.record.id)
-            _state.value = repository.load().copy(conflicts = result.conflicts)
+            _state.value = loadValidatedRepository().copy(conflicts = result.conflicts)
             result.project
         }
 
@@ -80,85 +88,95 @@ class ProjectStore private constructor(
      * same Source transaction, so Compose never sees a Project/Engine mismatch.
      */
     suspend fun persistActive(projectId: String?): ProjectStoreState =
-        withContext(Dispatchers.IO) {
-            repositoryMutex.withLock {
+        withRepository {
+            synchronized(com.lingxi.code.conversation.SessionAdmissionGate.lock) {
+                check(!_state.value.storageUnavailable) { "Conversation storage is unavailable" }
                 repository.setActiveProject(projectId)
             }
         }
 
-    /** Publish the already-durable Project state without another I/O race. */
-    fun publishActive(persisted: ProjectStoreState) {
-        _state.value = persisted.copy(
-            conflicts = _state.value.conflicts,
-            operation = _state.value.operation,
-            errorMessage = null,
-        )
+    suspend fun validateOwnerIndexes() = withRepository {
+        publishRepositoryState(loadValidatedRepository())
     }
 
-    suspend fun recordWorkspace(projectId: String, state: SessionWorkspaceState): Unit = withContext(Dispatchers.IO) {
-        repositoryMutex.withLock {
-            _state.value = repository.recordWorkspace(projectId, state)
+    /** Publish the already-durable Project state without another I/O race. */
+    fun publishActive(persisted: ProjectStoreState, activate: () -> Unit): Boolean =
+        synchronized(com.lingxi.code.conversation.SessionAdmissionGate.lock) {
+            if (_state.value.storageUnavailable) false else {
+                _state.value = persisted.copy(
+                    conflicts = _state.value.conflicts,
+                    operation = _state.value.operation,
+                    errorMessage = null,
+                )
+                activate()
+                true
+            }
         }
+
+    suspend fun addVisibleMode(projectId: String, mode: com.lingxi.code.model.SessionMode) = withRepository {
+        repository.addVisibleMode(projectId, mode)
+        publishRepositoryState(loadValidatedRepository())
+    }
+
+    suspend fun recordWorkspace(projectId: String, state: SessionWorkspaceState): Unit = withRepository {
+        _state.value = repository.recordWorkspace(projectId, state)
     }
 
     suspend fun syncEngineSessions(projectId: String?, rows: List<SessionRow>): ProjectStoreState =
-        withContext(Dispatchers.IO) {
-            repositoryMutex.withLock {
-                val timestamp = System.currentTimeMillis()
-                repository.updateSessions(
-                    projectId,
-                    rows.mapIndexed { index, row ->
-                        ProjectSessionSummary(
-                            sessionId = row.uuid,
-                            title = row.title,
-                            transcriptPath = row.transcriptPath,
-                            workspaceDirectory = row.workspaceDirectory,
-                            messageCount = row.messageCount,
-                            relativeTime = row.relativeTime,
-                            updatedAtEpochMillis = row.modifiedAtEpochSeconds
-                                ?.takeIf { it > 0L }
-                                ?.times(1000L)
-                                ?: (timestamp - index),
-                            mode = row.mode,
-                        )
-                    },
-                ).also(::publishRepositoryState)
-            }
+        withRepository {
+            requireMatchingSessionOwners(rows.associate {
+                canonicalSessionId(it.uuid) to ScopeStateStore.SessionOwner(projectId?.let { id -> "project.$id" } ?: "global", it.mode)
+            }, readRecordedOwners())
+            val timestamp = System.currentTimeMillis()
+            repository.updateSessions(
+                projectId,
+                rows.mapIndexed { index, row ->
+                    ProjectSessionSummary(
+                        sessionId = row.uuid,
+                        title = row.title,
+                        transcriptPath = row.transcriptPath,
+                        workspaceDirectory = row.workspaceDirectory,
+                        messageCount = row.messageCount,
+                        relativeTime = row.relativeTime,
+                        updatedAtEpochMillis = row.modifiedAtEpochSeconds
+                            ?.takeIf { it > 0L }
+                            ?.times(1000L)
+                            ?: (timestamp - index),
+                        mode = row.mode,
+                    )
+                },
+            ).also(::publishRepositoryState)
         }
 
     suspend fun recordStartedSession(
         projectId: String?,
         sessionId: String,
         title: String,
-        mode: com.lingxi.code.model.SessionMode = com.lingxi.code.model.SessionMode.Code,
+        mode: com.lingxi.code.model.SessionMode,
         initialMessageCount: Int = 0,
     ) {
-        withContext(Dispatchers.IO) {
-            repositoryMutex.withLock {
-                publishRepositoryState(
-                    repository.recordStartedSession(projectId, sessionId, title, mode, initialMessageCount),
-                )
-            }
+        withRepository {
+            requireMatchingSessionOwners(mapOf(canonicalSessionId(sessionId) to
+                ScopeStateStore.SessionOwner(projectId?.let { "project.$it" } ?: "global", mode)), readRecordedOwners())
+            publishRepositoryState(
+                repository.recordStartedSession(projectId, sessionId, title, mode, initialMessageCount),
+            )
         }
     }
 
     suspend fun setSessionArchived(projectId: String?, sessionId: String, archived: Boolean) {
-        withContext(Dispatchers.IO) {
-            repositoryMutex.withLock {
-                publishRepositoryState(repository.setSessionArchived(projectId, sessionId, archived))
-                if (archived) com.lingxi.code.cron.AndroidCronRepository.get(appContext)
-                    .pauseForArchivedSession(projectId ?: com.lingxi.code.cron.GLOBAL_CRON_SCOPE_ID, sessionId)
-            }
+        withRepository {
+            publishRepositoryState(repository.setSessionArchived(projectId, sessionId, archived))
+            if (archived) com.lingxi.code.cron.AndroidCronRepository.get(appContext)
+                .pauseForArchivedSession(projectId ?: com.lingxi.code.cron.GLOBAL_CRON_SCOPE_ID, sessionId)
         }
     }
 
     suspend fun markActiveSession(projectId: String, sessionId: String) {
-        withContext(Dispatchers.IO) {
-            repositoryMutex.withLock {
-                publishRepositoryState(
-                    repository.markActiveSession(projectId, sessionId),
-                )
-            }
+        withRepository {
+            publishRepositoryState(
+                repository.markActiveSession(projectId, sessionId),
+            )
         }
     }
 
@@ -170,7 +188,7 @@ class ProjectStore private constructor(
                 com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_reimporting_message),
             ) {
                 val result = synchronizer.reimport(projectId)
-                repository.load().copy(conflicts = result.conflicts)
+                loadValidatedRepository().copy(conflicts = result.conflicts)
             }
         }
     }
@@ -192,7 +210,7 @@ class ProjectStore private constructor(
                     ),
                 )
                 val result = synchronizer.reimport(projectId)
-                repository.load().copy(conflicts = result.conflicts)
+                loadValidatedRepository().copy(conflicts = result.conflicts)
             }
         }
     }
@@ -205,7 +223,7 @@ class ProjectStore private constructor(
                 com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_exporting_message),
             ) {
                 val result = synchronizer.export(projectId)
-                repository.load().copy(conflicts = result.conflicts)
+                loadValidatedRepository().copy(conflicts = result.conflicts)
             }
         }
     }
@@ -218,7 +236,7 @@ class ProjectStore private constructor(
                 com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_resolving_conflicts_message),
             ) {
                 val result = synchronizer.resolve(projectId, resolution)
-                repository.load().copy(conflicts = result.conflicts)
+                loadValidatedRepository().copy(conflicts = result.conflicts)
             }
         }
     }
@@ -227,12 +245,71 @@ class ProjectStore private constructor(
         _state.value = _state.value.copy(errorMessage = null)
     }
 
+    fun reportOwnerConflict(sessionId: String, indexed: ScopeStateStore.SessionOwner, recorded: ScopeStateStore.SessionOwner?) {
+        val scopes = listOfNotNull(indexed.scopeKey, recorded?.scopeKey).distinct().sorted()
+        publishRepositoryFailure(null, ProjectCatalogUnavailableException(scopes,
+            "Session $sessionId has conflicting recorded owners: ${scopes.joinToString()}"))
+    }
+
+    fun reportOwnerStateFailure(failure: Exception, scope: String = "owner-registry") {
+        synchronized(com.lingxi.code.conversation.SessionAdmissionGate.lock) {
+            val scopes = ((_state.value.unavailableScopes.takeIf { _state.value.storageUnavailable }.orEmpty()) + scope)
+                .distinct().sorted()
+            publishRepositoryFailure(null, ProjectCatalogUnavailableException(scopes,
+                "Conversation state is unavailable for $scope: ${failure.message.orEmpty()}", failure))
+        }
+    }
+
+    private fun publishRepositoryFailure(recovered: ProjectStoreState?, failure: Throwable) {
+        synchronized(com.lingxi.code.conversation.SessionAdmissionGate.lock) {
+            _state.value = repositoryFailureState(_state.value, recovered,
+                failure.message ?: failure::class.simpleName,
+                (failure as? ProjectCatalogUnavailableException)?.scopes.orEmpty())
+        }
+    }
+
     private fun publishRepositoryState(next: ProjectStoreState) {
         _state.value = next.copy(
             conflicts = _state.value.conflicts,
             operation = _state.value.operation,
             errorMessage = _state.value.errorMessage,
         )
+    }
+
+    private suspend fun readRecordedOwners(hasIndexedOwners: Boolean = false): Map<String, ScopeStateStore.SessionOwner> = try {
+        val present = ownerStateFile.exists() || java.nio.file.Files.isSymbolicLink(ownerStateFile.toPath())
+        requireOwnerRegistryPresent(present, ownerRegistryObserved, hasIndexedOwners)
+        ownerStore.readSessionOwners().also { if (present) ownerRegistryObserved = true }
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
+    } catch (error: ProjectCatalogUnavailableException) {
+        throw error
+    } catch (error: Exception) {
+        throw ProjectCatalogUnavailableException(listOf("owner-registry"), "Conversation owner registry is unavailable", error)
+    }
+
+    private suspend fun loadValidatedRepository(): ProjectStoreState {
+        val state = repository.load()
+        val indexed = repository.indexedSessionOwners(state.globalSessions)
+        requireMatchingSessionOwners(indexed, readRecordedOwners(hasIndexedOwners = indexed.isNotEmpty()))
+        return state
+    }
+
+    /** A failed validation must fence new owners even when a live refresh found it. */
+    private suspend fun <T> withRepository(block: suspend () -> T): T = withContext(Dispatchers.IO) {
+        repositoryMutex.withLock {
+            try {
+                loadValidatedRepository()
+                block()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                val reload = runCatching { loadValidatedRepository() }
+                val failure = reload.exceptionOrNull() ?: error
+                publishRepositoryFailure(reload.getOrNull(), failure)
+                throw error
+            }
+        }
     }
 
     private suspend fun <T> runSuspendingOperation(
@@ -250,12 +327,16 @@ class ProjectStore private constructor(
                 repositoryMutex.withLock { block() }
             }
         } catch (t: Throwable) {
-            val recovered = withContext(Dispatchers.IO) {
-                repositoryMutex.withLock { repository.load() }
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            val reload = try {
+                Result.success(withContext(Dispatchers.IO) { repositoryMutex.withLock { loadValidatedRepository() } })
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Result.failure(error)
             }
-            _state.value = recovered.copy(
-                errorMessage = t.message ?: t::class.simpleName,
-            )
+            val failure = reload.exceptionOrNull() ?: t
+            publishRepositoryFailure(reload.getOrNull(), failure)
             throw t
         } finally {
             _state.value = _state.value.copy(operation = null)
@@ -311,6 +392,7 @@ class ProjectStore private constructor(
                         userHome = File(paths.home),
                         projectsGuestRoot = paths.projectsGuestPath,
                         userHomeGuestPath = paths.guestHome,
+                        ownerStateFile = File(appContext.filesDir, ScopeStateStore.SCOPE_STATE_FILE),
                         strings = projectStrings(appContext),
                     )
                     return ProjectStore(

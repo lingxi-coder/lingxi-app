@@ -45,7 +45,7 @@ class DrawerUiState(
     }
 
     private fun workspaceModeKey(mode: SessionMode, workspaceKey: String): String =
-        "${mode.wireKey}:$workspaceKey"
+        "${mode.wireValue}:$workspaceKey"
 
     fun isWorkspaceCollapsed(mode: SessionMode, workspaceKey: String): Boolean =
         workspaceModeKey(mode, workspaceKey) in collapsedWorkspaces
@@ -65,17 +65,18 @@ class DrawerUiState(
     }
 
     fun pinnedAt(mode: SessionMode, workspaceKey: String): Long? =
-        pinnedWorkspaces[workspaceKey]
+        pinnedWorkspaces[workspaceModeKey(mode, workspaceKey)]
 
     fun toggleWorkspacePinned(
         mode: SessionMode,
         workspaceKey: String,
         nowEpochMillis: Long = System.currentTimeMillis(),
     ) {
-        pinnedWorkspaces = if (workspaceKey in pinnedWorkspaces) {
-            pinnedWorkspaces - workspaceKey
+        val key = workspaceModeKey(mode, workspaceKey)
+        pinnedWorkspaces = if (key in pinnedWorkspaces) {
+            pinnedWorkspaces - key
         } else {
-            pinnedWorkspaces + (workspaceKey to nowEpochMillis)
+            pinnedWorkspaces + (key to nowEpochMillis)
         }
     }
 

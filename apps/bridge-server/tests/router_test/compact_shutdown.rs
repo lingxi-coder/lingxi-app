@@ -120,6 +120,14 @@ async fn shutdown_finishes_real_compaction_after_durable_boundary_before_summary
         transcript.clone(),
         fs.clone(),
     ));
+    writer
+        .initialize_fixed_session_mode(
+            &session_id.to_string(),
+            lingxi_core::host::session_context::ConversationMode::Code,
+            0,
+        )
+        .await
+        .unwrap();
     let mut parent = None;
     for index in 0..6 {
         let id = uuid::Uuid::new_v4().to_string();

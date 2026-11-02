@@ -102,7 +102,7 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   routines: BotRoutinesBridge;
   onBack(): void;
   /** Show a chat of this Bot (a new one without an id) in the chat view. Rejects with the reason it could not start. */
-  onOpenChat(sessionId?: string): Promise<void>;
+  onOpenChat(sessionId?: string, transcriptPath?: string): Promise<void>;
   /** Show the chat that does a task, which is a chat of the Bot that was given the task: this one or another. Rejects with the reason it could not start. */
   onOpenTaskChat(botId: string, sessionId: string): Promise<void>;
   /** Go to the Scheduled page to make a task that runs as this Bot, in the scope the scheduler lists for it. */
@@ -167,7 +167,7 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
     if (!outcome.ok) setOpenError(outcome.message);
     setOpening(undefined);
   };
-  const open = (sessionId?: string) => openWith(sessionId ?? 'new', () => onOpenChat(sessionId));
+  const open = (sessionId?: string, transcriptPath?: string) => openWith(sessionId ?? 'new', () => onOpenChat(sessionId, transcriptPath));
   const remove = async () => {
     setDeleting({ busy: true, error: '' });
     const outcome = await removeBot(onDelete);
@@ -198,7 +198,7 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
     <nav className="bots-tabs" aria-label={tr('bots_sections_label')}>
       {TABS.map((id) => <button key={id} type="button" aria-current={tab === id ? 'page' : undefined} onClick={() => setTab(id)}>{tabLabel(id)}</button>)}
     </nav>
-    {tab === 'chats' ? <BotChatsPanel chats={chats} opening={opening} disabled={sessionLoading} onOpen={(sessionId) => void open(sessionId)} onRetry={() => { setChats({ status: 'loading' }); void loadChats(); }} /> : null}
+    {tab === 'chats' ? <BotChatsPanel chats={chats} opening={opening} disabled={sessionLoading} onOpen={(sessionId, transcriptPath) => void open(sessionId, transcriptPath)} onRetry={() => { setChats({ status: 'loading' }); void loadChats(); }} /> : null}
     {tab === 'routines' ? <BotRoutinesPanel controller={routines} scopeId={routineScope} onNew={onNewRoutine} onOpen={onOpenRoutine} /> : null}
     {tab === 'tasks' ? <BotTasksPanel controller={tasks} opening={opening} disabled={sessionLoading}
       onOpen={(task) => void openWith(task.taskId, () => onOpenTaskChat(task.botId, task.sessionId))} /> : null}

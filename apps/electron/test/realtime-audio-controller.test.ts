@@ -10,6 +10,7 @@ function setup(options: {
   startCapture?: () => Promise<any>;
   stopCapture?: () => Promise<void>;
   inputCloseObserverMs?: number;
+  retainRuntime?: (runtime: RealtimeAudioRuntime) => () => void;
 } = {}) {
   let event: ((eventJson: string) => void) | undefined;
   let device: ((event: NativeAudioEvent) => void) | undefined;
@@ -25,7 +26,7 @@ function setup(options: {
     startRealtimeCapture: async () => { captureCount++; return options.startCapture ? options.startCapture() : { type: 'recording_started', handle: 'h' }; },
     stopRealtimeCapture: async () => { stopCount++; return options.stopCapture?.(); },
     playRealtimeAudio: async (_session, pcm) => { played.push(pcm); return playback.promise; },
-  }, inputCloseObserverMs: options.inputCloseObserverMs });
+  }, inputCloseObserverMs: options.inputCloseObserverMs, retainRuntime: options.retainRuntime });
   return { controller, runtime, inputs, starts, states, played, playback, send: (item: unknown) => event?.(JSON.stringify({ operationId: starts.at(-1)?.operationId, ...(item as object) })), capture: (item: NativeAudioEvent) => device?.(item), setCurrent: (value?: RealtimeAudioRuntime) => { current = value; }, captures: () => captureCount, stops: () => stopCount };
 }
 const ready = { type: 'session_ready', model: 'realtime', inputFormat: { encoding: 'pcm16', sampleRateHz: 24_000, channels: 1 }, outputFormat: { encoding: 'pcm16', sampleRateHz: 24_000, channels: 1 }, capabilities: {} };
@@ -45,9 +46,32 @@ test('realtime playback completion is acknowledged only after device playback, t
   await f.controller.stop();
 });
 
-test('stale session events cannot play provider audio in the new active session', async () => {
-  const f = setup(); await f.controller.start(audioConfigurationDefaults()); f.setCurrent(undefined); f.send(delta); await tick();
-  assert.deepEqual(f.played, []); assert.equal(f.states.at(-1)?.phase, 'paused');
+test('navigation keeps realtime audio on its captured owner until explicitly stopped', async () => {
+  let retained = 0; let released = 0;
+  const f = setup({ retainRuntime: () => { retained++; return () => { released++; }; } });
+  await f.controller.start(audioConfigurationDefaults()); f.send(ready); await tick();
+  f.setCurrent({ ...f.runtime, sessionId: 'other' });
+  f.capture(chunk);
+  assert.deepEqual(f.inputs[0], { type: 'audio', operationId: f.starts[0].operationId, audioBase64: 'AAA=' });
+  await f.controller.commit();
+  f.send(delta); f.send({ type: 'turn_completed' }); await tick();
+  assert.deepEqual(f.played, ['AAA=']); assert.equal(f.controller.sessionId, 's');
+  assert.equal(retained, 1); assert.equal(released, 0);
+  f.playback.resolve({ type: 'playback_completed', duration_ms: 20 }); await tick(); await tick();
+  assert.equal(f.captures(), 2);
+  await f.controller.stop(); assert.equal(released, 1);
+  assert.equal(f.states.at(-1)?.sessionId, 's');
+});
+
+test('a timed-out capture close retains its runtime until the exact device close finishes', async () => {
+  const held = deferred<void>(); let released = 0;
+  const f = setup({ stopCapture: () => held.promise, inputCloseObserverMs: 15,
+    retainRuntime: () => () => { released++; } });
+  await f.controller.start(audioConfigurationDefaults()); f.send(ready); await tick();
+  await assert.rejects(f.controller.stop(), /remains unconfirmed/);
+  assert.equal(released, 0);
+  held.resolve(); await tick(); await tick();
+  assert.equal(released, 1);
 });
 
 test('interruptible mode requires actual native echo cancellation and fails before provider start', async () => {

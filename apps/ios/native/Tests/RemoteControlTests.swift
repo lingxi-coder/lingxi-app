@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import LingxiCode
 
 final class RemoteControlTests: XCTestCase {
@@ -32,6 +33,188 @@ final class RemoteControlTests: XCTestCase {
 
     #if canImport(harness_runtimeFFI)
     @MainActor
+    func testNativeModeRejectionStaysFailedAfterLaterModeUpdate() {
+        for code in ["SESSION_MODE_OVERFLOW", "SESSION_MODE_MISMATCH"] {
+            let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A")
+            func update(error: RemoteSessionErrorFfi?, mode: SessionModeDto?, phase: RemoteSessionPhaseFfi) -> RemoteSessionUpdateFfi {
+                RemoteSessionUpdateFfi(
+                    sessionId: session, sessionMode: mode, phase: phase, error: error, replace: true,
+                    messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+                    pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+                    turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+                    hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+            }
+            remote.receive(update(error: RemoteSessionErrorFfi(code: code, message: "rejected"), mode: nil, phase: .error))
+            XCTAssertEqual(remote.phase, .error)
+            remote.receive(update(error: nil, mode: .chat, phase: .live))
+            XCTAssertEqual(remote.phase, .error)
+            XCTAssertFalse(remote.model.sessionModeKnown)
+            XCTAssertFalse(remote.isAvailableForPrompts)
+        }
+    }
+
+    @MainActor
+    func testTeamApprovalCapabilityShowsOnlyPermissionAndNeverInventsMode() async throws {
+        actor Decisions {
+            var values: [Bool] = []
+            func add(_ allow: Bool) { values.append(allow) }
+            func snapshot() -> [Bool] { values }
+        }
+        let decisions = Decisions()
+        let id = "team-approval:" + String(repeating: "a", count: 32)
+        let remote = RemoteConversationSource(hostID: host, sessionID: id, uid: "A",
+            remotePermissionResponder: { _, allow in await decisions.add(allow) })
+        let permission = PermissionRequest(requestId: 1,
+            kind: .toolUseConfirm(toolName: "tool", toolInputJson: "{}", defaultAllow: false),
+            worker: nil, owner: nil, suppressAlwaysAllowRule: true, autoModePrompt: nil)
+        remote.receive(RemoteSessionUpdateFfi(
+            sessionId: id, sessionMode: nil, phase: .live, error: nil, replace: true,
+            messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+            pending: RemotePendingFfi(permissions: [permission], questions: [], computerAccess: []),
+            turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+            hasOlder: false, loadingOlder: false, answeredElsewhere: false))
+        XCTAssertTrue(remote.isApprovalCapability)
+        XCTAssertEqual(remote.phase, .live)
+        XCTAssertFalse(remote.model.sessionModeKnown)
+        XCTAssertEqual(remote.model.pendingPermissions.count, 1)
+        XCTAssertFalse(remote.isAvailableForPrompts)
+        XCTAssertNil(remote.send("not a chat"))
+        remote.approvePermission(1, .allowOnce)
+        remote.denyPermission(1)
+        for _ in 0..<100 {
+            if await decisions.snapshot().count == 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let received = await decisions.snapshot()
+        XCTAssertEqual(received.sorted { !$0 && $1 }, [false, true])
+    }
+
+    @MainActor
+    func testAttachmentAdmissionRacePreservesUnsentOriginalImage() async throws {
+        let (release, continuation) = AsyncStream<Void>.makeStream()
+        let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A",
+            remotePromptSender: { _, _ in
+                for await _ in release { break }
+                throw RemoteFfiError.Rpc(code: "forbidden", detail: "turn already running")
+            })
+        func update(running: Bool) -> RemoteSessionUpdateFfi {
+            RemoteSessionUpdateFfi(
+                sessionId: session, sessionMode: .chat, phase: .live, error: nil, replace: true,
+                messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+                pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+                turn: RemoteTurnFfi(running: running, turnId: running ? 9 : nil), controls: nil, outgoing: [],
+                hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        }
+        remote.receive(update(running: false))
+        let png = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).image { _ in UIColor.red.setFill(); UIRectFill(CGRect(x: 0, y: 0, width: 2, height: 2)) }
+        let original = try XCTUnwrap(png.pngData()).base64EncodedString()
+        XCTAssertNotNil(remote.send("attachment", images: [ImageRefDto(mediaType: "image/png", base64: original)]))
+        remote.receive(update(running: true))
+        continuation.yield(())
+        for _ in 0..<100 {
+            if !remote.unsentPrompts.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let unsent = try XCTUnwrap(remote.unsentPrompts.first)
+        XCTAssertEqual(unsent.text, "attachment")
+        XCTAssertEqual(unsent.images.first?.base64, original)
+        XCTAssertNotNil(remote.model.error)
+    }
+
+    @MainActor
+    func testRejectedRemoteSendRestoresOriginalDraftWithoutOverwritingNewEdits() async throws {
+        func update(_ phase: RemoteSessionPhaseFfi, mode: SessionModeDto?) -> RemoteSessionUpdateFfi {
+            RemoteSessionUpdateFfi(
+                sessionId: session, sessionMode: mode, phase: phase, error: nil, replace: true,
+                messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+                pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+                turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+                hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        }
+        for conflict in [false, true] {
+            let (release, continuation) = AsyncStream<Void>.makeStream()
+            let manager = RemoteControlManager()
+            let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A", manager: manager,
+                remotePromptSender: { _, _ in
+                    for await _ in release { break }
+                    throw RemoteFfiError.NotConnected
+                })
+            remote.receive(update(.live, mode: .chat))
+            let units: [UInt16] = [0xD800, 0x0061]
+            XCTAssertNotNil(remote.send("original", sourceCodeUnits: units, images: [], selectedSlashCommand: nil))
+            remote.receive(conflict ? update(.live, mode: .code) : update(.loading, mode: nil))
+            XCTAssertEqual(remote.phase, conflict ? .error : .loading)
+            await remote.stop()
+            let reopened = RemoteConversationSource(hostID: host, sessionID: "sess:" + session, uid: "A", manager: manager)
+            XCTAssertTrue(reopened.draftOwner === remote.draftOwner)
+            XCTAssertFalse(RemoteConversationSource(hostID: "other", sessionID: session, uid: "A", manager: manager).draftOwner === remote.draftOwner)
+            XCTAssertFalse(RemoteConversationSource(hostID: host, sessionID: session, uid: "B", manager: manager).draftOwner === remote.draftOwner)
+            continuation.yield(())
+            for _ in 0..<100 {
+                if !reopened.unsentPrompts.isEmpty { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let unsent = try XCTUnwrap(reopened.unsentPrompts.first)
+            XCTAssertEqual(unsent.text, "original")
+            XCTAssertEqual(unsent.sourceCodeUnits, units)
+            var draft = RemoteConversationDraft()
+            draft.text = "new edits"
+            XCTAssertFalse(draft.restore(unsent))
+            XCTAssertEqual(draft.text, "new edits")
+            draft.text = ""
+            XCTAssertTrue(draft.restore(unsent))
+            XCTAssertEqual(draft.text, "original")
+            XCTAssertEqual(draft.sourceCodeUnits, units)
+            await manager.configure(uid: nil)
+            let afterLogout = RemoteConversationSource(hostID: host, sessionID: session, uid: "A", manager: manager)
+            XCTAssertFalse(afterLogout.draftOwner === remote.draftOwner)
+        }
+    }
+
+    @MainActor
+    func testAdmittedSendKeepsItsOwnerAliveUntilRejectionIsRecorded() async throws {
+        let (release, continuation) = AsyncStream<Void>.makeStream()
+        let manager = RemoteControlManager()
+        var remote: RemoteConversationSource? = RemoteConversationSource(hostID: host, sessionID: session, uid: "A", manager: manager,
+            remotePromptSender: { _, _ in
+                for await _ in release { break }
+                throw RemoteFfiError.NotConnected
+            })
+        remote?.receive(RemoteSessionUpdateFfi(
+            sessionId: session, sessionMode: .chat, phase: .live, error: nil, replace: true,
+            messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+            pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+            turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+            hasOlder: false, loadingOlder: false, answeredElsewhere: false))
+        let owner = try XCTUnwrap(remote?.draftOwner)
+        weak var admittedOwner = remote
+        XCTAssertNotNil(remote?.send("retain this"))
+        remote = nil
+        XCTAssertNotNil(admittedOwner, "the accepted task must own the source before its first suspension")
+        continuation.yield(())
+        for _ in 0..<100 {
+            if !owner.unsentPrompts.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(owner.unsentPrompts.first?.text, "retain this")
+    }
+
+    @MainActor
+    func testRemoteDraftRecoveryPreservesAttachment() throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).image { context in
+            UIColor.red.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }
+        let base64 = try XCTUnwrap(image.pngData()).base64EncodedString()
+        let unsent = RemoteUnsentPrompt(id: UUID(), text: "photo", sourceCodeUnits: nil,
+            images: [ImageRefDto(mediaType: "image/png", base64: base64)])
+        var draft = RemoteConversationDraft()
+        XCTAssertTrue(draft.restore(unsent))
+        XCTAssertEqual(draft.text, "photo")
+        XCTAssertEqual(draft.attachment?.base64, base64)
+    }
+
+    @MainActor
     func testRemoteProjectionAcceptsDesktopTurnsAndRetainsStablePromptIdentity() {
         let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
@@ -55,22 +238,112 @@ final class RemoteControlTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteWaitsForModeAndReplaysSnapshotAndEventsInOrder() {
+        let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A")
+        func update(mode: SessionModeDto? = nil, replace: Bool = false, records: [RemoteSeqRecordFfi] = [],
+                    running: Bool = false) -> RemoteSessionUpdateFfi {
+            RemoteSessionUpdateFfi(
+                sessionId: session, sessionMode: mode, phase: .live, error: nil, replace: replace,
+                messages: replace ? [MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "history".clientTextDto)])] : [],
+                olderMessages: [], firstMessageIndex: 0, records: records,
+                pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+                turn: RemoteTurnFfi(running: running, turnId: running ? 10 : nil), controls: nil, outgoing: [],
+                hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        }
+        remote.receive(update(replace: true))
+        remote.receive(update(records: [
+            RemoteSeqRecordFfi(seq: 1, record: .prompt(turnId: 10, text: "prompt", images: [], origin: .desktop, deviceName: nil)),
+            RemoteSeqRecordFfi(seq: 2, record: .event(event: .turnStarted(turnId: 10), truncated: false)),
+            RemoteSeqRecordFfi(seq: 3, record: .event(event: .textDelta(text: "answer".clientTextDto), truncated: false))
+        ], running: true))
+        XCTAssertEqual(remote.phase, .loading)
+        XCTAssertFalse(remote.model.sessionModeKnown)
+        XCTAssertTrue(remote.model.messages.isEmpty)
+        XCTAssertNil(remote.send("not yet"))
+
+        remote.receive(update(mode: .chat, running: true))
+        XCTAssertEqual(remote.phase, .live)
+        XCTAssertTrue(remote.model.sessionModeKnown)
+        XCTAssertEqual(remote.sessionMode, .chat)
+        XCTAssertEqual(remote.model.messages.map(\.text), ["history", "prompt", "answer"])
+
+        remote.receive(update(mode: .code, running: true))
+        XCTAssertEqual(remote.phase, .error)
+        XCTAssertEqual(remote.sessionMode, .chat)
+        XCTAssertNil(remote.send("conflicting mode"))
+        remote.receive(update(running: true))
+        XCTAssertEqual(remote.phase, .error)
+    }
+
+    @MainActor
+    func testRemoteModeLifecycleAfterPromptDoesNotResetReplayedHistory() {
+        let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A")
+        func update(replace: Bool = false, records: [RemoteSeqRecordFfi] = []) -> RemoteSessionUpdateFfi {
+            RemoteSessionUpdateFfi(
+                sessionId: session, sessionMode: nil, phase: .live, error: nil, replace: replace,
+                messages: replace ? [MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "history".clientTextDto)])] : [],
+                olderMessages: [], firstMessageIndex: 0, records: records,
+                pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+                turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+                hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        }
+        remote.receive(update(replace: true))
+        remote.receive(update(records: [
+            RemoteSeqRecordFfi(seq: 1, record: .prompt(turnId: 9, text: "prompt", images: [], origin: .desktop, deviceName: nil)),
+            RemoteSeqRecordFfi(seq: 2, record: .event(event: .sessionStarted(sessionId: "foreign", mode: .code), truncated: false)),
+        ]))
+        remote.receive(update(records: [
+            RemoteSeqRecordFfi(seq: 3, record: .event(event: .sessionResumed(sessionId: session, mode: .chat, messages: []), truncated: false)),
+        ]))
+        XCTAssertEqual(remote.phase, .live)
+        XCTAssertEqual(remote.sessionMode, .chat)
+        XCTAssertEqual(remote.model.messages.map(\.text), ["history", "prompt"])
+    }
+
+    @MainActor
+    func testRemoteLifecycleModeMustBelongToCurrentSession() {
+        let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A")
+        func update(_ id: String) -> RemoteSessionUpdateFfi {
+            RemoteSessionUpdateFfi(
+                sessionId: session, sessionMode: nil, phase: .live, error: nil, replace: false,
+                messages: [], olderMessages: [], firstMessageIndex: 0,
+                records: [RemoteSeqRecordFfi(seq: 1, record: .event(event: .sessionStarted(sessionId: id, mode: .chat), truncated: false))],
+                pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+                turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+                hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        }
+        remote.receive(update("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"))
+        XCTAssertEqual(remote.phase, .loading)
+        XCTAssertFalse(remote.model.sessionModeKnown)
+        remote.receive(update(session))
+        XCTAssertEqual(remote.phase, .live)
+        XCTAssertEqual(remote.sessionMode, .chat)
+    }
+
+    @MainActor
     func testRemoteSnapshotAndLiveModeDoNotReplaceTheTranscript() {
         let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
         source.replaceRemoteTranscript([MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "hello".clientTextDto)])], sessionID: session)
-        let update = RemoteSessionUpdateFfi(
-            sessionId: session, sessionMode: .chat, phase: .live, error: nil, replace: true,
-            messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
-            pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
-            turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
-            hasOlder: false, loadingOlder: false, answeredElsewhere: false)
-        source.reconcileRemoteState(update)
+        func update(_ mode: SessionModeDto?) -> RemoteSessionUpdateFfi {
+            RemoteSessionUpdateFfi(
+                sessionId: session, sessionMode: mode, phase: .live, error: nil, replace: true,
+                messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+                pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+                turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+                hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        }
+        source.reconcileRemoteState(update(nil))
+        XCTAssertFalse(source.model.sessionModeKnown, "A partial update must not invent a mode")
+        source.reconcileRemoteState(update(.chat))
+        XCTAssertTrue(source.model.sessionModeKnown)
+        XCTAssertEqual(source.model.sessionMode, .chat)
+        source.reconcileRemoteState(update(nil))
         XCTAssertTrue(source.model.sessionModeKnown)
         XCTAssertEqual(source.model.sessionMode, .chat)
         let rows = source.model.messages.map(\.text)
-        source.applyRemoteEvent(.sessionModeChanged(sessionId: session, mode: .code, pendingMode: nil, revision: 1))
-        XCTAssertEqual(source.model.sessionMode, .code)
+        source.applyRemoteEvent(.sessionStarted(sessionId: session, mode: .code))
+        XCTAssertEqual(source.model.sessionMode, .chat)
         XCTAssertEqual(source.model.messages.map(\.text), rows)
         XCTAssertEqual(source.model.activeSessionId, session)
     }

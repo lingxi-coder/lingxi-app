@@ -2,6 +2,7 @@ package com.lingxi.code.remote
 
 import android.app.Activity
 import android.graphics.BitmapFactory
+import android.widget.Toast
 import androidx.compose.ui.graphics.asImageBitmap
 import java.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -41,10 +42,13 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.bindings.client.PermissionResponseDto
+import com.lingxi.code.bindings.android.RemoteSessionPhaseFfi
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.conversation.ChatScreen
@@ -52,16 +56,22 @@ import com.lingxi.code.conversation.ChatViewModel
 import com.lingxi.code.conversation.ComposerAttachment
 import com.lingxi.code.conversation.ConversationBackgroundExecution
 import com.lingxi.code.conversation.PermissionPromptDialog
+import com.lingxi.code.conversation.PermissionPromptState
 import com.lingxi.code.conversation.REMOTE_MAX_PROMPT_IMAGES
 import com.lingxi.code.conversation.RemoteConversationSource
 import com.lingxi.code.conversation.conversationStrings
+import com.lingxi.code.conversation.isTeamApprovalSessionId
 import com.lingxi.code.conversation.sessionModeLabel
 import com.lingxi.code.model.SessionRef
-import com.lingxi.code.model.SessionMode
 import com.lingxi.code.theme.LingXiTheme
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewmodel.initializer
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 
 /** A followed session: its source and the view model that renders it. */
 class RemoteChat internal constructor(
@@ -69,6 +79,12 @@ class RemoteChat internal constructor(
     val chat: ChatViewModel,
     private val store: ViewModelStore,
 ) {
+    internal var savedDraft: String = ""
+    internal var needsReattach: Boolean = false
+    internal val attachments = mutableStateListOf<ComposerAttachment>()
+
+    internal fun updateDraft(value: String) { savedDraft = value }
+
     /** Stops following (the feed collection ends with the view model) and drops the state. */
     internal fun release() = store.clear()
 }
@@ -80,10 +96,12 @@ class RemoteChat internal constructor(
  */
 class RemoteSessionHolder : ViewModel() {
     private val open = mutableMapOf<String, RemoteChat>()
+    private val releasing = mutableMapOf<String, Job>()
 
     /** The followed session for [key], made by [create] the first time. [created] is true then. */
-    fun open(key: String, create: () -> RemoteConversationSource, onCreated: (RemoteChat) -> Unit, strings: com.lingxi.code.conversation.ConversationStrings): RemoteChat =
-        open.getOrPut(key) {
+    fun open(key: String, create: () -> RemoteConversationSource, onCreated: (RemoteChat) -> Unit, strings: com.lingxi.code.conversation.ConversationStrings): RemoteChat {
+        releasing.remove(key)?.cancel()
+        return open.getOrPut(key) {
             val source = create()
             val store = ViewModelStore()
             val chat = ViewModelProvider(
@@ -101,12 +119,32 @@ class RemoteSessionHolder : ViewModel() {
             )[ChatViewModel::class.java]
             RemoteChat(source, chat, store).also(onCreated)
         }
+    }
 
     fun release(key: String) {
-        open.remove(key)?.release()
+        val remote = open[key] ?: return
+        remote.needsReattach = true
+        releasing.remove(key)?.cancel()
+        // A submitted write and a failed or unsent draft belong to this owner
+        // even after the screen disappears. Reopening cancels this cleanup.
+        if (remote.savedDraft.isNotEmpty() || remote.attachments.isNotEmpty()) return
+        val cleanup = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            combine(remote.chat.externalSendInFlight, remote.chat.externalSendFailures) { count, failed ->
+                count == 0 && failed.isEmpty()
+            }.first { it }
+            if (open[key] === remote) {
+                open.remove(key)
+                remote.release()
+            }
+            releasing.remove(key)
+        }
+        releasing[key] = cleanup
+        cleanup.start()
     }
 
     override fun onCleared() {
+        releasing.values.forEach { it.cancel() }
+        releasing.clear()
         open.values.forEach { it.release() }
         open.clear()
     }
@@ -137,14 +175,19 @@ internal fun RemoteSessionScreen(
     val remote = remember(key) {
         holder.open(
             key = key,
-            create = { RemoteConversationSource(manager.sessionPort(hostId, sessionId), deviceName, strings) },
+            create = { RemoteConversationSource(manager.sessionPort(hostId, sessionId), sessionId, deviceName, strings) },
             onCreated = { it.chat.beginExternalLoading(SessionRef(sessionId, title ?: sessionId)) },
             strings = strings,
         )
     }
+    var draft by rememberSaveable(key) { mutableStateOf(remote.savedDraft) }
+    val attachments = remote.attachments
     val activity = context as? Activity
     DisposableEffect(key) {
-        onDispose { if (activity?.isChangingConfigurations != true) holder.release(key) }
+        onDispose {
+            remote.updateDraft(draft)
+            if (activity?.isChangingConfigurations != true) holder.release(key)
+        }
     }
 
     val scope = rememberCoroutineScope()
@@ -168,19 +211,60 @@ internal fun RemoteSessionScreen(
     val state by chat.state.collectAsState()
     val pendingPermission by chat.pendingPermission.collectAsState()
     val meta by remote.source.meta.collectAsState()
+    val approvalOnly = remember(sessionId) { isTeamApprovalSessionId(sessionId) }
+    var reattaching by remember(remote) { mutableStateOf(remote.needsReattach) }
+    var reattachError by remember(remote) { mutableStateOf<String?>(null) }
+    LaunchedEffect(remote) {
+        if (reattaching) {
+            remote.source.prepareForReattach()
+            chat.beginExternalLoading(SessionRef(sessionId, title ?: sessionId))
+            try {
+                manager.reattachSession(hostId, sessionId, ownerUid)
+                remote.needsReattach = false
+                reattaching = false
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reattachError = error.message ?: context.getString(R.string.remote_err_generic)
+            }
+        }
+    }
 
-    var draft by rememberSaveable(key) { mutableStateOf("") }
-    val attachments = remember(key) { mutableStateListOf<ComposerAttachment>() }
-    LaunchedEffect(chat) {
-        chat.externalSendFailures.collect { failed ->
-            if (draft.isEmpty() && attachments.isEmpty()) {
-                draft = failed.text
-                failed.images.forEach { image ->
+    fun reportPermissionError(error: Throwable) {
+        val message = error.message ?: context.getString(R.string.remote_err_generic)
+        if (approvalOnly) Toast.makeText(context, message, Toast.LENGTH_LONG).show() else chat.reportHostError(message)
+    }
+    val approve: (ULong, PermissionResponseDto) -> Unit = { requestId, response ->
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try { chat.approvePermission(requestId, response) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { reportPermissionError(error) }
+        }
+    }
+    val deny: (ULong) -> Unit = { requestId ->
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try { chat.denyPermission(requestId) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { reportPermissionError(error) }
+        }
+    }
+
+    val failedSends by chat.externalSendFailures.collectAsState()
+    LaunchedEffect(chat, failedSends, draft, attachments.size) {
+        val failed = failedSends.firstOrNull()
+        if (failed != null && draft.isEmpty() && attachments.isEmpty()) {
+            val restored = runCatching {
+                failed.images.map { image ->
                     val bytes = Base64.getDecoder().decode(image.base64)
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { bitmap ->
-                        attachments += ComposerAttachment(bitmap.asImageBitmap(), bitmap.width, bitmap.height, image.mediaType, image.base64)
-                    }
+                    val bitmap = checkNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size))
+                    ComposerAttachment(bitmap.asImageBitmap(), bitmap.width, bitmap.height, image.mediaType, image.base64)
                 }
+            }.getOrNull()
+            if (restored != null) {
+                draft = failed.text
+                remote.updateDraft(failed.text)
+                attachments.addAll(restored)
+                chat.acknowledgeExternalSendFailure(failed)
             }
         }
     }
@@ -212,73 +296,83 @@ internal fun RemoteSessionScreen(
                 )
             }
             Column(Modifier.weight(1f)) {
-                Text(state.session.title, color = t.text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text(if (approvalOnly) stringResource(R.string.permission_request_title) else state.session.title,
+                    color = t.text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                 val modeLabel = meta.sessionMode?.let { sessionModeLabel(it) }
                 Text(listOfNotNull(botName, hostName, modeLabel).joinToString(" · "), color = t.text3, fontSize = 12.sp, maxLines = 1)
             }
         }
-        if (meta.hasOlder) {
-            Text(
-                stringResource(if (meta.loadingOlder) R.string.remote_loading_older else R.string.remote_load_older),
-                color = t.accent, fontSize = 13.sp,
-                modifier = Modifier.fillMaxWidth().clickable(enabled = !meta.loadingOlder) {
-                    scope.launch { runCatching { remote.source.loadOlder() } }
-                }.padding(vertical = 8.dp),
+        val ownerMode = meta.sessionMode
+        if (reattaching) {
+            Text(reattachError ?: stringResource(R.string.remote_session_loading), color = t.text3,
+                modifier = Modifier.weight(1f).padding(16.dp))
+        } else if (approvalOnly) {
+            TeamApprovalContent(
+                phase = meta.phase,
+                statusLine = state.statusLine,
+                permission = pendingPermission,
+                onApprove = approve,
+                onDeny = deny,
+                modifier = Modifier.weight(1f),
+            )
+        } else if (ownerMode == null) {
+            Text(state.statusLine ?: stringResource(R.string.remote_session_loading), color = t.text3,
+                modifier = Modifier.weight(1f).padding(16.dp))
+        } else {
+            if (meta.hasOlder) {
+                Text(
+                    stringResource(if (meta.loadingOlder) R.string.remote_loading_older else R.string.remote_load_older),
+                    color = t.accent, fontSize = 13.sp,
+                    modifier = Modifier.fillMaxWidth().clickable(enabled = !meta.loadingOlder) {
+                        scope.launch { runCatching { remote.source.loadOlder() } }
+                    }.padding(vertical = 8.dp),
+                )
+            }
+            RemoteFilesPanel(manager, hostId, sessionId, enabled = meta.phase == com.lingxi.code.bindings.android.RemoteSessionPhaseFfi.LIVE)
+            ChatScreen(
+                modifier = Modifier.weight(1f),
+                state = state,
+                onSend = { chat.send(it) },
+                onSendWithAttachment = { text, _ ->
+                    chat.send(text, images = attachments.map { ImageRefDto(it.mediaType, it.base64) })
+                },
+                onSendPreflight = { text, _ -> chat.admitComposerSend(text, attachments.isNotEmpty()) },
+                onNewChat = {},
+                onSelectModel = chat::selectModel,
+                remoteModelSelection = true,
+                onSelectReasoning = chat::selectReasoning,
+                isDark = isDark,
+                sessionMode = ownerMode,
+                showTopBar = false,
+                showNewChatControls = false,
+                // Voice belongs to the local engine; a remote session takes typed text.
+                voiceInputSupported = false,
+                voiceConversationSupported = false,
+                draft = draft,
+                onDraftChange = { remote.updateDraft(it); draft = it },
+                pendingPermission = pendingPermission != null,
+                effectivePermissionMode = meta.controls?.permission?.effective ?: "default",
+                onOpenPermissionSettings = { modeDialog = true },
+                onCameraClick = {
+                    if (state.isStreaming) chat.reportHostError(imagesWhileRunning)
+                    else pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+                attachments = attachments.toList(),
+                onRemoveAttachmentAt = { if (it in attachments.indices) attachments.removeAt(it) },
+                onRemoveAttachment = { attachments.clear() },
+                onStop = chat::cancel,
+                onDismissError = chat::dismissError,
+                onDismissCompactRejection = chat::dismissCompactRejection,
+                onAnswerQuestion = chat::answerQuestion,
+                onCancelQuestion = chat::cancelQuestion,
+                onToggleToolCall = chat::toggleToolCall,
+                onTogglePlan = chat::togglePlanExpanded,
             )
         }
-        RemoteFilesPanel(manager, hostId, sessionId, enabled = meta.phase == com.lingxi.code.bindings.android.RemoteSessionPhaseFfi.LIVE)
-        ChatScreen(
-            modifier = Modifier.weight(1f),
-            state = state,
-            onSend = { chat.send(it) },
-            onSendWithAttachment = { text, _ ->
-                chat.send(text, images = attachments.map { ImageRefDto(it.mediaType, it.base64) })
-            },
-            onSendPreflight = { text, _ -> chat.admitComposerSend(text, attachments.isNotEmpty()) },
-            onNewChat = {},
-            onSelectModel = chat::selectModel,
-            remoteModelSelection = true,
-            onSelectReasoning = chat::selectReasoning,
-            isDark = isDark,
-            sessionMode = meta.sessionMode ?: SessionMode.Code,
-            showTopBar = false,
-            showNewChatControls = false,
-            // Voice belongs to the local engine; a remote session takes typed text.
-            voiceInputSupported = false,
-            voiceConversationSupported = false,
-            draft = draft,
-            onDraftChange = { draft = it },
-            pendingPermission = pendingPermission != null,
-            effectivePermissionMode = meta.controls?.permission?.effective ?: "default",
-            onOpenPermissionSettings = { modeDialog = true },
-            onCameraClick = {
-                if (state.isStreaming) chat.reportHostError(imagesWhileRunning)
-                else pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            },
-            attachments = attachments.toList(),
-            onRemoveAttachmentAt = { if (it in attachments.indices) attachments.removeAt(it) },
-            onRemoveAttachment = { attachments.clear() },
-            onStop = chat::cancel,
-            onDismissError = chat::dismissError,
-                    onDismissCompactRejection = chat::dismissCompactRejection,
-            onAnswerQuestion = chat::answerQuestion,
-            onCancelQuestion = chat::cancelQuestion,
-            onToggleToolCall = chat::toggleToolCall,
-            onTogglePlan = chat::togglePlanExpanded,
-        )
     }
 
     // Allow once or deny only: the desktop does not take "always allow" from a phone.
-    PermissionPromptDialog(
-        state = pendingPermission,
-        onApprove = { requestId, response ->
-            scope.launch {
-                runCatching { chat.approvePermission(requestId, response) }
-                    .onFailure { chat.reportHostError(it.message ?: it.toString()) }
-            }
-        },
-        onDeny = { requestId -> scope.launch { runCatching { chat.denyPermission(requestId) } } },
-    )
+    if (!approvalOnly && !reattaching) PermissionPromptDialog(state = pendingPermission, onApprove = approve, onDeny = deny)
 
     if (modeDialog) {
         RemotePermissionModeDialog(
@@ -293,6 +387,28 @@ internal fun RemoteSessionScreen(
             onDismiss = { modeDialog = false },
         )
     }
+}
+
+/** A Team approval is a capability, so this surface has no composer, files, or session controls. */
+@Composable
+internal fun TeamApprovalContent(
+    phase: RemoteSessionPhaseFfi,
+    statusLine: String?,
+    permission: PermissionPromptState?,
+    onApprove: (ULong, PermissionResponseDto) -> Unit,
+    onDeny: (ULong) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        statusLine ?: stringResource(R.string.remote_needs_permission),
+        color = LingXiTheme.palette.text3,
+        modifier = modifier.fillMaxWidth().padding(16.dp),
+    )
+    PermissionPromptDialog(
+        state = if (phase == RemoteSessionPhaseFfi.LIVE) permission?.copy(suppressAlwaysAllowRule = true, autoModePrompt = null) else null,
+        onApprove = onApprove,
+        onDeny = onDeny,
+    )
 }
 
 /** The permission modes a phone may pick (never bypass), among those the session offers. */

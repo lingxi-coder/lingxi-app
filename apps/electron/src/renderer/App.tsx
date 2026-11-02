@@ -150,6 +150,7 @@ export function App() {
   }, []);
   const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams') => {
     if (sessionNavigationBlocked()) return;
+    if (next !== 'chat' && localAppBridge.current.handoffPending) void localAppBridge.current.cancelSessionHandoff();
     cancelLocalAppNavigation();
     setPage(next);
   }, [cancelLocalAppNavigation, sessionNavigationBlocked]);
@@ -184,6 +185,12 @@ export function App() {
     return () => window.removeEventListener('keydown', toggle);
   }, [settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked]);
   useEffect(() => window.lingxi?.onLocalAppEdit?.(openLocalAppChat), [openLocalAppChat]);
+  useEffect(() => window.lingxi?.onConversationShown?.(() => {
+    cancelLocalAppNavigation();
+    setSettingsRoute(null);
+    setPage('chat');
+    setActivityView(false);
+  }), [cancelLocalAppNavigation]);
   // The host made a chat of a Bot the displayed one on its own (a notification was clicked): bring the window to it.
   useEffect(() => botsApi?.onSessionShown?.((session) => {
     cancelLocalAppNavigation();
@@ -224,6 +231,7 @@ export function App() {
   useEffect(() => {
     const openPicker = (event: Event) => {
       if (sessionNavigationBlocked()) return;
+      if (localAppBridge.current.handoffPending) void localAppBridge.current.cancelSessionHandoff();
       cancelLocalAppNavigation();
       const detail = (event as CustomEvent<{ query?: unknown }>).detail;
       const request: SessionPickerRequest = {
@@ -281,6 +289,7 @@ export function App() {
   };
   const openSettings = useCallback((route?: Pick<SettingsRoute, 'pageId' | 'providerId' | 'pendingModelReference' | 'linkRequest'>) => {
     if (sessionNavigationBlocked()) return;
+    if (localAppBridge.current.handoffPending) void localAppBridge.current.cancelSessionHandoff();
     cancelLocalAppNavigation();
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setSettingsRoute({ ...route, restoreFocus: () => opener?.focus() });
@@ -325,9 +334,12 @@ export function App() {
         // Merely changing activeProject leaves that engine in the previous cwd.
         if ((settingsTarget || kind === 'settings' || kind === 'provider') && delivery.projectPath && delivery.projectPath !== bridge.activeSession?.projectPath) {
           const catalog = await bridge.listProjectSessions(delivery.projectPath);
-          const session = catalog?.sessions[0];
+          const session = catalog?.sessions.find((row) => {
+            const owner = bridge.bootstrap?.conversationSpaces.sessions.find((entry) => entry.sessionId === row.uuid);
+            return row.mode === bridge.bootstrap?.conversationSpaces.activeMode && (!owner || owner.projectId === delivery.projectPath);
+          });
           if (!session) throw new Error(tr('desktop_link_open_project_config'));
-          if (!await bridge.openSession(delivery.projectPath, session.uuid)) throw new Error(tr('desktop_link_project_conversation_error'));
+          if (!await bridge.openSession(delivery.projectPath, session.uuid, { scope: 'current', transcriptPath: session.path })) throw new Error(tr('desktop_link_project_conversation_error'));
         }
         if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); }
         else if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
@@ -339,7 +351,10 @@ export function App() {
         else if (kind === 'session' || kind === 'project') {
           setMessageTarget(null);
           if (!delivery.projectPath) throw new Error(tr('desktop_link_project_unregistered'));
-          if (kind === 'session' && !await bridge.openSession(delivery.projectPath, id!)) throw new Error(tr('desktop_link_conversation_error'));
+          if (kind === 'session') {
+            if (params.mode !== 'chat' && params.mode !== 'code') throw new Error(tr('desktop_link_conversation_error'));
+            if (!await bridge.openSession(delivery.projectPath, id!, undefined, params.mode)) throw new Error(tr('desktop_link_conversation_error'));
+          }
           if (kind === 'project') await bridge.activateProject(delivery.projectPath);
           setPage('chat');
           setActivityView(false);
@@ -350,9 +365,7 @@ export function App() {
             });
           }
         } else if (kind === 'new') {
-          const project = delivery.projectPath ?? bridge.bootstrap?.settings.activeProject;
-          if (!project) throw new Error(tr('desktop_link_select_project'));
-          const session = await bridge.newSession(project);
+          const session = await bridge.newSession(delivery.projectPath);
           if (!session) throw new Error(tr('desktop_link_create_error'));
           if (typeof delivery.target.payload?.prompt === 'string') bridge.offerLinkDraft({ sessionId: session.sessionId, text: delivery.target.payload.prompt, requestId: delivery.id });
           setPage('chat');
@@ -510,7 +523,7 @@ export function App() {
                   onOpenAgent={(agentId) => bridge.openRuntimeItem({ kind: 'agent', id: agentId })}
                   collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
                   emptyMessage={emptyMessage}
-                  welcomeProject={botChat ? activeBot?.name ?? '' : (bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path)?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
+                  welcomeProject={botChat ? activeBot?.name ?? '' : bridge.activeSession?.projectId?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
                   // Item ids restart at `i1` in every session; the Stage's
                   // collapse map is scoped by this and dropped when it changes.
                   sessionKey={bridge.conversation.sessionKey}
@@ -541,10 +554,13 @@ export function App() {
                     onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
                   />
                 </ModUiParentSite>}
-                <ModUiAbovePrompt
-                  sessionId={settledSession?.sessionId ?? ''}
-                  enabled={page === 'chat' && settingsRoute === null && bridge.connected && !bridge.sessionLoading}
-                />
+                {(bridge.bootstrap?.runtimes ?? []).map((runtime) => <div
+                  key={runtime.sessionId}
+                  style={{ display: page === 'chat' && settingsRoute === null && !bridge.sessionLoading
+                    && settledSession?.sessionId === runtime.sessionId ? 'contents' : 'none' }}
+                >
+                  <ModUiAbovePrompt sessionId={runtime.sessionId} enabled={runtime.connection.status === 'connected'} />
+                </div>)}
                 <BetaComposer
                   localAppDraft={localAppDraft}
                   onLocalAppDraftConsumed={consumeLocalAppDraft}
@@ -627,7 +643,7 @@ export function App() {
         {bridge.projectCreationOpen && <CreateProjectDialog localApp={bridge.projectCreationPurpose === 'local-app'}
           onDefaultFolder={bridge.defaultAppProjectFolder} onPickFolder={bridge.pickProjectFolder}
           onCreate={bridge.confirmProjectCreation} onClose={bridge.cancelProjectCreation} />}
-        {sessionPicker && <SessionPicker key={sessionPicker.id} projectPath={sessionPicker.projectPath} initialQuery={sessionPicker.query}
+        {sessionPicker && <SessionPicker key={sessionPicker.id} projectPath={sessionPicker.projectPath} mode={bridge.bootstrap?.conversationSpaces.activeMode ?? 'chat'} initialQuery={sessionPicker.query}
           suspended={sessionPickerSuspended}
           activeSessionId={bridge.activeSession?.sessionId} listProjectSessions={bridge.listProjectSessions} openSession={bridge.openSession}
           onOpened={openedPickerSession} onClose={closeSessionPicker} />}

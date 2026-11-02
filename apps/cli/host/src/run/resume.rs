@@ -8,9 +8,7 @@ use permission;
 use platform_posix::PosixFileSystem as HostFileSystem;
 #[cfg(windows)]
 use platform_windows::WindowsFileSystem as HostFileSystem;
-use session::jsonl::loader::{
-    list_recent_sessions, select_session_interactive, LoaderError, SessionMetadata,
-};
+use session::jsonl::loader::{select_session_interactive, LoaderError, SessionMetadata};
 use session::jsonl::JsonlMessage;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,43 +23,79 @@ pub(crate) async fn create_independent_cli_branch(
     selected_source_path: Option<&std::path::Path>,
     custom_title: Option<&str>,
 ) -> Result<(PathBuf, session::branch::BranchResult), String> {
-    let live = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"));
-    let source_lease = live.claim_session_id(&source_id.to_string(), std::process::id())
-        .map_err(|error| format!("claim source session: {error}"))?.into_shared();
-    let _target_lease = live.claim_session_id(&target_id.to_string(), std::process::id())
-        .map_err(|error| format!("claim branch session: {error}"))?.into_shared();
     let path = match selected_source_path {
         Some(path) => path.to_path_buf(),
         None => session::jsonl::resolve_session_path_across_worktrees(home, target_cwd, source_id)
-            .await.map_err(|error| error.to_string())?,
+            .await
+            .map_err(|error| error.to_string())?,
     };
-    let path = crate::init::absolute_resolved_tui_resume_path(path).map_err(|error| error.to_string())?;
+    let path =
+        crate::init::absolute_resolved_tui_resume_path(path).map_err(|error| error.to_string())?;
     let path = crate::init::validate_exact_tui_resume_path(home, source_id, &path)
         .map_err(|error| error.to_string())?;
     let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(PathBuf::from(target_cwd)));
-    let (_, content, loaded) = session::jsonl::load_routed_session_from_path_with_source(
-        &path, source_id, fs.clone(),
-    ).await.map_err(|error| error.to_string())?;
+    let (_, preflight, _) =
+        session::jsonl::load_routed_session_from_path_with_source(&path, source_id, fs.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+    crate::init::validate_resume_mode(
+        &preflight,
+        source_id,
+        Some(lingxi_core::host::session_context::ConversationMode::Code),
+    )
+    .map_err(|error| error.to_string())?;
+    let live = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"));
+    let source_lease = live
+        .claim_session_id(&source_id.to_string(), std::process::id())
+        .map_err(|error| format!("claim source session: {error}"))?
+        .into_shared();
+    let _target_lease = live
+        .claim_session_id(&target_id.to_string(), std::process::id())
+        .map_err(|error| format!("claim branch session: {error}"))?
+        .into_shared();
+    let (_, content, loaded) =
+        session::jsonl::load_routed_session_from_path_with_source(&path, source_id, fs.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+    crate::init::validate_resume_mode(
+        &content,
+        source_id,
+        Some(lingxi_core::host::session_context::ConversationMode::Code),
+    )
+    .map_err(|error| error.to_string())?;
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &source_id.to_string());
     let recovery = harness_runtime::desktop::session_state::capture_branch_recovery(
-        home, source_id, source_lease.clone(),
-    ).await.map_err(|error| format!("resume the original conversation first: {error}"))?;
+        home,
+        source_id,
+        source_lease.clone(),
+    )
+    .await
+    .map_err(|error| format!("resume the original conversation first: {error}"))?;
     orchestrator::native_computer::validate_independent_branch(
-        source_id, &content, &messages, recovery.as_ref(),
-    ).map_err(|error| format!("resume the original conversation first: {error}"))?;
+        source_id,
+        &content,
+        &messages,
+        recovery.as_ref(),
+    )
+    .map_err(|error| format!("resume the original conversation first: {error}"))?;
     let source_cwd = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
         .unwrap_or_else(|| target_cwd.to_owned());
-    let result = session::branch::create_branch_from_captured(session::branch::CapturedBranch {
-        lingxi_home: home,
-        source_cwd: &source_cwd,
-        target_cwd,
-        source_session_id: source_id,
-        target_session_id: target_id,
-        source_content: &content,
-        messages: &messages,
-        custom_title,
-        mode: Some(lingxi_core::host::session_context::ConversationMode::Code),
-    }, fs).await.map_err(|error| error.to_string())?;
+    let result = session::branch::create_branch_from_captured(
+        session::branch::CapturedBranch {
+            lingxi_home: home,
+            source_cwd: &source_cwd,
+            target_cwd,
+            source_session_id: source_id,
+            target_session_id: target_id,
+            source_content: &content,
+            messages: &messages,
+            custom_title,
+            mode: Some(lingxi_core::host::session_context::ConversationMode::Code),
+        },
+        fs,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let target = session::jsonl::path::session_path(home, target_cwd, &target_id.to_string());
     let target = crate::init::validate_exact_tui_resume_path(home, target_id, &target)
         .map_err(|error| error.to_string())?;
@@ -74,13 +108,20 @@ async fn initial_resume_target(argv: &Argv, source_id: uuid::Uuid) -> Result<uui
     }
     let target_id = match argv.session_id.as_deref() {
         Some(id) => lingxi_core::types::SessionId::parse_prefixed(id)
-            .map(|id| id.as_uuid()).ok_or_else(|| "Invalid branch session ID".to_owned())?,
+            .map(|id| id.as_uuid())
+            .ok_or_else(|| "Invalid branch session ID".to_owned())?,
         None => uuid::Uuid::new_v4(),
     };
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     create_independent_cli_branch(
-        &lingxi_home_dir(), &cwd.to_string_lossy(), source_id, target_id, None, None,
-    ).await?;
+        &lingxi_home_dir(),
+        &cwd.to_string_lossy(),
+        source_id,
+        target_id,
+        None,
+        None,
+    )
+    .await?;
     Ok(target_id)
 }
 
@@ -348,7 +389,16 @@ pub(super) async fn load_resume_rows_all() -> Result<Vec<SessionMetadata>, Loade
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let cwd_str = cwd.to_string_lossy().into_owned();
     let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.clone()));
-    list_recent_sessions(&lingxi_home, &cwd_str, usize::MAX, fs).await
+    session::jsonl::list_recent_sessions_in_scope_with_mode(
+        &lingxi_home,
+        &cwd_str,
+        session::jsonl::SessionDiscoveryScope::Current,
+        usize::MAX,
+        fs,
+        Some(session::jsonl::SessionMode::Code),
+    )
+    .await
+    .map(|catalog| catalog.sessions)
 }
 
 /// `-c/--continue` — resume the MOST-RECENT conversation in the current cwd's
@@ -466,6 +516,7 @@ pub(super) async fn mount_resumed_tui(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -493,6 +544,7 @@ pub(crate) async fn mount_background_resumed_tui(
         handoff,
         Some(shell_launch),
         Some(PathBuf::from(&shell_launch.transcript_path)),
+        None,
     )
     .await
 }
@@ -507,6 +559,7 @@ pub(super) async fn mount_resumed_tui_inner(
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     shell_launch: Option<&crate::background_launch::BackgroundLaunchSpec>,
     transcript_path: Option<PathBuf>,
+    admitted_remount_mode: Option<lingxi_core::host::session_context::ConversationMode>,
 ) -> crate::mode::RunOutcome {
     // A cold resume inherits the last persisted assistant effort unless the
     // caller explicitly supplied a new `--effort`. Resolve this before build:
@@ -531,6 +584,10 @@ pub(super) async fn mount_resumed_tui_inner(
             parent_session_id,
             native_settings_agent_context,
             transcript_path,
+            admitted_remount_mode.or_else(|| {
+                (!shell_launch.is_some_and(|launch| launch.options.preserve_admitted_context))
+                    .then_some(lingxi_core::host::session_context::ConversationMode::Code)
+            }),
         )
         .await
         {
@@ -584,12 +641,6 @@ pub(super) async fn mount_resumed_tui_inner(
     .await
     {
         eprintln!("lingxi-cli: resume deferred tools failed: {error}");
-        return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
-    }
-    if let Err(error) = apply_cli_resume_profile(
-        tui_build.runtime.orchestrator.as_ref(), shell_launch.map(|launch| &launch.options),
-    ).await {
-        eprintln!("lingxi-cli: cannot resume in Code mode: {error}");
         return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
     }
     // COST seed on resume: the durable ledger owns this. Every host now has a
@@ -684,19 +735,6 @@ pub(super) async fn mount_resumed_tui_inner(
     .await
 }
 
-/// A live worker continues its captured scope; a cold CLI resume selects Code.
-pub(crate) async fn apply_cli_resume_profile(
-    handle: &dyn OrchestratorHandle,
-    background_options: Option<&crate::background_launch::BackgroundLaunchOptions>,
-) -> Result<(), lingxi_core::host::HandleError> {
-    if !background_options.is_some_and(|options| options.preserve_admitted_context) {
-        handle.set_conversation_mode(
-            lingxi_core::host::session_context::ConversationMode::Code,
-        ).await?;
-    }
-    Ok(())
-}
-
 /// Recover the source session stamped by `session::branch::create_branch`.
 /// Legacy and ordinary transcripts have no marker and intentionally return
 /// `None`.
@@ -739,7 +777,7 @@ pub(crate) async fn drive_tui_switch_loop(
     initial_session_id: Option<uuid::Uuid>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
 ) -> i32 {
-    drive_tui_switch_loop_inner(argv, first, initial_session_id, registration).await
+    drive_tui_switch_loop_inner(argv, first, initial_session_id, registration, None).await
 }
 
 /// Background variant that preserves the worker registration across every
@@ -749,8 +787,19 @@ pub(crate) async fn drive_background_tui_switch_loop(
     first: crate::mode::RunOutcome,
     initial_session_id: Option<uuid::Uuid>,
     registration: std::sync::Arc<crate::agents_registry::SessionRegistration>,
+    preserve_admitted_context: bool,
 ) -> i32 {
-    drive_tui_switch_loop_inner(argv, first, initial_session_id, Some(registration)).await
+    let admitted_session = preserve_admitted_context
+        .then_some(initial_session_id)
+        .flatten();
+    drive_tui_switch_loop_inner(
+        argv,
+        first,
+        initial_session_id,
+        Some(registration),
+        admitted_session,
+    )
+    .await
 }
 
 pub(super) async fn remount_tui(
@@ -760,7 +809,13 @@ pub(super) async fn remount_tui(
     transcript_path: PathBuf,
     state: Option<crate::mode::RemountState>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
+    admitted_session: Option<uuid::Uuid>,
 ) -> crate::mode::RunOutcome {
+    let admitted_mode = if admitted_session == Some(session_id) {
+        state.as_ref().map(|state| state.conversation_mode)
+    } else {
+        None
+    };
     mount_resumed_tui_inner(
         argv,
         session_id,
@@ -771,6 +826,7 @@ pub(super) async fn remount_tui(
         None,
         None,
         Some(transcript_path),
+        admitted_mode,
     )
     .await
 }
@@ -789,6 +845,7 @@ async fn remount_source_from(
     current: Option<uuid::Uuid>,
     state: Option<&crate::mode::RemountState>,
     target: uuid::Uuid,
+    admitted_session: Option<uuid::Uuid>,
 ) -> Result<RemountSource, LoaderError> {
     let path = if current == Some(target) {
         state
@@ -796,7 +853,7 @@ async fn remount_source_from(
             .ok_or_else(|| LoaderError::Io {
                 arg: target.to_string(),
                 source: std::io::Error::other("mounted transcript path is unavailable"),
-        })?
+            })?
     } else {
         let path = session::jsonl::resolve_session_path_across_worktrees(
             home,
@@ -809,7 +866,14 @@ async fn remount_source_from(
             source: std::io::Error::other(error.to_string()),
         })?
     };
-    remount_source_at(home, cwd, target, &path).await
+    let expected_mode = if current == Some(target) && admitted_session == Some(target) {
+        state
+            .map(|state| state.conversation_mode)
+            .unwrap_or(lingxi_core::host::session_context::ConversationMode::Code)
+    } else {
+        lingxi_core::host::session_context::ConversationMode::Code
+    };
+    remount_source_at(home, cwd, target, &path, expected_mode).await
 }
 
 async fn remount_source_at(
@@ -817,17 +881,24 @@ async fn remount_source_at(
     cwd: &std::path::Path,
     target: uuid::Uuid,
     path: &std::path::Path,
+    expected_mode: lingxi_core::host::session_context::ConversationMode,
 ) -> Result<RemountSource, LoaderError> {
     let path =
         crate::init::validate_exact_tui_resume_path(home, target, path).map_err(|error| {
+            LoaderError::Io {
+                arg: path.display().to_string(),
+                source: std::io::Error::other(error.to_string()),
+            }
+        })?;
+    let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.to_path_buf()));
+    let (_, content, loaded) =
+        session::jsonl::load_routed_session_from_path_with_source(&path, target, fs).await?;
+    crate::init::validate_resume_mode(&content, target, Some(expected_mode)).map_err(|error| {
         LoaderError::Io {
             arg: path.display().to_string(),
             source: std::io::Error::other(error.to_string()),
         }
     })?;
-    let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.to_path_buf()));
-    let (_, _, loaded) =
-        session::jsonl::load_routed_session_from_path_with_source(&path, target, fs).await?;
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &target.to_string());
     if messages.is_empty() {
         return Err(LoaderError::EmptyDirectory);
@@ -839,10 +910,11 @@ async fn remount_source(
     current: Option<uuid::Uuid>,
     state: Option<&crate::mode::RemountState>,
     target: uuid::Uuid,
+    admitted_session: Option<uuid::Uuid>,
 ) -> Result<RemountSource, LoaderError> {
     let home = lingxi_home_dir();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    remount_source_from(&home, &cwd, current, state, target).await
+    remount_source_from(&home, &cwd, current, state, target, admitted_session).await
 }
 
 /// Source mutations run under the same UUID writer claim as a mounted
@@ -881,11 +953,13 @@ async fn branch_mounted_cli(
     if !state.transcript_persistent {
         return Err("mounted session is read-only".into());
     }
-    let path = state.transcript_path.as_deref()
+    let path = state
+        .transcript_path
+        .as_deref()
         .ok_or_else(|| "mounted transcript path is unavailable".to_string())?;
-    let (_, result) = create_independent_cli_branch(
-        home, cwd, source, uuid::Uuid::new_v4(), Some(path), title,
-    ).await?;
+    let (_, result) =
+        create_independent_cli_branch(home, cwd, source, uuid::Uuid::new_v4(), Some(path), title)
+            .await?;
     Ok(result)
 }
 
@@ -937,6 +1011,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
     first: crate::mode::RunOutcome,
     initial_session_id: Option<uuid::Uuid>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
+    admitted_session: Option<uuid::Uuid>,
 ) -> i32 {
     struct InboxShutdown;
     impl Drop for InboxShutdown {
@@ -1087,7 +1162,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
                 };
             }
             crate::mode::RunOutcome::SwitchTo { target, state } => {
-                match remount_source(current, state.as_ref(), target).await {
+                match remount_source(current, state.as_ref(), target, admitted_session).await {
                     Ok(source) => {
                         current = Some(target);
                         outcome = remount_tui(
@@ -1097,6 +1172,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
                             source.path,
                             state,
                             registration.clone(),
+                            admitted_session,
                         )
                         .await;
                     }
@@ -1109,7 +1185,14 @@ pub(super) async fn drive_tui_switch_loop_inner(
                         match recover_from_failed_switch(current) {
                             SwitchRecovery::Remount(fallback) => {
                                 eprintln!("lingxi-cli: staying in current session {fallback}");
-                                match remount_source(current, state.as_ref(), fallback).await {
+                                match remount_source(
+                                    current,
+                                    state.as_ref(),
+                                    fallback,
+                                    admitted_session,
+                                )
+                                .await
+                                {
                                     Ok(source) => {
                                         outcome = remount_tui(
                                             argv,
@@ -1118,6 +1201,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
                                             source.path,
                                             state,
                                             registration.clone(),
+                                            admitted_session,
                                         )
                                         .await;
                                     }
@@ -1147,8 +1231,13 @@ pub(super) async fn drive_tui_switch_loop_inner(
                 let cwd_str = cwd.to_string_lossy().into_owned();
                 let mut state = state;
                 let branch = branch_mounted_cli(
-                    &lingxi_home, &cwd_str, source, state.as_ref(), title.as_deref(),
-                ).await;
+                    &lingxi_home,
+                    &cwd_str,
+                    source,
+                    state.as_ref(),
+                    title.as_deref(),
+                )
+                .await;
                 let mount_target = match branch {
                     Ok(result) => {
                         // claude-code 2.1.205 success confirmation, rendered in
@@ -1192,7 +1281,15 @@ pub(super) async fn drive_tui_switch_loop_inner(
                     }
                 };
                 let selected = if mount_target == source {
-                    remount_source_from(&lingxi_home, &cwd, current, state.as_ref(), source).await
+                    remount_source_from(
+                        &lingxi_home,
+                        &cwd,
+                        current,
+                        state.as_ref(),
+                        source,
+                        admitted_session,
+                    )
+                    .await
                 } else {
                     let path = session::jsonl::session_path(
                         &lingxi_home,
@@ -1201,7 +1298,14 @@ pub(super) async fn drive_tui_switch_loop_inner(
                     );
                     match crate::init::absolute_resolved_tui_resume_path(path) {
                         Ok(path) => {
-                            remount_source_at(&lingxi_home, &cwd, mount_target, &path).await
+                            remount_source_at(
+                                &lingxi_home,
+                                &cwd,
+                                mount_target,
+                                &path,
+                                lingxi_core::host::session_context::ConversationMode::Code,
+                            )
+                            .await
                         }
                         Err(error) => Err(LoaderError::Io {
                             arg: mount_target.to_string(),
@@ -1219,6 +1323,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
                             selected.path,
                             state,
                             registration.clone(),
+                            admitted_session,
                         )
                         .await;
                     }
@@ -1228,7 +1333,14 @@ pub(super) async fn drive_tui_switch_loop_inner(
                         eprintln!("lingxi-cli: couldn't open {mount_target}: {e}");
                         match recover_from_failed_switch(current) {
                             SwitchRecovery::Remount(fallback) => {
-                                match remount_source(current, state.as_ref(), fallback).await {
+                                match remount_source(
+                                    current,
+                                    state.as_ref(),
+                                    fallback,
+                                    admitted_session,
+                                )
+                                .await
+                                {
                                     Ok(selected) => {
                                         outcome = remount_tui(
                                             argv,
@@ -1237,6 +1349,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
                                             selected.path,
                                             state,
                                             registration.clone(),
+                                            admitted_session,
                                         )
                                         .await;
                                     }
@@ -1315,7 +1428,8 @@ pub(super) async fn drive_tui_switch_loop_inner(
                     Err(error) => eprintln!("lingxi-cli: cannot rewind: {error}"),
                 }
                 let mount_target = source;
-                match remount_source(current, state.as_ref(), mount_target).await {
+                match remount_source(current, state.as_ref(), mount_target, admitted_session).await
+                {
                     Ok(selected) => {
                         current = Some(mount_target);
                         outcome = remount_tui(
@@ -1325,6 +1439,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
                             selected.path,
                             state,
                             registration.clone(),
+                            admitted_session,
                         )
                         .await;
                     }
@@ -1364,6 +1479,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
                             path,
                             state,
                             registration.clone(),
+                            admitted_session,
                         )
                         .await;
                     }
@@ -1371,7 +1487,14 @@ pub(super) async fn drive_tui_switch_loop_inner(
                         eprintln!("lingxi-cli: couldn't open {mount_target} after rewind: {e}");
                         match recover_from_failed_switch(current) {
                             SwitchRecovery::Remount(fallback) => {
-                                match remount_source(current, state.as_ref(), fallback).await {
+                                match remount_source(
+                                    current,
+                                    state.as_ref(),
+                                    fallback,
+                                    admitted_session,
+                                )
+                                .await
+                                {
                                     Ok(selected) => {
                                         outcome = remount_tui(
                                             argv,
@@ -1380,6 +1503,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
                                             selected.path,
                                             state,
                                             registration.clone(),
+                                            admitted_session,
                                         )
                                         .await;
                                     }
@@ -1488,10 +1612,6 @@ pub(crate) async fn seed_orchestrator_session(
         .sync_active_goal_stop_hook_for_current_state()
         .await;
     orchestrator.restore_resume_runtime_metadata(messages).await;
-    orchestrator
-        .restore_conversation_mode(lingxi_core::host::session_context::ConversationMode::Code)
-        .await
-        .map_err(|error| error.to_string())?;
     Ok(effective_permission_mode)
 }
 
@@ -1668,7 +1788,16 @@ pub(super) async fn load_resume_rows_from(
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
     let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.to_path_buf()));
-    list_recent_sessions(lingxi_home, &cwd_str, usize::MAX, fs).await
+    session::jsonl::list_recent_sessions_in_scope_with_mode(
+        lingxi_home,
+        &cwd_str,
+        session::jsonl::SessionDiscoveryScope::Current,
+        usize::MAX,
+        fs,
+        Some(session::jsonl::SessionMode::Code),
+    )
+    .await
+    .map(|catalog| catalog.sessions)
 }
 
 /// Map M5-08 loader metadata into the picker's lean [`tui::resume::ResumeRow`]s
@@ -1752,7 +1881,25 @@ pub(crate) async fn load_resume_session_from(
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
     let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.to_path_buf()));
-    session::jsonl::load_session_across_worktrees(lingxi_home, &cwd_str, session_id, fs).await
+    let path =
+        session::jsonl::resolve_session_path_across_worktrees(lingxi_home, &cwd_str, session_id)
+            .await?;
+    let (_, content, loaded) =
+        session::jsonl::load_routed_session_from_path_with_source(&path, session_id, fs).await?;
+    crate::init::validate_resume_mode(
+        &content,
+        session_id,
+        Some(lingxi_core::host::session_context::ConversationMode::Code),
+    )
+    .map_err(|error| LoaderError::Io {
+        arg: path.display().to_string(),
+        source: std::io::Error::other(error.to_string()),
+    })?;
+    let (chain, _) = session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
+    if chain.is_empty() {
+        return Err(LoaderError::EmptyDirectory);
+    }
+    Ok(chain)
 }
 
 /// Claude config home dir. `$LINGXI_CONFIG_DIR` when set wins (claude-code `tr()`
@@ -1810,6 +1957,11 @@ pub(super) fn resume_by_id_error(
             format!("No conversation found with session ID: {session_id}"),
             exit_codes::RUNTIME_ERROR,
         )),
+        Err(LoaderError::Io { source, .. })
+            if source.to_string().contains("session_mode_mismatch") =>
+        {
+            Some((source.to_string(), exit_codes::RUNTIME_ERROR))
+        }
         Err(_) => Some((
             format!("Failed to resume session {session_id}"),
             exit_codes::RUNTIME_ERROR,

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { buildDeepLink, parseDeepLink } from './index.ts';
 test('scheme and HTTPS preserve identity and private draft without side effects', () => {
   for (const route of ['session/abc', 'project/abc', 'new', 'settings/general', 'extensions/mcp/server', 'cron/run/r1', 'import/provider']) {
-    const target = { route, params: { workspace: 'project.abc' }, ...(route === 'new' ? { payload: { prompt: '你好 + & #\nnext' } } : {}) };
+    const target = { route, params: { workspace: 'project.abc', ...(route.startsWith('session/') ? { mode: 'chat' } : {}) }, ...(route === 'new' ? { payload: { prompt: '你好 + & #\nnext' } } : {}) };
     for (const format of ['https', 'scheme'] as const) assert.deepEqual(parseDeepLink(buildDeepLink(target, format)), target);
   }
 });
@@ -24,10 +24,20 @@ test('shared cross-language corpus', async () => {
 });
 
 test('only message UUIDs are normalized while resource and workspace identities retain case', () => {
-  const input = { route: 'session/CasePreserved', params: { workspace: 'project.CasePreserved', message: '123E4567-E89B-12D3-A456-426614174000' } };
+  const input = { route: 'session/CasePreserved', params: { workspace: 'project.CasePreserved', mode: 'code', message: '123E4567-E89B-12D3-A456-426614174000' } };
   for (const format of ['https', 'scheme'] as const) {
     const raw = buildDeepLink(input, format);
     assert.ok(raw.includes('message=123e4567-e89b-12d3-a456-426614174000'));
     assert.deepEqual(parseDeepLink(raw), { route: input.route, params: { ...input.params, message: input.params.message.toLowerCase() } });
+  }
+});
+
+test('session links require an explicit fixed mode in either format', () => {
+  for (const raw of ['lingxi://session/a', 'https://lingxios.net/open/session/a?workspace=global',
+    'lingxi://session/a?mode=Chat', 'lingxi://session/a?mode=chat&mode=code']) {
+    assert.throws(() => parseDeepLink(raw));
+  }
+  for (const mode of ['chat', 'code']) {
+    assert.equal(parseDeepLink(`lingxi://session/a?workspace=global&mode=${mode}`).params.mode, mode);
   }
 });

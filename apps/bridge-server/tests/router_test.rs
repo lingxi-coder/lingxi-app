@@ -260,7 +260,6 @@ struct ResumingHandle {
     plan_mode: Mutex<bool>,
     operation_log: Mutex<Vec<String>>,
     session_mode: Mutex<lingxi_core::host::session_context::SessionModeSnapshot>,
-    mode_turn_active: Mutex<bool>,
     resume_error: Mutex<Option<String>>,
     permission_mode_error: Mutex<Option<String>>,
     plan_mode_error: Mutex<Option<String>>,
@@ -278,7 +277,6 @@ impl ResumingHandle {
             session_mode: Mutex::new(
                 lingxi_core::host::session_context::SessionModeSnapshot::default(),
             ),
-            mode_turn_active: Mutex::new(false),
             resume_error: Mutex::new(None),
             permission_mode_error: Mutex::new(None),
             plan_mode_error: Mutex::new(None),
@@ -325,29 +323,6 @@ impl lingxi_core::host::OrchestratorHandle for ResumingHandle {
     }
     async fn conversation_mode(&self) -> lingxi_core::host::session_context::SessionModeSnapshot {
         self.session_mode.lock().await.clone()
-    }
-    async fn restore_conversation_mode(
-        &self,
-        mode: lingxi_core::host::session_context::ConversationMode,
-    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
-        let mut snapshot = self.session_mode.lock().await;
-        snapshot.active = mode;
-        snapshot.selected = mode;
-        snapshot.pending = false;
-        Ok(snapshot.clone())
-    }
-    async fn set_conversation_mode(
-        &self,
-        mode: lingxi_core::host::session_context::ConversationMode,
-    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
-        let mut snapshot = self.session_mode.lock().await;
-        snapshot.selected = mode;
-        snapshot.revision += 1;
-        snapshot.pending = *self.mode_turn_active.lock().await && snapshot.active != mode;
-        if !snapshot.pending {
-            snapshot.active = mode;
-        }
-        Ok(snapshot.clone())
     }
     async fn clear_session(&self) -> Result<(), HandleError> {
         Ok(())
@@ -628,6 +603,16 @@ fn router_with_store_and_tasks(
     ))
 }
 
+fn fixed_header(session_id: &str, mode: &str) -> String {
+    serde_json::json!({"type":"fixed-session-mode", "sessionId":session_id, "sessionMode":mode, "instructionEpoch":0}).to_string()
+}
+
+fn set_fixture_mode(path: &std::path::Path, session_id: &str, mode: &str) {
+    let content = std::fs::read_to_string(path).unwrap();
+    let (_, rows) = content.split_once('\n').unwrap();
+    std::fs::write(path, format!("{}\n{rows}", fixed_header(session_id, mode))).unwrap();
+}
+
 fn seed_session_file(root: &std::path::Path) -> String {
     seed_session_file_with_ids(
         root,
@@ -664,7 +649,7 @@ fn seed_session_file_with_ids(
     });
     std::fs::write(
         project_dir.join(format!("{uuid}.jsonl")),
-        format!("{}\n", serde_json::to_string(&line).unwrap()),
+        format!("{}\n{}\n", fixed_header(&uuid, "code"), serde_json::to_string(&line).unwrap()),
     )
     .unwrap();
     uuid
@@ -764,7 +749,7 @@ fn seed_replay_session(root: &std::path::Path) -> String {
     });
     std::fs::write(
         project_dir.join(format!("{session_id}.jsonl")),
-        format!("{pre_user}\n{pre_assistant}\n{boundary}\n{user}\n{assistant}\n"),
+        format!("{}\n{pre_user}\n{pre_assistant}\n{boundary}\n{user}\n{assistant}\n", fixed_header(&session_id, "code")),
     )
     .unwrap();
     session_id
@@ -844,7 +829,7 @@ fn seed_plan_replay_session(root: &std::path::Path) -> String {
     });
     std::fs::write(
         project_dir.join(format!("{session_id}.jsonl")),
-        format!("{boundary}\n{summary}\n{assistant}\n{user}\n"),
+        format!("{}\n{boundary}\n{summary}\n{assistant}\n{user}\n", fixed_header(&session_id, "code")),
     )
     .unwrap();
     session_id
@@ -2438,7 +2423,13 @@ async fn list_sessions_reads_jsonl_metadata_and_empty_store_replies() {
     let router = router_with_store(Arc::new(MockOrchestratorHandle::new()), populated.path());
     let sink = CapturingSink::arc();
     router
-        .route(ClientCommand::ListSessions { limit: None }, sink.clone())
+        .route(
+            ClientCommand::ListSessions {
+                limit: None,
+                mode: None,
+            },
+            sink.clone(),
+        )
         .await;
 
     let events = sink.events().await;
@@ -2474,6 +2465,56 @@ async fn list_sessions_reads_jsonl_metadata_and_empty_store_replies() {
 }
 
 #[tokio::test]
+async fn list_sessions_filters_mode_before_applying_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let code = seed_session_file_with_ids(
+        root.path(),
+        "11111111-2222-4333-8444-555555555555",
+        "aaaaaaaa-2222-4333-8444-555555555555",
+        "code",
+    );
+    let chat = seed_session_file_with_ids(
+        root.path(),
+        "22222222-2222-4333-8444-555555555555",
+        "bbbbbbbb-2222-4333-8444-555555555555",
+        "chat",
+    );
+    let cwd = root.path().to_string_lossy().into_owned();
+    let project = root
+        .path()
+        .join(".lingxi/projects")
+        .join(session::jsonl::project_dir_name(&cwd));
+    let code_path = project.join(format!("{code}.jsonl"));
+    let old = std::fs::read_to_string(&code_path)
+        .unwrap()
+        .replace("2026-05-25T12:00:00.000Z", "2020-05-25T12:00:00.000Z");
+    std::fs::write(code_path, old).unwrap();
+    set_fixture_mode(&project.join(format!("{chat}.jsonl")), &chat, "chat");
+    let router = router_with_store(Arc::new(MockOrchestratorHandle::new()), root.path());
+    let sink = CapturingSink::arc();
+    router
+        .route(
+            ClientCommand::ListSessions {
+                limit: Some(1),
+                mode: Some(SessionModeDto::Code),
+            },
+            sink.clone(),
+        )
+        .await;
+    let events = sink.events().await;
+    let rows = events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::SessionList { sessions } => Some(sessions),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].uuid, code);
+    assert_eq!(rows[0].mode, SessionModeDto::Code);
+}
+
+#[tokio::test]
 async fn list_sessions_reports_corrupt_catalog_as_error() {
     let root = tempfile::tempdir().unwrap();
     let cwd = root.path().to_string_lossy().into_owned();
@@ -2490,7 +2531,13 @@ async fn list_sessions_reports_corrupt_catalog_as_error() {
     let router = router_with_store(Arc::new(MockOrchestratorHandle::new()), root.path());
     let sink = CapturingSink::arc();
     router
-        .route(ClientCommand::ListSessions { limit: None }, sink.clone())
+        .route(
+            ClientCommand::ListSessions {
+                limit: None,
+                mode: None,
+            },
+            sink.clone(),
+        )
         .await;
 
     let events = sink.events().await;
@@ -2530,7 +2577,13 @@ async fn list_sessions_preserves_readable_rows_when_one_transcript_is_corrupt() 
     let router = router_with_store(Arc::new(MockOrchestratorHandle::new()), root.path());
     let sink = CapturingSink::arc();
     router
-        .route(ClientCommand::ListSessions { limit: None }, sink.clone())
+        .route(
+            ClientCommand::ListSessions {
+                limit: None,
+                mode: None,
+            },
+            sink.clone(),
+        )
         .await;
 
     let events = sink.events().await;
@@ -2572,6 +2625,7 @@ async fn new_session_clears_applies_model_and_emits_started() {
             ClientCommand::NewSession {
                 cwd: None,
                 model: Some(ClientTextDto::from_code_units(model_units.clone())),
+                mode: client::protocol::listings::SessionModeDto::Code,
             },
             sink.clone(),
         )
@@ -2596,13 +2650,32 @@ async fn new_session_clears_applies_model_and_emits_started() {
                 session_id: expected_id.clone(),
                 mode: SessionModeDto::Code,
             },
-            ClientEvent::SessionModeChanged {
-                session_id: expected_id,
-                mode: SessionModeDto::Code,
-                pending_mode: None,
-                revision: 0,
-            },
         ]
+    );
+}
+
+#[tokio::test]
+async fn new_session_rejects_a_different_mode_before_clear_or_model_change() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
+    let sink = CapturingSink::arc();
+    let command = ClientCommand::NewSession {
+        cwd: None,
+        model: Some("different-model".into()),
+        mode: SessionModeDto::Chat,
+    };
+    let (kind, error) = router
+        .preflight_session_transition(&command)
+        .await
+        .unwrap_err();
+    assert_eq!(kind, ErrorKindDto::Rejected);
+    assert!(error.contains("session_mode_mismatch"));
+    router.route(command, sink.clone()).await;
+    assert!(!handle.was_clear_session_called());
+    assert!(handle.last_switched_model().is_none());
+    assert!(
+        matches!(sink.events().await.as_slice(), [ClientEvent::Error { kind: ErrorKindDto::Rejected, message }]
+        if message.display().contains("session_mode_mismatch"))
     );
 }
 
@@ -2616,10 +2689,12 @@ async fn new_and_resume_are_rejected_mid_turn_and_bad_resume_is_honest() {
         ClientCommand::NewSession {
             cwd: None,
             model: None,
+            mode: client::protocol::listings::SessionModeDto::Code,
         },
         ClientCommand::ResumeSession {
             session_id: "not-a-uuid".into(),
             cwd: None,
+            expected_mode: client::protocol::listings::SessionModeDto::Code,
         },
     ] {
         let sink = CapturingSink::arc();
@@ -2638,6 +2713,7 @@ async fn new_and_resume_are_rejected_mid_turn_and_bad_resume_is_honest() {
             ClientCommand::ResumeSession {
                 session_id: "not-a-uuid".into(),
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
             sink.clone(),
         )
@@ -2964,6 +3040,7 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
             ClientCommand::ResumeSession {
                 session_id: session_id.clone(),
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
             sink.clone(),
         )
@@ -3007,7 +3084,7 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
         session_id: emitted_id,
         mode,
         messages,
-    }, ClientEvent::SessionModeChanged { .. }, ClientEvent::UsageUpdate {
+    }, ClientEvent::UsageUpdate {
         is_snapshot: Some(true),
         input_tokens: 1200,
         output_tokens: 80,
@@ -3074,6 +3151,7 @@ async fn resume_session_sets_plan_state_before_replay() {
             ClientCommand::ResumeSession {
                 session_id: session_id.clone(),
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
             sink.clone(),
         )
@@ -3100,7 +3178,6 @@ async fn resume_session_sets_plan_state_before_replay() {
         sink.events().await.as_slice(),
         [
             ClientEvent::SessionResumed { .. },
-            ClientEvent::SessionModeChanged { .. },
             ClientEvent::StatusSnapshot { .. },
             ClientEvent::ModelChanged { .. }
         ]
@@ -3134,6 +3211,7 @@ async fn resume_session_rolls_back_plan_preset_when_plan_mode_enable_fails() {
             ClientCommand::ResumeSession {
                 session_id,
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
             sink.clone(),
         )
@@ -3187,6 +3265,7 @@ async fn resume_session_does_not_adopt_when_plan_permission_preset_fails() {
             ClientCommand::ResumeSession {
                 session_id,
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
             sink.clone(),
         )
@@ -3237,6 +3316,7 @@ async fn resume_session_rolls_back_plan_state_when_replay_fails() {
             ClientCommand::ResumeSession {
                 session_id,
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
             sink.clone(),
         )
@@ -4637,61 +4717,55 @@ fn bridge_source<T: serde::Serialize>(
 }
 
 #[tokio::test]
-async fn conversation_mode_routes_during_turn_and_manifest_reports_pending_selection() {
-    use lingxi_core::host::session_context::ConversationMode;
+async fn context_manifest_reports_fixed_session_mode() {
     let handle = Arc::new(ResumingHandle::new());
-    handle.session_mode.lock().await.session_id = handle.session_id.as_uuid().to_string();
-    *handle.mode_turn_active.lock().await = true;
-    let router = EngineCommandRouter::new(
-        handle.clone(),
-        Arc::new(MockAuth),
+    let router = EngineCommandRouter::new(handle, Arc::new(MockAuth), Arc::new(MockTaskRegistry { rows: vec![] }), None, None);
+    router.set_turn_active(true);
+    let sink = CapturingSink::arc();
+    router.route(ClientCommand::GetContextManifest, sink.clone()).await;
+    let events = sink.events().await;
+    let manifest = events.iter().find_map(|event| match event {
+        ClientEvent::ContextManifest { manifest_json } => Some(serde_json::from_str::<serde_json::Value>(manifest_json).unwrap()),
+        _ => None,
+    }).unwrap();
+    assert_eq!(manifest["session"]["mode"], "code");
+}
+
+#[tokio::test]
+async fn handoff_request_is_not_rejected_as_a_busy_session_transition() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
         Arc::new(MockTaskRegistry { rows: vec![] }),
-        None,
-        None,
     );
     router.set_turn_active(true);
     let sink = CapturingSink::arc();
     router
         .route(
-            ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Chat,
+            ClientCommand::PrepareSessionHandoff {
+                request_id: "handoff-1".into(),
+                target_mode: SessionModeDto::Chat,
             },
             sink.clone(),
         )
         .await;
     router
-        .route(ClientCommand::GetContextManifest, sink.clone())
+        .route(
+            ClientCommand::RetrySessionHandoff {
+                request_id: "handoff-2".into(),
+            },
+            sink.clone(),
+        )
         .await;
     let events = sink.events().await;
-    let [ClientEvent::SessionModeChanged {
-        mode,
-        pending_mode,
-        revision,
-        ..
-    }, ClientEvent::SessionModeChanged { .. }, ClientEvent::ContextManifest { manifest_json }] =
-        events.as_slice()
-    else {
-        panic!("unexpected mode response: {events:?}");
-    };
-    assert_eq!(*mode, SessionModeDto::Code);
-    assert_eq!(*pending_mode, Some(SessionModeDto::Chat));
-    assert_eq!(*revision, 1);
-    let manifest: serde_json::Value = serde_json::from_str(manifest_json).unwrap();
-    assert_eq!(manifest["session"]["active"], "code");
-    assert_eq!(manifest["session"]["selected"], "chat");
-    assert_eq!(
-        handle.conversation_mode().await.selected,
-        ConversationMode::Chat
-    );
-    assert_eq!(
-        handle.current_permission_mode().await.as_deref(),
-        Some("default")
-    );
+    assert!(matches!(events.as_slice(), [
+        ClientEvent::SessionHandoffFailed { request_id: first, message: first_error },
+        ClientEvent::SessionHandoffFailed { request_id: second, message: second_error },
+    ] if first == "handoff-1" && second == "handoff-2"
+        && first_error == "handoff runtime is unavailable" && second_error == "handoff runtime is unavailable"));
 }
 
 #[tokio::test]
 async fn resumed_chat_restores_mode_from_same_transcript_as_messages() {
-    use std::io::Write;
     let root = tempfile::tempdir().unwrap();
     let session_id = seed_replay_session(root.path());
     let cwd = root.path().to_string_lossy().into_owned();
@@ -4700,16 +4774,50 @@ async fn resumed_chat_restores_mode_from_same_transcript_as_messages() {
         .join("projects")
         .join(session::jsonl::project_dir_name(&cwd))
         .join(format!("{session_id}.jsonl"));
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    writeln!(
-        file,
-        "{}",
-        serde_json::json!({"type":"session-mode", "sessionId":session_id, "sessionMode":"chat"})
+    set_fixture_mode(&path, &session_id, "chat");
+    let handle = Arc::new(ResumingHandle::new());
+    {
+        let mut mode = handle.session_mode.lock().await;
+        mode.mode = lingxi_core::host::session_context::ConversationMode::Chat;
+    }
+    let router = EngineCommandRouter::new(
+        handle.clone(),
+        Arc::new(MockAuth),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+        None,
+        None,
     )
-    .unwrap();
+    .with_session_store(SessionStoreContext::new(
+        home,
+        cwd,
+        Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
+    ));
+    let sink = CapturingSink::arc();
+    let command = ClientCommand::ResumeSession {
+        session_id: session_id.clone(),
+        cwd: None,
+        expected_mode: client::protocol::listings::SessionModeDto::Chat,
+    };
+    assert!(router.preflight_session_transition(&command).await.is_ok());
+    router.route(command, sink.clone()).await;
+    let events = sink.events().await;
+    assert!(
+        matches!(events.first(), Some(ClientEvent::SessionResumed { session_id: id, mode: SessionModeDto::Chat, .. }) if id == &session_id)
+    );
+}
+
+#[tokio::test]
+async fn hot_resume_rejects_a_different_session_mode_before_adoption() {
+    let root = tempfile::tempdir().unwrap();
+    let session_id = seed_replay_session(root.path());
+    let cwd = root.path().to_string_lossy().into_owned();
+    let home = root.path().join(".lingxi");
+    let path = home
+        .join("projects")
+        .join(session::jsonl::project_dir_name(&cwd))
+        .join(format!("{session_id}.jsonl"));
+    set_fixture_mode(&path, &session_id, "chat");
+    let before = std::fs::read(&path).unwrap();
     let handle = Arc::new(ResumingHandle::new());
     let router = EngineCommandRouter::new(
         handle.clone(),
@@ -4724,69 +4832,43 @@ async fn resumed_chat_restores_mode_from_same_transcript_as_messages() {
         Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
     ));
     let sink = CapturingSink::arc();
-    router
-        .route(
-            ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-            },
-            sink.clone(),
-        )
-        .await;
-    let events = sink.events().await;
+    let wrong_runtime = ClientCommand::ResumeSession {
+        session_id: session_id.clone(),
+        cwd: None,
+        expected_mode: SessionModeDto::Chat,
+    };
+    let (kind, error) = router
+        .preflight_session_transition(&wrong_runtime)
+        .await
+        .unwrap_err();
+    assert_eq!(kind, ErrorKindDto::Rejected);
+    assert!(error.contains("session_mode_mismatch"));
+    let command = ClientCommand::ResumeSession {
+        session_id,
+        cwd: None,
+        expected_mode: SessionModeDto::Code,
+    };
+    let (kind, error) = router
+        .preflight_session_transition(&command)
+        .await
+        .unwrap_err();
+    assert_eq!(kind, ErrorKindDto::Rejected);
+    assert!(error.contains("session_mode_mismatch"));
+    router.route(command, sink.clone()).await;
     assert!(
-        matches!(events.first(), Some(ClientEvent::SessionResumed { session_id: id, mode: SessionModeDto::Chat, .. }) if id == &session_id)
+        sink.events().await.iter().any(|event| matches!(event,
+        ClientEvent::Error { message, .. } if message.display().contains("session_mode_mismatch")))
     );
-    assert!(events.iter().any(|event| matches!(event, ClientEvent::SessionModeChanged { session_id: id, mode: SessionModeDto::Chat, pending_mode: None, .. } if id == &session_id)));
+    assert!(handle.resumed.lock().await.is_none());
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
 #[tokio::test]
-async fn session_started_reports_admitted_mode_before_pending_selection() {
-    use lingxi_core::host::session_context::ConversationMode;
+async fn session_started_reports_the_fixed_mode() {
     let handle = Arc::new(ResumingHandle::new());
-    {
-        let mut mode = handle.session_mode.lock().await;
-        mode.session_id = handle.session_id.as_uuid().to_string();
-        mode.active = ConversationMode::Code;
-        mode.selected = ConversationMode::Chat;
-        mode.pending = true;
-        mode.revision = 4;
-    }
-    let router = EngineCommandRouter::new(
-        handle,
-        Arc::new(MockAuth),
-        Arc::new(MockTaskRegistry { rows: vec![] }),
-        None,
-        None,
-    );
+    let router = EngineCommandRouter::new(handle, Arc::new(MockAuth), Arc::new(MockTaskRegistry { rows: vec![] }), None, None);
     let sink = CapturingSink::arc();
-    router
-        .route(
-            ClientCommand::NewSession {
-                cwd: None,
-                model: None,
-            },
-            sink.clone(),
-        )
-        .await;
+    router.route(ClientCommand::NewSession { cwd: None, model: None, mode: SessionModeDto::Code }, sink.clone()).await;
     let events = sink.events().await;
-    assert!(
-        matches!(
-            events.as_slice(),
-            [
-                ClientEvent::SessionStarted {
-                    mode: SessionModeDto::Code,
-                    ..
-                },
-                ClientEvent::SessionModeChanged {
-                    mode: SessionModeDto::Code,
-                    pending_mode: Some(SessionModeDto::Chat),
-                    revision: 4,
-                    ..
-                },
-                ..
-            ]
-        ),
-        "{events:?}"
-    );
+    assert!(matches!(events.first(), Some(ClientEvent::SessionStarted { mode: SessionModeDto::Code, .. })), "{events:?}");
 }

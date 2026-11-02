@@ -55,6 +55,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
                     context = context, model = configured.defaultModel,
                     providerProfilesJson = configured.providerProfilesJson, routingJson = configured.routingJson,
                     scenario = NativeEngineScenario.LocalAppAgent, mediaHost = mediaHost,
+                    sessionMode = com.lingxi.code.model.SessionMode.Code,
                 ) ?: error("无法初始化应用的模型服务，请检查模型配置。")
                 agentConfiguration = identity
             }

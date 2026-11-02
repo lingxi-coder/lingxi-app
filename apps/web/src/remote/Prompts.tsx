@@ -13,20 +13,21 @@ interface PromptsProps {
   controller: SessionController;
   pending: RemotePending;
   answeredElsewhere: boolean;
+  disabled?: boolean;
 }
 
 /** What the session is waiting on: permission requests, questions, and (display only) computer access. */
-export function PendingPrompts({ locale, controller, pending, answeredElsewhere }: PromptsProps) {
+export function PendingPrompts({ locale, controller, pending, answeredElsewhere, disabled = false }: PromptsProps) {
   const any = pending.permissions.length + pending.questions.length + pending.computer_access.length > 0;
   if (!any && !answeredElsewhere) return null;
   return (
     <section className="rc-pending" aria-live="polite">
       {answeredElsewhere ? <p className="rc-note">{t(locale, 'answeredElsewhere')}</p> : null}
       {pending.permissions.map((request) => (
-        <PermissionCard key={request.request_id} locale={locale} controller={controller} request={request} />
+        <PermissionCard key={request.request_id} locale={locale} controller={controller} request={request} disabled={disabled} />
       ))}
       {pending.questions.map((request) => (
-        <QuestionCard key={request.request_id} locale={locale} controller={controller} request={request} />
+        <QuestionCard key={request.request_id} locale={locale} controller={controller} request={request} disabled={disabled} />
       ))}
       {pending.computer_access.length > 0 ? <p className="rc-note">{t(locale, 'computerAccessPending')}</p> : null}
     </section>
@@ -54,7 +55,7 @@ function useAnswer(locale: Locale): { busy: boolean; error: string | null; run(a
   };
 }
 
-function PermissionCard({ locale, controller, request }: { locale: Locale; controller: SessionController; request: PermissionRequest }) {
+function PermissionCard({ locale, controller, request, disabled }: { locale: Locale; controller: SessionController; request: PermissionRequest; disabled: boolean }) {
   const answer = useAnswer(locale);
   const { kind } = request;
   // Only "allow once" and "deny" are offered here; an always-allow rule and the bypass mode stay on the computer.
@@ -84,11 +85,11 @@ function PermissionCard({ locale, controller, request }: { locale: Locale; contr
       )}
       <div className="rc-actions">
         {kind.type === 'bypass_permissions_mode' ? null : (
-          <button type="button" className="button primary" disabled={answer.busy} onClick={() => respond('allow_once')}>
+          <button type="button" className="button primary" disabled={disabled || answer.busy} onClick={() => respond('allow_once')}>
             {t(locale, 'allowOnce')}
           </button>
         )}
-        <button type="button" className="button secondary" disabled={answer.busy} onClick={() => respond('deny')}>
+        <button type="button" className="button secondary" disabled={disabled || answer.busy} onClick={() => respond('deny')}>
           {t(locale, 'deny')}
         </button>
       </div>
@@ -97,7 +98,7 @@ function PermissionCard({ locale, controller, request }: { locale: Locale; contr
   );
 }
 
-function QuestionCard({ locale, controller, request }: { locale: Locale; controller: SessionController; request: AskUserQuestionRequestDto }) {
+function QuestionCard({ locale, controller, request, disabled }: { locale: Locale; controller: SessionController; request: AskUserQuestionRequestDto; disabled: boolean }) {
   const answer = useAnswer(locale);
   const [chosen, setChosen] = useState<ReadonlyMap<string, readonly string[]>>(new Map());
   const [other, setOther] = useState<ReadonlyMap<string, string>>(new Map());
@@ -144,10 +145,10 @@ function QuestionCard({ locale, controller, request }: { locale: Locale; control
         </fieldset>
       ))}
       <div className="rc-actions">
-        <button type="button" className="button primary" disabled={answer.busy || Object.keys(answers).length === 0} onClick={() => answer.run(() => controller.answerQuestion(request.request_id, answers))}>
+        <button type="button" className="button primary" disabled={disabled || answer.busy || Object.keys(answers).length === 0} onClick={() => answer.run(() => controller.answerQuestion(request.request_id, answers))}>
           {t(locale, 'questionSubmit')}
         </button>
-        <button type="button" className="button secondary" disabled={answer.busy} onClick={() => answer.run(() => controller.cancelQuestion(request.request_id))}>
+        <button type="button" className="button secondary" disabled={disabled || answer.busy} onClick={() => answer.run(() => controller.cancelQuestion(request.request_id))}>
           {t(locale, 'questionSkip')}
         </button>
       </div>

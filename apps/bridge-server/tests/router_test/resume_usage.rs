@@ -61,14 +61,13 @@ async fn resume_usage_snapshot_crosses_idle_websocket_and_late_usage_stays_filte
             &ClientCommand::ResumeSession {
                 session_id: session_id.clone(),
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
         )
         .await;
 
         assert!(matches!(next_frame(&mut ws).await,
             Frame::Event(ClientEvent::SessionResumed { session_id: actual, .. }) if actual == session_id));
-        assert!(matches!(next_frame(&mut ws).await,
-            Frame::Event(ClientEvent::SessionModeChanged { session_id: actual, .. }) if actual == session_id));
         if let Some(input) = input {
             match next_frame(&mut ws).await {
                 Frame::Event(ClientEvent::UsageUpdate {

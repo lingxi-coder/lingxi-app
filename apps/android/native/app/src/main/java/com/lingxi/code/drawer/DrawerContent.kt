@@ -661,7 +661,7 @@ private fun RecentRow(
                         ),
                     )
                 },
-                modifier = Modifier.testTag(UiTags.drawerSessionFork(session.uuid, otherMode.wireKey)),
+                modifier = Modifier.testTag(UiTags.drawerSessionFork(session.uuid, otherMode.wireValue)),
                 onClick = {
                     menuOpen = false
                     onContinue(

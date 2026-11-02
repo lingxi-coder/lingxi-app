@@ -468,7 +468,8 @@ test('a Bot\'s chat is titled with the Bot, not with a folder path, and offers t
   assert.match(html, /aria-label="Open Bot"/);
   assert.ok(!html.includes('/data/bots'), 'the Bot\'s private folder is not shown');
 
-  const project = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop }));
+  const projectBridge = { ...bridge, activeSession: { ...bridge.activeSession!, projectId: '/data/bots/a/workspace', mode: 'code' as const } };
+  const project = render(React.createElement(BetaTopBar, { bridge: projectBridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop }));
   assert.ok(!project.includes('Open Bot'));
   assert.match(project, /\/data\/bots\/a\/workspace/, 'a project chat still shows its folder');
 });

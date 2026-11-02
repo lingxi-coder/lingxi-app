@@ -25,8 +25,9 @@ use media_runtime::audio::Pcm16StreamConverter;
 use media_runtime::{MediaAttachmentHandle, MediaAttachmentPermit};
 use orchestrator::{
     MediaAgentCapabilityContext, MediaAgentHandoffRequest, MediaConversationAttachment,
-    RealtimeAgentContext, RealtimeAgentInput, RealtimeAgentLimits, RealtimeAgentSessionIo,
-    ScheduledMediaChild, ScheduledMediaChildRoute, ScheduledMediaParentCheck,
+    RealtimeAgentContext, RealtimeAgentInput, RealtimeAgentLimits, RealtimeAgentOutput,
+    RealtimeAgentSessionIo, RealtimeCompletionBoundary, ScheduledMediaChild,
+    ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 use serde::Deserialize;
 use std::{
@@ -34,7 +35,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     task::{Context, Poll},
@@ -76,6 +77,7 @@ struct MediaPreparedProvider {
     output_format: RealtimeAudioFormat,
     max_chunk_bytes: usize,
     image_input_supported: bool,
+    completion_boundary: RealtimeCompletionBoundary,
     cancel: CancellationToken,
     registration: Option<Arc<Registration>>,
 }
@@ -92,6 +94,7 @@ impl From<PreparedRealtimeProvider> for MediaPreparedProvider {
             output_format,
             max_chunk_bytes,
             image_input_supported,
+            completion_boundary,
             cancel,
             _registration,
             ..
@@ -106,6 +109,7 @@ impl From<PreparedRealtimeProvider> for MediaPreparedProvider {
             output_format,
             max_chunk_bytes,
             image_input_supported,
+            completion_boundary,
             cancel,
             registration: Some(_registration),
         }
@@ -830,6 +834,7 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
             output_format,
             max_chunk_bytes,
             image_input_supported,
+            completion_boundary,
             cancel,
             registration,
         } = connected;
@@ -846,6 +851,8 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
             result
         });
         let input_paused = Arc::new(AtomicBool::new(false));
+        let awaiting_admissions = Arc::new(AtomicUsize::new(0));
+        let agent_in_flight = Arc::new(AtomicBool::new(false));
         let playback = Arc::new(Mutex::new(PlaybackState::default()));
         let io_gate = Arc::new(AsyncMutex::new(()));
         let provider_control = control.clone();
@@ -853,6 +860,8 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
             let audio = audio.clone();
             let input = input.clone();
             let input_paused = input_paused.clone();
+            let awaiting_admissions = awaiting_admissions.clone();
+            let agent_in_flight = agent_in_flight.clone();
             let playback = playback.clone();
             let io_gate = io_gate.clone();
             let cancel = cancel.child_token();
@@ -863,6 +872,8 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
                     first_frame,
                     input,
                     input_paused,
+                    awaiting_admissions,
+                    agent_in_flight,
                     playback,
                     io_gate,
                     input_format,
@@ -919,6 +930,8 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
         let output_control = control.clone();
         let output_input = input.clone();
         let output_paused = input_paused.clone();
+        let output_awaiting_admissions = awaiting_admissions.clone();
+        let output_agent_in_flight = agent_in_flight.clone();
         let output_playback = playback.clone();
         let output_gate = io_gate.clone();
         let output_cancel = cancel.child_token();
@@ -929,6 +942,8 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
                 audio,
                 output_input,
                 output_paused,
+                output_awaiting_admissions,
+                output_agent_in_flight,
                 output_playback,
                 output_gate,
                 output_control,
@@ -980,6 +995,7 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
         });
 
         let mut limits = RealtimeAgentLimits::default();
+        limits.completion_boundary = completion_boundary;
         limits.max_image_inputs = MAX_IMAGE_INPUTS;
         limits.max_image_bytes_per_input =
             usize::try_from(MAX_IMAGE_INPUT_BYTES).unwrap_or(usize::MAX);
@@ -1023,6 +1039,8 @@ async fn capture_audio(
     first_frame: MediaFrame,
     input: mpsc::Sender<RealtimeAgentInput>,
     input_paused: Arc<AtomicBool>,
+    awaiting_admissions: Arc<AtomicUsize>,
+    agent_in_flight: Arc<AtomicBool>,
     playback: Arc<Mutex<PlaybackState>>,
     io_gate: Arc<AsyncMutex<()>>,
     format: RealtimeAudioFormat,
@@ -1061,9 +1079,10 @@ async fn capture_audio(
                 let tail = converter.finish().map_err(|error| error.to_string())?;
                 if speech_active && speech_duration >= SPEECH_MIN_DURATION {
                     if !tail.is_empty() {
-                        enqueue_audio(&input, tail, sample_rate_hz, max_chunk_bytes)?;
+                        enqueue_audio(&input, tail, sample_rate_hz, max_chunk_bytes, &cancel)
+                            .await?;
                     }
-                    commit_input(&input)?;
+                    commit_input(&input, &cancel).await?;
                 }
             }
             return Err("native media audio input ended during realtime".into());
@@ -1101,7 +1120,12 @@ async fn capture_audio(
             for bytes in converted {
                 let duration =
                     Duration::from_secs_f64((bytes.len() / 2) as f64 / f64::from(sample_rate_hz));
-                if input_paused.load(Ordering::Acquire) {
+                // Rendering can race a capture endpoint while clearing the
+                // playback pause. The admission count independently gates
+                // capture until the producer actually starts the new input.
+                if input_paused.load(Ordering::Acquire)
+                    || awaiting_admissions.load(Ordering::Acquire) > 0
+                {
                     preroll.clear();
                     preroll_duration = Duration::ZERO;
                     speech_active = false;
@@ -1133,12 +1157,19 @@ async fn capture_audio(
                     silence_duration = Duration::ZERO;
                     turn_started = Instant::now();
                     if matches!(interaction, InteractionMode::Interruptible)
-                        && playback_active(&playback)
+                        && (agent_in_flight.load(Ordering::Acquire) || playback_active(&playback))
                     {
                         interrupt_playback(&audio, &input, &playback, &io_gate, &cancel).await?;
                     }
                     while let Some(chunk) = preroll.pop_front() {
-                        enqueue_audio(&input, chunk.bytes, sample_rate_hz, max_chunk_bytes)?;
+                        enqueue_audio(
+                            &input,
+                            chunk.bytes,
+                            sample_rate_hz,
+                            max_chunk_bytes,
+                            &cancel,
+                        )
+                        .await?;
                         if chunk.voiced {
                             speech_duration = speech_duration.saturating_add(chunk.duration);
                         }
@@ -1147,7 +1178,7 @@ async fn capture_audio(
                     current_sent = true;
                 }
                 if !current_sent {
-                    enqueue_audio(&input, bytes, sample_rate_hz, max_chunk_bytes)?;
+                    enqueue_audio(&input, bytes, sample_rate_hz, max_chunk_bytes, &cancel).await?;
                     speech_duration = speech_duration.saturating_add(duration);
                 }
                 if voiced {
@@ -1159,15 +1190,17 @@ async fn capture_audio(
                     && (silence_duration >= SPEECH_ENDPOINT_SILENCE
                         || turn_started.elapsed() >= SPEECH_MAX_TURN)
                 {
-                    commit_input(&input)?;
+                    // The producer may defer this commit while an interrupted
+                    // turn drains. Pause before enqueueing so later audio
+                    // cannot overtake that boundary or fill its bounded queue.
+                    awaiting_admissions.fetch_add(1, Ordering::AcqRel);
+                    input_paused.store(true, Ordering::Release);
+                    commit_input(&input, &cancel).await?;
                     speech_active = false;
                     speech_duration = Duration::ZERO;
                     silence_duration = Duration::ZERO;
                     preroll.clear();
                     preroll_duration = Duration::ZERO;
-                    if matches!(interaction, InteractionMode::TurnBased) {
-                        input_paused.store(true, Ordering::Release);
-                    }
                 }
             }
         }
@@ -1195,10 +1228,12 @@ fn validate_capture_frame(frame: &MediaFrame, max_payload_bytes: u64) -> Result<
 }
 
 async fn render_agent_output(
-    mut events: mpsc::Receiver<RealtimeEvent>,
+    mut events: mpsc::Receiver<RealtimeAgentOutput>,
     audio: Arc<dyn MediaAudioChannel>,
     input: mpsc::Sender<RealtimeAgentInput>,
     input_paused: Arc<AtomicBool>,
+    awaiting_admissions: Arc<AtomicUsize>,
+    agent_in_flight: Arc<AtomicBool>,
     playback: Arc<Mutex<PlaybackState>>,
     io_gate: Arc<AsyncMutex<()>>,
     control: llm_runtime::services::sdk::realtime::RealtimeControl,
@@ -1220,6 +1255,47 @@ async fn render_agent_output(
             biased;
             _ = cancel.cancelled() => return Ok(()),
             event = events.recv() => match event { Some(event) => event, None => break },
+        };
+        let event = match event {
+            RealtimeAgentOutput::Provider(event) => event,
+            RealtimeAgentOutput::AgentResponseStarted { .. } => {
+                // Provider audio before this local admission belongs to the
+                // previous owner and was processed earlier in this queue.
+                {
+                    let _write_guard = io_gate.lock().await;
+                    let mut state = playback
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if state.interrupting {
+                        return Err(
+                            "new realtime input arrived during playback interruption".into()
+                        );
+                    }
+                    state.interrupted = false;
+                }
+                interruption_pending = false;
+                interrupted_seen = false;
+                agent_in_flight.store(true, Ordering::Release);
+                let remaining = awaiting_admissions
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        count.checked_sub(1)
+                    })
+                    .unwrap_or(0)
+                    .saturating_sub(1);
+                if matches!(interaction, InteractionMode::TurnBased) {
+                    input_paused.store(true, Ordering::Release);
+                } else if remaining == 0 {
+                    input_paused.store(false, Ordering::Release);
+                }
+                continue;
+            }
+            RealtimeAgentOutput::AgentTurnCompleted { .. } => {
+                agent_in_flight.store(false, Ordering::Release);
+                if awaiting_admissions.load(Ordering::Acquire) == 0 {
+                    input_paused.store(false, Ordering::Release);
+                }
+                continue;
+            }
         };
         match event {
             RealtimeEvent::AudioDelta { .. }
@@ -1280,7 +1356,10 @@ async fn render_agent_output(
                     )
                     .await?;
                 }
-                if matches!(interaction, InteractionMode::TurnBased) {
+                if awaiting_admissions.load(Ordering::Acquire) > 0
+                    || (agent_in_flight.load(Ordering::Acquire)
+                        && matches!(interaction, InteractionMode::TurnBased))
+                {
                     input_paused.store(true, Ordering::Release);
                 }
             }
@@ -1302,17 +1381,25 @@ async fn render_agent_output(
                     &playback,
                     &io_gate,
                     &input_paused,
+                    awaiting_admissions.load(Ordering::Acquire) == 0
+                        && (!agent_in_flight.load(Ordering::Acquire)
+                            || matches!(interaction, InteractionMode::Interruptible)),
                     &cancel,
                     control.capabilities().audio_truncation,
                 )
                 .await?;
+                if awaiting_admissions.load(Ordering::Acquire) > 0
+                    || (agent_in_flight.load(Ordering::Acquire)
+                        && matches!(interaction, InteractionMode::TurnBased))
+                {
+                    input_paused.store(true, Ordering::Release);
+                }
                 interruption_pending = true;
                 interrupted_seen = interrupted_status;
             }
             RealtimeEvent::TurnCompleted { .. } => {
-                finish_playback_item(&audio, &input, &playback, &io_gate, &input_paused, true)
+                finish_playback_item(&audio, &input, &playback, &io_gate, &input_paused, false)
                     .await?;
-                input_paused.store(false, Ordering::Release);
                 interruption_pending = false;
                 interrupted_seen = false;
             }
@@ -1325,10 +1412,19 @@ async fn render_agent_output(
                     &playback,
                     &io_gate,
                     &input_paused,
+                    awaiting_admissions.load(Ordering::Acquire) == 0
+                        && (!agent_in_flight.load(Ordering::Acquire)
+                            || matches!(interaction, InteractionMode::Interruptible)),
                     &cancel,
                     control.capabilities().audio_truncation,
                 )
                 .await?;
+                if awaiting_admissions.load(Ordering::Acquire) > 0
+                    || (agent_in_flight.load(Ordering::Acquire)
+                        && matches!(interaction, InteractionMode::TurnBased))
+                {
+                    input_paused.store(true, Ordering::Release);
+                }
                 interruption_pending = true;
                 interrupted_seen = interrupted;
             }
@@ -1628,6 +1724,7 @@ async fn handle_provider_interruption(
     playback: &Arc<Mutex<PlaybackState>>,
     io_gate: &Arc<AsyncMutex<()>>,
     input_paused: &AtomicBool,
+    resume_input: bool,
     cancel: &CancellationToken,
     can_truncate: bool,
 ) -> Result<(), String> {
@@ -1647,7 +1744,9 @@ async fn handle_provider_interruption(
             }
         }
     }
-    input_paused.store(false, Ordering::Release);
+    if resume_input {
+        input_paused.store(false, Ordering::Release);
+    }
     Ok(())
 }
 
@@ -1667,21 +1766,27 @@ async fn interrupt_playback(
     enqueue_inputs_wait(input, inputs, cancel).await
 }
 
-fn commit_input(input: &mpsc::Sender<RealtimeAgentInput>) -> Result<(), String> {
-    enqueue_inputs(
+async fn commit_input(
+    input: &mpsc::Sender<RealtimeAgentInput>,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
+    enqueue_inputs_wait(
         input,
-        [
+        vec![
             RealtimeAgentInput::Provider(RealtimeInput::CommitAudio),
             RealtimeAgentInput::Provider(RealtimeInput::ContinueResponse),
         ],
+        cancel,
     )
+    .await
 }
 
-fn enqueue_audio(
+async fn enqueue_audio(
     input: &mpsc::Sender<RealtimeAgentInput>,
     bytes: Vec<u8>,
     sample_rate_hz: u32,
     max_chunk_bytes: usize,
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     if bytes.is_empty() {
         return Ok(());
@@ -1692,13 +1797,18 @@ fn enqueue_audio(
         return Err("native realtime audio payload bound is too small".into());
     }
     for chunk in bytes.chunks(chunk_size) {
-        enqueue_input(
+        enqueue_inputs_wait(
             input,
-            RealtimeAgentInput::Provider(RealtimeInput::Audio {
+            vec![RealtimeAgentInput::Provider(RealtimeInput::Audio {
                 data: Bytes::copy_from_slice(chunk),
                 format: RealtimeAudioFormat::Pcm16 { sample_rate_hz },
-            }),
-        )?;
+            })],
+            cancel,
+        )
+        .await?;
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
     }
     Ok(())
 }
@@ -1710,19 +1820,6 @@ fn enqueue_input(
     input
         .try_send(value)
         .map_err(|_| "native realtime input queue is full or closed".into())
-}
-
-fn enqueue_inputs<const N: usize>(
-    input: &mpsc::Sender<RealtimeAgentInput>,
-    values: [RealtimeAgentInput; N],
-) -> Result<(), String> {
-    let permits = input
-        .try_reserve_many(N)
-        .map_err(|_| "native realtime input queue is full or closed".to_owned())?;
-    for (permit, value) in permits.zip(values) {
-        permit.send(value);
-    }
-    Ok(())
 }
 
 async fn enqueue_inputs_wait(
@@ -2905,6 +3002,31 @@ mod tests {
         }
     }
 
+    struct GeminiFramesTransport {
+        state: Arc<ProviderTestState>,
+        inbound: Mutex<
+            Option<
+                futures::channel::mpsc::UnboundedReceiver<
+                    Result<sdk::realtime::RealtimeFrame, sdk::realtime::RealtimeError>,
+                >,
+            >,
+        >,
+    }
+
+    #[async_trait]
+    impl sdk::realtime::RealtimeTransport for GeminiFramesTransport {
+        async fn connect(
+            &self,
+            _request: sdk::realtime::RealtimeConnectRequest,
+        ) -> Result<sdk::realtime::RealtimeConnection, sdk::realtime::RealtimeError> {
+            use futures::StreamExt;
+            Ok(sdk::realtime::RealtimeConnection {
+                outbound: Box::new(TestRealtimeSink(self.state.clone())),
+                inbound: self.inbound.lock().unwrap().take().unwrap().boxed(),
+            })
+        }
+    }
+
     struct TestRealtimeCodec;
 
     impl sdk::realtime::RealtimeCodec for TestRealtimeCodec {
@@ -3002,6 +3124,7 @@ mod tests {
                         },
                         max_chunk_bytes: MAX_NATIVE_AUDIO_CHUNK_BYTES,
                         image_input_supported: true,
+                        completion_boundary: RealtimeCompletionBoundary::ExplicitResponse,
                         cancel: provider.cancel.clone(),
                         registration: None,
                     })
@@ -3017,6 +3140,11 @@ mod tests {
             session_id: "open-session".into(),
             profile_name: Some("openai".into()),
             account_scope: Some("profile:openai".into()),
+            conversation_mode: lingxi_core::host::session_context::SessionModeSnapshot {
+                session_id: "open-session".into(),
+                mode: lingxi_core::host::session_context::ConversationMode::Code,
+            },
+            conversation_profile_epoch: 0,
             attachment_id: Some(attachment.id().clone()),
             instructions: String::new(),
             history: Vec::new(),
@@ -3548,6 +3676,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capture_audio_backpressure_preserves_pcm_and_commit_order() {
+        let (input, mut received) = mpsc::channel(2);
+        for _ in 0..2 {
+            input
+                .send(RealtimeAgentInput::Provider(
+                    RealtimeInput::ContinueResponse,
+                ))
+                .await
+                .unwrap();
+        }
+        let cancel = CancellationToken::new();
+        let producer = tokio::spawn(async move {
+            enqueue_audio(&input, vec![1, 2, 3, 4], 16_000, 2, &cancel).await?;
+            commit_input(&input, &cancel).await
+        });
+        tokio::task::yield_now().await;
+        assert!(!producer.is_finished());
+        for _ in 0..2 {
+            received.recv().await.unwrap();
+        }
+        for expected in [vec![1, 2], vec![3, 4]] {
+            match received.recv().await.unwrap() {
+                RealtimeAgentInput::Provider(RealtimeInput::Audio { data, .. }) => {
+                    assert_eq!(data.as_ref(), expected.as_slice())
+                }
+                _ => panic!("capture must retain each PCM chunk in order"),
+            }
+        }
+        assert!(matches!(
+            received.recv().await.unwrap(),
+            RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)
+        ));
+        assert!(matches!(
+            received.recv().await.unwrap(),
+            RealtimeAgentInput::Provider(RealtimeInput::ContinueResponse)
+        ));
+        tokio::time::timeout(Duration::from_secs(2), producer)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_audio_backpressure_can_be_cancelled_without_queue_capacity() {
+        let (input, mut received) = mpsc::channel(1);
+        input
+            .send(RealtimeAgentInput::Provider(
+                RealtimeInput::ContinueResponse,
+            ))
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let producer_cancel = cancel.clone();
+        let producer = tokio::spawn(async move {
+            enqueue_audio(&input, vec![1, 2, 3, 4], 16_000, 2, &producer_cancel).await
+        });
+        tokio::task::yield_now().await;
+        assert!(!producer.is_finished());
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), producer)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            received.recv().await.unwrap(),
+            RealtimeAgentInput::Provider(RealtimeInput::ContinueResponse)
+        ));
+        assert!(received.recv().await.is_none());
+    }
+
+    #[tokio::test]
     async fn capture_endpoint_ignores_short_silence_and_commits_after_endpoint() {
         let first_frame = captured_audio(1, 8_000);
         let mut frames: Vec<_> = (2..=4)
@@ -3562,6 +3763,8 @@ mod tests {
             audio,
             first_frame,
             input,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(0)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(PlaybackState::default())),
             Arc::new(AsyncMutex::new(())),
@@ -3602,6 +3805,355 @@ mod tests {
         }
         assert_eq!(commit_count, 1);
         assert_eq!(continue_count, 1);
+    }
+
+    #[tokio::test]
+    async fn interruptible_speech_interrupts_thinking_agent_without_playback() {
+        let first_frame = captured_audio(1, 8_000);
+        let frames = (2..=4)
+            .map(|sequence| captured_audio(sequence, 8_000))
+            .collect();
+        let audio = Arc::new(FakeAudioChannel::new(frames));
+        let (input, mut inputs) = mpsc::channel(128);
+        let result = capture_audio(
+            audio,
+            first_frame,
+            input,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(Mutex::new(PlaybackState::default())),
+            Arc::new(AsyncMutex::new(())),
+            RealtimeAudioFormat::Pcm16 {
+                sample_rate_hz: 24_000,
+            },
+            MAX_NATIVE_AUDIO_CHUNK_BYTES,
+            1024 * 1024,
+            InteractionMode::Interruptible,
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            inputs.recv().await,
+            Some(RealtimeAgentInput::Provider(RealtimeInput::Interrupt))
+        ));
+        assert!(matches!(
+            inputs.recv().await,
+            Some(RealtimeAgentInput::Provider(RealtimeInput::Audio { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_admission_blocks_capture_even_if_playback_unpauses() {
+        let first_frame = captured_audio(1, 8_000);
+        let frames = (2..=5)
+            .map(|sequence| captured_audio(sequence, 8_000))
+            .collect();
+        let audio = Arc::new(FakeAudioChannel::new(frames));
+        let (input, mut inputs) = mpsc::channel(128);
+        let result = capture_audio(
+            audio,
+            first_frame,
+            input,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(1)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(PlaybackState::default())),
+            Arc::new(AsyncMutex::new(())),
+            RealtimeAudioFormat::Pcm16 {
+                sample_rate_hz: 24_000,
+            },
+            MAX_NATIVE_AUDIO_CHUNK_BYTES,
+            1024 * 1024,
+            InteractionMode::Interruptible,
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            inputs.try_recv().is_err(),
+            "audio must not overtake the deferred commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_audio_resumes_after_interrupting_thinking_without_provider_start() {
+        use lingxi_llm_client::providers::google::live::{GeminiLiveConfig, GeminiLiveSession};
+        use sdk::realtime::{RealtimeConnectRequest, RealtimeFrame, RealtimeLimits};
+
+        let (provider, incoming) = futures::channel::mpsc::unbounded();
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(r#"{"setupComplete":{}}"#)))
+            .unwrap();
+        let transport = Arc::new(GeminiFramesTransport {
+            state: ProviderTestState::new(false, false),
+            inbound: Mutex::new(Some(incoming)),
+        });
+        let (session, driver) = GeminiLiveSession::connect(
+            transport,
+            RealtimeConnectRequest {
+                endpoint: "wss://test.invalid/ws".into(),
+                headers: Vec::new(),
+                max_frame_bytes: 1024 * 1024,
+            },
+            GeminiLiveConfig::new("gemini-3.8-live", "fixture-account").with_agent_history(),
+            RealtimeLimits::default(),
+        )
+        .await
+        .unwrap();
+        let (control, mut provider_events) = session.into_realtime_parts();
+        let driver = tokio::spawn(driver.run());
+        let concrete_audio = Arc::new(FakeAudioChannel::new(Vec::new()));
+        let audio: Arc<dyn MediaAudioChannel> = concrete_audio.clone();
+        let (input, mut inputs) = mpsc::channel(8);
+        let (output, events) = mpsc::channel(16);
+        let paused = Arc::new(AtomicBool::new(false));
+        let awaiting = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicBool::new(false));
+        let playback = Arc::new(Mutex::new(PlaybackState::default()));
+        let io_gate = Arc::new(AsyncMutex::new(()));
+        let cancel = CancellationToken::new();
+        let rendering = tokio::spawn(render_agent_output(
+            events,
+            audio.clone(),
+            input.clone(),
+            paused,
+            awaiting,
+            active.clone(),
+            playback.clone(),
+            io_gate.clone(),
+            control.clone(),
+            RealtimeAudioFormat::Pcm16 {
+                sample_rate_hz: 24_000,
+            },
+            MAX_NATIVE_AUDIO_CHUNK_BYTES,
+            InteractionMode::Interruptible,
+            cancel.clone(),
+        ));
+        output
+            .send(RealtimeAgentOutput::AgentResponseStarted {
+                turn_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            while !active.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // Decode an A audio frame, then its IDLE boundary. The A audio is held
+        // to exercise a queued old-owner frame at the render boundary.
+        provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AQI="}}]}}}"#))).unwrap();
+        let old_audio = loop {
+            let event = timeout(Duration::from_secs(2), provider_events.next())
+                .await
+                .unwrap()
+                .unwrap();
+            match event {
+                event @ RealtimeEvent::AudioDelta { .. } => break event,
+                RealtimeEvent::TurnStarted { .. } => {
+                    panic!("Gemini emitted an unexpected response start")
+                }
+                _ => {}
+            }
+        };
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(
+                r#"{"serverContent":{"turnComplete":true,"interactionStatus":"IDLE"}}"#,
+            )))
+            .unwrap();
+        loop {
+            let event = timeout(Duration::from_secs(2), provider_events.next())
+                .await
+                .unwrap()
+                .unwrap();
+            let idle = matches!(&event, RealtimeEvent::ProviderEvent { name, native } if name == "serverContent" && native.pointer("/serverContent/turnComplete").and_then(serde_json::Value::as_bool) == Some(true));
+            assert!(!matches!(&event, RealtimeEvent::TurnStarted { .. }));
+            output
+                .send(RealtimeAgentOutput::Provider(event))
+                .await
+                .unwrap();
+            if idle {
+                break;
+            }
+        }
+        interrupt_playback(&audio, &input, &playback, &io_gate, &cancel)
+            .await
+            .unwrap();
+        assert!(matches!(
+            inputs.recv().await,
+            Some(RealtimeAgentInput::Provider(RealtimeInput::Interrupt))
+        ));
+        assert!(playback_was_interrupted(&playback));
+        output
+            .send(RealtimeAgentOutput::Provider(old_audio))
+            .await
+            .unwrap();
+        output
+            .send(RealtimeAgentOutput::AgentTurnCompleted {
+                turn_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        output
+            .send(RealtimeAgentOutput::AgentResponseStarted {
+                turn_id: "agent-2".into(),
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            while playback_was_interrupted(&playback) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            concrete_audio.writes.lock().unwrap().is_empty(),
+            "old-owner audio must remain discarded"
+        );
+
+        provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AwQ="}}]}}}"#))).unwrap();
+        loop {
+            let event = timeout(Duration::from_secs(2), provider_events.next())
+                .await
+                .unwrap()
+                .unwrap();
+            match event {
+                event @ RealtimeEvent::AudioDelta { .. } => {
+                    output
+                        .send(RealtimeAgentOutput::Provider(event))
+                        .await
+                        .unwrap();
+                    break;
+                }
+                RealtimeEvent::TurnStarted { .. } => {
+                    panic!("Gemini emitted an unexpected response start")
+                }
+                _ => {}
+            }
+        }
+        timeout(Duration::from_secs(2), async {
+            while concrete_audio.writes.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(concrete_audio.writes.lock().unwrap()[0].pcm16le, vec![3, 4]);
+        cancel.cancel();
+        rendering.await.unwrap().unwrap();
+        let _ = control.abort(RealtimeClose::normal("test finished")).await;
+        let _ = driver.await;
+    }
+
+    #[tokio::test]
+    async fn interruptible_capture_stays_paused_until_deferred_input_is_admitted() {
+        let transport = TestRealtimeTransport(ProviderTestState::new(false, false));
+        let (session, driver) = sdk::realtime::RealtimeSession::connect(
+            &transport,
+            sdk::realtime::RealtimeConnectRequest {
+                endpoint: "wss://test.invalid".into(),
+                headers: Vec::new(),
+                max_frame_bytes: 1024 * 1024,
+            },
+            Arc::new(TestRealtimeCodec),
+            sdk::realtime::RealtimeLimits::default(),
+        )
+        .await
+        .unwrap();
+        let (control, _provider_events) = session.into_parts();
+        let driver = tokio::spawn(driver.run());
+        let audio = Arc::new(FakeAudioChannel::new(Vec::new()));
+        let (input, _inputs) = mpsc::channel(8);
+        let (output, events) = mpsc::channel(8);
+        let paused = Arc::new(AtomicBool::new(true));
+        let awaiting = Arc::new(AtomicUsize::new(1));
+        let cancel = CancellationToken::new();
+        let rendering = tokio::spawn(render_agent_output(
+            events,
+            audio.clone(),
+            input,
+            paused.clone(),
+            awaiting.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(PlaybackState::default())),
+            Arc::new(AsyncMutex::new(())),
+            control.clone(),
+            RealtimeAudioFormat::Pcm16 {
+                sample_rate_hz: 24_000,
+            },
+            MAX_NATIVE_AUDIO_CHUNK_BYTES,
+            InteractionMode::Interruptible,
+            cancel.clone(),
+        ));
+        output
+            .send(RealtimeAgentOutput::AgentResponseStarted {
+                turn_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            while paused.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(awaiting.load(Ordering::Acquire), 0);
+
+        // A second endpoint was committed while the first owner still drains.
+        awaiting.fetch_add(1, Ordering::AcqRel);
+        paused.store(true, Ordering::Release);
+        output
+            .send(RealtimeAgentOutput::AgentTurnCompleted {
+                turn_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        output
+            .send(RealtimeAgentOutput::Provider(RealtimeEvent::AudioDelta {
+                data: Bytes::from_static(&[0, 0]),
+                format: RealtimeAudioFormat::Pcm16 {
+                    sample_rate_hz: 24_000,
+                },
+                item_id: Some("late".into()),
+            }))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            while audio.writes.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            paused.load(Ordering::Acquire),
+            "old completion must not unpause a deferred commit"
+        );
+        output
+            .send(RealtimeAgentOutput::AgentResponseStarted {
+                turn_id: "agent-2".into(),
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            while paused.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(awaiting.load(Ordering::Acquire), 0);
+        cancel.cancel();
+        rendering.await.unwrap().unwrap();
+        let _ = control.abort(RealtimeClose::normal("test finished")).await;
+        let _ = driver.await;
     }
 
     #[tokio::test]
@@ -3804,11 +4356,13 @@ mod tests {
             &playback,
             &io_gate,
             &input_paused,
+            false,
             &CancellationToken::new(),
             true,
         )
         .await
         .unwrap();
+        assert!(input_paused.load(Ordering::Acquire));
         handle_provider_interruption(
             RealtimeEvent::Interrupted,
             &audio,
@@ -3816,6 +4370,7 @@ mod tests {
             &playback,
             &io_gate,
             &input_paused,
+            true,
             &CancellationToken::new(),
             true,
         )
@@ -3870,6 +4425,7 @@ mod tests {
                     &playback,
                     &io_gate,
                     &input_paused,
+                    true,
                     &CancellationToken::new(),
                     true,
                 )

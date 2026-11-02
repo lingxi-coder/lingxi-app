@@ -13,13 +13,14 @@
  * sandbox and on POSIX path rules. Anywhere else every operation is refused.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
 
 import type { SessionRowDto } from '@lingxi/bridge-client';
 import type { BotsAvailability } from '../../shared/bots.js';
 import type { SessionRef, WorkspaceLaunchSettings } from '../bridgeTypes.js';
+import type { SessionRuntime } from '../bridge.js';
 import type { RemoteBot, RemoteBotLookup, BotChat } from '../remoteControl/remoteBots.js';
 import type { RoutineBot } from '../scheduled.js';
 import type { ProjectSessionCatalogRow } from '../session-catalog.js';
@@ -31,8 +32,9 @@ import { BotNotFoundError, type BotCreateInput, type BotPatch, type BotRecord, t
 
 /** What of the runtime manager the Bots use. */
 export interface BotRuntimes {
-  newSession(projectPath: string, model?: string): Promise<SessionRef>;
-  openSession(ref: SessionRef, empty?: boolean, resumeModel?: string): Promise<unknown>;
+  newSession(projectPath: string, model: string | undefined, ownership: { mode: 'chat' | 'code'; projectId: string | null }): Promise<SessionRef>;
+  openSession(ref: SessionRef, empty?: boolean, resumeModel?: string, activate?: boolean, transcriptPath?: string): Promise<unknown>;
+  get?(sessionId: string): SessionRuntime | undefined;
   /** Stops every session of the folder; rejects while one of them is working. */
   closeProject(projectPath: string): Promise<void>;
 }
@@ -41,6 +43,7 @@ export interface BotRuntimes {
 export interface BotCatalog {
   list(projectPath: string): Promise<{ sessions: ProjectSessionCatalogRow[] }>;
   find(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogRow | undefined>;
+  select(projectPath: string, sessionId: string, selection: { scope: 'current'; transcriptPath: string }): Promise<ProjectSessionCatalogRow | undefined>;
   workspaceSettings(projectPath: string): Promise<WorkspaceLaunchSettings>;
   /** Forget what was listed, so that the next listing reads the home again. */
   invalidate(): void;
@@ -203,21 +206,78 @@ export class BotService {
   }
 
   /** A new session of the Bot, or an existing one of its own. */
-  async openSession(botId: string, sessionId?: string): Promise<BotSessionRef> {
+  async openSession(botId: string, sessionId?: string, transcriptPath?: string): Promise<BotSessionRef> {
     this.assertAvailable();
     this.assertNotDeleting(botId);
     const record = this.store.get(botId);
     const projectPath = this.store.workspaceDir(botId);
     if (sessionId === undefined) {
-      const ref = await this.options.runtimes.newSession(projectPath, record.model);
+      if (transcriptPath !== undefined) throw new Error('invalid Bot session selection');
+      const ref = await this.options.runtimes.newSession(projectPath, record.model, { mode: 'code', projectId: null });
       return { botId, projectPath: ref.projectPath, sessionId: ref.sessionId };
     }
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
+    sessionId = sessionId.toLowerCase();
     if (this.options.routines?.isControllerSession(projectPath, sessionId.toLowerCase())) throw new Error('session does not belong to this Bot');
-    const row = await this.catalog(botId).find(projectPath, sessionId);
-    if (!row) throw new Error('session does not belong to this Bot');
-    await this.options.runtimes.openSession({ projectPath, sessionId: row.uuid }, row.empty_session, row.resume_model ?? record.model);
+    const live = this.options.runtimes.get?.(sessionId);
+    if (!transcriptPath && live?.projectPath === projectPath && live.sessionMode) {
+      await this.options.runtimes.openSession({ projectPath, sessionId, mode: live.sessionMode });
+      return { botId, projectPath, sessionId };
+    }
+    const saved = this.store.sessionSource(botId, sessionId);
+    const selectedPath = transcriptPath ?? saved?.path;
+    if (!selectedPath) throw new Error('The Bot session source is unavailable. Choose an exact transcript.');
+    if (saved && saved.path !== selectedPath) throw new Error('The Bot session already has a different saved source.');
+    const row = await this.verifiedSessionSource(botId, sessionId, selectedPath, saved?.mode);
+    if (live) {
+      if (live.projectPath !== projectPath || live.sessionMode !== row.mode) {
+        throw new Error('The Bot session is already owned by a different runtime.');
+      }
+      if (live.connectionState.status !== 'connected') {
+        await this.options.runtimes.openSession({ projectPath, sessionId, mode: row.mode });
+      }
+      if (this.options.runtimes.get?.(sessionId) !== live || live.connectionState.status !== 'connected'
+        || (await live.getWorkspaceState()).transcript_path !== row.path) {
+        throw new Error('The Bot session is already owned by a different runtime.');
+      }
+    }
+    await this.options.runtimes.openSession({ projectPath, sessionId: row.uuid, mode: row.mode }, row.empty_session, row.resume_model ?? record.model, true, row.path);
+    this.store.rememberSessionSource(botId, row.uuid, { path: row.path, mode: row.mode });
     return { botId, projectPath, sessionId: row.uuid };
+  }
+
+  private async verifiedSessionSource(botId: string, sessionId: string, path: string, mode?: 'chat' | 'code'): Promise<ProjectSessionCatalogRow> {
+    const workspace = this.store.workspaceDir(botId);
+    if (!isAbsolute(path) || path.includes('\0') || basename(path).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`) throw new Error('invalid Bot session selection');
+    const row = await this.catalog(botId).select(workspace, sessionId, { scope: 'current', transcriptPath: path });
+    if (!row || row.uuid.toLowerCase() !== sessionId.toLowerCase() || row.path !== path || (mode && row.mode !== mode)
+      || (row.workspace_path && realpathSync.native(row.workspace_path) !== realpathSync.native(workspace))) throw new Error('The Bot session source is unavailable.');
+    return row;
+  }
+
+  async resolveSavedTranscript(ref: SessionRef): Promise<{ path: string; mode: 'chat' | 'code' } | undefined> {
+    const botId = this.botIdFor(ref.projectPath);
+    if (!botId || (ref.projectId !== undefined && ref.projectId !== null)) throw new Error('The Bot session owner is unavailable.');
+    const saved = this.store.sessionSource(botId, ref.sessionId);
+    if (!saved) return undefined;
+    if (ref.mode && ref.mode !== saved.mode) throw new Error('The Bot session mode does not match its saved source.');
+    const row = await this.verifiedSessionSource(botId, ref.sessionId, saved.path, saved.mode);
+    return { path: row.path, mode: row.mode };
+  }
+
+  async captureSessionSource(ref: SessionRef, runtime: SessionRuntime): Promise<string> {
+    const botId = this.botIdFor(ref.projectPath);
+    if (!botId || runtime.projectPath !== ref.projectPath || runtime.sessionId.toLowerCase() !== ref.sessionId.toLowerCase()
+      || !runtime.sessionMode || (ref.mode && ref.mode !== runtime.sessionMode)
+      || (ref.projectId !== undefined && ref.projectId !== null)) throw new Error('The Bot session owner changed.');
+    const state = await runtime.getWorkspaceState(), path = state.transcript_path;
+    if (!path || !isAbsolute(path) || basename(path).toLowerCase() !== `${ref.sessionId.toLowerCase()}.jsonl`
+      || realpathSync.native(state.cwd) !== realpathSync.native(ref.projectPath) || !lstatSync(path).isFile()) throw new Error('The Bot session has no verified transcript source.');
+    await this.verifiedSessionSource(botId, ref.sessionId, path, runtime.sessionMode);
+    if (this.options.runtimes.get?.(ref.sessionId) !== runtime || runtime.projectPath !== ref.projectPath) throw new Error('The Bot session owner changed.');
+    this.store.rememberSessionSource(botId, ref.sessionId, { path, mode: runtime.sessionMode });
+    runtime.rememberTranscriptSelection(path);
+    return path;
   }
 
   /** The Bot's own sessions, read from its home. */

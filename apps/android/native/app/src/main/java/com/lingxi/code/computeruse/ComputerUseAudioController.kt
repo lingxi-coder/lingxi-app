@@ -2,6 +2,7 @@ package com.lingxi.code.computeruse
 
 import android.content.Context
 import com.lingxi.code.voice.audio.AndroidAudioServiceProvider
+import com.lingxi.code.voice.audio.AndroidAudioSessionContext
 import com.lingxi.code.voice.audio.AudioOperationException
 import com.lingxi.code.voice.audio.AudioOwnerKey
 import com.lingxi.code.voice.audio.DeviceAudioErrorKind
@@ -11,7 +12,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import java.util.UUID
 import kotlin.math.max
 
 internal data class ComputerUseTranscript(
@@ -38,12 +38,31 @@ internal fun audioPlaybackTimeoutMs(frameCount: Int, sampleRate: Int): Long {
 /** Computer Use uses the same owner-scoped service as UI, Flow and engine operations. */
 internal class ComputerUseAudioController(context: Context) {
     private val appContext = context.applicationContext
-    private val owner = AudioOwnerKey.ui("computer-use-${UUID.randomUUID()}")
     private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val activeOwners = mutableMapOf<AudioOwnerKey, Int>()
 
-    suspend fun listen(language: String?, timeoutMs: Long): ComputerUseTranscript {
+    private fun requireOwner(engineOwner: String): AudioOwnerKey {
+        val owner = AudioOwnerKey.computerUse(engineOwner)
+        if (AndroidAudioSessionContext.engineFor(owner) == null) {
+            throw AudioOperationException(DeviceAudioErrorKind.Unavailable, "The originating Computer Use audio session is unavailable.")
+        }
+        return owner
+    }
+
+    private suspend fun <T> withOwner(engineOwner: String, action: suspend (AudioOwnerKey) -> T): T {
+        val owner = requireOwner(engineOwner)
+        synchronized(activeOwners) { activeOwners[owner] = (activeOwners[owner] ?: 0) + 1 }
+        try { return action(owner) } finally {
+            synchronized(activeOwners) {
+                val count = activeOwners[owner] ?: 0
+                if (count <= 1) activeOwners.remove(owner) else activeOwners[owner] = count - 1
+            }
+        }
+    }
+
+    suspend fun listen(engineOwner: String, language: String?, timeoutMs: Long): ComputerUseTranscript = withOwner(engineOwner) { owner ->
         val startedAt = System.currentTimeMillis()
-        return when (
+        when (
             val result = AndroidAudioServiceProvider.perform(
                 context = appContext,
                 owner = owner,
@@ -62,9 +81,9 @@ internal class ComputerUseAudioController(context: Context) {
         }
     }
 
-    suspend fun speak(text: String, voice: String?, speed: Float): ComputerUseSpeechResult {
+    suspend fun speak(engineOwner: String, text: String, voice: String?, speed: Float): ComputerUseSpeechResult = withOwner(engineOwner) { owner ->
         val startedAt = System.currentTimeMillis()
-        return when (
+        when (
             val result = AndroidAudioServiceProvider.perform(
                 context = appContext,
                 owner = owner,
@@ -86,7 +105,9 @@ internal class ComputerUseAudioController(context: Context) {
         }
     }
 
-    suspend fun stopAndWait() {
+    suspend fun stopAndWait(engineOwner: String) = stopOwner(AudioOwnerKey.computerUse(engineOwner))
+
+    private suspend fun stopOwner(owner: AudioOwnerKey) {
         when (val result = AndroidAudioServiceProvider.perform(appContext, owner, DeviceAudioOperation.EndOwner)) {
             DeviceAudioResult.OwnerEnded -> Unit
             is DeviceAudioResult.Failed -> throw AudioOperationException(result.error.kind, result.error.message)
@@ -98,7 +119,8 @@ internal class ComputerUseAudioController(context: Context) {
     }
 
     fun stop() {
-        cleanupScope.launch { runCatching { stopAndWait() } }
+        val owners = synchronized(activeOwners) { activeOwners.keys.toList() }
+        cleanupScope.launch { owners.forEach { owner -> runCatching { stopOwner(owner) } } }
     }
 }
 

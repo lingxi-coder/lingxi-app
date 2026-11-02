@@ -76,9 +76,8 @@ class NativeConversationParityFixtureTest {
     @Test fun sharedWorkflowEventsRejectLateProgressAndForeignSessions() {
         for (scenario in scenarios().filter { it.has("workflow_updates") }) {
             val vm = ChatViewModel()
-            if (scenario.has("previous_session")) vm.applyActivatedSession(ActivatedSession(
-                scenario.getString("previous_session"), emptyList(), SessionActivationKind.Started))
-            vm.applyActivatedSession(ActivatedSession(scenario.getString("active_session"), emptyList(), SessionActivationKind.Resumed))
+            vm.applyActivatedSession(ActivatedSession(scenario.getString("active_session"), emptyList(),
+                SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code))
             val updates = scenario.getJSONArray("workflow_updates")
             for (index in 0 until updates.length()) {
                 val row = updates.getJSONObject(index)

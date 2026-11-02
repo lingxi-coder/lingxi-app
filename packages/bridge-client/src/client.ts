@@ -537,10 +537,10 @@ export class BridgeClient extends EventEmitter {
     if (!result || typeof result !== 'object' || (result as { status?: unknown }).status !== 'ok') throw new Error('invalid runtime controls restore response');
   }
 
-  async resumeSessionFromTranscript(sessionId: string, transcriptPath: string, signal?: AbortSignal): Promise<void> {
+  async resumeSessionFromTranscript(sessionId: string, transcriptPath: string, expectedMode: 'chat' | 'code', signal?: AbortSignal): Promise<void> {
     // The Desktop resume owner pauses its deadline for live tool interactions.
     // Its signal replaces the fixed request deadline only for that owner.
-    const result = await this.request('resume_selected_session', { session_id: sessionId, transcript_path: transcriptPath },
+    const result = await this.request('resume_selected_session', { session_id: sessionId, transcript_path: transcriptPath, expected_mode: expectedMode },
       signal ? null : 30_000, undefined, signal);
     if (!result || typeof result !== 'object' || (result as { status?: unknown }).status !== 'ok') {
       throw new Error('invalid selected session resume response');

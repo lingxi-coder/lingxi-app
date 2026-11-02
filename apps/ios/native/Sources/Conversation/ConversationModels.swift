@@ -172,11 +172,6 @@ struct PendingPermission: Identifiable, Equatable {
 
 /// The observable conversation state ChatView renders. Both sources mutate it on
 /// the main actor: the mock with canned timers, the engine from listener events.
-struct SessionRestoreRecovery: Equatable, Identifiable {
-    let id = UUID()
-    let unavailableSessionID: String
-}
-
 struct SessionTransitionFailure: Equatable, Identifiable {
     let id = UUID()
     let requestedSessionID: String
@@ -528,19 +523,9 @@ final class ConversationModel: ObservableObject {
     @Published var visualizationChip: VisualizationContextChip?
 
     @Published var contextUsage: ConversationUsageSnapshot? = nil
-    /// The engine owns the actual mode and, during a turn, its next mode.
+    /// The engine validates this immutable mode when the session is opened.
     @Published var sessionMode: SessionMode = .code
     @Published var sessionModeKnown = true
-    @Published var pendingSessionMode: SessionMode?
-    /// The latest selection remains here until its command is acknowledged.
-    /// A failed selection stays retryable without consuming the composer's draft.
-    @Published var requestedSessionMode: SessionMode?
-    @Published var sessionModeSubmissionFailed = false
-    /// A new session cannot send until its requested initial mode is confirmed.
-    @Published var awaitingNewSessionMode = false
-    @Published var newSessionModeFailed = false
-    @Published var requestedNewSessionMode: SessionMode?
-    var sessionModeRevision: UInt64?
     @Published var activeSessionId: String = "" {
         didSet {
             promptSuggestion = nil
@@ -556,14 +541,8 @@ final class ConversationModel: ObservableObject {
     /// confirmed by SessionStarted / SessionResumed. While true, an older
     /// SessionList must not replace the persisted project index.
     @Published var sessionTransitionPending: Bool = false
-    /// Emitted only when ResumeSession proves that a persisted session no longer
-    /// exists. RootView consumes this before adopting the replacement NewSession,
-    /// clearing the stale project/UserDefaults selection without hiding other
-    /// resume failures.
-    @Published var sessionRestoreRecovery: SessionRestoreRecovery? = nil
-    /// Emitted when a requested ResumeSession fails without a recoverable
-    /// missing-session migration. RootView uses it to roll optimistic drawer
-    /// selection back to the last engine-confirmed session.
+    /// A failed restore remains an error for the requested owner. The UI can
+    /// roll its optimistic selection back without creating a new session.
     @Published var sessionTransitionFailure: SessionTransitionFailure? = nil
     /// Monotonic signal emitted after a new session is confirmed or a real turn
     /// settles. The composition root responds with ListSessions, allowing the

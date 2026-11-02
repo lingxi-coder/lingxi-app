@@ -111,9 +111,9 @@ class DrawerSearchTest {
     // --- engine sessions (the REAL drawer catalog) -------------------------
 
     private val sessions = listOf(
-        SessionRow(uuid = "u1", title = "重装 LingXi", messageCount = 8, relativeTime = "2 小时前"),
-        SessionRow(uuid = "u2", title = "客户邮件回复模板", messageCount = 4, relativeTime = "昨天"),
-        SessionRow(uuid = "u3", title = "上海差旅规划", messageCount = 17, relativeTime = "5月3日"),
+        SessionRow(uuid = "u1", title = "重装 LingXi", messageCount = 8, relativeTime = "2 小时前", mode = com.lingxi.code.model.SessionMode.Code),
+        SessionRow(uuid = "u2", title = "客户邮件回复模板", messageCount = 4, relativeTime = "昨天", mode = com.lingxi.code.model.SessionMode.Code),
+        SessionRow(uuid = "u3", title = "上海差旅规划", messageCount = 17, relativeTime = "5月3日", mode = com.lingxi.code.model.SessionMode.Code),
     )
 
     @Test

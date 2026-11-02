@@ -80,13 +80,15 @@ export function Projects({ bridge }: PageContentProps) {
   const [error, setError] = useState<string | null>(null);
 
   const settings = bridge.bootstrap?.settings;
+  const spaces = bridge.bootstrap?.conversationSpaces;
   // Mirrors `BetaSidebar`'s own precedence for "which project is active"
   // (an in-flight session's project outranks the persisted `activeProject`,
   // which outranks whatever `workspace` currently resolves to) — `projectRows`
   // itself stays simple and pure, taking a single resolved path.
-  const activePath = bridge.activeSession?.projectPath ?? settings?.activeProject ?? bridge.bootstrap?.workspace?.path;
-  const rows = projectRows({ projects: settings?.projects ?? [], activeProject: activePath });
-  const pinnedRows = pinnedSessionRows({ pinnedSessions: settings?.pinnedSessions ?? [] });
+  const activePath = bridge.activeSession?.projectId ?? (spaces ? spaces.navigation[spaces.activeMode].projectId : undefined) ?? undefined;
+  const rows = projectRows({ projects: (settings?.projects ?? []).filter((path) => spaces?.projects[path]?.includes(spaces.activeMode)), activeProject: activePath });
+  const pinnedRows = pinnedSessionRows({ pinnedSessions: (settings?.pinnedSessions ?? []).filter((row) => row.mode === spaces?.activeMode
+    && (row.projectId == null || (spaces && spaces.projects[row.projectId]?.includes(spaces.activeMode)))) });
   const workspace = bridge.bootstrap?.workspace;
 
   const hasActiveWork = (path: string) =>

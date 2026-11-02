@@ -1455,15 +1455,19 @@ export function validateClientEvent(value: unknown): ClientEvent {
         mode: sessionMode(input['mode'], 'mode'),
         messages: input['messages'] as ClientEvent & { messages: unknown[] }['messages'],
       } as ClientEvent;
-    case 'session_mode_changed':
-      exactKeys(input, ['type', 'session_id', 'mode', 'pending_mode', 'revision'], 'client event');
-      return {
-        type,
-        session_id: string(input['session_id'], 'session_id'),
-        mode: sessionMode(input['mode'], 'mode'),
-        ...(input['pending_mode'] === undefined ? {} : { pending_mode: sessionMode(input['pending_mode'], 'pending_mode') }),
-        revision: integer(input['revision'], 'revision'),
+    case 'session_handoff_prepared':
+      exactKeys(input, ['type', 'request_id', 'source_session_id', 'source_mode', 'target_mode', 'cutoff', 'summary'], 'client event');
+      return { type,
+        request_id: string(input['request_id'], 'request_id'),
+        source_session_id: string(input['source_session_id'], 'source_session_id'),
+        source_mode: sessionMode(input['source_mode'], 'source_mode'),
+        target_mode: sessionMode(input['target_mode'], 'target_mode'),
+        cutoff: string(input['cutoff'], 'cutoff'),
+        summary: string(input['summary'], 'summary'),
       };
+    case 'session_handoff_failed':
+      exactKeys(input, ['type', 'request_id', 'message'], 'client event');
+      return { type, request_id: string(input['request_id'], 'request_id'), message: string(input['message'], 'message') };
     case 'context_manifest': {
       exactKeys(input, ['type', 'manifest_json'], 'client event');
       const manifest_json = string(input['manifest_json'], 'manifest_json');

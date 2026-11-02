@@ -43,7 +43,6 @@ import com.lingxi.code.theme.LingXiTheme
 internal data class SessionPanelModel(
     val title: String,
     val mode: SessionMode,
-    val pendingMode: SessionMode? = null,
     val canSwitchMode: Boolean = true,
     val workspaceName: String,
     val modelName: String,
@@ -54,6 +53,8 @@ internal data class SessionPanelModel(
     val pinned: Boolean,
     /** False for scheduled-task run sessions, which are managed from the task page. */
     val canArchive: Boolean = true,
+    val handoffSourceMode: SessionMode? = null,
+    val handoffSourceId: String? = null,
 )
 
 /**
@@ -69,6 +70,7 @@ internal fun SessionPanel(
     onDismiss: () -> Unit,
     onSelectMode: (SessionMode) -> Unit,
     onContinueInOtherMode: () -> Unit,
+    onOpenHandoffSource: () -> Unit,
     onOpenPermissionSettings: () -> Unit,
     onTogglePinned: () -> Unit,
     onMakeScheduled: () -> Unit,
@@ -115,8 +117,7 @@ internal fun SessionPanel(
                 Box {
                     SettingsRow(
                         label = stringResource(R.string.cron_mode_label),
-                        sub = model.pendingMode?.let { stringResource(R.string.session_mode_pending, sessionModeLabel(it)) }
-                            ?: sessionModeDescription(model.mode),
+                        sub = sessionModeDescription(model.mode),
                         value = sessionModeLabel(model.mode),
                         valueColor = t.modeColor(model.mode),
                         onTap = { if (model.canSwitchMode) modeMenuOpen.value = true },
@@ -129,7 +130,7 @@ internal fun SessionPanel(
                                 text = { Text("${sessionModeLabel(candidate)} — ${sessionModeDescription(candidate)}") },
                                 onClick = { modeMenuOpen.value = false; onSelectMode(candidate) },
                                 trailingIcon = if (isSelected) {{ LXIcon(LXIconName.Check, size = 16.dp, color = t.text2) }} else null,
-                                modifier = Modifier.testTag(UiTags.sessionPanelModeOption(candidate.wireKey))
+                                modifier = Modifier.testTag(UiTags.sessionPanelModeOption(candidate.wireValue))
                                     .semantics { selected = isSelected },
                             )
                         }
@@ -157,6 +158,14 @@ internal fun SessionPanel(
                 )
             }
             SettingsSection {
+                model.handoffSourceMode?.let { sourceMode ->
+                    SettingsRow(
+                        label = stringResource(R.string.session_handoff_open_source, sessionModeLabel(sourceMode)),
+                        sub = model.handoffSourceId?.take(8),
+                        icon = LXIconName.Share,
+                        onTap = onOpenHandoffSource,
+                    )
+                }
                 SettingsRow(
                     label = stringResource(
                         if (model.pinned) R.string.drawer_session_unpin else R.string.drawer_session_pin,

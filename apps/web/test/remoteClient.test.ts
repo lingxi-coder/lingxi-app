@@ -32,6 +32,7 @@ const controls: ConversationControlsDto = {
 /** A desktop that serves one session from a script. */
 class SessionScript {
   epoch = 'e1';
+  sessionMode: 'chat' | 'code' | undefined = 'code';
   messages: MessageDto[] = [message('user', 'hi'), message('assistant', 'hello')];
   records: RemoteSeqRecord[] = [];
   cursorSeq = 0;
@@ -80,7 +81,8 @@ class SessionScript {
 
   sendSnapshot(conn: HostConnection): void {
     const to = (p: object) => void conn.notify('session.snapshot', { session_id: SESSION, ...p });
-    to({ phase: 'begin', epoch: this.epoch, first_message_index: this.firstIndex });
+    to({ phase: 'begin', epoch: this.epoch, first_message_index: this.firstIndex,
+      ...(this.sessionMode === undefined ? {} : { session_mode: this.sessionMode }) });
     to({ phase: 'messages', messages: this.messages });
     to({ phase: 'records', records: this.records });
     to({ phase: 'end', cursor: { epoch: this.epoch, seq: this.cursorSeq }, pending: this.pending, turn: { running: this.running }, controls });
@@ -300,7 +302,10 @@ test('prompts: images only while idle, the echo is matched by turn id, failures 
   await waitFor(() => controller.getState().turn.running, 'the turn to start');
   script.calls.length = 0;
   script.failWith.set('prompt.send', 'internal');
-  await controller.sendPrompt('more', [image]);
+  assert.throws(() => controller.sendPrompt('more', [image]), 'a stale idle view must retain its image');
+  assert.throws(() => controller.sendPrompt('more', [], ['receipt']), 'a stale idle view must retain its file receipt');
+  assert.equal(script.calls.length, 0);
+  await controller.sendPrompt('more');
   assert.equal(script.calls[0]!.params.images, undefined, 'a running turn takes text only');
   assert.equal(controller.getState().outgoing[0]!.status, 'failed');
   const id = script.calls[0]!.params.client_request_id;

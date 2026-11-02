@@ -38,11 +38,34 @@ pub(crate) fn transcript(
         "isSidechain":false, "version":"test", "message":{"role":"user","content":text}
     });
     let profile = serde_json::json!({
-        "type":"session-mode", "sessionId":id.to_string(), "sessionMode":mode,
-        "contextRevision":4, "profileEpoch":4, "admittedMode":mode,"admittedEpoch":4,"pending":false
+        "type":"fixed-session-mode", "sessionId":id.to_string(), "sessionMode":mode,
+        "instructionEpoch":4
     });
-    std::fs::write(&path, format!("{user}\n{profile}\n")).unwrap();
+    std::fs::write(&path, format!("{profile}\n{user}\n")).unwrap();
     path
+}
+
+#[tokio::test]
+async fn public_cli_rejects_chat_before_writer_claim() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let home = root.path().join("config");
+    let id = uuid::Uuid::new_v4();
+    let path = transcript(&home, &cwd, id, "chat source", "2026-10-28T00:00:00.000Z", "chat");
+    let before = std::fs::read(&path).unwrap();
+    let mut cfg = DesktopConfig::default();
+    cfg.cwd = cwd;
+    cfg.lingxi_home = home.clone();
+    cfg.session_persistence = true;
+    cfg.session_transcript_path = Some(path.clone());
+    let error = capture_tui_resume(
+        &mut cfg, id, Some(lingxi_core::host::session_context::ConversationMode::Code),
+    ).await.err().expect("Chat must not be admitted by public CLI");
+    assert!(error.to_string().contains("session_mode_mismatch"));
+    assert!(cfg.session_writer_lease.is_none());
+    assert!(!home.join("sessions").exists());
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
 #[tokio::test]
@@ -91,7 +114,7 @@ async fn exact_background_resume_keeps_selected_worktree_and_profile() {
         cfg.lingxi_home = home.clone();
         cfg.session_persistence = persistent;
         cfg.session_transcript_path = Some(selected.clone());
-        let captured = capture_tui_resume(&mut cfg, id).await.unwrap();
+        let captured = capture_tui_resume(&mut cfg, id, None).await.unwrap();
         assert_eq!(
             cfg.session_transcript_path,
             Some(selected.canonicalize().unwrap())
@@ -103,13 +126,13 @@ async fn exact_background_resume_keeps_selected_worktree_and_profile() {
             std::str::from_utf8(&selected_bytes).unwrap()
         );
         let mode =
-            session::JsonlWriter::session_mode_transition_from_source(source, &id.to_string())
+            session::JsonlWriter::fixed_session_profile_from_source(source, &id.to_string())
                 .unwrap();
         assert_eq!(
-            mode.active,
+            mode.mode,
             lingxi_core::host::session_context::ConversationMode::Chat
         );
-        assert_eq!(mode.revision, 4);
+        assert_eq!(mode.instruction_epoch, 4);
         let encoded = captured
             .messages
             .iter()
@@ -157,7 +180,7 @@ async fn exact_resume_missing_or_invalid_source_never_falls_back() {
         cfg.lingxi_home = home.clone();
         cfg.session_persistence = false;
         cfg.session_transcript_path = Some(invalid);
-        assert!(capture_tui_resume(&mut cfg, id).await.is_err());
+        assert!(capture_tui_resume(&mut cfg, id, Some(lingxi_core::host::session_context::ConversationMode::Code)).await.is_err());
         assert!(cfg.session_resume_snapshot.is_none());
     }
 }
@@ -187,6 +210,6 @@ async fn exact_resume_rejects_symlink_source() {
     cfg.lingxi_home = home;
     cfg.session_persistence = false;
     cfg.session_transcript_path = Some(link);
-    assert!(capture_tui_resume(&mut cfg, id).await.is_err());
+    assert!(capture_tui_resume(&mut cfg, id, Some(lingxi_core::host::session_context::ConversationMode::Code)).await.is_err());
     assert!(cfg.session_resume_snapshot.is_none());
 }

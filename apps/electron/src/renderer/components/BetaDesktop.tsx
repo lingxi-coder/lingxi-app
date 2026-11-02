@@ -474,7 +474,9 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     [scheduledWorkspace, settings?.projects, spaces?.projects, currentSpace],
   );
   const visibleDrafts = (spaces?.drafts ?? []).filter((draft) => draft.mode === currentSpace
-    && (draft.projectId === null || projects.includes(draft.projectId)));
+    && (draft.projectId === null || projects.includes(draft.projectId))
+    && !bridge.bootstrap?.projectCatalogs?.[draft.projectPath]?.sessions.some((row) =>
+      row.uuid === draft.sessionId && row.mode === draft.mode && row.message_count > 0));
   const generalPaths = useMemo(() => [...new Set([globalWorkspace, scheduledWorkspace].filter((path): path is string => Boolean(path)))], [globalWorkspace, scheduledWorkspace]);
   const ownedPaths = useMemo(() => [...new Set((spaces?.sessions ?? []).filter((owner) => owner.mode === currentSpace
     && (owner.projectId === null || projects.includes(owner.projectId))).map((owner) => owner.projectPath))], [spaces?.sessions, currentSpace, projects]);

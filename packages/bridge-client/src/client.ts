@@ -409,13 +409,19 @@ export class BridgeClient extends EventEmitter {
     ws.on('close', (code: number, reason: Buffer) => this.onClose(code, reason.toString(), ws));
     ws.on('error', (err: Error) => { if (this.ws === ws) this.emit('error', err); });
 
-    const hello = await this.handshake();
-    if (generation !== this.connectionGeneration) {
+    try {
+      const hello = await this.handshake();
+      if (generation !== this.connectionGeneration) {
+        throw new Error('Bridge connection was replaced during handshake.');
+      }
+      this.serverHello = hello;
+      return hello;
+    } catch (error) {
+      // Retire the socket whose handshake failed, even if another connection
+      // has replaced it. Never close that replacement from this continuation.
       ws.close();
-      throw new Error('Bridge connection was replaced during handshake.');
+      throw error;
     }
-    this.serverHello = hello;
-    return hello;
   }
 
   /** Send the {@link ClientHello} and verify the {@link ServerHello} reply. */

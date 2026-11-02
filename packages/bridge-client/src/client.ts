@@ -148,6 +148,7 @@ interface QueueWaiter {
 }
 
 interface PendingMediaServiceRequest {
+  socket: WebSocket | null;
   resolve: (response: MediaServiceResponseDto) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
@@ -198,6 +199,7 @@ export class BridgeClient extends EventEmitter {
 
   /** Monotonic correlation id for outbound `Frame::Request`s. */
   private nextRequestId = 1;
+  private connectionGeneration = 0;
 
   /** Buffered inbound events + parked async-iterator waiters. */
   private readonly eventQueue: ClientEvent[] = [];
@@ -208,7 +210,7 @@ export class BridgeClient extends EventEmitter {
   /** Pending `Frame::Response` correlators keyed by request id. */
   private readonly pendingResponses = new Map<
     number,
-    { resolve: (result: unknown) => void; reject: (err: Error) => void }
+    { socket: WebSocket | null; resolve: (result: unknown) => void; reject: (err: Error) => void }
   >();
 
   /** Correlates private app-scoped MediaService command/response events. */
@@ -296,7 +298,7 @@ export class BridgeClient extends EventEmitter {
         this.pendingMediaService.delete(request.request_id);
         reject(new Error('bridge media service request timed out'));
       }, timeoutMs);
-      this.pendingMediaService.set(request.request_id, { resolve, reject, timer });
+      this.pendingMediaService.set(request.request_id, { socket: this.ws, resolve, reject, timer });
       try {
         this.sendCommand({ type: 'media_service_request', request });
       } catch (error) {
@@ -309,7 +311,7 @@ export class BridgeClient extends EventEmitter {
 
   private acceptMediaServiceResponse(response: MediaServiceResponseDto): void {
     const pending = this.pendingMediaService.get(response.request_id);
-    if (!pending) return;
+    if (!pending || pending.socket !== this.ws) return;
     this.pendingMediaService.delete(response.request_id);
     clearTimeout(pending.timer);
     if (response.error) pending.reject(mediaServiceError(response.error));
@@ -360,9 +362,11 @@ export class BridgeClient extends EventEmitter {
    * accepted; rejects on auth failure, transport error, or version mismatch.
    */
   async connect(): Promise<ServerHello> {
+    const generation = ++this.connectionGeneration;
     try {
-      return await this.connectInternal();
+      return await this.connectInternal(generation);
     } catch (error) {
+      if (generation !== this.connectionGeneration) throw error;
       this.closeStream();
       // A rejected hello must not leave an incompatible open connection.
       if (this.ws?.readyState === WebSocket.OPEN) this.ws.close();
@@ -370,7 +374,7 @@ export class BridgeClient extends EventEmitter {
     }
   }
 
-  private async connectInternal(): Promise<ServerHello> {
+  private async connectInternal(generation: number): Promise<ServerHello> {
     const lockfile = this.resolveLockfile();
     this.lockfile = lockfile;
 
@@ -395,12 +399,21 @@ export class BridgeClient extends EventEmitter {
       ws.once('error', onError);
     });
 
+    if (generation !== this.connectionGeneration) {
+      ws.close();
+      throw new Error('Bridge connection was replaced while opening.');
+    }
+
     // Wire the steady-state message/close/error handlers now that we are open.
-    ws.on('message', (data: WebSocket.RawData) => this.onMessage(data));
-    ws.on('close', (code: number, reason: Buffer) => this.onClose(code, reason.toString()));
-    ws.on('error', (err: Error) => this.emit('error', err));
+    ws.on('message', (data: WebSocket.RawData) => this.onMessage(data, ws));
+    ws.on('close', (code: number, reason: Buffer) => this.onClose(code, reason.toString(), ws));
+    ws.on('error', (err: Error) => { if (this.ws === ws) this.emit('error', err); });
 
     const hello = await this.handshake();
+    if (generation !== this.connectionGeneration) {
+      ws.close();
+      throw new Error('Bridge connection was replaced during handshake.');
+    }
     this.serverHello = hello;
     return hello;
   }
@@ -482,6 +495,7 @@ export class BridgeClient extends EventEmitter {
       signal?.addEventListener('abort', aborted, { once: true });
 
       this.pendingResponses.set(id, {
+        socket: this.ws,
         resolve: (r) => {
           cleanup();
           try {
@@ -529,6 +543,28 @@ export class BridgeClient extends EventEmitter {
 
   async getWorkspaceState(): Promise<SessionWorkspaceState> {
     return validateSessionWorkspaceState(await this.request('workspace_state', {}));
+  }
+
+  /** Bind metadata work to this socket, never to a later reconnection. */
+  async captureSessionMetadataOwner(source: { sessionId: string; transcriptPath: string; sessionMode: 'chat' | 'code' }):
+    Promise<(action: 'rename' | 'touch' | 'verify', title?: string) => Promise<void>> {
+    const socket = this.ws;
+    if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('Session metadata requires a connected owner.');
+    const captured = await this.request('session_metadata', { action: 'capture', ...source });
+    if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) throw new Error('The metadata capture connection changed.');
+    if (!captured || typeof captured !== 'object' || Array.isArray(captured)
+      || typeof (captured as { receipt?: unknown }).receipt !== 'string' || !(captured as { receipt: string }).receipt) {
+      throw new Error('Invalid session metadata capture response.');
+    }
+    const receipt = (captured as { receipt: string }).receipt;
+    return async (action, title) => {
+      if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) throw new Error('The session metadata connection changed.');
+      const result = await this.request('session_metadata', { action, receipt, ...(title === undefined ? {} : { title }) });
+      if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) throw new Error('The metadata result is unconfirmed after the connection changed.');
+      if (!result || typeof result !== 'object' || Array.isArray(result) || (result as { ok?: unknown }).ok !== true) {
+        throw new Error('Invalid session metadata response.');
+      }
+    };
   }
 
   async restoreWorkspaceControls(snapshot: string): Promise<void> {
@@ -727,7 +763,8 @@ export class BridgeClient extends EventEmitter {
 
   // ── Inbound frames ──────────────────────────────────────────────────────────
 
-  private onMessage(data: WebSocket.RawData): void {
+  private onMessage(data: WebSocket.RawData, socket = this.ws): void {
+    if (socket !== this.ws) return;
     let frame: Frame;
     try {
       frame = JSON.parse(data.toString()) as Frame;
@@ -771,7 +808,7 @@ export class BridgeClient extends EventEmitter {
       case 'response': {
         const { id, result, error } = frame.payload;
         const pending = this.pendingResponses.get(id);
-        if (!pending) {
+        if (!pending || pending.socket !== socket) {
           break;
         }
         this.pendingResponses.delete(id);
@@ -789,18 +826,23 @@ export class BridgeClient extends EventEmitter {
     }
   }
 
-  private onClose(code: number, reason: string): void {
-    this.emit('close', code, reason);
-    this.closeStream();
-    for (const pending of this.pendingMediaService.values()) {
+  private onClose(code: number, reason: string, socket = this.ws): void {
+    for (const [id, pending] of this.pendingResponses) {
+      if (pending.socket !== socket) continue;
+      this.pendingResponses.delete(id);
+      pending.reject(new Error(`bridge connection closed (code=${code})`));
+    }
+    for (const [id, pending] of this.pendingMediaService) {
+      if (pending.socket !== socket) continue;
+      this.pendingMediaService.delete(id);
       clearTimeout(pending.timer);
       pending.reject(new Error('bridge connection closed before media service response'));
     }
-    this.pendingMediaService.clear();
-    for (const pending of this.pendingResponses.values()) {
-      pending.reject(new Error(`bridge connection closed (code=${code})`));
-    }
-    this.pendingResponses.clear();
+    // A delayed close from a previous connection cannot close the replacement's
+    // stream or reject its requests and media commands.
+    if (socket !== this.ws) return;
+    this.emit('close', code, reason);
+    this.closeStream();
   }
 
   // ── Async event stream ──────────────────────────────────────────────────────

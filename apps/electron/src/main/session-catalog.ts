@@ -138,6 +138,27 @@ export class ProjectSessionCatalog {
 
   constructor(private readonly options: ProjectSessionCatalogOptions = {}) {}
 
+  async captureMetadataSource(projectPath: string, sessionId: string, transcriptPath: string, sessionMode: 'chat' | 'code'): Promise<string> {
+    if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')) throw new Error('Invalid metadata source.');
+    const result = await this.metadataRequest(projectPath, { action: 'capture', sessionId, transcriptPath, sessionMode });
+    if (typeof result.receipt !== 'string' || !result.receipt || result.receipt.length > 128_000) throw new Error('Invalid metadata source receipt.');
+    return result.receipt;
+  }
+
+  async mutateMetadataSource(projectPath: string, receipt: string, action: 'rename' | 'touch' | 'verify', title?: string): Promise<void> {
+    const result = await this.metadataRequest(projectPath, { action, receipt, ...(title === undefined ? {} : { title }) });
+    if (result.ok !== true) throw new Error('Invalid session metadata result.');
+  }
+
+  private async metadataRequest(projectPath: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const args = ['--session-metadata-json', ...(this.options.configHome ? ['--session-config-home', this.options.configHome] : [])];
+    const output = await this.runOutput(realpathSync.native(projectPath), args, `${JSON.stringify(input)}\n`,
+      input.action !== 'rename' && input.action !== 'touch');
+    const result: unknown = JSON.parse(boundedOutput(output));
+    if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('Invalid session metadata response.');
+    return result as Record<string, unknown>;
+  }
+
   async providerSettings(patch?: Record<string, unknown>, expected?: Record<string, unknown>): Promise<HostProviderSettings> {
     const output = await this.runOutput(realpathSync.native(homedir()), ['--provider-settings-command'], JSON.stringify({ patch, expected }));
     const result: unknown = JSON.parse(boundedOutput(output));
@@ -355,7 +376,7 @@ export class ProjectSessionCatalog {
     return this.runOutput(canonical, args).then((output) => parseCatalog(output));
   }
 
-  private runOutput(canonical: string, args: string[], input?: string): Promise<string> {
+  private runOutput(canonical: string, args: string[], input?: string, killOnTimeout = true): Promise<string> {
     const bin = resolveServerBin({
       serverBin: this.options.serverBin,
       isPackaged: this.options.isPackaged,
@@ -367,6 +388,7 @@ export class ProjectSessionCatalog {
         env: { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) },
         stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        detached: !killOnTimeout,
       });
       if (input !== undefined) {
         child.stdin?.on('error', () => { /* Process close carries the bounded failure. */ });
@@ -380,8 +402,8 @@ export class ProjectSessionCatalog {
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
-        child.kill();
-        reject(new Error('session catalog timed out'));
+        if (killOnTimeout) child.kill(); else child.unref();
+        reject(new Error(killOnTimeout ? 'session catalog timed out' : 'The metadata result is unconfirmed; its writer is still completing.'));
       }, this.options.timeoutMs ?? 15_000);
       timeout.unref();
       child.stdout!.on('data', (chunk: Buffer | string) => {
@@ -391,8 +413,8 @@ export class ProjectSessionCatalog {
         if (stdoutBytes > MAX_OUTPUT_BYTES) {
           settled = true;
           clearTimeout(timeout);
-          child.kill();
-          reject(new Error('session catalog output is too large'));
+          if (killOnTimeout) child.kill(); else child.unref();
+          reject(new Error(killOnTimeout ? 'session catalog output is too large' : 'The metadata result is unconfirmed after oversized output.'));
           return;
         }
         stdout.push(bytes);

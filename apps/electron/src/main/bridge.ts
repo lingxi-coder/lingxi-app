@@ -3146,6 +3146,25 @@ export class SessionRuntime {
     this.notifyActivityChanged();
   }
 
+  /** Metadata stays with the captured runtime, socket and writer incarnation. */
+  async captureSessionMetadataOwner(transcriptPath: string, mode: 'chat' | 'code'):
+    Promise<(action: 'rename' | 'touch' | 'verify', title?: string) => Promise<void>> {
+    const client = this.requireClient();
+    const generation = this.generation;
+    if (this.sessionMode !== mode) throw new Error('The metadata owner mode changed.');
+    const write = await client.captureSessionMetadataOwner({ sessionId: this.sessionId, transcriptPath, sessionMode: mode });
+    if (this.client !== client || this.generation !== generation || this.disposed) throw new Error('The metadata capture owner changed.');
+    return async (action, title) => {
+      if (this.client !== client || this.generation !== generation || this.disposed || this.sessionMode !== mode) {
+        throw new Error('The metadata runtime owner changed.');
+      }
+      await write(action, title);
+      if (this.client !== client || this.generation !== generation || this.disposed) {
+        throw new Error('The metadata result is unconfirmed after the runtime changed.');
+      }
+    };
+  }
+
   /** Renderer UI control is a narrow typed lane, separate from generic `command()`. */
   async dispatchModUiControl(value: unknown): Promise<UiControlCallResultDto<NativeUiControlResponse>> {
     const request = validateModUiControlRequest(value);

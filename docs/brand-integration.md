@@ -2,6 +2,16 @@
 
 品牌源为 `assets/brand/identity-v1/`。本轮将设计源接入应用资源与官网，保持 bundle ID、URL scheme、包名、账号和签名配置。
 
+## 2026-11-01 星芒图标统一
+
+母品牌与 Code、Chat、Control、Apps、Remote、Harness、SDK 全部使用同一 ✨ 四角星芒，产品之间只保留既有配色差异。所有尺寸使用同一几何，移除双环及各产品叠加的功能符号；字标中的品牌图形一并更新。
+
+已重新生成主应用 Desktop / iOS / Android / Web 的 35 个平台资源，更新 Chat 默认、深浅备用与 Icon Composer 的 178 个资源、Control 的 SVG / PNG / ICNS，以及应用市场字标、favicon、touch icon。各仓来源摘要已同步；品牌预览截图与 ZIP 已刷新。执行 `python3 assets/brand/identity-v1/build.py --png --archive` 可重新生成设计资源与下载包。
+
+资源校验通过：7 产品的 21 个图标 SVG 共享同一星芒路径；56 个产品 PNG 尺寸正确，8 个 1024 px 母版不透明；各仓资源摘要、Chat 深浅备用图标、Android adaptive 安全区与 Control ICNS 均通过独立复核。浏览器验证预览页 28 种产品 / 主题 / 语言组合无图片加载错误，390 px 手机页面无横向溢出。历史双环路径在本轮品牌源及接入副本中无遗留。
+
+本轮只更新源码资源与本地预览，未部署网站、生成签名发行包或安装真机客户端。以下记录保留原验收日期与范围。
+
 ## 产品仓库
 
 - Desktop：ICNS、ICO、PNG、通知示意图、窗口图标及打包资源；Windows 打包写入 EXE 图标和产品 label，Linux 注册文件引用随包 PNG。

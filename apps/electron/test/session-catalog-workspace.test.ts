@@ -70,16 +70,17 @@ test('catalog exact lookups normalize pasted UUIDs before cache, process and sel
   const project = mkdtempSync(join(tmpdir(), 'catalog-uppercase-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   const uuid = 'abcdef12-abcd-4abc-8abc-abcdef123456';
+  const path = `/store/${uuid}.jsonl`;
   const calls: string[][] = [];
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: ((_bin, args) => {
     calls.push(args as string[]);
     const spawned = child();
-    queueMicrotask(() => spawned.finish({ version: 1, sessions: [{ ...row, uuid }] }));
+    queueMicrotask(() => spawned.finish({ version: 1, sessions: [{ ...row, uuid, path }] }));
     return spawned.process;
   }) as any });
   assert.equal((await catalog.find(project, uuid.toUpperCase()))?.uuid, uuid);
   assert.equal(calls[0].at(-1), uuid);
-  assert.equal((await catalog.select(project, uuid.toUpperCase(), { scope: 'repository', transcriptPath: row.path }))?.uuid, uuid);
+  assert.equal((await catalog.select(project, uuid.toUpperCase(), { scope: 'repository', transcriptPath: path }))?.uuid, uuid);
   assert.equal(calls[1][calls[1].indexOf('--session-id') + 1], uuid);
   await catalog.list(project);
   const spawns = calls.length;

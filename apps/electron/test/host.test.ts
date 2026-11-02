@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -293,10 +293,26 @@ test('session clear accepts Claude Code name syntax and labels the session being
     handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
     removeHandler: (channel: string) => { handlers.delete(channel); },
   };
+  const events: string[] = [];
+  let leases = 0;
   const runtime = {
     projectPath: project,
+    sessionMode: 'code' as const,
     connectionState: { status: 'connected' as const },
     getWorkspaceState: async () => ({ cwd: project, additional_directories: [], transcript_path: transcriptPath }),
+    captureSessionMetadataOwner: async (path: string, mode: string) => {
+      assert.equal(path, transcriptPath);
+      assert.equal(mode, 'code');
+      assert.equal(leases, 1);
+      events.push('capture');
+      return async (action: string, title?: string) => {
+        assert.equal(action, 'rename');
+        assert.equal(title, 'investigation');
+        assert.equal(leases, 1);
+        events.push('rename');
+        appendFileSync(path, `${JSON.stringify({ type: 'custom-title', customTitle: title, sessionId })}\n`);
+      };
+    },
     pendingInteractions: 0,
     pendingAskUserQuestions: [],
   };
@@ -306,8 +322,14 @@ test('session clear accepts Claude Code name syntax and labels the session being
     get: (requestedSessionId: string) => requestedSessionId === sessionId ? runtime : undefined,
     hasActiveWork: () => false,
     isProjectClosing: () => false,
-    closeSession: async () => undefined,
-    newSession: async () => ({ projectPath: project, sessionId: replacementId }),
+    retainBackgroundSession: (ref: { sessionId: string }) => {
+      assert.equal(ref.sessionId, sessionId);
+      leases++;
+      events.push('lease');
+      return () => { leases--; events.push('release'); };
+    },
+    closeSession: async () => { events.push('close'); },
+    newSession: async () => { events.push('new'); return { projectPath: project, sessionId: replacementId }; },
   };
   const catalog = {
     find: async () => row,
@@ -324,7 +346,10 @@ test('session clear accepts Claude Code name syntax and labels the session being
 
   try {
     await clear!({ sender, senderFrame: frame }, sessionId, 'investigation');
-    assert.match(readFileSync(transcriptPath, 'utf8'), /"customTitle":"investigation"/);
+    assert.deepEqual(JSON.parse(readFileSync(transcriptPath, 'utf8').trim().split('\n').at(-1)!),
+      { type: 'custom-title', customTitle: 'investigation', sessionId });
+    assert.deepEqual(events, ['lease', 'capture', 'rename', 'release', 'close', 'new']);
+    assert.equal(leases, 0);
     assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, projectId: project, sessionId: replacementId, mode: 'code' });
   } finally {
     host.dispose();

@@ -1,4 +1,5 @@
 import { fixtureAccountSnapshot } from './provider-accounts-mock';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -43,6 +44,7 @@ const audioOperationTypes: AudioOperationDto['type'][] = [];
 let settlePendingAudioListen: ((result: AudioOperationResultDto) => void) | undefined;
 let audioCancelCount = 0;
 let audioFinishCount = 0;
+const audioLeases = new Map<string, string>();
 
 function supportedAudioSnapshot() {
   const snapshot = defaultNativeAudioSnapshot();
@@ -143,7 +145,7 @@ if (!window.lingxi) (window as unknown as { lingxi: { audio: unknown } }).lingxi
 };
 
 function bridgeFixture(sessionId: string | null, running: boolean, backgroundStatus: string | undefined, isCancelling: boolean, models: string[], connected: boolean, sessionLoading: boolean) {
-  const activeSession = sessionId ? { projectPath, sessionId } : null;
+  const activeSession = sessionId ? { projectPath, sessionId, mode: 'code' as const, projectId: projectPath } : null;
   return {
     // Whether anything is up to take a command — all the model control is
     // gated on, and independent of the `ready` that gates SENDING.
@@ -157,6 +159,15 @@ function bridgeFixture(sessionId: string | null, running: boolean, backgroundSta
     audioExecute: executeAudioOperation,
     audioCancel: cancelAudioOperation,
     audioFinishListen: finishAudioListen,
+    audioRetainFlow: async (owner: string, lease: string, retain: boolean) => {
+      if (retain) {
+        if (audioLeases.size > 0) throw new Error('Fixture audio is already owned');
+        audioLeases.set(owner, lease);
+      } else {
+        if (audioLeases.get(owner) !== lease) throw new Error('Fixture audio lease does not match');
+        audioLeases.delete(owner);
+      }
+    },
     activeSession,
     bootstrap: {
       revision: 1,
@@ -168,6 +179,8 @@ function bridgeFixture(sessionId: string | null, running: boolean, backgroundSta
         pinnedSessions: [],
       },
       workspace: { path: projectPath, trusted: true },
+      conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: [projectPath], selectedProject: projectPath,
+        activeSession: activeSession ?? undefined }),
       activeSession,
       runtimes: [],
       projectCatalogs: { [projectPath]: { sessions: [] } },

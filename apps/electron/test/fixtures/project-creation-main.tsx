@@ -1,4 +1,5 @@
 import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { createRoot } from 'react-dom/client';
 import { StrictMode } from 'react';
 import type { LocalAppEditRequest } from '../../src/shared/localApps';
@@ -31,6 +32,7 @@ function snapshot() {
     settings: { version: 1, projects: [...projects], activeProject: ref.projectPath, activeSession: ref,
       pinnedSessions: [], archivedSessions: [], theme: location.search.includes('dark') ? 'dark' : 'light' },
     activeSession: ref, workspace: { path: ref.projectPath, trusted: false }, diagnostics: [],
+    conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects, selectedProject: ref.projectPath, activeSession: ref }),
     connection: { status: 'connected' },
     runtimes: [{ ...ref, connection: { status: 'connected' }, turnActive: false, pendingInteractions: 0, pendingAskUserQuestions: 0 }],
     projectCatalogs: Object.fromEntries(projects.map(path => [path, { sessions: [] }])),

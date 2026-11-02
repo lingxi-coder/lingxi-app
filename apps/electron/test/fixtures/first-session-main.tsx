@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 import { createRoot } from 'react-dom/client';
 import { useBridge } from '../../src/renderer/bridge/useBridge.js';
 import { BetaSidebar } from '../../src/renderer/components/BetaDesktop';
@@ -6,7 +7,8 @@ import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
 
-const ref = { projectPath: '/fixture', sessionId: 'new-session' };
+setLanguagePreference('en');
+const ref = { projectPath: '/fixture', sessionId: 'new-session', mode: 'code' as const, projectId: '/fixture' };
 let saved = false;
 let finishSend: (() => void) | undefined;
 const oldRows = Array.from({ length: 6 }, (_, i) => ({ uuid: `old-${i}`, title: `Older chat ${i}`, message_count: 2, modified_rfc3339: '2026-09-10T00:00:00Z', mode: 'code', path: '' }));
@@ -20,6 +22,11 @@ const list = () => ({ projectPath: ref.projectPath, sessions: saved ? [...oldRow
   bootstrap: async () => ({
     settings: { projects: ['/fixture'], activeProject: '/fixture', activeSession: ref, pinnedSessions: [], archivedSessions: [] },
     activeSession: ref, workspace: { path: '/fixture', trusted: false }, diagnostics: [],
+    conversationSpaces: {
+      activeMode: 'code', projects: { '/fixture': ['code'] }, globalWorkspace: '/global',
+      navigation: { chat: { projectId: null }, code: { projectId: '/fixture', session: ref } },
+      sessions: [ref], drafts: [ref],
+    },
     runtimes: [{ ...ref, connection: { status: 'connected' }, turnActive: false, pendingInteractions: 0, pendingAskUserQuestions: 0 }],
     projectCatalogs: { '/fixture': { sessions: oldRows } },
   }),

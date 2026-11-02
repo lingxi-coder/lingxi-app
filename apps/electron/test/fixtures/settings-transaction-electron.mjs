@@ -21,7 +21,7 @@ async function waitFor(webContents, expression, timeout = 8000) {
 async function runCloseScenario(webContents) {
   await waitFor(webContents, `Boolean(document.querySelector('[data-testid^="provider-account-test-"]'))`);
   const connectionTestButtonState = await webContents.executeJavaScript('window.__settingsTransactionTest.connectionTestButtonState()');
-  if (!connectionTestButtonState.exists || connectionTestButtonState.disabled || !connectionTestButtonState.providerCredentialField) {
+  if (!connectionTestButtonState.exists || connectionTestButtonState.disabled) {
     throw new Error(`Anthropic connection-test prerequisites are not ready: ${JSON.stringify(connectionTestButtonState)}`);
   }
   await webContents.executeJavaScript('window.__settingsTransactionTest.startConnectionTest()');
@@ -30,16 +30,23 @@ async function runCloseScenario(webContents) {
   if (connectionTestCalls !== 1) throw new Error(`expected one rejected Anthropic connection test, observed ${connectionTestCalls}`);
   const connectionTestErrorBeforeDelete = await webContents.executeJavaScript('window.__settingsTransactionTest.connectionTestErrorVisible()');
   await webContents.executeJavaScript('window.__settingsTransactionTest.clearStoredCredential()');
+  await waitFor(webContents, 'Boolean(document.querySelector("dialog[open] .pa-danger-button"))');
+  await webContents.executeJavaScript('window.__settingsTransactionTest.confirmCredentialRemoval()');
   await waitFor(webContents, '!window.__settingsTransactionTest.connectionTestErrorVisible()');
   const connectionTestErrorAfterDelete = await webContents.executeJavaScript('window.__settingsTransactionTest.connectionTestErrorVisible()');
+  await waitFor(webContents, '!document.querySelector("dialog[open] .pa-danger-button")');
+  await webContents.executeJavaScript('window.__settingsTransactionTest.openAddAccount()');
+  await waitFor(webContents, 'window.__settingsTransactionTest.connectionTestButtonState().providerCredentialField');
   await webContents.executeJavaScript('window.__settingsTransactionTest.startSave()');
   await waitFor(webContents, 'window.__settingsTransactionTest.state().persistencePending');
   const busyState = await webContents.executeJavaScript(`({
     closeDisabled: document.querySelector('button[aria-label="Back to app"]')?.disabled ?? true,
     state: window.__settingsTransactionTest.state(),
   })`);
-  webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ESC' });
-  webContents.sendInputEvent({ type: 'keyUp', keyCode: 'ESC' });
+  // The account form is modal while saving. Simulate the owning settings surface
+  // being torn down by navigation/window lifecycle, not an impossible click
+  // through that modal.
+  await webContents.executeJavaScript('window.__settingsTransactionTest.closeOwner()');
   await waitFor(webContents, '!document.querySelector(\'[role="dialog"]\')');
   const afterClose = await webContents.executeJavaScript('window.__settingsTransactionTest.state()');
   await webContents.executeJavaScript('window.__settingsTransactionTest.switchSessionAndStartWork()');

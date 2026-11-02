@@ -45,8 +45,8 @@ async function main() {
     await wait(`document.querySelector('.beta-stage')?.innerText.includes('Previous session message') || document.body.innerText.includes('Previous session message')`);
     await run(`document.querySelector('.sidebar-primary-action').click()`);
     await wait('window.welcomeStartupFixture.newSessionPending');
-    await wait(`document.querySelector('main').innerText.includes('What should we build in LingXi-Next?') && ${send}.disabled`);
-    result.pendingWelcome = await run(`document.body.innerText.includes('What should we build in LingXi-Next?') && !document.querySelector('main').innerText.includes('Previous session message')`);
+    await wait(`document.querySelector('main').innerText.includes('What should we build today?') && ${send}.disabled`);
+    result.pendingWelcome = await run(`document.querySelector('main').innerText.includes('What should we build today?') && !document.querySelector('main').innerText.includes('Previous session message')`);
     writeFileSync('/tmp/lingxi-new-session-welcome.png', (await window.webContents.capturePage()).toPNG());
     result.pendingEditable = await run(`${prompt}.isContentEditable && ${prompt}.getAttribute('aria-disabled') === 'false'`);
     await enter('Draft while new session starts');
@@ -60,7 +60,7 @@ async function main() {
     result.connectedSend = await run(`window.welcomeStartupFixture.sent[1][0] === 'new-session' && window.welcomeStartupFixture.sent[1][1] === 'Draft while new session starts'`);
     await enter('Draft in the existing session', false);
     await run(`document.querySelector('.sidebar-primary-action').click()`);
-    await wait(`document.querySelector('main').innerText.includes('What should we build in LingXi-Next?') && document.querySelector('.sidebar-primary-action').disabled`);
+    await wait(`document.querySelector('main').innerText.includes('What should we build today?') && document.querySelector('.sidebar-primary-action').disabled`);
     await enter('Draft belonging to the failed session', false);
     await run('window.welcomeStartupFixture.failNewSession()');
     await wait(`!document.querySelector('.sidebar-primary-action').disabled && document.body.innerText.includes('fixture engine startup failed')`);

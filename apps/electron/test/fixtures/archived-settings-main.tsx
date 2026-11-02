@@ -1,4 +1,5 @@
 import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SettingsScreen } from '../../src/renderer/components/settings/SettingsScreen';
@@ -13,6 +14,8 @@ localStorage.setItem(LANGUAGE_STORAGE_KEY, 'zh-Hans');
 // Isolated UI state only: never connects to a real project, engine, or preload.
 const records = Array.from({ length: 27 }, (_, index) => ({
   projectPath: index % 2 ? '/fixture/project-beta' : '/fixture/project-alpha',
+  projectId: index % 2 ? '/fixture/project-beta' : '/fixture/project-alpha',
+  mode: 'chat' as const,
   sessionId: `archive-${index}`,
   title: `Archived conversation ${String(index).padStart(2, '0')}`,
   archivedAt: new Date(Date.UTC(2026, 8, index + 1)).toISOString(),
@@ -25,7 +28,11 @@ function Fixture() {
   Object.assign(window, { archivedSettingsFixture: { state: () => ({ open, calls: calls.current, closes: closes.current }) } });
   const bridge = {
     connected: false, sessionLoading: false, settingsSnapshotEvent: null,
-    bootstrap: { settings: { archivedSessions: records }, workspace: {} },
+    bootstrap: {
+      settings: { archivedSessions: [...records, { ...records[0], sessionId: 'other-mode', title: 'Other mode', mode: 'code' }] },
+      conversationSpaces: fixtureConversationSpaces({ mode: 'chat', projects: ['/fixture/project-alpha', '/fixture/project-beta'] }),
+      workspace: {},
+    },
     openSession: async (projectPath: string, sessionId: string) => {
       calls.current.push([projectPath, sessionId]);
       if (fail.current) { fail.current = false; throw new Error('Fixture restore failed — retry available'); }

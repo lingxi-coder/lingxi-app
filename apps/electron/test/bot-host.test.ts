@@ -36,6 +36,7 @@ function hostFixture(t: TestContext) {
   let pickResult: string | undefined;
   const closed: string[] = [];
   const created: string[] = [];
+  const activated: Array<{ projectPath: string; sessionId: string }> = [];
   let summaries: any[] = [];
   const sent: Array<[string, unknown]> = [];
   /** The sessions the Bots' own catalog has, by id. */
@@ -46,6 +47,7 @@ function hostFixture(t: TestContext) {
     get: (id: string) => id === SESSION ? { sessionMode: 'code', pendingInteractions: 0, pendingAskUserQuestions: [] } : undefined,
     isProjectClosing: () => false,
     hasActiveWork: () => false,
+    activateSession: (ref: { projectPath: string; sessionId: string }) => { activated.push(ref); },
     closeSession: async (ref: { sessionId: string }) => { closed.push(ref.sessionId); },
     newSession: async (projectPath: string) => { created.push(projectPath); return { projectPath, sessionId: REPLACEMENT }; },
   };
@@ -92,7 +94,7 @@ function hostFixture(t: TestContext) {
   const event = { sender, senderFrame: frame };
   const call = async (channel: string, ...args: unknown[]): Promise<any> => registered.get(channel)!(event, ...args);
   return {
-    ...f, settings, project, ownerRef, host, service, scheduled, registered, call, closed, created, picks, sent, botSessions,
+    ...f, settings, project, ownerRef, host, service, scheduled, registered, call, closed, created, picks, sent, botSessions, activated,
     pickReturns(path: string | undefined) { pickResult = path; },
     setSummaries(value: any[]) { summaries = value; },
     freshSettings: () => new SettingsStore(f.userData),
@@ -277,7 +279,8 @@ test('the chat of a routine\'s run opens as a chat of the Bot, not of a project'
   runSession(f);
   assert.deepEqual(f.scheduled.scopes().filter((scope) => scope.botId === bot.botId).map((scope) => scope.id), [workspace], 'the Bot\'s workspace is a scope');
   const opened = await f.call(CH_SCHEDULED, { action: 'open', scopeId: workspace, sessionId: RUN_SESSION });
-  assert.deepEqual(opened, { botId: bot.botId, projectPath: workspace, sessionId: RUN_SESSION });
+  assert.deepEqual(opened.activeSession, { projectPath: workspace, sessionId: RUN_SESSION });
+  assert.deepEqual(f.activated, [{ botId: bot.botId, projectPath: workspace, sessionId: RUN_SESSION }]);
   assert.deepEqual(f.settings.getPublic().activeSession, { projectPath: workspace, sessionId: RUN_SESSION }, 'the window is shown the run\'s chat');
   assert.deepEqual(f.settings.getPublic().projects, [f.project], 'and no project was added');
   assert.deepEqual(f.freshSettings().getPublic().activeSession, f.ownerRef, 'the session the app restores is still the owner\'s');

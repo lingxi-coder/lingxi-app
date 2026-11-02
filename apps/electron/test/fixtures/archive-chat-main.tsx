@@ -1,4 +1,5 @@
 import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BetaSidebar } from '../../src/renderer/components/BetaDesktop';
@@ -16,8 +17,13 @@ function Fixture() {
   const sidebarAttempts = useRef(0);
   const [sidebarCalls, setSidebarCalls] = useState(0);
   const bridge = {
-    bootstrap: { settings: { projects: ['/fixture'], pinnedSessions: [], activeProject: '/fixture' }, workspace: { path: '/fixture' }, projectCatalogs: { '/fixture': { sessions: [{ uuid: 'fixture-session', title: 'Sidebar chat' }] } } },
-    sessionRuntimeStatus: () => undefined, preflightSessionArchive: async () => [],
+    bootstrap: {
+      settings: { projects: ['/fixture'], pinnedSessions: [], activeProject: '/fixture' },
+      workspace: { path: '/fixture' },
+      conversationSpaces: fixtureConversationSpaces({ mode: 'chat', projects: ['/fixture'], selectedProject: '/fixture' }),
+      projectCatalogs: { '/fixture': { sessions: [{ uuid: 'fixture-session', title: 'Sidebar chat', mode: 'chat' }] } },
+    },
+    sessionRuntimeStatus: () => undefined, listProjectSessions: async () => ({ sessions: [] }), preflightSessionArchive: async () => [],
     archiveSession: async () => { setSidebarCalls(value => value + 1); if (sidebarAttempts.current++ === 0) throw new Error('Fixture archive failure'); },
   } as unknown as UseBridge;
   const [open, setOpen] = useState(false);

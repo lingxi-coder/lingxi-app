@@ -229,7 +229,8 @@ internal fun transcriptSpacingBefore(previous: ChatRenderItem?, current: ChatRen
         is ChatRenderItem.Streaming -> message.role == com.lingxi.code.model.Role.User
         else -> false
     }
-    fun ChatRenderItem.isActivity(): Boolean = this is ChatRenderItem.Tools || this == ChatRenderItem.StreamingIndicator
+    fun ChatRenderItem.isActivity(): Boolean = this is ChatRenderItem.Tools ||
+        this is ChatRenderItem.AgentRun || this == ChatRenderItem.StreamingIndicator
     if (previous.isUser() || current.isUser()) return 16
     if (previous.isActivity() || current.isActivity()) return 8
     return 12

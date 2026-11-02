@@ -635,8 +635,8 @@ body {
 .transcript-row + .transcript-row {
   margin-top: 1.5rem;
 }
-.transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking']) + .transcript-row,
-.transcript-row + .transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking']) {
+.transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking'], [data-row-type='agents']) + .transcript-row,
+.transcript-row + .transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking'], [data-row-type='agents']) {
   margin-top: .75rem;
 }
 .transcript-row[data-message-role='user'] + .transcript-row,

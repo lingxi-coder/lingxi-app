@@ -31,6 +31,26 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: [groups[0]]), [0, 16])
     }
 
+    func testAgentRowsUseActivitySpacingAndPreserveUserTurnBoundaries() {
+        let groups = [
+            ConversationTimelineGroup(id: "before", runID: nil, rows: [.message(Message(role: .ai, text: "Checking"))]),
+            ConversationTimelineGroup(id: "after", runID: nil, rows: [.message(Message(role: .ai, text: "Result"))]),
+            ConversationTimelineGroup(id: "user", runID: nil, rows: [.message(Message(role: .user, text: "Continue"))]),
+        ]
+        for status in ["running", "completed"] {
+            let agent = ConversationAgentSummary(id: "child", name: "Child", agentType: "worker", status: status)
+            XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(
+                groups: groups, transcriptAgents: [agent], transcriptAgentAnchors: [agent.id: "before"]
+            ), [0, 8, 8, 16, 16])
+            XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(
+                groups: groups, transcriptAgents: [agent], transcriptAgentAnchors: [agent.id: "user"]
+            ), [0, 12, 16, 16, 8])
+            XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(
+                groups: groups, transcriptAgents: [agent]
+            ), [0, 8, 12, 16, 16])
+        }
+    }
+
     @MainActor
     func testThinkingVisibilityKeepsRenderedTranscriptHeight() throws {
         let message = Message(role: .ai, text: "A stable reply")

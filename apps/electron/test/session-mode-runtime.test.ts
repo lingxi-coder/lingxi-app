@@ -364,7 +364,7 @@ test('voice flow retains its owner and provider context across navigation and re
     audioSessionContext: { sessionId: id, profileId: `profile-${id}` }, retainAudioOperation: () => () => {} }]));
   const bridge = { registerWindow() {}, registerIpc() {}, get: (id: string) => runtimes.get(id), isProjectClosing: () => false,
     retainBackgroundSession: (ref: { sessionId: string }) => () => released.push(ref.sessionId) };
-  const audio = { onEvent: () => () => {}, executeUiAudioOperation: async (_operation: unknown, _window: unknown, _revision: unknown, _override: unknown, context: unknown) => { contexts.push(context); return {}; },
+  const audio = { onEvent: () => () => {}, executeUiAudioOperation: async (_operation: unknown, _window: unknown, _revision: unknown, _override: unknown, context: unknown, release?: () => void) => { contexts.push(context); release?.(); return {}; },
     cancelUiAudioOperations: async () => { cancels++; }, finishUiAudioListen: async () => { finishes++; } };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
     { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any, undefined, undefined, audio as any);
@@ -412,7 +412,8 @@ test('a native operation retains its owner until it settles even if its flow lea
   const runtime = { projectPath: path, sessionId, retainAudioOperation: () => { reservations++; return () => { reservations--; }; } };
   const bridge = { registerWindow() {}, registerIpc() {}, get: () => runtime, isProjectClosing: () => false,
     retainBackgroundSession: () => () => {} };
-  const audio = { onEvent: () => () => {}, executeUiAudioOperation: () => finished.promise };
+  const audio = { onEvent: () => () => {}, executeUiAudioOperation: async (_operation: unknown, _window: unknown, _revision: unknown,
+    _override: unknown, _context: unknown, release?: () => void) => { try { return await finished.promise; } finally { release?.(); } } };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
     { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any, undefined, undefined, audio as any);
   const frame = { url: 'http://127.0.0.1:4242' };

@@ -1621,15 +1621,14 @@ export class HostController {
       if (owner && !runtime) throw new Error('audio flow session is unavailable');
       const session = runtime?.audioSessionContext;
       const release = owner ? this.retainAudioRuntime(owner.runtime) : () => {};
-      try {
-        return await this.nativeAudio.executeUiAudioOperation(
-          operation,
-          String(event.sender.id),
-          configurationRevision as number | undefined,
-          configurationOverride,
-          { session: session ? { ...session } : undefined },
-        );
-      } finally { release(); }
+      return this.nativeAudio.executeUiAudioOperation(
+        operation,
+        String(event.sender.id),
+        configurationRevision as number | undefined,
+        configurationOverride,
+        { session: session ? { ...session } : undefined },
+        owner ? release : undefined,
+      );
     });
     this.ipc.handle(CH_REALTIME_AUDIO_COMMAND, async (event: IpcMainInvokeEvent, command: unknown) => {
       this.assertSender(event);

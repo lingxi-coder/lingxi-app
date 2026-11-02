@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { BridgeClient, validateClientEvent } from '@lingxi/bridge-client';
@@ -8,6 +11,9 @@ import { SessionRuntime } from '../src/main/bridge';
 import { RealtimeAudioController, type RealtimeAudioRuntime } from '../src/main/audio/realtimeAudioController';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { audioConfigurationDefaults } from '../src/shared/generatedAudioConfiguration';
+import { HostController } from '../src/main/host';
+import { SettingsStore } from '../src/main/settings';
+import { CH_NATIVE_AUDIO_FLOW_LEASE, CH_NATIVE_AUDIO_OPERATION } from '../src/shared/nativeAudio';
 
 class Helper extends EventEmitter {
   readonly stdout = new PassThrough(); readonly stderr = new PassThrough(); readonly stdin = new PassThrough();
@@ -35,9 +41,9 @@ function snapshot() { return { helper: { state: 'running', instanceId: '7a269634
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 async function envelope(helper: Helper, index: number) { for (let n = 0; n < 50; n++) { if (helper.writes[index]) return helper.writes[index]; await tick(); } throw new Error(`missing helper envelope ${index}`); }
 async function ackEnvelope(helper: Helper, index: number) { for (let n = 0; n < 50; n++) { if (helper.ackWrites[index]) return helper.ackWrites[index]; await tick(); } throw new Error(`missing helper ack ${index}`); }
-async function fixture() {
+async function fixture(overrides: Record<string, unknown> = {}) {
   const helper = new Helper();
-  const manager = new NativeAudioManager({ isPackaged: false, resourcesPath: '/resources', userDataPath: '/tmp/lingxi-audio-tests', helperPath: '/tmp/LingXiAudioHelper', diagnostics: new DiagnosticBuffer(), suspendTeardownTimeoutMs: 25, closeAckRetryMs: 10, spawnHelper: () => helper as any });
+  const manager = new NativeAudioManager({ isPackaged: false, resourcesPath: '/resources', userDataPath: '/tmp/lingxi-audio-tests', helperPath: '/tmp/LingXiAudioHelper', diagnostics: new DiagnosticBuffer(), suspendTeardownTimeoutMs: 25, closeAckRetryMs: 10, spawnHelper: () => helper as any, ...overrides });
   const priming = manager.request({ type: 'get_snapshot' }); const request = await envelope(helper, 0);
   helper.stdout.write(`${JSON.stringify({ id: request.id, type: 'response', result: { type: 'snapshot', snapshot: snapshot() } })}\n`); await priming;
   return { manager, helper, async close() { await manager.dispose(); helper.stdin.end(); helper.stdout.end(); helper.stderr.end(); } };
@@ -45,6 +51,169 @@ async function fixture() {
 const owner = { type: 'session', session_id: 's' } as const;
 const started = (handle: string) => ({ type: 'recording_started', handle });
 const stopped = { type: 'status', status: { recording: false, playing: false } };
+
+function uiOwnerFixture(audio: NativeAudioManager) {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-audio-owner-close-')));
+  const settings = new SettingsStore(root), projectPath = settings.conversationSpaces.globalWorkspace;
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const leaseId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  settings.conversationSpaces.register({ projectPath, projectId: null, sessionId, mode: 'chat' });
+  settings.setActiveSession({ projectPath, sessionId });
+  const runtime = new SessionRuntime({ projectPath, sessionId, launchConfig: () => ({ workspace: projectPath, trusted: true, sessionId }) });
+  (runtime as any).setState({ status: 'connected' });
+  const bridge = { registerWindow() {}, registerIpc() {}, get: (id: string) => id === sessionId ? runtime : undefined,
+    isProjectClosing: () => false, retainBackgroundSession: () => () => {} };
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+    { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any, undefined, undefined, audio);
+  const frame = { url: 'http://127.0.0.1:4242' }, sender = { id: 7, mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  const event = { sender, senderFrame: frame };
+  const lease = (retain: boolean) => handlers.get(CH_NATIVE_AUDIO_FLOW_LEASE)!(event, sessionId, leaseId, retain);
+  const listen = () => handlers.get(CH_NATIVE_AUDIO_OPERATION)!(event, { type: 'listen', language: 'en-US' }, undefined, undefined, { sessionId, leaseId });
+  return { runtime, lease, listen, async close() { host.dispose(); await runtime.dispose(); rmSync(root, { recursive: true, force: true }); } };
+}
+
+function answerClose(helper: Helper, command: any, overrides: Record<string, unknown> = {}) {
+  const closeReceipt = { disposition: 'closed', context: command.command.closeContext, identity: command.command.identity,
+    owner: command.command.owner, ...overrides };
+  helper.stdout.write(`${JSON.stringify({ id: command.id, type: 'response', result: { type: 'close_receipt', snapshot: snapshot(), closeReceipt } })}\n`);
+}
+
+test('UI audio keeps the original runtime after an admitted timeout until the exact close receipt', async () => {
+  const f = await fixture(), ui = uiOwnerFixture(f.manager);
+  try {
+    ui.lease(true);
+    const listening = ui.listen(), request = await envelope(f.helper, 1);
+    f.helper.respond(request, { type: 'failed', error: { kind: 'timeout', message: 'fixture timeout' } });
+    assert.equal((await listening).result.type, 'failed');
+    const firstClose = await envelope(f.helper, 2);
+    ui.lease(false);
+    assert.equal(ui.runtime.hasActiveAudio, true);
+    assert.throws(() => ui.runtime.beginWorkspaceChange(), /active work/);
+    answerClose(f.helper, firstClose, { context: { ...firstClose.command.closeContext, flight_id: 'old-flight' } });
+    await tick(); await tick();
+    assert.equal(ui.runtime.hasActiveAudio, true, 'a receipt from a different flight is not proof');
+    let rejectedOwnerReleased = false;
+    const blocked = await f.manager.executeUiAudioOperation({ type: 'listen', language: 'en-US' }, '7', undefined, undefined, undefined,
+      () => { rejectedOwnerReleased = true; });
+    assert.equal(blocked.result.type, 'failed_without_resource');
+    assert.equal(rejectedOwnerReleased, true, 'an unrelated rejected request has no ownership of the old flight');
+    const closing = f.manager.cancelAudioRequest(request.request.identity);
+    const retry = await envelope(f.helper, 3); answerClose(f.helper, retry);
+    assert.equal(await closing, 'verified'); await tick();
+    assert.equal(ui.runtime.hasActiveAudio, false);
+    const endChange = ui.runtime.beginWorkspaceChange(); endChange();
+  } finally { await ui.close(); await f.close(); }
+});
+
+test('UI audio releases its runtime after ordinary completion and before-admission rejection', async () => {
+  const f = await fixture(), ui = uiOwnerFixture(f.manager);
+  try {
+    ui.lease(true);
+    const listening = ui.listen(), request = await envelope(f.helper, 1);
+    f.helper.respond(request, { type: 'transcript', text: 'done', language: 'en-US' });
+    assert.equal((await listening).result.type, 'transcript');
+    ui.lease(false); assert.equal(ui.runtime.hasActiveAudio, false);
+    ui.lease(true); (f.manager as any).audioSuspending = true;
+    assert.equal((await ui.listen()).result.type, 'failed');
+    ui.lease(false); assert.equal(ui.runtime.hasActiveAudio, false);
+    (f.manager as any).audioSuspending = false;
+  } finally { await ui.close(); await f.close(); }
+});
+
+test('provider UI listening keeps the owner until every admitted child capture closes', async () => {
+  const configuration = audioConfigurationDefaults(); configuration.recognition.source = 'provider';
+  const f = await fixture({ getAudioConfiguration: () => configuration,
+    providerAudio: { preflight: async () => undefined, execute: async () => { throw new Error('failed capture cannot reach provider'); } } });
+  const ui = uiOwnerFixture(f.manager);
+  try {
+    ui.lease(true);
+    const listening = ui.listen(), start = await envelope(f.helper, 1);
+    assert.equal(start.request.operation.type, 'start_recording');
+    f.helper.respond(start, started('provider-child')); await tick();
+    await f.manager.finishUiAudioListen('7');
+    const stop = await envelope(f.helper, 2); assert.equal(stop.request.operation.type, 'stop_recording');
+    f.helper.respond(stop, { type: 'failed', error: { kind: 'native_failure', message: 'stop failed' } });
+    assert.equal((await listening).result.type, 'failed'); ui.lease(false);
+    const close1 = await envelope(f.helper, 3), close2 = await envelope(f.helper, 4);
+    assert.equal(ui.runtime.hasActiveAudio, true);
+    const startClose = [close1, close2].find(command => command.command.identity.id === start.request.identity.id)!;
+    const stopClose = [close1, close2].find(command => command.command.identity.id === stop.request.identity.id)!;
+    assert.ok(startClose && stopClose);
+    answerClose(f.helper, stopClose); await tick();
+    assert.equal(ui.runtime.hasActiveAudio, true, 'the capture origin remains unconfirmed');
+    answerClose(f.helper, startClose, { handle: 'provider-child' }); await tick(); await tick();
+    assert.equal(ui.runtime.hasActiveAudio, false);
+  } finally { await ui.close(); await f.close(); }
+});
+
+test('provider UI listening releases its owner on normal child and provider completion', async () => {
+  const configuration = audioConfigurationDefaults(); configuration.recognition.source = 'provider';
+  const f = await fixture({ getAudioConfiguration: () => configuration,
+    providerAudio: { preflight: async () => undefined, execute: async () => ({ type: 'transcript', text: 'provider result', language: 'en-US' }) } });
+  const ui = uiOwnerFixture(f.manager);
+  try {
+    ui.lease(true);
+    const listening = ui.listen(), start = await envelope(f.helper, 1);
+    f.helper.respond(start, started('normal-provider-child')); await tick();
+    await f.manager.finishUiAudioListen('7');
+    const stop = await envelope(f.helper, 2);
+    const origin = f.helper.captures.get('normal-provider-child'); assert.ok(origin);
+    f.helper.respond(stop, { type: 'recording', audio_base64: 'AQI=', mime_type: 'audio/wav' },
+      { closeReceipt: { disposition: 'closed', ...origin, handle: 'normal-provider-child' } });
+    assert.equal((await listening).result.type, 'transcript'); ui.lease(false);
+    assert.equal(ui.runtime.hasActiveAudio, false);
+  } finally { await ui.close(); await f.close(); }
+});
+
+test('provider UI stop during capture releases the owner after the child close is confirmed', async () => {
+  const configuration = audioConfigurationDefaults(); configuration.recognition.source = 'provider';
+  let providerCalls = 0;
+  const f = await fixture({ getAudioConfiguration: () => configuration,
+    providerAudio: { preflight: async () => undefined, execute: async () => { providerCalls++; return { type: 'transcript', text: 'late' }; } } });
+  const ui = uiOwnerFixture(f.manager);
+  try {
+    ui.lease(true);
+    const listening = ui.listen(), start = await envelope(f.helper, 1);
+    f.helper.respond(start, started('cancelled-provider-child')); await tick();
+    const cancelling = f.manager.cancelUiAudioOperations('7');
+    const childClose = await envelope(f.helper, 2);
+    answerClose(f.helper, childClose, { handle: 'cancelled-provider-child' });
+    const endOwner = await envelope(f.helper, 3);
+    f.helper.respond(endOwner, { type: 'owner_ended' });
+    await cancelling;
+    assert.equal((await listening).result.type, 'failed'); ui.lease(false);
+    assert.equal(providerCalls, 0);
+    assert.equal(ui.runtime.hasActiveAudio, false, 'the settled parent did not dispatch to the provider and its child closed');
+  } finally { await ui.close(); await f.close(); }
+});
+
+test('provider UI cancellation keeps its owner when a dispatched provider task is unconfirmed', async () => {
+  const configuration = audioConfigurationDefaults(); configuration.recognition.source = 'provider';
+  let admitProvider!: () => void;
+  const providerStarted = new Promise<void>(resolve => { admitProvider = resolve; });
+  const f = await fixture({ getAudioConfiguration: () => configuration,
+    providerAudio: { preflight: async () => undefined, execute: async (_kind: unknown, _configuration: unknown, _payload: unknown, _session: unknown, signal: AbortSignal) => {
+      admitProvider(); await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+      return { type: 'failed', error: { kind: 'cancelled', message: 'provider cancelled' } };
+    } } });
+  const ui = uiOwnerFixture(f.manager);
+  try {
+    ui.lease(true);
+    const listening = ui.listen(), start = await envelope(f.helper, 1);
+    f.helper.respond(start, started('dispatched-provider-child')); await tick();
+    await f.manager.finishUiAudioListen('7');
+    const stop = await envelope(f.helper, 2), origin = f.helper.captures.get('dispatched-provider-child'); assert.ok(origin);
+    f.helper.respond(stop, { type: 'recording', audio_base64: 'AQI=', mime_type: 'audio/wav' },
+      { closeReceipt: { disposition: 'closed', ...origin, handle: 'dispatched-provider-child' } });
+    await providerStarted;
+    await assert.rejects(f.manager.cancelUiAudioOperations('7'), /could not be ended/);
+    assert.equal((await listening).result.type, 'failed'); ui.lease(false);
+    assert.equal(ui.runtime.hasActiveAudio, true, 'provider cancellation without a completion receipt remains unconfirmed');
+    assert.throws(() => ui.runtime.beginWorkspaceChange(), /active work/);
+  } finally { await ui.close(); await f.close(); }
+});
 
 test('controller and JSONL manager stop forwarding immediately and report helper failure', async () => {
   const f = await fixture();

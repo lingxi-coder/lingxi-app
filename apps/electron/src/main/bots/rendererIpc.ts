@@ -199,10 +199,10 @@ export class BotsUi {
    * A new session of the Bot, or the one named, started the way the window asks
    * for it. The host calls this too, to open the session of a routine's run.
    */
-  async openSession(id: unknown, sessionId?: unknown, transcriptPath?: unknown): Promise<BotSessionRefUi> {
+  async openSession(id: unknown, sessionId?: unknown, transcriptPath?: unknown, activate = true): Promise<BotSessionRefUi> {
     if (sessionId !== undefined && !isSessionId(sessionId)) throw new Error('invalid session id');
     if (transcriptPath !== undefined && typeof transcriptPath !== 'string') throw new Error('invalid Bot session selection');
-    return this.deps.service.openSession(botId(id), sessionId, transcriptPath);
+    return this.deps.service.openSession(botId(id), sessionId, transcriptPath, activate);
   }
 
   /** The invoke handlers by channel. */

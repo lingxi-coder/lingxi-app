@@ -913,11 +913,11 @@ export class SessionRuntime {
   }
 
   private readonly pendingRunBindings = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-  markCronRunStarted(runId: string, sessionId: string): Promise<void> {
+  markCronRunStarted(runId: string, sessionId: string, context: { transcriptPath: string; mode: 'chat' | 'code'; scopeKey: string }): Promise<void> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pendingRunBindings.delete(runId); reject(new Error('Scheduled session binding timed out.')); }, 15_000);
       this.pendingRunBindings.set(runId, { resolve, reject, timer });
-      try { this.requireClient().sendCommand({ type: 'cron_run_started', run_id: runId, session_id: sessionId }); }
+      try { this.requireClient().sendCommand({ type: 'cron_run_started', run_id: runId, session_id: sessionId, transcript_path: context.transcriptPath, session_mode: context.mode, session_scope_key: context.scopeKey }); }
       catch (error) { clearTimeout(timer); this.pendingRunBindings.delete(runId); reject(error); }
     });
   }

@@ -233,7 +233,7 @@ test('a disconnected Bot writer is reconnected through its existing owner withou
   const workspace = s.store.workspaceDir(bot.bot_id);
   s.liveRuntimes.set(SESSION, { projectPath: workspace, sessionMode: 'code', connectionState: { status: 'disconnected' } });
   assert.deepEqual(await s.service.openSession(bot.bot_id, SESSION), { botId: bot.bot_id, projectPath: workspace, sessionId: SESSION });
-  assert.deepEqual(s.calls.filter(call => call[0] === 'openSession'), [['openSession', { projectPath: workspace, sessionId: SESSION, mode: 'code' }, undefined, undefined, undefined, undefined]]);
+  assert.deepEqual(s.calls.filter(call => call[0] === 'openSession'), [['openSession', { projectPath: workspace, sessionId: SESSION, mode: 'code' }, false, undefined, true, undefined]]);
   assert.equal(s.calls.some(call => call[0] === 'select'), false);
 });
 
@@ -686,4 +686,17 @@ test('a listener that fails does not fail the change, and is reported', async (t
   assert.equal(s.service.update(bot.bot_id, 1, { remote: true }).remote, true);
   await s.service.delete(bot.bot_id);
   assert.equal(s.warnings.filter((message) => message.includes('could not be passed on: listener broke')).length, 3);
+});
+
+test('preparing a scheduled Bot history source never activates it during native startup', async t => {
+  const s = setup(t), bot = s.service.create({ name: 'Prepared history' });
+  const workspace = s.store.workspaceDir(bot.bot_id);
+  await s.service.listSessions(bot.bot_id);
+  s.catalogs.get(s.store.homeDir(bot.bot_id))!.sessions.push(row(SESSION));
+  await s.service.openSession(bot.bot_id, SESSION, row(SESSION).path, false);
+  assert.equal(s.calls.filter(call => call[0] === 'openSession').at(-1)?.[4], false);
+  s.calls.length = 0;
+  s.liveRuntimes.set(SESSION, { projectPath: workspace, sessionMode: 'code' });
+  await s.service.openSession(bot.bot_id, SESSION, undefined, false);
+  assert.equal(s.calls.filter(call => call[0] === 'openSession').at(-1)?.[4], false);
 });

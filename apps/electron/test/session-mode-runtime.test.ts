@@ -8,6 +8,7 @@ import { SessionRuntime } from '../src/main/bridge.js';
 import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 import { SettingsStore } from '../src/main/settings.js';
 import { CH_SESSION_NEW, CH_SESSION_OPEN, HostController } from '../src/main/host.js';
+import { CH_SCHEDULED } from '../src/shared/scheduled.js';
 import { CH_CONVERSATION_SPACE } from '../src/shared/conversationSpaces.js';
 import { CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_FINISH_LISTEN, CH_NATIVE_AUDIO_FLOW_LEASE, CH_NATIVE_AUDIO_OPERATION } from '../src/shared/nativeAudio.js';
 import { DiagnosticBuffer } from '../src/main/host-utils.js';
@@ -438,3 +439,95 @@ test('failed captures keep one bounded lease until retry is discarded', async t 
   (host as any).discardHandoff('op'); (host as any).discardHandoff('op');
   assert.equal(released, 1);
 });
+
+
+test('a slow scheduled history open cannot reactivate its owner after a newer space choice', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-scheduled-navigation-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
+  const target = { ...source, sessionId: targetId };
+  settings.conversationSpaces.register(source); settings.conversationSpaces.register(target); settings.setActiveSession(source);
+  const ready = deferred<void>(), entered = deferred<void>(), handlers = new Map<string, (...args: any[]) => any>();
+  const activated: unknown[] = [];
+  const bridge = { registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, get: (id: string) => id === targetId ? { projectPath: path, sessionMode: 'chat' } : undefined,
+    openSession: async (_ref: unknown, _empty: unknown, _model: unknown, activate: boolean) => {
+      assert.equal(activate, false, 'a loading history must not activate before its navigation generation is checked');
+      entered.resolve(); await ready.promise;
+    }, activateSession: (ref: unknown) => activated.push(ref) };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+    { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any);
+  host.attachScheduled({ resolveSession: () => target } as any);
+  (host as any).bootstrap = () => ({ conversationSpaces: settings.conversationSpaces.snapshot() });
+  (host as any).trustSessionSource = async () => {};
+  (host as any).switchConversationSpace = async () => (host as any).bootstrap();
+  const frame = { url: 'http://127.0.0.1:4242' }, sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  const event = { sender, senderFrame: frame };
+  const opening = handlers.get(CH_SCHEDULED)!(event, { action: 'open', scopeId: 'global', sessionId: targetId });
+  await entered.promise;
+  const switching = handlers.get(CH_CONVERSATION_SPACE)!(event, 'code');
+  ready.resolve(); await opening; await switching;
+  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'code');
+  assert.equal(settings.getPublic().activeSession?.sessionId, sessionId);
+  assert.deepEqual(activated, []);
+});
+
+test('a queued scheduled Chat open superseded by New Chat preserves the visible Code mode', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-scheduled-queued-mode-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  settings.conversationSpaces.setMode('code');
+  const target = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
+  settings.conversationSpaces.register(target);
+  const handlers = new Map<string, (...args: any[]) => any>();
+  let created: any;
+  const bridge = { registerWindow() {}, registerIpc() {}, newSession: async (directory: string, _model: unknown, owner: any) => {
+    created = owner; return { projectPath: directory, sessionId: targetId };
+  }, activateSession() {} };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+    { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any);
+  host.attachScheduled({ resolveSession: () => target } as any);
+  (host as any).bootstrap = () => ({ conversationSpaces: settings.conversationSpaces.snapshot() });
+  const hold = deferred<void>(), entered = deferred<void>();
+  const blocked = (host as any).enqueueNavigation(async () => { entered.resolve(); await hold.promise; });
+  await entered.promise;
+  const frame = { url: 'http://127.0.0.1:4242' }, sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  const event = { sender, senderFrame: frame };
+  const opening = handlers.get(CH_SCHEDULED)!(event, { action: 'open', scopeId: 'global', sessionId });
+  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'code');
+  const creating = handlers.get(CH_SESSION_NEW)!(event, null, undefined);
+  hold.resolve(); await blocked; await opening; await creating;
+  assert.equal(created.mode, 'code'); assert.equal(created.projectId, null);
+  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'code');
+});
+
+for (const afterStart of [false, true]) {
+  test(`a scheduled Bot open superseded ${afterStart ? 'while starting' : 'while queued'} cannot activate`, async t => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-scheduled-bot-')));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const settings = new SettingsStore(root);
+    const handlers = new Map<string, (...args: any[]) => any>();
+    const bridge = { registerWindow() {}, registerIpc() {} };
+    const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+      { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any);
+    const target = { projectPath: '/bots/bot', sessionId: targetId, botId: 'bot' };
+    const entered = deferred<void>(), ready = deferred<void>();
+    let starts = 0, activations = 0;
+    (host as any).botsUi = { handlers: () => [], botIdFor: () => 'bot', openSession: async (_bot: unknown, _id: unknown, _path: unknown, activate: boolean) => { assert.equal(activate, false); starts++; entered.resolve(); await ready.promise; return target; } };
+    (host as any).showBotSession = () => { activations++; };
+    (host as any).bootstrap = () => ({});
+    host.attachScheduled({ resolveSession: () => target } as any);
+    const frame = { url: 'http://127.0.0.1:4242' }, sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+    host.registerWindow(sender as any, frame.url); host.registerIpc();
+    let blocker: Promise<void> | undefined;
+    if (!afterStart) blocker = (host as any).enqueueNavigation(() => ready.promise);
+    const opening = handlers.get(CH_SCHEDULED)!({ sender, senderFrame: frame }, { action: 'open', scopeId: '/bots/bot', sessionId: targetId });
+    if (afterStart) await entered.promise;
+    (host as any).navigationGeneration++;
+    ready.resolve(); await blocker; await opening;
+    assert.equal(starts, afterStart ? 1 : 0);
+    assert.equal(activations, 0);
+  });
+}

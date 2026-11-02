@@ -10,6 +10,7 @@ import type { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js
 import type { SettingsStore } from '../src/main/settings';
 import type { ProjectSessionCatalog } from '../src/main/session-catalog';
 import type { SessionRef } from '../src/shared/settings';
+import type { OwnedConversation } from '../src/shared/conversationSpaces';
 import { awakeFixture } from './bot-helpers.js';
 
 const targetId = '11111111-2222-4333-8444-555555555555';
@@ -32,7 +33,8 @@ function taskForClaim(saved: CronJobDto, occurrenceId: string, generation = 1): 
   };
 }
 function runClaim(service: ScheduledTaskService, source: SessionRuntime, occurrenceId: string, saved: CronJobDto, generation = 1) {
-  return service.run(source, claimWireId(occurrenceId, generation), taskForClaim(saved, occurrenceId, generation));
+  const configured = (source as SessionRuntime & { fixtureTask(task: CronJobDto): CronJobDto }).fixtureTask(saved);
+  return service.run(source, claimWireId(occurrenceId, generation), taskForClaim(configured, occurrenceId, generation));
 }
 async function writeCatalog(workspace: string, tasks: unknown[]): Promise<void> {
   await mkdir(join(workspace, '.lingxi'), { recursive: true });
@@ -48,6 +50,8 @@ async function harness(t: TestContext) {
   const project = join(directory, 'project');
   const global = join(directory, 'managed-scheduled-workspace');
   const projects = new Set([project]);
+  const ordinaryGlobal = join(directory, 'general-chat-workspace');
+  const owners = new Map<string, OwnedConversation>();
   const managedSessions = new Map<string, { projectPath: string; taskId: string; memory: string }>();
   const grants = new Map<string, readonly string[]>();
   const archived = new Set<string>();
@@ -73,8 +77,25 @@ async function harness(t: TestContext) {
   let checkBinding = async (_sessionId: string) => {};
   let ensureFailure: Error | undefined;
   let managed: CronJobDto[] = [];
-  const runtime = (ref: SessionRef) => ({ projectPath: ref.projectPath, sessionMode: ref.mode ?? 'code',
-    getWorkspaceState: async () => ({ transcript_path: catalogRows.get(ref.projectPath)?.find(row => row.uuid === ref.sessionId)?.path ?? join(ref.projectPath, `${ref.sessionId}.jsonl`) }),
+  const runtime = (ref: SessionRef, transcriptPath?: string) => ({ projectPath: ref.projectPath, sessionMode: ref.mode ?? 'code',
+    fixtureTask: (saved: CronJobDto): CronJobDto => {
+      const config = saved.automation!;
+      const scopeKey = ref.projectPath === global ? 'global' : ref.projectPath;
+      if (config.runMode === 'selected_session') {
+        const selected = (service as any).targetRef(ref.projectPath, config.targetSessionId);
+        const row = catalogRows.get(selected.projectPath)?.find(row => row.uuid === config.targetSessionId);
+        return { ...saved, automation: { ...config, targetSessionScopeKey: config.targetSessionScopeKey ?? scopeKey,
+          targetSessionTranscriptPath: config.targetSessionTranscriptPath ?? row?.path ?? join(selected.projectPath, `${config.targetSessionId}.jsonl`),
+          targetSessionMode: config.targetSessionMode ?? row?.mode ?? 'code' } };
+      }
+      const owned = config.ownedSessionId;
+      const selected = owned ? (service as any).targetRef(ref.projectPath, owned) : undefined;
+      const row = selected && catalogRows.get(selected.projectPath)?.find(row => row.uuid === owned);
+      return { ...saved, automation: { ...config, sessionMode: config.sessionMode ?? ref.mode ?? 'code', sessionScopeKey: config.sessionScopeKey ?? scopeKey,
+        ...(owned ? { ownedSessionTranscriptPath: config.ownedSessionTranscriptPath ?? row?.path ?? join(selected.projectPath, `${owned}.jsonl`),
+          ownedSessionMode: config.ownedSessionMode ?? row?.mode ?? 'code', ownedSessionScopeKey: config.ownedSessionScopeKey ?? scopeKey } : {}) } };
+    },
+    getWorkspaceState: async () => ({ transcript_path: transcriptPath ?? catalogRows.get(ref.projectPath)?.find(row => row.uuid === ref.sessionId)?.path ?? join(ref.projectPath, `${ref.sessionId}.jsonl`) }),
     markCronRunStarted: async (runId: string, sessionId: string) => { await checkBinding(sessionId); bindings.push({ runId, sessionId }); },
     manageCron: async (request: CronRequestDto) => { requests.push(request); return managed; },
     scheduledModelCatalog: async () => ({ details: [], current: 'openai/project-model' }),
@@ -82,6 +103,11 @@ async function harness(t: TestContext) {
   }) as unknown as SessionRuntime;
   const settings = {
     scheduledWorkspace: global,
+    conversationSpaces: { globalWorkspace: ordinaryGlobal,
+      findBySessionId: (id: string) => owners.get(id),
+      snapshot: () => ({ activeMode: 'code', sessions: [...owners.values()] }),
+      register: (owner: OwnedConversation) => { owners.set(owner.sessionId, owner); },
+    },
     settingsPath: join(directory, 'settings.v1.json'),
     getPublic: () => ({ projects: [...projects], model: 'openai/default' }),
     hasProject: (path: string) => projects.has(path),
@@ -104,7 +130,7 @@ async function harness(t: TestContext) {
     withBackgroundSession: async <T>(ref: SessionRef, empty: boolean, model: string | undefined, operation: (runtime: SessionRuntime) => Promise<T>, transcriptPath?: string, durableAnchor = false) => {
       background.push({ ref, empty, model, transcriptPath, durableAnchor });
       await prepareTarget(ref, durableAnchor);
-      return operation(runtime(ref));
+      return operation(runtime(ref, transcriptPath));
     },
     activate: () => assert.fail('Scheduled tasks must not activate a foreground session'),
     newSession: () => assert.fail('Scheduled tasks must not create foreground drafts'),
@@ -121,7 +147,7 @@ async function harness(t: TestContext) {
   const createService = (options: ScheduledTaskServiceOptions = {}) => new ScheduledTaskService(settings, manager, catalog, (title, body, ref) => notifications.push({ title, body, ref }), (error) => errors.push(error), options);
   const service = createService();
   t.after(async () => { service.dispose(); await rm(directory, { recursive: true, force: true }); });
-  return { directory, catalog, project, global, managedSessions, grants, projects, archived, catalogRows, ensured, background, turns, requests, leases, notifications, errors, bindings, service, createService,
+  return { directory, catalog, project, global, ordinaryGlobal, owners, managedSessions, grants, projects, archived, catalogRows, ensured, background, turns, requests, leases, notifications, errors, bindings, service, createService,
     source: runtime({ projectPath: project, sessionId: targetId }),
     globalSource: runtime({ projectPath: global, sessionId: targetId }),
     runtime, mounted,
@@ -158,7 +184,7 @@ test('scheduled creation carries its source mode and existing targets use their 
   await runClaim(h.service, chatSource, 'existing-code', task({ runMode: 'selected_session', targetSessionId: targetId, notificationPolicy: 'none' }));
   assert.equal(h.background[1].ref.mode, 'code');
   (chatSource as any).sessionMode = undefined;
-  await assert.rejects(runClaim(h.service, chatSource, 'unknown-mode', task({ notificationPolicy: 'none' })), /mode is unavailable/);
+  await assert.rejects(h.service.run(chatSource, claimWireId('unknown-mode'), taskForClaim(task({ notificationPolicy: 'none', sessionScopeKey: h.project }), 'unknown-mode')), /owner is unavailable/);
   assert.equal(h.background.length, 2);
 });
 
@@ -184,6 +210,7 @@ test('scheduled cold targets reject missing sources and use the saved path inste
   assert.equal(h.background.length, 0);
   const savedPath = `/saved/${targetId}.jsonl`;
   h.setResolveSource(async () => ({ path: savedPath, mode: 'code' }));
+  Object.assign(job.automation!, { targetSessionTranscriptPath: savedPath, targetSessionMode: 'code', targetSessionScopeKey: h.project });
   h.catalogRows.set(h.project, [{ uuid: targetId, title: 'Different copy', mode: 'chat', path: `/other/${targetId}.jsonl` }]);
   await runClaim(h.service, h.source, 'saved-source', job);
   assert.equal(h.background[0].transcriptPath, savedPath);
@@ -252,8 +279,8 @@ test('an emptied catalog retires the cached jobs of that scope', async (t) => {
 test('new-session runs use unique background sessions and forward the fixed model/effort snapshot', async (t) => {
   const h = await harness(t);
   const saved = task();
-  const firstTask = taskForClaim(saved, 'run-a');
-  const secondTask = taskForClaim(saved, 'run-b');
+  const firstTask = (h.source as any).fixtureTask(taskForClaim(saved, 'run-a'));
+  const secondTask = (h.source as any).fixtureTask(taskForClaim(saved, 'run-b'));
   const first = await h.service.run(h.source, claimWireId('run-a'), firstTask);
   const second = await h.service.run(h.source, claimWireId('run-b'), secondTask);
   assert.notEqual(first.sessionId, second.sessionId);
@@ -446,8 +473,8 @@ test('no-project runs use branded per-run workspaces, stable task memory, and re
   assert.ok((await stat(join(one.projectPath, 'outputs'))).isDirectory());
   assert.equal(h.background[0].ref.projectPath, one.projectPath, 'the engine really launches in the generated directory');
   const publicRef = { projectPath: h.background[0].ref.projectPath, sessionId: first.sessionId };
-  assert.deepEqual(h.service.resolveSession('global', first.sessionId), publicRef);
-  assert.deepEqual(h.notifications[0].ref, publicRef);
+  assert.deepEqual(h.service.resolveSession('global', first.sessionId), { ...publicRef, mode: 'code' });
+  assert.deepEqual(h.notifications[0].ref, { ...publicRef, mode: 'code' });
   assert.equal(h.projects.size, 1, 'generated directories are not user projects');
   assert.match(h.turns[0].task.prompt, /Task memory:/);
   assert.ok(h.turns[0].task.prompt.includes(join(one.projectPath, 'outputs')));
@@ -937,4 +964,80 @@ test('nothing is asked of the computer when the owner has not asked for it', asy
   h.setExecute(async () => 'Done');
   await runClaim(s.service, h.runtime({ projectPath: s.b.workspace, sessionId: targetId }), 'bot-run', task());
   assert.deepEqual(s.log, []);
+});
+
+
+test('ordinary Global targets keep their logical owner after cd into a project', async t => {
+  const h = await harness(t);
+  const id = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const exact = `/captured/${id}.jsonl`;
+  h.owners.set(id, { sessionId: id, projectId: null, projectPath: h.ordinaryGlobal, mode: 'chat' });
+  h.catalogRows.set(h.ordinaryGlobal, [{ uuid: id, title: 'Ordinary Global', mode: 'chat', path: exact }]);
+  assert.deepEqual((await h.service.context('global', 'chat')).sessions, [{ uuid: id, title: 'Ordinary Global' }]);
+  h.owners.set(id, { ...h.owners.get(id)!, projectPath: h.project });
+  h.catalogRows.set(h.project, [{ uuid: id, title: 'Moved Global', mode: 'chat', path: exact }]);
+  assert.deepEqual((await h.service.context(h.project, 'chat')).sessions, []);
+  assert.deepEqual((await h.service.context('global', 'chat')).sessions, [{ uuid: id, title: 'Moved Global' }]);
+  assert.deepEqual((await h.service.context('global', 'code')).sessions, []);
+  await assert.rejects(h.service.manage(h.project, { action: 'create', automation: task({ runMode: 'selected_session', targetSessionId: id }).automation }, 'chat'), /another scope/);
+  await h.service.manage('global', { action: 'create', automation: task({ runMode: 'selected_session', targetSessionId: id }).automation }, 'chat');
+  const captured = h.requests.at(-1)!.automation!;
+  assert.equal(captured.targetSessionMode, 'chat');
+  assert.equal(captured.targetSessionTranscriptPath, exact);
+  assert.equal(captured.targetSessionScopeKey, 'global');
+  await runClaim(h.service, h.globalSource, 'global-existing', task(captured));
+  assert.equal(h.background.at(-1)!.ref.projectPath, h.project);
+  assert.equal(h.background.at(-1)!.ref.mode, 'chat');
+  assert.equal(h.background.at(-1)!.transcriptPath, exact);
+});
+
+test('saving a target rejects a mode conflict and a relocated owner during source lookup', async t => {
+  const h = await harness(t);
+  const id = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const owner = { sessionId: id, projectId: null, projectPath: h.ordinaryGlobal, mode: 'chat' as const };
+  h.owners.set(id, owner);
+  h.catalogRows.set(h.ordinaryGlobal, [{ uuid: id, title: 'Global', mode: 'chat', path: `/captured/${id}.jsonl` }]);
+  const request = { action: 'create' as const, automation: task({ runMode: 'selected_session', targetSessionId: id }).automation };
+  await assert.rejects(h.service.manage('global', request, 'code'), /another conversation space/);
+  h.setResolveSource(async () => {
+    h.owners.set(id, { ...owner, projectPath: h.project });
+    return { mode: 'chat', path: `/captured/${id}.jsonl` };
+  });
+  await assert.rejects(h.service.manage('global', request, 'chat'), /owner changed/);
+  assert.equal(h.requests.length, 0);
+});
+
+for (const runMode of ['new_session', 'task_session', 'selected_session'] as const) {
+  test(`editing a Code ${runMode} task from Chat preserves its captured mode`, async t => {
+    const h = await harness(t);
+    h.owners.set(targetId, { projectPath: h.ordinaryGlobal, projectId: null, sessionId: targetId, mode: 'code' });
+    h.catalogRows.set(h.ordinaryGlobal, [{ uuid: targetId, title: 'Code target', mode: 'code' }]);
+    const saved = task({ runMode, sessionMode: 'code', sessionScopeKey: 'global',
+      ...(runMode === 'selected_session' ? { targetSessionId: targetId,
+        targetSessionTranscriptPath: join(h.ordinaryGlobal, `${targetId}.jsonl`), targetSessionMode: 'code', targetSessionScopeKey: 'global' } : {}),
+      ...(runMode === 'task_session' ? { ownedSessionId: targetId,
+        ownedSessionTranscriptPath: join(h.ordinaryGlobal, `${targetId}.jsonl`), ownedSessionMode: 'code', ownedSessionScopeKey: 'global' } : {}) });
+    h.setManaged([saved]);
+    const form = task({ runMode, ...(runMode === 'selected_session' ? { targetSessionId: targetId } : {}) }).automation!;
+    await h.service.manage('global', { action: 'update', id: saved.id, prompt: '# Renamed\n\nSame task', automation: form }, 'chat');
+    const request = h.requests.find(request => request.action === 'update')!;
+    assert.equal(runMode === 'selected_session' ? request.automation?.targetSessionMode : request.automation?.sessionMode, 'code');
+    assert.equal(request.automation?.targetSessionTranscriptPath, runMode === 'selected_session' ? join(h.ordinaryGlobal, `${targetId}.jsonl`) : undefined);
+  });
+}
+
+test('a new-session run bound before cancellation leaves an openable durable source', async t => {
+  const h = await harness(t);
+  h.setPrepareTarget(async (ref, durableAnchor) => {
+    assert.equal(durableAnchor, true);
+    h.catalogRows.set(ref.projectPath, [{ uuid: ref.sessionId, title: 'Cancelled run', mode: ref.mode,
+      path: `/sessions/${ref.sessionId}.jsonl`, empty_session: true }]);
+  });
+  h.setCheckBinding(async id => { assert.equal(h.catalogRows.get(h.project)?.[0].uuid, id); });
+  h.setAfterBinding(async () => { throw new Error('cancelled: after bind'); });
+  await assert.rejects(runClaim(h.service, h.source, 'new-cancelled', task({ runMode: 'new_session', notificationPolicy: 'none' })), /after bind/);
+  assert.equal(h.bindings.length, 1);
+  const source = await (h.service as any).validateTarget(h.project, h.bindings[0].sessionId);
+  assert.equal(source.mode, 'code');
+  assert.equal(source.path, `/sessions/${h.bindings[0].sessionId}.jsonl`);
 });

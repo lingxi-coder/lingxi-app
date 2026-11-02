@@ -27,7 +27,7 @@ test(cancelledBeforeBinding
   : 'an admitted claim replays after controller disconnect and completes once on the new transport', async (t) => {
   const job = {
     id: 'job', prompt: 'Scheduled task', automation: {
-      model: 'provider/model', reasoning: { type: 'automatic' }, runMode: 'new_session', notificationPolicy: 'none',
+      model: 'provider/model', reasoning: { type: 'automatic' }, runMode: 'new_session', notificationPolicy: 'none', sessionMode: 'code', sessionScopeKey: workspace,
       runs: [{ id: 'occurrence', claimGeneration: 1, status: 'running', scheduledAt: 1 }],
     },
   } as unknown as CronJobDto;
@@ -49,16 +49,17 @@ test(cancelledBeforeBinding
     internal.setState({ status: 'connected' });
   };
   const settings = {
+    conversationSpaces: { register() {} },
     getPublic: () => ({ projects: [workspace] }),
     isTrustedWorkspace: () => true,
     isSessionArchived: () => false,
   };
   const manager = {
     get: () => undefined,
-    withBackgroundSession: async (ref: { sessionId: string }, _empty: boolean, _model: unknown, operation: (runtime: SessionRuntime) => Promise<unknown>) => {
+    withBackgroundSession: async (ref: { sessionId: string; mode: 'chat' | 'code' }, _empty: boolean, _model: unknown, operation: (runtime: SessionRuntime) => Promise<unknown>) => {
       executions++;
       target = new SessionRuntime({
-        sessionId: ref.sessionId, projectPath: workspace,
+        sessionId: ref.sessionId, projectPath: workspace, expectedSessionMode: ref.mode,
         launchConfig: () => ({ workspace, trusted: true }),
       });
       targetClient = transport();
@@ -68,6 +69,7 @@ test(cancelledBeforeBinding
       internal.client = targetClient;
       internal.credentialRoutingSettings = {};
       internal.ensureModelProviderCredential = async () => undefined;
+      internal.getWorkspaceState = async () => ({ transcript_path: `${workspace}/${ref.sessionId}.jsonl` });
       internal.scheduledModelCatalog = async () => ({
         details: [{ reference: 'provider/model', reasoning: { options: [], provider_default: { type: 'automatic' } } }],
       });
@@ -158,7 +160,7 @@ test('a non-current scheduled claim is rejected and acknowledged without invokin
     run_id: 'bare-occurrence',
     task: {
       id: 'job', prompt: 'Scheduled task', automation: {
-        model: 'provider/model', reasoning: { type: 'automatic' }, runMode: 'new_session', notificationPolicy: 'none',
+        model: 'provider/model', reasoning: { type: 'automatic' }, runMode: 'new_session', notificationPolicy: 'none', sessionMode: 'code', sessionScopeKey: workspace,
         runs: [{ id: 'bare-occurrence', claimGeneration: 1, status: 'running', scheduledAt: 1 }],
       },
     },

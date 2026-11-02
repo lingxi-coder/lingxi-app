@@ -347,3 +347,70 @@ test('an intentional runtime replacement remains routable and does not surface a
   context.handleState({ sessionId: 'A', event: { status: 'disconnected', reason: 'unexpected loss' } });
   assert.deepEqual(errors, ['unexpected loss']);
 });
+
+for (const bot of [false, true]) {
+  test(`scheduled history ${bot ? 'Bot' : 'ordinary'} open reports supersession to its page caller`, async () => {
+    const file = source('src/renderer/bridge/useBridge.ts');
+    const declaration = findNode(file, node => ts.isVariableDeclaration(node) && node.name.getText(file) === 'openScheduledSession') as ts.VariableDeclaration;
+    const initializer = declaration.initializer as ts.CallExpression;
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    let generation = 0, applied = 0;
+    const context: any = {
+      host: { scheduled: { openSession: () => waiting }, bootstrap: async () => ({}) },
+      scheduledScopes: bot ? [{ id: 'scope', botId: 'bot' }] : [],
+      navigationOperationRef: { current: generation },
+      beginNavigationOperation: () => { context.navigationOperationRef.current = ++generation; return generation; },
+      isCurrentNavigationOperation: (operation: number) => operation === generation,
+      applyBootstrap: () => { applied++; },
+      followBotSession: async (_bot: string, _id: string, open: () => Promise<void>, applied: (snapshot: unknown) => void) => {
+        const operation = context.beginNavigationOperation(); await open();
+        if (context.isCurrentNavigationOperation(operation)) applied({ activeSession: { sessionId: 'session' }, settings: {} });
+      },
+    };
+    evaluate(`globalThis.openHistory = ${initializer.arguments[0].getText(file)};`, context);
+    const opening = context.openHistory('scope', 'session');
+    context.beginNavigationOperation(); release();
+    assert.equal(await opening, false);
+    assert.equal(applied, 0);
+  });
+}
+
+test('the scheduled history button leaves a newer page visible after an old open completes', async () => {
+  const file = source('src/renderer/components/ScheduledTasks.tsx');
+  const click = findNode(file, node => ts.isJsxAttribute(node) && node.name.getText(file) === 'onClick'
+    && node.getText(file).includes('bridge.openScheduledSession')) as ts.JsxAttribute;
+  const handler = (click.initializer as ts.JsxExpression).expression!;
+  for (const [opened, visible, expected] of [[false, true, 0], [true, false, 0], [true, true, 1]] as const) {
+    let release!: (opened: boolean) => void;
+    let shown = 0;
+    const promise = new Promise<boolean>(resolve => { release = resolve; });
+    const context = { bridge: { openScheduledSession: () => promise }, selected: { scopeId: 'scope' },
+      run: { sessionId: 'session' }, visibleRef: { current: true },
+      onOpenChat: () => { shown++; }, setError: (cause: unknown) => { throw cause; } };
+    evaluate(`globalThis.clickHistory = ${handler.getText(file)};`, context);
+    (context as any).clickHistory(); context.visibleRef.current = visible; release(opened);
+    await promise; await Promise.resolve();
+    assert.equal(shown, expected);
+  }
+});
+
+for (const bot of [false, true]) {
+  test(`scheduled ${bot ? 'Bot' : 'ordinary'} open does not claim a different host-selected owner`, async () => {
+    const file = source('src/renderer/bridge/useBridge.ts');
+    const declaration = findNode(file, node => ts.isVariableDeclaration(node) && node.name.getText(file) === 'openScheduledSession') as ts.VariableDeclaration;
+    const initializer = declaration.initializer as ts.CallExpression;
+    const snapshot = { activeSession: { sessionId: 'newer-host-owner' }, settings: {} };
+    let applied = 0;
+    const context: any = { host: { scheduled: { openSession: async () => snapshot }, bootstrap: async () => snapshot },
+      scheduledScopes: bot ? [{ id: 'scope', botId: 'bot' }] : [],
+      beginNavigationOperation: () => 1, isCurrentNavigationOperation: () => true,
+      applyBootstrap: () => { applied++; },
+      followBotSession: async (_bot: string, _id: string, open: () => Promise<unknown>, onApplied: (snapshot: unknown) => void) => {
+        await open(); onApplied(snapshot);
+      } };
+    evaluate(`globalThis.openHistory = ${initializer.arguments[0].getText(file)};`, context);
+    assert.equal(await context.openHistory('scope', 'requested-owner'), false);
+    assert.equal(applied, bot ? 0 : 1, 'the current host state can still refresh without reporting the old request opened');
+  });
+}

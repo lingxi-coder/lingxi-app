@@ -206,12 +206,13 @@ export class BotService {
   }
 
   /** A new session of the Bot, or an existing one of its own. */
-  async openSession(botId: string, sessionId?: string, transcriptPath?: string): Promise<BotSessionRef> {
+  async openSession(botId: string, sessionId?: string, transcriptPath?: string, activate = true): Promise<BotSessionRef> {
     this.assertAvailable();
     this.assertNotDeleting(botId);
     const record = this.store.get(botId);
     const projectPath = this.store.workspaceDir(botId);
     if (sessionId === undefined) {
+      if (!activate) throw new Error('A prepared Bot open requires an existing session.');
       if (transcriptPath !== undefined) throw new Error('invalid Bot session selection');
       const ref = await this.options.runtimes.newSession(projectPath, record.model, { mode: 'code', projectId: null });
       return { botId, projectPath: ref.projectPath, sessionId: ref.sessionId };
@@ -221,7 +222,7 @@ export class BotService {
     if (this.options.routines?.isControllerSession(projectPath, sessionId.toLowerCase())) throw new Error('session does not belong to this Bot');
     const live = this.options.runtimes.get?.(sessionId);
     if (!transcriptPath && live?.projectPath === projectPath && live.sessionMode) {
-      await this.options.runtimes.openSession({ projectPath, sessionId, mode: live.sessionMode });
+      await this.options.runtimes.openSession({ projectPath, sessionId, mode: live.sessionMode }, false, undefined, activate);
       return { botId, projectPath, sessionId };
     }
     const saved = this.store.sessionSource(botId, sessionId);
@@ -234,14 +235,14 @@ export class BotService {
         throw new Error('The Bot session is already owned by a different runtime.');
       }
       if (live.connectionState.status !== 'connected') {
-        await this.options.runtimes.openSession({ projectPath, sessionId, mode: row.mode });
+        await this.options.runtimes.openSession({ projectPath, sessionId, mode: row.mode }, false, undefined, activate);
       }
       if (this.options.runtimes.get?.(sessionId) !== live || live.connectionState.status !== 'connected'
         || (await live.getWorkspaceState()).transcript_path !== row.path) {
         throw new Error('The Bot session is already owned by a different runtime.');
       }
     }
-    await this.options.runtimes.openSession({ projectPath, sessionId: row.uuid, mode: row.mode }, row.empty_session, row.resume_model ?? record.model, true, row.path);
+    await this.options.runtimes.openSession({ projectPath, sessionId: row.uuid, mode: row.mode }, row.empty_session, row.resume_model ?? record.model, activate, row.path);
     this.store.rememberSessionSource(botId, row.uuid, { path: row.path, mode: row.mode });
     return { botId, projectPath, sessionId: row.uuid };
   }

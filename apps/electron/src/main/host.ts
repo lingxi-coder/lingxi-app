@@ -1199,15 +1199,36 @@ export class HostController {
       if (request['action'] === 'manage') {
         const validated = validateClientCommand({ type: 'cron_manage', request_id: 'host-scheduled', request: request['request'] });
         if (validated.type !== 'cron_manage') throw new Error('Invalid scheduled request');
-        return this.scheduled.manage(request['scopeId'], validated.request);
+        return this.scheduled.manage(request['scopeId'], validated.request, this.settings.conversationSpaces.snapshot().activeMode);
       }
       if (request['action'] === 'open') {
-        ++this.navigationGeneration;
+        const generation = ++this.navigationGeneration;
         if (!isSessionId(request['sessionId'])) throw new Error('Invalid scheduled session');
         const ref = this.scheduled.resolveSession(request['scopeId'], request['sessionId'] as string);
         const botId = this.botsUi?.botIdFor(ref.projectPath);
-        if (botId !== undefined) return this.enqueueNavigation(() => this.openBotSession(botId, ref.sessionId));
-        return this.enqueueNavigation(() => this.openSessionAndActivateInternal(ref));
+        if (botId !== undefined) return this.enqueueNavigation(async () => {
+          if (generation !== this.navigationGeneration) return this.bootstrap();
+          if (!this.botsUi) throw new Error('Bots are unavailable.');
+          const opened = await this.botsUi.openSession(botId, ref.sessionId, undefined, false);
+          if (generation === this.navigationGeneration) {
+            this.bridge.activateSession(opened);
+            this.showBotSession(opened);
+          }
+          return this.bootstrap();
+        });
+        const previousMode = this.settings.conversationSpaces.snapshot().activeMode;
+        const mode = ref.mode ?? previousMode;
+        return this.enqueueNavigation(async () => {
+          if (generation !== this.navigationGeneration) return this.bootstrap();
+          this.settings.conversationSpaces.setMode(mode);
+          try { return await this.openSessionAndActivateInternal(ref, undefined, generation, mode); }
+          catch (error) {
+            if (generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === mode) {
+              this.settings.conversationSpaces.setMode(previousMode);
+            }
+            throw error;
+          }
+        });
       }
       throw new Error('Invalid scheduled action');
     });

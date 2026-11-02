@@ -2106,13 +2106,13 @@ test('cron_run_bound settles the binding wait the scheduler blocks on', async ()
   (runtime as any).client = client;
   (runtime as any).wireClient(client, 0);
 
-  const bound = runtime.markCronRunStarted('bind-1', 'session-1');
+  const bound = runtime.markCronRunStarted('bind-1', 'session-1', { transcriptPath: '/fixture/session-1.jsonl', mode: 'code', scopeKey: '/fixture' });
   assert.equal((runtime as any).pendingRunBindings.size, 1);
   client.emit('event', { type: 'cron_run_bound', run_id: 'bind-1' });
   await bound;
   assert.equal((runtime as any).pendingRunBindings.size, 0);
 
-  const refused = runtime.markCronRunStarted('bind-2', 'session-1');
+  const refused = runtime.markCronRunStarted('bind-2', 'session-1', { transcriptPath: '/fixture/session-1.jsonl', mode: 'code', scopeKey: '/fixture' });
   client.emit('event', { type: 'cron_run_bound', run_id: 'bind-2', error: 'that session is gone' });
   await assert.rejects(refused, /that session is gone/);
   assert.equal((runtime as any).pendingRunBindings.size, 0);

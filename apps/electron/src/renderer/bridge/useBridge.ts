@@ -1955,7 +1955,7 @@ export function useBridge(): UseBridge {
    * is thrown to the caller, who tells the owner where they are, and is not put
    * in the window's error banner.
    */
-  const followBotSession = useCallback(async <T,>(botId: string, sessionId: string | undefined, open: () => Promise<T>): Promise<T> => {
+  const followBotSession = useCallback(async <T,>(botId: string, sessionId: string | undefined, open: () => Promise<T>, onApplied?: (snapshot: BootstrapState) => void): Promise<T> => {
     if (!host) throw new Error('Desktop host unavailable.');
     const operationId = beginNavigationOperation();
     const target = { projectPath: pendingBotPath(botId), sessionId: sessionId ?? `pending-new:${operationId}` } satisfies SessionRef;
@@ -1974,6 +1974,7 @@ export function useBridge(): UseBridge {
         sessionLoadingRef.current = false;
         setPendingSession(null);
         applyBootstrap(snapshot);
+        onApplied?.(snapshot);
       }
       return opened;
     } catch (cause) {
@@ -2715,12 +2716,28 @@ export function useBridge(): UseBridge {
     // A Bot's workspace is no project: the chat of a run opens as a Bot's chat does.
     const botId = scheduledScopes.find((scope) => scope.id === scopeId)?.botId;
     if (botId !== undefined) {
-      await followBotSession(botId, sessionId, () => scheduled.openSession(scopeId, sessionId));
-      return;
+      let opened = false;
+      await followBotSession(botId, sessionId, () => scheduled.openSession(scopeId, sessionId), snapshot => {
+        const active = snapshot.activeSession ?? snapshot.settings.activeSession;
+        opened = active?.sessionId.toLowerCase() === sessionId.toLowerCase();
+      });
+      return opened;
     }
-    await scheduled.openSession(scopeId, sessionId);
-    applyBootstrap(await host.bootstrap());
-  }, [host, applyBootstrap, followBotSession, scheduledScopes]);
+    const operation = beginNavigationOperation();
+    try {
+      await scheduled.openSession(scopeId, sessionId);
+      if (!isCurrentNavigationOperation(operation)) return false;
+      const snapshot = await host.bootstrap();
+      if (!isCurrentNavigationOperation(operation)) return false;
+      applyBootstrap(snapshot);
+      const opened = snapshot.activeSession ?? snapshot.settings.activeSession;
+      return opened?.sessionId.toLowerCase() === sessionId.toLowerCase();
+    } catch (error) {
+      try { const snapshot = await host.bootstrap(); if (isCurrentNavigationOperation(operation)) applyBootstrap(snapshot); }
+      catch { /* Preserve the original opening error. */ }
+      throw error;
+    }
+  }, [host, applyBootstrap, followBotSession, scheduledScopes, beginNavigationOperation, isCurrentNavigationOperation]);
   const runConfigurationAdmin = useCallback(async (
     domain: ConfigurationDomainDto,
     envelope:

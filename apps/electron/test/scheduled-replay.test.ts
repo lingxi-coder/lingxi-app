@@ -19,7 +19,8 @@ function task(patch: Partial<CronAutomationDto> = {}): CronJobDto {
     recurring: true, durable: true, permanent: false, created_at: 1,
     automation: {
       version: 2, status: 'active', model: 'openai/test-model', reasoning: { type: 'automatic' },
-      runMode: 'new_session', notificationPolicy: 'all', ...patch,
+      runMode: 'new_session', notificationPolicy: 'all', sessionMode: 'code', sessionScopeKey: '/project-a',
+      ...(patch.runMode === 'selected_session' ? { targetSessionTranscriptPath: `/project-a/${patch.targetSessionId}.jsonl`, targetSessionMode: 'code', targetSessionScopeKey: '/project-a' } : {}), ...patch,
     },
   };
 }
@@ -78,6 +79,7 @@ function harness(t: TestContext) {
   let listCatalog = async (_path: string) => ({ sessions: [{ uuid: targetSessionId, mode: 'code' as const }] });
   const runtime = (ref: SessionRef) => ({
     projectPath: ref.projectPath, sessionMode: ref.mode ?? 'code',
+    getWorkspaceState: async () => ({ transcript_path: `${ref.projectPath}/${ref.sessionId}.jsonl` }),
     markCronRunStarted: async (runId: string, sessionId: string) => {
       bindings.push({ projectPath: ref.projectPath, runId, sessionId });
     },
@@ -90,6 +92,7 @@ function harness(t: TestContext) {
   }) as unknown as SessionRuntime;
   const settings = {
     scheduledWorkspace: '/global',
+    conversationSpaces: { snapshot: () => ({ activeMode: 'code', sessions: [] }), findBySessionId: () => undefined, register() {} },
     getPublic: () => ({ projects: [...projects], model: 'openai/default' }),
     hasProject: (path: string) => projects.has(path),
     isTrustedWorkspace: (path: string) => projects.has(path),
@@ -402,14 +405,14 @@ test('the same run ID in different projects executes independently', async (t) =
   const h = harness(t);
   const secondSource = h.sourceFor('/project-b');
   const first = runClaim(h, h.source, 'shared-run-id', task());
-  const second = runClaim(h, secondSource, 'shared-run-id', task());
+  const second = runClaim(h, secondSource, 'shared-run-id', task({ sessionScopeKey: '/project-b' }));
   assert.notStrictEqual(second, first);
   const [a, b] = await Promise.all([first, second]);
   assert.notEqual(a.sessionId, b.sessionId);
   assert.deepEqual(h.background.map((ref) => ref.projectPath).sort(), ['/project-a', '/project-b']);
   assert.equal(h.notifications.length, 2);
   assert.strictEqual(runClaim(h, h.source, 'shared-run-id', task()), first);
-  assert.strictEqual(runClaim(h, secondSource, 'shared-run-id', task()), second);
+  assert.strictEqual(runClaim(h, secondSource, 'shared-run-id', task({ sessionScopeKey: '/project-b' })), second);
 });
 
 test('disposed service rejects and replays first-time admission without opening a runtime', async (t) => {

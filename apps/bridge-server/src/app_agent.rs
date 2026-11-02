@@ -1571,7 +1571,7 @@ fn project_team_model_routes(
                 serde_json::to_value(model).map_err(|_| "catalog_serialization_failed")?;
             value["canSelect"] = json!(can_select);
             if let Some(route) = route {
-                route.validate().map_err(|_| "catalog_route_invalid")?;
+                route.validate_accounts().map_err(|_| "catalog_route_invalid")?;
                 value["team_route"] =
                     serde_json::to_value(route).map_err(|_| "catalog_serialization_failed")?;
             }
@@ -1603,7 +1603,8 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
         migrations::global_config::global_config_path()
             .unwrap_or_else(|| PathBuf::from("/dev/null"))
     });
-    let selected_mcp = mcp::load_mcp_servers(&request.cwd.join(".mcp.json"), &global, &request.cwd);
+    let mut selected_mcp = mcp::load_mcp_servers(&request.cwd.join(".mcp.json"), &global, &request.cwd);
+    mcp::local_apps::append(&mut selected_mcp, &request.config_home);
     let cancel = CancellationToken::new();
     let sink = Arc::new(EventSink::new(
         String::new(),
@@ -1657,64 +1658,71 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
     ))
     .await
     .map_err(|_| "catalog_initialization_failed")?;
-    let models = project_team_model_routes(
-        runtime.orchestrator.list_model_listings().await,
-        runtime.team_model_routes(),
-        catalog_accounts.as_ref(),
-    )?;
-    // Snapshot each descriptor and its exact source config under one lock.
-    // The host must not reconstruct identities from model-facing aliases.
-    let connections = runtime.mcp_registry.connections.read().await;
-    let mut names = connections.keys().collect::<Vec<_>>();
-    names.sort();
-    let mut mcp_configs = Vec::new();
-    let mut mcp_tools = Vec::new();
-    for name in names {
-        let Some(connection) = connections.get(name) else {
-            continue;
-        };
-        let (config, tools) = match connection {
-            mcp::McpConnectionState::Connected { config, tools, .. }
-            | mcp::McpConnectionState::Cached { config, tools, .. } => (config, tools),
-            _ => continue,
-        };
-        let config_index = mcp_configs.len();
-        for tool in tools {
-            let identity = tool_api::McpToolIdentity::from_config_tool(config, tool);
-            let mut row =
-                serde_json::to_value(identity).map_err(|_| "catalog_serialization_failed")?;
-            row["configIndex"] = json!(config_index);
-            row["label"] = json!(format!("{} / {}", config.name, tool.tool_name));
-            row["description"] = json!(tool
-                .description
-                .string_at("")
-                .unwrap_or_default()
-                .chars()
-                .take(1024)
-                .collect::<String>());
-            mcp_tools.push(row);
+    let candidate = async {
+        // One catalog response uses one model snapshot. Rebuilding the account-backed
+        // directory for each route is expensive and can mix publication generations.
+        let models = llm_runtime::catalog_task::scope(async {
+            project_team_model_routes(
+                runtime.orchestrator.list_model_listings().await,
+                runtime.team_model_routes(),
+                catalog_accounts.as_ref(),
+            )
+        }).await?;
+        // Snapshot each descriptor and its exact source config under one lock.
+        // The host must not reconstruct identities from model-facing aliases.
+        let connections = runtime.mcp_registry.connections.read().await;
+        let mut names = connections.keys().collect::<Vec<_>>();
+        names.sort();
+        let mut mcp_configs = Vec::new();
+        let mut mcp_tools = Vec::new();
+        for name in names {
+            let Some(connection) = connections.get(name) else {
+                continue;
+            };
+            let (config, tools) = match connection {
+                mcp::McpConnectionState::Connected { config, tools, .. }
+                | mcp::McpConnectionState::Cached { config, tools, .. } => (config, tools),
+                _ => continue,
+            };
+            let config_index = mcp_configs.len();
+            for tool in tools {
+                let identity = tool_api::McpToolIdentity::from_config_tool(config, tool);
+                let mut row =
+                    serde_json::to_value(identity).map_err(|_| "catalog_serialization_failed")?;
+                row["configIndex"] = json!(config_index);
+                row["label"] = json!(format!("{} / {}", config.name, tool.tool_name));
+                row["description"] = json!(tool
+                    .description
+                    .string_at("")
+                    .unwrap_or_default()
+                    .chars()
+                    .take(1024)
+                    .collect::<String>());
+                mcp_tools.push(row);
+            }
+            mcp_configs.push(config.clone());
         }
-        mcp_configs.push(config.clone());
-    }
-    drop(connections);
-    let registry = runtime.orchestrator.shared_tool_registry();
-    let mut builtins = Vec::new();
-    for name in harness_runtime::desktop::app_invocation::APP_AGENT_BUILTIN_TOOLS {
-        if let Some(tool) = registry.find_registered(name) {
-            let description = tool
-                .description(
-                    &Utf16JsonProjection::plain(json!({})),
-                    &tool_api::tool_trait::DescriptionOptions {
-                        is_non_interactive_session: false,
-                    },
-                )
-                .await;
-            builtins.push(json!({"name":name,"description":description.chars().take(1024).collect::<String>()}));
+        drop(connections);
+        let registry = runtime.orchestrator.shared_tool_registry();
+        let mut builtins = Vec::new();
+        for name in harness_runtime::desktop::app_invocation::APP_AGENT_BUILTIN_TOOLS {
+            if let Some(tool) = registry.find_registered(name) {
+                let description = tool
+                    .description(
+                        &Utf16JsonProjection::plain(json!({})),
+                        &tool_api::tool_trait::DescriptionOptions {
+                            is_non_interactive_session: false,
+                        },
+                    )
+                    .await;
+                builtins.push(json!({"name":name,"description":description.chars().take(1024).collect::<String>()}));
+            }
         }
-    }
-    let result = json!({"type":"catalog","protocolVersion":PROTOCOL_VERSION,"models":models,"builtins":builtins,"providerProfiles":provider_profiles,"routing":routing,"mcpTools":mcp_tools,"mcpConfigs":mcp_configs});
+        let result = json!({"type":"catalog","protocolVersion":PROTOCOL_VERSION,"models":models,"builtins":builtins,"providerProfiles":provider_profiles,"routing":routing,"mcpTools":mcp_tools,"mcpConfigs":mcp_configs});
+        Ok(result)
+    }.await;
     let result = complete_runtime_execution(
-        Ok(result),
+        candidate,
         &state,
         runtime.session_lifecycle.shutdown_and_drain(),
     )
@@ -2815,6 +2823,18 @@ mod tests {
             request_model: "gpt-fixture".into(),
             ..Default::default()
         }];
+        let mut account_route = route.clone();
+        account_route.model_profile.auth = serde_json::from_value(json!("chat_gpt_o_auth")).unwrap();
+        account_route.model_endpoint = "https://chatgpt.com/backend-api/codex".into();
+        account_route.model_profile.base_url = account_route.model_endpoint.clone();
+        assert!(account_route.validate().is_err());
+        let account_rows = project_team_model_routes(
+            models.clone(),
+            BTreeMap::from([(("openai".into(), "gpt-fixture".into()), account_route)]),
+            None,
+        ).unwrap();
+        assert_eq!(account_rows[0]["canSelect"], false);
+        assert_eq!(account_rows[0]["team_route"]["model_profile"]["auth"], "chat_gpt_o_auth");
         let rows = project_team_model_routes(
             models,
             BTreeMap::from([(("openai".into(), "gpt-fixture".into()), route)]),

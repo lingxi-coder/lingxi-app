@@ -122,12 +122,14 @@ function parseCatalog(value: unknown): WireCatalog {
 export class LocalAppAgentExecutor {
   private cached?: { wire: WireCatalog; expires: number; configVersion: string };
   private catalogPending?: Promise<WireCatalog>;
+  private catalogGeneration = 0;
   constructor(private readonly options: LocalAppAgentExecutorOptions) {}
 
-  invalidateCatalog(): void { this.cached = undefined; }
+  invalidateCatalog(): void { this.cached = undefined; this.catalogGeneration++; }
   private async configVersion(): Promise<string> {
     const environment = this.options.environment ?? process.env;
     const paths = [join(this.options.configHome, 'settings.json'), join(this.options.configHome, '.config.json'),
+      join(this.options.configHome, 'desktop-local-app-mcp.json'),
       join(environment.LINGXI_CONFIG_DIR ?? environment.HOME ?? homedir(), '.lingxi.json')];
     const versions = await Promise.all(paths.map(async path => {
       try { const value = await fs.stat(path, { bigint: true }); return [path, String(value.ino), String(value.size), String(value.mtimeNs), String(value.ctimeNs)]; }
@@ -147,6 +149,7 @@ export class LocalAppAgentExecutor {
       try {
         let catalogVersion = configVersion;
         for (let attempt = 0; attempt < 2; attempt++) {
+          const generation = this.catalogGeneration;
           let result: WireCatalog | undefined;
           await this.exchange({ type: 'catalog', protocolVersion: 1, cwd, configHome: this.options.configHome, credentials: credentialEnvelope(await this.options.catalogCredentials?.() ?? {}) }, cwd, controller.signal, async event => {
             if (event.type !== 'catalog') throw protocolError();
@@ -154,7 +157,7 @@ export class LocalAppAgentExecutor {
           });
           if (!result) throw protocolError();
           const currentVersion = await this.configVersion();
-          if (currentVersion !== catalogVersion) {
+          if (currentVersion !== catalogVersion || generation !== this.catalogGeneration) {
             // A fresh Harness home may initialize host metadata on first read.
             // Re-read once; never publish a catalog from a changing snapshot.
             if (attempt === 0) { catalogVersion = currentVersion; continue; }

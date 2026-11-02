@@ -32,14 +32,15 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, launchTimeou
   const root = await fs.mkdtemp(join(tmpdir(),'remote-app-host-'));
   let windowCount = 0, shown = 0, running = false, revision = 1, runId = 'run-one', liveSession = false, honorAbort = true, ended = 0;
   let startHook = async (_signal?: AbortSignal) => {};
+  const heldStarts = new Map<string, number>();
   let loadWindow = (): Promise<void> => Promise.reject(new Error('load failed'));
   const electron = { BrowserWindow: class {
     static getAllWindows(){return [];}
     private closed?:()=>void;private destroyed=false;
     webContents={id:17,on(){},setWindowOpenHandler(){}};
     constructor(){windowCount++;}isDestroyed(){return this.destroyed;}on(name:string,fn:()=>void){if(name==='closed')this.closed=fn;}
-    destroy(){this.destroyed=true;this.closed?.();}loadURL(){return loadWindow();}show(){shown++;}focus(){}
-  }, ipcMain:{removeHandler(){}}, session:{fromPartition:()=>({flushStorageData(){}})}, dialog:{showMessageBox:async()=>({response:1})} };
+    destroy(){this.destroyed=true;this.closed?.();}close(){this.destroy();}loadURL(){return loadWindow();}show(){shown++;}focus(){}
+  }, ipcMain:{removeHandler(){}}, session:{fromPartition:()=>({flushStorageData(){},async clearStorageData(){},async clearCache(){}})}, dialog:{showMessageBox:async()=>({response:1})} };
   const module = { exports: {} };
   const hostSetTimeout = (fn: () => void, ms: number) => {
     const timer = setTimeout(fn, ms === 900_000 && launchTimeoutMs !== undefined ? launchTimeoutMs : ms);
@@ -57,9 +58,10 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, launchTimeou
   const store:any = {root, get:async()=>structuredClone(row), getRevision:async()=>structuredClone(row), list:async()=>[structuredClone(row)], save:async(value:any)=>{Object.assign(row,structuredClone(value));}, assertTarget:async()=>{}, revisionPath:()=>root, core:{request:async()=>({digest:row.releaseDigest,files:[]})}, publish:async()=>{row.revision++;row.currentRevision=row.revision;return structuredClone(row);} };
   host.store = store;
   const runtime:any = {status:(value:any)=>({...value,phase:running?'running':'stopped',runningRevision:running?revision:undefined,runId:running?runId:undefined}),
+    suspendStarts:(appId:string)=>{heldStarts.set(appId,(heldStarts.get(appId)??0)+1);return()=>{const count=(heldStarts.get(appId)??1)-1;if(count)heldStarts.set(appId,count);else heldStarts.delete(appId);};},
     phase:()=>running?'running':'stopped', revision:()=>running?revision:undefined, invocationId:()=>running?runId:undefined,manifest:()=>row.manifest,
     owner:()=>running?({appId:id,runId,revision,releaseDigest:row.releaseDigest}):undefined,
-    start:async(_id:string,_repair:boolean,signal?:AbortSignal)=>{await startHook(signal);if(honorAbort)signal?.throwIfAborted(); running=true;revision=row.revision;}, stop:async()=>{running=false;},exclusive:async(_id:string,fn:()=>Promise<unknown>)=>fn()};
+    start:async(_id:string,_repair:boolean,signal?:AbortSignal)=>{if(heldStarts.has(_id))throw new Error('Application is stopping');await startHook(signal);if(honorAbort)signal?.throwIfAborted(); running=true;revision=row.revision;}, stop:async()=>{running=false;},exclusive:async(_id:string,fn:()=>Promise<unknown>)=>fn()};
   host.runtime=runtime;
   const gateway:any = {open:async(run:any,requestedOwner:any)=>{assert.equal(requestedOwner.deviceId,owner.deviceId); liveSession=true;return {app_id:run.appId,revision:run.revision,url:`https://${id}-${'1'.repeat(20)}.apps.example.com/__lingxi_remote_bootstrap#ticket`,expires_at:Date.now()+60000};},
     hasAccess:()=>liveSession,hasRun:(_id:string,run:string)=>liveSession && run===runId,hasSession:(_id:string,run:string,session:string)=>liveSession && run===runId && session==='s'.repeat(43),revokeApp:(revoked:string)=>{if(revoked===id)liveSession=false;},revokeOwner:(revoked:any)=>{if(revoked.deviceId===owner.deviceId)liveSession=false;},revokeAll:()=>{liveSession=false;},dispose:async()=>{liveSession=false;}};

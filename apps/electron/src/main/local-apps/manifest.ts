@@ -1,5 +1,5 @@
 import { isAbsolute, posix } from 'node:path';
-import type { DesktopAppManifest, LocalAppTarget, LocalAppCapability, LocalAppProcess, LocalAppStep } from '../../shared/localApps.js';
+import type { DesktopAppManifest, LocalAppTarget, LocalAppCapability, LocalAppProcess, LocalAppStep, LocalAppMcpServer } from '../../shared/localApps.js';
 
 export function relativePath(value: unknown, label = 'path'): string {
   if (typeof value !== 'string' || !value || value.includes('\0') || value.includes('\\') || isAbsolute(value)
@@ -81,7 +81,7 @@ export function parseManifest(value: unknown): DesktopAppManifest {
   }
   if (entry.type === 'server' && !processes.some(p => p.name === entry.process)) throw new Error('Entry process does not exist');
   const capabilities = new Set<LocalAppCapability>();
-  const supported: LocalAppCapability[] = ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone', 'photos', 'share', 'agent', 'background'];
+  const supported: LocalAppCapability[] = ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone', 'photos', 'share', 'agent', 'background', 'mcp'];
   if (v.capabilities !== undefined) {
     if (!Array.isArray(v.capabilities)) throw new Error('capabilities must be an array');
     for (const cap of v.capabilities) {
@@ -90,6 +90,25 @@ export function parseManifest(value: unknown): DesktopAppManifest {
     }
   }
   const install = steps(v.install), build = steps(v.build);
+  const mcpServers: Record<string, LocalAppMcpServer> = Object.create(null);
+  if (v.mcpServers !== undefined) {
+    const servers = Object.entries(object(v.mcpServers));
+    if (servers.length > 16) throw new Error('At most 16 MCP servers are supported');
+    for (const [name, raw] of servers) {
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) throw new Error('Invalid MCP server name');
+      const server = object(raw);
+      if (server.type === 'stdio') {
+        if (Object.keys(server).some(key => !['type', 'command', 'cwd', 'env', 'venv', 'python'].includes(key))) throw new Error('Unknown MCP stdio field');
+        mcpServers[name] = { type: 'stdio', ...step(server) };
+      } else if (server.type === 'http') {
+        if (Object.keys(server).some(key => !['type', 'process', 'path'].includes(key))) throw new Error('Unknown MCP HTTP field');
+        const process = text(server.process, 'MCP process', 80), path = text(server.path, 'MCP path', 2048);
+        if (!processes.some(p => p.name === process) || !path.startsWith('/') || path.startsWith('//') || /[\\\r\n\0%?#]/.test(path) || path.split('/').some(part => part === '.' || part === '..')) throw new Error('MCP HTTP endpoint must use a declared process and a plain absolute path');
+        mcpServers[name] = { type: 'http', process, path };
+      } else throw new Error('MCP transport must be stdio or http');
+    }
+    if (servers.length && !capabilities.has('mcp')) throw new Error('MCP servers require the mcp capability');
+  }
   let agent: DesktopAppManifest['agent'];
   if (v.agent !== undefined) {
     const a = object(v.agent);
@@ -112,7 +131,7 @@ export function parseManifest(value: unknown): DesktopAppManifest {
     capabilities.add('agent');
   }
   if (capabilities.has('agent') && !agent) agent = { tools: [], skills: [] };
-  if (install.length || build.length || processes.length) capabilities.add('process');
+  if (install.length || build.length || processes.length || Object.keys(mcpServers).length) capabilities.add('process');
   if (!Array.isArray(v.targets) || !v.targets.length) throw new Error('Application targets must be a nonempty array');
   const targets = v.targets.map(raw => {
     const t = object(raw);
@@ -120,9 +139,10 @@ export function parseManifest(value: unknown): DesktopAppManifest {
     if (t.capabilities !== undefined && (!Array.isArray(t.capabilities) || t.capabilities.some(c => !supported.includes(c as LocalAppCapability)))) throw new Error('Unsupported target capability');
     return t as unknown as LocalAppTarget;
   });
+  if (Object.keys(mcpServers).length && targets.some(t => !['macos', 'windows', 'linux'].includes(t.platform) || t.environment !== 'native')) throw new Error('MCP servers require Desktop native targets');
   return { schema: 2, targets, ...(agent ? { agent } : {}),
     ...(v.dataSchema ? { dataSchema: v.dataSchema as DesktopAppManifest['dataSchema'] } : {}),
     ...(v.remix ? { remix: v.remix as DesktopAppManifest['remix'] } : {}),
     ...(v.package ? { package: v.package as DesktopAppManifest['package'] } : {}), name: text(v.name, 'application name', 60), summary: typeof v.summary === 'string' ? v.summary.slice(0, 160) : '',
-    entry, install, build, processes: sorted, capabilities: [...capabilities].sort() };
+    entry, install, build, processes: sorted, ...(Object.keys(mcpServers).length ? { mcpServers } : {}), capabilities: [...capabilities].sort() };
 }

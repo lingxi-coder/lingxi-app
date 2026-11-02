@@ -991,6 +991,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       bunExecutable: resolveModBunExecutable({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE }),
       mainWindow: () => getMainWindow() ?? createWindow(),
       agentCatalog: () => agentExecutor.catalog(),
+      onMcpChanged: () => agentExecutor.invalidateCatalog(),
       edit: async request => {
         const window = getMainWindow() ?? createWindow();
         window.show(); window.focus();

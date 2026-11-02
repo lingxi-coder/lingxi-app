@@ -84,7 +84,7 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
   };
   const catalog = {
     async find(projectPath: string, id: string) { calls.find.push({ projectPath, sessionId: id }); return id === sessionId ? row() : undefined; },
-    async select(projectPath: string, id: string, selection: { scope: string }) {
+    async select(projectPath: string, id: string, selection: { scope: string; transcriptPath?: string }) {
       calls.select.push({ projectPath, sessionId: id, scope: selection.scope });
       return id === sessionId ? row() : undefined;
     },
@@ -124,6 +124,27 @@ test('alias rename writes the live source transcript without starting, replacing
   assert.deepEqual(f.calls.background, []); assert.deepEqual(f.calls.closed, []); assert.deepEqual(f.calls.trust, []);
   assert.deepEqual(f.ref, { projectPath: f.alias, sessionId });
   assert.equal((f.host as any).catalogs.get(f.source).sessions[0].title, 'Renamed in B');
+});
+
+test('cold metadata changes select the saved exact source instead of a same-UUID sibling', async t => {
+  const f = fixture(t, { running: false });
+  const owner = { ...f.sourceRef, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(owner);
+  f.settings.rememberSessionTranscriptSelection(owner, { catalogProjectPath: f.source, scope: 'current', transcriptPath: f.path });
+  const siblingDir = join(f.root, 'sibling'); mkdirSync(siblingDir);
+  const sibling = join(siblingDir, `${sessionId}.jsonl`); writeFileSync(sibling, f.original);
+  f.catalog.find = async () => { throw new Error('UUID winner must not be used'); };
+  f.catalog.select = async (projectPath, id, selection) => {
+    assert.equal(projectPath, f.source);
+    assert.equal(id, sessionId);
+    assert.deepEqual(selection, { scope: 'current', transcriptPath: f.path });
+    return { uuid: sessionId, title: 'Saved chat', path: f.path, workspace_path: f.source,
+      modified_rfc3339: '', message_count: 1, mode: 'code', empty_session: false };
+  };
+  await (f.host as any).persistSessionTitle(owner, 'Selected source');
+  assert.match(readFileSync(f.path, 'utf8'), /Selected source/);
+  assert.equal(readFileSync(sibling, 'utf8'), f.original);
+  assert.deepEqual(f.calls.background, []);
 });
 
 test('alias touch updates only the source transcript and leaves active work in place', async (t) => {

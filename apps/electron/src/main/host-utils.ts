@@ -745,7 +745,8 @@ export function buildBridgeArguments(config: {
   if (config.listSessionsJson) {
     return ['--cwd', config.workspace, '--list-sessions-json',
       ...(config.sessionScope ? ['--session-scope', config.sessionScope] : []),
-      ...(config.sessionId ? ['--session-id', config.sessionId] : [])];
+      ...(config.sessionId ? ['--session-id', config.sessionId] : []),
+      ...(config.sessionTranscriptPath ? ['--session-transcript-path', config.sessionTranscriptPath] : [])];
   }
   const args = ['--cwd', config.workspace, '--bridge-dir', config.bridgeDir];
   if (config.appVersion) args.push('--app-version', config.appVersion);

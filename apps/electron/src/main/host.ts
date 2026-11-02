@@ -2061,7 +2061,7 @@ export class HostController {
     this.sessionCatalog.invalidate(owner.projectPath);
     let selected: { catalogProjectPath: string; scope: SessionCatalogScope; transcriptPath: string } | undefined;
     for (const scope of ['current', 'repository', 'all'] as const) {
-      const row = await this.sessionCatalog.select(owner.projectPath, owner.sessionId, { scope });
+      const row = await this.sessionCatalog.select(owner.projectPath, owner.sessionId, { scope, transcriptPath: path });
       if (!row || row.path !== path) continue;
       if (row.uuid.toLowerCase() !== owner.sessionId.toLowerCase() || row.mode !== owner.mode
         || (row.workspace_path && canonicalWorkspace(row.workspace_path) !== owner.projectPath)) {
@@ -2271,9 +2271,13 @@ export class HostController {
     }
     if (runtime) throw new Error('Reconnect this chat before changing its metadata.');
     this.sessionCatalog.invalidate(source);
-    // Sidebar actions select the same fresh Current+alias row the user sees.
-    // The CLI UUID resolver has deliberately different duplicate ordering.
-    const row = await this.sessionCatalog.select(source, ref.sessionId, { scope: 'current' });
+    // A previously confirmed owner retains its exact source across cold
+    // metadata actions. A first discovery may use the displayed Current row.
+    const lookupRef = { ...ref, projectPath: source };
+    const savedSource = this.settings.getSessionTranscriptSelection(lookupRef);
+    const row = savedSource
+      ? await resolveSavedConversationTranscriptRow(this.settings, this.sessionCatalog, lookupRef)
+      : await this.sessionCatalog.select(source, ref.sessionId, { scope: 'current' });
     if (!row) throw new Error('session does not belong to this project');
     if (row.workspace_path) {
       try { source = canonicalWorkspace(row.workspace_path); }
@@ -2334,6 +2338,16 @@ export class HostController {
         }
         this.settings.assertSessionRelocationAllowed(ref.projectPath, ref);
         this.bridge.setSessionDirectoryGrants(sessionId, before.additional_directories);
+        let previousSourceIdentity: { dev: number; ino: number } | undefined;
+        if (before.transcript_path) {
+          try {
+            const stat = lstatSync(before.transcript_path);
+            if (!stat.isFile()) throw new Error('The session source is not a regular file.');
+            previousSourceIdentity = { dev: stat.dev, ino: stat.ino };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          }
+        }
         attemptedMove = true;
         let result = await runtime.setWorkingDirectory({ path });
         // Every affirmative answer is pinned to the canonical path shown by
@@ -2350,9 +2364,52 @@ export class HostController {
         const target = canonicalWorkspace(result.cwd);
         if (this.isProjectClosing(target)) throw new Error('project is closing');
         this.assertNotAppData(target);
+        const transcriptPath = after.transcript_path;
+        const savedSource = this.settings.getSessionTranscriptSelection(ref);
+        if (transcriptPath !== undefined && (!isAbsolute(transcriptPath) || transcriptPath.includes('\0')
+          || basename(transcriptPath).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`)) {
+          throw new Error('The engine reported an invalid session source.');
+        }
+        if ((previousSourceIdentity || before.has_conversation === true || savedSource)
+          && before.transcript_path !== transcriptPath) throw new Error('The session source changed during the directory update.');
+        if (savedSource && savedSource.transcriptPath !== transcriptPath) throw new Error('The session source changed during the directory update.');
+        let sourceExists = false;
+        if (transcriptPath) {
+          try {
+            const stat = lstatSync(transcriptPath);
+            if (!stat.isFile()) throw new Error('The session source is not a regular file.');
+            if (previousSourceIdentity && (stat.dev !== previousSourceIdentity.dev || stat.ino !== previousSourceIdentity.ino)) {
+              throw new Error('The session source changed during the directory update.');
+            }
+            sourceExists = true;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          }
+        }
+        if (!sourceExists && (previousSourceIdentity || before.has_conversation === true || savedSource || after.has_conversation !== false)) {
+          throw new Error('The session source is unavailable after the directory update.');
+        }
+        // A durable empty anchor still owns its exact transcript. Only a
+        // genuinely unwritten draft may be remounted as a fresh session.
+        const empty = !sourceExists;
+        this.sessionCatalog.invalidate();
+        const row = sourceExists ? await this.sessionCatalog.select(target, sessionId,
+          { scope: 'current', transcriptPath: transcriptPath! }) : undefined;
+        if (sourceExists && (!row || row.path !== transcriptPath)) throw new Error('The session source is unavailable in its new directory.');
+        if (row && (row.uuid.toLowerCase() !== sessionId.toLowerCase()
+          || (runtime.sessionMode && row.mode !== runtime.sessionMode)
+          || (row.workspace_path && canonicalWorkspace(row.workspace_path) !== target))) {
+          throw new Error('The session catalog does not match its source owner.');
+        }
+        if (previousSourceIdentity && transcriptPath) {
+          const stat = lstatSync(transcriptPath);
+          if (!stat.isFile() || stat.dev !== previousSourceIdentity.dev || stat.ino !== previousSourceIdentity.ino) {
+            throw new Error('The session source changed during the directory update.');
+          }
+        }
         const relocateDraft = this.bridge.prepareDraftRelocation(ref, target);
-        this.settings.relocateSession(ref, target, after.has_conversation === false || !after.transcript_path ? null : {
-          catalogProjectPath: target, scope: 'current', transcriptPath: after.transcript_path,
+        this.settings.relocateSession(ref, target, empty ? null : {
+          catalogProjectPath: target, scope: 'current', transcriptPath: transcriptPath!,
         });
         relocateDraft();
         const relocatedOwner = this.settings.conversationSpaces.find({ ...ref, projectPath: target });
@@ -2373,10 +2430,8 @@ export class HostController {
         // close's first await. No prompt can enter the old composition here.
         release();
         await this.bridge.closeSession(ref, { replacing: true });
-        const row = await this.sessionCatalog.find(target, sessionId);
-        const empty = after.has_conversation === false || row?.empty_session === true;
         await this.bridge.openSession(moved, empty,
-          row?.resume_model ?? this.settings.getSessionModel(moved), true, empty ? undefined : after.transcript_path ?? row?.path,
+          row?.resume_model ?? this.settings.getSessionModel(moved), true, empty ? undefined : transcriptPath,
           after.runtime_controls);
         await this.loadProjectSessions(target);
         return this.bootstrap();

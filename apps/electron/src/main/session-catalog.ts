@@ -3,7 +3,7 @@ import type { HostProviderSettings, ProviderAccountCommand, ProviderAccountSnaps
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute } from 'node:path';
+import { basename, isAbsolute } from 'node:path';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 
 import { buildBridgeArguments, buildBridgeEnvironment } from './host-utils.js';
@@ -270,9 +270,7 @@ export class ProjectSessionCatalog {
     const cached = this.cache.get(`${canonical}\0current`);
     // Every session open waits on this lookup. Without a fresh catalog, ask
     // for this one row: the full catalog parses every transcript in the
-    // Project, most of a second once one of them is tens of megabytes. A
-    // runtime that predates the narrowed mode ignores the filter and returns
-    // the full catalog, which the search below handles the same way.
+    // Project, most of a second once one of them is tens of megabytes.
     const match = cached && cached.expiresAt > Date.now()
       ? cached.result.sessions.find((candidate) => candidate.uuid === sessionId) : undefined;
     if (match) return { ...match };
@@ -285,8 +283,12 @@ export class ProjectSessionCatalog {
   async select(projectPath: string, sessionId: string, selection: SessionOpenSelection): Promise<ProjectSessionCatalogRow | undefined> {
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
     sessionId = sessionId.toLowerCase();
+    if (selection.transcriptPath !== undefined && (!isAbsolute(selection.transcriptPath)
+      || selection.transcriptPath.includes('\0') || basename(selection.transcriptPath).toLowerCase() !== `${sessionId}.jsonl`)) {
+      throw new Error('invalid selected transcript path');
+    }
     const canonical = realpathSync.native(projectPath);
-    const result = await this.run(canonical, sessionId, sessionCatalogScope(selection.scope));
+    const result = await this.run(canonical, sessionId, sessionCatalogScope(selection.scope), selection.transcriptPath);
     const row = result.sessions.find((candidate) => candidate.uuid === sessionId);
     if (row && selection.transcriptPath !== undefined && row.path !== selection.transcriptPath) {
       throw new Error('This session selection has changed. Refresh the session list and try again.');
@@ -340,13 +342,14 @@ export class ProjectSessionCatalog {
     return operation;
   }
 
-  private run(canonical: string, sessionId?: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogResult> {
+  private run(canonical: string, sessionId?: string, scope?: SessionCatalogScope, transcriptPath?: string): Promise<ProjectSessionCatalogResult> {
     const args = buildBridgeArguments({
       workspace: canonical,
       bridgeDir: '',
       listSessionsJson: true,
       sessionScope: scope,
       ...(sessionId ? { sessionId } : {}),
+      ...(transcriptPath ? { sessionTranscriptPath: transcriptPath } : {}),
       trusted: false,
     });
     return this.runOutput(canonical, args).then((output) => parseCatalog(output));

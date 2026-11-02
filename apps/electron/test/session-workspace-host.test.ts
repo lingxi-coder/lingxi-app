@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -87,6 +87,7 @@ function hostFixture(t: TestContext) {
   settings.conversationSpaces.setMode('code');
   settings.addProject(source); settings.activateProject(source); settings.setActiveSession(ref);
   const original = new WorkspaceRuntime(source, sessionId);
+  writeFileSync(original.transcriptPath, '{}\n');
   const runtimes = new Map<string, WorkspaceRuntime>([[sessionId, original]]);
   const grants = new Map<string, readonly string[]>();
   const projectRoots = new Map<string, string>();
@@ -145,7 +146,8 @@ function hostFixture(t: TestContext) {
     find: async (path: string, id: string): Promise<ProjectSessionCatalogRow | undefined> => { calls.find.push({ projectPath: path, sessionId: id }); return row(path, id); },
     select: async (path: string, id: string, selection: SessionOpenSelection): Promise<ProjectSessionCatalogRow | undefined> => {
       calls.select.push({ ref: { projectPath: path, sessionId: id }, selection: { ...selection } });
-      return row(path, id);
+      return { ...row(path, id), ...(id === sessionId ? { mode: original.sessionMode } : {}),
+        ...(selection.transcriptPath ? { path: selection.transcriptPath } : {}) };
     },
     list: async (path: string, scope: SessionCatalogScope = 'current') => { calls.list.push({ path, scope }); return { sessions: [row(path)] }; },
     invalidate: () => { calls.invalidations++; },
@@ -302,6 +304,7 @@ test('/cd opens an unsent draft without resuming its computed but unwritten tran
   f.settings.setActiveSession(undefined);
   f.settings.setActiveSessionDraft(f.ref);
   f.original.hasConversation = false;
+  unlinkSync(f.original.transcriptPath);
   f.catalog.find = async (path, id) => { f.calls.find.push({ projectPath: path, sessionId: id }); return undefined; };
   f.catalog.list = async () => ({ sessions: [] });
   assert.equal(new SettingsStore(f.userData).getPublic().activeSession, undefined, 'the unsent draft must start as volatile state');
@@ -325,6 +328,7 @@ test('/cd rolls back the native directory move if the target already owns a draf
   f.settings.setActiveSession(undefined);
   f.settings.setActiveSessionDraft(f.ref);
   f.original.hasConversation = false;
+  unlinkSync(f.original.transcriptPath);
   f.bridge.prepareDraftRelocation = () => { throw new Error('The destination project already has an unsent draft.'); };
   await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), /already has an unsent draft/);
   assert.equal(f.original.cwd, f.source);
@@ -336,27 +340,133 @@ test('/cd rolls back the native directory move if the target already owns a draf
 
 test('/cd with history and no catalog row propagates a missing transcript failure instead of silently opening an empty draft', async (t) => {
   for (const hasConversation of [true, undefined]) {
-    const f = hostFixture(t), moved = { projectPath: f.target, sessionId }, selectedPath = f.row(f.source).path;
+    const f = hostFixture(t);
     f.original.hasConversation = hasConversation;
+    unlinkSync(f.original.transcriptPath);
     f.catalog.find = async (path, id) => { f.calls.find.push({ projectPath: path, sessionId: id }); return undefined; };
-    const open = f.bridge.openSession;
-    f.bridge.openSession = async (...args) => {
-      if (args[1] !== true) {
-        const [ref, empty = false, model] = args;
-        f.calls.open.push({ ref: { ...ref }, empty, model }); f.calls.openArguments.push(args);
-        // Exercise a real persistence read error at the manager boundary.
-        readFileSync(args[4]!, 'utf8');
-        assert.fail('the deliberately missing transcript unexpectedly exists');
-      }
-      return open(...args);
-    };
-    await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), { code: 'ENOENT', path: selectedPath });
-    assert.deepEqual(f.calls.openArguments, [[moved, false, undefined, true, selectedPath, undefined]]);
-    assert.deepEqual(f.calls.close, [f.ref]);
-    assert.equal(f.runtimes.get(sessionId), undefined);
+    const before = readFileSync(f.settings.settingsPath, 'utf8');
+    await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), /source is unavailable/);
+    assert.deepEqual(f.calls.openArguments, []);
+    assert.deepEqual(f.calls.close, []);
+    assert.strictEqual(f.runtimes.get(sessionId), f.original);
+    assert.equal(f.original.cwd, f.source);
+    assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
     assert.equal(f.projectRoots.get(sessionId), f.source);
     assert.equal(f.original.releases, 1);
   }
+});
+
+test('/cd ignores a same-UUID sibling anchor and resumes the engine source', async t => {
+  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  const moved = { ...owner, projectPath: f.target }, source = f.original.transcriptPath;
+  f.settings.conversationSpaces.register(owner);
+  f.settings.setSessionModel(owner, 'owner/model');
+  f.settings.rememberSessionTranscriptSelection(owner, { catalogProjectPath: f.source, scope: 'current', transcriptPath: source });
+  f.catalog.find = async () => ({ ...f.row(f.target), empty_session: true, resume_model: 'sibling/model' });
+  f.catalog.select = async (path, id, selection) => {
+    assert.deepEqual(selection, { scope: 'current', transcriptPath: source });
+    return { ...f.row(path, id), path: source, resume_model: 'owner/model' };
+  };
+  await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
+  assert.deepEqual(f.calls.openArguments, [[{ projectPath: f.target, sessionId }, false, 'owner/model', true, source, undefined]]);
+  const saved = new SettingsStore(f.userData);
+  assert.deepEqual(saved.conversationSpaces.findBySessionId(sessionId), moved);
+  assert.equal(saved.getSessionTranscriptSelection(moved)?.transcriptPath, source);
+});
+
+test('/cd preserves and resumes a durable empty scheduled anchor', async t => {
+  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: null };
+  const moved = { ...owner, projectPath: f.target }, source = f.original.transcriptPath;
+  f.original.hasConversation = false;
+  writeFileSync(source, `${JSON.stringify({ type: 'fixed-session-mode', sessionId, sessionMode: 'code', instructionEpoch: 0 })}\n${JSON.stringify({ type: 'custom-title', sessionId, mobileEmptySession: 1, cwd: f.source })}\n`);
+  f.settings.conversationSpaces.register(owner);
+  f.settings.rememberSessionTranscriptSelection(owner, { catalogProjectPath: f.source, scope: 'current', transcriptPath: source });
+  f.catalog.select = async (path, id, selection) => {
+    assert.deepEqual(selection, { scope: 'current', transcriptPath: source });
+    return { ...f.row(path, id), path: source, empty_session: true, workspace_path: f.target };
+  };
+  await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
+  assert.deepEqual(f.calls.openArguments, [[{ projectPath: f.target, sessionId }, false, undefined, true, source, undefined]]);
+  const saved = new SettingsStore(f.userData);
+  assert.deepEqual(saved.conversationSpaces.findBySessionId(sessionId), moved);
+  assert.deepEqual(saved.getSessionTranscriptSelection(moved), {
+    projectPath: f.target, sessionId, catalogProjectPath: f.target, scope: 'current', transcriptPath: source,
+  });
+});
+
+test('/cd rejects a missing or mismatched exact catalog source before changing its owner', async t => {
+  for (const conflict of ['missing', 'path', 'mode'] as const) {
+    const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+    const source = f.original.transcriptPath;
+    f.settings.conversationSpaces.register(owner);
+    f.settings.rememberSessionTranscriptSelection(owner, { catalogProjectPath: f.source, scope: 'current', transcriptPath: source });
+    const before = readFileSync(f.settings.settingsPath, 'utf8');
+    f.catalog.select = async (path, id) => conflict === 'missing' ? undefined : {
+      ...f.row(path, id), path: conflict === 'path' ? join(f.target, `${sessionId}.jsonl`) : source,
+      mode: conflict === 'mode' ? 'chat' : 'code',
+    };
+    await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), /source is unavailable|catalog does not match/);
+    assert.equal(f.original.cwd, f.source);
+    assert.strictEqual(f.runtimes.get(sessionId), f.original);
+    assert.deepEqual(f.settings.conversationSpaces.findBySessionId(sessionId), owner);
+    assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
+    assert.deepEqual(f.calls.close, []);
+  }
+});
+
+test('/cd rejects a different live source even before a selection was saved', async t => {
+  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(owner);
+  const before = readFileSync(f.settings.settingsPath, 'utf8'), source = f.original.transcriptPath;
+  const change = f.original.setWorkingDirectory.bind(f.original);
+  f.original.setWorkingDirectory = async request => {
+    const result = await change(request);
+    f.original.transcriptPath = request.path === f.target ? join(f.target, `${sessionId}.jsonl`) : source;
+    return result;
+  };
+  await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), /source changed/);
+  assert.equal(f.original.cwd, f.source);
+  assert.equal(f.original.transcriptPath, source);
+  assert.deepEqual(f.settings.conversationSpaces.findBySessionId(sessionId), owner);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
+  assert.deepEqual(f.calls.close, []);
+});
+
+test('/cd never recreates an observed empty anchor that disappeared during the move', async t => {
+  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: null };
+  f.original.hasConversation = false;
+  f.settings.conversationSpaces.register(owner);
+  const before = readFileSync(f.settings.settingsPath, 'utf8');
+  const change = f.original.setWorkingDirectory.bind(f.original);
+  f.original.setWorkingDirectory = async request => {
+    const result = await change(request);
+    if (request.path === f.target) unlinkSync(f.original.transcriptPath);
+    return result;
+  };
+  await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), /source is unavailable/);
+  assert.equal(f.original.cwd, f.source);
+  assert.deepEqual(f.settings.conversationSpaces.findBySessionId(sessionId), owner);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
+  assert.deepEqual(f.calls.open, []);
+  assert.deepEqual(f.calls.close, []);
+});
+
+test('/cd rejects a same-byte source replacement during exact catalog lookup', async t => {
+  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(owner);
+  const source = f.original.transcriptPath, bytes = readFileSync(source);
+  const before = readFileSync(f.settings.settingsPath, 'utf8');
+  f.catalog.select = async (path, id) => {
+    renameSync(source, `${source}.original`);
+    writeFileSync(source, bytes);
+    return { ...f.row(path, id), path: source };
+  };
+  await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), /source changed/);
+  assert.equal(f.original.cwd, f.source);
+  assert.deepEqual(f.settings.conversationSpaces.findBySessionId(sessionId), owner);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
+  assert.deepEqual(f.calls.open, []);
+  assert.deepEqual(f.calls.close, []);
 });
 
 test('explicit /add-dir saves session grants without adding a project, changing selection or remounting', async (t) => {
@@ -720,6 +830,8 @@ test('a first durable prompt records the live writer source without changing ano
   assert.deepEqual(saved.getSessionTranscriptSelection(owner), { projectPath: f.source, sessionId,
     catalogProjectPath: f.source, scope: 'current', transcriptPath: f.original.transcriptPath });
   assert.deepEqual(saved.getPublic().activeSession, other);
+  assert.deepEqual(f.calls.select, [{ ref: f.ref, selection: { scope: 'current', transcriptPath: f.original.transcriptPath } }]);
+  assert.deepEqual(f.calls.find, []);
   assert.deepEqual(await resolveSavedConversationTranscript(saved, f.catalog as any, owner), { path: f.original.transcriptPath, mode: 'code' });
 });
 
@@ -1122,6 +1234,7 @@ test('/cd keeps the visible draft selection attached to its relocated owner', as
   f.settings.setActiveSession(undefined); f.settings.setActiveSessionDraft(draft);
   (f.host as any).draftSelections.set('code', draft);
   f.original.hasConversation = false;
+  unlinkSync(f.original.transcriptPath);
   f.catalog.find = async () => undefined;
   await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
   const moved = { ...draft, projectPath: f.target };

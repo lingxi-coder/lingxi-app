@@ -24,6 +24,44 @@ function fakeChild(stdoutBody: string) {
   return child;
 }
 
+test('exact selections pass their path to separate catalog queries without a UUID fallback', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-source-'));
+  const id = '11111111-2222-4333-8444-555555555555';
+  const sourceA = join(project, 'a', `${id}.jsonl`), sourceB = join(project, 'b', `${id}.jsonl`);
+  const calls: string[][] = [];
+  let missingA = false, wrongCopy = false;
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+    spawnProcess: ((_bin: string, args: readonly string[]) => {
+      calls.push([...args]);
+      const path = args[args.indexOf('--session-transcript-path') + 1];
+      const selected = wrongCopy ? sourceB : path;
+      return fakeChild(JSON.stringify({ version: 1, sessions: missingA && path === sourceA ? [] : [{
+        uuid: id, title: selected === sourceA ? 'A' : 'B', modified_rfc3339: '', message_count: 1,
+        mode: 'code', path: selected, empty_session: false,
+      }] }));
+    }) as any });
+  try {
+    const [a, b] = await Promise.all([
+      catalog.select(project, id, { scope: 'current', transcriptPath: sourceA }),
+      catalog.select(project, id, { scope: 'current', transcriptPath: sourceB }),
+    ]);
+    assert.equal(a?.path, sourceA);
+    assert.equal(b?.path, sourceB);
+    assert.equal(calls.length, 2, 'separate physical sources must not share a pending lookup');
+    for (const [index, path] of [sourceA, sourceB].entries()) {
+      assert.deepEqual(calls[index]?.slice(-6), ['--session-scope', 'current', '--session-id', id, '--session-transcript-path', path]);
+    }
+    missingA = true;
+    assert.equal(await catalog.select(project, id, { scope: 'current', transcriptPath: sourceA }), undefined);
+    assert.equal(calls.length, 3, 'a missing source must not trigger an unscoped UUID retry');
+    missingA = false; wrongCopy = true;
+    await assert.rejects(catalog.select(project, id, { scope: 'current', transcriptPath: sourceA }), /selection has changed/);
+    const before = calls.length;
+    await assert.rejects(catalog.select(project, id, { scope: 'current', transcriptPath: 'relative.jsonl' }), /invalid selected transcript path/);
+    assert.equal(calls.length, before);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
 test('product paths use native product discovery without merging workspace settings', async () => {
   const brandHome = join(tmpdir(), '.another-product');
   let flags: readonly string[] | undefined;

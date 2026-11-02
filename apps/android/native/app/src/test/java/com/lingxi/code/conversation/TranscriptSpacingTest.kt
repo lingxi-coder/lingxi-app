@@ -31,6 +31,20 @@ class TranscriptSpacingTest {
             transcriptSpacingBefore(completed, ChatRenderItem.StreamingIndicator))
     }
 
+    @Test fun agentExecutionUsesActivitySpacingAndPreservesUserTurnBoundaries() {
+        val tools = ChatRenderItem.Tools(listOf(ToolCallUi(id = "spawn", tool = "Agent")))
+        for (outcome in AgentRunOutcome.entries) {
+            val agent = ChatRenderItem.AgentRun(AgentRunState(turnId = 1, outcome = outcome))
+            assertEquals(0, transcriptSpacingBefore(null, agent))
+            for (activity in listOf(reply, tools, agent, ChatRenderItem.StreamingIndicator)) {
+                assertEquals(8, transcriptSpacingBefore(activity, agent))
+                assertEquals(8, transcriptSpacingBefore(agent, activity))
+            }
+            assertEquals(16, transcriptSpacingBefore(user, agent))
+            assertEquals(16, transcriptSpacingBefore(agent, user))
+        }
+    }
+
     @Test fun streamingSettlementKeepsIdentityAndSpacing() {
         val streaming = ChatRenderItem.Streaming(reply.message)
         assertEquals(reply.key, streaming.key)

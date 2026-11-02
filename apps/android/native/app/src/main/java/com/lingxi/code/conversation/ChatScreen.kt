@@ -801,7 +801,6 @@ private fun MessageList(
                     }
                     is ChatRenderItem.AgentRun -> AgentRunTimeline(
                         state = item.run,
-                        modifier = Modifier.padding(vertical = 4.dp),
                         expandedToolCalls = state.expandedToolCalls,
                         onToggleToolCall = stableOnToggleToolCall,
                     )

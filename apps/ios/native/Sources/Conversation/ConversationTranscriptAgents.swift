@@ -74,7 +74,6 @@ struct ConversationTranscriptAgents: View {
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 4)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("conversation.transcript-agents")
         }

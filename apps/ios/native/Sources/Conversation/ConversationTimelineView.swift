@@ -45,11 +45,13 @@ struct ConversationTimelineView: View {
 
     static func projectedSegmentSpacings(
         groups: [ConversationTimelineGroup],
+        transcriptAgents: [ConversationAgentSummary] = [],
+        transcriptAgentAnchors: [String: String] = [:],
         streaming: Bool = false,
         showThinking: Bool = true
     ) -> [CGFloat] {
         let segments = projectedSegments(
-            groups: groups, transcriptAgents: [], transcriptAgentAnchors: [:],
+            groups: groups, transcriptAgents: transcriptAgents, transcriptAgentAnchors: transcriptAgentAnchors,
             liveToolIDs: nil, hasLiveOwner: true, streaming: streaming, showThinking: showThinking
         )
         return segments.enumerated().map { index, segment in
@@ -315,7 +317,7 @@ struct ConversationTimelineView: View {
 
         var isActivity: Bool {
             switch self {
-            case .toolBatch, .reasoning, .thinkingSlot: return true
+            case .toolBatch, .reasoning, .thinkingSlot, .agents: return true
             default: return false
             }
         }

@@ -66,6 +66,8 @@ Navigation = { captured target owner, navigation operation id }
 
 不同操作使用各自的身份校验。迟到的连接结果不能覆盖新选择；旧 turn 的终态不能清除新 turn 的恢复记录；旧音频响应不能解除下一次输入的暂停。
 
+Desktop 音频在启动前即保留原 runtime；同 UUID 的选源替换、`/cd`、关闭或重启不能绕过该 reservation。native operation 返回 failed 不等于资源已关闭：若仍有 unknown、helper close binding 或 hosted provider 的 child capture/play identity，保留原 owner，直到全部精确关闭得到确认。其他 UUID 的普通导航仍可继续，正常完成和明确 never-admitted 则及时释放。
+
 ## 3. 总体架构
 
 ```mermaid
@@ -273,6 +275,18 @@ SDK Rust DTO、snapshot/ordinal 合约、TS 生成类型、客户端 validator�
 显式、未限定来源的 Desktop/CLI UUID 查询可以使用严格唯一查找；多个匹配必须报错。查找一旦选定来源，后续 claim、bootstrap、writer activation 必须继续使用捕获的 root/file identity。fork 使用发布新文件时返回的 authority，不能再次按路径打开并把替换文件当作刚发布的目标。
 
 故障边界是所有合作的 SDK writer 通过 UUID lease 和共享持久化事务协调，以及对可观测外部 root/leaf 替换的拒绝。检测到替换后不得确认写入成功或幂等成功；可能已经落盘的操作应保留恢复证据并报告不确定状态。正常 compaction、尾片段修复和 cwd 重定位在事务内迁移 authority，不能为避免竞争而停用这些能力。这里不承诺抵御绕过锁的同用户进程在最后一次检查之后主动更换命名空间；这不是跨文件系统 inode CAS 或 WAL 协议。
+
+Desktop 的重命名、更新时间和归档预检也遵循精确来源合同。行操作先携带所显示来源的 scope/path；打开重命名对话框或归档预检时，Host 捕获 opaque token，确认时继续使用同一 token，不能重新搜索 UUID。Host token 绑定原 renderer、runtime 和连接代次，取消、过期或窗口关闭释放保留的 runtime。
+
+热 owner 的 metadata 操作通过原连接 `session_metadata` RPC，在 UUID lease 与原 durable writer 事务中执行；冷来源使用私有 `--session-metadata-json` 子进程。文件身份保留为 opaque receipt 字符串，不经 JavaScript number 解码。冷来源捕获后若出现新的 live owner，确认操作失败并要求重新选择，不能自动改走新 runtime。
+
+metadata observer 超时只表示结果未确认；已接纳写入继续持有 lease 完成，不能杀进程或释放 writer。Bridge receipt 限原连接存活，断线后不重投；旧 socket 的迟到关闭或响应不能影响替换连接。归档须预检原来源与关联调度任务，并拒绝正在执行或等待交互的 owner，不以导航或关闭窗口取消 turn。
+
+fork 的线性化点是 claim 内读完的不可变 source snapshot；之后原会话继续写入不使已经正确发布的新分支失效。新分支的 publication receipt 必须保留到首次 mount；Bridge 进程重启后的新目录选择是一次新的捕获，不宣称跨进程永久 inode 映射。
+
+当前 FileHistory/rewind 生产接线属于 Desktop/CLI；移动 runtime 未安装 FileHistorySink，也没有对应原生还原入口，本轮不新增该能力。FileHistory checkpoint 的文件路径属于原始编辑位置，不能在恢复时按当前 cwd 重新展开。当前格式固定原绝对路径和原父目录 authority，恢复使用 no-follow 的读取、删除与写入；无法证明出处的记录直接拒绝。Write 新建多层父目录后，需要使用实际写入所打开的父目录 receipt，才可完成对应 pending checkpoint，不能从后来出现的同路径目录猜测归属。
+
+`/rewind` 与 headless file rewind 使用 claim 内捕获的同一 source snapshot；transcript 重写经 checked staging 发布并返回新 target authority，不能原地 truncate，也不能在失败后重新捕获替代 inode。工作树文件还原不是跨文件原子事务：部分失败必须报出并返回失败，不能报告全部成功。普通 fork 在 source snapshot 捕获完成后即独立，不因新分支 runtime 构建而持续占用原会话 claim。
 
 ### 9.6 调度来源与永久 owner 记录
 

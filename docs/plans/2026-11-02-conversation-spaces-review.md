@@ -46,3 +46,19 @@ Desktop 全量首轮允许 localhost 后为 3810 通过、27 失败、16 跳过�
 SDK 最新冻结 session 门禁为 457 unit + 177 integration/doc，共 634 项通过（`sdk/final-session-full-r3.log`）；目录发现定向 16/16、client protocol 28/28、snapshot 9/9 通过。组合 runtime/UniFFI、mobile-only、App pin 与原生验证仍待完成，不能据此宣称整条链已验收。
 
 归属准入覆盖产品实际同一 App 进程；合作的 SDK writer 使用 UUID lease 与各 scope 持久事务。可观测文件替换必须拒绝或报告结果不确定，不宣称具备跨所有 scope 的跨进程原子 claim，或抵御绕过锁的同用户进程在最后检查之后更换命名空间。
+
+## 2026-11-02 SDK successor 与 Desktop metadata 增量
+
+Harness 本轮 successor 为 `9c8f4f6c4c6cffd2d14056225ebd80d2210b0efe`，此前 `186ecf40` 的结果为历史基线。新冻结源码完整 session lib **464/464**、session integrations **177/177** 通过；fresh Desktop prompt → authority → capture/fork **1/1** 通过。补充回归覆盖 fresh header authority、active metadata incarnation、非 LF 尾片段、staging 替换与发布后不确定状态。App 已更新 immutable pin，最终绑定、原生编译和设备测试仍需单独闭环。
+
+Desktop metadata 不再由 Node 直接 append transcript：热 owner 使用原连接的 SDK writer，冷来源使用持 UUID lease 的私有 Rust subprocess。确认操作复用对话框打开时捕获的 token。真实 WS 回归发现并修复旧 socket 延迟关闭误拒绝新请求的问题；socket 归属覆盖 RPC 和 media response，旧 connect 失败不关闭新连接。新 pin 下 BridgeClient 完整测试为 **360 pass / 5 emulator skip / 0 fail**（365 项），build/typecheck 通过；metadata subprocess observer 定向 **9/9**。它们不能替代 Host/UI 或实际 Rust subprocess/native 验证。
+
+后续独立 review 确认三项 SDK 缺口，当前正在同一 successor 中集中修复：合法空锚点 rename 必须保留可恢复 marker 与验证后的 cwd；retry/tombstone 发布 transcript 后 sidecar 清理失败必须报告不确定并禁止继续用已删除 parent；compaction 不得把发布后的不确定结果当作可忽略 GC 失败。9c8f host FFI 构建已安全中断、无最终库与绑定，不能计为原生通过。待这组修复及调用方复审闭合后再更新最终 pin。
+
+Desktop Host/UI 收口提交 `4b14b4735`：重命名与归档确认复用首次捕获 token，取消、导航、dispose 和中途出现新 runtime 时不改用其他来源；归档按固定 logical scope 管理任务，不为预检启动冷会话。Host 聚焦 92/92、Node/Web 类型检查、真实 Electron archive/rename 2/2 通过。独立复审发现的缓存标题同 UUID sibling P2 已修，回退同时比较 UUID/path/mode，增量 rename 回归 3/3 与 Node 类型通过。默认 Desktop 构建和另外五组真实 Electron 交互（首条输入、runtime lifecycle、picker、gestures、storage）均通过；它们使用 fixture bridge，并不替代最终真实 Bridge binary 联调。
+
+当前 scheduler pause API 只按 task ID 更新，列表后并发改目标不具有 expected-target CAS；任务暂停与 session archive 不是跨文件原子事务，部分暂停后失败明确报告已完成的暂停数量。本轮不引入新的全局事务协议。
+
+独立复审继续确认两组必须先修的来源风险，最终 native 构建继续等待：Desktop audio reservation 原先只防 cache eviction，同 UUID 来源替换或 `/cd` 仍可重挂录音 owner；单次听写也须捕获原 runtime。SDK FileHistory 把旧目录 A 的相对文件名在当前 cwd B 展开，可能删除或覆盖 B 的同名业务文件；新格式须保留原绝对来源，无法证明出处的相对记录直接拒绝。SDK durable side-record 和 metadata backstop 也必须受原 authority/uncertain fence 保护，不得绕过或先污染缓存。上述修复正在同一轮集中推进，不能把 9c8f 或历史通过数字视为最终验收。
+
+Desktop 音频源码检查点为 `7305467d6` 与 `4df650e07`：runtime reservation 覆盖 dictation/flow/realtime 启动和运行，同 UUID 来源替换、`/cd`、archive、clear、close/restart 不能重挂原音频 owner。operation promise 返回 failed 仍不视为资源已关闭；原 native manager 汇总 parent/child identity，只有 never-admitted 或全部任务/精确关闭完成才释放，错误 flight 回执不能释放。最终定向 258/258、Node/Web 类型、diff-check 通过；此前真实 Electron dictation 1/1。独立静态复审本组无剩余确定性阻断。旧 archive 生命周期 fixture 更新 `461367206` 两文件 15/15。完整 default Desktop suite 正在按当前源码执行，仍需区分 provisional SDK pin 与待到位的真实 Rust producer/binary。

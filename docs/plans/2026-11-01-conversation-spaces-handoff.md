@@ -2,7 +2,9 @@
 
 ## 2026-11-02 合并后续作（当前状态，优先于全部旧快照）
 
-当前 App HEAD 为 `c4adeaa69`（包含 Desktop 调度 owner/导航、Sidebar 去重、fixture 对齐与精确目录 remount 修复；此前 checkpoint 为 `daf4cf41d3174ec982304bf741a6d23524bfdf80`），包括 main 合并 `0b2c85ceac1568fe76c084eaecaaf64a8dc74766` 和 Desktop 异步远程准入修复。SDK 已有 `58edfaff943fb769f6ccd0c82f731f95e263d516`、`f061fb74b4fc605b17a760f6c7bb0a4b61d5186e` 两次本地修复提交；App 当前 pin 为后者，LLM 为 `0c2f041e856265e093e404d9b202c4238f73ef3c`。**SDK 和三端仍有授权范围内的未提交后续修复，当前 pin 不是最终交付版本。未推送。**
+当前 App 包含 main 合并 `0b2c85ceac1568fe76c084eaecaaf64a8dc74766`、Desktop 调度与导航修复 `484104889`、精确目录来源 `c4adeaa69`，以及 metadata writer/连接归属修复 `767993fca`。Harness 当前 SDK pin 为 `9c8f4f6c4c6cffd2d14056225ebd80d2210b0efe`，LLM 为 `0c2f041e856265e093e404d9b202c4238f73ef3c`；App 已更新 pin 与 lockfile。**独立复审发现 rename 空锚点丢失、retry/compaction 发布后错误被吞的缺口，SDK 正在集中修复，9c8f 现仅为 provisional pin。App 仍有授权范围内三端与协议修复待验证提交。未推送。**
+
+新 SDK 冻结源码 session lib 464/464、integration 177/177、fresh Desktop runtime authority/fork 1/1 通过。BridgeClient 全套 360 pass / 5 Firebase emulator skip；最后追加 socket owner guard 后真实 WS 10/10、build/typecheck 通过。metadata subprocess observer 9/9 为注入进程测试，不能代替 Rust writer/lease 验证。最终两端绑定、目标架构库、Desktop Host/UI 和原生设备验证尚在推进。
 
 独立审查进一步确认并正在修复的合同：
 

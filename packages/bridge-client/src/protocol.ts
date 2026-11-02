@@ -1183,6 +1183,8 @@ export interface WorkspaceStateDto {
 
 /** One live agent instance attached to the active session. */
 export interface SessionAgentSummaryDto {
+  /** Report admission is independent of task completion. */
+  report_delivery?: 'delivered' | 'flagged' | 'withheld' | 'pending';
   agent_id: string;
   name: string;
   agent_type: string;

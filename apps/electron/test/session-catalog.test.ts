@@ -434,3 +434,29 @@ test('global provider settings use a headless Host command with expected snapsho
   assert.deepEqual(envelope, { patch, expected });
   assert.equal(result.effective.providerRegion, 'international');
 });
+
+test('native brand paths share discovery across concurrent Host services and survive caller mutation', async () => {
+  let calls = 0;
+  const brandHome = join(tmpdir(), '.configured-brand');
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => {
+    calls++;
+    return fakeChild(JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') }));
+  }) as any });
+  const rows = await Promise.all(Array.from({ length: 12 }, () => catalog.productPaths()));
+  assert.equal(calls, 1, 'concurrent consumers must not launch competing native discovery processes');
+  rows[0].brandHome = '/caller-mutated';
+  assert.equal((await catalog.productPaths()).brandHome, brandHome);
+  assert.equal(calls, 1);
+});
+
+test('a failed native brand discovery is not retained by later Host operations', async () => {
+  let calls = 0;
+  const brandHome = join(tmpdir(), '.configured-brand');
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => {
+    calls++;
+    return fakeChild(calls === 1 ? '{' : JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') }));
+  }) as any });
+  await assert.rejects(catalog.productPaths(), /invalid product paths response/);
+  assert.equal((await catalog.productPaths()).brandHome, brandHome);
+  assert.equal(calls, 2);
+});

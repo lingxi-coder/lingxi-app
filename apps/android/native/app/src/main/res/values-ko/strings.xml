@@ -2543,4 +2543,9 @@
     <string name="teams_message_confirming">서버 확인을 기다리는 중입니다. 재시도해도 같은 메시지를 사용합니다.</string>
     <string name="teams_message_failed">대기 중인 변경이 거부되었습니다. 삭제한 후 다시 시도하세요.</string>
     <string name="teams_messages_storage_error">기기에 메시지를 저장할 수 없습니다. 저장 공간을 확인한 후 다시 시도하세요.</string>
+    <string name="chat_agent_report_withheld">종료됨, 보고서 미전달</string>
+    <string name="chat_agent_report_flagged">경고와 함께 보고서 전달됨</string>
+    <string name="chat_agent_report_pending">종료됨, 보고서 전달 대기 중</string>
+    <string name="chat_agent_report_delivered">보고서 전달됨</string>
+    <string name="chat_agent_execution_ended">실행 종료</string>
 </resources>

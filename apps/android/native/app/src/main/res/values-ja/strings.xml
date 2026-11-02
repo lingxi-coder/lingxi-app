@@ -2543,4 +2543,9 @@
     <string name="teams_message_confirming">サーバーの確認を待っています。再試行でも同じメッセージを使用します。</string>
     <string name="teams_message_failed">この未送信の操作は拒否されました。破棄してやり直してください。</string>
     <string name="teams_messages_storage_error">端末にメッセージを保存できません。空き容量を確認して再試行してください。</string>
+    <string name="chat_agent_report_withheld">終了・レポート未送信</string>
+    <string name="chat_agent_report_flagged">警告付きレポート送信済み</string>
+    <string name="chat_agent_report_pending">終了・レポート送信待ち</string>
+    <string name="chat_agent_report_delivered">レポート送信済み</string>
+    <string name="chat_agent_execution_ended">実行終了</string>
 </resources>

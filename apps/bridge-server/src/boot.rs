@@ -663,11 +663,11 @@ fn without_settings_credentials(
 }
 
 /// Brand data home: the branding crate's configuration-directory override when
-/// set (including an empty value), otherwise the branded hidden home directory.
+/// set to a non-empty value, otherwise the branded hidden home directory.
 /// Shared by configuration, sessions, apps, and scheduled workspaces.
 #[must_use]
 pub fn brand_home() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV).filter(|dir| !dir.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     dirs::home_dir().map(|h| h.join(branding::DOT_DIR))

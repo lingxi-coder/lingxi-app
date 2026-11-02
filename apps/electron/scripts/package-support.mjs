@@ -406,8 +406,10 @@ function copyPackagePayload(sourceRoot, destinationRoot, manifest) {
 
 export function copyProductionDependencies(dependencies, sourceRoot, targetNodeModules) {
   const copied = new Map();
+  const sources = new Map();
+  const sourceModules = resolvePossiblyMissingPath(join(sourceRoot, 'node_modules'));
 
-  function copyOne(name, fromRoot, optional = false) {
+  function copyOne(name, fromRoot, optional = false, parentTarget) {
     // DefinitelyTyped declarations are build inputs, even when a library
     // lists them as production dependencies. They have no runtime payload.
     if (name.startsWith('@types/')) return;
@@ -420,19 +422,38 @@ export function copyProductionDependencies(dependencies, sourceRoot, targetNodeM
     }
     const manifest = readJson(join(dependencyRoot, 'package.json'));
     const key = `${manifest.name}@${manifest.version}`;
-    if (copied.has(name)) {
-      if (copied.get(name) !== key) {
-        throw new Error(`cannot flatten conflicting runtime versions for ${name}`);
+    // Preserve npm's installed scopes. Hoisting every version to one directory
+    // changes Node resolution and cannot represent valid nested dependencies.
+    let destination = isPathWithin(sourceModules, dependencyRoot)
+      ? join(targetNodeModules, relative(sourceModules, dependencyRoot))
+      : join(parentTarget ? join(parentTarget, 'node_modules') : targetNodeModules, ...name.split('/'));
+    // Linked workspace packages live outside the installation root. Reuse a
+    // matching visible ancestor, including cycles back to a workspace package.
+    if (!isPathWithin(sourceModules, dependencyRoot) && parentTarget) {
+      for (let scope = parentTarget; isPathWithin(dirname(targetNodeModules), scope); scope = dirname(scope)) {
+        const visible = join(scope, 'node_modules', ...name.split('/'));
+        if (sources.has(visible)) {
+          if (sources.get(visible) === dependencyRoot) destination = visible;
+          break;
+        }
+        if (scope === dirname(scope)) break;
+      }
+    }
+    const location = relative(targetNodeModules, destination);
+    if (copied.has(location)) {
+      if (copied.get(location) !== key || sources.get(destination) !== dependencyRoot) {
+        throw new Error(`conflicting runtime dependency at ${location}`);
       }
       return;
     }
-    copied.set(name, key);
-    copyPackagePayload(dependencyRoot, join(targetNodeModules, ...name.split('/')), manifest);
+    copied.set(location, key);
+    sources.set(destination, dependencyRoot);
+    copyPackagePayload(dependencyRoot, destination, manifest);
     for (const child of Object.keys(manifest.dependencies ?? {}).sort()) {
-      copyOne(child, dependencyRoot);
+      copyOne(child, dependencyRoot, false, destination);
     }
     for (const child of Object.keys(manifest.optionalDependencies ?? {}).sort()) {
-      copyOne(child, dependencyRoot, true);
+      copyOne(child, dependencyRoot, true, destination);
     }
   }
 

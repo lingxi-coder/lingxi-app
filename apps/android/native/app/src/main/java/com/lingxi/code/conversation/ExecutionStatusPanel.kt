@@ -191,7 +191,7 @@ private fun AgentSummaryRow(agent: SessionAgentUi) {
     var details by remember(agent.agentId) { mutableStateOf(false) }
     if (details) RuntimeDetails(
         title = agent.name.ifBlank { agent.agentId },
-        body = listOfNotNull(agent.agentId, agent.agentType, agent.model, agent.status, agent.latestActivity)
+        body = listOfNotNull(agent.agentId, agent.agentType, agent.model, agent.status, agent.reportStatusText(), agent.latestActivity)
             .filter(String::isNotBlank).joinToString("\n\n"),
         onClose = { details = false },
     )
@@ -203,7 +203,7 @@ private fun AgentSummaryRow(agent: SessionAgentUi) {
         Column(Modifier.padding(start = 7.dp).weight(1f)) {
             Text(agent.name.ifBlank { agent.agentId }, color = palette.text2, fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
-                listOfNotNull(agent.agentType.takeIf(String::isNotBlank), agent.model, agent.latestActivity).joinToString(" · "),
+                listOfNotNull(agent.agentType.takeIf(String::isNotBlank), agent.model, agent.reportStatusText(), agent.latestActivity).joinToString(" · "),
                 color = palette.text4,
                 fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
                 maxLines = 1,

@@ -1380,8 +1380,21 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
       && current.activeSession?.sessionId !== sessionId && current.activeSession?.sessionId;
   }, { label: 'second chat for LocalApp modification' });
   assert.notEqual(otherSession, sessionId, 'the pre-Modify chat must differ from the saved authoring session');
+  // Host bootstrap changes before the renderer completes session admission.
+  // Navigation is intentionally blocked until that admission commits.
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('[aria-label="Prompt"][contenteditable="true"]')) && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'second chat renderer admission before Apps navigation' });
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === 'Apps')?.click()`);
-  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'packaged Apps library' });
+  try {
+    await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'packaged Apps library' });
+  } catch (error) {
+    const state = await evaluate(page, `(async () => ({ bootstrap: await window.lingxi.bootstrap(), apps: await window.lingxi.localApps.list(), body: document.body.innerText, buttons: Array.from(document.querySelectorAll('button')).map(button => ({ label: button.getAttribute('aria-label'), disabled: button.disabled, text: button.textContent })) }))()`);
+    const evidence = process.env.LINGXI_LOCAL_APP_EVIDENCE;
+    if (evidence) {
+      mkdirSync(evidence, { recursive: true });
+      writeFileSync(join(evidence, 'packaged-apps-library-failure.json'), JSON.stringify(state, null, 2));
+    }
+    throw error;
+  }
   await evaluate(page, `(() => {
     const tile = Array.from(document.querySelectorAll('.local-app-tile')).find(tile => tile.querySelector('h2')?.textContent === ${JSON.stringify(created.name)});
     const modify = Array.from(tile?.querySelectorAll('button') ?? []).find(button => button.textContent.trim() === 'Modify');
@@ -1393,6 +1406,7 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
   // through the real New chat action and verify the composer follows that chat.
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat')?.click()`);
   await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId !== '${sessionId}' && !document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && !document.querySelector('.local-app-chat-card'))`), { label: 'new unrelated source-project chat has its own transcript and draft' });
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('[aria-label="Prompt"][contenteditable="true"]')) && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'unrelated chat renderer admission before returning to Apps' });
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === 'Apps')?.click()`);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'return to application library' });
   const screenshot = await page.send('Page.captureScreenshot', { format: 'png' });
@@ -1698,6 +1712,10 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     if (logErrors.length) log(`renderer log errors: ${JSON.stringify(logErrors.slice(-3))}`);
     if (existsSync(runtimePaths.diagnosticsPath)) {
       const diagnosticLines = readFileSync(runtimePaths.diagnosticsPath, 'utf8').split('\n');
+      if (process.env.LINGXI_LOCAL_APP_EVIDENCE) {
+        mkdirSync(process.env.LINGXI_LOCAL_APP_EVIDENCE, { recursive: true });
+        cpSync(runtimePaths.diagnosticsPath, join(process.env.LINGXI_LOCAL_APP_EVIDENCE, 'packaged-runtime-diagnostics.jsonl'));
+      }
       const shutdownPhases = diagnosticLines.flatMap(line => {
         try {
           const event = JSON.parse(JSON.parse(line).message);

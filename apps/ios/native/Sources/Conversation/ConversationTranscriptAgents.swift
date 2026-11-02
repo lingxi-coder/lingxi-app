@@ -42,9 +42,9 @@ struct ConversationTranscriptAgents: View {
                                     isActive: AgentStatusPresentation(rawValue: agent.status) == .running,
                                     highlightColor: t.text
                                 )
-                            Text(statusText(agent.status))
+                            Text(agent.reportStatusText ?? statusText(agent.status))
                                 .font(.caption)
-                                .foregroundStyle(statusColor(agent.status))
+                                .foregroundStyle(agent.reportDelivery == "withheld" ? t.danger : statusColor(agent.status))
                                 .lineLimit(1)
                             if let activity = agent.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines), !activity.isEmpty {
                                 Text(activity)
@@ -95,7 +95,7 @@ struct ConversationTranscriptAgents: View {
     }
 
     private func accessibilityLabel(for agent: ConversationAgentSummary) -> String {
-        var values = [agent.name, statusText(agent.status)]
+        var values = [agent.name, agent.reportStatusText ?? statusText(agent.status)]
         if let activity = agent.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines), !activity.isEmpty {
             values.append(activity)
         }

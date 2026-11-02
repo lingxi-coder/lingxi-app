@@ -472,7 +472,16 @@ export class DesktopProviderAccounts {
           if (transient) health.cooldownUntilMs = Date.now() + 60_000;
         }
         const rawCode = (error as NodeJS.ErrnoException | undefined)?.code;
-        const code = typeof rawCode === 'string' && ['ENOENT', 'EACCES', 'EPERM', 'ETIMEDOUT', 'EPIPE', 'ECONNRESET'].includes(rawCode) ? rawCode : undefined;
+        const lockFailures: Record<string, string> = {
+          'Provider account refresh lock needs recovery.': 'LOCK_OWNER_UNPUBLISHED',
+          'Provider account refresh is busy.': 'LOCK_BUSY',
+          'Provider account lock recovery is busy.': 'LOCK_RECOVERY_BUSY',
+          'invalid account lock': 'INVALID_ACCOUNT_LOCK',
+          'session catalog timed out': 'PRODUCT_PATHS_TIMEOUT',
+          'invalid product paths response': 'INVALID_PRODUCT_PATHS',
+        };
+        const code = typeof rawCode === 'string' && ['ENOENT', 'EACCES', 'EPERM', 'ETIMEDOUT', 'EPIPE', 'ECONNRESET'].includes(rawCode) ? rawCode
+          : stage === 'lock' && error instanceof Error ? lockFailures[error.message] : undefined;
         this.options.onCredentialDiagnostic?.({ accountId: account.accountId, identityGeneration: account.identityGeneration, stage, outcome: 'failed', ...(code ? { code } : {}), ...(health?.reason ? { healthReason: health.reason } : {}) });
       }
     }

@@ -2705,5 +2705,10 @@
   "teams_recall_confirm": "全員に対してこのメッセージを取り消しますか？",
   "teams_message_confirming": "サーバーの確認を待っています。再試行でも同じメッセージを使用します。",
   "teams_message_failed": "この未送信の操作は拒否されました。破棄してやり直してください。",
-  "teams_messages_storage_error": "端末にメッセージを保存できません。空き容量を確認して再試行してください。"
+  "teams_messages_storage_error": "端末にメッセージを保存できません。空き容量を確認して再試行してください。",
+  "chat_agent_report_withheld": "終了・レポート未送信",
+  "chat_agent_report_flagged": "警告付きレポート送信済み",
+  "chat_agent_report_pending": "終了・レポート送信待ち",
+  "chat_agent_report_delivered": "レポート送信済み",
+  "chat_agent_execution_ended": "実行終了"
 }

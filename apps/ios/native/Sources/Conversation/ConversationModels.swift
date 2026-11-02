@@ -193,6 +193,15 @@ struct ConversationAgentSummary: Identifiable, Equatable, Sendable {
     let model: String?
     let modelProfile: String?
     var reportDelivery: String?
+    var reportStatusText: String? {
+        switch reportDelivery {
+        case "withheld": return String(localized: "chat_agent_report_withheld")
+        case "flagged": return String(localized: "chat_agent_report_flagged")
+        case "pending": return String(localized: "chat_agent_report_pending")
+        case "delivered": return String(localized: "chat_agent_report_delivered")
+        default: return status == "completed" ? String(localized: "chat_agent_execution_ended") : nil
+        }
+    }
     var status: String
     var latestActivity: String?
     var updatedAtMs: UInt64

@@ -39,7 +39,7 @@ test('running and finished agents remain visible with distinct states and detail
   // `done`, not `completed`: claude-code relabels only that one status, and
   // this chip sentence-cases whatever it is shown as. (A `cancelled` agent
   // stays `Cancelled` below — only a background SHELL renames it to `stopped`.)
-  assert.match(html, /Review · Done · Open agent details/);
+  assert.match(html, /Review · Execution ended · Open agent details/);
   assert.match(html, /Build · Failed · Open agent details/);
   assert.match(html, /Checked 5 files/);
 });
@@ -51,4 +51,17 @@ test('unnamed, waiting, cancelled, and unknown agents have readable static label
   assert.match(html, /c · Custom state/);
   assert.doesNotMatch(html, /data-agent-running/);
   assert.equal(render([]), '');
+});
+
+ test('execution completion never implies a missing report was delivered', () => {
+  const html = render([
+    { ...agent('Withheld', 'completed'), report_delivery: 'withheld' },
+    { ...agent('Flagged', 'completed'), report_delivery: 'flagged' },
+    { ...agent('Pending', 'completed'), report_delivery: 'pending' },
+    { ...agent('Delivered', 'completed'), report_delivery: 'delivered' },
+  ]);
+  assert.match(html, /Withheld · Ended, report not delivered/);
+  assert.match(html, /Flagged · Report delivered with warning/);
+  assert.match(html, /Pending · Ended, report pending/);
+  assert.match(html, /Delivered · Done/);
 });

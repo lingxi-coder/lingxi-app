@@ -2543,4 +2543,9 @@
     <string name="teams_message_confirming">等待伺服器確認，重試會沿用同一則訊息。</string>
     <string name="teams_message_failed">此待發操作未被接受，請捨棄後重試。</string>
     <string name="teams_messages_storage_error">本機訊息儲存空間無法使用，請檢查空間後重試。</string>
+    <string name="chat_agent_report_withheld">已結束，報告未送達</string>
+    <string name="chat_agent_report_flagged">報告已送達，附有警告</string>
+    <string name="chat_agent_report_pending">已結束，報告待送達</string>
+    <string name="chat_agent_report_delivered">報告已送達</string>
+    <string name="chat_agent_execution_ended">執行已結束</string>
 </resources>

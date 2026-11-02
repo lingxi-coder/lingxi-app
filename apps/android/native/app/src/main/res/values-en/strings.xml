@@ -2543,4 +2543,9 @@
     <string name="teams_message_confirming">Waiting for server confirmation. Retries keep the same message identity.</string>
     <string name="teams_message_failed">This pending change was rejected. Discard it and try again.</string>
     <string name="teams_messages_storage_error">Local message storage is unavailable. Check free space and try again.</string>
+    <string name="chat_agent_report_withheld">Ended, report not delivered</string>
+    <string name="chat_agent_report_flagged">Report delivered with warning</string>
+    <string name="chat_agent_report_pending">Ended, report pending</string>
+    <string name="chat_agent_report_delivered">Report delivered</string>
+    <string name="chat_agent_execution_ended">Execution ended</string>
 </resources>

@@ -453,10 +453,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   // The wall clock is checked every minute and on wake: a timer alone would
   // sleep with the laptop.
   const accountBroker = credentialBroker;
-  const accountLockDirectory = sessionCatalog.productPaths().then(paths => join(paths.brandHome, 'provider-account-locks', accountBroker?.credentialChannel ?? 'development'));
+  const accountLockDirectory = () => sessionCatalog.productPaths().then(paths => join(paths.brandHome, 'provider-account-locks', accountBroker?.credentialChannel ?? 'development'));
   const codexTokens = accountBroker ? new CodexTokenManager({
-    store: withFileRefreshIntents(providerAccountSessionStore(accountBroker, reference => providerAccounts?.latestSnapshot?.accounts.find(a => a.credentialRef.secretRef === reference)?.identityGeneration, version => sessionCatalog.publishProviderAccountCredentialVersion(version)), () => accountLockDirectory),
-    withAccountLock: (accountId, operation) => accountLockDirectory.then(directory => withProviderAccountLock(directory, accountId, operation)),
+    store: withFileRefreshIntents(providerAccountSessionStore(accountBroker, reference => providerAccounts?.latestSnapshot?.accounts.find(a => a.credentialRef.secretRef === reference)?.identityGeneration, version => sessionCatalog.publishProviderAccountCredentialVersion(version)), accountLockDirectory),
+    withAccountLock: (accountId, operation) => accountLockDirectory().then(directory => withProviderAccountLock(directory, accountId, operation)),
     onError: (message) => diagnostics.add('warn', 'host', message),
   }) : undefined;
   providerAccounts = accountBroker && codexTokens ? new DesktopProviderAccounts({
@@ -471,7 +471,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       const catalog = ref ? bridge?.get(ref.sessionId)?.officialProviderCatalog ?? [] : [];
       return providersFromCatalog(catalog).find(provider => provider.id === bindingId) ?? providerById(bindingId);
     },
-    withAccountMutationLock: (reference, operation) => accountLockDirectory.then(directory => withProviderAccountLock(directory, reference, operation)),
+    withAccountMutationLock: (reference, operation) => accountLockDirectory().then(directory => withProviderAccountLock(directory, reference, operation)),
     registry: (request, presence) => sessionCatalog.providerAccountCommand(request, undefined, presence),
     broker: accountBroker,
     publishVersions: async versions => { for (const version of versions) await sessionCatalog.publishProviderAccountCredentialVersion(version); },

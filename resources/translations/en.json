@@ -2710,5 +2710,10 @@
   "teams_recall_confirm": "Recall this message for everyone?",
   "teams_message_confirming": "Waiting for server confirmation. Retries keep the same message identity.",
   "teams_message_failed": "This pending change was rejected. Discard it and try again.",
-  "teams_messages_storage_error": "Local message storage is unavailable. Check free space and try again."
+  "teams_messages_storage_error": "Local message storage is unavailable. Check free space and try again.",
+  "chat_agent_report_withheld": "Ended, report not delivered",
+  "chat_agent_report_flagged": "Report delivered with warning",
+  "chat_agent_report_pending": "Ended, report pending",
+  "chat_agent_report_delivered": "Report delivered",
+  "chat_agent_execution_ended": "Execution ended"
 }

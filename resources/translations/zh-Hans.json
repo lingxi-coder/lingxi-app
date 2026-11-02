@@ -2705,5 +2705,10 @@
   "teams_recall_confirm": "为所有人撤回此消息？",
   "teams_message_confirming": "等待服务器确认，重试会沿用同一条消息。",
   "teams_message_failed": "此待发操作未被接受，请丢弃后重试。",
-  "teams_messages_storage_error": "本地消息存储不可用，请检查空间后重试。"
+  "teams_messages_storage_error": "本地消息存储不可用，请检查空间后重试。",
+  "chat_agent_report_withheld": "已结束，报告未送达",
+  "chat_agent_report_flagged": "报告已送达，附有警告",
+  "chat_agent_report_pending": "已结束，报告待送达",
+  "chat_agent_report_delivered": "报告已送达",
+  "chat_agent_execution_ended": "执行已结束"
 }

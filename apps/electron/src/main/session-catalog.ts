@@ -132,6 +132,7 @@ export class ProjectSessionCatalog {
   private readonly cache = new Map<string, CatalogCacheEntry>();
   private readonly pending = new Map<string, Promise<ProjectSessionCatalogResult>>();
   private readonly pendingSessions = new Map<string, Promise<ProjectSessionCatalogResult>>();
+  private nativeProductPaths?: Promise<ProductPaths>;
   private generation = 0;
 
   constructor(private readonly options: ProjectSessionCatalogOptions = {}) {}
@@ -183,6 +184,17 @@ export class ProjectSessionCatalog {
 
   /** Product directory discovery must work even if workspace settings are broken. */
   async productPaths(): Promise<ProductPaths> {
+    if (!this.nativeProductPaths) {
+      const operation = this.discoverProductPaths().catch(error => {
+        if (this.nativeProductPaths === operation) this.nativeProductPaths = undefined;
+        throw error;
+      });
+      this.nativeProductPaths = operation;
+    }
+    return { ...await this.nativeProductPaths };
+  }
+
+  private async discoverProductPaths(): Promise<ProductPaths> {
     const output = await this.runOutput(realpathSync.native(homedir()), ['--product-paths-json']);
     let value: unknown;
     try { value = JSON.parse(boundedOutput(output)); }

@@ -20,7 +20,7 @@ const otherId = '22222222-3333-4444-8555-666666666666';
 
 class WorkspaceRuntime {
   connectionState = { status: 'connected' as const };
-  sessionMode = 'code' as const;
+  sessionMode: 'chat' | 'code' = 'code';
   cwd: string;
   initialProjectRoot: string;
   transcriptPath: string;
@@ -62,7 +62,6 @@ class WorkspaceRuntime {
     const changed = cwd !== this.cwd;
     this.cwd = cwd;
     if (changed) {
-      this.transcriptPath = join(cwd, `${this.sessionId}.jsonl`);
       this.promptDirectories = [cwd];
       if (this.hasConversation === false) this.initialProjectRoot = cwd;
     }
@@ -181,7 +180,7 @@ test('opening a pasted uppercase UUID retains the canonical runtime and persiste
   assert.equal(f.calls.find.length, 0, 'reuse the connected canonical owner instead of opening a duplicate');
 });
 
-test('/cd remounts the same UUID in its new cwd and carries pin, model, order and explicit grants', async (t) => {
+test('/cd retains the exact source while remounting its owner in the new cwd', async (t) => {
   const f = hostFixture(t), moved = { projectPath: f.target, sessionId };
   const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
   f.settings.conversationSpaces.register(owner);
@@ -200,7 +199,7 @@ test('/cd remounts the same UUID in its new cwd and carries pin, model, order an
   assert.equal(f.runtimes.get(sessionId)?.initialProjectRoot, f.source);
   assert.deepEqual(f.promptDirectories.get(sessionId), [f.target]);
   assert.deepEqual(f.runtimes.get(sessionId)?.promptDirectories, [f.target]);
-  assert.equal(f.calls.openArguments[0]?.[4], f.row(f.target).path, 'the post-cd native transcript path must replace the old copy');
+  assert.equal(f.calls.openArguments[0]?.[4], f.row(f.source).path, 'the remount must use the original transcript');
   assert.deepEqual(f.runtimes.get(sessionId)?.directories, [f.root]);
   assert.deepEqual(f.calls.terminals, [{ before: owner, after: moved }]);
   assert.equal((f.host as any).catalogs.has(f.source), false);
@@ -210,11 +209,52 @@ test('/cd remounts the same UUID in its new cwd and carries pin, model, order an
   assert.equal(saved.getPublic().pinnedSessions[0]?.projectPath, f.target);
   assert.equal(saved.getSessionModel(moved), 'anthropic/session-model');
   assert.deepEqual(saved.getSessionTranscriptSelection(moved), {
-    ...moved, catalogProjectPath: f.target, scope: 'current', transcriptPath: f.row(f.target).path,
+    ...moved, catalogProjectPath: f.target, scope: 'current', transcriptPath: f.row(f.source).path,
   });
   assert.deepEqual(saved.getPublic().sidebar?.manualSessionOrder, { [f.source]: [otherId, sessionId] });
   assert.equal(f.original.releases, 1);
 });
+
+for (const { mode, global } of [{ mode: 'code', global: false }, { mode: 'chat', global: true }] as const) {
+  test(`/cd cold resume retains the ${global ? 'Global' : 'project'} ${mode} owner and exact source`, async t => {
+    const f = hostFixture(t), selectedPath = f.original.transcriptPath;
+    const owner = { ...f.ref, mode, projectId: global ? null : f.source };
+    const moved = { ...owner, projectPath: f.target };
+    f.original.sessionMode = mode;
+    f.settings.conversationSpaces.setMode(mode);
+    f.settings.conversationSpaces.register(owner);
+    f.settings.setActiveSession(owner);
+    f.settings.rememberSessionTranscriptSelection(owner, {
+      catalogProjectPath: f.source, scope: 'current', transcriptPath: selectedPath,
+    });
+
+    await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
+    const saved = new SettingsStore(f.userData);
+    assert.deepEqual(saved.conversationSpaces.findBySessionId(sessionId), moved);
+    assert.deepEqual(saved.getPublic().activeSession, moved);
+    assert.deepEqual(saved.getSessionTranscriptSelection(moved), {
+      projectPath: f.target, sessionId, catalogProjectPath: f.target, scope: 'current', transcriptPath: selectedPath,
+    });
+
+    // Model a fresh process: only the on-disk settings and a catalog row whose
+    // workspace was updated by the native relocation marker survive.
+    f.runtimes.clear();
+    f.calls.openArguments.length = 0;
+    f.catalog.select = async (path, id, selection) => {
+      assert.equal(path, f.target);
+      assert.equal(id, sessionId);
+      assert.deepEqual(selection, { scope: 'current', transcriptPath: selectedPath });
+      return { ...f.row(f.target), mode, path: selectedPath, workspace_path: f.target };
+    };
+    const coldHost = new HostController(saved, f.bridge as any, new DiagnosticBuffer(), f.catalog as any,
+      { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, f.dialogs);
+    (coldHost as any).bootstrap = () => ({ settings: saved.getPublic(), activeSession: saved.getPublic().activeSession });
+    t.after(() => coldHost.dispose());
+    await coldHost.openSessionAndActivate(moved);
+    assert.deepEqual(f.calls.openArguments, [[moved, false, undefined, true, selectedPath]]);
+    assert.deepEqual(saved.conversationSpaces.findBySessionId(sessionId), moved);
+  });
+}
 
 test('startup restores the displayed Current alias path in its authoritative workspace', async (t) => {
   const f = hostFixture(t), moved = { projectPath: f.target, sessionId };
@@ -296,7 +336,7 @@ test('/cd rolls back the native directory move if the target already owns a draf
 
 test('/cd with history and no catalog row propagates a missing transcript failure instead of silently opening an empty draft', async (t) => {
   for (const hasConversation of [true, undefined]) {
-    const f = hostFixture(t), moved = { projectPath: f.target, sessionId }, selectedPath = f.row(f.target).path;
+    const f = hostFixture(t), moved = { projectPath: f.target, sessionId }, selectedPath = f.row(f.source).path;
     f.original.hasConversation = hasConversation;
     f.catalog.find = async (path, id) => { f.calls.find.push({ projectPath: path, sessionId: id }); return undefined; };
     const open = f.bridge.openSession;
@@ -370,7 +410,6 @@ test('trust approval echoes the displayed canonical directory and re-prompts whe
     const actual = realpathSync.native(request.path);
     if (!request.trust_accepted || request.trusted_directory !== actual) return { status: 'needs_trust', directory: actual };
     f.original.cwd = actual;
-    f.original.transcriptPath = join(actual, `${sessionId}.jsonl`);
     f.original.promptDirectories = [actual];
     return { status: 'ok', cwd: actual, changed: true, transcript_relocated: true };
   };
@@ -449,15 +488,43 @@ test('canceling trust or a rejected native cd leaves the old session authoritati
 });
 
 test('a real settings write failure rolls the native cwd back before releasing the lease', async (t) => {
-  const f = hostFixture(t), before = f.settings.getPublic(), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(owner);
+  f.settings.rememberSessionTranscriptSelection(owner, {
+    catalogProjectPath: f.source, scope: 'current', transcriptPath: f.original.transcriptPath,
+  });
+  const before = f.settings.getPublic(), bytes = readFileSync(f.settings.settingsPath, 'utf8');
   mkdirSync(`${f.settings.settingsPath}.tmp`);
   await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), /EISDIR|directory/i);
   assert.equal(f.original.cwd, f.source);
   assert.deepEqual(f.original.changes, [{ path: f.target }, { path: f.source, trust_accepted: true, trusted_directory: f.source }]);
   assert.deepEqual(f.settings.getPublic(), before);
   assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);
+  assert.deepEqual(f.settings.conversationSpaces.findBySessionId(sessionId), owner);
+  assert.equal(f.settings.getSessionTranscriptSelection(owner)?.transcriptPath, f.original.transcriptPath);
   assert.equal(f.runtimes.get(sessionId), f.original);
   assert.deepEqual(f.calls.close, []); assert.equal(f.original.releases, 1);
+});
+
+test('a native relocation marker failure keeps the source and owner unchanged', async t => {
+  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(owner);
+  f.settings.rememberSessionTranscriptSelection(owner, {
+    catalogProjectPath: f.source, scope: 'current', transcriptPath: f.original.transcriptPath,
+  });
+  const before = readFileSync(f.settings.settingsPath, 'utf8');
+  f.original.setWorkingDirectory = async request => {
+    f.original.changes.push(request);
+    throw new Error('could not persist relocation marker');
+  };
+  await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), /relocation marker/);
+  assert.equal(f.original.cwd, f.source);
+  assert.equal(f.original.transcriptPath, f.row(f.source).path);
+  assert.deepEqual(f.settings.conversationSpaces.findBySessionId(sessionId), owner);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
+  assert.strictEqual(f.runtimes.get(sessionId), f.original);
+  assert.deepEqual(f.calls.close, []);
+  assert.equal(f.original.releases, 1);
 });
 
 test('failed native rollback stops the engine and reports both the persistence and recovery failure', async (t) => {

@@ -52,7 +52,7 @@ export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent, activeAge
 
   return <div className="transcript-agents" role="group" aria-label={tr("desktop_ui_session_agents")} style={{
     color: t.text2,
-    '--agent-hover': t.surfaceHover,
+    '--agent-ink-focus': t.text,
     '--agent-focus': t.accent,
   } as CSSProperties}>
     {rows.map((agent) => {

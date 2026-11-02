@@ -118,7 +118,7 @@ fun buildChatRenderItems(state: ChatState, anchoredMessageUuid: String? = null):
     var canMergeTools = true
     fun appendTools(calls: List<ToolCallUi>, anchor: String) {
         val previous = if (canMergeTools) lastOrNull() as? ChatRenderItem.Tools else null
-        if (previous == null) add(ChatRenderItem.Tools(calls, anchor))
+        if (previous == null || !sameToolGroup(previous.calls.last(), calls.first())) add(ChatRenderItem.Tools(calls, anchor))
         else { removeAt(lastIndex); add(previous.copy(calls = previous.calls + calls)) }
         canMergeTools = true
     }

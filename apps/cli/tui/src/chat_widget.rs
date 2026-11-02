@@ -1878,6 +1878,13 @@ impl ChatWidget {
                 if tui_core::collapse::classify(tool.as_str(), &input, self.collapse_fullscreen)
                     .is_collapsible
                 {
+                    if self
+                        .collapse_group
+                        .as_ref()
+                        .is_some_and(|group| !group.can_absorb(&tool, &input))
+                    {
+                        self.finalize_collapse_group();
+                    }
                     if self.collapse_group.is_none() {
                         self.flush_or_discard_active();
                         self.collapse_group =
@@ -1887,7 +1894,7 @@ impl ChatWidget {
                         self.collapse_group_id = Some(id.clone());
                     }
                     if let Some(group) = self.collapse_group.as_mut() {
-                        group.absorb_start(&tool, &input);
+                        group.absorb_start_with_id(&id.to_string(), &tool, &input);
                     }
                     if let Some(uuid) = block_uuid {
                         self.transcript.identify_active_row_uuid(uuid);
@@ -1950,6 +1957,9 @@ impl ChatWidget {
                 // A result for a folded use is absorbed (keeps the fold active);
                 // any other result breaks a still-open fold.
                 if self.collapse_ids.remove(&id) {
+                    if let Some(group) = self.collapse_group.as_mut() {
+                        group.record_result(&id.to_string(), &result);
+                    }
                     self.tool_inputs.remove(&id);
                     self.render_active_collapse();
                     self.apply_focus_refresh(focus_refresh);
@@ -10820,7 +10830,7 @@ mod tests {
     /// user's "collapse consecutive tools to one line" request. A breaker
     /// (`TurnEnded`) seals the group.
     #[test]
-    fn consecutive_read_search_tools_fold_into_one_collapsed_cell() {
+    fn different_tool_types_keep_separate_ordered_cells() {
         use crate::history_cell::tool::{CollapsedReadSearchCell, ToolUseCell};
         let mut widget = widget();
         submit_command(&mut widget, "look");
@@ -10843,8 +10853,8 @@ mod tests {
         widget.apply_turn_event(TurnEvent::TurnEnded(
             lingxi_core::host::TurnOutcome::EndTurn,
         ));
-        // user "look" + ONE folded cell — no per-tool ●/⎿ cells.
-        assert_eq!(widget.transcript.committed_cells().len(), 2);
+        // User prose followed by Read and Grep, each at its invocation position.
+        assert_eq!(widget.transcript.committed_cells().len(), 3);
         assert!(cells(&widget)[1]
             .as_any()
             .downcast_ref::<CollapsedReadSearchCell>()
@@ -10855,7 +10865,7 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_bash_folds_and_silent_meta_remains_verbose_only() {
+    fn fullscreen_bash_and_tool_search_keep_separate_summaries() {
         use crate::history_cell::tool::CollapsedReadSearchCell;
 
         let mut widget = widget();
@@ -10872,14 +10882,14 @@ mod tests {
             .active_cell()
             .expect("silent-only group must remain available to verbose mode");
         assert!(
-            active
+            !active
                 .display_lines(
                     80,
                     &Theme::dark(),
                     crate::history_cell::RenderMode::default(),
                 )
                 .is_empty(),
-            "normal mode must not render an empty badge"
+            "normal mode retains a neutral ToolSearch summary"
         );
         let verbose = active
             .display_lines(
@@ -10910,12 +10920,12 @@ mod tests {
             lingxi_core::host::TurnOutcome::EndTurn,
         ));
 
-        assert_eq!(widget.transcript.committed_cells().len(), 2);
+        assert_eq!(widget.transcript.committed_cells().len(), 3);
         assert!(cells(&widget)[1]
             .as_any()
             .downcast_ref::<CollapsedReadSearchCell>()
             .is_some());
-        let summary = cells(&widget)[1]
+        let summary = cells(&widget)[2]
             .display_lines(
                 80,
                 &Theme::dark(),
@@ -10925,7 +10935,7 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(summary.contains("Ran 1 bash command"), "{summary}");
+        assert!(summary.contains("Bash · 1 call"), "{summary}");
     }
 
     #[test]
@@ -10955,7 +10965,7 @@ mod tests {
             .as_any()
             .downcast_ref::<CollapsedReadSearchCell>()
             .expect("finalized silent group must stay in transcript for verbose replay");
-        assert!(cell
+        assert!(!cell
             .display_lines(
                 80,
                 &Theme::dark(),
@@ -11076,7 +11086,7 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(first_summary.contains("Read 1 file"), "{first_summary}");
+        assert!(first_summary.contains("Read · 1 call"), "{first_summary}");
 
         let second = cells(&widget)[2]
             .as_any()
@@ -11092,10 +11102,7 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(
-            second_summary.contains("Ran 1 bash command"),
-            "{second_summary}"
-        );
+        assert!(second_summary.contains("Bash · 1 call"), "{second_summary}");
     }
 
     /// `!`-prefixed bash mode runs the command inline (no LLM turn): it echoes

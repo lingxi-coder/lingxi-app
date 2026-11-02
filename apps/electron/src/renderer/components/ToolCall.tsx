@@ -193,7 +193,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
   const permissionStatusInBody = permissionRequest && expandable && Boolean(permissionStatusText);
   const compactError = item.status === 'error' && expandable && !permissionRequest;
   const summaryResponse = compactError
-    ? tr("voice_model_state_failed")
+    ? tr('desktop_ui_tool_attempt_unsuccessful')
     : item.tool === 'WebSearch' && item.status === 'done' && expandable
     ? `${tr('desktop_ui_search_completed')}${truncationNotice ? ` ${tr('desktop_ui_truncated_suffix')}` : ''}`
     : permissionStatusInBody

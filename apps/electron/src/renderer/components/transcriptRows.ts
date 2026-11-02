@@ -1,5 +1,6 @@
 import type { RunItem, ToolRunItem } from '../model/runItem';
 import { localAppReference } from '../model/localAppReference';
+import { transcriptToolKey } from './toolPresentation';
 
 export interface TranscriptToolGroup {
   readonly type: 'tool-group';
@@ -9,7 +10,7 @@ export interface TranscriptToolGroup {
 
 export type TranscriptRow = Exclude<RunItem, ToolRunItem> | TranscriptToolGroup;
 
-/** Thinking never divides tools; messages and application deliverables retain boundaries. */
+/** Adjacent, related tools share a group; prose and deliverables retain their place. */
 export function transcriptRows(items: readonly RunItem[], running: boolean, hasPendingActivity = false): TranscriptRow[] {
   const rows: TranscriptRow[] = [];
   let group: TranscriptToolGroup | undefined;
@@ -34,7 +35,8 @@ export function transcriptRows(items: readonly RunItem[], running: boolean, hasP
         group = undefined;
         continue;
       }
-      if (!group) {
+      const key = transcriptToolKey(item);
+      if (!group || !key || key !== transcriptToolKey(group.tools[0]!)) {
         group = { type: 'tool-group', id: `tool-group:${item.id}`, tools: [] };
         rows.push(group);
       }

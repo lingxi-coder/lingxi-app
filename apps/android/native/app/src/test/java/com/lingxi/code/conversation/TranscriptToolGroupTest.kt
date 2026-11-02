@@ -4,6 +4,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TranscriptToolGroupTest {
+    @Test fun activityTypesNeverReorderOrMergeAcrossOtherCalls() {
+        val calls = listOf("Read", "Read", "Edit", "Read", "mcp__a__search", "mcp__b__search")
+            .mapIndexed { index, name -> ToolCallUi(index.toString(), name) }
+        assertEquals(listOf(listOf("0", "1"), listOf("2"), listOf("3"), listOf("4"), listOf("5")),
+            consecutiveToolGroups(calls).map { group -> group.map { it.id } })
+        assertEquals(calls, consecutiveToolGroups(calls).flatten())
+    }
+
+    @Test fun questionsAndAgentsRemainIndividuallyReachable() {
+        for (name in listOf("Agent", "Skill", "AskUserQuestion", "PermissionRequest")) {
+            assertEquals(2, consecutiveToolGroups(listOf(ToolCallUi("a", name), ToolCallUi("b", name))).size)
+        }
+    }
     private fun tool(id: String, status: AgentToolStatus = AgentToolStatus.Completed) =
         MessageContent.Tool(ToolCallUi(id, "Read", status = status))
 

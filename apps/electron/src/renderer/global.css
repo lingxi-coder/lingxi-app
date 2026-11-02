@@ -640,6 +640,9 @@ body {
 .transcript-row + .transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking'], [data-row-type='agents']) {
   margin-top: .75rem;
 }
+.transcript-row:is([data-row-type='tool-group'], [data-row-type='agents']) + .transcript-row:is([data-row-type='tool-group'], [data-row-type='agents']) {
+  margin-top: .125rem;
+}
 .transcript-row[data-message-role='user'] + .transcript-row,
 .transcript-row + .transcript-row[data-message-role='user'] {
   margin-top: 2rem;

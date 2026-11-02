@@ -2548,4 +2548,8 @@
     <string name="chat_agent_report_pending">已结束，报告待送达</string>
     <string name="chat_agent_report_delivered">报告已送达</string>
     <string name="chat_agent_execution_ended">执行已结束</string>
+    <string name="chat_tool_calls_count">%1$d 次</string>
+    <string name="chat_tool_running_count">%1$d 项运行中</string>
+    <string name="chat_tool_calls_unsuccessful">调用未成功</string>
+    <string name="chat_tool_group_shell">执行命令</string>
 </resources>

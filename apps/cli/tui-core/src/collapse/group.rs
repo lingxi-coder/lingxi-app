@@ -2,7 +2,7 @@
 //! `createCollapsedGroup` + `getSearchReadSummaryText`
 //! (`utils/collapseReadSearch.ts`). See design doc §4.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -14,6 +14,8 @@ use super::classify::classify;
 #[derive(Debug, Default)]
 pub struct CollapseGroup {
     fullscreen: bool,
+    kind: Option<String>,
+    pending_results: BTreeMap<String, usize>,
     search_count: u64,
     read_file_paths: BTreeSet<String>,
     read_operation_count: u64,
@@ -47,9 +49,10 @@ impl CollapseGroup {
     /// (the caller must finalize this group and process the breaker instead).
     pub fn absorb_start(&mut self, tool: &str, input: &Value) -> bool {
         let info = classify(tool, input, self.fullscreen);
-        if !info.is_collapsible {
+        if !info.is_collapsible || !self.can_absorb(tool, input) {
             return false;
         }
+        self.kind = Some(tool.to_string());
         self.entries.push(verbose_entry(tool, input));
         // Silent meta-ops (REPL/Snip/ToolSearch) contribute no count.
         if info.is_absorbed_silently {
@@ -86,6 +89,30 @@ impl CollapseGroup {
             self.memory_write_count += 1;
         }
         true
+    }
+
+    /// Preserve invocation order: a different tool closes the current fold.
+    #[must_use]
+    pub fn can_absorb(&self, tool: &str, _input: &Value) -> bool {
+        self.kind.as_deref().is_none_or(|kind| kind == tool)
+    }
+
+    /// Store result details in their originating invocation's slot, even when
+    /// parallel results arrive in reverse order. Normal summaries remain neutral.
+    pub fn absorb_start_with_id(&mut self, id: &str, tool: &str, input: &Value) -> bool {
+        if !self.absorb_start(tool, input) {
+            return false;
+        }
+        self.pending_results
+            .insert(id.to_string(), self.entries.len() - 1);
+        true
+    }
+
+    pub fn record_result(&mut self, id: &str, result: &Value) {
+        if let Some(index) = self.pending_results.remove(id) {
+            self.entries[index].push_str(" → ");
+            self.entries[index].push_str(&result.to_string());
+        }
     }
 
     /// `createCollapsedGroup` read count: unique read file paths, falling back to
@@ -365,22 +392,23 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_group_summarizes_bash_mcp_and_memory() {
+    fn fullscreen_group_keeps_different_tool_types_separate() {
         let mut g = CollapseGroup::with_fullscreen(true);
-        assert!(g.absorb_start("Bash", &json!({"command": "rm a.rs"})));
-        assert!(g.absorb_start("mcp__github__search_code", &json!({})));
-        assert!(g.absorb_start(
-            "Write",
-            &json!({"file_path": "/home/u/.lingxi/memdir/note.md"})
-        ));
+        assert!(g.absorb_start("Bash", &json!({"command": "pwd"})));
+        assert!(!g.absorb_start("mcp__github__search_code", &json!({})));
+        assert_eq!(g.entries().len(), 1);
         assert_eq!(g.bash_count(), 1);
-        assert_eq!(g.mcp_call_count(), 1);
-        assert_eq!(g.mcp_server_names(), vec!["github"]);
-        assert_eq!(g.memory_write_count(), 1);
-        assert_eq!(
-            g.summary_text(false),
-            "Queried github, ran 1 bash command, wrote 1 memory"
-        );
+    }
+
+    #[test]
+    fn parallel_results_remain_in_start_order() {
+        let mut g = CollapseGroup::new();
+        assert!(g.absorb_start_with_id("a", "Read", &json!({"file_path":"a"})));
+        assert!(g.absorb_start_with_id("b", "Read", &json!({"file_path":"b"})));
+        g.record_result("b", &json!({"ok":true}));
+        g.record_result("a", &json!({"is_error":true}));
+        assert!(g.entries()[0].contains("is_error"));
+        assert!(g.entries()[1].contains("ok"));
     }
 
     #[test]

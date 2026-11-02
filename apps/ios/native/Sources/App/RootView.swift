@@ -2288,10 +2288,10 @@ struct RootView: View {
             source.model.deepLinkScrollRevision &+= 1
             pendingMessageLink = nil
         } else if let toolID = source.model.transcriptUUIDToolIDs[pending.uuid],
-                  let group = ConversationRenderLayout.timelineGroups(source.model.items).first(where: { group in
-                      group.rows.contains { if case let .tool(_, tool) = $0 { return tool.id == toolID }; return false }
-                  }), let firstToolID = group.rows.compactMap({ row -> String? in if case let .tool(_, tool) = row { return tool.id }; return nil }).first {
-            source.model.deepLinkScrollRowID = ConversationTimelineView.toolSegmentID(firstToolID: firstToolID)
+                  let destination = ConversationTimelineView.toolDestinationID(toolID: toolID,
+                      groups: source.model.visibleTimelineGroups, transcriptAgents: source.model.orderedAgentSummaries,
+                      transcriptAgentAnchors: source.model.transcriptAgentAnchors) {
+            source.model.deepLinkScrollRowID = destination
             source.model.deepLinkScrollRevision &+= 1
             pendingMessageLink = nil
         } else if !projectSwitching && pendingSessionRestoreID == nil {

@@ -11,7 +11,7 @@ test('restored agents split tool groups at creation, before the answer', () => {
   const items = [tool('spawn-a', 'a'), tool('read'), tool('spawn-b', 'b'), message('answer')];
   const agents = [agent('b'), agent('a'), agent('main')];
   const anchors = anchorTranscriptAgents(new Map(), items, agents);
-  assert.deepEqual(placeTranscriptAgents(transcriptRows(items, false), items, agents, anchors).map(row => row.id), ['tool-group:spawn-a', 'agents:spawn-a', 'tool-group:read', 'agents:spawn-b', 'answer']);
+  assert.deepEqual(placeTranscriptAgents(transcriptRows(items, false), items, agents, anchors).map(row => row.id), ['agents:spawn-a', 'tool-group:read', 'agents:spawn-b', 'answer']);
 });
 test('status changes and subsequent messages retain the first-seen boundary', () => {
   const before = [message('before')];
@@ -26,6 +26,29 @@ test('status changes and subsequent messages retain the first-seen boundary', ()
 test('late tool metadata resolves first creation, never a later resume', () => {
   const items = [tool('spawn', 'a'), message('answer'), tool('resume', 'a')];
   assert.equal(anchorTranscriptAgents(new Map([['a', 'answer']]), items, [agent('a')]).get('a'), 'spawn');
+});
+test('duplicate launches merge within a prose boundary while a later resume stays visible', () => {
+  const spawn = tool('spawn', 'a');
+  const duplicate = tool('duplicate', 'agent:a');
+  const resume = tool('resume', 'a');
+  const items = [message('before'), spawn, tool('read'), duplicate, message('answer'), resume];
+  const agents = [agent('agent:a', 'cancelled')];
+  const anchors = anchorTranscriptAgents(new Map(), items, agents);
+  const rows = placeTranscriptAgents(transcriptRows(items, false), items, agents, anchors);
+  assert.deepEqual(rows.map(row => row.id), ['before', 'agents:spawn', 'tool-group:read', 'answer', 'tool-group:resume']);
+  const merged = rows.find(row => row.type === 'agents');
+  assert.ok(merged?.type === 'agents');
+  assert.equal(merged.launches.get('agent:a'), spawn);
+  assert.deepEqual(merged.sourceIds, ['spawn', 'duplicate'], 'merged rows retain the source identities for message links');
+  assert.equal(merged.agents[0]?.status, 'cancelled');
+  assert.equal(items[1], spawn, 'stored launch remains intact');
+});
+test('unmatched launches and errors remain visible and same-name agents stay separate', () => {
+  const items = [tool('spawn-a', 'a'), { ...tool('failed', 'b'), status: 'error' as const }, tool('unknown', 'c')];
+  const agents = [{ ...agent('a'), name: 'reviewer' }, { ...agent('b'), name: 'reviewer' }];
+  const rows = placeTranscriptAgents(transcriptRows(items, false), items, agents, anchorTranscriptAgents(new Map(), items, agents));
+  assert.deepEqual(rows.map(row => row.id), ['agents:spawn-a', 'tool-group:failed', 'agents:failed', 'tool-group:unknown']);
+  assert.equal(rows.filter(row => row.type === 'agents').length, 2);
 });
 test('hidden anchors resolve to preceding visible rows', () => {
   const items: RunItem[] = [message('before'), { type: 'thinking', id: 'hidden', text: '', done: true }, message('after')];
@@ -46,7 +69,7 @@ test('a prefixed wire id anchors to the bare id the spawning tool reported', () 
   assert.notEqual(anchors.get(`agent:${uuid}`), 'answer');
   assert.deepEqual(
     placeTranscriptAgents(transcriptRows(items, false), items, agents, anchors).map(row => row.id),
-    ['tool-group:spawn', 'agents:spawn', 'answer'],
+    ['agents:spawn', 'answer'],
   );
 });
 test('structured identity supports both engine field names', () => {
@@ -76,7 +99,7 @@ test('a restored transcript anchors its agents at the calls that spawned them', 
   // by -1, so it would stay green with the card gone entirely.
   assert.deepEqual(
     placeTranscriptAgents(transcriptRows(state.items, false), state.items, agents, anchors).map(row => row.id),
-    ['i1', 'tool-group:toolu_spawn', 'agents:toolu_spawn', 'i2'],
+    ['i1', 'agents:toolu_spawn', 'i2'],
   );
 });
 
@@ -128,4 +151,22 @@ test('Stage renders agent between creation tool and final reply', () => {
   assert.ok(html.indexOf('Introduction') < html.indexOf('data-agent-id="a"'));
   assert.ok(html.indexOf('data-agent-id="a"') < html.indexOf('Final reply'));
   assert.equal((html.match(/data-agent-id="a"/g) ?? []).length, 1);
+});
+test('Stage renders one named agent with its task and current status instead of the launch receipt', () => {
+  const spawn = {
+    ...tool('fork', 'agent:guide'), tool: 'Skill',
+    view: { verb: 'other' as const, label: 'lingxi-code-guide', primary: '核对配置归属', title: 'lingxi-code-guide(核对配置归属)' },
+    result: { body: 'Async agent launched successfully.', body_lines: 1 },
+  };
+  const html = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, React.createElement(Stage, {
+    liveItems: [message('Introduction'), spawn, tool('search'), message('Final reply')],
+    agents: [{ ...agent('agent:guide', 'cancelled'), name: 'lingxi-code-guide', latest_activity: 'SubagentHandback' }],
+    sessionKey: 'merged-placement', onOpenAgent: () => {},
+  })));
+  assert.equal((html.match(/data-agent-id="agent:guide"/g) ?? []).length, 1);
+  assert.match(html, /核对配置归属/);
+  assert.doesNotMatch(html, /Async agent launched successfully|SubagentHandback/);
+  assert.match(html, /transcript-disclosure-chevron/);
+  assert.ok(html.indexOf('Introduction') < html.indexOf('data-agent-id="agent:guide"'));
+  assert.ok(html.indexOf('data-agent-id="agent:guide"') < html.indexOf('Final reply'));
 });

@@ -2548,4 +2548,8 @@
     <string name="chat_agent_report_pending">終了・レポート送信待ち</string>
     <string name="chat_agent_report_delivered">レポート送信済み</string>
     <string name="chat_agent_execution_ended">実行終了</string>
+    <string name="chat_tool_calls_count">%1$d 回</string>
+    <string name="chat_tool_running_count">%1$d 件実行中</string>
+    <string name="chat_tool_calls_unsuccessful">呼び出し未成功</string>
+    <string name="chat_tool_group_shell">コマンドを実行</string>
 </resources>

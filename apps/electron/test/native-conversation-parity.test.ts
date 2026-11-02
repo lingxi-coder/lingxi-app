@@ -28,10 +28,9 @@ for (const scenario of fixture.scenarios) {
     });
     const groups = transcriptRows(items, items.some(item => item.type === 'tool' && item.status === 'running'))
       .filter(row => row.type === 'tool-group');
-    assert.deepEqual(groups.map(group => ({
-      ids: group.tools.map(tool => tool.id),
-      active_ids: group.tools.filter(tool => tool.status === 'running').map(tool => tool.id),
-      summary: group.tools.at(-1)?.tool,
-    })), scenario.expected_groups.map(({ ids, active_ids, summary }) => ({ ids, active_ids, summary })));
+    // Desktop groups adjacent activity types; all clients still retain the
+    // same ordered calls and running identities from the shared wire fixture.
+    assert.deepEqual(groups.flatMap(group => group.tools.map(tool => tool.id)), scenario.expected_groups.flatMap(group => group.ids));
+    assert.deepEqual(groups.flatMap(group => group.tools.filter(tool => tool.status === 'running').map(tool => tool.id)), scenario.expected_groups.flatMap(group => group.active_ids));
   });
 }

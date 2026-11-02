@@ -363,6 +363,19 @@ pub(crate) fn collapsed_read_search_lines(
         memory_write_count,
         is_active,
     );
+    // Entries are kept in invocation order. Counts refer to attempts, not
+    // successful operations or unique files; details retain each raw outcome.
+    let summary = if let Some(first) = entries.first() {
+        let label = first.split_whitespace().next().unwrap_or("Tools");
+        format!(
+            "{label} · {} {}{}",
+            entries.len(),
+            if entries.len() == 1 { "call" } else { "calls" },
+            if is_active { " · working…" } else { "" }
+        )
+    } else {
+        summary
+    };
     let mut out = if summary.is_empty() {
         Vec::new()
     } else {
@@ -923,7 +936,7 @@ mod tests {
         assert_eq!(
             plain(&cell, true),
             vec![
-                "Searched for 1 pattern, read 1 file".to_string(),
+                "Read · 2 calls".to_string(),
                 "  ⎿  Read a.rs".to_string(),
                 "  ⎿  Grep foo".to_string(),
             ]
@@ -1017,10 +1030,7 @@ mod tests {
             None,
             vec!["Read a.rs".to_string(), "Grep foo".to_string()],
         );
-        assert_eq!(
-            plain(&cell, false),
-            vec!["Searched for 1 pattern, read 1 file".to_string()]
-        );
+        assert_eq!(plain(&cell, false), vec!["Read · 2 calls".to_string()]);
         let styled = cell.display_lines(80, &Theme::dark(), RenderMode::default());
         assert_eq!(styled[0].spans[0].style.fg, Some(rata(Theme::dark().dim)));
     }

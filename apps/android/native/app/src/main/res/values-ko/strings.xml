@@ -2548,4 +2548,8 @@
     <string name="chat_agent_report_pending">종료됨, 보고서 전달 대기 중</string>
     <string name="chat_agent_report_delivered">보고서 전달됨</string>
     <string name="chat_agent_execution_ended">실행 종료</string>
+    <string name="chat_tool_calls_count">%1$d 회</string>
+    <string name="chat_tool_running_count">%1$d 개 실행 중</string>
+    <string name="chat_tool_calls_unsuccessful">호출이 성공하지 못함</string>
+    <string name="chat_tool_group_shell">명령 실행</string>
 </resources>

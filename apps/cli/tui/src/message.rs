@@ -681,7 +681,7 @@ mod tests {
                     mem_write: 0,
                 },
                 false,
-                Expect::Visible(&["Searched for 1 pattern", "read 1 file"]),
+                Expect::Visible(&["Read · 2 calls"]),
             ),
         ]
     }

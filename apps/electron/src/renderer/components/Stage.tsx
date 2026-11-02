@@ -1,6 +1,5 @@
 import { tr } from '../i18n/locale';
 import { crossSessionMessage } from './messageOrigin';
-import { ActivityToolGroup } from './ActivityToolGroup';
 import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
 import { PlanPreview, PlanDocument } from './PlanDocument';
@@ -8,7 +7,6 @@ import type { SubmittedPlan } from '../bridge/submittedPlan';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useT } from '../theme/ThemeContext';
 import type { CommandRunItem, RunItem, TurnFileChange, VisualizationFollowup } from '../model/runItem';
-import { localAppReference } from '../model/localAppReference';
 import { VisualizationCard, VisualizationContextBadge, VisualizationPlaceholder, VisualizationUnavailable } from './VisualizationCard';
 import {
   transcriptRowUuids,
@@ -735,11 +733,8 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           // break the sibling spacing when that status appears or disappears.
           if (item === tailThinking) return null;
           const content = (() => {
-          if (activityView && item.type === 'tool-group' && !item.tools.some(tool => localAppReference(tool) || submittedPlans.some(plan => plan.id === tool.id))) {
-            return <div className="transcript-run-item" data-run-type="tool" key={item.id}><ActivityToolGroup group={item}><ToolGroup group={item} modUiSessionId={modUiSessionId} open={true} ungrouped toolOpen={id => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} /></ActivityToolGroup></div>;
-          }
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} files={item.files} onReview={onReviewFiles ? path => onReviewFiles(item.id, item.files!, path) : undefined} />;
-          if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
+          if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} launches={item.launches} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
           if (item.type === 'narration') {
             if (instructionIds.has(item.id)) return <div className="transcript-run-item" data-run-type="skill-instructions" key={item.id}>
               <LocalAppInstructions id={item.id} text={item.text} name={instructionIds.get(item.id)}
@@ -873,7 +868,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           return null;
           })();
           if (!content) return null;
-          const sourceIds = item.type === 'tool-group' ? item.tools.map(tool => tool.id) : [item.id];
+          const sourceIds = item.type === 'tool-group' ? item.tools.map(tool => tool.id) : item.type === 'agents' ? item.sourceIds : [item.id];
           const uuids = [...new Set(sourceIds.flatMap(id => {
             const source = liveItemById.get(id);
             return source ? transcriptRowUuids(source) : [];

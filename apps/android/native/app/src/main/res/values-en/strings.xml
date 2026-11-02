@@ -2548,4 +2548,8 @@
     <string name="chat_agent_report_pending">Ended, report pending</string>
     <string name="chat_agent_report_delivered">Report delivered</string>
     <string name="chat_agent_execution_ended">Execution ended</string>
+    <string name="chat_tool_calls_count">%1$d calls</string>
+    <string name="chat_tool_running_count">%1$d running</string>
+    <string name="chat_tool_calls_unsuccessful">Calls unsuccessful</string>
+    <string name="chat_tool_group_shell">Run commands</string>
 </resources>

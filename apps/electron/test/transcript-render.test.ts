@@ -94,7 +94,7 @@ test('finished shell cards and groups do not announce that commands are still ru
       render(React.createElement(ToolCall, { item, onSetOpen: () => {} })),
       render(React.createElement(ToolGroup, { group: { type: 'tool-group', id: 'group', tools: [item] }, open: true, toolOpen: () => false, onSetOpen: () => {} })),
     ]) {
-      assert.ok(html.includes(status === 'running' ? '>Running<' : '>Ran<'));
+      assert.ok(html.includes(status === 'running' ? '>Running<' : status === 'done' ? '>Ran<' : '>Run<'));
       assert.ok(html.includes('echo done'));
       assert.doesNotMatch(html, /Running 1 shell command|Shell command/);
     }

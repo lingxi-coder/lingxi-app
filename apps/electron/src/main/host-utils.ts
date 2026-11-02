@@ -1,3 +1,5 @@
+import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
+import type { RuntimeProviderAccountCredential } from './provider-accounts.js';
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
@@ -728,7 +730,6 @@ export function buildBridgeArguments(config: {
   configHome?: string;
   globalConfigPath?: string;
   model?: string;
-  hasApiKey: boolean;
   hasCredentialStdin?: boolean;
   trusted: boolean;
   /** Private parent-to-bridge verdict for the local Insights command gate. */
@@ -761,7 +762,6 @@ export function buildBridgeArguments(config: {
   for (const directory of config.promptDirectories ?? []) args.push('--session-prompt-directory', directory);
   if (config.model) args.push('--model', config.model);
   if (config.hasCredentialStdin) args.push('--credential-stdin');
-  else if (config.hasApiKey) args.push('--api-key-stdin');
   if (config.trusted) args.push('--trusted-workspace');
   if (typeof config.allowInsights === 'boolean') {
     args.push('--host-insights-policy-gate', String(config.allowInsights));
@@ -782,26 +782,15 @@ export function buildBridgeArguments(config: {
  * Keep this boundary explicitly snake_case: it is a Rust serde contract, not
  * an Electron/JavaScript object passed over IPC.
  */
-export interface OpenAiOAuthSession {
-  access_token: string;
-  refresh_token?: string;
-  expires_at: number;
-  account_id?: string;
-  fedramp: boolean;
-  email?: string;
-}
-
 export function buildCredentialEnvelope(config: {
-  openaiOAuth?: OpenAiOAuthSession;
-  apiKey?: string;
-  providerCredentials?: Record<string, string>;
+  providerAccountHome?: string;
+  providerAccounts?: ProviderAccountSnapshot;
+  providerAccountCredentials?: Record<string, RuntimeProviderAccountCredential>;
   pluginSecrets?: Record<string, Record<string, string>>;
 }): string {
   return `${JSON.stringify({
-    api_key: config.apiKey ?? null,
-    provider_keys: config.providerCredentials ?? {},
+    ...(config.providerAccounts ? { provider_accounts: config.providerAccounts, ...(config.providerAccountHome ? { provider_account_home: config.providerAccountHome } : {}), provider_account_credentials: config.providerAccountCredentials ?? {} } : {}),
     plugin_secrets: config.pluginSecrets ?? {},
-    ...(config.openaiOAuth ? { openai_oauth: config.openaiOAuth } : {}),
   })}\n`;
 }
 

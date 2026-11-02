@@ -50,14 +50,14 @@ struct LingxiCodeApp: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                #if canImport(harness_runtimeFFI)
-                RootView(
-                    voiceCapability: voice,
-                    mediaHostComposition: mediaHostComposition,
-                    mediaHostInitializationError: mediaHostInitializationError
-                )
+                #if DEBUG
+                if ProcessInfo.processInfo.environment["LINGXI_PROVIDER_ACCOUNT_COMPONENT_TEST"] == "1" {
+                    ProviderAccountComponentTestFixture()
+                } else {
+                    normalRoot
+                }
                 #else
-                RootView(voiceCapability: voice)
+                normalRoot
                 #endif
             }
                 .onOpenURL { _ = GIDSignIn.sharedInstance.handle($0) }
@@ -73,4 +73,17 @@ struct LingxiCodeApp: App {
                 .tint(app.palette.accent)
         }
     }
+
+    @ViewBuilder private var normalRoot: some View {
+        #if canImport(harness_runtimeFFI)
+                RootView(
+                    voiceCapability: voice,
+                    mediaHostComposition: mediaHostComposition,
+                    mediaHostInitializationError: mediaHostInitializationError
+                )
+                #else
+                RootView(voiceCapability: voice)
+                #endif
+    }
+
 }

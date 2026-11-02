@@ -48,6 +48,13 @@ struct ChatView: View {
     var onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil
     @ObservedObject private var convo: ConversationModel
     private var displayedSessionMode: SessionMode { source.isTemporaryConversation ? convo.sessionMode : sessionMode }
+    private var usesLocalAccountCatalog: Bool {
+        #if canImport(harness_runtimeFFI)
+        !(source is RemoteConversationSource)
+        #else
+        true
+        #endif
+    }
 
     @State private var latestMessageRequestRevision: UInt64 = 0
     @State private var pendingAgentDetailID: String?
@@ -178,7 +185,8 @@ struct ChatView: View {
 
     @ViewBuilder
     private var conversationContent: some View {
-        let visibleAvailableModels = providerRepository.visibleModelReferences(convo.availableModels)
+        let visibleAvailableModels = usesLocalAccountCatalog
+            ? providerRepository.visibleModelReferences(convo.availableModels) : convo.availableModels
         ZStack {
             t.windowBg.ignoresSafeArea()
             VStack(spacing: 0) {
@@ -227,6 +235,7 @@ struct ChatView: View {
                          // pick, the source submits `SetModel(id)` with a real id.
                          availableModels: convo.availableModels,
                          availableModelDetails: convo.availableModelDetails,
+                         usesLocalAccountCatalog: usesLocalAccountCatalog,
                          activeModelId: convo.activeModelId,
                          activeModelDisplay: convo.activeModelSource,
                          contextUsage: convo.sessionTransitionPending ? nil : convo.contextUsage,
@@ -324,7 +333,8 @@ struct ChatView: View {
     }
 
     var body: some View {
-        let visibleAvailableModels = providerRepository.visibleModelReferences(convo.availableModels)
+        let visibleAvailableModels = usesLocalAccountCatalog
+            ? providerRepository.visibleModelReferences(convo.availableModels) : convo.availableModels
         conversationContent
         .overlay(alignment: .top) {
             if let rejectionID = convo.compactRejectionID {

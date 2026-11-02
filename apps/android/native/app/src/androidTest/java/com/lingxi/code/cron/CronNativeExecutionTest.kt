@@ -56,7 +56,7 @@ class CronNativeExecutionTest {
                     config = AndroidEngineLaunchConfigFfi(
                         appVersion = null,
                         appAgentHost = false,
-                        apiBase = server.baseUrl, apiKey = "test-only-local", model = "anthropic/claude-sonnet-4-6", sessionMode = SessionModeDto.CODE,
+                        apiBase = server.baseUrl, model = "anthropic/claude-sonnet-4-6", sessionMode = SessionModeDto.CODE,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,
                         providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":["anthropic"]}"""),
                         mobileLinux = runtimeConfig,
@@ -70,7 +70,12 @@ class CronNativeExecutionTest {
                     mediaHost = AndroidNativeMediaHostProvider.get(context.applicationContext), share = AndroidShareAdapter(),
                     location = AndroidLocationAdapter(), notifications = AndroidNotificationAdapter(), clipboard = AndroidClipboardAdapter(),
                     permissions = object : AndroidPermissionSink { override suspend fun onRequest(request: PermissionRequest) { error("Scheduled fixture must not request permission") } },
-                    computerUse = null, shell = null, git = null, gitCredentialProvider = null, secureStorage = null, deviceControl = null)
+                    computerUse = null, shell = null, git = null, gitCredentialProvider = null, secureStorage = com.lingxi.code.secure.AndroidSecureStorageAdapter(File(root, "secure-store")), deviceControl = null)
+
+                val accountId = UUID.randomUUID().toString()
+                engine.providerAccountCommand(JSONObject().put("action", "add").put("expectedRevision", 0)
+                    .put("accountId", accountId).put("providerId", "anthropic").put("displayName", "Local test")
+                    .put("executionBindingId", "anthropic").put("authKind", "api_key").toString(), "test-only-local")
 
                 val store = buildAndroidCronStore(root.path, managedRoot.path, null)
                 try {
@@ -191,7 +196,14 @@ class CronNativeExecutionTest {
                     fire(fresh.id)
                     assertEquals("succeeded", latestRun(fresh.id).getString("status"))
                     assertNotEquals(cancelledId, latestRun(fresh.id).getString("id"))
-                } finally { store.destroy(); engine.destroy() }
+                } finally {
+                    runCatching {
+                        val revision = JSONObject(engine.providerAccountsSnapshot()).getLong("configRevision")
+                        engine.providerAccountCommand(JSONObject().put("action", "remove").put("expectedRevision", revision)
+                            .put("accountId", accountId).toString(), null)
+                    }
+                    store.destroy(); engine.destroy()
+                }
             } finally { events.close(); server.close(); root.deleteRecursively() }
         }
     }

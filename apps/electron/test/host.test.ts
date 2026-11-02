@@ -6,11 +6,6 @@ import { join } from 'node:path';
 
 import {
   CH_BRIDGE_RESTART,
-  CH_CODEX_LOGIN,
-  CH_CODEX_CANCEL,
-  CH_PROVIDER_CREDENTIAL_CLEAR,
-  CH_PROVIDER_CREDENTIAL_SET,
-  CH_PROVIDER_CREDENTIALS_GET,
   CH_SESSION_CLEAR,
   CH_SETTINGS_UPDATE,
   CH_WORKSPACE_FILE_PREVIEW,
@@ -18,7 +13,6 @@ import {
   readWorkspaceFilePreview,
 } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
-import { CodexTokenManager } from '../src/main/codex-tokens';
 import { SettingsStore } from '../src/main/settings';
 import { audioConfigurationDefaults } from '../src/shared/generatedAudioConfiguration';
 
@@ -780,104 +774,6 @@ test('bootstrap surfaces an explicit recovery state when the persisted workspace
   assert.match(diagnostics.snapshot()[0]?.message ?? '', /workspace path is not a directory/);
 });
 
-test('bootstrap treats a credential already supplied to the running engine as configured', async () => {
-  const diagnostics = new DiagnosticBuffer();
-  const settings = {
-    conversationSpaces: fakeConversationSpaces(),
-    getWorkspace: () => '/workspace',
-    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
-    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' } }),
-    credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
-    providerCredentialMetadataFor: (providerIds: readonly string[]) => providerIds.map((providerId) => ({
-      providerId,
-      configured: false,
-      encryptionAvailable: false,
-    })),
-  };
-  const runtime = {
-    connectionState: { status: 'connected' as const },
-    activeCredentialProviderIds: ['deepseek'],
-  };
-  const bridge = { get: () => runtime, runtimeSummaries: [] };
-  const host = new HostController(settings as any, bridge as any, diagnostics);
-
-  const bootstrap = await (host as any).bootstrap();
-  const deepseek = bootstrap.providerCredentials.find((entry: { providerId: string }) => entry.providerId === 'deepseek');
-
-  assert.deepEqual(deepseek, {
-    providerId: 'deepseek',
-    configured: true,
-    encryptionAvailable: false,
-    runtimeOnly: true,
-  });
-});
-
-test('bootstrap does not treat launch credentials as configured when the engine failed to start', async () => {
-  const diagnostics = new DiagnosticBuffer();
-  const settings = {
-    conversationSpaces: fakeConversationSpaces(),
-    getWorkspace: () => '/workspace',
-    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
-    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' } }),
-    credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
-    providerCredentialMetadataFor: (providerIds: readonly string[]) => providerIds.map((providerId) => ({
-      providerId,
-      configured: false,
-      encryptionAvailable: false,
-    })),
-  };
-  const runtime = {
-    connectionState: { status: 'error' as const, message: 'bridge-server binary not found' },
-    activeCredentialProviderIds: ['deepseek'],
-  };
-  const bridge = { get: () => runtime, runtimeSummaries: [] };
-  const host = new HostController(settings as any, bridge as any, diagnostics);
-
-  const bootstrap = await (host as any).bootstrap();
-  const deepseek = bootstrap.providerCredentials.find((entry: { providerId: string }) => entry.providerId === 'deepseek');
-
-  assert.deepEqual(deepseek, {
-    providerId: 'deepseek',
-    configured: false,
-    encryptionAvailable: false,
-  });
-});
-
-test('bootstrap reports CLI/TUI credentials discovered by the shared engine store as persisted', async () => {
-  const diagnostics = new DiagnosticBuffer();
-  const settings = {
-    conversationSpaces: fakeConversationSpaces(),
-    getWorkspace: () => '/workspace',
-    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
-    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' } }),
-    credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
-    providerCredentialMetadataFor: (providerIds: readonly string[]) => providerIds.map((providerId) => ({
-      providerId,
-      configured: false,
-      encryptionAvailable: false,
-    })),
-  };
-  const runtime = {
-    connectionState: { status: 'connected' as const },
-    activeCredentialProviderIds: ['deepseek'],
-    persistedCredentialProviderIds: ['deepseek'],
-    providerCredentialStorageEncrypted: true,
-    providerCredentialPreviews: { deepseek: '••••abcd' },
-  };
-  const bridge = { get: () => runtime, runtimeSummaries: [] };
-  const host = new HostController(settings as any, bridge as any, diagnostics);
-
-  const bootstrap = await (host as any).bootstrap();
-  const deepseek = bootstrap.providerCredentials.find((entry: { providerId: string }) => entry.providerId === 'deepseek');
-
-  assert.deepEqual(deepseek, {
-    providerId: 'deepseek',
-    configured: true,
-    encryptionAvailable: true,
-    credentialPreview: '••••abcd',
-  });
-});
-
 test('bootstrap replays pending AskUserQuestion requests after a renderer reload', async () => {
   const diagnostics = new DiagnosticBuffer();
   const settings = {
@@ -987,200 +883,7 @@ test('host catalog generations keep only the newest deferred response', async ()
   assert.equal((await (host as any).bootstrap()).projectCatalogs[projectPath].sessions[0].title, 'new');
 });
 
-test('provider credential IPC uses the broker path, hot-syncs cached sessions, and never returns the full secret', async () => {
-  const handlers = new Map<string, (...args: unknown[]) => unknown>();
-  const ipc = {
-    handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
-    removeHandler: (channel: string) => { handlers.delete(channel); },
-  };
-  const settings = {
-    conversationSpaces: fakeConversationSpaces(),
-    getWorkspace: () => '/workspace',
-    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
-    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
-  };
-  const operations: string[] = [];
-  const bridge = {
-    registerIpc: () => undefined,
-    registerWindow: () => undefined,
-    runtimeSummaries: [],
-    hasActiveWork: () => false,
-    invalidateLaunchConfigCache: () => undefined,
-    refreshCachedProviderCredential: async (providerId: string, credential: string) => {
-      assert.equal(credential, 'sk-replacement-secret');
-      operations.push(`runtime:set:${providerId}`);
-    },
-    clearCachedProviderCredential: async (providerId: string) => {
-      operations.push(`runtime:delete:${providerId}`);
-    },
-  };
-  const host = new HostController(
-    settings as any,
-    bridge as any,
-    new DiagnosticBuffer(),
-    undefined,
-    ipc as any,
-    undefined,
-    {
-      health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
-      listStatus: async () => [{ providerId: 'anthropic', configured: true }],
-      preview: async () => ({ providerId: 'anthropic', configured: true, maskedValue: '••••cret' }),
-      resolve: async () => 'sk-test-secret',
-      set: async (providerId: string) => {
-        operations.push(`broker:set:${providerId}`);
-        return { providerId, configured: true, maskedValue: '••••cret' };
-      },
-      delete: async (providerId: string) => { operations.push(`broker:delete:${providerId}`); },
-    },
-  );
-  const frame = { url: 'http://127.0.0.1:4242' };
-  const sender = { mainFrame: frame, isDestroyed: () => false, once: () => undefined, removeListener: () => undefined };
-  host.registerWindow(sender as any, frame.url);
-  host.registerIpc();
-
-  const credentials = handlers.get(CH_PROVIDER_CREDENTIALS_GET);
-  assert.ok(credentials);
-  const result = await credentials!({ sender, senderFrame: frame }, 'anthropic') as Array<Record<string, unknown>>;
-  const anthropic = result.find((entry) => entry['providerId'] === 'anthropic');
-
-  assert.deepEqual(anthropic, {
-    providerId: 'anthropic',
-    configured: true,
-    encryptionAvailable: true,
-    credentialPreview: '••••cret',
-  });
-  assert.equal(JSON.stringify(result).includes('sk-test-secret'), false);
-
-  for (let refresh = 0; refresh < 3; refresh += 1) {
-    await credentials!({ sender, senderFrame: frame }, 'anthropic');
-  }
-  assert.deepEqual(operations, [], 'repeated status/preview requests must not write broker or runtime credentials');
-
-  const setCredential = handlers.get(CH_PROVIDER_CREDENTIAL_SET);
-  const clearCredential = handlers.get(CH_PROVIDER_CREDENTIAL_CLEAR);
-  assert.ok(setCredential);
-  assert.ok(clearCredential);
-  const stored = await setCredential!({ sender, senderFrame: frame }, 'anthropic', 'sk-replacement-secret') as Record<string, unknown>;
-  assert.equal(JSON.stringify(stored).includes('sk-replacement-secret'), false);
-  assert.deepEqual(operations, ['broker:set:anthropic', 'runtime:set:anthropic']);
-
-  await clearCredential!({ sender, senderFrame: frame }, 'anthropic');
-  assert.deepEqual(operations, [
-    'broker:set:anthropic',
-    'runtime:set:anthropic',
-    'broker:delete:anthropic',
-    'runtime:delete:anthropic',
-  ]);
-});
-
-test('custom provider credentials use the current runtime configuration and remain isolated', async () => {
-  const handlers = new Map<string, (...args: unknown[]) => unknown>();
-  const ipc = {
-    handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
-    removeHandler: (channel: string) => { handlers.delete(channel); },
-  };
-  const settings = {
-    conversationSpaces: fakeConversationSpaces(),
-    getWorkspace: () => '/workspace',
-    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
-    getPublic: () => ({ version: 1, activeSession: { sessionId: 'custom-session', projectPath: '/workspace' }, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
-  };
-  const operations: string[] = [];
-  const runtime = {
-    connectionState: { status: 'connected' as const },
-    customProviderIds: ['my-provider'],
-  };
-  let activeWork = false;
-  const bridge = {
-    get: () => runtime,
-    registerIpc: () => undefined,
-    registerWindow: () => undefined,
-    runtimeSummaries: [],
-    hasActiveWork: () => activeWork,
-    restart: async (ref: unknown, beforeRestart: () => void) => {
-      assert.deepEqual(ref, { sessionId: 'custom-session', projectPath: '/workspace' });
-      beforeRestart();
-      operations.push('runtime:reload:custom-session');
-    },
-    invalidateLaunchConfigCache: () => undefined,
-    refreshCachedProviderCredential: async (providerId: string, credential: string) => {
-      assert.equal(credential, 'sk-replacement-secret');
-      operations.push(`runtime:set:${providerId}`);
-    },
-    clearCachedProviderCredential: async (providerId: string) => {
-      operations.push(`runtime:delete:${providerId}`);
-    },
-  };
-  const host = new HostController(
-    settings as any,
-    bridge as any,
-    new DiagnosticBuffer(),
-    undefined,
-    ipc as any,
-    undefined,
-    {
-      health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
-      listStatus: async () => [{ providerId: 'my-provider', configured: true }],
-      preview: async () => ({ providerId: 'my-provider', configured: true, maskedValue: '••••cret' }),
-      resolve: async () => 'sk-test-secret',
-      set: async (providerId: string) => {
-        operations.push(`broker:set:${providerId}`);
-        return { providerId, configured: true, maskedValue: '••••cret' };
-      },
-      delete: async (providerId: string) => { operations.push(`broker:delete:${providerId}`); },
-    },
-  );
-  const frame = { url: 'http://127.0.0.1:4242' };
-  const sender = { mainFrame: frame, isDestroyed: () => false, once: () => undefined, removeListener: () => undefined };
-  host.registerWindow(sender as any, frame.url);
-  host.registerIpc();
-
-  const credentials = handlers.get(CH_PROVIDER_CREDENTIALS_GET);
-  assert.ok(credentials);
-  const result = await credentials!({ sender, senderFrame: frame }, 'my-provider') as Array<Record<string, unknown>>;
-  const customProvider = result.find((entry) => entry['providerId'] === 'my-provider');
-
-  assert.deepEqual(customProvider, {
-    providerId: 'my-provider',
-    configured: true,
-    encryptionAvailable: true,
-    credentialPreview: '••••cret',
-  });
-  assert.equal(JSON.stringify(result).includes('sk-test-secret'), false);
-
-  const setCredential = handlers.get(CH_PROVIDER_CREDENTIAL_SET);
-  const clearCredential = handlers.get(CH_PROVIDER_CREDENTIAL_CLEAR);
-  assert.ok(setCredential);
-  assert.ok(clearCredential);
-  const stored = await setCredential!({ sender, senderFrame: frame }, 'my-provider', 'sk-replacement-secret') as Record<string, unknown>;
-  assert.equal(JSON.stringify(stored).includes('sk-replacement-secret'), false);
-  assert.deepEqual(operations, ['broker:set:my-provider', 'runtime:set:my-provider']);
-
-  activeWork = true;
-  await setCredential!({ sender, senderFrame: frame }, 'my-provider', 'sk-replacement-secret');
-  await clearCredential!({ sender, senderFrame: frame }, 'my-provider');
-  assert.equal(activeWork, true, 'credential changes retain the active turn');
-  assert.equal(operations.some((operation) => operation.startsWith('runtime:reload:')), false);
-  activeWork = false;
-
-  await assert.rejects(async () => setCredential!({ sender, senderFrame: frame }, 'unknown', 'secret'), /unsupported provider/);
-  runtime.customProviderIds = [];
-  await assert.rejects(async () => setCredential!({ sender, senderFrame: frame }, 'my-provider', 'secret'), /unsupported provider/);
-  runtime.customProviderIds = ['my-provider'];
-  await clearCredential!({ sender, senderFrame: frame }, 'my-provider');
-  assert.deepEqual(operations, [
-    'broker:set:my-provider',
-    'runtime:set:my-provider',
-    'broker:set:my-provider',
-    'runtime:set:my-provider',
-    'broker:delete:my-provider',
-    'runtime:delete:my-provider',
-    'broker:delete:my-provider',
-    'runtime:delete:my-provider',
-  ]);
-});
-
-test('broker-backed bootstrap reads configured status from the broker', async () => {
+test('bootstrap returns the canonical provider account snapshot', async () => {
   const settings = {
     conversationSpaces: fakeConversationSpaces(),
     getWorkspace: () => '/workspace',
@@ -1208,13 +911,11 @@ test('broker-backed bootstrap reads configured status from the broker', async ()
     broker,
   );
 
+  const accountSnapshot = { storeScope: 'test-scope', configRevision: 4, accounts: [], health: [], modelEntitlements: [], modelAvailability: [] };
+  host.attachProviderAccounts({ latestSnapshot: accountSnapshot, snapshot: async () => accountSnapshot } as any);
   const bootstrap = await (host as any).bootstrap();
-  const deepseek = bootstrap.providerCredentials.find((entry: { providerId: string }) => entry.providerId === 'deepseek');
-  assert.deepEqual(deepseek, {
-    providerId: 'deepseek',
-    configured: false,
-    encryptionAvailable: true,
-  });
+  assert.deepEqual(bootstrap.providerAccountSnapshot, accountSnapshot);
+  assert.equal('providerCredentials' in bootstrap, false);
 });
 
 test('settings model, voice and Thought patches persist without restarting a live session', async () => {
@@ -1329,63 +1030,4 @@ test('settings model, voice and Thought patches persist without restarting a liv
     host.dispose();
     rmSync(userData, { recursive: true, force: true });
   }
-});
-
-test('Codex login keeps tokens in broker and signs out through the token manager', async () => {
-  const handlers = new Map<string, (...args: any[]) => any>();
-  const operations: string[] = [];
-  let configured = false;
-  let storedSession = '';
-  const broker = { health: async () => { operations.push('health'); },
-      set: async (id: string, secret: string) => {
-        assert.equal(id, 'openai-chatgpt');
-        assert.equal(JSON.parse(secret).refresh_token, 'private-refresh');
-        operations.push('store'); configured = true; storedSession = secret;
-        return { providerId: id, configured: true, maskedValue: 'must-not-expose' };
-      },
-      delete: async () => { operations.push('delete'); configured = false; },
-      listStatus: async () => [{ providerId: 'openai-chatgpt', configured }],
-      resolve: async () => (configured ? storedSession : undefined),
-      preview: async () => { throw new Error('OAuth previews must never be requested'); },
-  };
-  const codexTokens = new CodexTokenManager({ store: broker });
-  const served: unknown[] = [];
-  codexTokens.subscribe((session) => served.push(session?.access_token));
-  const host = new HostController(
-    { getPublic: () => ({ projects: [], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: 'session-1' } }) } as any,
-    { registerIpc() {}, registerWindow() {}, hasActiveWork: () => false, runtimeSummaries: [],
-      get: () => ({ connectionState: { status: 'disconnected' } }),
-      invalidateLaunchConfigCache() {},
-      restart: async () => { throw new Error('a sign-in must not restart the engine'); },
-      codexTokens,
-    } as any,
-    new DiagnosticBuffer(), undefined,
-    { handle: (channel: string, handler: any) => handlers.set(channel, handler), removeHandler: (channel: string) => handlers.delete(channel) } as any,
-    undefined,
-    broker as any,
-    undefined,
-    async () => { operations.push('login'); return { access_token: 'private-access', refresh_token: 'private-refresh', expires_at: 9999, fedramp: false, email: 'user@example.com' }; },
-  );
-  const frame = { url: 'http://127.0.0.1:4242' };
-  const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, removeListener() {} };
-  const event = { sender, senderFrame: frame };
-  host.registerWindow(sender as any, frame.url); host.registerIpc();
-  const result = await handlers.get(CH_CODEX_LOGIN)!(event);
-  assert.deepEqual(operations, ['health', 'login', 'store']);
-  assert.deepEqual(served, ['private-access'], 'every open chat is served the new access token');
-  assert.deepEqual(result.credential, {
-    providerId: 'openai-chatgpt', configured: true, encryptionAvailable: true, codexAccountEmail: 'user@example.com',
-  });
-  assert.equal(JSON.stringify(result).includes('private'), false);
-  // The address is re-read from the broker on every status refresh, so it
-  // survives an app restart instead of living only in the login response.
-  const relisted = await handlers.get(CH_PROVIDER_CREDENTIALS_GET)!(event, 'openai-chatgpt');
-  assert.equal(relisted.find((entry: any) => entry.providerId === 'openai-chatgpt').codexAccountEmail, 'user@example.com');
-  await assert.rejects(handlers.get(CH_PROVIDER_CREDENTIAL_SET)!(event, 'openai-chatgpt', 'api-key'), /账号登录/);
-  const cleared = await handlers.get(CH_PROVIDER_CREDENTIAL_CLEAR)!(event, 'openai-chatgpt');
-  assert.equal(cleared.configured, false);
-  assert.equal(cleared.codexAccountEmail, undefined);
-  assert.deepEqual(operations.slice(-1), ['delete']);
-  assert.deepEqual(served, ['private-access', undefined], 'signing out takes the token from every chat');
-  await handlers.get(CH_CODEX_CANCEL)!(event);
 });

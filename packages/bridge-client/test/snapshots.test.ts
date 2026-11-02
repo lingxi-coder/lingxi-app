@@ -125,7 +125,6 @@ function validateListingKind(v: unknown): void {
       'memory',
       'status',
       'settings',
-      'auth',
       'doctor',
       'tasks',
     ].includes(o['type'] as string),
@@ -790,6 +789,9 @@ function validateCommand(name: string, v: unknown): void {
     case 'cancel_ask_user_question':
       assert.ok(isNumber(o['request_id']));
       break;
+    case 'provider_accounts':
+      assert.ok(isNumber(o['operation_id']) && isString(o['action']) && isString(o['request_json']));
+      break;
     case 'set_permission_mode':
       validatePermissionMode(o['mode']);
       break;
@@ -803,33 +805,6 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'set_typescript_lsp_mode':
       validateTypescriptLspMode(o['mode']);
-      break;
-    case 'list_provider_credentials':
-      assert.ok(isNumber(o['operation_id']) && Array.isArray(o['provider_ids']));
-      for (const providerId of o['provider_ids'] as unknown[]) assert.ok(isString(providerId));
-      if (o['preview_provider_ids'] !== undefined) {
-        assert.ok(Array.isArray(o['preview_provider_ids']));
-        for (const providerId of o['preview_provider_ids'] as unknown[]) assert.ok(isString(providerId));
-      }
-      break;
-    case 'set_provider_credential':
-      assert.ok(
-        isNumber(o['operation_id']) &&
-          isString(o['provider_id']) &&
-          isString(o['credential']),
-      );
-      break;
-    case 'delete_provider_credential':
-      assert.ok(isNumber(o['operation_id']) && isString(o['provider_id']));
-      break;
-    case 'test_provider_connection':
-      assert.ok(
-        isNumber(o['operation_id']) &&
-          isString(o['provider_id']) &&
-          isString(o['api_base']) &&
-          isString(o['model']),
-      );
-      if ('credential_override' in o) assert.ok(isString(o['credential_override']));
       break;
     case 'cron_run_started':
       assert.ok(isString(o['run_id']) && isString(o['session_id']));
@@ -939,8 +914,6 @@ function validateCommand(name: string, v: unknown): void {
       exactObjectKeys(o, ['type', 'request_id', 'request_json'], [], `command snapshot ${name}`);
       assert.ok(isString(o['request_id']) && isString(o['request_json']));
       break;
-    case 'login':
-    case 'logout':
     case 'force_compact':
     case 'clear_session':
     case 'request_exit':
@@ -1389,6 +1362,15 @@ function validateEvent(name: string, v: unknown): void {
     case 'model_changed':
       assert.ok(isString(o['model']));
       break;
+    case 'provider_accounts_updated':
+      assert.ok(isNumber(o['operation_id']) && isString(o['snapshot_json']));
+      break;
+    case 'provider_account_routing':
+      assert.ok(isString(o['event_json']));
+      break;
+    case 'provider_account_refresh_requested':
+      assert.ok(isString(o['account_id']) && isNumber(o['identity_generation']) && isNumber(o['credential_revision']));
+      break;
     case 'permission_mode_changed':
       validatePermissionMode(o['mode']);
       break;
@@ -1402,43 +1384,6 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'fast_mode_changed':
       assert.ok(isBool(o['enabled']));
-      break;
-    case 'openai_oauth_updated': {
-      const session = rec(o['session']);
-      assert.ok(isString(session['access_token']) && isNumber(session['expires_at']) && isBool(session['fedramp']));
-      if (session['refresh_token'] != null) assert.ok(isString(session['refresh_token']));
-      if (session['account_id'] != null) assert.ok(isString(session['account_id']));
-      break;
-    }
-    case 'provider_credential_status':
-      assert.ok(
-        isNumber(o['operation_id']) &&
-          Array.isArray(o['configured_provider_ids']) &&
-          isBool(o['storage_encrypted']),
-      );
-      for (const providerId of o['configured_provider_ids'] as unknown[]) assert.ok(isString(providerId));
-      if ('credential_previews' in o) {
-        const previews = rec(o['credential_previews']);
-        for (const [providerId, preview] of Object.entries(previews)) {
-          assert.ok(isString(providerId) && isString(preview));
-          assert.match(preview as string, /^••••.{0,4}$/u);
-        }
-      }
-      if ('error' in o) assert.ok(isString(o['error']));
-      break;
-    case 'provider_connection_tested':
-      assert.ok(
-        isNumber(o['operation_id']) &&
-          isString(o['provider_id']) &&
-          isBool(o['connected']) &&
-          isBool(o['reachable']) &&
-          isBool(o['authenticated']) &&
-          isBool(o['model_available']) &&
-          isNumber(o['latency_ms']) &&
-          isString(o['message']) &&
-          isBool(o['used_stored_credential']),
-      );
-      if ('http_status' in o) assert.ok(isNumber(o['http_status']));
       break;
     case 'mcp_servers':
       assert.ok(Array.isArray(o['servers']));
@@ -1527,12 +1472,6 @@ function validateEvent(name: string, v: unknown): void {
       if ('locked' in o) validateStringArray(o['locked']);
       if ('layers_json' in o) assert.ok(isString(o['layers_json']));
       break;
-    case 'auth_state': {
-      const st = rec(o['state']);
-      assert.ok(['signed_out', 'signed_in'].includes(st['type'] as string));
-      if (st['type'] === 'signed_in') assert.ok(isString(st['email']) && isString(st['org_id']));
-      break;
-    }
     case 'doctor_report': {
       const r = rec(o['report']);
       assert.ok(Array.isArray(r['checks']));

@@ -2,9 +2,10 @@ import { extractFile } from '@electron/asar';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
 import { test } from 'node:test';
 
 import {
@@ -628,4 +629,49 @@ test('packaged quit skips exited processes and removes listeners when requesting
   const running = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
   await assert.rejects(waitForPackagedAppExit(running, async () => { throw new Error('quit failed'); }), /quit failed/);
   assert.equal(running.listenerCount('exit'), 0);
+});
+
+test('runtime dependency copy preserves nested versions and their actual Node resolution', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-runtime-versions-'));
+  const writePackage = (path, name, version, dependencies, code) => {
+    mkdirSync(path, { recursive: true });
+    writeFileSync(join(path, 'package.json'), JSON.stringify({ name, version, main: 'index.cjs', dependencies }));
+    writeFileSync(join(path, 'index.cjs'), code);
+  };
+  try {
+    writePackage(join(root, 'node_modules', 'sdk'), 'sdk', '1.0.0', { shared: '^1' }, "module.exports = require('shared');");
+    writePackage(join(root, 'node_modules', 'server'), 'server', '1.0.0', { shared: '^2' }, "module.exports = require('shared');");
+    writePackage(join(root, 'node_modules', 'shared'), 'shared', '1.0.0', { sdk: '*' }, "module.exports = 'one';");
+    writePackage(join(root, 'node_modules', 'server', 'node_modules', 'shared'), 'shared', '2.0.0', {}, "module.exports = 'two';");
+    const target = join(root, 'output', 'node_modules');
+    copyProductionDependencies({ sdk: '1.0.0', server: '1.0.0' }, root, target);
+    const load = createRequire(join(root, 'output', 'entry.cjs'));
+    assert.equal(load('sdk'), 'one');
+    assert.equal(load('server'), 'two');
+    assert.equal(JSON.parse(readFileSync(join(target, 'shared', 'package.json'))).version, '1.0.0');
+    assert.equal(JSON.parse(readFileSync(join(target, 'server', 'node_modules', 'shared', 'package.json'))).version, '2.0.0');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('runtime dependency copy preserves linked workspace scopes and dependency cycles', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-workspace-runtime-'));
+  const linked = join(root, 'workspace');
+  const writePackage = (path, name, version, dependencies, code) => {
+    mkdirSync(path, { recursive: true });
+    writeFileSync(join(path, 'package.json'), JSON.stringify({ name, version, main: 'index.cjs', dependencies }));
+    writeFileSync(join(path, 'index.cjs'), code);
+  };
+  try {
+    writePackage(linked, 'linked', '1.0.0', { shared: '^2' }, "module.exports = require('shared');");
+    writePackage(join(linked, 'node_modules', 'shared'), 'shared', '2.0.0', { linked: '*' }, "module.exports = 'two';");
+    writePackage(join(root, 'node_modules', 'shared'), 'shared', '1.0.0', {}, "module.exports = 'one';");
+    symlinkSync(linked, join(root, 'node_modules', 'linked'), 'dir');
+    symlinkSync(linked, join(linked, 'node_modules', 'linked'), 'dir');
+    const target = join(root, 'output', 'node_modules');
+    copyProductionDependencies({ linked: '1.0.0', shared: '1.0.0' }, root, target);
+    const load = createRequire(join(root, 'output', 'entry.cjs'));
+    assert.equal(load('linked'), 'two');
+    assert.equal(load('shared'), 'one');
+    assert.equal(existsSync(join(target, 'linked', 'node_modules', 'shared', 'node_modules', 'linked')), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

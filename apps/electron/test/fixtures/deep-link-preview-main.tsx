@@ -1,3 +1,4 @@
+import { fixtureAccountSnapshot, providerAccountsMock } from './provider-accounts-mock';
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../../src/renderer/global.css';
@@ -33,11 +34,13 @@ const stageConversation = conversationFromMessages([
 const noop = async () => undefined;
 const scheduledJob = { id: 'job-1', cron: '0 9 * * *', prompt: '# Linked task\n\nInspect this project', recurring: true, durable: true };
 const scheduledRuns = [{ id: 'run-1', status: 'succeeded', scheduledAt: 1700000000000, model: 'test/model', summary: 'Linked run result' }];
+const accountApi = providerAccountsMock();
 const bridge = {
+  providerAccounts: accountApi,
   activeSession: { projectPath: '/test/project', sessionId: 'session-a' }, connected: true, sessionLoading: false,
-  bootstrap: { workspace: { path: '/test/project', trusted: true }, settings: { projects: ['/test/project'] }, providerCredentials: [], projectCatalogs: {} },
+  bootstrap: { workspace: { path: '/test/project', trusted: true }, settings: { projects: ['/test/project'] }, providerAccountSnapshot: fixtureAccountSnapshot([]), projectCatalogs: {} },
   settingsSnapshotEvent: { effective_json: '{}', provenance_json: '{}', layers_json: '{"user":{},"project":{},"local":{}}' },
-  refreshSettingsSnapshot: noop, refreshProviderCredential: noop,
+  refreshSettingsSnapshot: noop,
   mcpConfigurationSnapshotEvent: { snapshot_json: JSON.stringify({ scopes: [{ scope: 'user', path: '/test/.lingxi.json', revision_sha256: 'r1', raw_json: '{"mcpServers":{"known":{"command":"echo","args":["ok"]}}}' }] }) },
   skillCatalogEvent: { catalog_json: JSON.stringify({ entries: [{ id: 'skill-id', name: 'known-skill', source: 'user', rootDir: '/skills', directory: '/skills/known-skill', writable: true }], trash: [] }) },
   pluginCatalogEvent: { catalog_json: JSON.stringify({ installed: [{ id: 'known-plugin', name: 'known-plugin' }], available: [], revisions: { user: 'r1' } }) },
@@ -52,7 +55,7 @@ const bridge = {
   scheduledContext: async () => ({ models: [], currentModel: null, sessions: [] }),
   configurationOperations: {}, refreshMcpServers: noop, refreshSkills: noop,
 } as any;
-window.lingxi = { terminal: {
+window.lingxi = { providerAccounts: accountApi, terminal: {
   list: async () => records.slice(),
   create: async scope => { const tab = { id: 'term-1', scope, title: 'Shell', status: 'running' as const, exitCode: null, output: '', sequence: 0 }; records.push(tab); return tab; },
   input: async (_id, data) => { inputs.push(data); }, resize: noop, acknowledge: noop, close: noop, onEvent: () => () => {},

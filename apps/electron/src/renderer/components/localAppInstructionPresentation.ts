@@ -1,22 +1,26 @@
 import type { RunItem } from '../model/runItem';
 
-/** Recognize the desktop skill's injected companion, never a standalone heading. */
-export function localAppInstructionIds(items: readonly RunItem[]): ReadonlySet<string> {
-  const ids = new Set<string>();
-  let awaitingBody = false;
+/** Recognize an injected skill prompt using its adjacent tool result as evidence. */
+export function skillInstructionNames(items: readonly RunItem[]): ReadonlyMap<string, string> {
+  const ids = new Map<string, string>();
+  let skill: Extract<RunItem, { type: 'tool' }> | undefined;
   for (const item of items) {
     if (item.type === 'thinking') continue;
     if (item.type === 'tool') {
-      awaitingBody = item.status === 'done' && item.view.verb === 'skill'
-        && item.view.primary === 'local-app';
+      skill = item.status === 'done' && item.view.verb.toLowerCase() === 'skill' ? item : undefined;
       continue;
     }
-    if (awaitingBody && item.type === 'narration' && item.role === 'user'
-      && !item.images?.length && !item.delivery
-      && /^# Desktop Local Apps\r?\n/.test(item.text.trimStart())) {
-      ids.add(item.id);
+    if (skill && item.type === 'narration' && item.role === 'user' && !item.images?.length && !item.delivery) {
+      const output = skill.nativeOutput;
+      const body = output && typeof output === 'object' && !Array.isArray(output) && typeof output.body === 'string'
+        ? output.body.trim() : '';
+      const text = item.text.replace(/^Base directory for this skill: [^\n]*\r?\n\r?\n/, '').trim();
+      const knownLocalApp = skill.view.primary === 'local-app' && /^# Desktop Local Apps\r?\n/.test(text);
+      if ((body && (text === body || text.startsWith(`${body}\n`))) || knownLocalApp) {
+        ids.set(item.id, skill.view.primary || skill.view.label);
+      }
     }
-    awaitingBody = false;
+    skill = undefined;
   }
   return ids;
 }

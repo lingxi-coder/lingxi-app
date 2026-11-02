@@ -1,3 +1,4 @@
+import { providerAccountEnvelope, type ProviderAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, lstatSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
@@ -8,12 +9,13 @@ export interface TeamBotTarget {
 }
 export interface TeamRunSnapshot {
   instructions: string; model_provider: string; model_protocol: string; model_id: string; model_endpoint: string;
-  model_profile: Record<string, unknown>; model_api_key: string;
+  model_profile: Record<string, unknown>;
   max_turns: number; max_input_bytes: number; output_tokens_per_request: number; physical_dispatches: number;
 }
 export interface TeamHostBootstrap {
   version: 1; type: 'start'; mode: 'run' | 'retry_result'; owner_uid: string; account_epoch: number;
   endpoint: 'https://lingxios.net/v1/teams/messages'; journal_root: string; runtime_root: string;
+  credentials?: ProviderAccountEnvelope;
   worker_executable: string; target: TeamBotTarget; snapshot?: TeamRunSnapshot;
 }
 export interface TeamHostResult { status: 'settled' | 'busy' | 'recovery_required' | 'unstarted'; state?: string; reply_id?: string }
@@ -23,6 +25,7 @@ export class TeamHostFailure extends Error {
 export interface TeamHostProcessOptions {
   executable: string; home: string; tmp: string; bootstrap: TeamHostBootstrap; signal: AbortSignal;
   token(): Promise<string>; assertCurrent(): void;
+  accountCredentials?: (request: {accountId: string; identityGeneration: number; credentialRevision: number}) => Promise<ProviderAccountLaunch>;
   permission(input: { target: TeamBotTarget; toolName: string; input: unknown }, signal: AbortSignal): Promise<boolean>;
   spawnProcess?: (executable: string, args: string[], options: Parameters<typeof spawn>[2]) => ChildProcessWithoutNullStreams;
   timeoutMs?: number;
@@ -98,10 +101,10 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
       options.assertCurrent();
       const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(line));
       if (!object(value) || value.version !== 1 || result) throw new Error('TEAM_HOST_PROTOCOL');
-      if (value.type === 'credential' || value.type === 'permission') {
-        exact(value, value.type === 'credential' ? ['version', 'type', 'id'] : ['version', 'type', 'id', 'tool_name', 'input']);
+      if (value.type === 'credential' || value.type === 'permission' || value.type === 'provider_account_refresh') {
+        exact(value, value.type === 'credential' ? ['version', 'type', 'id'] : value.type === 'permission' ? ['version', 'type', 'id', 'tool_name', 'input'] : ['version', 'type', 'id', 'account_id', 'identity_generation', 'credential_revision']);
         if (typeof value.id !== 'string') throw new Error('TEAM_HOST_PROTOCOL');
-        const correlation = /^(credential|permission)-([1-9][0-9]{0,19})$/u.exec(value.id);
+        const correlation = /^(credential|permission|provider_account_refresh)-([1-9][0-9]{0,19})$/u.exec(value.id);
         if (!correlation || correlation[1] !== value.type) throw new Error('TEAM_HOST_PROTOCOL');
         const sequence = BigInt(correlation[2]!);
         // Rust assigns its global counter while holding the output lock. A
@@ -117,6 +120,13 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
             const token = await options.token(); options.assertCurrent();
             send({ version: 1, type: 'credential', id: value.id, owner_uid: options.bootstrap.owner_uid,
               account_epoch: options.bootstrap.account_epoch, id_token: token });
+          } else if (value.type === 'provider_account_refresh') {
+            if (!options.accountCredentials || !options.bootstrap.credentials || typeof value.account_id !== 'string' || !/^[a-f0-9-]{36}$/.test(value.account_id)
+              || !Number.isSafeInteger(value.identity_generation) || !Number.isSafeInteger(value.credential_revision)
+              || (value.identity_generation as number) < 1 || (value.credential_revision as number) < 0) throw new Error('TEAM_HOST_PROTOCOL');
+            const accounts = await options.accountCredentials({ accountId: value.account_id, identityGeneration: value.identity_generation as number, credentialRevision: value.credential_revision as number });
+            options.assertCurrent();
+            send({ version: 1, type: 'provider_accounts_updated', id: value.id, credentials: providerAccountEnvelope(accounts, options.bootstrap.credentials!.provider_account_profiles) });
           } else {
             const allow = await options.permission({ target: options.bootstrap.target, toolName: 'Bash', input: value.input }, controller.signal).catch(() => false);
             options.assertCurrent(); send({ version: 1, type: 'permission', id: value.id, allow: allow === true });

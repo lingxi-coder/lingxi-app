@@ -156,6 +156,8 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     const state = this.stateOf(viewer, channel);
     const params = rawParams === undefined ? {} : rawParams;
     switch (method) {
+      case 'provider.accounts':
+        return this.deps.commands.providerAccounts(viewer, params);
       case 'sessions.list':
         return { sessions: await this.summaries() };
       case 'sessions.watch': {

@@ -86,7 +86,7 @@ final class NativeConversationParityFixtureTests: XCTestCase {
         for scenario in try scenarios() {
             guard let updates = scenario["workflow_updates"] as? [[String: Any]] else { continue }
             let source = EngineConversationSource(config: EngineConfig(
-                apiBase: "https://invalid.example", apiKey: "", model: "", appSandboxRoot: NSTemporaryDirectory(),
+                apiBase: "https://invalid.example", model: "", appSandboxRoot: NSTemporaryDirectory(),
                 projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false),
                 handleBuilder: { _, _, _, _ in throw Offline() })
             source.model.activeSessionId = scenario["active_session"] as! String

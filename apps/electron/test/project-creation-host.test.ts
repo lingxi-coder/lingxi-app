@@ -27,7 +27,7 @@ function fixture(t: TestContext, existing = false) {
   const configHome = join(root, '.another-product');
   const catalog = { productPaths: async () => ({ brandHome: configHome, appProjectsRoot: join(configHome, '.apps') }) };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as ProjectSessionCatalog, ipc as any,
-    undefined, undefined, undefined, undefined, dialogs);
+    undefined, undefined, undefined, dialogs);
   const sender = new EventEmitter() as any;
   sender.mainFrame = { url: 'app://desktop/index.html' }; sender.isDestroyed = () => false; sender.send = () => {};
   host.registerWindow(sender, sender.mainFrame.url); host.registerIpc();

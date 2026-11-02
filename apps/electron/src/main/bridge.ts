@@ -1,3 +1,6 @@
+import { providerAccountRenewFailureCode } from './provider-accounts.js';
+import { parseProviderAccountRouting } from '../shared/providerAccounts.js';
+import type { ProviderAccountConfiguration } from './session-catalog.js';
 import { DesktopTelemetry } from './telemetry.js';
 import { protectBridgeTelemetryEnvironment, resolveDesktopTelemetry, telemetryPrivacyDisabled } from './telemetryPolicy.js';
 import { assertComputerAccessSubset } from './computerAccessApproval.js';
@@ -101,7 +104,6 @@ import type {
   InteractionRecord,
   PromptJournalEntry,
   PromptSource,
-  ProviderConnectionTestResult,
   RemoteObservation,
   RemoteObserver,
   RemoteRuntimeView,
@@ -112,10 +114,6 @@ import type {
 } from './bridgeTypes.js';
 import {
   configuredCredentialProviderIds,
-  fusionCredentialSelection,
-  resolveFusionCredentialProviderIds,
-  resolveModelCredentialProviderIds,
-  resolveProviderIdForModel,
 } from './credential-broker.js';
 import { GitActivityTracker } from './git-activity.js';
 import { scheduledRunIdentity } from './scheduled-run-identity.js';
@@ -129,9 +127,6 @@ import {
   resolveModBunExecutable,
   sanitizeDiagnostic,
 } from './host-utils.js';
-import type { OpenAiOAuthSession } from './host-utils.js';
-import { CODEX_PROVIDER_ID } from './codex-auth.js';
-import { codexAccessToken } from './codex-tokens.js';
 import { isSessionId } from './sessionIdentity.js';
 import { parseVisualizationReference, type VisualizationReference } from '../shared/visualization.js';
 import {
@@ -148,35 +143,6 @@ import {
   validatePrompt,
   validateRequestId,
 } from './validation.js';
-
-type ProviderCredentialStatus = Extract<ClientEvent, { type: 'provider_credential_status' }>;
-
-const CODEX_SIGN_IN_REQUIRED = 'Codex authentication is unavailable. Sign in again.';
-
-/**
- * `operation_id` of a credential status the engine sends unasked: its Codex
- * access token expired, and it waits for the next one. Requests are numbered
- * from 1.
- */
-const CODEX_TOKEN_REQUEST_OPERATION_ID = 0;
-
-function isCodexModel(model: string | undefined): boolean {
-  return model?.startsWith(`${CODEX_PROVIDER_ID}/`) === true;
-}
-
-interface PendingCredentialOperation {
-  providerIds: readonly string[];
-  resolve: (status: ProviderCredentialStatus) => void;
-  reject: (error: Error) => void;
-  timer: NodeJS.Timeout;
-}
-
-interface PendingProviderConnectionTest {
-  providerId: string;
-  resolve: (result: ProviderConnectionTestResult) => void;
-  reject: (error: Error) => void;
-  timer: NodeJS.Timeout;
-}
 
 interface PendingAskUserQuestionRequest {
   request: AskUserQuestionRequestDto;
@@ -259,18 +225,7 @@ export class SessionRuntime {
   private ownedTranscriptPath: string | undefined;
   private remountControls: string | undefined;
   private activeWorkspaceTrusted = false;
-  private runtimeCredentialProviders = new Set<string>();
-  private persistedCredentialProviders = new Set<string>();
-  private activeCredentialProviders = new Set<string>();
-  private credentialPreviews = new Map<string, string>();
   private credentialStorageEncrypted = false;
-  private nextCredentialOperationId = 1;
-  private readonly pendingCredentialOperations = new Map<number, PendingCredentialOperation>();
-  private readonly pendingRuntimeCredentialLoads = new Map<string, Promise<void>>();
-  private readonly providerCredentialEpochs = new Map<string, number>();
-  private readonly providerCredentialWrites = new Map<string, Promise<void>>();
-  private readonly invalidatedProviderCredentials = new Set<string>();
-  private readonly pendingProviderConnectionTests = new Map<number, PendingProviderConnectionTest>();
   private readonly pendingModUiRequests = new SessionEventCorrelator<Extract<ClientEvent, { type: 'ui_control_result' }>>();
   private outstandingModUiRequests = 0;
   private readonly queuedModUiRequests: Array<{ send(): void; reject(error: Error): void }> = [];
@@ -287,8 +242,6 @@ export class SessionRuntime {
   private disconnectedForegroundPending = false;
   private liveConnectionRecovered = false;
   private lastKnownCost: Extract<ClientEvent, { type: 'turn_ended' }>['cost'] | undefined;
-  /** The Codex access token this engine was last given. */
-  private servedCodexToken: string | undefined;
   private oauthPersistence: Promise<void> = Promise.resolve();
   private activeTurnId: number | undefined;
   /** The turn that ended last. `turn_ended` does not say which, and the active one is let go of by the time the notifier hears of it. */
@@ -799,6 +752,16 @@ export class SessionRuntime {
   private latestOfficialProviderCatalog: ProviderModelCatalogEntryDto[] = [];
   get officialProviderCatalog(): readonly ProviderModelCatalogEntryDto[] { return this.latestOfficialProviderCatalog; }
 
+  async providerAccountConfiguration(): Promise<ProviderAccountConfiguration> {
+    if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
+    const effective = this.credentialRoutingSettings;
+    if (!effective || typeof effective !== 'object' || Array.isArray(effective)) throw new Error('Invalid provider settings.');
+    const { providers, providerRegion = 'international' } = effective as Record<string, unknown>;
+    if (providerRegion !== 'international' && providerRegion !== 'china_mainland') throw new Error('Invalid provider region.');
+    if (providers !== undefined && providers !== null && (typeof providers !== 'object' || Array.isArray(providers))) throw new Error('Invalid provider profiles.');
+    return { profilesJson: JSON.stringify(providers ?? {}), providerRegion };
+  }
+
   get customProviderIds(): readonly string[] {
     return [...this.configuredCustomProviderIds];
   }
@@ -1004,11 +967,6 @@ export class SessionRuntime {
       try { await this.ensureModelProviderCredential(config.model); }
       catch (error) { assertPreparing(); throw new Error(`paused: ${error instanceof Error ? error.message : String(error)}`); }
       assertPreparing();
-      if (isCodexModel(config.model) && this.opts.resolveOpenAiOAuth) {
-        try { await this.ensureCodexToken(); }
-        catch (error) { assertPreparing(); throw new Error(`paused: ${error instanceof Error ? error.message : String(error)}`); }
-        assertPreparing();
-      }
       const catalog = await this.scheduledModelCatalog();
       assertPreparing();
       const model = catalog.details?.find((item) => item.reference === config.model);
@@ -1198,22 +1156,6 @@ export class SessionRuntime {
       await lifecycle.catch(() => undefined);
     } while (lifecycle !== this.restartChain);
     if (this.disposed) throw new Error('session runtime is no longer open');
-  }
-
-  get activeCredentialProviderIds(): readonly string[] {
-    return [...this.activeCredentialProviders];
-  }
-
-  get persistedCredentialProviderIds(): readonly string[] {
-    return [...this.persistedCredentialProviders];
-  }
-
-  get providerCredentialStorageEncrypted(): boolean {
-    return this.credentialStorageEncrypted;
-  }
-
-  get providerCredentialPreviews(): Readonly<Record<string, string>> {
-    return Object.fromEntries(this.credentialPreviews);
   }
 
   get runtimeVersions(): BridgeRuntimeVersions | undefined {
@@ -1963,9 +1905,8 @@ export class SessionRuntime {
       generation,
       phase: 'launch_config',
     });
+    this.accountBindings = new Set(launch.providerAccounts?.accounts.map(a => a.executionBindingId) ?? []);
     // An engine receives only the access token; this host refreshes the session.
-    if (launch.openaiOAuth) launch.openaiOAuth = codexAccessToken(launch.openaiOAuth);
-    this.servedCodexToken = launch.openaiOAuth?.access_token;
     if (this.disposed) throw new Error('SessionRuntime is disposed');
     this.selectedModelReference = launch.model;
     this.activeWorkspace = launch.workspace;
@@ -1973,14 +1914,6 @@ export class SessionRuntime {
       throw new Error('bridge launch session id does not match the runtime');
     }
     this.activeWorkspaceTrusted = launch.trusted;
-    this.runtimeCredentialProviders = new Set([
-      ...(launch.apiKey ? ['anthropic'] : []),
-      ...Object.keys(launch.providerCredentials ?? {}),
-    ]);
-    this.persistedCredentialProviders.clear();
-    this.activeCredentialProviders = new Set(this.runtimeCredentialProviders);
-    this.credentialPreviews.clear();
-    this.credentialStorageEncrypted = false;
     const bridgeDir = this.createLaunchDirectory();
 
     this.setState({ status: 'spawning' });
@@ -2000,10 +1933,7 @@ export class SessionRuntime {
     });
     const pluginSecretValues = Object.values(launch.pluginSecrets ?? {}).flatMap((values) => Object.values(values));
     this.captureLogs(child, [
-      launch.apiKey,
-      launch.openaiOAuth?.access_token,
-      launch.openaiOAuth?.refresh_token,
-      ...Object.values(launch.providerCredentials ?? {}),
+      ...Object.values(launch.providerAccountCredentials ?? {}).flatMap(record => record.kind.kind === 'api_key' ? [record.kind.key] : [record.kind.access_token]),
       ...pluginSecretValues,
     ].filter((value): value is string => Boolean(value)));
 
@@ -2153,11 +2083,6 @@ export class SessionRuntime {
       });
     }
     assertCurrentConnection();
-    // A transport reconnect can reuse a living sidecar whose keys changed
-    // while it was offline. Reconcile those keys before exposing readiness.
-    for (const providerId of this.invalidatedProviderCredentials) {
-      await this.ensureProviderCredentialCached(providerId);
-    }
     assertCurrentConnection();
     if (this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0) this.requireClient().sendCommand({ type: 'side_chat_list' });
     if (publishConnected) this.setState({ status: 'connected' });
@@ -2165,20 +2090,6 @@ export class SessionRuntime {
       durationMs: Date.now() - startedAt,
       generation,
     });
-    // Status refreshes use attribute-only broker queries; they do not
-    // decrypt every saved credential or expose secret bytes to the renderer.
-    void this.refreshProviderCredentials();
-  }
-
-  private async refreshProviderCredentials(): Promise<void> {
-    const providerIds = this.opts.providerIds ?? [];
-    if (providerIds.length > 0) {
-      try {
-        await this.listProviderCredentials(providerIds);
-      } catch (error) {
-        this.diagnostics.add('warn', 'bridge', error);
-      }
-    }
   }
 
   private createLaunchDirectory(): string {
@@ -2209,9 +2120,7 @@ export class SessionRuntime {
       configHome: launch.configHome,
       globalConfigPath: launch.globalConfigPath,
       model: launch.model,
-      hasApiKey: Boolean(launch.apiKey),
-      hasCredentialStdin: Boolean(launch.openaiOAuth) || Object.keys(launch.providerCredentials ?? {}).length > 0
-        || Object.keys(launch.pluginSecrets ?? {}).length > 0,
+      hasCredentialStdin: true,
       trusted: launch.trusted,
       allowInsights: launch.allowInsights,
       allowTeamOnboarding: launch.allowTeamOnboarding,
@@ -2290,133 +2199,8 @@ export class SessionRuntime {
       windowsHide: true,
       detached: process.platform !== 'win32',
     });
-    const providerCredentials = launch.providerCredentials ?? {};
-    if (launch.openaiOAuth || Object.keys(providerCredentials).length > 0 || Object.keys(launch.pluginSecrets ?? {}).length > 0) {
-      child.stdin?.end(buildCredentialEnvelope(launch));
-    } else if (launch.apiKey) child.stdin?.end(`${launch.apiKey}\n`);
-    else child.stdin?.end();
+    child.stdin?.end(buildCredentialEnvelope(launch));
     return child;
-  }
-
-  listProviderCredentials(
-    providerIds: readonly string[],
-    previewProviderIds: readonly string[] = [],
-  ): Promise<ProviderCredentialStatus> {
-    const ids = providerIds.map((providerId) => this.validateProviderId(providerId));
-    const previews = previewProviderIds.map((providerId) => this.validateProviderId(providerId));
-    if (ids.length > 32) throw new Error('too many provider credentials requested');
-    if (previews.some((providerId) => !ids.includes(providerId))) {
-      throw new Error('credential preview provider must be included in the status query');
-    }
-    return this.requestCredentialOperation(ids, (operationId) => ({
-      type: 'list_provider_credentials',
-      operation_id: operationId,
-      provider_ids: ids,
-      ...(previews.length > 0 ? { preview_provider_ids: previews } : {}),
-    }));
-  }
-
-  setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialStatus> {
-    const id = this.validateProviderId(providerId);
-    if (!credential || credential.length > 16_384 || credential.includes('\0')) {
-      throw new Error('invalid provider credential');
-    }
-    return this.requestCredentialOperation([id], (operationId) => ({
-      type: 'set_provider_credential',
-      operation_id: operationId,
-      provider_id: id,
-      credential,
-    }));
-  }
-
-  deleteProviderCredential(providerId: string): Promise<ProviderCredentialStatus> {
-    const id = this.validateProviderId(providerId);
-    return this.requestCredentialOperation([id], (operationId) => ({
-      type: 'delete_provider_credential',
-      operation_id: operationId,
-      provider_id: id,
-    }));
-  }
-
-  testProviderConnection(
-    providerId: string,
-    apiBase: string,
-    model: string,
-    credentialOverride?: string,
-  ): Promise<ProviderConnectionTestResult> {
-    const id = this.validateProviderId(providerId);
-    if (!apiBase || apiBase.length > 2_048 || apiBase.includes('\0')) throw new Error('invalid provider API base');
-    if (model.length > 512 || model.includes('\0')) throw new Error('invalid provider model');
-    if (credentialOverride !== undefined
-      && (!credentialOverride.trim() || credentialOverride.length > 16_384 || credentialOverride.includes('\0'))) {
-      throw new Error('invalid provider credential');
-    }
-    const client = this.client;
-    if (!client) throw new Error(`bridge client not connected (state=${this.state.status})`);
-    const operationId = this.nextCredentialOperationId;
-    this.nextCredentialOperationId = Number.isSafeInteger(operationId + 1) ? operationId + 1 : 1;
-    return new Promise<ProviderConnectionTestResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingProviderConnectionTests.delete(operationId);
-        reject(new Error('provider connection test timed out'));
-      }, 20_000);
-      timer.unref();
-      this.pendingProviderConnectionTests.set(operationId, { providerId: id, resolve, reject, timer });
-      try {
-        client.sendCommand({
-          type: 'test_provider_connection',
-          operation_id: operationId,
-          provider_id: id,
-          api_base: apiBase,
-          model,
-          ...(credentialOverride !== undefined ? { credential_override: credentialOverride } : {}),
-        });
-      } catch (error) {
-        clearTimeout(timer);
-        this.pendingProviderConnectionTests.delete(operationId);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-  }
-
-  private requestCredentialOperation(
-    providerIds: readonly string[],
-    command: (operationId: number) => ClientCommand,
-  ): Promise<ProviderCredentialStatus> {
-    const client = this.client;
-    if (!client) throw new Error(`bridge client not connected (state=${this.state.status})`);
-    const operationId = this.nextCredentialOperationId;
-    this.nextCredentialOperationId = Number.isSafeInteger(operationId + 1)
-      ? operationId + 1
-      : 1;
-
-    return new Promise<ProviderCredentialStatus>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingCredentialOperations.delete(operationId);
-        reject(new Error('provider credential operation timed out'));
-      }, 10_000);
-      timer.unref();
-      this.pendingCredentialOperations.set(operationId, {
-        providerIds: [...providerIds],
-        resolve,
-        reject,
-        timer,
-      });
-      try {
-        client.sendCommand(command(operationId));
-      } catch (error) {
-        clearTimeout(timer);
-        this.pendingCredentialOperations.delete(operationId);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-  }
-
-  private validateProviderId(providerId: string): string {
-    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(providerId)) {
-      throw new Error('invalid provider id');
-    }
-    return providerId;
   }
 
   private captureLogs(child: ChildProcess, secrets: readonly string[] = []): void {
@@ -2498,6 +2282,34 @@ export class SessionRuntime {
       // Attachment binding metadata is host-private and is not a renderer event.
       if (event.type === 'audio_session_context') {
         this.installAudioSessionContext(client, generation, event);
+        return;
+      }
+      if (event.type === 'provider_account_routing') {
+        try { this.opts.onProviderAccountRouting?.(parseProviderAccountRouting(JSON.parse(event.event_json))); }
+        catch { this.diagnostics.add('warn', 'host', 'Invalid account routing event was ignored.'); }
+        return;
+      }
+      if (event.type === 'provider_account_refresh_requested') {
+        const accountId = /^[a-f0-9-]{36}$/.test(event.account_id) ? event.account_id : 'invalid';
+        const identityGeneration = Number.isSafeInteger(event.identity_generation) ? event.identity_generation : 0;
+        const rejectedRevision = Number.isSafeInteger(event.credential_revision) ? event.credential_revision : 0;
+        void (async () => {
+          try {
+            if (!this.opts.renewProviderAccount) throw new Error('Authority unavailable');
+            await this.opts.renewProviderAccount(event.account_id, event.identity_generation, event.credential_revision);
+          } catch (error) {
+            this.diagnostics.add('warn', 'host', diagnosticEvent('provider_account_refresh_failed', {
+              accountId, identityGeneration, rejectedRevision, stage: 'renew', reason: providerAccountRenewFailureCode(error),
+            }));
+            return;
+          }
+          try { await this.refreshProviderAccounts(); }
+          catch {
+            this.diagnostics.add('warn', 'host', diagnosticEvent('provider_account_refresh_failed', {
+              accountId, identityGeneration, rejectedRevision, stage: 'inject', reason: 'injection_failed',
+            }));
+          }
+        })();
         return;
       }
       this.telemetry?.onEvent(event);
@@ -2591,19 +2403,6 @@ export class SessionRuntime {
         this.lastKnownCost = cost;
       }
       this.gitActivity.accept(event);
-      if (event.type === 'openai_oauth_updated') {
-        // A sign-in made inside this engine. The host adopts it and serves it
-        // to every engine, this one included, from then on.
-        this.oauthPersistence = this.oauthPersistence.then(async () => {
-          if (!this.opts.onOpenAiOAuthUpdated) throw new Error('OAuth persistence unavailable');
-          await this.opts.onOpenAiOAuthUpdated(event.session);
-        }).catch(() => {
-          // Never include token-bearing event or arbitrary broker error text.
-          this.diagnostics.add('error', 'host', 'Failed to persist Codex authentication. Sign in again.');
-          this.broadcastClientEvent({ type: 'error', kind: { type: 'internal' }, message: 'Failed to persist Codex authentication. Sign in again.' });
-        });
-        return;
-      }
       if (event.type === 'cron_run_bound') {
         const pending = this.pendingRunBindings.get(event.run_id);
         if (pending) {
@@ -2707,12 +2506,6 @@ export class SessionRuntime {
         for (const providerId of this.configuredCredentialIds) {
           for (const resolve of this.customProviderWaiters.get(providerId) ?? []) resolve();
         }
-      }
-      if (event.type === 'provider_credential_status') {
-        this.handleProviderCredentialStatus(event);
-      }
-      if (event.type === 'provider_connection_tested') {
-        this.handleProviderConnectionTested(event);
       }
       if (event.type === 'context_manifest') {
         const pending = this.pendingDraftModeSnapshot;
@@ -3182,70 +2975,6 @@ export class SessionRuntime {
     this.audioCleanupGenerations.delete(generation);
   }
 
-  private handleProviderCredentialStatus(event: ProviderCredentialStatus): void {
-    if (event.operation_id === CODEX_TOKEN_REQUEST_OPERATION_ID) {
-      void this.answerCodexTokenRequest().catch((error: unknown) => {
-        this.diagnostics.add('warn', 'bridge', `Codex access token was not renewed: ${sanitizeDiagnostic(error)}`);
-      });
-      return;
-    }
-    const pending = this.pendingCredentialOperations.get(event.operation_id);
-    if (pending) {
-      clearTimeout(pending.timer);
-      this.pendingCredentialOperations.delete(event.operation_id);
-    }
-    const configured = new Set(event.configured_provider_ids);
-    const unavailable = new Set(event.unavailable_provider_ids ?? []);
-    const previews = event.credential_previews ?? {};
-    // The configured/unavailable id sets are authoritative regardless of whether
-    // the originating promise is still pending — a LATE (post-timeout) event must
-    // still fold into the cached state, or providerCredentialSnapshot() reports
-    // engine-persisted CLI/TUI credentials as not configured. With no pending
-    // entry the event only speaks to the providers it names.
-    const scope = pending ? pending.providerIds : [...configured, ...unavailable];
-    // Absence is only authoritative on a NON-error event: on an error the
-    // enumeration may be partial, so a provider merely absent from the lists must
-    // NOT have its persisted flag cleared (it may still hold credentials).
-    const clearAbsent = !event.error;
-    for (const providerId of scope) {
-      if (unavailable.has(providerId)) continue;
-      if (configured.has(providerId)) {
-        this.persistedCredentialProviders.add(providerId);
-        const preview = previews[providerId];
-        if (preview) this.credentialPreviews.set(providerId, preview);
-        // A status-only query intentionally omits previews so it can use an
-        // attribute-only Keychain lookup. Preserve any previously fetched
-        // suffix until an explicit preview query replaces it or deletion
-        // clears the provider below.
-      } else if (clearAbsent) {
-        this.persistedCredentialProviders.delete(providerId);
-        this.credentialPreviews.delete(providerId);
-      }
-    }
-    this.credentialStorageEncrypted = event.storage_encrypted;
-    this.activeCredentialProviders = new Set([
-      ...this.runtimeCredentialProviders,
-      ...this.persistedCredentialProviders,
-    ]);
-    if (this.state.status === 'connected') this.broadcast(CH_STATE_CHANGED, this.state);
-    if (pending) {
-      if (event.error) pending.reject(new Error(sanitizeDiagnostic(event.error)));
-      else pending.resolve(event);
-    }
-  }
-
-  private handleProviderConnectionTested(event: ProviderConnectionTestResult): void {
-    const pending = this.pendingProviderConnectionTests.get(event.operation_id);
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    this.pendingProviderConnectionTests.delete(event.operation_id);
-    if (pending.providerId !== event.provider_id) {
-      pending.reject(new Error('provider connection test returned a mismatched provider'));
-      return;
-    }
-    pending.resolve(event);
-  }
-
   sendPrompt(text: unknown, images: unknown = [], turnId?: unknown, visualizationContext?: unknown, source?: PromptSource): void | Promise<void> {
     const id = validateOptionalTurnId(turnId);
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
@@ -3258,9 +2987,7 @@ export class SessionRuntime {
     const context = visualizationContext === undefined || visualizationContext === null
       ? undefined
       : parseVisualizationReference(visualizationContext);
-    const mayNeedCodex = this.opts.resolveOpenAiOAuth !== undefined
-      && (isCodexModel(this.selectedModelReference) || isCodexModel(this.pendingModelSwitch?.model));
-    if (this.opts.resolveProviderCredential || mayNeedCodex) {
+    if (this.opts.resolveProviderAccounts) {
       const generation = this.generation;
       const client = this.requireClient();
       const token = Symbol('prompt hydration');
@@ -3271,12 +2998,6 @@ export class SessionRuntime {
           if (this.pendingModelSwitch) await this.pendingModelSwitch.promise;
           if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
           if (this.selectedModelReference) await this.ensureModelProviderCredential(this.selectedModelReference);
-          if (isCodexModel(this.selectedModelReference) && this.opts.resolveOpenAiOAuth) await this.ensureCodexToken();
-          // Optional Fusion routes must not gate a turn using a healthy main
-          // model. Explicit /fusion still awaits these same cached loads.
-          void this.ensureFusionProviderCredentials(false).catch(() => {
-            this.diagnostics.add('warn', 'bridge', 'Optional Fusion credential preload failed.');
-          });
           if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) throw new Error('Prompt credential loading was interrupted.');
           this.sendPreparedPrompt(prompt, validatedImages, id, context, source);
         } finally {
@@ -3571,13 +3292,6 @@ export class SessionRuntime {
     }
     if ((validated.type === 'set_model' || validated.type === 'run_slash_command') && this.pendingModelSwitch) throw new Error('A model switch is already in progress.');
     assertCommandAllowedDuringTurn(validated, this.turnActive);
-    // The app signs in to Codex and refreshes that one session for every chat.
-    // A chat that signed in by itself would refresh its own copy behind the
-    // app, and two refreshers of one session invalidate each other's tokens.
-    if (validated.type === 'run_slash_command' && this.opts.resolveOpenAiOAuth
-      && /^\/connect\s+(?:chatgpt|openai-chatgpt)$/i.test(validated.raw.trim())) {
-      throw new Error('Sign in to Codex from Settings. Every chat uses that sign-in.');
-    }
     let fusion: ReturnType<typeof fusionInvocation> = null;
     if (validated.type === 'run_slash_command') {
       try { fusion = fusionInvocation(validated.raw); }
@@ -3587,7 +3301,7 @@ export class SessionRuntime {
       }
     }
     if (validated.type === 'run_slash_command' && fusion
-      && (this.opts.resolveProviderCredential || this.opts.resolveOpenAiOAuth)) {
+      && (this.opts.resolveProviderAccounts)) {
       const generation = this.generation;
       const client = this.requireClient();
       const token = Symbol('fusion credential hydration');
@@ -3608,11 +3322,7 @@ export class SessionRuntime {
           if (!this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) {
             throw new Error('Fusion credential loading was interrupted.');
           }
-          const credentialSelection = fusionCredentialSelection(selection, fusion,
-            parent ? (parent.current.includes('/') ? parent.current.slice(0, parent.current.indexOf('/'))
-              : resolveProviderIdForModel(parent.current)) : undefined);
-          await this.ensureFusionCodexToken(token, credentialSelection);
-          await this.ensureFusionProviderCredentials(true, credentialSelection);
+          await this.refreshProviderAccounts();
           if (parent && (await this.scheduledModelCatalog()).current !== parent.current) {
             throw new Error('The conversation model changed while preparing Fusion; submit the command again.');
           }
@@ -3650,15 +3360,8 @@ export class SessionRuntime {
         throw new Error('Bypass Permissions mode was not accepted');
       }
     }
-    if (validated.type === 'set_model' && (this.opts.resolveProviderCredential || this.opts.resolveOpenAiOAuth || this.opts.onModelSelected)) {
+    if (validated.type === 'set_model' && (this.opts.resolveProviderAccounts || this.opts.onModelSelected)) {
       return this.switchModel(validated.model);
-    }
-    // Other slash commands may run a Codex turn. Serving the token here is
-    // best effort: a command that never needs it must still run.
-    if (validated.type === 'run_slash_command' && isCodexModel(this.selectedModelReference) && this.opts.resolveOpenAiOAuth) {
-      await this.ensureCodexToken().catch((error) => {
-        this.diagnostics.add('warn', 'bridge', `Codex access token was not served for a slash command: ${sanitizeDiagnostic(error)}`);
-      });
     }
     if (validated.type === 'set_permission_mode' && (this.opts.getSavedPermissionMode || this.opts.onPermissionModeSelected)) {
       return this.applyPermissionMode(validated.mode, true);
@@ -3733,199 +3436,33 @@ export class SessionRuntime {
 
   private nextFusionResolutionId = Date.now();
 
-  private async ensureProviderCredentialCached(providerId: string): Promise<void> {
-    if (!this.opts.resolveProviderCredential) return;
-    const existing = this.pendingRuntimeCredentialLoads.get(providerId);
-    if (existing) return existing;
-    const generation = this.generation;
+  private async ensureModelProviderCredential(_model: string): Promise<void> {
+    if (this.opts.resolveProviderAccounts) await this.refreshProviderAccounts();
+  }
+
+  private nextProviderAccountsOperation = Date.now();
+  private accountBindings = new Set<string>();
+  async refreshProviderAccounts(): Promise<void> {
+    if (this.state.status !== 'connected' || !this.opts.resolveProviderAccounts) return;
+    const launch = await this.opts.resolveProviderAccounts();
+    if (!launch) return;
+    for (const account of launch.providerAccounts.accounts) this.accountBindings.add(account.executionBindingId);
     const client = this.requireClient();
-    let loading!: Promise<void>;
-    loading = (async () => {
-      for (;;) {
-        const writing = this.providerCredentialWrites.get(providerId);
-        if (writing) await writing;
-        if (generation !== this.generation || client !== this.client) {
-          throw new Error('provider credential loading was interrupted');
-        }
-        if (this.runtimeCredentialProviders.has(providerId) && !this.invalidatedProviderCredentials.has(providerId)) return;
-        const epoch = this.providerCredentialEpochs.get(providerId) ?? 0;
-        let credential: string | undefined;
-        try { credential = await this.opts.resolveProviderCredential!(providerId); }
-        catch (error) {
-          if (epoch !== (this.providerCredentialEpochs.get(providerId) ?? 0)) continue;
-          throw error;
-        }
-        if (generation !== this.generation || client !== this.client) {
-          throw new Error('provider credential loading was interrupted');
-        }
-        if (epoch !== (this.providerCredentialEpochs.get(providerId) ?? 0)) continue;
-        try {
-          if (credential) await this.cacheProviderCredential(providerId, credential);
-          else if (this.invalidatedProviderCredentials.has(providerId)) await this.clearCachedProviderCredential(providerId);
-        } catch (error) {
-          if (epoch !== (this.providerCredentialEpochs.get(providerId) ?? 0)) continue;
-          throw error;
-        }
-        if (epoch === (this.providerCredentialEpochs.get(providerId) ?? 0)) return;
-      }
-    })().finally(() => {
-      if (this.pendingRuntimeCredentialLoads.get(providerId) === loading) {
-        this.pendingRuntimeCredentialLoads.delete(providerId);
-      }
-    });
-    this.pendingRuntimeCredentialLoads.set(providerId, loading);
-    return loading;
-  }
-
-  private async ensureFusionProviderCredentials(explicit: boolean, selected?: FusionStrategySelectionDto): Promise<void> {
-    if (!this.opts.resolveProviderCredential) return;
     const generation = this.generation;
-    const client = this.requireClient();
-    if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
-    // Optional default-route warming never loads the other saved strategies.
-    const selection = selected ?? await this.resolveFusionStrategy().then((resolved) => fusionCredentialSelection(resolved)).catch((error) => {
-      if (explicit) throw error;
-      return undefined;
+    const operationId = ++this.nextProviderAccountsOperation;
+    await new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => { clearTimeout(timer); client.off('event', onEvent); error ? reject(error) : resolve(); };
+      const onEvent = (event: ClientEvent) => {
+        if (event.type !== 'provider_accounts_updated' || event.operation_id !== operationId) return;
+        if (generation !== this.generation || client !== this.client) { finish(new Error('Account update interrupted.')); return; }
+        finish(event.error ? new Error('Provider account runtime update failed.') : undefined);
+      };
+      const timer = setTimeout(() => finish(new Error('Provider account runtime update timed out.')), 30_000);
+      client.on('event', onEvent);
+      try { client.sendCommand({ type: 'provider_accounts', operation_id: operationId, action: 'inject_credentials',
+        request_json: JSON.stringify(launch.providerAccounts), credential: JSON.stringify(launch.providerAccountCredentials) }); }
+      catch { finish(new Error('Provider account runtime update failed.')); }
     });
-    if (!selection) return;
-    if (generation !== this.generation || client !== this.client) throw new Error('Fusion credential loading was interrupted.');
-    await Promise.all(resolveFusionCredentialProviderIds(this.credentialRoutingSettings, selection, explicit, this.latestOfficialProviderCatalog)
-      .filter((providerId) => providerId !== 'openai-chatgpt')
-      .map((providerId) => this.ensureProviderCredentialCached(providerId)));
-  }
-
-  private async ensureModelProviderCredential(model: string): Promise<void> {
-    if (!this.opts.resolveProviderCredential) return;
-    const generation = this.generation;
-    const client = this.requireClient();
-    if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
-    if (generation !== this.generation || client !== this.client) throw new Error('Provider credential loading was interrupted.');
-    await Promise.all(resolveModelCredentialProviderIds(model, this.credentialRoutingSettings, this.latestOfficialProviderCatalog)
-      .map((providerId) => this.ensureProviderCredentialCached(providerId)));
-  }
-
-  private async ensureFusionCodexToken(token: symbol, selection: FusionStrategySelectionDto): Promise<void> {
-    const generation = this.generation;
-    const client = this.requireClient();
-    const assertCurrent = () => {
-      if (this.disposed || this.archiving || generation !== this.generation
-        || client !== this.client || !this.pendingPromptHydrations.has(token)) {
-        throw new Error('Fusion credential loading was interrupted.');
-      }
-    };
-    if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
-    assertCurrent();
-    if (!resolveFusionCredentialProviderIds(this.credentialRoutingSettings, selection, true).includes(CODEX_PROVIDER_ID)) return;
-    if (!this.opts.resolveOpenAiOAuth) return;
-    const session = await this.opts.resolveOpenAiOAuth();
-    assertCurrent();
-    if (!session) throw new Error(CODEX_SIGN_IN_REQUIRED);
-    await this.serveCodexToken(session);
-    assertCurrent();
-  }
-
-  /** Give this engine the current Codex access token before Codex work. */
-  private async ensureCodexToken(): Promise<void> {
-    const session = await this.opts.resolveOpenAiOAuth!();
-    if (!session) throw new Error(CODEX_SIGN_IN_REQUIRED);
-    await this.serveCodexToken(session);
-  }
-
-  /**
-   * The engine's Codex access token expired or was rejected. Serve a newer
-   * one: the host's current token if this engine has not seen it yet,
-   * otherwise a renewed one.
-   */
-  private async answerCodexTokenRequest(): Promise<void> {
-    const current = await this.opts.resolveOpenAiOAuth?.();
-    const next = current && current.access_token !== this.servedCodexToken
-      ? current
-      : await this.opts.renewOpenAiOAuth?.();
-    if (next) await this.serveCodexToken(next);
-  }
-
-  /**
-   * Serve `session`'s access token from this engine, or stop serving one.
-   * Only a packaged engine takes it: an unpackaged one would store it as an
-   * API key.
-   */
-  async serveCodexToken(session: OpenAiOAuthSession | undefined): Promise<void> {
-    if (this.opts.isPackaged !== true || this.state.status !== 'connected') return;
-    if (!session) {
-      if (this.servedCodexToken === undefined) return;
-      this.servedCodexToken = undefined;
-      await this.deleteProviderCredential(CODEX_PROVIDER_ID);
-      return;
-    }
-    if (session.access_token === this.servedCodexToken) return;
-    const credential = JSON.stringify(codexAccessToken(session));
-    await this.requestCredentialOperation([CODEX_PROVIDER_ID], (operationId) => ({
-      type: 'set_provider_credential',
-      operation_id: operationId,
-      provider_id: CODEX_PROVIDER_ID,
-      credential,
-    }));
-    this.servedCodexToken = session.access_token;
-  }
-
-  hasCachedProviderCredential(providerId: string): boolean {
-    return this.runtimeCredentialProviders.has(providerId);
-  }
-
-  /** Invalidate slow reads as well as keys already acknowledged by the engine. */
-  async refreshCachedProviderCredential(providerId: string, credential?: string): Promise<void> {
-    this.providerCredentialEpochs.set(providerId, (this.providerCredentialEpochs.get(providerId) ?? 0) + 1);
-    this.invalidatedProviderCredentials.add(providerId);
-    // Keep the invalidation across transport loss; connectBridgeClient reconciles
-    // a cached key before a recovered living engine can accept another prompt.
-    if (this.state.status !== 'connected') return;
-    if (credential !== undefined) await this.cacheProviderCredential(providerId, credential);
-    else await this.clearCachedProviderCredential(providerId);
-  }
-
-  private writeCachedProviderCredential(providerId: string, credential: string | undefined): Promise<void> {
-    const generation = this.generation;
-    const client = this.client;
-    if (!client) throw new Error(`bridge client not connected (state=${this.state.status})`);
-    const epoch = this.providerCredentialEpochs.get(providerId) ?? 0;
-    const assertCurrent = (): void => {
-      if (generation !== this.generation || client !== this.client
-        || epoch !== (this.providerCredentialEpochs.get(providerId) ?? 0)) {
-        throw new Error('provider credential update was interrupted');
-      }
-    };
-    const previous = this.providerCredentialWrites.get(providerId) ?? Promise.resolve();
-    const operation = previous.catch(() => undefined).then(async () => {
-      assertCurrent();
-      const status = credential === undefined
-        ? await this.deleteProviderCredential(providerId)
-        : await this.setProviderCredential(providerId, credential);
-      assertCurrent();
-      if (status.configured_provider_ids.includes(providerId) !== (credential !== undefined)) {
-        throw new Error('provider credential update was not confirmed');
-      }
-      this.persistedCredentialProviders.delete(providerId);
-      if (credential === undefined) this.runtimeCredentialProviders.delete(providerId);
-      else this.runtimeCredentialProviders.add(providerId);
-      this.invalidatedProviderCredentials.delete(providerId);
-      this.activeCredentialProviders = new Set([
-        ...this.runtimeCredentialProviders,
-        ...this.persistedCredentialProviders,
-      ]);
-    });
-    const completion = operation.finally(() => {
-      if (this.providerCredentialWrites.get(providerId) === completion) this.providerCredentialWrites.delete(providerId);
-    });
-    this.providerCredentialWrites.set(providerId, completion);
-    return completion;
-  }
-
-  async cacheProviderCredential(providerId: string, credential: string): Promise<void> {
-    await this.writeCachedProviderCredential(providerId, credential);
-  }
-
-  async clearCachedProviderCredential(providerId: string): Promise<void> {
-    await this.writeCachedProviderCredential(providerId, undefined);
   }
 
   /** Remember a host-verified selection when reusing a connected runtime. */
@@ -4221,18 +3758,7 @@ export class SessionRuntime {
     this.credentialRoutingSettings = undefined;
     this.pendingPromptHydrations.clear();
     this.clearTurnInteractions(true);
-    for (const pending of this.pendingCredentialOperations.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('bridge credential operation was interrupted'));
-    }
-    this.pendingCredentialOperations.clear();
-    this.pendingRuntimeCredentialLoads.clear();
-    this.providerCredentialWrites.clear();
-    for (const pending of this.pendingProviderConnectionTests.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('provider connection test was interrupted'));
-    }
-    this.pendingProviderConnectionTests.clear();
+
   }
 
   private async stopBridge(): Promise<void> {
@@ -4260,16 +3786,12 @@ export class SessionRuntime {
     if (mediaStopTimer) clearTimeout(mediaStopTimer);
     if (!mediaStopped) this.diagnostics.add('warn', 'bridge', 'native media cleanup is still awaiting confirmation');
     await this.oauthPersistence;
-    this.servedCodexToken = undefined;
     this.liveSideChats.clear();
     this.pendingSideCreates.clear();
     this.connectionLockfilePath = null;
     this.clearPendingConnectionOperations();
     this.activeWorkspace = undefined;
     this.activeWorkspaceTrusted = false;
-    this.runtimeCredentialProviders.clear();
-    this.persistedCredentialProviders.clear();
-    this.activeCredentialProviders.clear();
     this.credentialStorageEncrypted = false;
     this.gitActivity.reset();
     this.disconnectedForegroundPending = false;

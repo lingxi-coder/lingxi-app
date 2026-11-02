@@ -61,6 +61,7 @@ internal class FakeRemoteSessionPort : RemoteSessionPort {
     val sentImages = mutableListOf<List<RemotePromptImageFfi>>()
     var fetchGate: CompletableDeferred<Unit>? = null
     var sendGate: CompletableDeferred<Unit>? = null
+    var providerAccountGate: CompletableDeferred<Unit>? = null
     var permissionFailure: Exception? = null
     var modelListRequests = 0
 
@@ -93,6 +94,11 @@ internal class FakeRemoteSessionPort : RemoteSessionPort {
     override suspend fun setModel(model: String) { calls += "model:$model" }
     override suspend fun setReasoning(selection: ReasoningSelectionDto) { calls += "reasoning" }
     override suspend fun setPermissionMode(mode: RemotePermissionModeFfi) { calls += "mode:$mode" }
+    override suspend fun providerAccountCommand(requestJson: String, credential: String?): String {
+        calls += "providerAccount"
+        providerAccountGate?.await()
+        return "{}"
+    }
     override suspend fun listModels(): RemoteModelsFfi {
         modelListRequests++
         return RemoteModelsFfi(listOf("a"), "a", emptyList())

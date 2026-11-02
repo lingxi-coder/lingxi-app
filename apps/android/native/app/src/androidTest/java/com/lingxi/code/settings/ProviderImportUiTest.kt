@@ -41,20 +41,18 @@ class ProviderImportUiTest {
         showImporter()
         val sourceJson = """{"providers":{"custom":{"type":"openai","baseUrl":"https://api.example.test","models":["model"],"apiKey":"fixture-hidden"}}}"""
         val parsed = parseProviderImport(sourceJson, org.json.JSONObject()).entries.single()
-        org.junit.Assert.assertNull("Native JSON parser must accept the fixture", parsed.error)
-        org.junit.Assert.assertTrue("Native JSON parser must extract the fixture credential", parsed.credential != null)
+        org.junit.Assert.assertNotNull("Configuration import must reject embedded credentials", parsed.error)
         rule.onNodeWithText(label(R.string.settings_parity_import_json)).performTextInput(sourceJson)
         rule.onNodeWithText(label(R.string.settings_parity_import_preview)).performScrollTo().performClick()
         rule.onNodeWithText("custom").assertExists()
         rule.onAllNodesWithText("fixture-hidden",substring=true).assertCountEquals(0)
-        rule.onNodeWithTag("provider-import-secure-credential").performScrollTo().assertIsDisplayed()
+        rule.onNodeWithText(label(R.string.provider_account_import_without_credentials)).performScrollTo().assertIsDisplayed()
     }
-    @Test fun nativeEnvironmentReferenceUsesIcuCompatiblePattern() {
+    @Test fun environmentAuthenticationIsRejectedByConfigurationImport() {
         val json = """{"providers":{"custom":{"type":"openai","baseUrl":"https://api.example.test","models":["model"],"apiKey":"{env:PROVIDER_API_KEY}"}}}"""
         val parsed = parseProviderImport(json, org.json.JSONObject()).entries.single()
-        org.junit.Assert.assertNull(parsed.error)
-        org.junit.Assert.assertNull(parsed.credential)
-        org.junit.Assert.assertEquals("PROVIDER_API_KEY", parsed.definition.getString("apiKeyEnv"))
+        org.junit.Assert.assertNotNull(parsed.error)
+        org.junit.Assert.assertFalse(parsed.definition.toString().contains("PROVIDER_API_KEY"))
     }
 
     @Test fun invalidInputRemainsEditableAfterValidationFailure() {

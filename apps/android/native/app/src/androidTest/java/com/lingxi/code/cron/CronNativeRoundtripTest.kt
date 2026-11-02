@@ -78,7 +78,7 @@ class CronNativeRoundtripTest {
                     config = AndroidEngineLaunchConfigFfi(
                         appVersion = null,
                         appAgentHost = false,
-                        apiBase = "https://invalid.example", apiKey = "", model = "", sessionMode = SessionModeDto.CODE,
+                        apiBase = "https://invalid.example", model = "", sessionMode = SessionModeDto.CODE,
                         initialSessionId = id,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,
                         providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":[]}"""),

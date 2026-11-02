@@ -334,6 +334,35 @@ enum ModelDisplay {
         }
     }
 
+    /// Keep OpenAI billing channels adjacent and show a usable channel first.
+    /// Every row retains its exact execution binding; no auth substitution.
+    static func pickerSections(for references: [String],
+                               detailsByReference: [String: ModelRuntimeDetails] = [:],
+                               eligibleReferences: Set<String>) -> [ModelProviderSection] {
+        let original = sections(for: references, detailsByReference: detailsByReference)
+        var order: [String] = []
+        var grouped: [String: [ModelProviderSection]] = [:]
+        for section in original {
+            let logicalID = section.providerId == "openai-chatgpt" ? "openai" : section.providerId
+            if grouped[logicalID] == nil { order.append(logicalID) }
+            grouped[logicalID, default: []].append(section)
+        }
+        return order.flatMap { logicalID in
+            let siblings = grouped[logicalID, default: []]
+            let available = siblings.filter { $0.models.contains { eligibleReferences.contains($0.reference) } }
+            let unavailable = siblings.filter { !$0.models.contains { eligibleReferences.contains($0.reference) } }
+            return (available + unavailable).map { section in
+                let name: String
+                switch section.providerId {
+                case "openai-chatgpt": name = "OpenAI · " + String(localized: "ChatGPT subscription")
+                case "openai": name = "OpenAI · " + String(localized: "API key")
+                default: name = section.name
+                }
+                return ModelProviderSection(providerId: section.providerId, name: name, models: section.models)
+            }
+        }
+    }
+
     /// Narrow the engine's references to those matching `query`, preserving the
     /// engine's order so `sections(for:)` still groups them exactly as before.
     ///

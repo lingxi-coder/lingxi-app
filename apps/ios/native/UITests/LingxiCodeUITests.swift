@@ -906,12 +906,15 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(scrollUntilHittable(deepSeekPreset, in: app.collectionViews.firstMatch), app.debugDescription)
         deepSeekPreset.tap()
 
-        let keyField = app.secureTextFields["provider.api-key"]
-        let visibility = app.buttons["provider.api-key.visibility"]
-        let clear = app.buttons["provider.api-key.clear"]
+        let accounts = app.buttons["provider.accounts"]
+        XCTAssertTrue(accounts.waitForExistence(timeout: 5), app.debugDescription)
+        accounts.tap()
+        let addAccount = app.buttons["provider.account.add"]
+        XCTAssertTrue(addAccount.waitForExistence(timeout: 5), app.debugDescription)
+        addAccount.tap()
+        let keyField = app.secureTextFields["provider.account.api-key"]
         XCTAssertTrue(keyField.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(visibility.exists)
-        XCTAssertFalse(clear.exists)
+        XCTAssertFalse(app.textFields["provider.account.api-key"].exists)
         let editorShot = XCTAttachment(screenshot: app.screenshot())
         editorShot.name = "模型设置-编辑提供商"
         editorShot.lifetime = .keepAlways
@@ -919,11 +922,12 @@ final class LingxiCodeUITests: XCTestCase {
 
         keyField.tap()
         keyField.typeText("sk-ui-draft")
-        XCTAssertTrue(visibility.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertLessThanOrEqual(keyField.frame.maxX, visibility.frame.minX + 0.5)
-        XCTAssertFalse(clear.exists)
+        XCTAssertTrue(keyField.exists)
+        XCTAssertFalse(app.textFields["provider.account.api-key"].exists)
 
         app.keyboards.buttons["return"].tap()
+        app.buttons["provider.account.cancel"].tap()
+        app.navigationBars["账号"].buttons["DeepSeek"].tap()
         // The editor is pushed inside the add modal: back to the preset list,
         // then cancel the modal.
         app.navigationBars["DeepSeek"].buttons["添加 LLM"].tap()

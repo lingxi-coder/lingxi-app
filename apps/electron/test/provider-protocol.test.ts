@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { protocolDefaults, protocolSettingsPatch } from '../src/renderer/components/settings/pages/ProviderProtocol';
 import { PROVIDER_PROTOCOLS } from '../src/shared/providerProtocols';
 
-test('protocol setting changes only the selected account in its destination layer', () => {
+test('protocol setting changes only the selected provider in Host routing', () => {
   const routing = { aliases: { fast: 'deepseek/deepseek-flash' }, retry: { maxAttempts: 2 },
     defaultProtocols: { openai: 'open_ai_chat', deepseek: 'open_ai_chat' } };
   const patch = protocolSettingsPatch(routing, 'deepseek', 'anthropic_messages');

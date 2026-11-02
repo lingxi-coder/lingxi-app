@@ -72,9 +72,8 @@ internal fun ProviderBulkImport(bridge: SettingsEngineBridge, layer: String) {
                         Text(entry.id,modifier=Modifier.weight(1f))
                     }
                     if (entry.conflict) Text(settingsLabel("Replaces an existing profile when selected."))
-                    entry.error?.let {Text(it,color=MaterialTheme.colorScheme.error)}
+                    entry.error?.let {Text(settingsLabel(it),color=MaterialTheme.colorScheme.error)}
                     entry.warnings.forEach {Text(settingsLabel(it))}
-                    if (entry.credential != null) Text(settingsLabel("API key detected; it will be stored separately in secure credential storage."), modifier=Modifier.testTag("provider-import-secure-credential"))
                     if (entry.error==null) SelectionContainer {Text(entry.definition.toString(2))}
                 }
                 Button(enabled=!locked && !busy && selected.values.any {it},onClick={coroutine.launch {

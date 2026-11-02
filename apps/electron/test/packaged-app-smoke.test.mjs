@@ -16,7 +16,7 @@ import {
   enterPackagedProjectName,
   createPackagedSettings,
   isExpectedBootstrapPromptPlaceholder,
-  isSafeProviderCredentialSnapshot,
+  isSafeProviderAccountSnapshot,
   runtimePathsForHome,
   runPackagedCredentialStability,
   sanitizePackagedAppEnvironment,
@@ -216,29 +216,20 @@ test('runtime paths stay inside the isolated HOME tree', () => {
   assert.equal(paths.diagnosticsPath, join(home, APP_USER_DATA_SUBPATH, 'logs', 'desktop.jsonl'));
 });
 
-test('packaged bootstrap accepts configured providers but rejects secret-bearing metadata', () => {
-  assert.equal(isSafeProviderCredentialSnapshot([
-    { providerId: 'anthropic', configured: false, encryptionAvailable: true },
-    { providerId: 'openai', configured: true, encryptionAvailable: true, credentialPreview: '••••abcd' },
-  ]), true);
-  assert.equal(isSafeProviderCredentialSnapshot([
-    { providerId: 'anthropic', configured: false, encryptionAvailable: true },
-    { providerId: 'openai', configured: true, encryptionAvailable: true, credentialPreview: 'plain-secret' },
-  ]), false);
-  assert.equal(isSafeProviderCredentialSnapshot([
-    { providerId: 'openai', configured: true, encryptionAvailable: true, apiKey: 'secret' },
-  ]), false);
-  assert.equal(isSafeProviderCredentialSnapshot(undefined), false);
-});
-
-test('packaged Codex metadata accepts account email while rejecting OAuth secrets', () => {
-  const metadata = { providerId: 'openai-chatgpt', configured: true, encryptionAvailable: true, codexAccountEmail: 'user@example.com' };
-  assert.equal(isSafeProviderCredentialSnapshot([metadata]), true);
-  assert.equal(isSafeProviderCredentialSnapshot([{ ...metadata, access_token: 'secret' }]), false);
-  assert.equal(isSafeProviderCredentialSnapshot([{ ...metadata, refresh_token: 'secret' }]), false);
-  assert.equal(isSafeProviderCredentialSnapshot([{ ...metadata, codexAccountEmail: { access_token: 'secret' } }]), false);
-  assert.equal(isSafeProviderCredentialSnapshot([{ ...metadata, providerId: 'openai' }]), false);
-  assert.equal(isSafeProviderCredentialSnapshot([{ ...metadata, codexAccountEmail: 'secret' }]), false);
+test('packaged bootstrap validates account metadata and rejects nested secret payloads', () => {
+  const account = { accountId: 'account-id', providerId: 'openai', displayName: 'Test account', authKind: 'oauth',
+    executionBindingId: 'openai-chatgpt', credentialRef: { storeScope: 'test-scope', secretRef: 'acct.test' },
+    enabled: true, userPriority: 0, configRevision: 1, identityGeneration: 1 };
+  const snapshot = { storeScope: 'test-scope', configRevision: 1, accounts: [account], health: [], modelEntitlements: [], modelAvailability: [] };
+  assert.equal(isSafeProviderAccountSnapshot(snapshot), true);
+  const scopedHealth = [{ accountId: account.accountId, identityGeneration: 1, scopeKind: 'model', scopeId: 'test-model', unavailableUntilMs: 42, reason: 'rate_limited' }];
+  assert.equal(isSafeProviderAccountSnapshot({ ...snapshot, scopedHealth }), true);
+  assert.equal(isSafeProviderAccountSnapshot({ ...snapshot, scopedHealth: [{ ...scopedHealth[0], access_token: 'secret' }] }), false);
+  assert.equal(isSafeProviderAccountSnapshot({ ...snapshot, accounts: [] }), true);
+  assert.equal(isSafeProviderAccountSnapshot(undefined), false);
+  assert.equal(isSafeProviderAccountSnapshot({ ...snapshot, access_token: 'secret' }), false);
+  assert.equal(isSafeProviderAccountSnapshot({ ...snapshot, accounts: [{ ...account, refresh_token: 'secret' }] }), false);
+  assert.equal(isSafeProviderAccountSnapshot({ ...snapshot, accounts: [{ ...account, credentialRef: { ...account.credentialRef, apiKey: 'secret' } }] }), false);
 });
 
 test('packaged renderer accepts bootstrap progress and verifies an already-ready composer', () => {

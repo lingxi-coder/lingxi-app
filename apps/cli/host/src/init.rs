@@ -12,7 +12,7 @@
 //! 1. `platform-posix` provides `HttpTransport` + `Clock` +
 //!    `SecureStorage`.
 //! 2. The llm-runtime transport bridge is built from `cfg.api_base`
-//!    (default `https://api.anthropic.com`) + `cfg.api_key`.
+//!    (default `https://api.anthropic.com`); credentials use named provider accounts.
 //! 3. `llm_runtime::oauth::anthropic::ClaudeAiOAuthClient` wraps the credential manager so
 //!    `/login` + `/logout` have a real handle.
 //! 4. `orchestrator::ConversationOrchestrator` is constructed with
@@ -93,6 +93,8 @@ pub struct TuiBuild {
     pub(crate) captured_resume: Option<CapturedTuiResume>,
     /// Source identity for a read-only resume without a transcript writer.
     pub(crate) resume_transcript_path: Option<std::path::PathBuf>,
+    /// Exact launch settings and managed policy cache used by account actions.
+    pub provider_account_config: Arc<DesktopConfig>,
     pub initial_draft: Option<String>,
     pub message_anchor: Option<String>,
     /// Reload the exact Fusion sources admitted by this CLI session.
@@ -590,19 +592,6 @@ fn load_settings_plans_directory(
         .filter(|d| !d.trim().is_empty())
 }
 
-/// Load merged `settings.apiKeyHelper` (project + user + env layers), blank
-/// filtered. The live credential provider invokes the helper only when no
-/// higher-priority Anthropic credential was configured.
-fn load_settings_api_key_helper(
-    project_dir: &std::path::Path,
-    include_user: bool,
-    include_project: bool,
-) -> Option<String> {
-    load_scoped_settings_at(project_dir, include_user, include_project)
-        .and_then(|eff| eff.settings.api_key_helper)
-        .filter(|d| !d.trim().is_empty())
-}
-
 /// Load the merged `settings.companyAnnouncements` (project + user + env
 /// layers) — the startup announcement strings CC shows via `LVs`/`oip()`.
 /// `None` when unset; the TUI composition root selects one (memoized) and
@@ -663,7 +652,7 @@ fn load_routing(
 /// mirrors the concrete read the pre-lift `build_runtime` made:
 ///
 /// - `api_base` ← `resolve_api_base()` (env `LINGXI_API_BASE_URL`).
-/// - `api_key` ← env `ANTHROPIC_API_KEY` (empty string is valid).
+/// - model credentials are resolved only from named provider accounts.
 /// - `cwd` ← `std::env::current_dir()` (the process has already `chdir`'d into
 ///   any `--cwd`).
 /// - `lingxi_home` ← config-home (`$LINGXI_CONFIG_DIR` else `~/.claude`, via
@@ -777,7 +766,7 @@ pub(crate) fn resolve_desktop_config_at(
     // settings-derived value already folds the `LINGXI_MODEL` settings-env layer
     // (kept — deliberate lingxi design); the literal `ANTHROPIC_MODEL` name is
     // added here because this repo keeps `ANTHROPIC_*` env names verbatim
-    // (ANTHROPIC_API_KEY, ANTHROPIC_DEFAULT_*_MODEL) and CC honors it directly.
+    // (ANTHROPIC_DEFAULT_*_MODEL) and CC honors it directly.
     if let Some(persisted) = load_settings_model(&cwd, incl_user, incl_project) {
         default_model = persisted;
     }
@@ -867,45 +856,18 @@ pub(crate) fn resolve_desktop_config_at(
         __desktop_config.request_identity = None;
         __desktop_config.anthropic_compatible_version = None;
         __desktop_config.native_thinking_display = None;
-        __desktop_config.oauth_environment_lookup = None;
         __desktop_config.enable_automation_scheduler = true;
         __desktop_config.host_workspace_trusted = None;
         __desktop_config.insights_policy_gate = None;
         __desktop_config.mod_render_surface = None;
-        // Real CLI session: the machine's keychain and env ARE legitimate
-        // credential sources here.
+        // Named accounts in the actual native credential domain are the only
+        // model credential authority for CLI sessions.
         __desktop_config.isolated_credential_storage = false;
         __desktop_config.credential_storage_policy =
             lingxi_core::host::CredentialStoragePolicy::NativePreferred;
         __desktop_config.injected_plugin_secrets = std::collections::BTreeMap::new();
         __desktop_config.api_base = api_base;
         __desktop_config.anthropic_client_metadata = anthropic_client_metadata;
-        __desktop_config.api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-        __desktop_config.api_key_source = llm_runtime::CredentialSource::Environment {
-            variable: "ANTHROPIC_API_KEY".into(),
-        };
-        __desktop_config.api_key_helper = if restricted {
-            flag_settings
-                .as_ref()
-                .and_then(|settings| settings.api_key_helper.clone())
-                .filter(|helper| !helper.trim().is_empty())
-        } else {
-            load_settings_api_key_helper(&cwd, incl_user, incl_project)
-        };
-        // (M13) Host-launcher OAuth forcing is claude-code's `KWr()`
-        // (@228931361) — a pure env predicate that `zb()` (@228933355)
-        // evaluates at credential-resolution time, so the ENGINE reads it
-        // there and every entrypoint agrees (incl. `mcp serve` /
-        // `auto-mode-setup`, which never build a runtime through
-        // `build_runtime_from_config`). Nothing on the CLI side declares it: a
-        // managed `forceLoginMethod` policy is NOT that predicate and never
-        // participates in credential precedence.
-        __desktop_config.managed_oauth_only = false;
-        // (M13) FD-inherited key presence — claude-code's managed/remote
-        // launcher contract. Env presence only; LingXi never reads the FD.
-        __desktop_config.anthropic_key_fd_present =
-            std::env::var("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR")
-                .is_ok_and(|v| !v.trim().is_empty());
         __desktop_config.cwd = cwd.clone();
         // The CLI is a local host. Native Windows mapped-drive roots need a
         // separate filesystem-boundary resolver before they can be advertised.
@@ -1055,10 +1017,6 @@ pub(crate) fn resolve_desktop_config_at(
             argv.permission_mode.is_some() || argv.dangerously_skip_permissions;
         __desktop_config.allow_dangerously_skip_permissions =
             argv.allow_dangerously_skip_permissions;
-        // Plan 3c: the tui supplies the masked-key prompt via the credential
-        // store + `pump_store_provider_key`, not this engine port — so the
-        // engine `/connect` text-command path uses the headless no-op default.
-        __desktop_config.connect_prompt = None;
         // CLI `--system-prompt` / `--system-prompt-file` (print-mode only):
         // override the assembled system prompt for the session. `None` in
         // interactive mode so the LINGXI.md hierarchy prompt is used unchanged.
@@ -1600,7 +1558,9 @@ pub(crate) async fn capture_tui_resume(
                 .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
         let captured_mode = validate_resume_mode(&content, session_id, expected_mode)?;
         if captured_mode != mode {
-            return Err(InitError::Orchestrator("session_mode_mismatch: session mode changed during resume".into()));
+            return Err(InitError::Orchestrator(
+                "session_mode_mismatch: session mode changed during resume".into(),
+            ));
         }
         (content, loaded, Some(lease))
     } else {
@@ -1642,11 +1602,13 @@ pub(crate) fn validate_resume_mode(
     session_id: uuid::Uuid,
     expected: Option<lingxi_core::host::session_context::ConversationMode>,
 ) -> Result<lingxi_core::host::session_context::ConversationMode, InitError> {
-    let mode = session::JsonlWriter::fixed_session_mode_from_source(source, &session_id.to_string())
-        .map_err(|error| InitError::Orchestrator(format!("invalid session mode: {error}")))?;
+    let mode =
+        session::JsonlWriter::fixed_session_mode_from_source(source, &session_id.to_string())
+            .map_err(|error| InitError::Orchestrator(format!("invalid session mode: {error}")))?;
     if expected.is_some_and(|expected| expected != mode) {
         return Err(InitError::Orchestrator(format!(
-            "session_mode_mismatch: session {session_id} belongs to {}", mode.as_str()
+            "session_mode_mismatch: session {session_id} belongs to {}",
+            mode.as_str()
         )));
     }
     Ok(mode)
@@ -1811,6 +1773,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     )?;
 
     let flag_settings = cfg.flag_settings.clone();
+    let provider_account_config = Arc::new(cfg.clone());
     let fusion_cfg = cfg.clone();
     let fusion_layers = Arc::new(move || {
         harness_runtime::desktop::fusion_settings_layers_for_config(&fusion_cfg)
@@ -1846,6 +1809,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     Ok(TuiBuild {
         captured_resume,
         resume_transcript_path,
+        provider_account_config,
         initial_draft: argv.resolve_prefill(),
         message_anchor: argv.deep_link_message.clone(),
         fusion_layers,

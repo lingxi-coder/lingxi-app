@@ -419,8 +419,13 @@ object ProviderModelVisibilityRules {
         visibilityByProviderId: Map<String, ProviderModelVisibility>,
     ): List<ModelOption> =
         models.filter { model ->
-            val visibility = visibilityByProviderId[model.providerId] ?: return@filter true
-            val catalogModelIds = visibility.catalogModelIds
+            val exactVisibility = visibilityByProviderId[model.providerId]
+            val visibility = exactVisibility
+                ?: (if (model.providerId == "openai-chatgpt") visibilityByProviderId["openai"]
+                    else if (model.providerId == "openai") visibilityByProviderId["openai-chatgpt"] else null)
+                ?: return@filter true
+            // A sibling shares picker preferences, never its binding-specific catalog.
+            val catalogModelIds = exactVisibility?.catalogModelIds
             if (catalogModelIds != null) {
                 val catalog = catalogModelIds.toHashSet()
                 val requestModelId = model.requestModelId()
@@ -853,6 +858,12 @@ object EngineModelCatalog {
             )
         }
     }
+
+    fun pickerGroups(models: List<ModelOption>, eligibleReferences: Set<String>): List<ModelProviderGroup> =
+        groups(models).groupBy { if (it.id == "openai-chatgpt") "openai" else it.id }
+            .values.flatMap { siblings ->
+                siblings.sortedByDescending { group -> group.models.any { it.id in eligibleReferences } }
+            }
 
     fun visibleModels(
         models: List<ModelOption>,

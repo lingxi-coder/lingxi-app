@@ -64,6 +64,7 @@ final class RemoteConversationSource: ConversationSource {
     @ObservationIgnored private let projection: EngineConversationSource
     @ObservationIgnored private let remotePromptSender: ((String, [RemotePromptImageFfi]) async throws -> Void)?
     @ObservationIgnored private let remotePermissionResponder: ((UInt64, Bool) async throws -> Void)?
+    @ObservationIgnored private let remoteProviderAccountSender: ((String, String?) async throws -> String)?
     @ObservationIgnored private var modeAdmission = RemoteModeAdmission<RemoteSessionUpdateFfi>()
     @ObservationIgnored private var approvalFailed = false
     @ObservationIgnored private var history: [MessageDto] = []
@@ -84,13 +85,15 @@ final class RemoteConversationSource: ConversationSource {
         mediaHostComposition: IOSNativeMediaHostComposition? = nil,
         mediaHostInitializationError: String? = nil,
         remotePromptSender: ((String, [RemotePromptImageFfi]) async throws -> Void)? = nil,
-        remotePermissionResponder: ((UInt64, Bool) async throws -> Void)? = nil
+        remotePermissionResponder: ((UInt64, Bool) async throws -> Void)? = nil,
+        remoteProviderAccountSender: ((String, String?) async throws -> String)? = nil
     ) {
         self.hostID = hostID
         self.sessionID = sessionID
         self.uid = uid
         self.remotePromptSender = remotePromptSender
         self.remotePermissionResponder = remotePermissionResponder
+        self.remoteProviderAccountSender = remoteProviderAccountSender
         let manager = manager ?? RemoteControlManager(
             mediaHostComposition: mediaHostComposition,
             mediaHostInitializationError: mediaHostInitializationError
@@ -98,7 +101,7 @@ final class RemoteConversationSource: ConversationSource {
         self.manager = manager
         self.draftOwner = manager.draftOwner(hostID: hostID, sessionID: sessionID, uid: uid)
         projection = EngineConversationSource(config: EngineConfig(
-            apiBase: "", apiKey: "", model: "", appSandboxRoot: "", projectCwd: nil,
+            apiBase: "", model: "", appSandboxRoot: "", projectCwd: nil,
             sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
         projection.replaceRemoteTranscript([], sessionID: sessionID)
         model.slashCommandsLoaded = true
@@ -439,6 +442,28 @@ final class RemoteConversationSource: ConversationSource {
             }
         default: throw RemoteFfiError.Rpc(code: "forbidden", detail: String(localized: "remote_err_forbidden"))
         }
+    }
+
+    func providerAccountsSnapshot() async throws -> String {
+        try await providerAccountCommand(requestJSON: ProviderAccountCommand(action: "list").encoded(), credential: nil)
+    }
+
+    func providerAccountCommand(requestJSON: String, credential: String?) async throws -> String {
+        guard canControl, !isApprovalCapability else {
+            throw RemoteFfiError.Rpc(code: "forbidden", detail: String(localized: "remote_err_forbidden"))
+        }
+        if let remoteProviderAccountSender {
+            let result = try await remoteProviderAccountSender(requestJSON, credential)
+            guard canControl, !isApprovalCapability, !Task.isCancelled else { throw CancellationError() }
+            return result
+        }
+        guard let ticket = manager.connectionTicket(hostID: hostID, uid: uid) else { throw RemoteFfiError.NotConnected }
+        let result = try await manager.withSessionClient(hostID: hostID, uid: uid, ticket: ticket) {
+            try await $0.providerAccountCommand(requestJson: requestJSON, credential: credential)
+        }
+        guard canControl, !isApprovalCapability, !Task.isCancelled,
+              manager.connectionTicket(hostID: hostID, uid: uid) == ticket else { throw CancellationError() }
+        return result
     }
     func loadOlder() { perform { try await $0.loadOlderMessages(sessionId: self.sessionID) } }
     func retryPrompt(_ id: String) { perform { try await $0.retryPrompt(sessionId: self.sessionID, promptId: id) } }

@@ -1,11 +1,18 @@
 package com.lingxi.code.conversation
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
@@ -84,6 +91,9 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
     }
     val t = LingXiTheme.palette
     val open = group.id in expandedIds
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val hovered by interaction.collectIsHoveredAsState()
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (!group.running) {
             val last = group.summary
@@ -92,7 +102,7 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
             val failed = group.calls.count { it.status == AgentToolStatus.Failed }
             Row(
                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
-                    .clickable(role = Role.Button) { onToggle(group.id) }
+                    .clickable(interactionSource = interaction, indication = LocalIndication.current, role = Role.Button) { onToggle(group.id) }
                     .testTag("conversation.tool.group"),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -101,7 +111,8 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
                 Text(title + detail, modifier = Modifier.weight(1f), color = t.text3, fontSize = 13.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (failed > 0) Text("! $failed", color = t.danger, fontSize = 12.sp)
-                LXIcon(if (open) LXIconName.Chevron else LXIconName.ChevronR, size = 12.dp, color = t.text4)
+                LXIcon(if (open) LXIconName.Chevron else LXIconName.ChevronR,
+                    modifier = Modifier.alpha(if (open || focused || hovered) 1f else 0f), size = 12.dp, color = t.text4)
             }
         }
         if (group.running || open) {

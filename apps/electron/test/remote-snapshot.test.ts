@@ -94,8 +94,8 @@ test('adjacent deltas are merged into one record at the later sequence, and a he
 test('events the table withholds never reach a snapshot, whatever they carry', () => {
   const runtime = new FakeRuntime();
   runtime.resume();
-  runtime.push({ type: 'provider_credential_status', secret: 'sk-live-123' } as any);
-  runtime.push({ type: 'openai_oauth_updated', access_token: 'tok-456' } as any);
+  runtime.push({ type: 'provider_accounts_updated', secret: 'sk-live-123' } as any);
+  runtime.push({ type: 'provider_account_refresh_requested', access_token: 'tok-456' } as any);
   runtime.push({ type: 'side_chat_event', side_id: 's', event_json: '{"text":"private"}' } as any);
   runtime.push({ type: 'mcp_servers', servers: [{ env: { TOKEN: 'abc' } }] } as any);
   runtime.push({ type: 'brand_new_event_type', payload: 'leak' } as any);

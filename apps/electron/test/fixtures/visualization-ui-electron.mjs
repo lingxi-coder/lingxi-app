@@ -110,6 +110,11 @@ async function main() {
     assert.equal(skill.expanded, 'false');
     assert.equal(skill.body, false);
     assert.ok(skill.height <= 56, JSON.stringify(skill));
+    await delay(150);
+    assert.equal(await run('getComputedStyle(document.querySelector(".tool-disclosure-trigger .transcript-disclosure-chevron")).opacity'), '0');
+    await run('document.querySelector(".tool-disclosure-trigger").focus()');
+    await delay(150);
+    assert.equal(await run('getComputedStyle(document.querySelector(".tool-disclosure-trigger .transcript-disclosure-chevron")).opacity'), '1');
     await click('.tool-disclosure-trigger');
     await wait('document.querySelector(".transcript-tool-row").innerText.includes("END_OF_SKILL_INSTRUCTIONS")');
     assert.equal(await run('document.querySelector(".tool-disclosure-trigger").getAttribute("aria-expanded")'), 'true');

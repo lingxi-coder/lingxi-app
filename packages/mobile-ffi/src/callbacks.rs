@@ -137,6 +137,17 @@ impl lingxi_core::host::SecureStorage for SecureStorageBridge {
             None => Ok(None),
         }
     }
+    async fn contains(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<bool, lingxi_core::host::SecureStorageError> {
+        self.inner
+            .list(service.to_string())
+            .await
+            .map(|accounts| accounts.iter().any(|stored| stored == account))
+            .map_err(securestorage_error_from_ffi)
+    }
     async fn delete(
         &self,
         service: &str,
@@ -186,6 +197,86 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    struct PresenceOnlyStorage {
+        retrieves: Arc<AtomicUsize>,
+        list_fails: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl PlatformSecureStorage for PresenceOnlyStorage {
+        async fn store(
+            &self,
+            _service: String,
+            _account: String,
+            _blob: Vec<u8>,
+        ) -> Result<(), SecureStorageFfiError> {
+            Ok(())
+        }
+        async fn retrieve(
+            &self,
+            _service: String,
+            _account: String,
+        ) -> Result<Option<Vec<u8>>, SecureStorageFfiError> {
+            self.retrieves.fetch_add(1, Ordering::SeqCst);
+            Err(SecureStorageFfiError::BackendUnavailable {
+                message: "presence checks must not retrieve payloads".into(),
+            })
+        }
+        async fn delete(
+            &self,
+            _service: String,
+            _account: String,
+        ) -> Result<(), SecureStorageFfiError> {
+            Ok(())
+        }
+        async fn list(&self, service: String) -> Result<Vec<String>, SecureStorageFfiError> {
+            assert_eq!(service, "isolated-service");
+            if self.list_fails {
+                Err(SecureStorageFfiError::PermissionDenied {
+                    message: "fixture attributes denied".into(),
+                })
+            } else {
+                Ok(vec!["account-a".into(), "account-b".into()])
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn account_presence_uses_exact_attribute_membership_without_retrieve() {
+        let retrieves = Arc::new(AtomicUsize::new(0));
+        let storage = SecureStorageBridge {
+            inner: Box::new(PresenceOnlyStorage {
+                retrieves: retrieves.clone(),
+                list_fails: false,
+            }),
+        };
+        assert!(storage
+            .contains("isolated-service", "account-a")
+            .await
+            .unwrap());
+        assert!(!storage
+            .contains("isolated-service", "account")
+            .await
+            .unwrap());
+        assert_eq!(retrieves.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn account_presence_reports_attribute_errors_instead_of_missing() {
+        let retrieves = Arc::new(AtomicUsize::new(0));
+        let storage = SecureStorageBridge {
+            inner: Box::new(PresenceOnlyStorage {
+                retrieves: retrieves.clone(),
+                list_fails: true,
+            }),
+        };
+        assert!(matches!(
+            storage.contains("isolated-service", "account-a").await,
+            Err(SecureStorageError::PermissionDenied(_))
+        ));
+        assert_eq!(retrieves.load(Ordering::SeqCst), 0);
+    }
 
     struct MalformedStorage {
         writes: Arc<AtomicUsize>,

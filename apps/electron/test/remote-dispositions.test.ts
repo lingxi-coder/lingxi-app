@@ -24,7 +24,7 @@ test('the remote command table names exactly the commands the desktop table name
 
 test('events that carry secrets, credentials, configuration or other chats are withheld from viewers', () => {
   const mustWithhold = [
-    'provider_model_catalog', 'provider_credential_status', 'provider_connection_tested', 'openai_oauth_updated', 'auth_state', 'settings_snapshot',
+    'provider_model_catalog', 'provider_accounts_updated', 'provider_account_refresh_requested', 'provider_account_routing', 'settings_snapshot',
     'mcp_servers', 'mcp_configuration_snapshot', 'hooks', 'skills', 'agents', 'memory_entries', 'plugin_catalog',
     'doctor_report', 'task_output_chunk', 'configuration_operation',
     'side_chat_created', 'side_chat_list', 'side_chat_snapshot', 'side_chat_event', 'side_chat_permission', 'side_chat_submitted', 'side_chat_ended',

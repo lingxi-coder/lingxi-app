@@ -175,7 +175,6 @@ async fn shutdown_finishes_real_compaction_after_durable_boundary_before_summary
     ));
     let router = Arc::new(EngineCommandRouter::new(
         orchestrator.clone(),
-        Arc::new(MockAuth),
         Arc::new(MockTaskRegistry { rows: vec![] }),
         None,
         None,

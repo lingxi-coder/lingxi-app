@@ -698,17 +698,14 @@ test('Fusion transfers its slash lease to the authoritative background roster', 
   const internal = runtime as any;
   internal.activeWorkspace = source.projectPath;
   internal.activeWorkspaceTrusted = true;
-  internal.opts.resolveProviderCredential = async () => undefined;
   internal.resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'default' }, revision: 'aabb', config: {} });
-  internal.ensureFusionCodexToken = async () => {};
-  internal.ensureFusionProviderCredentials = async () => {};
   internal.wireClient(client, internal.generation);
   internal.setState({ status: 'connected' });
   manager.activateSession(source);
   await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion compare approaches', images: [], turn_id: 91 });
   await manager.ensure(target, false);
   manager.activateSession(target);
-  assert.equal(manager.get(sessionId), runtime, 'credential hydration handed ownership to the sent slash');
+  assert.equal(manager.get(sessionId), runtime, 'the sent slash retains its owning runtime');
   client.emit('event', { type: 'slash_command_result', turn_id: 91, display: 'Fusion started: task-1 quality cross-provider' });
   await nextTurn();
   assert.equal(manager.get(sessionId), runtime, 'a delayed task event cannot leave an unpinned gap');

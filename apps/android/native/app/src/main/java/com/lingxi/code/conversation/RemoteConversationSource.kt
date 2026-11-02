@@ -26,6 +26,8 @@ import com.lingxi.code.model.ReasoningControl
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -53,6 +55,8 @@ interface RemoteSessionPort {
     suspend fun setModel(model: String)
     suspend fun setReasoning(selection: ReasoningSelectionDto)
     suspend fun setPermissionMode(mode: RemotePermissionModeFfi)
+    suspend fun providerAccountCommand(requestJson: String, credential: String?): String =
+        error("remote host account management unavailable")
     suspend fun listModels(): RemoteModelsFfi
 
     /**
@@ -105,6 +109,8 @@ class RemoteConversationSource(
     private val mutableModels = MutableStateFlow(EngineModelState())
     private val approvalConsumed = AtomicBoolean(false)
     @Volatile private var approvalDelivered = false
+    private val accountAdmissionLock = Any()
+    private var accountGeneration = 0L
 
     /** Images already fetched, by reference: a new snapshot re-lists the prompts that carry them. */
     private val fetchedImages = ConcurrentHashMap<String, ImageRefDto>()
@@ -168,32 +174,39 @@ class RemoteConversationSource(
                 invalidateImages()
                 cancelProjections()
             }
-            mutableMeta.value = if (failure != null) {
-                mutableMeta.value.copy(
-                    phase = RemoteSessionPhaseFfi.ERROR,
-                    error = failure,
-                    hasOlder = false,
-                    loadingOlder = false,
-                    controls = null,
-                    sessionMode = mapper.ownerMode,
-                )
-            } else if (lastAccepted != null) {
-                RemoteSessionMeta(
-                    phase = lastAccepted.phase,
-                    error = lastAccepted.error,
-                    hasOlder = lastAccepted.hasOlder,
-                    loadingOlder = lastAccepted.loadingOlder,
-                    controls = lastAccepted.controls,
-                    sessionMode = mapper.ownerMode,
-                )
-            } else {
-                mutableMeta.value.copy(
-                    phase = if (mapper.ownerMode == null && !approvalOnly) {
-                        if (incoming.phase == RemoteSessionPhaseFfi.LIVE) RemoteSessionPhaseFfi.LOADING else incoming.phase
-                    } else RemoteSessionPhaseFfi.OFFLINE,
-                    error = if (mapper.ownerMode == null && !approvalOnly) incoming.error else null,
-                    sessionMode = mapper.ownerMode,
-                )
+            synchronized(accountAdmissionLock) {
+                val previous = mutableMeta.value
+                val next = if (failure != null) {
+                    previous.copy(
+                        phase = RemoteSessionPhaseFfi.ERROR,
+                        error = failure,
+                        hasOlder = false,
+                        loadingOlder = false,
+                        controls = null,
+                        sessionMode = mapper.ownerMode,
+                    )
+                } else if (lastAccepted != null) {
+                    RemoteSessionMeta(
+                        phase = lastAccepted.phase,
+                        error = lastAccepted.error,
+                        hasOlder = lastAccepted.hasOlder,
+                        loadingOlder = lastAccepted.loadingOlder,
+                        controls = lastAccepted.controls,
+                        sessionMode = mapper.ownerMode,
+                    )
+                } else {
+                    previous.copy(
+                        phase = if (mapper.ownerMode == null && !approvalOnly) {
+                            if (incoming.phase == RemoteSessionPhaseFfi.LIVE) RemoteSessionPhaseFfi.LOADING else incoming.phase
+                        } else RemoteSessionPhaseFfi.OFFLINE,
+                        error = if (mapper.ownerMode == null && !approvalOnly) incoming.error else null,
+                        sessionMode = mapper.ownerMode,
+                    )
+                }
+                if (previous.phase == RemoteSessionPhaseFfi.LIVE && next.phase != RemoteSessionPhaseFfi.LIVE) {
+                    accountGeneration++
+                }
+                mutableMeta.value = next
             }
             accepted.forEach { acceptedUpdate ->
                 mutablePermission.value = if (acceptedUpdate.phase == RemoteSessionPhaseFfi.LIVE && (!approvalOnly || !approvalDelivered)) {
@@ -338,6 +351,26 @@ class RemoteConversationSource(
         respondPermission(requestId, allow = false)
     }
 
+    override val supportsProviderAccountOAuth: Boolean get() = false
+    override suspend fun providerAccountsSnapshot(): String =
+        accountCommand("{\"action\":\"list\",\"expectedRevision\":0}", null)
+    override suspend fun providerAccountCommand(requestJson: String, credential: String?): String =
+        accountCommand(requestJson, credential)
+
+    private suspend fun accountCommand(requestJson: String, credential: String?): String {
+        val generation = synchronized(accountAdmissionLock) {
+            requireConversation()
+            accountGeneration
+        }
+        val result = port.providerAccountCommand(requestJson, credential)
+        currentCoroutineContext().ensureActive()
+        synchronized(accountAdmissionLock) {
+            check(generation == accountGeneration) { "Remote session changed while loading provider accounts" }
+            requireConversation()
+        }
+        return result
+    }
+
     override suspend fun submitClientCommand(command: ClientCommand) {
         requireConversation()
         when (command) {
@@ -367,7 +400,10 @@ class RemoteConversationSource(
 
     internal fun prepareForReattach() {
         mutablePermission.value = null
-        mutableMeta.value = mutableMeta.value.copy(phase = RemoteSessionPhaseFfi.LOADING, error = null)
+        synchronized(accountAdmissionLock) {
+            accountGeneration++
+            mutableMeta.value = mutableMeta.value.copy(phase = RemoteSessionPhaseFfi.LOADING, error = null)
+        }
     }
 
     private fun requireConversation() {

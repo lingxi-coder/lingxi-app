@@ -122,9 +122,9 @@ struct AgentStatusDock: View {
                                 .clipShape(Capsule())
                         }
                     }
-                    Text(activityText(
+                    Text(agent.reportStatusText ?? activityText(
                         activity,
-                        fallback: AgentStatusPresentation(rawValue: agent.status).label,
+                        fallback: agent.reportStatusText ?? AgentStatusPresentation(rawValue: agent.status).label,
                         model: agent.modelDisplayLabel
                     ))
                     .font(.caption)

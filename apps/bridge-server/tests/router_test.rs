@@ -8,7 +8,7 @@
 //!
 //! The seam mirrors the proven [`bridge_server::server::TurnDriver`] shape: the
 //! production server binds an [`bridge_server::router::EngineCommandRouter`]
-//! wrapping the real engine handles (`OrchestratorHandle`, `AuthHandle`,
+//! wrapping the real engine handles (`OrchestratorHandle`,
 //! `TaskRegistryHandle`); these tests bind the SAME `EngineCommandRouter` over
 //! the engine's own `MockOrchestratorHandle` / mock task + auth handles, so the
 //! routing-and-lowering path under test is the production one (no test-only
@@ -39,15 +39,13 @@ use bridge_server::server::BridgeConnection;
 use bridge_server::settings_bridge::{SettingsContext, SettingsPaths};
 use client::adapter::{AdapterPermissionGate, ClientEventSink, PermissionRequestSink};
 use client::protocol::commands::{
-    ClientCommand, ListingKindDto, PermissionBehaviorDto, ProviderCredentialSecretDto,
-    WritableScopeDto,
+    ClientCommand, ListingKindDto, PermissionBehaviorDto, WritableScopeDto,
 };
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 use client::protocol::listings::SessionModeDto;
 use client::protocol::permission::PermissionRequest;
 use client::protocol::text::ClientTextDto;
 use futures_util::{SinkExt, StreamExt};
-use lingxi_core::host::auth::{AuthError, AuthHandle, LoginInfo};
 use lingxi_core::host::orchestrator::{
     AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
     McpStatus, MemoryEditorOutcome, SkillInfo, StatusSnapshot,
@@ -61,13 +59,11 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::test_support::MockOrchestratorHandle;
 #[cfg(unix)]
 use platform_posix::{
-    PlainTextSecureStorage, PosixClock as NativeClock, PosixFileSystem as NativeFileSystem,
-    PosixHttp as NativeHttp,
+    PosixClock as NativeClock, PosixFileSystem as NativeFileSystem, PosixHttp as NativeHttp,
 };
 #[cfg(windows)]
 use platform_windows::{
-    PlainTextSecureStorage, WindowsClock as NativeClock, WindowsFileSystem as NativeFileSystem,
-    WindowsHttp as NativeHttp,
+    WindowsClock as NativeClock, WindowsFileSystem as NativeFileSystem, WindowsHttp as NativeHttp,
 };
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
@@ -115,82 +111,6 @@ struct CapturingSink {
     events: Mutex<Vec<ClientEvent>>,
 }
 
-#[derive(Default)]
-struct SelectiveFailureStorage {
-    values: std::sync::Mutex<
-        std::collections::HashMap<(String, String), lingxi_core::types::SecureStorageData>,
-    >,
-}
-
-#[async_trait]
-impl lingxi_core::host::SecureStorage for SelectiveFailureStorage {
-    async fn store(
-        &self,
-        service: &str,
-        account: &str,
-        data: lingxi_core::types::SecureStorageData,
-    ) -> Result<(), lingxi_core::host::SecureStorageError> {
-        self.values
-            .lock()
-            .unwrap()
-            .insert((service.to_string(), account.to_string()), data);
-        Ok(())
-    }
-
-    async fn retrieve(
-        &self,
-        service: &str,
-        account: &str,
-    ) -> Result<Option<lingxi_core::types::SecureStorageData>, lingxi_core::host::SecureStorageError>
-    {
-        if account == "provider-key-openrouter" {
-            return Err(lingxi_core::host::SecureStorageError::PermissionDenied(
-                "test keychain denial".to_string(),
-            ));
-        }
-        Ok(self
-            .values
-            .lock()
-            .unwrap()
-            .get(&(service.to_string(), account.to_string()))
-            .cloned())
-    }
-
-    async fn delete(
-        &self,
-        service: &str,
-        account: &str,
-    ) -> Result<(), lingxi_core::host::SecureStorageError> {
-        self.values
-            .lock()
-            .unwrap()
-            .remove(&(service.to_string(), account.to_string()));
-        Ok(())
-    }
-
-    async fn list(
-        &self,
-        service: &str,
-    ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
-        Ok(self
-            .values
-            .lock()
-            .unwrap()
-            .keys()
-            .filter(|(stored_service, _)| stored_service == service)
-            .map(|(_, account)| account.clone())
-            .collect())
-    }
-
-    fn is_encrypted(&self) -> bool {
-        true
-    }
-
-    fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
-        lingxi_core::host::SecureStorageBackend::MacOsKeychain
-    }
-}
-
 impl CapturingSink {
     fn arc() -> Arc<Self> {
         Arc::new(Self::default())
@@ -207,35 +127,7 @@ impl ClientEventSink for CapturingSink {
     }
 }
 
-// ── Mock auth + task handles ─────────────────────────────────────────────────
-
-/// Auth double — `current_user` returns a fixed signed-in user.
-struct MockAuth;
-
-#[async_trait]
-impl AuthHandle for MockAuth {
-    fn register_account_change_observer(
-        &self,
-        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
-    ) {
-    }
-
-    async fn login(&self) -> Result<LoginInfo, AuthError> {
-        Ok(LoginInfo {
-            email: "u@x.com".into(),
-            org_id: "org_1".into(),
-        })
-    }
-    async fn logout(&self) -> Result<(), AuthError> {
-        Ok(())
-    }
-    async fn current_user(&self) -> Option<LoginInfo> {
-        Some(LoginInfo {
-            email: "u@x.com".into(),
-            org_id: "org_1".into(),
-        })
-    }
-}
+// ── Mock task handles ─────────────────────────────────────────────────
 
 /// Task-registry double — `list` returns the pre-loaded rows; other CRUD is a
 /// no-op success default.
@@ -545,35 +437,10 @@ fn router_with(
 ) -> EngineCommandRouter {
     EngineCommandRouter::new(
         handle as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         tasks as Arc<dyn TaskRegistryHandle>,
         None,
         None,
     )
-}
-
-async fn router_with_credentials() -> (
-    EngineCommandRouter,
-    Arc<secret::CredentialManager>,
-    tempfile::TempDir,
-) {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let storage = Arc::new(
-        PlainTextSecureStorage::new(temp.path().join("credentials"))
-            .await
-            .expect("storage"),
-    );
-    let credentials = Arc::new(secret::CredentialManager::new(
-        storage,
-        Arc::new(NativeClock::new()),
-        Arc::new(NativeHttp::new()),
-    ));
-    let router = router_with(
-        Arc::new(MockOrchestratorHandle::new()),
-        Arc::new(MockTaskRegistry { rows: Vec::new() }),
-    )
-    .with_credentials(credentials.clone());
-    (router, credentials, temp)
 }
 
 fn router_with_store(
@@ -591,7 +458,6 @@ fn router_with_store_and_tasks(
     let cwd = root.to_string_lossy().into_owned();
     EngineCommandRouter::new(
         handle as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         tasks,
         None,
         None,
@@ -838,358 +704,130 @@ fn seed_plan_replay_session(root: &std::path::Path) -> String {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn provider_credentials_round_trip_through_shared_engine_store() {
-    let (router, credentials, _temp) = router_with_credentials().await;
+async fn account_injection_tombstones_removed_records_and_rejects_stale_snapshots() {
+    use client::protocol::commands::ProviderCredentialSecretDto;
+    use lingxi_core::host::provider_accounts::{
+        AccountAuthKind, AccountMetadata, AccountSnapshot, CredentialRef,
+    };
+    let home = tempfile::tempdir().unwrap();
+    let credentials = Arc::new(secret::CredentialManager::new(
+        Arc::new(lingxi_core::host::InMemorySecureStorage::new()),
+        Arc::new(NativeClock::new()),
+        Arc::new(NativeHttp::new()),
+    ));
+    let account = |id: &str, priority| AccountMetadata {
+        account_id: id.into(),
+        provider_id: "openai".into(),
+        display_name: id.into(),
+        auth_kind: AccountAuthKind::ApiKey,
+        execution_binding_id: "openai".into(),
+        credential_ref: CredentialRef {
+            store_scope: "test-scope".into(),
+            secret_ref: format!("acct.{id}"),
+        },
+        enabled: true,
+        user_priority: priority,
+        config_revision: 1,
+        identity_generation: 1,
+    };
+    let a = account("00000000-0000-4000-8000-000000000001", 0);
+    let b = account("00000000-0000-4000-8000-000000000002", 1);
+    let record = |key: &str| secret::AccountCredential {
+        credential_revision: 1,
+        identity_generation: 1,
+        kind: secret::AccountCredentialKind::ApiKey {
+            key: lingxi_core::types::Secret::new(key.into()),
+        },
+    };
+    let previous = AccountSnapshot {
+        store_scope: "test-scope".into(),
+        config_revision: 1,
+        accounts: vec![a.clone(), b.clone()],
+        provider_policies: Default::default(),
+        health: vec![],
+        model_entitlements: vec![],
+        model_availability: vec![],
+        scoped_health: vec![],
+    };
+    for item in [&a, &b] {
+        credentials
+            .set_account_credential_ephemeral(&item.credential_ref, Some(record("test-key")))
+            .await
+            .unwrap();
+    }
+    let store = Arc::new(
+        harness_runtime::provider_accounts::ProviderAccountStore::new(
+            home.path().into(),
+            "test-scope".into(),
+            credentials.clone(),
+        ),
+    );
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    )
+    .with_provider_account_store(store, Some(previous.clone()))
+    .with_ephemeral_provider_credentials(true);
+    let current = AccountSnapshot {
+        config_revision: 2,
+        accounts: vec![b.clone()],
+        ..previous.clone()
+    };
+    std::fs::create_dir(home.path().join("provider-accounts")).unwrap();
+    std::fs::write(
+        home.path().join("provider-accounts/test-scope.json"),
+        serde_json::to_vec(&current).unwrap(),
+    )
+    .unwrap();
+    let values = std::collections::BTreeMap::from([(b.account_id.clone(), record("test-key"))]);
     let sink = CapturingSink::arc();
-
     router
         .route(
-            ClientCommand::SetProviderCredential {
+            ClientCommand::ProviderAccounts {
                 operation_id: 1,
-                provider_id: "deepseek".into(),
-                credential: ProviderCredentialSecretDto::new("sk-shared-secret".into()),
-            },
-            sink.clone(),
-        )
-        .await;
-
-    let stored = credentials
-        .get_provider_key("deepseek")
-        .await
-        .expect("read")
-        .expect("stored");
-    assert_eq!(stored.expose_secret(), "sk-shared-secret");
-    assert_eq!(
-        sink.events().await.last(),
-        Some(&ClientEvent::ProviderCredentialStatus {
-            operation_id: 1,
-            configured_provider_ids: vec!["deepseek".into()],
-            unavailable_provider_ids: Vec::new(),
-            storage_encrypted: false,
-            credential_previews: std::collections::HashMap::from([(
-                "deepseek".into(),
-                "••••cret".into(),
-            )]),
-            error: None,
-        })
-    );
-
-    router
-        .route(
-            ClientCommand::DeleteProviderCredential {
-                operation_id: 2,
-                provider_id: "deepseek".into(),
-            },
-            sink.clone(),
-        )
-        .await;
-
-    assert!(credentials
-        .get_provider_key("deepseek")
-        .await
-        .expect("read after delete")
-        .is_none());
-    assert_eq!(
-        sink.events().await.last(),
-        Some(&ClientEvent::ProviderCredentialStatus {
-            operation_id: 2,
-            configured_provider_ids: Vec::new(),
-            unavailable_provider_ids: Vec::new(),
-            storage_encrypted: false,
-            credential_previews: std::collections::HashMap::new(),
-            error: None,
-        })
-    );
-
-    router
-        .route(
-            ClientCommand::SetProviderCredential {
-                operation_id: 3,
-                provider_id: "anthropic".into(),
-                credential: ProviderCredentialSecretDto::new("sk-ant-shared-secret".into()),
-            },
-            sink.clone(),
-        )
-        .await;
-    let anthropic = credentials
-        .get_anthropic_api_key()
-        .await
-        .expect("read Anthropic key")
-        .expect("stored Anthropic key");
-    assert_eq!(anthropic.expose_secret(), "sk-ant-shared-secret");
-
-    router
-        .route(
-            ClientCommand::DeleteProviderCredential {
-                operation_id: 4,
-                provider_id: "anthropic".into(),
-            },
-            sink,
-        )
-        .await;
-    assert!(credentials
-        .get_anthropic_api_key()
-        .await
-        .expect("read Anthropic key after delete")
-        .is_none());
-}
-
-#[tokio::test]
-async fn externally_owned_provider_credentials_stay_process_local() {
-    let (router, credentials, _temp) = router_with_credentials().await;
-    let router = router.with_ephemeral_provider_credentials(true);
-    let sink = CapturingSink::arc();
-
-    router
-        .route(
-            ClientCommand::SetProviderCredential {
-                operation_id: 41,
-                provider_id: "openrouter".into(),
-                credential: ProviderCredentialSecretDto::new("or-session-secret".into()),
-            },
-            sink.clone(),
-        )
-        .await;
-
-    assert_eq!(
-        credentials
-            .get_provider_key("openrouter")
-            .await
-            .expect("read process cache")
-            .expect("cached key")
-            .expose_secret(),
-        "or-session-secret"
-    );
-    credentials
-        .delete_provider_key_ephemeral("openrouter")
-        .await;
-    assert!(
-        credentials
-            .get_provider_key("openrouter")
-            .await
-            .expect("inspect persistent fallback")
-            .is_none(),
-        "the packaged Desktop route must not persist the broker-owned secret"
-    );
-
-    router
-        .route(
-            ClientCommand::SetProviderCredential {
-                operation_id: 42,
-                provider_id: "openrouter".into(),
-                credential: ProviderCredentialSecretDto::new("replacement-secret".into()),
-            },
-            sink.clone(),
-        )
-        .await;
-    router
-        .route(
-            ClientCommand::DeleteProviderCredential {
-                operation_id: 43,
-                provider_id: "openrouter".into(),
-            },
-            sink,
-        )
-        .await;
-    assert!(credentials
-        .get_provider_key("openrouter")
-        .await
-        .expect("read after process-cache delete")
-        .is_none());
-}
-
-/// Token refresh transport for Codex slot tests. The sessions they install
-/// expire long after the test ends, so it is never reached.
-fn codex_host_session() -> Arc<llm_runtime::auth::openai::HostSession> {
-    Arc::new(llm_runtime::auth::openai::HostSession::new(Arc::new(
-        NativeClock::new(),
-    )))
-}
-
-fn codex_session_json(access_token: &str) -> String {
-    let expires_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_secs()
-        + 24 * 60 * 60;
-    serde_json::json!({
-        "access_token": access_token,
-        "refresh_token": "codex-refresh-secret",
-        "expires_at": expires_at,
-        "fedramp": false,
-    })
-    .to_string()
-}
-
-#[tokio::test]
-async fn a_codex_token_the_desktop_serves_is_used_and_never_stored() {
-    let (router, credentials, _temp) = router_with_credentials().await;
-    let session = codex_host_session();
-    let router = router
-        .with_ephemeral_provider_credentials(true)
-        .with_openai_host_session(Some(session.clone()));
-    let sink = CapturingSink::arc();
-
-    router
-        .route(
-            ClientCommand::SetProviderCredential {
-                operation_id: 51,
-                provider_id: "openai-chatgpt".into(),
-                credential: ProviderCredentialSecretDto::new(codex_session_json(
-                    "codex-access-secret",
+                action: "inject_credentials".into(),
+                request_json: serde_json::to_string(&current).unwrap(),
+                credential: Some(ProviderCredentialSecretDto::new(
+                    serde_json::to_string(&values).unwrap(),
                 )),
             },
             sink.clone(),
         )
         .await;
-    assert_eq!(
-        sink.events().await.last(),
-        Some(&ClientEvent::ProviderCredentialStatus {
-            operation_id: 51,
-            configured_provider_ids: vec!["openai-chatgpt".into()],
-            unavailable_provider_ids: Vec::new(),
-            storage_encrypted: false,
-            credential_previews: std::collections::HashMap::new(),
-            error: None,
-        })
-    );
-    let scope = llm_runtime::CredentialScope::new(llm_runtime::ProviderId::OpenAI, "chatgpt");
     assert!(matches!(
-        llm_runtime::CredentialProvider::load(session.as_ref(), &scope).await,
-        Ok(llm_runtime::Credential::ChatGptOAuth { access_token, .. })
-            if access_token == "codex-access-secret"
-    ));
-    assert!(
-        credentials
-            .get_openai_oauth_tokens()
-            .await
-            .expect("read stored session")
-            .is_none(),
-        "the desktop owns the session; the engine only uses its access token"
-    );
-    assert!(credentials
-        .get_provider_key("openai-chatgpt")
-        .await
-        .expect("read provider key")
-        .is_none());
-
-    router
-        .route(
-            ClientCommand::DeleteProviderCredential {
-                operation_id: 52,
-                provider_id: "openai-chatgpt".into(),
-            },
-            sink.clone(),
-        )
-        .await;
-    assert_eq!(
         sink.events().await.last(),
-        Some(&ClientEvent::ProviderCredentialStatus {
-            operation_id: 52,
-            configured_provider_ids: Vec::new(),
-            unavailable_provider_ids: Vec::new(),
-            storage_encrypted: false,
-            credential_previews: std::collections::HashMap::new(),
-            error: None,
-        })
-    );
-    assert!(!session.is_active());
-}
-
-#[tokio::test]
-async fn an_invalid_codex_token_is_reported_without_its_secrets() {
-    let cases = [
-        "{\"access_token\":\"codex-access-secret\"}".to_string(),
-        codex_session_json(""),
-    ];
-    for (operation_id, credential) in (61..).zip(cases) {
-        let session = codex_host_session();
-        let router = router_with(
-            Arc::new(MockOrchestratorHandle::new()),
-            Arc::new(MockTaskRegistry { rows: Vec::new() }),
-        )
-        .with_ephemeral_provider_credentials(true)
-        .with_openai_host_session(Some(session.clone()));
-        let sink = CapturingSink::arc();
-        router
-            .route(
-                ClientCommand::SetProviderCredential {
-                    operation_id,
-                    provider_id: "openai-chatgpt".into(),
-                    credential: ProviderCredentialSecretDto::new(credential),
-                },
-                sink.clone(),
-            )
-            .await;
-        let Some(ClientEvent::ProviderCredentialStatus {
-            configured_provider_ids,
-            unavailable_provider_ids,
-            credential_previews,
-            error,
-            ..
-        }) = sink.events().await.last().cloned()
-        else {
-            panic!("a credential status answers every write");
-        };
-        assert!(configured_provider_ids.is_empty());
-        assert_eq!(unavailable_provider_ids, vec!["openai-chatgpt".to_string()]);
-        assert!(credential_previews.is_empty());
-        assert_eq!(error.as_deref(), Some("invalid Codex OAuth session"));
-        assert!(!session.is_active());
-    }
-}
-
-#[tokio::test]
-async fn provider_credential_listing_reports_partial_success_without_erasing_unknown_state() {
-    let credentials = Arc::new(secret::CredentialManager::new(
-        Arc::new(SelectiveFailureStorage::default()),
-        Arc::new(NativeClock::new()),
-        Arc::new(NativeHttp::new()),
+        Some(ClientEvent::ProviderAccountsUpdated { error: None, .. })
     ));
-    credentials
-        .set_provider_key("deepseek", "sk-deepseek")
+    assert!(credentials
+        .get_account_credential(&a.credential_ref)
         .await
-        .expect("seed readable credential");
-    let router = router_with(
-        Arc::new(MockOrchestratorHandle::new()),
-        Arc::new(MockTaskRegistry { rows: Vec::new() }),
-    )
-    .with_credentials(credentials);
-    let sink = CapturingSink::arc();
-
+        .unwrap()
+        .is_none());
+    assert!(credentials
+        .get_account_credential(&b.credential_ref)
+        .await
+        .unwrap()
+        .is_some());
     router
         .route(
-            ClientCommand::ListProviderCredentials {
-                operation_id: 9,
-                provider_ids: vec!["deepseek".into(), "openrouter".into()],
-                preview_provider_ids: vec!["deepseek".into()],
+            ClientCommand::ProviderAccounts {
+                operation_id: 2,
+                action: "inject_credentials".into(),
+                request_json: serde_json::to_string(&previous).unwrap(),
+                credential: Some(ProviderCredentialSecretDto::new("{}".into())),
             },
             sink.clone(),
         )
         .await;
-
-    let events = sink.events().await;
-    let ClientEvent::ProviderCredentialStatus {
-        configured_provider_ids,
-        unavailable_provider_ids,
-        storage_encrypted,
-        credential_previews,
-        error,
-        ..
-    } = &events[0]
-    else {
-        panic!("expected provider status event")
-    };
-    assert_eq!(configured_provider_ids, &["deepseek"]);
-    assert_eq!(unavailable_provider_ids, &["openrouter"]);
-    assert!(*storage_encrypted);
-    assert_eq!(
-        credential_previews.get("deepseek").map(String::as_str),
-        Some("••••seek")
-    );
-    assert!(error
-        .as_deref()
-        .is_some_and(|message| message.contains("openrouter")));
+    assert!(matches!(
+        sink.events().await.last(),
+        Some(ClientEvent::ProviderAccountsUpdated { error: Some(_), .. })
+    ));
+    assert!(credentials
+        .get_account_credential(&b.credential_ref)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
@@ -1695,7 +1333,6 @@ async fn list_models_uses_full_provider_catalog_when_provided() {
     });
     let router = EngineCommandRouter::new(
         handle as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
         None,
@@ -1838,7 +1475,6 @@ async fn slash_command_routes_to_registry() {
     let router = Arc::new(EngineCommandRouter::new(
         Arc::new(MockOrchestratorHandle::new())
             as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(dispatcher),
         None,
@@ -1896,7 +1532,6 @@ async fn fusion_preparation_failure_routes_without_dispatching_a_slash_command()
     }
     let router = EngineCommandRouter::new(
         Arc::new(MockOrchestratorHandle::new()),
-        Arc::new(MockAuth),
         Arc::new(MockTaskRegistry { rows: vec![] }),
         Some(Arc::new(NeverDispatch)),
         None,
@@ -1946,7 +1581,6 @@ async fn refresh_slash_commands_applies_mod_descriptions_to_live_catalog() {
     handle.set_mod_describe_rewrite("deploy", "launch safely", Some("<target>"), true);
     let router = EngineCommandRouter::new(
         handle.clone() as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(dispatcher),
         Some(shared),
@@ -2011,7 +1645,6 @@ async fn desktop_plan_enables_plan_state_and_runs_the_argument_as_a_turn() {
     let handle = Arc::new(ResumingHandle::new());
     let router = EngineCommandRouter::new(
         handle.clone() as Arc<dyn OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
         None,
@@ -2046,7 +1679,6 @@ async fn desktop_plan_enables_plan_state_and_runs_the_argument_as_a_turn() {
 async fn desktop_diff_runs_as_a_read_only_turn_instead_of_returning_tui_only() {
     let router = EngineCommandRouter::new(
         Arc::new(MockOrchestratorHandle::new()) as Arc<dyn OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
         None,
@@ -2121,7 +1753,6 @@ async fn display_only_slash_results_are_not_persisted_in_task_history() {
     let shared = Arc::new(RwLock::new(CommandRegistry::new()));
     let router = EngineCommandRouter::new(
         handle.clone() as Arc<dyn OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(Arc::new(MutatingDispatcher {
             registry: shared.clone(),
@@ -2173,7 +1804,6 @@ async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
     let router = Arc::new(EngineCommandRouter::new(
         Arc::new(MockOrchestratorHandle::new())
             as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(Arc::new(MutatingDispatcher {
             registry: shared.clone(),
@@ -2293,13 +1923,8 @@ async fn correlated_task_list_reports_empty_and_failure() {
             true,
         ),
     ] {
-        let router = EngineCommandRouter::new(
-            Arc::new(MockOrchestratorHandle::new()),
-            Arc::new(MockAuth),
-            tasks,
-            None,
-            None,
-        );
+        let router =
+            EngineCommandRouter::new(Arc::new(MockOrchestratorHandle::new()), tasks, None, None);
         let sink = CapturingSink::arc();
         router
             .route(
@@ -3023,7 +2648,6 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
         handle.clone() as Arc<dyn lingxi_core::host::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
         None,
@@ -3134,7 +2758,6 @@ async fn resume_session_sets_plan_state_before_replay() {
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
         handle.clone() as Arc<dyn lingxi_core::host::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
         None,
@@ -3194,7 +2817,6 @@ async fn resume_session_rolls_back_plan_preset_when_plan_mode_enable_fails() {
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
         handle.clone() as Arc<dyn lingxi_core::host::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
         None,
@@ -3248,7 +2870,6 @@ async fn resume_session_does_not_adopt_when_plan_permission_preset_fails() {
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
         handle.clone() as Arc<dyn lingxi_core::host::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
         None,
@@ -3299,7 +2920,6 @@ async fn resume_session_rolls_back_plan_state_when_replay_fails() {
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
         handle.clone() as Arc<dyn lingxi_core::host::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
         None,

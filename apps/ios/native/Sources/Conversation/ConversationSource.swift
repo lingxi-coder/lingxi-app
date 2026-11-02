@@ -5,7 +5,7 @@
 //
 //   - MockConversationSource     — the prior canned behavior (no engine).
 //   - EngineConversationSource   — the real in-process engine over UniFFI:
-//       builds a `MobileEngineHandle` via `buildIosEngine(...)`, registers a
+//       builds a `MobileEngineHandle` via `buildIosEngineWithConfig(...)`, registers a
 //       Swift `IosEventListener` whose `onEvent(_:)` maps each inbound
 //       `ClientEvent` onto @MainActor-published state, and drives turns via
 //       `handle.submit(.sendPrompt(...))`.
@@ -14,10 +14,7 @@
 // one protocol (`client-protocol`), one transport (UniFFI), one renderer
 // (SwiftUI). The engine runs ON the device; no network bridge.
 //
-// SECRETS: the LLM API key is resolved from the iOS Keychain (`Keychain`) with a
-// runtime `ANTHROPIC_API_KEY` env override for dev — see
-// `EngineConfig.fromEnvironment`. It is NEVER hardcoded, logged, or persisted in
-// plaintext here.
+// Provider credentials are resolved by the Host account authority through native secure storage.
 
 import Foundation
 
@@ -155,27 +152,12 @@ protocol ConversationSource: AnyObject {
         /// Resolve a parked permission request by denying it: submit
         /// `DenyPermission{requestId}` and pop the head of the queue.
         func denyPermission(_ requestId: UInt64)
-        /// Submit a non-turn command such as secure Provider credential CRUD.
+        /// Submit a non-turn settings or catalog command.
         func submitEngineCommand(_ command: ClientCommand) async throws
-        /// Exercise the engine's token-free Provider model-list probe.
-        func testProviderConnection(
-            profile: ProviderLaunchProfile,
-            credentialOverride: String?
-        ) async throws -> ProviderConnectionTestResult
         /// Read the engine's credential-free built-in Provider catalog.
         func providerCatalog() async throws -> [ProviderCatalogEntry]
-        /// Run the native browser OAuth flow. The engine owns PKCE/state and
-        /// only receives the callback URL from this coordinator.
-        func loginOAuth(provider: String) async throws -> ProviderOAuthState
-        func logoutOAuth(provider: String) async throws
-        func authState(provider: String) async throws -> ProviderOAuthState
-        func testOAuthConnection(
-            provider: String,
-            profile: ProviderLaunchProfile
-        ) async throws -> ProviderConnectionTestResult
-        /// Route an app-level `lingxi://oauth/callback` into the pending web
-        /// authentication session when iOS delivers it through `onOpenURL`.
-        func handleOAuthCallback(_ url: URL)
+        func providerAccountsSnapshot() async throws -> String
+        func providerAccountCommand(requestJSON: String, credential: String?) async throws -> String
         /// Observe out-of-band engine events without duplicating the listener.
         func setExternalEventHandler(_ handler: ((ClientEvent) -> Void)?)
     #endif
@@ -233,27 +215,11 @@ extension ConversationSource {
         func approvePermission(_ requestId: UInt64, _ response: PermissionResponseDto) {}
         func denyPermission(_ requestId: UInt64) {}
         func submitEngineCommand(_ command: ClientCommand) async throws {}
-        func testProviderConnection(
-            profile: ProviderLaunchProfile,
-            credentialOverride: String?
-        ) async throws -> ProviderConnectionTestResult {
-            .failure(message: String(localized: "chat_provider_engine_unavailable"))
-        }
         func providerCatalog() async throws -> [ProviderCatalogEntry] { [] }
-        func loginOAuth(provider: String) async throws -> ProviderOAuthState {
-            throw NSError(domain: "ConversationSource", code: 1, userInfo: [NSLocalizedDescriptionKey: "OAuth requires the engine"])
+        func providerAccountsSnapshot() async throws -> String { throw ProviderAccountError.unavailable }
+        func providerAccountCommand(requestJSON: String, credential: String?) async throws -> String {
+            throw ProviderAccountError.unavailable
         }
-        func logoutOAuth(provider: String) async throws {}
-        func authState(provider: String) async throws -> ProviderOAuthState {
-            ProviderOAuthState(provider: provider, signedIn: false, accountLabel: nil, accountID: nil, organizationID: nil, fedramp: false)
-        }
-        func testOAuthConnection(
-            provider: String,
-            profile: ProviderLaunchProfile
-        ) async throws -> ProviderConnectionTestResult {
-            .failure(message: String(localized: "chat_provider_engine_unavailable"))
-        }
-        func handleOAuthCallback(_ url: URL) {}
         func setExternalEventHandler(_ handler: ((ClientEvent) -> Void)?) {}
     }
 #endif

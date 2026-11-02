@@ -4,6 +4,47 @@ import XCTest
 
 @MainActor
 final class IOSCloudAudioTests: XCTestCase {
+    func testCurrentOwnerInvalidationClearsContextAndPreservesReplacementOwner() {
+        let service = IOSAudioProviderService()
+        service.claimSessionContext(ownerID: "first-source")
+        service.setSessionContext(sessionID: "first-session", profileID: "openai", accountScope: "first-account")
+        XCTAssertEqual(service.sessionContext?.accountScope, "first-account")
+        service.clearSessionContext(ownerID: "first-source")
+        XCTAssertNil(service.sessionContext, "A current source whose Host route disappears must become unavailable")
+
+        service.claimSessionContext(ownerID: "replacement-source")
+        service.setSessionContext(sessionID: "replacement-session", profileID: "anthropic", accountScope: "replacement-account")
+        service.clearSessionContext(ownerID: "first-source")
+        XCTAssertEqual(service.sessionContext?.sessionId, "replacement-session")
+        XCTAssertEqual(service.sessionContext?.accountScope, "replacement-account",
+            "A stale source's invalidation must preserve the current owner's context")
+    }
+
+    func testSelectedAudioAccountSurvivesUnboundRefreshUntilRouteChanges() throws {
+        let attachment = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: UUID().uuidString.lowercased(), generation: 1))
+        let owner = IOSAudioOwner.attached(attachment: attachment, logicalOwner: .session(sessionID: "session"))
+        var routes = IOSAudioAttachmentSessionRoutes()
+        XCTAssertTrue(routes.register(attachment: attachment, ownerID: "engine"))
+        let unbound = IOSAudioSessionContext(sessionId: "session", profileId: "openai",
+            accountScope: "unbound", engineAttachmentIdentity: attachment)
+        XCTAssertTrue(routes.update(attachment: attachment, ownerID: "engine", context: unbound))
+        routes.bindSelected(owner: owner, expectedProfileID: "openai", profileID: "account.a", accountScope: "stable-account-a")
+        XCTAssertTrue(routes.update(attachment: attachment, ownerID: "engine", context: unbound))
+        XCTAssertEqual(routes.context(for: owner)?.profileId, "account.a")
+        XCTAssertEqual(routes.context(for: owner)?.accountScope, "stable-account-a")
+        let changed = IOSAudioSessionContext(sessionId: "session", profileId: "other-provider",
+            accountScope: "unbound", engineAttachmentIdentity: attachment)
+        XCTAssertTrue(routes.update(attachment: attachment, ownerID: "engine", context: changed))
+        XCTAssertEqual(routes.context(for: owner), changed)
+        routes.bindSelected(owner: owner, expectedProfileID: "openai", profileID: "account.late", accountScope: "late")
+        XCTAssertEqual(routes.context(for: owner), changed, "A late response from the old route cannot replace the new route")
+        let newSession = IOSAudioSessionContext(sessionId: "new-session", profileId: "openai",
+            accountScope: "unbound", engineAttachmentIdentity: attachment)
+        XCTAssertTrue(routes.update(attachment: attachment, ownerID: "engine", context: newSession))
+        routes.bindSelected(owner: owner, expectedProfileID: "openai", profileID: "account.old", accountScope: "stale")
+        XCTAssertEqual(routes.context(for: attachment), newSession)
+    }
+
     func testCaptureDeadlineLeavesCompletionBudgetAndBoundsPayload() {
         XCTAssertEqual(IOSAudioService.captureDurationMs(timeoutBudgetMs: 1_000, maximumBytes: 1_000_000), 800)
         XCTAssertEqual(IOSAudioService.captureDurationMs(timeoutBudgetMs: nil, maximumBytes: 4_000), 900)

@@ -35,7 +35,7 @@ async function expired(promise: Promise<void>) {
 test('a timed-out resume credential completion cannot resolve its next unconfirmed resume', async (t) => {
   const credential = deferred<string | undefined>();
   const runtime = new SessionRuntime({ ...ref, expectedSessionMode: ref.mode, sessionResumeTimeoutMs: 20,
-    launchConfig: () => ({ workspace: ref.projectPath, trusted: true }), resolveProviderCredential: () => credential.promise });
+    launchConfig: () => ({ workspace: ref.projectPath, trusted: true }), resolveProviderAccounts: async () => { await credential.promise; return undefined; } });
   t.after(() => runtime.dispose());
   const client = wire(runtime);
   const first = runtime.resumeOwnedSession();
@@ -57,7 +57,7 @@ test('a prior restart broker load cannot reject a newer generation resume', asyn
   const credential = deferred<string | undefined>();
   const manager = new SessionRuntimeManager({ sessionResumeTimeoutMs: 20,
     launchConfig: (owned) => ({ workspace: owned.projectPath, sessionId: owned.sessionId, trusted: true }),
-    resolveProviderCredential: () => credential.promise });
+    resolveProviderAccounts: async () => { await credential.promise; return undefined; } });
   t.after(() => manager.dispose());
   const runtime = await manager.ensure(ref, false);
   const internal = runtime as any;

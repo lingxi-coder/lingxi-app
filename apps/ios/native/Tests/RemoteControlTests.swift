@@ -90,6 +90,78 @@ final class RemoteControlTests: XCTestCase {
     }
 
     @MainActor
+    func testProviderAccountsRequireConfirmedLiveConversationAndRejectTeamCapability() async throws {
+        var calls = 0
+        let sender: (String, String?) async throws -> String = { _, _ in
+            calls += 1
+            return "{}"
+        }
+        let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A",
+                                              remoteProviderAccountSender: sender)
+        func update(_ id: String, mode: SessionModeDto?) -> RemoteSessionUpdateFfi {
+            RemoteSessionUpdateFfi(
+                sessionId: id, sessionMode: mode, phase: .live, error: nil, replace: true,
+                messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+                pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+                turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+                hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        }
+        remote.receive(update(session, mode: nil))
+        do { _ = try await remote.providerAccountsSnapshot(); XCTFail("Unknown mode must not access accounts") }
+        catch {}
+        XCTAssertEqual(calls, 0)
+
+        remote.receive(update(session, mode: .chat))
+        let snapshot = try await remote.providerAccountsSnapshot()
+        XCTAssertEqual(snapshot, "{}")
+        XCTAssertEqual(calls, 1)
+
+        remote.receive(update(session, mode: .code))
+        XCTAssertEqual(remote.phase, .error)
+        do { _ = try await remote.providerAccountCommand(requestJSON: "{}", credential: nil); XCTFail("Conflicting mode must not access accounts") }
+        catch {}
+        XCTAssertEqual(calls, 1)
+
+        let teamID = "team-approval:" + String(repeating: "a", count: 32)
+        let team = RemoteConversationSource(hostID: host, sessionID: teamID, uid: "A",
+                                            remoteProviderAccountSender: sender)
+        team.receive(update(teamID, mode: nil))
+        do { _ = try await team.providerAccountsSnapshot(); XCTFail("Team approval has no account capability") }
+        catch {}
+        XCTAssertEqual(calls, 1)
+    }
+
+    @MainActor
+    func testProviderAccountReplyIsDiscardedIfModeConflictsWhileRequestRuns() async throws {
+        let (release, continuation) = AsyncStream<Void>.makeStream()
+        var started = false
+        let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A",
+            remoteProviderAccountSender: { _, _ in
+                started = true
+                for await _ in release { break }
+                return "{}"
+            })
+        func update(_ mode: SessionModeDto) -> RemoteSessionUpdateFfi {
+            RemoteSessionUpdateFfi(
+                sessionId: session, sessionMode: mode, phase: .live, error: nil, replace: true,
+                messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+                pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+                turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+                hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        }
+        remote.receive(update(.chat))
+        let request = Task { try await remote.providerAccountsSnapshot() }
+        for _ in 0..<100 where !started { await Task.yield() }
+        XCTAssertTrue(started)
+        remote.receive(update(.code))
+        continuation.yield(())
+        continuation.finish()
+        do { _ = try await request.value; XCTFail("A stale reply must be discarded") }
+        catch is CancellationError {}
+        catch { XCTFail("Unexpected error: \(error)") }
+    }
+
+    @MainActor
     func testAttachmentAdmissionRacePreservesUnsentOriginalImage() async throws {
         let (release, continuation) = AsyncStream<Void>.makeStream()
         let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A",
@@ -216,7 +288,7 @@ final class RemoteControlTests: XCTestCase {
 
     @MainActor
     func testRemoteProjectionAcceptsDesktopTurnsAndRetainsStablePromptIdentity() {
-        let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
         source.replaceRemoteTranscript([], sessionID: session)
         source.appendRemotePrompt(turnID: 10, text: "from desktop", images: [], origin: "Desktop")
@@ -322,7 +394,7 @@ final class RemoteControlTests: XCTestCase {
 
     @MainActor
     func testRemoteSnapshotAndLiveModeDoNotReplaceTheTranscript() {
-        let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
         source.replaceRemoteTranscript([MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "hello".clientTextDto)])], sessionID: session)
         func update(_ mode: SessionModeDto?) -> RemoteSessionUpdateFfi {
@@ -350,7 +422,7 @@ final class RemoteControlTests: XCTestCase {
 
     @MainActor
     func testRemoteHistoryImageHydrationPreservesRowsAndAccountInvalidationClearsData() {
-        let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
         let ref = session + ":m:0:0"
         source.replaceRemoteTranscript([MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "photo".clientTextDto)],
@@ -400,7 +472,7 @@ final class RemoteControlTests: XCTestCase {
 
     @MainActor
     func testRemoteProjectionCannotBootstrapLocalEngine() async {
-        let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
         do { try await source.prepare(); XCTFail("remote projection built a local engine") }
         catch { XCTAssertTrue(error is RemoteFfiError) }

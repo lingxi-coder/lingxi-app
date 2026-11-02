@@ -5,6 +5,7 @@ struct ProviderBulkImportPage: View {
     let layer: DesktopSettingsLayer
     var initialInput: String? = nil
     @State private var repository = DesktopSettingsRepository.shared
+    @State private var accounts = ProviderAccountRepository.shared
     @Environment(\.dismiss) private var dismiss
     @State private var input = ""
     @State private var rejectedInput: String?
@@ -15,9 +16,11 @@ struct ProviderBulkImportPage: View {
     @State private var errorMessage: String?
     @State private var status: String?
     @State private var reviewedProviders = ""
+    @State private var accountBindings: [UUID: String] = [:]
+    @State private var reloadingBindings = false
+    @State private var acceptedReloadGeneration: Int?
     private var own: [String: Any] { repository.ownValue(key: "providers", layer: layer) as? [String: Any] ?? [:] }
     private var writable: Bool { repository.canEdit(key: "providers", layer: layer) && !importing }
-    private var configured: Set<String> { Set(repository.credentialStates.filter { $0.value }.map(\.key)) }
 
     var body: some View {
         NavigationStack {
@@ -62,13 +65,14 @@ struct ProviderBulkImportPage: View {
                 loadFile(result)
             }
         }
-        .onChange(of: repository.sourceGeneration) { _, _ in
+        .onChange(of: repository.sourceGeneration) { _, generation in
+            guard !reloadingBindings, generation != acceptedReloadGeneration else { return }
             importTask?.cancel(); input = ""; rejectedInput = nil; document = nil; importing = false
             errorMessage = String(localized: "settings_parity_import_source_changed")
         }
         .onDisappear { importTask?.cancel(); input = ""; rejectedInput = nil; document = nil }
         .task {
-            await repository.refreshCredentials()
+            await accounts.refresh()
             if let initialInput { input = initialInput; preview() }
         }
     }
@@ -89,14 +93,28 @@ struct ProviderBulkImportPage: View {
                 TextField(String(localized: "settings_parity_base_url"), text: string(entry.id, field: "baseUrl")).textInputAutocapitalization(.never).autocorrectionDisabled()
                 TextField(String(localized: "settings_parity_api_key_env"), text: string(entry.id, field: "apiKeyEnv")).textInputAutocapitalization(.never).autocorrectionDisabled()
                 SecureField(String(localized: "settings_provider_api_key"), text: string(entry.id, field: "credential")).textInputAutocapitalization(.never).autocorrectionDisabled()
+                if bindingIDs(entry).count > 1 {
+                    Picker("Connection", selection: Binding(
+                        get: { accountBindings[entry.id] ?? bindingIDs(entry)[0] },
+                        set: { accountBindings[entry.id] = $0 }
+                    )) {
+                        ForEach(bindingIDs(entry), id: \.self) { Text($0).tag($0) }
+                    }
+                }
                 if entry.credential?.isEmpty == false { Text("settings_parity_import_secret_detected").font(.caption).foregroundStyle(.secondary) }
-                if let issue = ProviderBulkImport.validate(entry, credentialConfigured: configured.contains(entry.name)) { Text(issue).font(.caption).foregroundStyle(.red) }
+                if let issue = ProviderBulkImport.validate(entry) { Text(issue).font(.caption).foregroundStyle(.red) }
                 ForEach(Array(entry.warnings.enumerated()), id: \.offset) { _, warning in Text(warning).font(.caption).foregroundStyle(.secondary) }
                 DisclosureGroup(String(localized: "settings_provider_sanitized")) {
                     Text(DesktopSettingsRepository.json(entry.draft)).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                 }
             }.textFieldStyle(.roundedBorder).disabled(importing)
         }
+    }
+
+    private func bindingIDs(_ entry: ProviderImportEntry) -> [String] {
+        let connections = entry.draft["connections"] as? [[String: Any]] ?? []
+        let ids = connections.compactMap { ($0["id"] as? String).map { "\(entry.name):\($0)" } }
+        return ids.isEmpty ? [entry.name] : ids
     }
 
     private func current(_ id: UUID) -> ProviderImportEntry? { document?.entries.first { $0.id == id } }
@@ -120,13 +138,13 @@ struct ProviderBulkImportPage: View {
     }
     private func preview() {
         let parsed = ProviderBulkImport.parse(input, existing: own)
-        rejectedInput = !parsed.errors.isEmpty || parsed.entries.contains { ProviderBulkImport.validate($0, credentialConfigured: configured.contains($0.name)) != nil } ? input : nil
+        rejectedInput = !parsed.errors.isEmpty || parsed.entries.contains { ProviderBulkImport.validate($0) != nil } ? input : nil
         document = parsed
+        accountBindings = [:]
         input = ""
         reviewedProviders = DesktopSettingsRepository.json(own)
         errorMessage = nil; status = nil
-        let ids = document?.entries.map(\.name) ?? []
-        Task { await repository.refreshCredentials(providerIDs: ids) }
+        Task { await accounts.refresh() }
     }
     private func loadFile(_ result: Result<[URL], Error>) {
         do {
@@ -145,6 +163,7 @@ struct ProviderBulkImportPage: View {
     private func startImport() {
         guard let document, writable else { return }
         let generation = repository.sourceGeneration
+        let accountScope = accounts.snapshot.storeScope
         let reviewed = reviewedProviders
         let entries = document.entries
         let original = own
@@ -152,22 +171,39 @@ struct ProviderBulkImportPage: View {
         importTask = Task { @MainActor in
             var savedCredentials = false
             do {
-                let merged = try ProviderBulkImport.merge(entries, into: original, configured: configured)
-                for entry in entries where entry.selected {
-                    try validateScope(generation: generation, reviewed: reviewed)
-                    if let secret = entry.credential, !secret.isEmpty {
-                        await repository.saveCredential(providerID: entry.name, secret: secret)
-                        try await repository.waitForConfirmation(generation: generation)
-                        savedCredentials = true
-                    }
-                }
+                let merged = try ProviderBulkImport.merge(entries, into: original)
                 try validateScope(generation: generation, reviewed: reviewed)
                 await repository.save(key: "providers", json: DesktopSettingsRepository.json(merged), layer: layer)
                 try await repository.waitForConfirmation(generation: generation)
+                if entries.contains(where: { $0.selected && $0.credential?.isEmpty == false }) {
+                    reloadingBindings = true
+                    do {
+                        try await ProviderRepository.shared.reloadAccountBindings()
+                        acceptedReloadGeneration = repository.sourceGeneration
+                        reloadingBindings = false
+                    } catch {
+                        reloadingBindings = false
+                        throw error
+                    }
+                    await accounts.refresh()
+                    for entry in entries where entry.selected {
+                        try Task.checkCancellation()
+                        guard !accountScope.isEmpty, accounts.snapshot.storeScope == accountScope else {
+                            throw ProviderBulkImport.ImportError("The execution Host changed during import.")
+                        }
+                        guard let secret = entry.credential, !secret.isEmpty else { continue }
+                        let provider = entry.name == "openai-chatgpt" ? "openai" : entry.name
+                        let binding = accountBindings[entry.id] ?? bindingIDs(entry)[0]
+                        let accepted = await accounts.perform(.init(action: "add", providerId: provider,
+                            accountId: UUID().uuidString.lowercased(), displayName: entry.name,
+                            executionBindingId: binding, authKind: "api_key"), credential: secret)
+                        guard accepted else { throw ProviderBulkImport.ImportError(accounts.errorMessage ?? "Account import failed.") }
+                        savedCredentials = true
+                    }
+                }
                 status = String(localized: "settings_provider_import_saved")
                 self.document = nil
             } catch {
-                guard generation == repository.sourceGeneration else { return }
                 errorMessage = error.localizedDescription + (savedCredentials ? " " + String(localized: "settings_provider_import_partial_credentials") : "")
                 // Keep only sanitized configuration after any attempted write.
                 if var pending = self.document {

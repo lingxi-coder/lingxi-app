@@ -3,6 +3,16 @@ import XCTest
 
 final class ProviderBulkImportTests: XCTestCase {
 
+    func testProviderDefinitionsImportWithoutAnyCredentialAuthority() throws {
+        let input = #"{"custom":{"type":"openai","baseUrl":"https://example.test/v1","models":["m"]}}"#
+        let document = ProviderBulkImport.parse(input, existing: [:])
+        let entry = try XCTUnwrap(document.entries.first)
+        XCTAssertNil(entry.credential)
+        XCTAssertNil(ProviderBulkImport.validate(entry))
+        let merged = try ProviderBulkImport.merge(document.entries, into: [:])
+        XCTAssertNotNil(merged["custom"])
+    }
+
     func testOutputDefaultRequiresPositiveU32AndAllowsRuntimeClamping() throws {
         let valid = ["null", "1", "8192", "4294967295"]
         for budget in valid + ["0", "-1", "1.5", "4294967296", "true", #""8192""#] {
@@ -10,11 +20,11 @@ final class ProviderBulkImportTests: XCTestCase {
             let document = ProviderBulkImport.parse(input, existing: [:])
             let entry = try XCTUnwrap(document.entries.first)
             if valid.contains(budget) {
-                XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
-                XCTAssertNoThrow(try ProviderBulkImport.merge(document.entries, into: [:], configured: []))
+                XCTAssertNil(ProviderBulkImport.validate(entry))
+                XCTAssertNoThrow(try ProviderBulkImport.merge(document.entries, into: [:]))
             } else {
-                XCTAssertNotNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
-                XCTAssertThrowsError(try ProviderBulkImport.merge(document.entries, into: [:], configured: []))
+                XCTAssertNotNil(ProviderBulkImport.validate(entry))
+                XCTAssertThrowsError(try ProviderBulkImport.merge(document.entries, into: [:]))
             }
         }
     }
@@ -38,16 +48,16 @@ final class ProviderBulkImportTests: XCTestCase {
             let document = ProviderBulkImport.parse(input, existing: [:])
             let entry = try XCTUnwrap(document.entries.first)
             if valid.contains(context) {
-                XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
-                let merged = try ProviderBulkImport.merge(document.entries, into: [:], configured: [])
+                XCTAssertNil(ProviderBulkImport.validate(entry))
+                let merged = try ProviderBulkImport.merge(document.entries, into: [:])
                 let provider = try XCTUnwrap(merged["custom"] as? [String: Any])
                 let models = try XCTUnwrap(provider["models"] as? [[String: Any]])
                 let metadata = try XCTUnwrap(models.first?["metadata"] as? [String: Any])
                 let saved = try XCTUnwrap(metadata["context"] as? NSDictionary)
                 XCTAssertEqual(saved, try JSONSerialization.jsonObject(with: Data(context.utf8)) as? NSDictionary)
             } else {
-                XCTAssertNotNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
-                XCTAssertThrowsError(try ProviderBulkImport.merge(document.entries, into: [:], configured: []))
+                XCTAssertNotNil(ProviderBulkImport.validate(entry))
+                XCTAssertThrowsError(try ProviderBulkImport.merge(document.entries, into: [:]))
             }
         }
     }
@@ -64,10 +74,10 @@ final class ProviderBulkImportTests: XCTestCase {
             XCTAssertTrue(document.errors.isEmpty)
             let entry = try XCTUnwrap(document.entries.first)
             XCTAssertTrue(entry.warnings.isEmpty)
-            XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+            XCTAssertNil(ProviderBulkImport.validate(entry))
             XCTAssertEqual(entry.draft["regions"] as? [String], regions)
 
-            let merged = try ProviderBulkImport.merge(document.entries, into: [:], configured: [])
+            let merged = try ProviderBulkImport.merge(document.entries, into: [:])
             let provider = try XCTUnwrap(merged["regional"] as? [String: Any])
             XCTAssertEqual(provider["regions"] as? [String], regions)
         }
@@ -79,9 +89,9 @@ final class ProviderBulkImportTests: XCTestCase {
         XCTAssertTrue(document.errors.isEmpty)
         let entry = try XCTUnwrap(document.entries.first)
         XCTAssertTrue(entry.warnings.isEmpty)
-        XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+        XCTAssertNil(ProviderBulkImport.validate(entry))
 
-        let merged = try ProviderBulkImport.merge(document.entries, into: [:], configured: [])
+        let merged = try ProviderBulkImport.merge(document.entries, into: [:])
         let saved = try XCTUnwrap(merged["regional"] as? [String: Any])
         for provider in [entry.draft, saved] {
             XCTAssertEqual(provider["regions"] as? [String], ["international"])
@@ -101,7 +111,7 @@ final class ProviderBulkImportTests: XCTestCase {
         let json = #"{"providers":{"deepseek":{"type":"openai","models":[{"id":"deepseek-flash"}],"connections":[{"id":"intl","baseUrl":"https://api.deepseek.test"},{"id":"cn","baseUrl":"https://cn.deepseek.test/v1"}],"fallback":{"on":["rate_limit","auth"]}}}}"#
         let document = ProviderBulkImport.parse(json, existing: [:])
         let entry = try XCTUnwrap(document.entries.first)
-        XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: true))
+        XCTAssertNil(ProviderBulkImport.validate(entry))
         let connections = try XCTUnwrap(entry.draft["connections"] as? [[String: Any]])
         XCTAssertEqual(connections.count, 2)
         XCTAssertEqual(connections[0]["id"] as? String, "intl")
@@ -114,7 +124,7 @@ final class ProviderBulkImportTests: XCTestCase {
     func testProviderLevelBaseUrlIsNotRequiredWhenConnectionsSupplyIt() throws {
         let json = #"{"providers":{"p":{"type":"openai","models":[{"id":"m"}],"connections":[{"id":"a","baseUrl":"https://a.test/v1"}]}}}"#
         let entry = try XCTUnwrap(ProviderBulkImport.parse(json, existing: [:]).entries.first)
-        XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: true))
+        XCTAssertNil(ProviderBulkImport.validate(entry))
     }
 
     /// Every connection is validated as the flat provider it desugars to, and
@@ -122,7 +132,7 @@ final class ProviderBulkImportTests: XCTestCase {
     func testABrokenConnectionFailsValidationEvenWhenSiblingsAreValid() throws {
         let json = #"{"providers":{"p":{"type":"openai","models":[{"id":"m"}],"connections":[{"id":"good","baseUrl":"https://good.test/v1"},{"id":"bad","baseUrl":"not-a-url"}]}}}"#
         let entry = try XCTUnwrap(ProviderBulkImport.parse(json, existing: [:]).entries.first)
-        XCTAssertNotNil(ProviderBulkImport.validate(entry, credentialConfigured: true))
+        XCTAssertNotNil(ProviderBulkImport.validate(entry))
     }
 
     /// A connection id becomes part of a qualified model reference, so a
@@ -131,7 +141,7 @@ final class ProviderBulkImportTests: XCTestCase {
         for bad in ["a/b", "a:b", "a#b"] {
             let json = "{\"providers\":{\"p\":{\"type\":\"openai\",\"baseUrl\":\"https://x.test/v1\",\"models\":[{\"id\":\"m\"}],\"connections\":[{\"id\":\"\(bad)\"}]}}}"
             let entry = try XCTUnwrap(ProviderBulkImport.parse(json, existing: [:]).entries.first)
-            XCTAssertNotNil(ProviderBulkImport.validate(entry, credentialConfigured: true), "id \(bad) must be rejected")
+            XCTAssertNotNil(ProviderBulkImport.validate(entry), "id \(bad) must be rejected")
         }
     }
 
@@ -143,37 +153,37 @@ final class ProviderBulkImportTests: XCTestCase {
         let connections = try XCTUnwrap(entry.draft["connections"] as? [[String: Any]])
         let models = try XCTUnwrap(connections[0]["models"] as? [[String: Any]])
         XCTAssertEqual(models.first?["id"] as? String, "shorthand")
-        XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: true))
+        XCTAssertNil(ProviderBulkImport.validate(entry))
     }
 
     /// Duplicate connection ids would desugar to two profiles with one name.
     func testDuplicateConnectionIdsAreRejected() throws {
         let json = #"{"providers":{"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],"connections":[{"id":"a"},{"id":"a"}]}}}"#
         let entry = try XCTUnwrap(ProviderBulkImport.parse(json, existing: [:]).entries.first)
-        XCTAssertNotNil(ProviderBulkImport.validate(entry, credentialConfigured: true))
+        XCTAssertNotNil(ProviderBulkImport.validate(entry))
     }
 
     /// `credentialIds` names stored credentials; it must be distinct non-empty ids.
     func testCredentialIdsMustBeDistinctNonEmptyStrings() throws {
         let ok = #"{"providers":{"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],"credentialIds":["k1","k2"]}}}"#
-        XCTAssertNil(ProviderBulkImport.validate(try XCTUnwrap(ProviderBulkImport.parse(ok, existing: [:]).entries.first), credentialConfigured: true))
+        XCTAssertNil(ProviderBulkImport.validate(try XCTUnwrap(ProviderBulkImport.parse(ok, existing: [:]).entries.first)))
         let dupe = #"{"providers":{"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],"credentialIds":["k1","k1"]}}}"#
-        XCTAssertNotNil(ProviderBulkImport.validate(try XCTUnwrap(ProviderBulkImport.parse(dupe, existing: [:]).entries.first), credentialConfigured: true))
+        XCTAssertNotNil(ProviderBulkImport.validate(try XCTUnwrap(ProviderBulkImport.parse(dupe, existing: [:]).entries.first)))
     }
 
     /// An unknown trigger silently disables failover, which is invisible until
     /// the day it is needed — so it must be rejected by name.
     func testFallbackTriggersAreCheckedAgainstWhatTheEngineImplements() throws {
         let bad = #"{"providers":{"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],"connections":[{"id":"a"}],"fallback":{"on":["rate_limits"]}}}}"#
-        XCTAssertNotNil(ProviderBulkImport.validate(try XCTUnwrap(ProviderBulkImport.parse(bad, existing: [:]).entries.first), credentialConfigured: true))
+        XCTAssertNotNil(ProviderBulkImport.validate(try XCTUnwrap(ProviderBulkImport.parse(bad, existing: [:]).entries.first)))
     }
     func testNativeWrappedImportExtractsSecretAndRetainsMetadata() throws {
         let document = ProviderBulkImport.parse(#"{"providers":{"custom":{"type":"openai","baseUrl":"https://example.test/v1","apiKey":"fake-test-key","models":[{"id":"m","metadata":{"contextWindowTokens":1000,"pricing":{"inputPerMillion":1.2}}}]}}}"#, existing: [:])
         let entry = try XCTUnwrap(document.entries.first)
         XCTAssertEqual(entry.credential, "fake-test-key")
         XCTAssertNil(entry.draft["apiKey"])
-        XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
-        let merged = try ProviderBulkImport.merge(document.entries, into: ["untouched": ["type": "anthropic"]], configured: [])
+        XCTAssertNil(ProviderBulkImport.validate(entry))
+        let merged = try ProviderBulkImport.merge(document.entries, into: ["untouched": ["type": "anthropic"]])
         XCTAssertNotNil(merged["untouched"])
         let data = try JSONSerialization.data(withJSONObject: merged)
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("fake-test-key"))
@@ -190,15 +200,15 @@ final class ProviderBulkImportTests: XCTestCase {
         XCTAssertNil(entry.credential)
         XCTAssertEqual((entry.draft["models"] as? [[String: Any]])?.first?["aliases"] as? [String], ["friendly"])
         XCTAssertFalse(document.warnings.isEmpty)
-        XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+        XCTAssertNil(ProviderBulkImport.validate(entry))
     }
 
     func testExistingProfilesStartUnselectedAndMustBeExplicitlyChosen() throws {
         var document = ProviderBulkImport.parse(validInput, existing: ["custom": ["type": "anthropic"]])
         XCTAssertFalse(try XCTUnwrap(document.entries.first).selected)
-        XCTAssertThrowsError(try ProviderBulkImport.merge(document.entries, into: [:], configured: []))
+        XCTAssertThrowsError(try ProviderBulkImport.merge(document.entries, into: [:]))
         document.entries[0].selected = true
-        XCTAssertNoThrow(try ProviderBulkImport.merge(document.entries, into: [:], configured: []))
+        XCTAssertNoThrow(try ProviderBulkImport.merge(document.entries, into: [:]))
     }
 
     func testNestedCredentialsAreRejectedWithoutDiagnosticsLeakingValues() throws {
@@ -207,16 +217,16 @@ final class ProviderBulkImportTests: XCTestCase {
         XCTAssertFalse(entry.errors.isEmpty)
         XCTAssertFalse(entry.errors.joined().contains("do-not-print"))
         XCTAssertFalse(try String(data: JSONSerialization.data(withJSONObject: entry.draft), encoding: .utf8)!.contains("do-not-print"))
-        XCTAssertThrowsError(try ProviderBulkImport.merge(document.entries, into: [:], configured: []))
+        XCTAssertThrowsError(try ProviderBulkImport.merge(document.entries, into: [:]))
     }
 
     func testUnsafeURLDuplicateModelsAndUnknownSDKAreRejected() throws {
         var entry = try XCTUnwrap(ProviderBulkImport.parse(validInput, existing: [:]).entries.first)
         entry.draft["baseUrl"] = "https://user:password@example.test"
-        XCTAssertNotNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+        XCTAssertNotNil(ProviderBulkImport.validate(entry))
         entry.draft["baseUrl"] = "https://example.test"
         entry.draft["models"] = [["id": "duplicate"], ["id": "duplicate"]]
-        XCTAssertNotNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+        XCTAssertNotNil(ProviderBulkImport.validate(entry))
         let unknown = ProviderBulkImport.parse(#"{"provider":{"custom":{"npm":"unknown","options":{},"models":{"m":{}}}}}"#, existing: [:])
         XCTAssertFalse(try XCTUnwrap(unknown.entries.first).errors.isEmpty)
     }
@@ -231,7 +241,7 @@ final class ProviderBulkImportTests: XCTestCase {
     func testBooleanPricingDoesNotPassAsNumber() throws {
         var entry = try XCTUnwrap(ProviderBulkImport.parse(validInput, existing: [:]).entries.first)
         entry.draft["pricing"] = ["m": ["inputPerMtok": true, "outputPerMtok": 1]]
-        XCTAssertNotNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+        XCTAssertNotNil(ProviderBulkImport.validate(entry))
     }
 
     private var validInput: String { #"{"custom":{"type":"openai","baseUrl":"https://example.test","apiKeyEnv":"API_KEY","models":["m"]}}"# }

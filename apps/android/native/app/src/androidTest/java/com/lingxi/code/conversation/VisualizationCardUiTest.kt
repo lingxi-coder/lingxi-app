@@ -204,7 +204,7 @@ class VisualizationCardUiTest {
             context = context,
             sessionMode = com.lingxi.code.model.SessionMode.Code,
             apiBase = "https://invalid.example",
-            apiKey = "",
+
             model = "",
             providerProfilesJson = "{}",
             routingJson = """{"mobileEnabledProfiles":[]}""",

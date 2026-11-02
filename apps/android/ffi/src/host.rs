@@ -814,7 +814,6 @@ pub fn build_android_engine(
         app_version,
         app_agent_host,
         api_base,
-        api_key,
         model,
         session_mode,
         initial_session_id,
@@ -943,7 +942,6 @@ pub fn build_android_engine(
         if !api_base.is_empty() {
             cfg.api_base = api_base;
         }
-        cfg.api_key = api_key;
         if !model.is_empty() {
             cfg.default_model = model;
         }
@@ -1122,7 +1120,6 @@ pub fn build_android_engine(
     {
         let _ = (
             api_base,
-            api_key,
             model,
             app_files_root,
             listener,
@@ -1153,11 +1150,11 @@ mod mobile_media_scope_tests {
     };
     use super::*;
     use client::protocol::{audio as audio_dto, media as media_dto};
+    use lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE;
     use media_api::{
         MediaOperation, MediaOperationContext, MediaOperationId, MediaOperationKind, MediaOwner,
         MediaResult,
     };
-    use std::collections::BTreeMap;
     use std::time::Duration;
 
     struct Audio;
@@ -1273,8 +1270,16 @@ mod mobile_media_scope_tests {
                 Ok(MediaResult::Sources { .. })
             ));
         }
+        let account_home = tempfile::tempdir().unwrap();
         let provider = || {
-            Arc::new(AudioProviderHost::new("{}", "international", None, BTreeMap::new()).unwrap())
+            let (services, ids) = harness_runtime::account_audio::build_account_audio_services(
+                account_home.path().to_path_buf(),
+                "{}",
+                "international",
+                Arc::new(lingxi_core::host::InMemorySecureStorage::new()),
+            )
+            .unwrap();
+            Arc::new(AudioProviderHost::from_provider_services(services, ids))
         };
         let first_provider = provider();
         let second_provider = provider();
@@ -1285,13 +1290,18 @@ mod mobile_media_scope_tests {
                 .register_attached_profile(&permit, "openai", provider.clone())
                 .unwrap();
             registry
-                .bind_attached_session_to_profile(&permit, "openai", "profile:openai")
+                .bind_attached_session_to_profile(&permit, "openai", UNBOUND_ACCOUNT_SCOPE)
                 .unwrap();
         }
         let callback = host.attachment_confirmed_callback(&first);
         callback();
         assert!(registry
-            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .provider_for_attached_session(
+                first.id(),
+                "same-session",
+                "openai",
+                UNBOUND_ACCOUNT_SCOPE
+            )
             .is_ok());
         let (idle, _, _) = host.create_engine_media_scope().unwrap();
         let _idle_audio = idle.audio_service(host.audio_service()).unwrap();
@@ -1310,7 +1320,12 @@ mod mobile_media_scope_tests {
         first.begin_revoke();
         callback();
         assert!(registry
-            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .provider_for_attached_session(
+                first.id(),
+                "same-session",
+                "openai",
+                UNBOUND_ACCOUNT_SCOPE
+            )
             .is_ok());
         assert_eq!(
             first.revoke(Duration::from_secs(2)).await,
@@ -1318,7 +1333,12 @@ mod mobile_media_scope_tests {
         );
         callback();
         assert!(registry
-            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .provider_for_attached_session(
+                first.id(),
+                "same-session",
+                "openai",
+                UNBOUND_ACCOUNT_SCOPE
+            )
             .is_err());
         assert!(Arc::ptr_eq(
             &registry
@@ -1326,7 +1346,7 @@ mod mobile_media_scope_tests {
                     second.id(),
                     "same-session",
                     "openai",
-                    "profile:openai"
+                    UNBOUND_ACCOUNT_SCOPE
                 )
                 .unwrap(),
             &second_provider

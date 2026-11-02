@@ -10,6 +10,7 @@ internal class AudioOwnerBindingRegistry<T : Any> {
     @Synchronized fun current(): T? = current
     @Synchronized fun reserve(owner: AudioOwnerKey) { if (owner !in owners) owners[owner] = null }
     @Synchronized fun bind(owner: AudioOwnerKey, handle: T) { owners[owner] = handle }
+    @Synchronized fun isBound(owner: AudioOwnerKey, handle: T): Boolean = owners.containsKey(owner) && owners[owner] === handle
     @Synchronized fun release(owner: AudioOwnerKey) { owners.remove(owner) }
     @Synchronized fun releaseIfBound(owner: AudioOwnerKey, handle: T) {
         if (owners[owner] === handle) owners.remove(owner)

@@ -28,6 +28,7 @@ import {
 } from '../bridge/runtimeCenterState';
 import { statusLabel } from '../bridge/agentStatus';
 import { tr } from '../i18n/locale';
+import { ImagePreview } from './ImagePreview';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { DesktopIcon } from './DesktopIcon';
@@ -532,7 +533,7 @@ function ResourceDetail({ resource, bridge }: { resource: RuntimeResource | unde
   }, [bridge.previewWorkspaceFile, resource?.id, resource?.path]);
   if (!resource) return <EmptyRow>{tr('desktop_runtime_resource_missing')}</EmptyRow>;
   if (resource.kind === 'image' && resource.url) {
-    return <div style={{ padding: 15 }}><img src={resource.url} alt={resource.name} style={{ display: 'block', maxWidth: '100%', maxHeight: 500, margin: '0 auto', objectFit: 'contain', borderRadius: 10, background: t.windowBg }} /><div style={{ marginTop: 10, color: t.text3, fontSize: 11 }}>{resource.name}</div></div>;
+    return <div style={{ padding: 15 }}><ImagePreview src={resource.url} alt={resource.name} imageStyle={{ display: 'block', maxWidth: '100%', maxHeight: 500, margin: '0 auto', objectFit: 'contain', borderRadius: 10, background: t.windowBg }} /><div style={{ marginTop: 10, color: t.text3, fontSize: 11 }}>{resource.name}</div></div>;
   }
   if (resource.kind === 'file') {
     if (error) return <div role="alert" style={{ padding: 15, color: t.danger, fontSize: 11 }}>{error === 'desktop_runtime_preview_failed' ? tr(error) : error}</div>;

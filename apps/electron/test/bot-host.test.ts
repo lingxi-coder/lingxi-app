@@ -79,7 +79,7 @@ function hostFixture(t: TestContext) {
     pickDirectory: async (path) => { picks.push(path); return pickResult; },
     trustDirectory: async () => true,
   };
-  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any, undefined, undefined, undefined, undefined, dialogs);
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any, undefined, undefined, undefined, dialogs);
   host.attachBots(new BotsUi({ service, content: new BotContent(f.store), tasks: noTasks, loginItem: noLoginItem }));
   scheduled = new ScheduledTaskService(settings, bridge as any, {} as any, () => false, () => undefined);
   scheduled.attachBots(service);

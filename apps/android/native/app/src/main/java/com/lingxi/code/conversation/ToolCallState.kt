@@ -313,6 +313,8 @@ data class ToolCallUi(
     val questionAnswers: List<AnsweredQuestion>? = null,
     /** The app a `LocalApp` publish stored; the row is drawn as its card. */
     val localApp: PublishedLocalApp? = null,
+    /** Original skill body used to identify the adjacent injected prompt. */
+    val skillBody: String? = null,
 )
 
 /** One ordered piece of a settled transcript message. */

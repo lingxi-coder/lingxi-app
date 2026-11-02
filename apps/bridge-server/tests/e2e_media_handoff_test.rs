@@ -276,6 +276,11 @@ impl orchestrator::MediaConversationAttachment for FakeAttachment {
     ) -> Result<RealtimeAgentSessionIo, String> {
         self.state.open_count.fetch_add(1, Ordering::SeqCst);
         *self.state.opened_request.lock().unwrap() = Some(request);
+        let provider_profile = prepared
+            .profile_name
+            .clone()
+            .ok_or_else(|| "fixture has no audio profile".to_owned())?;
+        let audio_profile_name = prepared.audio_profile_name.clone();
         *self.state.prepared_session_id.lock().unwrap() = Some(prepared.session_id);
         self.state
             .audio_channel_ptr
@@ -314,6 +319,9 @@ impl orchestrator::MediaConversationAttachment for FakeAttachment {
             .map_err(|error| error.to_string())?;
         self.state.open_ready.notify_one();
         Ok(RealtimeAgentSessionIo {
+            audio_profile_name,
+            provider_profile,
+            provider_account_scope: "explicit-service.fixture".into(),
             control,
             events,
             inputs,

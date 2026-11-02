@@ -3,9 +3,10 @@ import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import { SessionRuntime } from '../src/main/bridge.js';
 
-function fixture(resolveProviderCredential?: () => Promise<string | undefined>) {
+function fixture(prepareAccounts?: () => Promise<string | undefined>) {
   const workspace = '/prompt-admission';
-  const runtime = new SessionRuntime({ launchConfig: () => ({ workspace, trusted: true }), resolveProviderCredential });
+  const runtime = new SessionRuntime({ launchConfig: () => ({ workspace, trusted: true }), ...(prepareAccounts ? { resolveProviderAccounts: async () => undefined } : {}) });
+  if (prepareAccounts) runtime.refreshProviderAccounts = async () => { await prepareAccounts(); };
   const prompts: Array<{ text: string; turnId?: number }> = [];
   const cancels: Array<number | undefined> = [];
   const client = new EventEmitter() as EventEmitter & { sendPrompt(text: string, options: { turnId?: number }): void; cancel(id?: number): void; close(): void };

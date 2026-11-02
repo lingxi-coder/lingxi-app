@@ -45,6 +45,7 @@ import { Icon } from './Icon';
 import { MarkdownContent } from './MarkdownContent';
 import { ToolActivityIcon } from './ToolActivityIcon';
 import { ComputerApplicationIcon } from './ComputerApplicationIcon';
+import { AgentAvatar } from './AgentAvatar';
 import { ModUiParentSite } from './modUiAbovePrompt';
 
 const TITLE_STYLE: CSSProperties = Object.freeze({
@@ -133,6 +134,7 @@ function ToolGlyph({ item, permissionRequest }: { item: ToolRunItem; permissionR
     >
       {permissionRequest
         ? <Icon name="hand" size={18} stroke={1.7} />
+        : item.agentId ? <AgentAvatar agentId={item.agentId} size={18} />
         : <ComputerApplicationIcon item={item} fallback={<ToolActivityIcon name={toolIconName(item.view.verb, item.tool, item.view.icon)} />} />}
     </span>
   );

@@ -1,5 +1,4 @@
 use super::command_source_string;
-use super::lower_auth_state;
 use super::provider_model_catalog_from_listings;
 use super::EngineCommandRouter;
 use super::DEFAULT_SESSION_LIST_LIMIT;
@@ -12,7 +11,6 @@ use client::adapter::lowering::lower_status_snapshot;
 use client::adapter::ClientEventSink;
 use client::protocol::commands::ListingKindDto;
 use client::protocol::events::ClientEvent;
-use client::protocol::listings::AuthStateDto;
 use client::protocol::listings::SlashCommandDto;
 use client::protocol::text::ClientTextDto;
 use command_api::builtin_support::names::core_description;
@@ -29,7 +27,6 @@ pub(super) struct SlashAuthoritySnapshot {
     pub(super) model: String,
     pub(super) model_source: Option<ClientTextDto>,
     pub(super) permission_mode: Option<String>,
-    pub(super) auth: AuthStateDto,
     pub(super) catalog: Option<Vec<SlashCommandDto>>,
 }
 
@@ -180,7 +177,6 @@ impl EngineCommandRouter {
                 .as_ref()
                 .and_then(|source| ClientTextDto::from_projection(source).ok()),
             permission_mode: self.handle.permission_mode().await,
-            auth: lower_auth_state(self.auth.current_user().await),
             catalog: self.slash_command_catalog().await,
         }
     }
@@ -213,11 +209,7 @@ impl EngineCommandRouter {
                 events.push(ClientEvent::PermissionModeChanged { mode });
             }
         }
-        if before.auth != after.auth {
-            events.push(ClientEvent::AuthState {
-                state: after.auth.clone(),
-            });
-        }
+
         if before.catalog != after.catalog {
             if let Some(commands) = after.catalog.clone() {
                 events.push(ClientEvent::CommandsChanged { commands });
@@ -330,10 +322,6 @@ impl EngineCommandRouter {
             ListingKindDto::Doctor => {
                 let report = lower_doctor_report(&self.handle.run_doctor_checks().await);
                 sink.emit(ClientEvent::DoctorReport { report }).await;
-            }
-            ListingKindDto::Auth => {
-                let state = lower_auth_state(self.auth.current_user().await);
-                sink.emit(ClientEvent::AuthState { state }).await;
             }
             ListingKindDto::Tasks => {
                 self.emit_task_list(TaskListFilter::default(), sink).await;

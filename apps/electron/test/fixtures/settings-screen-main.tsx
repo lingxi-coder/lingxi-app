@@ -1,6 +1,7 @@
+import { fixtureAccountSnapshot, providerAccountsMock } from './provider-accounts-mock';
 import { useI18n } from '../../src/renderer/i18n/useI18n';
 import { LANGUAGE_STORAGE_KEY, invalidateLanguagePreference } from '../../src/renderer/i18n/locale';
-import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
+import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import '../../src/renderer/global.css';
@@ -40,7 +41,7 @@ function Fixture() {
   const [closeCalls, setCloseCalls] = useState(0);
   const [lastPermissionRuleCall, setLastPermissionRuleCall] = useState<unknown>(null);
   const [lastEngineSettingsPatch, setLastEngineSettingsPatch] = useState<unknown>(null);
-  const [providerCredentials, setProviderCredentials] = useState<Array<{ providerId: string; configured: boolean; encryptionAvailable: boolean; credentialPreview?: string }>>([]);
+  const [providerAccountSnapshot, setProviderAccountSnapshot] = useState(() => fixtureAccountSnapshot([]));
   const [credentialWrites, setCredentialWrites] = useState<string[]>([]);
   const [projectList, setProjectList] = useState<string[]>([]);
   const [projectCatalogs, setProjectCatalogs] = useState<Record<string, { sessions: Array<{ uuid: string; title: string; modified_rfc3339: string; message_count: number }> }>>({});
@@ -118,6 +119,10 @@ function Fixture() {
     });
   }, []);
 
+  const providerAccounts = useMemo(() => providerAccountsMock({ changed: setProviderAccountSnapshot, write: async providerId => {
+    if (failNextCredential.current) { failNextCredential.current = false; throw new Error('Simulated credential storage failure'); }
+    setCredentialWrites(values => [...values, providerId]);
+  } }), []);
   const bridge = {
     activeSession: { projectPath: '/test/project', sessionId: activeSessionId },
     bootstrap: {
@@ -128,7 +133,7 @@ function Fixture() {
       // thin would otherwise throw reading `.settings.theme` etc.
       settings: { version: 1 as const, projects: projectList, pinnedSessions: [] as never[] },
       projectCatalogs,
-      providerCredentials,
+      providerAccountSnapshot,
       workspace: hasProject ? { path: '/test/project', trusted: true } : { trusted: false },
       runtimes: [] as never[],
       diagnostics: [] as never[],
@@ -238,7 +243,6 @@ function Fixture() {
     configurationOperations: hookOperation ? { hook: hookOperation } : {},
     refreshMcpServers: noopAsyncVoid,
     refreshSkills: noopAsyncVoid,
-    refreshAuth: noopAsyncVoid,
     refreshHooks: noopAsyncVoid,
     refreshAgents: noopAsyncVoid,
     restartBridge: async () => { navCalls.current.push('restart'); },
@@ -272,8 +276,6 @@ function Fixture() {
     // unreachable: "cannot determine".
     microphonePermission: async () => 'unavailable' as const,
     sessionRuntimeStatus: () => undefined,
-    login: noopAsyncVoid,
-    logout: noopAsyncVoid,
     forceCompact: noopAsyncVoid,
     clearSession: noopAsyncVoid,
     // Write-side commands for Task 18's pages — none of these scenarios
@@ -281,20 +283,7 @@ function Fixture() {
     // scenario that does doesn't have to rediscover this same crash.
     updateEngineSettings,
     updateProviderSettings: updateEngineSettings,
-    setProviderCredential: async (providerId: string, credential: string) => {
-      if (failNextCredential.current) {
-        failNextCredential.current = false;
-        throw new Error('Simulated credential storage failure');
-      }
-      setCredentialWrites((values) => [...values, providerId]);
-      setProviderCredentials((values) => [...values.filter((entry) => entry.providerId !== providerId), {
-        providerId, configured: true, encryptionAvailable: true, credentialPreview: `••••${credential.slice(-4)}`,
-      }]);
-    },
-    clearProviderCredential: async (providerId: string) => {
-      setProviderCredentials((values) => values.filter((entry) => entry.providerId !== providerId));
-    },
-    refreshProviderCredential: noopAsyncVoid,
+    providerAccounts,
     refreshModelPicker: noopAsyncVoid,
     setModelPickerVisibility: noopAsyncVoid,
     updatePermissionRules,
@@ -449,11 +438,11 @@ function Fixture() {
         lastPermissionRuleCall,
         lastEngineSettingsPatch,
         credentialWrites,
-        providerCredentials,
+        providerAccountSnapshot,
       }),
     };
     return () => { delete window.__settingsScreenTest; };
-  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, credentialWrites, providerCredentials, settingsSnapshotEvent]);
+  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, credentialWrites, providerAccountSnapshot, settingsSnapshotEvent]);
 
   return (
     <Theme.Provider value={tokens(fixtureTheme === 'dark')}>
@@ -528,7 +517,7 @@ declare global {
         lastPermissionRuleCall: unknown;
         lastEngineSettingsPatch: unknown;
         credentialWrites: string[];
-        providerCredentials: unknown[];
+        providerAccountSnapshot: unknown;
       };
     };
   }

@@ -20,6 +20,7 @@ import { collapseFor, collapseInitial, collapseOpen, collapseSet } from './colla
 import { CommandOutput } from './CommandOutput';
 import { CompactionStatus } from './CompactionStatus';
 import { Icon } from './Icon';
+import { ImagePreview } from './ImagePreview';
 import type { SessionAgentSummaryDto, UiJsonValue } from '@lingxi/bridge-client';
 import { TranscriptAgents } from './TranscriptAgents';
 import { anchorTranscriptAgents, placeTranscriptAgents, type AgentAnchors } from './transcriptAgentPlacement';
@@ -29,7 +30,7 @@ import { ToolGroup } from './ToolGroup';
 import { TurnFileSummary } from './TurnFileSummary';
 import { MarkdownContent } from './MarkdownContent';
 import { LocalAppInstructions } from './LocalAppInstructions';
-import { localAppInstructionIds } from './localAppInstructionPresentation';
+import { skillInstructionNames } from './localAppInstructionPresentation';
 import { CommandIdentity } from './CommandIdentity';
 import { parseSlashCommandMessage } from './slashCommandMessage';
 import { formatClockTime } from '../bridge/sessionPresentation';
@@ -95,10 +96,10 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
         <div role="group" aria-label={tr('desktop_stage_images')} style={{ display: 'grid', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>
           {images.map((image, index) => (
             <div key={`${image.media_type}-${index}`} style={{ overflow: 'hidden', minWidth: 0, borderRadius: 11, background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 12%, transparent)` }}>
-              <img
+              <ImagePreview
                 src={image.url}
                 alt={tr('desktop_stage_image', index + 1)}
-                style={{ display: 'block', width: '100%', maxHeight: 260, aspectRatio: images.length > 1 ? '4 / 3' : 'auto', objectFit: 'contain', background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 8%, transparent)`, outlineOffset: -1 }}
+                imageStyle={{ display: 'block', width: '100%', maxHeight: 260, aspectRatio: images.length > 1 ? '4 / 3' : 'auto', objectFit: 'contain', background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 8%, transparent)`, outlineOffset: -1 }}
               />
             </div>
           ))}
@@ -364,7 +365,7 @@ const BOTTOM_SLACK = 24;
 export function Stage({ messageTarget, onMessageLocated, activityView = false, onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
-  const instructionIds = useMemo(() => localAppInstructionIds(liveItems), [liveItems]);
+  const instructionIds = useMemo(() => skillInstructionNames(liveItems), [liveItems]);
   useEffect(() => setLocalPlan(null), [sessionKey]);
   const stageRef = useRef<HTMLDivElement>(null);
   const feedRef = useRef<HTMLDivElement>(null);
@@ -741,7 +742,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
           if (item.type === 'narration') {
             if (instructionIds.has(item.id)) return <div className="transcript-run-item" data-run-type="skill-instructions" key={item.id}>
-              <LocalAppInstructions id={item.id} text={item.text}
+              <LocalAppInstructions id={item.id} text={item.text} name={instructionIds.get(item.id)}
                 open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} />
             </div>;
             const document = submittedPlans.find(plan => plan.id === item.id);

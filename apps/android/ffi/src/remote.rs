@@ -137,6 +137,15 @@ pub async fn build_android_remote_control_client(
 
 #[uniffi::export(async_runtime = "tokio")]
 impl AndroidRemoteControlClient {
+    /// Account metadata and exact credential mutations are executed by the authenticated target Host.
+    pub async fn provider_account_command(
+        &self,
+        request_json: String,
+        credential: Option<String>,
+    ) -> Result<String, RemoteFfiError> {
+        self.inner.provider_account_command(request_json, credential).await
+    }
+
     /// The push registration of this install, sent with the next handshake so the
     /// desktop can address and exclude it.
     pub fn set_push_installation_id(&self, id: Option<String>) {

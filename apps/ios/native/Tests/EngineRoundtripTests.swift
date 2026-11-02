@@ -7,9 +7,9 @@
 // Electron↔bridge real-conversation path: ONE protocol (`client-protocol`), ONE
 // transport (UniFFI), ONE listener.
 //
-// It runs — and MUST pass — KEYLESS.  With no `ANTHROPIC_API_KEY`:
+// It runs with an isolated configuration and no account credentials:
 //
-//   * `buildIosEngine(...)` still succeeds — the engine host is constructed and
+//   * `buildIosEngineWithConfig(...)` still succeeds — the engine host is constructed and
 //     the foreign listener is registered (the "handshake").  Construction does
 //     NOT touch the network and does NOT require a key.
 //   * `submit(.sendPrompt(...))` returns Ok — per the binding contract, a turn
@@ -30,8 +30,7 @@
 // `.textDelta`; this test does not require or assert that, so it never needs a
 // secret in CI.)
 //
-// NO secrets: the test passes an explicitly empty key and never reads or logs a
-// credential from the environment.
+// No credentials are supplied, read from the environment or logged.
 
 import XCTest
 
@@ -93,16 +92,11 @@ import XCTest
             progress _: WorkflowProgressDto
         ) async {}
 
-        func onWorkflowProgress(
-            taskId _: String,
-            runId _: String,
-            progress _: WorkflowProgressDto
-        ) async {}
     }
 
     /// A no-op `IosPermissionSink` for the keyless round-trip: the keyless turn
-    /// 401s before any tool runs, so no permission is ever requested. Required
-    /// only to satisfy `buildIosEngine`'s `permissions:` parameter.
+    /// fails before any tool runs, so no permission is ever requested. Required
+    /// only to satisfy `buildIosEngineWithConfig`'s `permissions:` parameter.
     final class NoopPermissionSink: IosPermissionSink, @unchecked Sendable {
         func onRequest(request: PermissionRequest) async {}
     }
@@ -111,11 +105,6 @@ import XCTest
         func onEvent(event: ClientEvent) async {}
         func onWorkflowProgress(
             originSessionId _: String,
-            taskId _: String,
-            runId _: String,
-            progress _: WorkflowProgressDto
-        ) async {}
-        func onWorkflowProgress(
             taskId _: String,
             runId _: String,
             progress _: WorkflowProgressDto
@@ -161,11 +150,6 @@ import XCTest
             progress _: WorkflowProgressDto
         ) async {}
 
-        func onWorkflowProgress(
-            taskId _: String,
-            runId _: String,
-            progress _: WorkflowProgressDto
-        ) async {}
     }
 
     final class EngineRoundtripTests: XCTestCase {
@@ -195,7 +179,6 @@ import XCTest
                 configDirName: directories.configDirName,
                 nativeConfigHome: directories.configHome,
                 apiBase: "https://api.anthropic.com",
-                apiKey: "",
                 model: snapshot.defaultModelID ?? "",
                 sessionMode: .code, initialSessionId: nil,
                 visionDelegationEnabled: snapshot.visionDelegationEnabled,
@@ -305,29 +288,21 @@ import XCTest
             try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: sandbox) }
 
-            // HANDSHAKE / engine-build: must succeed even with NO api key.  We do
-            // Pass an explicitly empty key so a developer's local environment
-            // cannot silently turn this into a credentialed/network-success test.
-            let apiKey = ""
+            // Engine startup succeeds with an isolated, empty account store.
+            // Local credentials cannot turn this into an upstream-success test.
             let handle: MobileEngineHandle
             let audioConfigurationJSON = AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON
             let mediaHostComposition = try IOSNativeMediaHostComposition(
                 audioConfigurationJSON: try XCTUnwrap(audioConfigurationJSON)
             )
             do {
-                handle = try buildIosEngine(
-                    apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
-                        ?? "https://api.anthropic.com",
-                    apiKey: apiKey,
-                    model: "claude-sonnet-4-20250514",
-                    appSandboxRoot: sandbox.path,
-                    listener: listener,
+                handle = try buildIosEngineWithConfig(config: try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: sandbox, apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
+                        ?? "https://api.anthropic.com", model: "claude-sonnet-4-20250514"), listener: listener,
                     mediaHost: mediaHostComposition.nativeHost,
                     share: ShareImpl(),
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),
                     permissions: NoopPermissionSink(),
-                    mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
                     secureStorage: nil,
                     deviceControl: nil)
             } catch {
@@ -434,11 +409,9 @@ import XCTest
             let mediaHostComposition = try IOSNativeMediaHostComposition(
                 audioConfigurationJSON: try XCTUnwrap(audioConfigurationJSON)
             )
-            let handle = try buildIosEngine(
-                apiBase: "https://api.anthropic.com", apiKey: "", model: "claude-sonnet-4-20250514",
-                appSandboxRoot: sandbox.path, listener: listener, mediaHost: mediaHostComposition.nativeHost,
+            let handle = try buildIosEngineWithConfig(config: try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: sandbox, apiBase: "https://api.anthropic.com", model: "claude-sonnet-4-20250514"), listener: listener, mediaHost: mediaHostComposition.nativeHost,
                 share: ShareImpl(), notifications: NotificationImpl(),
-                clipboard: ClipboardImpl(), permissions: NoopPermissionSink(), mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
+                clipboard: ClipboardImpl(), permissions: NoopPermissionSink(),
                 secureStorage: nil, deviceControl: nil)
             try await handle.submit(command: .resumeSession(sessionId: sessionID, cwd: nil, expectedMode: .code))
             var restoredMessages: [MessageDto]?
@@ -480,19 +453,13 @@ import XCTest
                 audioConfigurationJSON: try XCTUnwrap(audioConfigurationJSON)
             )
             do {
-                handle = try buildIosEngine(
-                    apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
-                        ?? "https://api.anthropic.com",
-                    apiKey: "",
-                    model: "",
-                    appSandboxRoot: sandbox.path,
-                    listener: listener,
+                handle = try buildIosEngineWithConfig(config: try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: sandbox, apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
+                        ?? "https://api.anthropic.com", model: ""), listener: listener,
                     mediaHost: mediaHostComposition.nativeHost,
                     share: ShareImpl(),
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),
                     permissions: NoopPermissionSink(),
-                    mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
                     secureStorage: nil,
                     deviceControl: nil)
             } catch {

@@ -8,8 +8,8 @@ export interface TeamModelRoute {
   model_provider: string; model_protocol: string; model_id: string; model_endpoint: string;
   credential_id: string; model_profile: Record<string, unknown>;
 }
-export interface TeamPersonaSnapshot extends TeamModelRoute { instructions: string }
-export interface TeamModelSelection { route: TeamModelRoute; assertCurrent(): Promise<void> }
+export interface TeamPersonaSnapshot extends TeamModelRoute { instructions: string; provider_account_profiles: Record<string, unknown>[] }
+export interface TeamModelSelection { route: TeamModelRoute; profiles: Record<string, unknown>[]; assertCurrent(): Promise<void> }
 
 /** Native catalog descriptors contain one resolved static route, never owner routing. */
 export function validateTeamModelRoute(value: unknown): asserts value is TeamModelRoute {
@@ -188,8 +188,11 @@ export class TeamPrivateStore {
   }); }
   private validateSnapshot(value: TeamPersonaSnapshot): void {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_TEAM_SNAPSHOT');
-    const { instructions, ...route } = value;
+    const { instructions, provider_account_profiles: profiles, ...route } = value;
     validateTeamModelRoute(route);
+    if (!Array.isArray(profiles) || !profiles.length || profiles.length > 64
+      || profiles.some(profile => !profile || typeof profile !== 'object' || Array.isArray(profile))
+      || !profiles.some(profile => JSON.stringify(profile) === JSON.stringify(route.model_profile))) throw new Error('INVALID_TEAM_SNAPSHOT');
     if (typeof instructions !== 'string' || !instructions.trim() || instructions.includes('\0')
       || Buffer.byteLength(instructions) > 64 * 1024) throw new Error('INVALID_TEAM_SNAPSHOT');
   }

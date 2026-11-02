@@ -74,7 +74,6 @@ async fn active_force_compact_refuses_while_slash_text_queues_and_ws_liveness_su
     let dispatcher = Arc::new(CompactDispatcher::default());
     let router = Arc::new(EngineCommandRouter::new(
         handle.clone(),
-        Arc::new(MockAuth),
         Arc::new(MockTaskRegistry { rows: vec![] }),
         Some(dispatcher.clone()),
         None,

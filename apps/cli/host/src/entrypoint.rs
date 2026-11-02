@@ -316,8 +316,8 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         None => {}
     }
 
-    // Custom beta headers are an API-key-only Anthropic surface. Validate at
-    // startup so OAuth/non-key sessions do not appear to accept an inert flag.
+    // Validate beta syntax and an explicit provider hint here. Authentication
+    // and actual route capabilities are enforced by the selected named account.
     if let Some(raw_betas) = parsed.betas.as_mut() {
         let mut seen = std::collections::HashSet::new();
         raw_betas.retain(|beta| {
@@ -332,13 +332,6 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             }
         }
         if !raw_betas.is_empty() {
-            if std::env::var("ANTHROPIC_API_KEY")
-                .ok()
-                .is_none_or(|key| key.trim().is_empty())
-            {
-                eprintln!("lingxi-cli: --betas is only available for Anthropic API-key users.");
-                return exit_codes::RUNTIME_ERROR;
-            }
             if parsed.model.as_deref().is_some_and(|model| {
                 let (profile, _) = llm_runtime::split_profile_model(model);
                 profile != "anthropic"
@@ -499,7 +492,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
     }
 
-    // Top-level subcommand dispatch (mcp/auth/plugin/project/setup-token/agents/
+    // Top-level subcommand dispatch (mcp/provider/plugin/project/agents/
     // install/update/doctor/auto-mode/ultrareview). When clap matched a leading
     // command token, run that family and exit — this is what stops a bare `mcp`/
     // `auth` token from being swallowed as a billable chat prompt.

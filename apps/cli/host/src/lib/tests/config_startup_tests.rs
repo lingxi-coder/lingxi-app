@@ -8,7 +8,6 @@ fn parsed(args: &[&str]) -> Argv {
 #[test]
 fn standard_commands_run_startup_while_special_fast_paths_do_not() {
     for args in [
-        &["auth", "status"][..],
         &["auto-mode", "defaults"][..],
         &["mcp", "list"][..],
         &["plugin", "list"][..],
@@ -24,6 +23,7 @@ fn standard_commands_run_startup_while_special_fast_paths_do_not() {
         &["project"][..],
         &["attach", "missing"][..],
         &["remote-control"][..],
+        &["provider", "accounts", "list", "openai"][..],
     ] {
         let argv = parsed(args);
         assert!(
@@ -41,7 +41,6 @@ fn only_device_identity_command_families_eagerly_create_user_id() {
     for args in [
         &["mcp", "list"][..],
         &["doctor"][..],
-        &["setup-token"][..],
         &["install"][..],
         &["update"][..],
     ] {
@@ -51,6 +50,6 @@ fn only_device_identity_command_families_eagerly_create_user_id() {
             "{args:?}"
         );
     }
-    let argv = parsed(&["auth", "status"]);
+    let argv = parsed(&["provider", "accounts", "list", "openai"]);
     assert!(!command_initializes_user_id(argv.command.as_ref()));
 }

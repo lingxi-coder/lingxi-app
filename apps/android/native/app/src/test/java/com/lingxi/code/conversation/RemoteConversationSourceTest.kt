@@ -29,6 +29,7 @@ import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import java.util.Base64
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -425,6 +426,8 @@ class RemoteConversationSourceTest {
             { source.setReasoningSelection("auto") },
             { source.setPermissionMode("plan") },
             { source.loadOlder() },
+            { source.providerAccountsSnapshot() },
+            { source.providerAccountCommand("{}", null) },
         )
         forbidden.forEach { action ->
             try { action(); fail("conversation operation reached an approval capability") }
@@ -541,6 +544,9 @@ class RemoteConversationSourceTest {
         assertEquals(RemoteSessionPhaseFfi.ERROR, source.meta.value.phase)
         try { source.sendExternalPrompt("blocked", emptyList()); fail("conflicting owner") }
         catch (_: IllegalStateException) {}
+        try { source.providerAccountsSnapshot(); fail("conflicting owner account access") }
+        catch (_: IllegalStateException) {}
+        assertTrue(port.calls.none { it == "providerAccount" })
         assertEquals(1, received.filterIsInstance<ExternalFeedItem.Base>().size)
         job.cancel()
     }
@@ -558,6 +564,10 @@ class RemoteConversationSourceTest {
         catch (_: IllegalStateException) {}
         try { source.loadOlder(); fail("unconfirmed owner") }
         catch (_: IllegalStateException) {}
+        try { source.providerAccountsSnapshot(); fail("unconfirmed owner account access") }
+        catch (_: IllegalStateException) {}
+        try { source.providerAccountCommand("{}", null); fail("unconfirmed owner account mutation") }
+        catch (_: IllegalStateException) {}
         assertTrue(port.calls.isEmpty())
         assertTrue(received.none { it is ExternalFeedItem.Base })
         port.updates.emit(remoteUpdate(sessionMode = com.lingxi.code.bindings.client.SessionModeDto.CHAT))
@@ -565,6 +575,46 @@ class RemoteConversationSourceTest {
         assertEquals(listOf(ImageRefDto("image/png", "AQID")),
             received.filterIsInstance<ExternalFeedItem.Base>().single().session.transcript.single().images)
         job.cancel()
+    }
+
+    @Test fun confirmedLiveConversationCanReadAndManageProviderAccounts() = runTest(UnconfinedTestDispatcher()) {
+        val port = FakeRemoteSessionPort()
+        val source = RemoteConversationSource(port, "s1", "Pixel 9")
+        startLive(source, port)
+        assertEquals("{}", source.providerAccountsSnapshot())
+        assertEquals("{}", source.providerAccountCommand("{}", null))
+        assertEquals(listOf("providerAccount", "providerAccount"), port.calls)
+    }
+
+    @Test fun pendingProviderAccountResultsAreRejectedAfterOwnerChanges() = runTest(UnconfinedTestDispatcher()) {
+        for (snapshot in listOf(true, false)) for (transition in listOf("conflict", "offline", "reattach")) {
+            val port = FakeRemoteSessionPort()
+            val source = RemoteConversationSource(port, "s1", "Pixel 9")
+            startLive(source, port)
+            val gate = CompletableDeferred<Unit>()
+            port.providerAccountGate = gate
+            val pending = async {
+                runCatching {
+                    if (snapshot) source.providerAccountsSnapshot() else source.providerAccountCommand("{}", null)
+                }
+            }
+            assertEquals(listOf("providerAccount"), port.calls)
+            when (transition) {
+                "conflict" -> port.updates.emit(remoteUpdate(sessionMode = com.lingxi.code.bindings.client.SessionModeDto.CHAT))
+                "offline" -> {
+                    port.updates.emit(remoteUpdate(phase = RemoteSessionPhaseFfi.OFFLINE))
+                    port.updates.emit(remoteUpdate())
+                    assertEquals(RemoteSessionPhaseFfi.LIVE, source.meta.value.phase)
+                }
+                else -> {
+                    source.prepareForReattach()
+                    port.updates.emit(remoteUpdate())
+                    assertEquals(RemoteSessionPhaseFfi.LIVE, source.meta.value.phase)
+                }
+            }
+            gate.complete(Unit)
+            assertTrue("$transition snapshot=$snapshot", pending.await().exceptionOrNull() is IllegalStateException)
+        }
     }
 
     @Test fun promptImagesAreFetchedOnceAndDeliveredWithTheirTurn() = runTest(UnconfinedTestDispatcher()) {

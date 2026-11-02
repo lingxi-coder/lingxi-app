@@ -1,3 +1,5 @@
+import { fixtureAccountSnapshot } from './provider-accounts-mock';
+import { providerAccountsMock } from './provider-accounts-mock';
 import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../../src/renderer/global.css';
@@ -8,15 +10,6 @@ import { tokens } from '../../src/renderer/theme/tokens';
 import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 
 setLanguagePreference('en');
-
-// Task 20: this fixture used to mount `BetaSettings` directly. That
-// component (and the modal it lived in) is gone — `ProviderCredentials.tsx`
-// (`src/renderer/components/settings/pages/ProviderCredentials.tsx`) is the
-// same already-tested transaction logic (`isCurrentCredentialTransaction`,
-// `persistProviderCredentialAndApplyModel`), lifted verbatim, now reached
-// through `SettingsScreen`. `initialProviderId="anthropic"` lands the shell
-// straight on that page (`resolveInitialPage`), so this fixture drives the
-// close-during-persistence behavior through the real settings shell.
 
 let persistencePending = false;
 let resolvePersistence: ((value: unknown) => void) | undefined;
@@ -35,7 +28,7 @@ const bridge = {
     activeSession: { projectPath: '/test/project', sessionId: activeSessionId },
     runtimes: [],
     projectCatalogs: {},
-    providerCredentials: [{ providerId: 'anthropic', configured: true, encryptionAvailable: true, credentialPreview: '••••test' }],
+    providerAccountSnapshot: fixtureAccountSnapshot(['anthropic']),
     connection: { status: 'connected' as const },
     diagnostics: [],
   },
@@ -56,19 +49,14 @@ const bridge = {
   },
   refreshSettingsSnapshot: async () => undefined,
   refreshDiagnostics: async () => [],
-  setProviderCredential: async () => {
-    persistencePending = true;
-    return new Promise<unknown>((resolve) => { resolvePersistence = resolve; });
-  },
+  providerAccounts: providerAccountsMock({
+    initial: [{ accountId: '11111111-1111-4111-8111-111111111111', providerId: 'anthropic', executionBindingId: 'anthropic', displayName: 'Test account', authKind: 'api_key', enabled: true, userPriority: 0, configRevision: 0, identityGeneration: 1, credentialRef: { storeScope: 'renderer-fixture', secretRef: 'acct.11111111-1111-4111-8111-111111111111' } }],
+    write: async () => { persistencePending = true; await new Promise(resolve => { resolvePersistence = resolve; }); },
+    probe: async () => { connectionTestCalls++; throw new Error('test credential rejected'); },
+  }),
   restartBridge: async () => { restartCalls += 1; },
   refreshModelPicker: async () => undefined,
   setModel: async () => undefined,
-  clearProviderCredential: async () => ({ providerId: 'anthropic', configured: false, encryptionAvailable: true }),
-  testProviderConnection: async () => {
-    connectionTestCalls += 1;
-    throw new Error('test credential rejected');
-  },
-  refreshProviderCredential: async () => undefined,
   setApiBaseUrl: async () => undefined,
   copyDiagnostics: async () => undefined,
   exportDiagnostics: async () => null,
@@ -85,11 +73,10 @@ function Fixture() {
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
         setter?.call(input, 'sk-pending-save');
         input?.dispatchEvent(new Event('input', { bubbles: true }));
-        const save = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Save');
-        save?.click();
+        setTimeout(() => [...document.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Add API key')?.click(), 0);
       },
       resolvePersistence: () => {
-        resolvePersistence?.({ credential: { providerId: 'anthropic', configured: true, encryptionAvailable: true }, settings: bridge.bootstrap.settings });
+        resolvePersistence?.(undefined);
         resolvePersistence = undefined;
         persistencePending = false;
       },
@@ -102,22 +89,22 @@ function Fixture() {
         setFixtureSessionId(activeSessionId);
       },
       startConnectionTest: () => {
-        const test = document.querySelector<HTMLButtonElement>('[data-testid="provider-connection-test"]');
+        const test = document.querySelector<HTMLButtonElement>('[data-testid^="provider-account-test-"]');
         if (!test) throw new Error('Anthropic provider connection test button is not mounted');
         if (test.disabled) throw new Error('Anthropic provider connection test button is disabled');
         test.click();
       },
       connectionTestButtonState: () => {
-        const button = document.querySelector<HTMLButtonElement>('[data-testid="provider-connection-test"]');
+        const button = document.querySelector<HTMLButtonElement>('[data-testid^="provider-account-test-"]');
         return {
           exists: Boolean(button),
           disabled: button?.disabled ?? true,
-          providerCredentialField: Boolean(document.querySelector('input[aria-label="Anthropic API key"]')),
+          providerCredentialField: Boolean(document.querySelector('input[aria-label="API key"]')),
         };
       },
       connectionTestCalls: () => connectionTestCalls,
       clearStoredCredential: () => {
-        const remove = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Delete API key');
+        const remove = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Remove');
         remove?.click();
       },
       connectionTestErrorVisible: () => document.body.innerText.includes('test credential rejected'),

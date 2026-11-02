@@ -81,10 +81,9 @@ pub use audio_provider::{
 pub use harness_runtime::mobile::{
     max_audio_payload_bytes, ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto,
     CronTaskDto, FiredCronJobDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
-    MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, MobileSessionMode,
-    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
-    ModelPricingTierDto, PermissionRequestSink, ProviderCatalogEntryDto, ProviderConnectionTestDto,
-    SessionModeDto,
+    MobileEngineHandle, MobileSessionMode, ModelBillingModeDto, ModelCapabilitiesDto,
+    ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, PermissionRequestSink,
+    ProviderCatalogEntryDto, SessionModeDto,
 };
 mod callbacks;
 mod configuration;
@@ -169,8 +168,6 @@ pub use configuration::IosMobileLinuxConfigFfi;
 pub use configuration::IosProviderConfigFfi;
 #[cfg(feature = "uniffi")]
 pub use host::build_ios_cron_store;
-#[cfg(feature = "uniffi")]
-pub use host::build_ios_engine;
 #[cfg(feature = "uniffi")]
 pub use host::build_ios_engine_with_config;
 #[cfg(feature = "uniffi")]
@@ -264,10 +261,7 @@ mod mobile_linux_sdk;
 // `platform-posix-minimal`; audio support is projected from the callback's
 // initial snapshot and updated by its service lifecycle.
 //
-// SECRETS: `api_key` arrives as a parameter the Swift side reads from the
-// process environment (`ANTHROPIC_API_KEY`) / an app setting at runtime; it is
-// NEVER hardcoded, logged, or persisted here. An empty key is valid — the
-// orchestrator only fails at `run_turn` with a 401 (mirrors `MobileConfig`).
+// Provider secrets are owned by the exact-account authority and native secure storage.
 
 /// Device-capability stubs used when the foreign host does not (yet) wire the
 /// camera / share callbacks. A text conversation never invokes these;

@@ -168,7 +168,7 @@ internal fun prepareDeepLinkImportProposal(kind: String, draft: String, scope: S
         }
         "provider" -> {
             val entries = parseProviderImport(parsed.toString(), JSONObject()).entries
-            require(entries.isNotEmpty() && entries.all { it.error == null && it.credential == null }) { "Review valid provider definitions without credentials." }
+            require(entries.isNotEmpty() && entries.all { it.error == null }) { "Review valid provider definitions without credentials." }
         }
     }
     return parsed

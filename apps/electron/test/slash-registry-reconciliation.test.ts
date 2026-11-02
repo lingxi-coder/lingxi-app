@@ -103,8 +103,6 @@ const NATIVE_295_BUILTIN_COMMAND_NAMES = [
   'install-github-app',
   'install-slack-app',
   'keybindings',
-  'login',
-  'logout',
   'mcp',
   'memory',
   'mobile',

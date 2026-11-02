@@ -17,6 +17,47 @@ const sessionId = '11111111-2222-4333-8444-555555555555';
 const targetId = '22222222-3333-4444-8555-666666666666';
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes; }); return { promise, resolve }; }
 
+test('account hydration keeps an admitted prompt with its original owner after navigation', async t => {
+  const accounts = deferred<any>();
+  const commits: Array<{ sessionId: string; isActive: boolean }> = [];
+  const manager = new SessionRuntimeManager({
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    resolveProviderAccounts: () => accounts.promise,
+    onFirstPromptSent: (ref, isActive) => { commits.push({ sessionId: ref.sessionId, isActive }); },
+  });
+  t.after(() => manager.dispose());
+  const source = { projectPath: '/workspace', sessionId, mode: 'code' as const, projectId: '/workspace' };
+  const target = { projectPath: '/workspace', sessionId: targetId, mode: 'chat' as const, projectId: '/workspace' };
+  const runtime = await manager.ensure(source, false);
+  const sent: string[] = [];
+  const client = Object.assign(new EventEmitter(), {
+    close() {},
+    sendPrompt: (text: string) => { sent.push(text); },
+    sendCommand: (command: any) => {
+      if (command.type === 'provider_accounts') queueMicrotask(() => client.emit('event', { type: 'provider_accounts_updated', operation_id: command.operation_id }));
+    },
+  });
+  const internal = runtime as any;
+  internal.client = client;
+  internal.activeWorkspace = source.projectPath;
+  internal.activeWorkspaceTrusted = true;
+  internal.credentialRoutingSettings = {};
+  internal.selectedModelReference = 'openai/test-model';
+  internal.setState({ status: 'connected' });
+  internal.wireClient(client, internal.generation);
+  manager.activateSession(source);
+  const pending = runtime.sendPrompt('keep this turn');
+  assert.equal(runtime.hasActiveWork, true);
+  await manager.ensure(target, false);
+  manager.activateSession(target);
+  accounts.resolve({ providerAccounts: { storeScope: 'host', configRevision: 0, accounts: [], health: [] }, providerAccountCredentials: {} });
+  await pending;
+  assert.deepEqual(sent, ['keep this turn']);
+  assert.deepEqual(commits, [{ sessionId, isActive: false }]);
+  assert.equal(runtime.turnActive, true);
+  assert.equal((manager as any).activeSessionId, targetId);
+});
+
 test('draft launch always carries its fixed owner mode', { skip: process.platform === 'win32' }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'lingxi-draft-mode-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

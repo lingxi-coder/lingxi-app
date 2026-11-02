@@ -54,6 +54,7 @@ sealed interface ReplyEvent {
         val planMarkdown: String? = null,
         val questionAnswers: List<AnsweredQuestion>? = null,
         val localApp: PublishedLocalApp? = null,
+        val skillBody: String? = null,
         val elapsedMs: Long? = null,
         /**
          * The engine's PRE-DERIVED call header, carried straight through from
@@ -345,6 +346,7 @@ fun clientEventToReply(
                 planMarkdown = if (!event.isError) toolPlanMarkdown(event.tool, event.resultJson) else null,
                 questionAnswers = if (!event.isError) parseQuestionAnswers(event.tool, event.resultJson) else null,
                 localApp = if (!event.isError) parseLocalAppResult(event.tool, event.resultJson) else null,
+                skillBody = if (!event.isError) parseSkillBody(event.tool, event.resultJson) else null,
             )
         }
     is ClientEvent.UsageUpdate -> ReplyEvent.Usage(

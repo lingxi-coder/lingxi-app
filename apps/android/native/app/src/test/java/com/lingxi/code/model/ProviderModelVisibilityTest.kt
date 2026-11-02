@@ -6,6 +6,27 @@ import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class ProviderModelVisibilityTest {
+    @Test fun subscriptionDoesNotInheritApiCatalogMembership() {
+        val subscription = option("openai-chatgpt/subscription-only", "openai-chatgpt", "subscription-only")
+        val api = ProviderModelVisibility(catalogModelIds = listOf("api-only"))
+        assertEquals(listOf(subscription), ProviderModelVisibilityRules.visibleConversationModels(listOf(subscription), mapOf("openai" to api)))
+        assertEquals(emptyList<ModelOption>(), ProviderModelVisibilityRules.visibleConversationModels(listOf(subscription),
+            mapOf("openai" to api, "openai-chatgpt" to ProviderModelVisibility(catalogModelIds = listOf("different-subscription-model")))))
+    }
+
+    @Test fun subscriptionKeepsItsOwnVisibilityWhenBothChannelsAreConfigured() {
+        val subscription = option("openai-chatgpt/shared-model", "openai-chatgpt", "shared-model")
+        assertEquals(emptyList<ModelOption>(), ProviderModelVisibilityRules.visibleConversationModels(listOf(subscription), mapOf(
+            "openai" to ProviderModelVisibility(showInModelPicker = true),
+            "openai-chatgpt" to ProviderModelVisibility(showInModelPicker = false))))
+    }
+
+    @Test fun subscriptionRespectsLogicalOpenAIVisibility() {
+        val models = listOf(option("openai-chatgpt/shared-model", "openai-chatgpt", "shared-model"))
+        assertEquals(emptyList<ModelOption>(), ProviderModelVisibilityRules.visibleConversationModels(models,
+            mapOf("openai" to ProviderModelVisibility(showInModelPicker = false))))
+    }
+
 
     @Test
     fun visibleCatalogModels_defaultsToAllAndHonorsExplicitEmptyAllowlist() {

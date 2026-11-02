@@ -9,6 +9,10 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,9 +27,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -96,6 +103,9 @@ internal fun ToolCallView(
     val isSkill = call.header?.verb == ToolVerbUi.Skill || call.tool.equals("Skill", ignoreCase = true)
     val headline = display?.let { resultHeadline(it) }
     val statusLabel = toolCallStatusLabel(call.status)
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val hovered by interaction.collectIsHoveredAsState()
     // Desktop parity: every result starts collapsed; the engine still owns
     // body/diff truncation and the client owns disclosure presentation.
     val collapsible = display != null && display.hasExpandableContent
@@ -112,7 +122,7 @@ internal fun ToolCallView(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 44.dp)
-                .then(if (collapsible) Modifier.clickable(onClick = openDetail) else Modifier)
+                .then(if (collapsible) Modifier.clickable(interactionSource = interaction, indication = LocalIndication.current, onClick = openDetail) else Modifier)
                 .then(if (isSkill && collapsible) Modifier.testTag(UiTags.TOOL_CALL_TOGGLE) else Modifier)
                 .semantics(mergeDescendants = true) {
                     contentDescription = "$statusLabel $title"
@@ -168,6 +178,7 @@ internal fun ToolCallView(
             if (isSkill && collapsible) {
                 com.lingxi.code.components.LXIcon(
                     com.lingxi.code.components.LXIconName.ChevronR,
+                    modifier = Modifier.alpha(if (focused || hovered) 1f else 0f),
                     size = 16.dp, color = t.text3,
                     contentDescription = null,
                 )

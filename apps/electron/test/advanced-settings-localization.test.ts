@@ -36,7 +36,7 @@ test('advanced settings render all supported languages while preserving profile 
   const snapshot = { files: [], effective: {}, active: {}, provenance: {}, locked: [], layers: { user: {} }, mergedKeys: [] };
   const props: any = {
     bridge: {
-      bootstrap: { settings: {}, providerCredentials: [] }, desktop: { currentModel: null, providerModelCatalog: [] },
+      bootstrap: { settings: {} }, desktop: { currentModel: null, providerModelCatalog: [] },
       agentCatalog: [{ name: 'User Agent', description: 'Keep original 用户说明', tools_allowed: [] }],
     },
     snapshot, editingLayer: 'user', theme: 'dark', onTheme() {}, onNavigate() {}, onClose() {},
@@ -44,8 +44,8 @@ test('advanced settings render all supported languages while preserving profile 
   for (const locale of DESKTOP_LOCALES) {
     const pages: Array<[React.ReactElement, string]> = [
       [React.createElement(CustomProviders, props), 'desktop_settings_cb6216aa42'],
-      [React.createElement(ProviderCredentials, { ...props, initialProviderId: 'openai-chatgpt' }), 'desktop_settings_1dcf32a354'],
-      [React.createElement(ProviderEditorFields, { name: 'User-Profile-用户', onName() {}, draft: { type: 'openai', models: [{ id: 'user-model' }] }, onDraft() {}, apiKey: '', onApiKey() {} }), 'desktop_settings_d1ff8f98bc'],
+      [React.createElement(ProviderCredentials, { ...props, initialProviderId: 'openai-chatgpt' }), 'provider_accounts_status_error'],
+      [React.createElement(ProviderEditorFields, { name: 'User-Profile-用户', onName() {}, draft: { type: 'openai', models: [{ id: 'user-model' }] }, onDraft() {}, apiKey: '', onApiKey() {} }), 'settings_provider_api_key'],
       [React.createElement(ProviderProtocol, { ...props, providerId: 'openai-chatgpt' }), 'desktop_settings_e06568d15f'],
       [React.createElement(ProviderRegion, props), 'desktop_settings_d50e29c2a9'],
       [React.createElement(Fusion, props), 'desktop_settings_53bc997d63'],

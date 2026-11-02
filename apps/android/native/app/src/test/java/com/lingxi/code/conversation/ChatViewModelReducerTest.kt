@@ -393,6 +393,34 @@ class ChatViewModelReducerTest {
         assertEquals(listOf(message), vm.state.value.messages)
     }
 
+    @Test fun outOfBandErrorNoticeSurfacesWithoutStartingAnInferenceTurn() {
+        val vm = newVm()
+        vm.reduceClientEvent(ClientEvent.SystemNotice("Media route unavailable".toClientTextDto(), true))
+        assertEquals("Media route unavailable", vm.state.value.error?.message)
+        assertFalse(vm.state.value.streaming)
+        assertTrue(vm.state.value.messages.isEmpty())
+    }
+
+    @Test fun outOfBandInformationalNoticeDoesNotBecomeAHostError() {
+        val vm = newVm()
+        val before = vm.state.value
+        vm.reduceClientEvent(ClientEvent.SystemNotice("Turn-scoped information".toClientTextDto(), false))
+        assertEquals(before, vm.state.value)
+    }
+
+    @Test fun activeTurnErrorNoticeKeepsExistingReplyStreamMappingWithoutDuplicateHostError() = runTest(dispatcher) {
+        val vm = ChatViewModel(RecordingSource())
+        vm.send("working")
+        runCurrent()
+        val event = ClientEvent.SystemNotice("Media route unavailable".toClientTextDto(), true)
+        vm.reduceClientEvent(event)
+        assertNull(vm.state.value.error)
+        assertTrue(vm.state.value.streaming)
+        vm.reduce(clientEventToReply(event)!!)
+        assertEquals("Media route unavailable", vm.state.value.statusLine)
+        assertNull(vm.state.value.error)
+    }
+
     @Test fun loopFoldDoesNotHideAShellFromBeforeTheFire() {
         val vm = newVm()
         vm.reduce(ReplyEvent.ShellTool(ShellToolUpdate.Started("old", "pwd", null)))
@@ -1722,7 +1750,7 @@ class ChatViewModelReducerTest {
 
     @Test
     fun sessionAgentTextProjectsToDisplayOnlyAtTheUiBoundary() {
-        val summary = SessionAgentSummaryDto(
+        val summary = SessionAgentSummaryDto(reportDelivery = "flagged",
             agentId = "agent:worker",
             name = ClientTextDto(codeUnits = listOf('A'.code.toUShort(), 0xD800.toUShort())),
             agentType = "worker",
@@ -1739,6 +1767,7 @@ class ChatViewModelReducerTest {
 
         assertEquals("A�", ui.name)
         assertEquals("x😃", ui.latestActivity)
+        assertEquals("flagged", ui.reportDelivery)
     }
 
     @Test

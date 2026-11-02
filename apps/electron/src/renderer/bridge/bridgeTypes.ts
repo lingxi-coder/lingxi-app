@@ -1,9 +1,9 @@
+import type { ProviderAccountsApi } from '../../shared/providerAccounts';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type {
   AgentDto,
   AskUserQuestionRequestDto,
   AudioOperationDto,
-  AuthStateDto,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -52,9 +52,6 @@ import type {
   PluginSecretCleanupResult,
   PluginSecretMetadata,
   ProjectSessionCatalogState,
-  ProviderConnectionTestResult,
-  ProviderCredentialMetadata,
-  ProviderCredentialUpdate,
   SessionPinInput,
   SessionRef,
   SystemSettingsPane,
@@ -116,6 +113,12 @@ export interface TrackedSpeechEvent {
 }
 
 export interface UseBridge {
+  providerSettings?: Record<string, unknown>;
+  providerSettingsLocked?: string[];
+  providerSettingsError?: string;
+  providerSettingsApplyPending?: boolean;
+  providerAccounts?: ProviderAccountsApi;
+  readonly providerAccountsRefreshing?: boolean;
   linkDraft: { sessionId: string; text: string; requestId: string } | null;
   offerLinkDraft(value: { sessionId: string; text: string; requestId: string }): void;
   clearLinkDraft(): void;
@@ -143,7 +146,6 @@ export interface UseBridge {
   readonly connected: boolean;
   readonly conversation: ConversationState;
   readonly desktop: DesktopState;
-  readonly authState: AuthStateDto | null;
   readonly hooksCatalog: readonly HookDto[];
   readonly agentCatalog: readonly AgentDto[];
   readonly cost: DesktopState['lastCost'];
@@ -228,12 +230,6 @@ export interface UseBridge {
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
   sessionRuntimeStatus(sessionId: string): SessionRuntimeStatus | undefined;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
-  setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
-  clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
-  loginCodex(): Promise<ProviderCredentialUpdate>;
-  cancelCodexLogin(): Promise<void>;
-  testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
-  refreshProviderCredential(providerId: string): Promise<void>;
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
   clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
@@ -276,7 +272,7 @@ export interface UseBridge {
    */
   updateEngineSettings(destination: 'user' | 'project' | 'local', patch: Record<string, unknown>): Promise<void>;
   /** Save provider settings and wait for confirmation from the persisted file layer. */
-  updateProviderSettings(destination: 'user' | 'project' | 'local', patch: Record<string, unknown>): Promise<void>;
+  updateProviderSettings(patch: Record<string, unknown>): Promise<void>;
   /**
    * `update_permission_rules` — the ONLY write path for `permissions.{allow,deny,ask}`.
    * `apply_patch` refuses the `permissions` key outright, so there is no
@@ -352,12 +348,9 @@ export interface UseBridge {
   setPermissionMode(mode: PermissionModeId): Promise<void>;
   initializeProactivity(proactivity: boolean, reinitialize?: boolean): Promise<void>;
   setProactivityLevel(level: NativeProactivityLevelDto, offerBypass?: boolean): Promise<void>;
-  login(): Promise<void>;
-  logout(): Promise<void>;
   forceCompact(instructions?: string): Promise<void>;
   clearSession(name?: string): Promise<void>;
   refreshTasks(options?: { preserve?: boolean }): Promise<void>;
-  refreshAuth(): Promise<void>;
   refreshHooks(): Promise<void>;
   refreshAgents(): Promise<void>;
   refreshStatus(): Promise<void>;

@@ -5,7 +5,7 @@ export const CH_LOCAL_APPS = 'lingxi:local-apps';
 export const CH_LOCAL_APPS_CHANGED = 'lingxi:local-apps:changed';
 export const LOCAL_APP_SCHEME = 'lingxi-app';
 
-export type LocalAppCapability = 'process' | 'files' | 'clipboard' | 'notifications' | 'camera' | 'microphone' | 'photos' | 'share' | 'agent' | 'background' | 'network' | 'location' | 'calendar' | 'contacts' | 'haptics';
+export type LocalAppCapability = 'process' | 'files' | 'clipboard' | 'notifications' | 'camera' | 'microphone' | 'photos' | 'share' | 'agent' | 'background' | 'network' | 'location' | 'calendar' | 'contacts' | 'haptics' | 'mcp';
 export interface LocalAppStep {
   /** A shell command, executed in cwd with the application's environment. */
   command: string;
@@ -21,6 +21,8 @@ export interface LocalAppProcess extends LocalAppStep {
   dependsOn?: string[];
   ready?: { path?: string; output?: string; timeoutMs?: number };
 }
+export type LocalAppMcpServer = ({ type: 'stdio' } & LocalAppStep) | { type: 'http'; process: string; path: string };
+export interface LocalAppMcpStatus { server: string; state: 'connecting' | 'connected' | 'reconnecting'; tools: number }
 export interface DesktopAppManifest {
   schema: 2;
   targets: LocalAppTarget[];
@@ -33,6 +35,7 @@ export interface DesktopAppManifest {
   install?: LocalAppStep[];
   build?: LocalAppStep[];
   processes?: LocalAppProcess[];
+  mcpServers?: Record<string, LocalAppMcpServer>;
   capabilities?: LocalAppCapability[];
   /** Requested host catalog IDs. This declaration never grants tool access. */
   agent?: { tools: string[]; skills?: Array<{ id: string; path: string }> };
@@ -65,6 +68,7 @@ export interface DesktopLocalApp {
   currentRevision?: number;
   runId?: string;
   error?: string;
+  mcp?: LocalAppMcpStatus[];
 }
 export interface LocalAppLog { sequence: number; time: number; runId: string; process: string; stream: 'stdout' | 'stderr' | 'host'; text: string }
 export interface LocalAppEditRequest {

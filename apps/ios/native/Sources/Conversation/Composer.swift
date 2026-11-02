@@ -21,6 +21,7 @@ struct Composer: View {
     // `model` remains in the view API for compatibility with its existing owner.
     var availableModels: [String] = []
     var availableModelDetails: [String: ModelRuntimeDetails] = [:]
+    var usesLocalAccountCatalog = true
     var contextUsage: ConversationUsageSnapshot? = nil
     var activeModelId: String = ""
     var activeModelDisplay: String? = nil
@@ -125,6 +126,7 @@ struct Composer: View {
         model: Binding<ModelOption>,
         availableModels: [String] = [],
         availableModelDetails: [String: ModelRuntimeDetails] = [:],
+        usesLocalAccountCatalog: Bool = true,
         activeModelId: String = "",
         activeModelDisplay: String? = nil,
         contextUsage: ConversationUsageSnapshot? = nil,
@@ -188,6 +190,7 @@ struct Composer: View {
         self._model = model
         self.availableModels = availableModels
         self.availableModelDetails = availableModelDetails
+        self.usesLocalAccountCatalog = usesLocalAccountCatalog
         self.activeModelId = activeModelId
         self.activeModelDisplay = activeModelDisplay
         self.contextUsage = contextUsage
@@ -402,7 +405,8 @@ struct Composer: View {
                 fastModePending: fastModePending,
                 fastModeError: fastModeError,
                 onSetFastMode: onSetFastMode,
-                showsFastMode: showsFastMode)
+                showsFastMode: showsFastMode,
+                usesLocalAccountCatalog: usesLocalAccountCatalog)
 
         }
         .sheet(isPresented: $controlsOpen) {
@@ -913,6 +917,7 @@ private struct ComposerTurnActionIcon: View {
 /// Android `AttachmentThumb`.
 private struct AttachmentThumb: View {
     @Environment(\.theme) private var t
+    @State private var preview = false
     let attachment: ComposerAttachment
     let onRemove: () -> Void
 
@@ -920,7 +925,7 @@ private struct AttachmentThumb: View {
         HStack(spacing: 8) {
             #if canImport(UIKit)
                 ZStack(alignment: .topTrailing) {
-                    Image(uiImage: attachment.image)
+                    Button { preview = true } label: { Image(uiImage: attachment.image)
                         .resizable()
                         .scaledToFill()
                         .frame(width: 74, height: 62)
@@ -929,6 +934,12 @@ private struct AttachmentThumb: View {
                             RoundedRectangle(cornerRadius: 10)
                                 .stroke(t.borderStrong.opacity(0.55), lineWidth: 0.5)
                         }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(String(localized: "chat_preview_attached_image"))
+                    .fullScreenCover(isPresented: $preview) {
+                        NativeImagePreview(source: "data:\(attachment.mediaType);base64,\(attachment.base64)", mediaType: attachment.mediaType, fallbackImage: attachment.image)
+                    }
                     Button(action: onRemove) {
                         LXIcon(name: .x, size: 11, color: .white, stroke: 2)
                             .frame(width: 24, height: 24)

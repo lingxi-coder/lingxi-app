@@ -108,7 +108,7 @@ enum ConversationSourceFactory {
                         stableWorkspaceId: "projects", abi: "arm64", rootfsVersion: "ui-test",
                         archiveSha256: nil, authorizationFile: nil)
                     let source = EngineConversationSource(config: EngineConfig(
-                        apiBase: "https://invalid.example", apiKey: "", model: "", appSandboxRoot: root.path,
+                        apiBase: "https://invalid.example", model: "", appSandboxRoot: root.path,
                         projectCwd: nil, sessionMode: options.sessionMode, visionDelegationEnabled: false,
                         mobileLinux: runtime), mediaHostComposition: options.mediaHostComposition)
                     source.model.providerConfigured = false
@@ -134,9 +134,8 @@ enum ConversationSourceFactory {
                 let root = appSandboxRoot()
                 // The shared engine restores its last confirmed model when the
                 // provider is still available. These values only seed its fallback:
-                // configured provider first, then the legacy Keychain model for
-                // installs that have not migrated their provider configuration.
-                let storedModel = options.defaultModelID ?? Keychain.get(.model) ?? ""
+                // the current structured provider configuration supplies the fallback.
+                let storedModel = options.defaultModelID ?? ""
                 var config = EngineConfig.fromEnvironment(
                     appSandboxRoot: root,
                     model: storedModel,

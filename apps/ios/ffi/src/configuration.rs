@@ -51,7 +51,7 @@ pub struct IosMobileLinuxConfigFfi {
 /// iOS-provided multi-provider configuration for the mobile engine.
 ///
 /// The JSON strings contain non-secret provider/routing settings only. API
-/// keys are sent separately through `SetProviderCredential` and persist in the
+/// keys are sent separately through `provider_account_command` and persist in the
 /// injected secure storage implementation.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -66,8 +66,7 @@ pub struct IosProviderConfigFfi {
 /// Compact launch configuration for the extended iOS engine constructor.
 ///
 /// This additive carrier keeps project scoping, provider configuration, and
-/// mobile-linux settings marshaled together without breaking the legacy flat
-/// `build_ios_engine` entry point.
+/// mobile-linux settings marshaled together through one structured entry point.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[derive(Debug, Clone)]
@@ -84,7 +83,6 @@ pub struct IosEngineLaunchConfigFfi {
     /// Native config directory corresponding to the selected brand profile.
     pub native_config_home: String,
     pub api_base: String,
-    pub api_key: String,
     pub model: String,
     pub session_mode: SessionModeDto,
     /// Restore this exact owner before any session lifecycle hooks run.
@@ -379,7 +377,6 @@ pub(super) fn ios_mobile_config_from_launch_config(
     if !config.api_base.is_empty() {
         cfg.api_base = config.api_base.clone();
     }
-    cfg.api_key = config.api_key.clone();
     if !config.model.is_empty() {
         cfg.default_model = config.model.clone();
     }

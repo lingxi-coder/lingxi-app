@@ -123,10 +123,6 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         __desktop_config.mod_render_surface =
             Some(harness_runtime::desktop::ModRenderSurface::Desktop);
         __desktop_config.api_base = "https://api.anthropic.com".to_string();
-        __desktop_config.api_key = String::new();
-        __desktop_config.api_key_helper = None;
-        __desktop_config.managed_oauth_only = false;
-        __desktop_config.anthropic_key_fd_present = false;
         __desktop_config.cwd = cwd.clone();
         __desktop_config.lingxi_home = lingxi_home;
         __desktop_config.default_model = "claude-sonnet-4-20250514".to_string();
@@ -162,7 +158,6 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         __desktop_config.permission_mode_preference = None;
         __desktop_config.permission_mode_cli_explicit = false;
         __desktop_config.allow_dangerously_skip_permissions = false;
-        __desktop_config.connect_prompt = None;
         __desktop_config.max_turns = None;
         __desktop_config.plan_mode_instructions = None;
         __desktop_config.plans_directory = None;

@@ -132,6 +132,8 @@ interface RemoteClientPort {
     suspend fun setModel(sessionId: String, model: String)
     suspend fun setReasoning(sessionId: String, selection: ReasoningSelectionDto)
     suspend fun setPermissionMode(sessionId: String, mode: com.lingxi.code.bindings.android.RemotePermissionModeFfi)
+    suspend fun providerAccountCommand(requestJson: String, credential: String?): String =
+        error("remote host account management unavailable")
     suspend fun listApps(): List<RemoteLocalAppFfi> = throw UnsupportedOperationException()
     suspend fun openApp(appId: String): RemoteLocalAppOpenFfi = throw UnsupportedOperationException()
     suspend fun listModels(): com.lingxi.code.bindings.android.RemoteModelsFfi
@@ -756,6 +758,8 @@ private class ManagerSessionPort(
     override suspend fun setReasoning(selection: ReasoningSelectionDto) = operation { it.setReasoning(sessionId, selection) }
     override suspend fun setPermissionMode(mode: RemotePermissionModeFfi) =
         operation { it.setPermissionMode(sessionId, mode) }
+    override suspend fun providerAccountCommand(requestJson: String, credential: String?): String =
+        operation { it.providerAccountCommand(requestJson, credential) }
     override suspend fun listModels() = operation { it.listModels() }
     override fun promptOriginBotName(turnId: ULong) = manager.promptOriginBotName(ownerUid, hostId, sessionId, turnId)
 }
@@ -833,6 +837,9 @@ private object AppRemoteMediaConfigProvider : AndroidRemoteMediaConfigProvider {
 
 /** [RemoteClientPort] over the generated [AndroidRemoteControlClient]. */
 internal class FfiRemoteClientPort(private val client: AndroidRemoteControlClient) : RemoteClientPort {
+    override suspend fun providerAccountCommand(requestJson: String, credential: String?): String =
+        client.providerAccountCommand(requestJson, credential)
+
     override suspend fun prepareFile(sessionId: String, path: String, name: String) = client.prepareFile(sessionId, path, name)
     override suspend fun uploadFile(file: RemoteFileFfi, path: String) = client.uploadFile(file, path)
     override suspend fun downloadFile(file: RemoteFileFfi, path: String) = client.downloadFile(file, path)

@@ -1,3 +1,6 @@
+import { providerById, providersFromCatalog } from '../shared/providers.js';
+import { DesktopProviderAccounts, providerAccountSessionStore, runtimeAccountCredential, withFileRefreshIntents, withProviderAccountLock } from './provider-accounts.js';
+import { loginCodex } from './codex-auth.js';
 import { promises as fs } from 'node:fs';
 import { LocalAppCoreClient } from './local-apps/coreClient.js';
 import { RemoteFileStore } from './remoteControl/fileStore.js';
@@ -37,12 +40,9 @@ import type { SessionRef } from './bridgeTypes.js';
 import { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import {
   createMacCredentialBrokerClient,
-  readProviderEnvironmentCredential,
-  resolveProviderCredential,
-  SessionLaunchCache,
+  resolveSessionLaunchPluginSecrets,
 } from './credential-broker.js';
-import { CodexTokenManager, codexAccessToken } from './codex-tokens.js';
-import { CODEX_PROVIDER_ID } from './codex-auth.js';
+import { CodexTokenManager } from './codex-tokens.js';
 import { createRemoteControl } from './remoteControl/electronBindings.js';
 import { RemotePolicy, managedSettingsDirectory } from './remoteControl/policy.js';
 import { RemoteCommands } from './remoteControl/remoteCommands.js';
@@ -414,13 +414,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     const sessionId = owner?.type === 'session' ? owner.session_id : owner?.type === 'attached' && owner.logical_kind === 'session' ? owner.logical_owner_id : settings.getPublic().activeSession?.sessionId;
     return sessionId ? bridge?.get(sessionId)?.audioSessionContext : undefined;
   };
+  let providerAccounts: DesktopProviderAccounts | undefined;
   const providerAudio = new ProviderAudioHost({
+    resolveProviderAccounts: () => providerAccounts?.launch() ?? Promise.resolve(undefined),
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     cwd: () => settings.getPublic().activeSession?.projectPath ?? settings.getWorkspace() ?? app.getPath('home'),
     session: () => audioSessionContext(),
     realtimeSupported: () => { const sessionId = settings.getPublic().activeSession?.sessionId; return !!sessionId && bridge?.get(sessionId)?.realtimeAudioSupported === true; },
-    resolveCredential: (credentialId) => resolveProviderCredential(credentialId, { credentialBroker }),
   });
   nativeAudio = process.platform === 'darwin'
     ? new NativeAudioManager({
@@ -441,6 +442,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       })
     : null;
   const catalogOptions = {
+    appVersion: app.getVersion(),
+    providerAccountChannel: credentialBroker?.credentialChannel ?? 'development',
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
@@ -448,15 +451,53 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const sessionCatalog = new ProjectSessionCatalog(catalogOptions);
   // Off unless the owner (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns Remote Control on for this computer.
   const remoteControlOn = (): boolean => settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1');
-  const launchCache = new SessionLaunchCache();
   // The one refresher of the Codex session. Engines get only access tokens.
   // The wall clock is checked every minute and on wake: a timer alone would
   // sleep with the laptop.
-  const codexTokens = new CodexTokenManager({
-    store: credentialBroker,
+  const accountBroker = credentialBroker;
+  const accountLockDirectory = () => sessionCatalog.productPaths().then(paths => join(paths.brandHome, 'provider-account-locks', accountBroker?.credentialChannel ?? 'development'));
+  const codexTokens = accountBroker ? new CodexTokenManager({
+    store: withFileRefreshIntents(providerAccountSessionStore(accountBroker, reference => providerAccounts?.latestSnapshot?.accounts.find(a => a.credentialRef.secretRef === reference)?.identityGeneration, version => sessionCatalog.publishProviderAccountCredentialVersion(version)), accountLockDirectory),
+    withAccountLock: (accountId, operation) => accountLockDirectory().then(directory => withProviderAccountLock(directory, accountId, operation)),
     onError: (message) => diagnostics.add('warn', 'host', message),
-  });
-  codexTokens.start();
+  }) : undefined;
+  providerAccounts = accountBroker && codexTokens ? new DesktopProviderAccounts({
+    accountHome: () => sessionCatalog.productPaths().then(paths => paths.brandHome),
+    configuredApiBinding: async (providerId, bindingId) => {
+      if (providerId !== bindingId) return false;
+      const providers = (await sessionCatalog.providerSettings()).effective.providers;
+      return !!providers && typeof providers === 'object' && !Array.isArray(providers) && Object.hasOwn(providers, bindingId);
+    },
+    providerDefinition: bindingId => {
+      const ref = settings.getPublic().activeSession;
+      const catalog = ref ? bridge?.get(ref.sessionId)?.officialProviderCatalog ?? [] : [];
+      return providersFromCatalog(catalog).find(provider => provider.id === bindingId) ?? providerById(bindingId);
+    },
+    withAccountMutationLock: (reference, operation) => accountLockDirectory().then(directory => withProviderAccountLock(directory, reference, operation)),
+    registry: (request, presence) => sessionCatalog.providerAccountCommand(request, undefined, presence),
+    broker: accountBroker,
+    publishVersions: async versions => { for (const version of versions) await sessionCatalog.publishProviderAccountCredentialVersion(version); },
+    tokens: codexTokens,
+    onCredentialDiagnostic: event => {
+      const accountId = /^[a-f0-9-]{36}$/.test(event.accountId) ? event.accountId : 'invalid';
+      diagnostics.add(event.outcome === 'failed' ? 'warn' : 'info', 'host', diagnosticEvent('provider_account_launch_credential', { ...event, accountId }));
+    },
+    login: signal => loginCodex({ openExternal: url => shell.openExternal(url), signal }),
+    changed: async () => {
+      if (bridge) await bridge.refreshProviderAccounts();
+    },
+    probe: async (account, credential) => {
+      const secret = JSON.stringify(runtimeAccountCredential(credential));
+      await sessionCatalog.providerAccountCommand({ action: 'test', expectedRevision: (await sessionCatalog.providerAccountCommand({ action: 'list', expectedRevision: 0 })).configRevision,
+        accountId: account.accountId }, secret);
+    },
+  }) : undefined;
+  const renewProviderAccount = async (accountId: string, identityGeneration: number, credentialRevision: number): Promise<void> => {
+    if (!providerAccounts) throw new Error('Provider account storage is unavailable.');
+    await providerAccounts.renewForRuntime(accountId, identityGeneration, credentialRevision);
+  };
+  codexTokens?.start();
+  codexTokens?.subscribe(() => { void bridge?.refreshProviderAccounts().catch(() => {}); });
   app.on('browser-window-focus', () => bridge?.refreshProviderCatalog('foreground'));
   app.on('browser-window-blur', () => {
     setImmediate(() => {
@@ -474,7 +515,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   catalogConnectivity.unref();
   app.once('before-quit', () => clearInterval(catalogConnectivity));
   powerMonitor.on('resume', () => {
-    codexTokens.check();
+    codexTokens?.check();
     bridge?.refreshProviderCatalog('foreground');
     remoteControl?.reconnect();
     // Timers stand still while the Mac sleeps: the routines that came due and the
@@ -525,8 +566,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     resolveSessionMode: async (ref) => {
       const owner = settings.conversationSpaces.find(ref);
       if (owner) return owner.mode;
-      const bot = bots?.routineBotFor(ref.projectPath);
-      return (await (bot ? bot.catalog() : sessionCatalog).find(ref.projectPath, ref.sessionId))?.mode;
+      if (bots?.ownsWorkspace(ref.projectPath)) return (await bots.resolveSavedTranscript(ref))?.mode;
+      return undefined;
     },
     resolveSavedTranscript: (ref) => bots?.ownsWorkspace(ref.projectPath)
       ? bots.resolveSavedTranscript(ref) : resolveSavedConversationTranscript(settings, sessionCatalog, ref),
@@ -564,9 +605,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // A Bot's model is its own; choosing one in a Bot's session must not become the default of the owner's sessions.
     onModelSelected: (ref, model) => { if (!bots?.ownsWorkspace(ref.projectPath)) settings.setSessionModel(ref, model); },
     getSavedModel: (ref) => bots?.ownsWorkspace(ref.projectPath) ? undefined : settings.getSessionModel(ref),
-    resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
-    codexTokens,
-    invalidateLaunchConfigCache: () => launchCache.invalidate(),
+    resolveProviderAccounts: () => providerAccounts?.launch() ?? Promise.resolve(undefined),
+    renewProviderAccount,
+    onProviderAccountRouting: event => { if (providerAccounts?.recordRouting(event)) host?.sendToWindows('lingxi:provider-accounts:routing', event); },
     onFirstPromptSent: (ref, isActive) => {
       // A Bot's session is not one of the owner's: it is neither the one to restore at startup nor one to share.
       if (bots?.ownsWorkspace(ref.projectPath)) return;
@@ -633,19 +674,20 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           return fallback;
         }
       };
-      const [credentials, pluginSecrets, openaiOAuth] = await Promise.all([
-        phase('provider_credentials', () => launchCache.credentials(model, credentialBroker), {}),
-        phase('plugin_secrets', () => launchCache.pluginSecrets(credentialBroker), {}),
-        phase('codex_session', () => codexTokens.current(), undefined),
+      const [pluginSecrets, accountLaunch] = await Promise.all([
+        phase('plugin_secrets', () => resolveSessionLaunchPluginSecrets(credentialBroker), {}),
+        providerAccounts ? providerAccounts.launch() : undefined,
       ]);
       diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_ready', {
         durationMs: Date.now() - startedAt,
         parallel: true,
-        hasApiKey: Boolean(credentials.apiKey),
         model,
         pluginSecretCount: Object.values(pluginSecrets).reduce((count, values) => count + Object.keys(values).length, 0),
         projectPath: workspace,
-        providerCredentialCount: Object.keys(credentials.providerCredentials ?? {}).length,
+        providerAccountCount: accountLaunch?.providerAccounts.accounts.length ?? 0,
+        providerCredentialVersions: Object.entries(accountLaunch?.providerAccountCredentials ?? {})
+          .filter(([id, record]) => /^[a-f0-9-]{36}$/.test(id) && Number.isSafeInteger(record.identity_generation) && Number.isSafeInteger(record.credential_revision))
+          .map(([id, record]) => ({ accountId: id, identityGeneration: record.identity_generation, credentialRevision: record.credential_revision })),
         sessionId: ref.sessionId,
       }));
       return {
@@ -666,8 +708,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           : remoteControlOn() && (remotePolicy?.allows() ?? true),
         ...(botWorkspace ? { permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS } : {}),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
-        ...credentials,
-        ...(openaiOAuth ? { openaiOAuth } : {}),
+        ...accountLaunch,
         pluginSecrets,
         model,
         apiBaseUrl: configured.apiBaseUrl,
@@ -684,6 +725,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     credentialBroker,
     nativeAudio ?? undefined,
   );
+  if (providerAccounts) host.attachProviderAccounts(providerAccounts);
   host.attachComputerSettings(computerSettings);
   // Whether the Mac may sleep while Bots work is the owner's to say; the switch is in the Bots page.
   const keepAwake = new KeepAwake({
@@ -725,6 +767,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     policy,
     bots: () => bots,
     commands: new RemoteCommands({
+      providerAccounts,
+      authorizeProviderAccounts: viewer => remoteControlOn() && policy.allows() && account.snapshot().user?.uid === viewer.account_uid,
       allowAlwaysAllow: () => policy.allowAlwaysAllow(),
       echo: (echo) => remoteUi?.echo(echo),
       codec: nativeImageCodec,
@@ -899,21 +943,17 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       root: agentRoot,
       isPackaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
-      credentials: async (providerId, refresh) => {
-        if (providerId === CODEX_PROVIDER_ID) {
-          const session = await (refresh ? codexTokens.renew() : codexTokens.current());
-          if (!session) throw new LocalAppAgentError('model_unavailable', 'Sign in to the selected Agent model in LingXi settings.');
-          return { openaiOAuth: codexAccessToken(session) };
+      catalogCredentials: async () => providerAccounts ? { providerAccounts: await providerAccounts.snapshot(), providerAccountCredentials: {}, providerAccountHome: productPaths.brandHome } : {},
+      credentials: async (providerId, refresh, accountRequest) => {
+        if (accountRequest) await renewProviderAccount(accountRequest.accountId, accountRequest.identityGeneration, accountRequest.credentialRevision);
+        if (providerAccounts) {
+          const launch = await providerAccounts.launch();
+          if (launch.providerAccounts.accounts.some(a => a.enabled && a.executionBindingId === providerId)) {
+            if (refresh && !accountRequest) throw new LocalAppAgentError('model_unavailable', 'The Agent host must request refresh for a specific account.');
+            return launch;
+          }
         }
-        const key = await resolveProviderCredential(providerId, { credentialBroker });
-        if (!key) throw new LocalAppAgentError('model_unavailable', 'Configure the selected Agent model in LingXi settings.');
-        return { providerCredentials: { [providerId]: key } };
-      },
-      credentialStatus: async providerIds => {
-        const rows = await credentialBroker?.listStatus(providerIds) ?? [];
-        const configured = new Set(rows.filter(row => row.configured).map(row => row.providerId));
-        for (const id of providerIds) if (readProviderEnvironmentCredential(id)) configured.add(id);
-        return configured;
+        throw new LocalAppAgentError('model_unavailable', 'Configure an enabled account for the selected Agent model in settings.');
       },
       permission: (input, signal) => localApps!.promptAgentPermission(input, signal),
       question: (input, signal) => localApps!.promptAgentQuestion(input, signal),
@@ -925,7 +965,18 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           binaries: () => resolveTeamBinaries({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }),
           defaultModel: () => settings.getPublic().model,
           modelRoute: selected => agentExecutor.teamModelRoute(selected),
-          modelCredential: credentialId => resolveProviderCredential(credentialId, { credentialBroker, environment: {} }),
+          modelAccounts: async (credentialId, bindingId, profiles) => {
+            const accounts = await providerAccounts?.launch();
+            if (!accounts) return undefined;
+            const managed = accounts.providerAccounts.accounts.filter(account => account.executionBindingId === (bindingId ?? credentialId));
+            if (!managed.length) return undefined;
+            const providerId = managed[0]!.providerId;
+            const bindings = new Set(profiles.map(profile => profile['profile_name']));
+            const candidates = accounts.providerAccounts.accounts.filter(account => account.providerId === providerId && bindings.has(account.executionBindingId));
+            const ids = new Set(candidates.map(account => account.accountId));
+            return { ...accounts, providerAccountCredentials: Object.fromEntries(Object.entries(accounts.providerAccountCredentials).filter(([id]) => ids.has(id))) };
+          },
+          renewModelAccount: renewProviderAccount,
           permission: async (input, signal) => teamApprovalBroker!.request({ ...input, showLocal: async localSignal => {
             localSignal.throwIfAborted();
             const options = { type: 'question' as const, signal: localSignal, title: 'Team Bot permission',
@@ -956,6 +1007,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       bunExecutable: resolveModBunExecutable({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE }),
       mainWindow: () => getMainWindow() ?? createWindow(),
       agentCatalog: () => agentExecutor.catalog(),
+      onMcpChanged: () => agentExecutor.invalidateCatalog(),
       edit: async request => {
         const window = getMainWindow() ?? createWindow();
         window.show(); window.focus();

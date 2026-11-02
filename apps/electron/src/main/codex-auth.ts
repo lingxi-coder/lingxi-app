@@ -11,6 +11,7 @@ export interface CodexOAuthSession {
   refresh_token?: string;
   expires_at: number;
   account_id?: string;
+  subject?: string;
   fedramp: boolean;
   /** Display-only; never used to authorize a request. */
   email?: string;
@@ -24,14 +25,19 @@ export function parseCodexSession(value: unknown): CodexOAuthSession {
   if (!token(row.access_token) || !Number.isSafeInteger(row.expires_at) || (row.expires_at as number) <= 0
     || (row.refresh_token != null && !token(row.refresh_token))
     || (row.account_id != null && (typeof row.account_id !== 'string' || row.account_id.length > 512))
+    || (row.subject != null && (typeof row.subject !== 'string' || !row.subject || row.subject.length > 512 || /[\u0000-\u001f\u007f]/.test(row.subject)))
     || (row.email != null && (typeof row.email !== 'string' || row.email.length === 0
       || row.email.length > 320 || /[\u0000-\u001f\u007f]/.test(row.email)))
     || typeof row.fedramp !== 'boolean') throw new Error('Codex 登录凭据无效，请重新登录。');
+  const legacySubject = claims(row.access_token).sub;
+  const subject = row.subject ?? (typeof legacySubject === 'string' && legacySubject.length > 0 && legacySubject.length <= 512
+    && !/[\u0000-\u001f\u007f]/.test(legacySubject) ? legacySubject : undefined);
   return {
     access_token: row.access_token,
     ...(row.refresh_token ? { refresh_token: row.refresh_token as string } : {}),
     expires_at: row.expires_at as number,
     ...(row.account_id ? { account_id: row.account_id as string } : {}),
+    ...(subject ? { subject: subject as string } : {}),
     fedramp: row.fedramp,
     ...(row.email ? { email: row.email as string } : {}),
   };
@@ -58,6 +64,7 @@ export function sessionFromTokenResponse(value: unknown, now = Date.now()): Code
     refresh_token: row.refresh_token,
     expires_at: Math.floor(now / 1000 + expiresIn),
     account_id: auth?.chatgpt_account_id ?? identity.chatgpt_account_id,
+    subject: identity.sub,
     fedramp: auth?.chatgpt_account_is_fedramp === true,
     email: identity.email,
   });
@@ -160,7 +167,7 @@ export async function loginCodex(options: {
       response_type: 'code', client_id: CODEX_CLIENT_ID, redirect_uri: redirect,
       scope: 'openid profile email offline_access',
       code_challenge: createHash('sha256').update(verifier).digest('base64url'),
-      code_challenge_method: 'S256', state,
+      code_challenge_method: 'S256', state, prompt: 'login',
       id_token_add_organizations: 'true', codex_cli_simplified_flow: 'true', originator: 'lingxi',
     });
     if (abort.signal.aborted) throw new Error('Codex 登录已取消。');

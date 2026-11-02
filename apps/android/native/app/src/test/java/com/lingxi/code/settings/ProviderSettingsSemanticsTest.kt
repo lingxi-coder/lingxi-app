@@ -10,30 +10,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProviderSettingsSemanticsTest {
-    @Test
-    fun successfulDraftTest_doesNotAdvertiseAnUnsavedProviderAsConnected() {
-        val unsaved = provider().copy(credentialConfigured = false)
-        val tested = providerAfterConnectionTest(unsaved, true, false)
-        assertEquals(ConnStatus.Idle, tested.status)
-        assertTrue(SettingsUiState(llmProviders = listOf(tested)).needsLlmSetup)
-    }
-
-    @Test
-    fun successfulDraftTest_doesNotVerifyAnExistingStoredKey() {
-        val saved = provider().copy(credentialConfigured = true)
-        assertEquals(ConnStatus.Configured, providerAfterConnectionTest(saved, true, false).status)
-        assertEquals(ConnStatus.Configured, providerAfterConnectionTest(saved, false, false).status)
-    }
-
-    @Test
-    fun onlySuccessfulStoredKeyTest_marksProviderConnected() {
-        val tested = providerAfterConnectionTest(provider(), true, true)
-        assertEquals(ConnStatus.Connected, tested.status)
-        assertFalse(SettingsUiState(llmProviders = listOf(tested)).needsLlmSetup)
-        assertFalse(ProviderSettingsRepository.buildEngineLaunchConfig(listOf(tested)).defaultModel.isEmpty())
-        assertFalse(providerLaunchConfigurationChanged(provider(), tested))
-        assertEquals(ConnStatus.Error, providerAfterConnectionTest(provider(), false, true).status)
-    }
 
     @Test
     fun modelSetup_isRequiredWithoutAnEnabledProviderModel() {
@@ -65,7 +41,7 @@ class ProviderSettingsSemanticsTest {
     }
 
     @Test
-    fun enabledProviderModel_withStoredCredential_satisfiesSetup() {
+    fun providerCredentialSummaryWithoutHostProjection_stillRequiresSetup() {
         val state = SettingsUiState(
             llmProviders = listOf(
                 provider().copy(
@@ -75,117 +51,15 @@ class ProviderSettingsSemanticsTest {
             ),
         )
 
+        assertTrue(state.needsLlmSetup)
+    }
+
+    @Test fun hostOAuthProjectionSatisfiesSetupWithoutMatchingApiProviderCredentialSummary() {
+        val row = ProviderAccountModelAvailability("openai", "openai-chatgpt", "oauth-model", listOf("oauth-account"),
+            emptyList(), listOf("oauth-account"), emptyList())
+        val state = SettingsUiState(llmProviders = listOf(provider().copy(credentialConfigured = false)), accountModelAvailability = listOf(row))
         assertFalse(state.needsLlmSetup)
-    }
-
-    @Test
-    fun encryptedCredential_isConfigured_notNetworkConnected() {
-        val status = ProviderSettingsRepository.statusFor(
-            provider = provider(),
-            credentialConfigured = true,
-            encrypted = true,
-            unavailable = false,
-        )
-
-        assertEquals(ConnStatus.Configured, status)
-        assertEquals("已配置", status.label)
-    }
-
-    @Test
-    fun disabledProvider_keepsConfiguredCredentialStatus() {
-        val status = ProviderSettingsRepository.statusFor(
-            provider = provider().copy(enabled = false),
-            credentialConfigured = true,
-            encrypted = true,
-            unavailable = false,
-        )
-
-        assertEquals(ConnStatus.Configured, status)
-    }
-
-    @Test
-    fun refreshSnapshot_restoresConfiguredCredentialStatus() {
-        val refreshed = ProviderSettingsRepository.applyCredentialSnapshot(
-            providers = listOf(provider()),
-            snapshot = ProviderCredentialSnapshot(
-                configuredProviderIds = setOf("openai"),
-                unavailableProviderIds = emptySet(),
-                storageEncrypted = true,
-            ),
-        )
-
-        assertTrue(refreshed.single().credentialConfigured)
-        assertEquals(ConnStatus.Configured, refreshed.single().status)
-    }
-
-    @Test
-    fun refreshFailure_isVisibleInsteadOfFallingBackToUnverified() {
-        val refreshed = ProviderSettingsRepository.applyCredentialSnapshot(
-            providers = listOf(provider()),
-            snapshot = ProviderCredentialSnapshot(
-                configuredProviderIds = emptySet(),
-                unavailableProviderIds = emptySet(),
-                storageEncrypted = false,
-                error = "credential status timed out",
-            ),
-        )
-
-        assertFalse(refreshed.single().credentialConfigured)
-        assertEquals(ConnStatus.Error, refreshed.single().status)
-    }
-
-    @Test
-    fun partialCredentialListingPreservesUnavailablePresenceAndAppliesHealthyAbsence() {
-        val openai = provider().copy(credentialConfigured = true)
-        val custom = provider().copy(id = "custom", url = "https://custom.example/v1", credentialConfigured = true)
-        val refreshed = ProviderSettingsRepository.applyCredentialSnapshot(
-            listOf(openai, custom),
-            ProviderCredentialSnapshot(emptySet(), setOf("openai"), true, "one credential is unavailable"),
-        )
-
-        assertTrue(refreshed[0].credentialConfigured)
-        assertEquals(ConnStatus.Error, refreshed[0].status)
-        assertFalse(refreshed[1].credentialConfigured)
-        assertEquals(ConnStatus.Idle, refreshed[1].status)
-    }
-
-    @Test
-    fun transportFailureCannotErasePreviouslyConfirmedCredentialPresence() {
-        val refreshed = ProviderSettingsRepository.applyCredentialSnapshot(
-            listOf(provider().copy(credentialConfigured = true)),
-            ProviderCredentialSnapshot(emptySet(), emptySet(), false, "engine unavailable"),
-        )
-        assertTrue(refreshed.single().credentialConfigured)
-        assertEquals(ConnStatus.Error, refreshed.single().status)
-    }
-
-    @Test
-    fun providerApplyState_savesCredentialDraftAlongsideConfiguration() {
-        val state = providerApplyUiState(
-            hasPendingConfiguration = false,
-            hasCredentialDraft = true,
-            busy = false,
-        )
-
-        assertTrue(state.enabled)
-        assertTrue(state.saveCredential)
-        assertEquals(com.lingxi.code.R.string.settings_provider_save_and_apply, state.labelRes)
-    }
-
-    @Test
-    fun rejectedReconnect_keepsSavedProviderChangesAvailableToRetry() {
-        val store = SettingsStore()
-        val id = store.addProvider(ProviderKind.Llm, "deepseek")
-        store.updateProvider(ProviderKind.Llm, id) { it.copy(model = "deepseek-flash") }
-        val pending = store.state.value.pendingLlmProviderChanges
-        assertTrue(pending.contains(id))
-
-        assertFalse(store.applyLlmConfiguration { false })
-        assertEquals(pending, store.state.value.pendingLlmProviderChanges)
-        assertTrue(providerApplyUiState(hasPendingConfiguration = true, hasCredentialDraft = false, busy = false).enabled)
-
-        assertTrue(store.applyLlmConfiguration { true })
-        assertTrue(store.state.value.pendingLlmProviderChanges.isEmpty())
+        assertTrue(state.copy(accountModelAvailability = listOf(row.copy(eligibleAccountIds = emptyList()))).needsLlmSetup)
     }
 
     @Test
@@ -201,90 +75,6 @@ class ProviderSettingsSemanticsTest {
         assertTrue(store.applyLlmConfiguration { reconnects += 1; true })
 
         assertEquals(1, reconnects)
-        assertTrue(store.state.value.pendingLlmProviderChanges.isEmpty())
-    }
-
-    @Test
-    fun replacingSavedCredential_preservesRoutingWithoutRequiringEngineReconnect() {
-        val store = catalogBackedStore()
-        val id = store.addProvider(ProviderKind.Llm, "anthropic")
-        val snapshot = ProviderCredentialSnapshot(
-            configuredProviderIds = setOf("anthropic"),
-            unavailableProviderIds = emptySet(),
-            storageEncrypted = true,
-        )
-        store.recordSavedProviderCredential(ProviderKind.Llm, id, snapshot)
-        assertTrue(store.state.value.llmProviders.single { it.id == id }.credentialConfigured)
-        assertTrue(store.applyLlmConfiguration { true })
-
-        store.recordSavedProviderCredential(ProviderKind.Llm, id, snapshot)
-
-        assertTrue(store.state.value.llmProviders.single { it.id == id }.credentialConfigured)
-        assertTrue(store.state.value.pendingLlmProviderChanges.isEmpty())
-    }
-
-    @Test
-    fun sharedCredentialSaveAndDeleteUpdateAllProviderRowsWithoutChangingRouting() {
-        val store = catalogBackedStore()
-        val first = store.addProvider(ProviderKind.Llm, "deepseek")
-        val second = store.addProvider(ProviderKind.Llm, "deepseek")
-        store.updateProvider(ProviderKind.Llm, first) { it.copy(model = "deepseek-flash") }
-        store.updateProvider(ProviderKind.Llm, second) { it.copy(model = "deepseek-flash") }
-        val configured = ProviderCredentialSnapshot(setOf("deepseek"), emptySet(), true)
-        store.applyLlmConfiguration { true }
-
-        store.recordSavedProviderCredential(ProviderKind.Llm, first, configured)
-        assertTrue(store.state.value.llmProviders.all { it.credentialConfigured })
-        assertFalse(store.state.value.needsLlmSetup)
-        assertTrue(store.state.value.pendingLlmProviderChanges.isEmpty())
-
-        store.recordSavedProviderCredential(ProviderKind.Llm, second, configured.copy(configuredProviderIds = emptySet()))
-        assertTrue(store.state.value.llmProviders.none { it.credentialConfigured })
-        assertTrue(store.state.value.needsLlmSetup)
-        assertTrue(store.state.value.pendingLlmProviderChanges.isEmpty())
-    }
-
-    @Test
-    fun lateStoredKeyProbeCannotResurrectCredentialDeletedThroughAnotherProviderRow() {
-        val store = catalogBackedStore()
-        val first = store.addProvider(ProviderKind.Llm, "deepseek")
-        val second = store.addProvider(ProviderKind.Llm, "deepseek")
-        val configured = ProviderCredentialSnapshot(setOf("deepseek"), emptySet(), true)
-        store.recordSavedProviderCredential(ProviderKind.Llm, first, configured)
-        val attempt = store.beginProviderConnectionTest(store.state.value.llmProviders.first { it.id == first })
-
-        store.recordSavedProviderCredential(ProviderKind.Llm, second, configured.copy(configuredProviderIds = emptySet()))
-        val oldSuccess = ProviderConnectionTestResult(true, true, true, true, 200, 10, "verified", true)
-        assertFalse(store.recordProviderConnectionTest(attempt, oldSuccess))
-        assertTrue(store.state.value.llmProviders.none { it.credentialConfigured })
-        assertTrue(store.state.value.needsLlmSetup)
-    }
-
-    @Test
-    fun probeFromPreviousEngineBindingCannotConfigureReplacementEngine() {
-        val store = SettingsStore()
-        val id = store.addProvider(ProviderKind.Llm, "deepseek")
-        val attempt = store.beginProviderConnectionTest(store.state.value.llmProviders.single { it.id == id })
-        store.bindProviderCredentialSource(null)
-
-        assertFalse(store.recordProviderConnectionTest(attempt, ProviderConnectionTestResult(true, true, true, true, 200, 10, "verified", true)))
-        assertFalse(store.state.value.llmProviders.single { it.id == id }.credentialConfigured)
-    }
-
-    @Test
-    fun genericCredentialMutationInvalidatesProbesWithoutChangingRouting() {
-        val store = SettingsStore()
-        val deepseek = store.addProvider(ProviderKind.Llm, "deepseek")
-        val openai = store.addProvider(ProviderKind.Llm, "openai")
-        val attempts = store.state.value.llmProviders.map(store::beginProviderConnectionTest)
-        store.applyLlmConfiguration { true }
-
-        store.refreshAfterProviderCredentialMutation()
-
-        val oldSuccess = ProviderConnectionTestResult(true, true, true, true, 200, 10, "verified", true)
-        attempts.forEach { assertFalse(store.recordProviderConnectionTest(it, oldSuccess)) }
-        assertEquals(setOf(deepseek, openai), store.state.value.llmProviders.map { it.id }.toSet())
-        assertTrue(store.state.value.llmProviders.none { it.credentialConfigured })
         assertTrue(store.state.value.pendingLlmProviderChanges.isEmpty())
     }
 
@@ -346,118 +136,29 @@ class ProviderSettingsSemanticsTest {
     }
 
     @Test
-    fun connectionEditsRequireApplyingButDoNotReuseConfirmationFromAnotherCredentialId() {
+    fun removingProviderConfigurationDoesNotRequireOrDeleteHostCredentials() {
         val store = SettingsStore()
-        val id = store.addProvider(ProviderKind.Llm, "deepseek")
-        store.recordSavedProviderCredential(ProviderKind.Llm, id, ProviderCredentialSnapshot(setOf("deepseek"), emptySet(), true))
-        store.applyLlmConfiguration { true }
-        val before = store.state.value.llmProviders.single { it.id == id }
+        val id = store.addProvider(ProviderKind.Llm, "openai")
+        store.updateProvider(ProviderKind.Llm, id) { it.copy(credentialConfigured = true) }
+        var result: String? = "not completed"
 
-        store.updateProvider(ProviderKind.Llm, id) { ProviderConnections.withAddedConnection(it) }
+        store.removeProvider(ProviderKind.Llm, id) { result = it }
 
-        val after = store.state.value.llmProviders.single { it.id == id }
-        assertFalse(after.credentialConfigured)
-        assertEquals(ConnStatus.Idle, after.status)
-        assertTrue(providerLaunchConfigurationChanged(before, after))
+        assertEquals(null, result)
+        assertTrue(store.state.value.llmProviders.none { it.id == id })
         assertTrue(id in store.state.value.pendingLlmProviderChanges)
     }
 
     @Test
-    fun changingCredentialIdentityWhileSavingKeepsConfirmationOnItsOriginalCredential() {
-        val store = catalogBackedStore()
-        val id = store.addProvider(ProviderKind.Llm, "deepseek")
-        val other = store.addProvider(ProviderKind.Llm, "deepseek")
-        store.updateProvider(ProviderKind.Llm, id) { it.copy(url = "https://custom.example/v1") }
-
-        store.recordSavedProviderCredential(ProviderKind.Llm, id, ProviderCredentialSnapshot(setOf("deepseek"), emptySet(), true), "deepseek")
-
-        assertFalse(store.state.value.llmProviders.single { it.id == id }.credentialConfigured)
-        assertTrue(store.state.value.llmProviders.single { it.id == other }.credentialConfigured)
-    }
-
-    @Test
-    fun editingTestedConfiguration_returnsStatusToCredentialBaseline() {
+    fun removingOneProviderConfigurationPreservesAnotherConfigurationOfTheSameProvider() {
         val store = SettingsStore()
-        val id = store.addProvider(ProviderKind.Llm, "deepseek")
-        store.updateProvider(ProviderKind.Llm, id) {
-            it.copy(
-                credentialConfigured = true,
-                status = ConnStatus.Connected,
-            )
-        }
+        val first = store.addProvider(ProviderKind.Llm, "openai")
+        val second = store.addProvider(ProviderKind.Llm, "openai")
+        store.updateProvider(ProviderKind.Llm, second) { it.copy(credentialConfigured = true) }
 
-        store.markProviderConnectionUnverified(ProviderKind.Llm, id)
+        store.removeProvider(ProviderKind.Llm, first)
 
-        val updated = store.state.value.llmProviders.single { it.id == id }
-        assertEquals(ConnStatus.Configured, updated.status)
-        assertTrue(updated.credentialConfigured)
-    }
-
-    @Test
-    fun editingDraftWithoutSavedCredential_returnsStatusToUnverified() {
-        val store = SettingsStore()
-        val id = store.addProvider(ProviderKind.Llm, "deepseek")
-        store.updateProvider(ProviderKind.Llm, id) {
-            it.copy(status = ConnStatus.Error)
-        }
-
-        store.markProviderConnectionUnverified(ProviderKind.Llm, id)
-
-        assertEquals(
-            ConnStatus.Idle,
-            store.state.value.llmProviders.single { it.id == id }.status,
-        )
-    }
-
-    @Test
-    fun removeLlmProvider_deletesCredentialBeforePersistedRow() = runTest {
-        val calls = mutableListOf<String>()
-
-        val error = removeProviderCredentialFirst(
-            kind = ProviderKind.Llm,
-            provider = provider(),
-            deleteCredential = {
-                calls += "credential"
-                ProviderCredentialSnapshot(
-                    configuredProviderIds = emptySet(),
-                    unavailableProviderIds = emptySet(),
-                    storageEncrypted = true,
-                )
-            },
-            removePersistedProvider = { calls += "provider" },
-        )
-
-        assertEquals(null, error)
-        assertEquals(listOf("credential", "provider"), calls)
-    }
-
-    @Test
-    fun removeLlmProvider_keepsRowWhenCredentialDeletionFails() = runTest {
-        val calls = mutableListOf<String>()
-
-        val error = removeProviderCredentialFirst(
-            kind = ProviderKind.Llm,
-            provider = provider(),
-            deleteCredential = {
-                calls += "credential"
-                ProviderCredentialSnapshot(
-                    configuredProviderIds = setOf("openai"),
-                    unavailableProviderIds = emptySet(),
-                    storageEncrypted = true,
-                    error = "secure storage unavailable",
-                )
-            },
-            removePersistedProvider = { calls += "provider" },
-        )
-
-        assertEquals("secure storage unavailable", error)
-        assertEquals(listOf("credential"), calls)
-    }
-
-    private fun catalogBackedStore() = SettingsStore().apply {
-        setLlmCatalogEntries(listOf("anthropic", "deepseek", "openai").map { id ->
-            com.lingxi.code.bindings.client.ProviderModelCatalogEntryDto(id, null, id, emptyList(), null, null)
-        })
+        assertTrue(store.state.value.llmProviders.single { it.id == second }.credentialConfigured)
     }
 
     private fun provider() = GenericProvider(
@@ -469,6 +170,5 @@ class ProviderSettingsSemanticsTest {
         model = "gpt-4o",
         status = ConnStatus.Idle,
         enabled = true,
-        catalogBaseUrl = "https://api.openai.com/v1",
     )
 }

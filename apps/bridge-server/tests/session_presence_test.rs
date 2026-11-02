@@ -12,8 +12,8 @@ use lingxi_core::host::task_registry::{
     TaskRegistryHandle, TaskUpdatePatch,
 };
 use lingxi_core::host::{
-    AuthError, AuthHandle, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo,
-    LoginInfo, McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, SkillInfo, StatusSnapshot,
+    CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo,
+    McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, SkillInfo, StatusSnapshot,
 };
 #[cfg(unix)]
 use platform_posix::PosixFileSystem as NativeFileSystem;
@@ -144,28 +144,7 @@ impl OrchestratorHandle for SwitchHandle {
     }
 }
 
-struct Auth;
 
-#[async_trait]
-impl AuthHandle for Auth {
-    fn register_account_change_observer(
-        &self,
-        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
-    ) {
-    }
-
-    async fn login(&self) -> Result<LoginInfo, AuthError> {
-        Err(AuthError::Network("test".into()))
-    }
-
-    async fn logout(&self) -> Result<(), AuthError> {
-        Ok(())
-    }
-
-    async fn current_user(&self) -> Option<LoginInfo> {
-        None
-    }
-}
 
 struct Tasks;
 
@@ -257,7 +236,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         fail: std::sync::atomic::AtomicBool::new(false),
     });
     let router =
-        EngineCommandRouter::new(handle.clone(), Arc::new(Auth), Arc::new(Tasks), None, None);
+        EngineCommandRouter::new(handle.clone(), Arc::new(Tasks), None, None);
     let sink = Arc::new(Sink::default());
     router
         .route(ClientCommand::ClearSession, sink.clone())
@@ -329,7 +308,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
     )
     .unwrap();
     let resume_router =
-        EngineCommandRouter::new(handle.clone(), Arc::new(Auth), Arc::new(Tasks), None, None)
+        EngineCommandRouter::new(handle.clone(), Arc::new(Tasks), None, None)
             .with_session_store(SessionStoreContext::new(
                 lingxi_home,
                 cwd,

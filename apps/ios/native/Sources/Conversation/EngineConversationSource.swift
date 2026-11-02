@@ -5,7 +5,6 @@ import OSLog
 import SwiftUI
 
 #if canImport(harness_runtimeFFI)
-import AuthenticationServices
 import UIKit
 import harness_runtimeFFI
 #endif
@@ -48,6 +47,7 @@ final class EngineConversationSource: ConversationSource {
     private var audioContextTask: Task<Void, Never>?
     private var audioSourceActive = false
     private var mediaHostSessionBinding: MediaAudioSessionBindingFfi?
+    private var mediaHostSessionEngine: MobileEngineHandle?
     /// One shared bootstrap attempt for every entry point that needs the
     /// engine. Access to this property remains main-actor-confined, which
     /// prevents interleaving callers from constructing competing handles;
@@ -66,10 +66,6 @@ final class EngineConversationSource: ConversationSource {
     private var providerCatalogEntries: [ProviderCatalogEntry] = []
     private var providerCatalogLoaded = false
     private var providerCatalogWaiters: [CheckedContinuation<[ProviderCatalogEntry], Error>] = []
-    private var oauthSession: ASWebAuthenticationSession?
-    private var oauthPresentationProvider: OAuthPresentationContextProvider?
-    private var oauthFlowID: String?
-    private var oauthCallbackHandler: ((URL) -> Void)?
     /// Index into `model.messages` of the assistant message currently being
     /// streamed (deltas append into it). `nil` between turns.
     private var streamingIndex: Int?
@@ -278,9 +274,17 @@ final class EngineConversationSource: ConversationSource {
     deinit {
         audioContextTask?.cancel()
         let ownerID = audioContextOwnerID
+        let mediaHostComposition = mediaHostComposition
+        let mediaHostSessionBinding = mediaHostSessionBinding
+        let mediaHostSessionEngine = mediaHostSessionEngine
         Task { @MainActor in
             IOSAudioProviderService.shared.releaseSessionContextSelection(ownerID: ownerID)
             IOSRealtimeAudioService.shared.detach(ownerID: ownerID)
+            if let mediaHostSessionBinding, let mediaHostSessionEngine {
+                mediaHostComposition?.removeAudioSessionContext(
+                    for: mediaHostSessionEngine, binding: mediaHostSessionBinding
+                )
+            }
         }
     }
 
@@ -1739,29 +1743,6 @@ final class EngineConversationSource: ConversationSource {
         reattachDurableTurnIfNeeded(sessionID: record.sessionID)
     }
 
-    func testProviderConnection(
-        profile: ProviderLaunchProfile,
-        credentialOverride: String?
-    ) async throws -> ProviderConnectionTestResult {
-        let handle = try await ensureHandle()
-        let trimmed = credentialOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let result = await handle.testProviderConnection(
-            providerId: profile.id,
-            providerPreset: profile.presetID,
-            apiBase: profile.baseURL,
-            model: profile.modelID,
-            credentialOverride: trimmed.flatMap { value in
-                value.isEmpty ? nil : ProviderCredentialSecretDto(value: value)
-            }
-        )
-        return result.connected
-            ? .success(
-                message: "\(result.message) · \(result.latencyMs)ms",
-                usedStoredCredential: result.usedStoredCredential
-            )
-            : .failure(message: result.message)
-    }
-
     func providerCatalog() async throws -> [ProviderCatalogEntry] {
         try await submitEngineCommand(.refreshProviderCatalog(trigger: "settings"))
         if providerCatalogLoaded {
@@ -1784,130 +1765,12 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
-    func loginOAuth(provider: String) async throws -> ProviderOAuthState {
-        let handle = try await ensureHandle()
-        let session = try await handle.beginOAuth(
-            provider: provider,
-            redirectUri: "lingxi://oauth/callback"
-        )
-        guard let authorizationURL = URL(string: session.authorizationUrl) else {
-            throw NSError(domain: "ConversationSource", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "OAuth 授权地址无效",
-            ])
-        }
-
-        return try await withCheckedThrowingContinuation { continuation in
-            oauthFlowID = session.flowId
-            let flowID = session.flowId
-            let callbackScheme = session.callbackUrlScheme
-            let presentationProvider = OAuthPresentationContextProvider()
-            oauthPresentationProvider = presentationProvider
-            oauthCallbackHandler = { [weak self] url in
-                guard let self else { return }
-                guard self.oauthFlowID == flowID else { return }
-                self.oauthCallbackHandler = nil
-                self.oauthFlowID = nil
-                Task { @MainActor in
-                    do {
-                        let state = try await handle.completeOAuth(
-                            flowId: flowID,
-                            callbackUrl: url.absoluteString
-                        )
-                        self.oauthSession = nil
-                        self.oauthPresentationProvider = nil
-                        continuation.resume(returning: Self.lowerOAuthState(state))
-                    } catch {
-                        self.oauthSession = nil
-                        self.oauthPresentationProvider = nil
-                        // The callback has become terminal even when the
-                        // token exchange or secure-store write fails. Rust
-                        // normally consumes the flow before exchange, but
-                        // cancel is an idempotent defence for malformed
-                        // callbacks and older engine binaries.
-                        await handle.cancelOAuth(flowId: flowID)
-                        continuation.resume(throwing: error)
-                    }
-                }
-            }
-
-            let webSession = ASWebAuthenticationSession(
-                url: authorizationURL,
-                callbackURLScheme: callbackScheme
-            ) { [weak self] url, error in
-                guard let self else { return }
-                guard self.oauthFlowID == flowID else { return }
-                if let error {
-                    self.oauthCallbackHandler = nil
-                    self.oauthSession = nil
-                    self.oauthPresentationProvider = nil
-                    self.oauthFlowID = nil
-                    Task { await handle.cancelOAuth(flowId: flowID) }
-                    continuation.resume(throwing: error)
-                    return
-                }
-                if let url {
-                    self.handleOAuthCallback(url)
-                }
-            }
-            webSession.presentationContextProvider = presentationProvider
-            webSession.prefersEphemeralWebBrowserSession = false
-            oauthSession = webSession
-            if !webSession.start() {
-                oauthCallbackHandler = nil
-                oauthSession = nil
-                oauthPresentationProvider = nil
-                oauthFlowID = nil
-                Task { await handle.cancelOAuth(flowId: flowID) }
-                continuation.resume(throwing: NSError(
-                    domain: "ConversationSource",
-                    code: 3,
-                    userInfo: [NSLocalizedDescriptionKey: "无法启动系统浏览器 OAuth 会话"]
-                ))
-            }
-        }
+    func providerAccountsSnapshot() async throws -> String {
+        try await (try await ensureHandle()).providerAccountsSnapshot()
     }
 
-    func logoutOAuth(provider: String) async throws {
-        let handle = try await ensureHandle()
-        try await handle.logoutOAuth(provider: provider)
-    }
-
-    func authState(provider: String) async throws -> ProviderOAuthState {
-        let handle = try await ensureHandle()
-        return Self.lowerOAuthState(try await handle.authState(provider: provider))
-    }
-
-    func testOAuthConnection(
-        provider: String,
-        profile: ProviderLaunchProfile
-    ) async throws -> ProviderConnectionTestResult {
-        let handle = try await ensureHandle()
-        let result = await handle.testOAuthConnection(
-            provider: provider,
-            apiBase: profile.baseURL,
-            model: profile.modelID
-        )
-        return result.connected
-            ? .success(
-                message: "\(result.message) · \(result.latencyMs)ms",
-                usedStoredCredential: result.usedStoredCredential
-            )
-            : .failure(message: result.message)
-    }
-
-    func handleOAuthCallback(_ url: URL) {
-        oauthCallbackHandler?(url)
-    }
-
-    private static func lowerOAuthState(_ state: MobileOAuthStateDto) -> ProviderOAuthState {
-        ProviderOAuthState(
-            provider: state.provider,
-            signedIn: state.signedIn,
-            accountLabel: state.accountLabel,
-            accountID: state.accountId,
-            organizationID: state.organizationId,
-            fedramp: state.fedramp
-        )
+    func providerAccountCommand(requestJSON: String, credential: String?) async throws -> String {
+        try await (try await ensureHandle()).providerAccountCommand(requestJson: requestJSON, credential: credential)
     }
 
     func setExternalEventHandler(_ handler: ((ClientEvent) -> Void)?) {
@@ -1988,12 +1851,22 @@ final class EngineConversationSource: ConversationSource {
             }
             guard !Task.isCancelled, self.audioContextGeneration == generation,
                   self.handle === handle, self.model.activeSessionId == sessionID,
-                  self.model.activeModelId == modelID, !self.model.sessionTransitionPending else { return }
+                  self.model.activeModelId == modelID, !self.model.sessionTransitionPending else {
+                // A cancelled refresh may still have installed a route. The
+                // host removes only this exact attachment and generation.
+                if let routeBinding {
+                    self.mediaHostComposition?.removeAudioSessionContext(for: handle, binding: routeBinding)
+                }
+                return
+            }
             guard let routeBinding, !routeBinding.profileId.isEmpty, !routeBinding.accountScope.isEmpty,
                   let attachment = IOSAudioProviderService.trustedAttachmentIdentity(
                     routeSessionID: routeBinding.sessionId, ownerSessionID: sessionID,
                     attachmentHostID: routeBinding.attachmentHostId,
                     attachmentGeneration: routeBinding.attachmentGeneration) else {
+                if let routeBinding {
+                    self.mediaHostComposition?.removeAudioSessionContext(for: handle, binding: routeBinding)
+                }
                 if let prior = self.mediaHostSessionBinding,
                    let identity = IOSMediaAttachmentIdentity(hostID: prior.attachmentHostId,
                                                              generation: prior.attachmentGeneration) {
@@ -2001,6 +1874,7 @@ final class EngineConversationSource: ConversationSource {
                         attachment: identity, ownerID: self.audioContextOwnerID, engine: handle)
                 }
                 self.mediaHostSessionBinding = nil
+                self.mediaHostSessionEngine = nil
                 return
             }
             guard IOSAudioProviderService.shared.attach(engine: handle, ownerID: self.audioContextOwnerID,
@@ -2009,8 +1883,12 @@ final class EngineConversationSource: ConversationSource {
                 sessionID: sessionID, profileID: routeBinding.profileId, accountScope: routeBinding.accountScope,
                 region: routeBinding.region, ownerID: self.audioContextOwnerID,
                 engineAttachmentIdentity: attachment, engine: handle
-            ) else { return }
+            ) else {
+                self.mediaHostComposition?.removeAudioSessionContext(for: handle, binding: routeBinding)
+                return
+            }
             self.mediaHostSessionBinding = routeBinding
+            self.mediaHostSessionEngine = handle
             guard self.audioSourceActive else { return }
             IOSRealtimeAudioService.shared.attach(engine: handle, ownerID: self.audioContextOwnerID)
             await IOSAudioProviderService.shared.refresh(snapshot: AudioConfigurationStore.shared.snapshot)
@@ -2153,7 +2031,12 @@ final class EngineConversationSource: ConversationSource {
         audioContextTask?.cancel()
         audioContextTask = nil
         setSettingsActive(false)
+        if let mediaHostSessionBinding, let mediaHostSessionEngine {
+            mediaHostComposition?.removeAudioSessionContext(
+                for: mediaHostSessionEngine, binding: mediaHostSessionBinding)
+        }
         mediaHostSessionBinding = nil
+        mediaHostSessionEngine = nil
         listener?.detachSource()
         listener = nil
         permissionSink = nil
@@ -2636,7 +2519,8 @@ final class EngineConversationSource: ConversationSource {
             latestActivity: dto.agentId == ConversationModel.mainAgentID
                 ? nil
                 : dto.latestActivity.map(displayText),
-            updatedAtMs: dto.updatedAtMs ?? 0
+            updatedAtMs: dto.updatedAtMs ?? 0,
+            reportDelivery: dto.reportDelivery
         )
         return ConversationModel.normalizedAgentSummaryForSource(summary)
     }
@@ -2974,7 +2858,8 @@ final class EngineConversationSource: ConversationSource {
             modelProfile: summary.modelProfile,
             status: summary.status,
             latestActivity: activity ?? summary.latestActivity,
-            updatedAtMs: summary.updatedAtMs
+            updatedAtMs: summary.updatedAtMs,
+            reportDelivery: summary.reportDelivery
         ))
     }
 
@@ -3651,6 +3536,7 @@ final class EngineConversationSource: ConversationSource {
                     trace.display = derivedDisplay
                     trace.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                     trace.localApp = isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson)
+                    trace.skillBody = isError ? nil : ConversationSkillInstructions.body(tool: tool, json: resultJson)
                     trace.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                 }
                 model.statusLine = wasCancelled
@@ -5450,6 +5336,7 @@ final class EngineConversationSource: ConversationSource {
                         merged.display = lowered
                         merged.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                         merged.localApp = isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson)
+                        merged.skillBody = isError ? nil : ConversationSkillInstructions.body(tool: tool, json: resultJson)
                         merged.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                         pendingRun?.tools[index] = merged
                     } else {
@@ -5463,7 +5350,8 @@ final class EngineConversationSource: ConversationSource {
                             display: lowered,
                             spawnedAgentID: ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson),
                             questionAnswers: isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson),
-                            localApp: isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson)
+                            localApp: isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson),
+                            skillBody: isError ? nil : ConversationSkillInstructions.body(tool: tool, json: resultJson)
                         )
                         pendingRun?.tools.append(trace)
                     }

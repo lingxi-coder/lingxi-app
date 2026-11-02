@@ -1,3 +1,4 @@
+import { fixtureAccountSnapshot } from './provider-accounts-mock';
 import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -20,6 +21,7 @@ import {
 setLanguagePreference('en');
 
 const projectPath = '/tmp/composer-draft-project';
+const openaiOAuthFixture = new URLSearchParams(location.search).has('openai-oauth');
 const mentionsFixture = new URLSearchParams(location.search).has('mentions');
 const slashHintsFixture = new URLSearchParams(location.search).has('slash-hints');
 const suggestionFeedback: Array<{ sessionId: string; uuid: string; action: string }> = [];
@@ -169,10 +171,7 @@ function bridgeFixture(sessionId: string | null, running: boolean, backgroundSta
       activeSession,
       runtimes: [],
       projectCatalogs: { [projectPath]: { sessions: [] } },
-      providerCredentials: [
-        { providerId: 'anthropic', configured: true, encryptionAvailable: true },
-        { providerId: 'openrouter', configured: true, encryptionAvailable: true },
-      ],
+      providerAccountSnapshot: openaiOAuthFixture ? fixtureAccountSnapshot(['openai-chatgpt'], models.map(reference => reference.replace('openai/', 'openai-chatgpt/'))) : fixtureAccountSnapshot(['anthropic', 'openrouter'], models),
       connection: { status: 'connected' },
       diagnostics: [],
     },
@@ -220,7 +219,7 @@ function bridgeFixture(sessionId: string | null, running: boolean, backgroundSta
     previewWorkspaceFile: async (path: string) => ({ kind: 'text', path, size: 20, content: 'export const value = 42;', truncated: false }),
     refreshModelPicker: async () => { modelRefreshCount += 1; },
     refreshSlashCommands: async () => undefined,
-    setModel: async () => undefined,
+    setModel: async (reference: string) => { (window as any).__selectedModel = reference; },
     setReasoningSelection: async () => undefined,
     setFastMode: async () => undefined,
     setPermissionMode: async (mode: string) => { permissionChanges.push(mode); },
@@ -249,7 +248,7 @@ function Fixture() {
   const [backgroundStatuses, setBackgroundStatuses] = useState<Record<string, string | undefined>>({});
   const [cancellingSessions, setCancellingSessions] = useState<Record<string, boolean>>({});
   const [sidebarWidth, setSidebarWidth] = useState(0);
-  const [models, setModels] = useState<string[]>(ALL_MODELS);
+  const [models, setModels] = useState<string[]>(openaiOAuthFixture ? ['openai/gpt-6.1-sol', 'openai/gpt-6-astra'] : ALL_MODELS);
   const [ready, setReady] = useState(true);
   const [connected, setConnected] = useState(true);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');

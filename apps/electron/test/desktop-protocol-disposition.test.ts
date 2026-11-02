@@ -33,6 +33,6 @@ test('every client event variant has a desktop disposition', () => {
 test('every refresh_listings kind has a desktop disposition', () => {
   assert.deepEqual(
     Object.keys(REFRESH_LISTING_DISPOSITIONS).sort(),
-    ['agents', 'auth', 'doctor', 'hooks', 'mcp', 'memory', 'models', 'sessions', 'settings', 'skills', 'slash_commands', 'status', 'tasks'].sort(),
+    ['agents', 'doctor', 'hooks', 'mcp', 'memory', 'models', 'sessions', 'settings', 'skills', 'slash_commands', 'status', 'tasks'].sort(),
   );
 });

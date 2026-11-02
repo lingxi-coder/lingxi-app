@@ -23,6 +23,7 @@ struct ToolCallView: View {
     @Environment(\.theme) private var t
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var isFocused: Bool
+    @State private var isHovering = false
     let trace: ConversationToolTrace
     var isExpanded: Bool = false
     /// Timeline mode uses Codex's borderless, dense row treatment. The legacy
@@ -57,6 +58,7 @@ struct ToolCallView: View {
                     Button(action: onToggle) { compactHeader }
                         .buttonStyle(.plain)
                         .focused($isFocused)
+                        .onHover { isHovering = $0 }
                         .accessibilityLabel(compactSummary)
                         .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
                         .accessibilityIdentifier("conversation.tool-call.\(trace.id).toggle")
@@ -117,7 +119,7 @@ struct ToolCallView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(t.text3)
                     .timelineChevron(
-                        isHighlighted: isFocused,
+                        isHighlighted: isFocused || isHovering,
                         isExpanded: isExpanded,
                         reduceMotion: reduceMotion
                     )

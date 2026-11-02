@@ -18,7 +18,7 @@ interface WireTool {
   configIndex: number; label?: string; description?: string;
 }
 interface WireModel {
-  provider_id: string; request_model: string; display_model: string;
+  provider_id: string; request_model: string; display_model: string; canSelect: boolean;
   capabilities: { vision?: boolean; tools?: boolean; structured_output?: boolean };
   team_route?: unknown;
 }
@@ -37,8 +37,8 @@ export interface LocalAppAgentExecutorOptions {
   resourcesPath?: string;
   serverBin?: string;
   /** Resolved only in the trusted host. Refresh tokens never go to the child. */
-  credentials(providerId: string, refresh?: boolean): Promise<Credentials>;
-  credentialStatus(providerIds: string[]): Promise<Set<string>>;
+  catalogCredentials?: () => Promise<Credentials>;
+  credentials(providerId: string, refresh?: boolean, accountRequest?: {accountId: string; identityGeneration: number; credentialRevision: number}): Promise<Credentials>;
   permission(input: { appId: string; runId: string; toolName: string; input: unknown }, signal: AbortSignal): Promise<boolean>;
   question(input: { appId: string; runId: string; requestId: number; questions: AskQuestionDto[] }, signal: AbortSignal): Promise<{ answers: Array<{ question: string; answer: string }> } | null>;
   /** Test-only injected process entry. Production always resolves the packaged binary. */
@@ -110,7 +110,7 @@ function parseCatalog(value: unknown): WireCatalog {
     || !Array.isArray(value.models) || !Array.isArray(value.builtins) || !Array.isArray(value.mcpTools) || !Array.isArray(value.mcpConfigs)
     || value.models.length > 10_000 || value.mcpTools.length > 10_000 || value.mcpConfigs.length > 512) throw protocolError();
   for (const model of value.models) if (!record(model) || !bounded(model.provider_id) || !bounded(model.request_model) || !bounded(model.display_model)
-    || !record(model.capabilities)) throw protocolError();
+    || typeof model.canSelect !== 'boolean' || !record(model.capabilities)) throw protocolError();
   for (const tool of value.builtins) if (!record(tool) || !bounded(tool.name)) throw protocolError();
   for (const tool of value.mcpTools) if (!record(tool) || !bounded(tool.serverConfigId) || !bounded(tool.configRevision)
     || !bounded(tool.rawToolName) || !bounded(tool.definitionFingerprint) || !Number.isSafeInteger(tool.configIndex)
@@ -122,13 +122,14 @@ function parseCatalog(value: unknown): WireCatalog {
 export class LocalAppAgentExecutor {
   private cached?: { wire: WireCatalog; expires: number; configVersion: string };
   private catalogPending?: Promise<WireCatalog>;
-  private credentialAvailability?: { key: string; expires: number; value: Promise<Set<string>> };
+  private catalogGeneration = 0;
   constructor(private readonly options: LocalAppAgentExecutorOptions) {}
 
-  invalidateCatalog(): void { this.cached = undefined; this.credentialAvailability = undefined; }
+  invalidateCatalog(): void { this.cached = undefined; this.catalogGeneration++; }
   private async configVersion(): Promise<string> {
     const environment = this.options.environment ?? process.env;
     const paths = [join(this.options.configHome, 'settings.json'), join(this.options.configHome, '.config.json'),
+      join(this.options.configHome, 'desktop-local-app-mcp.json'),
       join(environment.LINGXI_CONFIG_DIR ?? environment.HOME ?? homedir(), '.lingxi.json')];
     const versions = await Promise.all(paths.map(async path => {
       try { const value = await fs.stat(path, { bigint: true }); return [path, String(value.ino), String(value.size), String(value.mtimeNs), String(value.ctimeNs)]; }
@@ -148,14 +149,15 @@ export class LocalAppAgentExecutor {
       try {
         let catalogVersion = configVersion;
         for (let attempt = 0; attempt < 2; attempt++) {
+          const generation = this.catalogGeneration;
           let result: WireCatalog | undefined;
-          await this.exchange({ type: 'catalog', protocolVersion: 1, cwd, configHome: this.options.configHome, credentials: credentialEnvelope({}) }, cwd, controller.signal, async event => {
+          await this.exchange({ type: 'catalog', protocolVersion: 1, cwd, configHome: this.options.configHome, credentials: credentialEnvelope(await this.options.catalogCredentials?.() ?? {}) }, cwd, controller.signal, async event => {
             if (event.type !== 'catalog') throw protocolError();
             result = parseCatalog(event); return true;
           });
           if (!result) throw protocolError();
           const currentVersion = await this.configVersion();
-          if (currentVersion !== catalogVersion) {
+          if (currentVersion !== catalogVersion || generation !== this.catalogGeneration) {
             // A fresh Harness home may initialize host metadata on first read.
             // Re-read once; never publish a catalog from a changing snapshot.
             if (attempt === 0) { catalogVersion = currentVersion; continue; }
@@ -171,14 +173,6 @@ export class LocalAppAgentExecutor {
   }
   async catalog(force = false): Promise<LocalAppAgentCatalog> {
     const wire = await this.wireCatalog(force);
-    const providerIds = [...new Set(wire.models.map(model => model.provider_id))].sort();
-    const key = JSON.stringify(providerIds);
-    if (force || !this.credentialAvailability || this.credentialAvailability.key !== key || this.credentialAvailability.expires <= Date.now()) {
-      const value = this.options.credentialStatus(providerIds);
-      this.credentialAvailability = { key, expires: Date.now() + 5000, value };
-      void value.catch(() => { if (this.credentialAvailability?.value === value) this.credentialAvailability = undefined; });
-    }
-    const available = await this.credentialAvailability.value;
     const tools: LocalAppAgentToolChoice[] = wire.builtins.map(tool => ({ id: `builtin:${tool.name}`, kind: 'builtin', name: tool.name,
       label: tool.name, ...(typeof tool.description === 'string' ? { description: tool.description } : {}) }));
     tools.push(...wire.mcpTools.map(tool => ({ id: toolId(tool), kind: 'mcp' as const, serverConfigId: tool.serverConfigId, configRevision: tool.configRevision,
@@ -186,7 +180,7 @@ export class LocalAppAgentExecutor {
       ...(typeof tool.description === 'string' ? { description: tool.description } : {}) })));
     if (new Set(tools.map(tool => tool.id)).size !== tools.length) throw protocolError();
     return { models: wire.models.map(model => ({ providerId: model.provider_id, modelId: model.request_model, label: model.display_model,
-      canSelect: available.has(model.provider_id), supportsAttachments: true, supportsVision: model.capabilities.vision === true,
+      canSelect: model.canSelect, supportsAttachments: true, supportsVision: model.capabilities.vision === true,
       // Harness validates StructuredOutput as a tool, independent of provider response_format support.
       supportsStructuredOutput: model.capabilities.tools === true })), tools, skills: [] };
   }
@@ -202,10 +196,21 @@ export class LocalAppAgentExecutor {
     if (!model.team_route) throw new Error('TEAM_MODEL_UNSUPPORTED');
     const route = structuredClone(model.team_route);
     validateTeamModelRoute(route);
-    const configured = await this.options.credentialStatus([route.credential_id]);
-    if (!configured.has(route.credential_id)) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    if (!model.canSelect) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    const snapshot = (await this.options.catalogCredentials?.())?.providerAccounts;
+    const selectedProvider = snapshot?.accounts.find(account => account.executionBindingId === route.model_provider)?.providerId;
+    const bindings = new Set(snapshot?.accounts.filter(account => account.providerId === selectedProvider).map(account => account.executionBindingId) ?? []);
+    const profiles = [route.model_profile];
+    for (const candidate of catalog.models) {
+      if (!candidate.team_route) continue;
+      const related = structuredClone(candidate.team_route);
+      validateTeamModelRoute(related);
+      if (related.model_provider === route.model_provider || !bindings.has(related.model_provider)
+        || related.model_id !== route.model_id) continue;
+      if (!profiles.some(profile => JSON.stringify(profile) === JSON.stringify(related.model_profile))) profiles.push(related.model_profile);
+    }
     await assertCurrent();
-    return { route, assertCurrent };
+    return { route, profiles, assertCurrent };
   }
   async execute(execution: LocalAppAgentExecution): Promise<LocalAppAgentExecutorResult> {
     const { owner, runId, authorization, input, signal } = execution;
@@ -296,7 +301,10 @@ export class LocalAppAgentExecutor {
         send(answers ? { type: 'question_response', requestId: event.requestId, answers: answers.answers }
           : { type: 'question_cancel', requestId: event.requestId });
       } else if (event.type === 'credential_required') {
-        const refreshed = await this.options.credentials(model.providerId, true);
+        if (!bounded(event.accountId) || !Number.isSafeInteger(event.identityGeneration) || (event.identityGeneration as number) < 1
+          || !Number.isSafeInteger(event.credentialRevision) || (event.credentialRevision as number) < 0) throw protocolError();
+        const accountRequest = { accountId: event.accountId, identityGeneration: event.identityGeneration as number, credentialRevision: event.credentialRevision as number };
+        const refreshed = await this.options.credentials(model.providerId, true, accountRequest);
         await execution.assertAuthorized();
         send({ type: 'credential_update', credentials: credentialEnvelope(refreshed) });
       } else if (event.type === 'finished') {

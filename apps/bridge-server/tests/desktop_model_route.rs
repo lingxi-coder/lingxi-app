@@ -53,6 +53,56 @@ fn config(model: &str, duplicate: bool, origin: &str) -> (tempfile::TempDir, Des
     (tmp, cfg)
 }
 
+async fn seed_account(cfg: &DesktopConfig, profile: &str) {
+    use harness_runtime::provider_accounts::{
+        account_store_scope, ProviderAccountCatalog, ProviderAccountStore,
+    };
+    use lingxi_core::host::provider_accounts::{
+        AccountAuthKind, ProviderAccountAction, ProviderAccountCommand,
+    };
+    let shared = harness_runtime::desktop::build_shared_credential_stack_with_policy(
+        &cfg.lingxi_home,
+        true,
+        cfg.credential_storage_policy,
+    )
+    .await
+    .unwrap();
+    let scope = account_store_scope(
+        &cfg.lingxi_home,
+        &format!("{:?}", shared.credentials.account_storage_backend()),
+    );
+    let inputs = provider_config::AssembleInputs {
+        official_catalog: None,
+        anthropic_api_base: cfg.api_base.clone(),
+        anthropic_models: Vec::new(),
+        anthropic_has_api_key: false,
+        anthropic_has_oauth: false,
+        user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
+        routing: cfg.routing.clone(),
+    };
+    let store =
+        ProviderAccountStore::new(cfg.lingxi_home.clone(), scope, shared.credentials).with_catalog(
+            ProviderAccountCatalog::new(inputs, llm_runtime::Region::International, None, None),
+        );
+    store
+        .execute(
+            ProviderAccountCommand {
+                expected_revision: 0,
+                operation_id: None,
+                action: ProviderAccountAction::Add {
+                    provider_id: profile.into(),
+                    display_name: "fixture".into(),
+                    execution_binding_id: profile.into(),
+                    auth_kind: AccountAuthKind::ApiKey,
+                    account_id: None,
+                },
+            },
+            Some("fixture-only-key".into()),
+        )
+        .await
+        .unwrap();
+}
+
 async fn receive_request(listener: tokio::net::TcpListener) -> (String, serde_json::Value) {
     let (mut socket, _) = listener.accept().await.unwrap();
     let mut bytes = Vec::new();
@@ -102,6 +152,7 @@ async fn desktop_boot_preserves_the_resolved_model_profile() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let (_tmp, cfg) = config(model, duplicate, &origin);
+        seed_account(&cfg, expected_profile).await;
         let rt = build(
             cfg,
             Arc::new(MockOutputStream::new()),
@@ -127,9 +178,6 @@ async fn desktop_boot_preserves_the_resolved_model_profile() {
             expected_profile,
             "optional host metadata must see the same authoritative route"
         );
-        rt.credentials
-            .set_provider_key_ephemeral(expected_profile, "fixture-only-key")
-            .await;
         let request = tokio::spawn(receive_request(listener));
         tokio::time::timeout(
             Duration::from_secs(30),
@@ -183,6 +231,7 @@ async fn weather_usage_is_refreshed_after_turn_resume_and_clear() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (tmp, cfg) = config("deepseek/deepseek-flash", false, &origin);
+    seed_account(&cfg, "deepseek").await;
     let rt = build(
         cfg,
         Arc::new(MockOutputStream::new()),
@@ -215,9 +264,6 @@ async fn weather_usage_is_refreshed_after_turn_resume_and_clear() {
     )
     .await
     .expect("session.start probe timed out");
-    rt.credentials
-        .set_provider_key_ephemeral("deepseek", "fixture-only-key")
-        .await;
     let request = tokio::spawn(receive_request(listener));
     tokio::time::timeout(
         Duration::from_secs(30),

@@ -19,7 +19,7 @@ internal fun SettingsNavigationIcon(route: String) {
         SettingsRoutes.PLUGINS -> Icons.Outlined.Extension
         SettingsRoutes.DIAGNOSTICS -> Icons.Outlined.MonitorHeart
         SettingsRoutes.ACCOUNT -> Icons.Outlined.AccountCircle
-        SettingsRoutes.CREDENTIALS -> Icons.Outlined.Key
+        SettingsRoutes.PROVIDER_ACCOUNTS -> Icons.Outlined.Key
         SettingsRoutes.ENGINE_PERMISSIONS -> Icons.Outlined.Security
         SettingsRoutes.ARCHIVED -> Icons.Outlined.Archive
         SettingsRoutes.ENGINE_MCP -> Icons.Outlined.Dns

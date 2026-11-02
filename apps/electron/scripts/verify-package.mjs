@@ -129,8 +129,6 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     join(extractedApp, 'out', 'renderer', 'index.html'),
     join(extractedApp, 'out', 'renderer', 'remote-rtc.html'),
     join(extractedApp, 'node_modules', '@lingxi', 'bridge-client', 'dist', 'index.js'),
-    join(extractedApp, 'node_modules', 'ws', 'package.json'),
-    join(extractedApp, 'node_modules', 'ws', 'lib', 'stream.js'),
   ];
   try {
   for (const path of expected) requirePath(path);
@@ -210,7 +208,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   if (Object.keys(runtimeMetadata.dependencies ?? {}).sort().join(',') !== expectedDependencies.join(',')) {
     throw new Error('runtime package contains unexpected production dependencies');
   }
-  for (const dependency of new Set([...expectedDependencies, 'ws'])) {
+  for (const dependency of expectedDependencies) {
     const dependencyMetadata = readJson(join(extractedApp, 'node_modules', ...dependency.split('/'), 'package.json'));
     if ('devDependencies' in dependencyMetadata) {
       throw new Error(`${dependency} package contains devDependencies`);
@@ -220,7 +218,19 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   execFileSync(join(contents, 'MacOS', APP_NAME), [
     '--input-type=module',
     '-e',
-    'import("@lingxi/bridge-client").then(({ BridgeClient }) => { if (typeof BridgeClient !== "function") process.exit(2); })',
+    `import { createRequire } from 'node:module';
+     import { dirname, join } from 'node:path';
+     import { existsSync } from 'node:fs';
+     const bridgeLoad = createRequire(import.meta.resolve('@lingxi/bridge-client'));
+     const wsManifest = bridgeLoad.resolve('ws/package.json');
+     if (!existsSync(join(dirname(wsManifest), 'lib', 'stream.js'))) {
+       throw new Error('ws stream implementation is missing');
+     }
+     if ('devDependencies' in bridgeLoad('ws/package.json')) {
+       throw new Error('ws package contains devDependencies');
+     }
+     const { BridgeClient } = await import('@lingxi/bridge-client');
+     if (typeof BridgeClient !== 'function') throw new Error('BridgeClient export is missing');`,
   ], {
     cwd: extractedApp,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },

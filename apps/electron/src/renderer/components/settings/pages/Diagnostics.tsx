@@ -38,7 +38,6 @@ export function Diagnostics({ bridge, snapshot }: PageContentProps) {
   const doctor = bridge.desktop.doctor;
   const compaction = bridge.desktop.lastCompaction;
   const retry = bridge.desktop.lastApiRetry;
-  const auth = bridge.desktop.auth;
 
   useEffect(() => {
     void bridge.refreshDiagnostics().catch(() => undefined);
@@ -61,7 +60,6 @@ export function Diagnostics({ bridge, snapshot }: PageContentProps) {
       <Card title={tr('desktop_settings_3e3b45ef84')}>
         <Row title={tr('desktop_settings_8868595f7a')} desc={status?.status_line ?? tr('desktop_settings_fbb1434b70')} align="center">
           <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            <button type="button" onClick={() => void bridge.refreshAuth().catch(() => undefined)} style={ghostButtonStyle(t)}>{tr('desktop_settings_88275872d7')}</button>
             <button type="button" onClick={() => void bridge.refreshStatus().catch(() => undefined)} style={ghostButtonStyle(t)}>{tr('settings_linux_action_refresh')}</button>
             <button type="button" onClick={() => void bridge.refreshDoctor().catch(() => undefined)} style={ghostButtonStyle(t)}>{tr('desktop_settings_03b7295905')}</button>
           </div>
@@ -140,9 +138,7 @@ export function Diagnostics({ bridge, snapshot }: PageContentProps) {
       </Card>
 
       <Card title={tr('desktop_settings_4f89901316')}>
-        <Row title="Auth" desc={auth?.type === 'signed_in' ? `${auth.email} · ${auth.org_id}` : tr('desktop_settings_c1f6583730')} align="center">
-          <span className="mono" style={{ color: t.text3, fontSize: 11.5 }}>{auth?.type ?? 'unknown'}</span>
-        </Row>
+
         <Row title={tr('desktop_settings_b5f0cf9e9b')} desc={compaction ? tr('desktop_settings_1d1bb081f7', compaction.messages_before, compaction.messages_after, compaction.bytes_saved.toLocaleString()) : tr('desktop_settings_7fb3cbad4b')} align="center">
           <button type="button" onClick={() => void bridge.forceCompact().catch(() => undefined)} disabled={!hasSession || bridge.running || bridge.sessionLoading} style={ghostButtonStyle(t, !hasSession || bridge.running || bridge.sessionLoading)}>
             {tr('desktop_settings_a02cf1b2d5')}</button>

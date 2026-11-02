@@ -43,24 +43,24 @@ final class ProviderConnectionTests: XCTestCase {
         return try JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
+    func testAccountBindingChoicesMatchEmittedFlatAndConnectionProfiles() throws {
+        let repository = providerConfigurationTestRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "deepseek")
+        var subject = try XCTUnwrap(repository.state(for: id)?.profile)
+        let flatBinding = repository.engineProfileID(for: subject)
+        XCTAssertEqual(repository.executionBindingIDs(for: subject), [flatBinding])
+        subject.connections = [.init(id: "single", baseURL: subject.baseURL)]
+        XCTAssertEqual(repository.executionBindingIDs(for: subject), [repository.engineProfileID(for: subject)],
+            "The profile serializer emits a flat definition for one connection")
+        subject.connections.append(.init(id: "cn", baseURL: "https://cn.example.test/v1"))
+        let group = repository.engineProfileID(for: subject)
+        XCTAssertEqual(repository.executionBindingIDs(for: subject), ["\(group):single", "\(group):cn"])
+    }
+
     // MARK: - Persistence
 
     /// Every profile written before this feature existed has no `connections`
     /// key at all; decoding one must not fail and must not invent a connection.
-    func testProfileWrittenBeforeConnectionsDecodesAsReachableOneWay() throws {
-        let legacy = """
-        {"id":"deepseek","presetID":"deepseek","name":"DeepSeek",
-         "baseURL":"https://api.deepseek.com","modelID":"deepseek-flash",
-         "enabled":true,"isDefault":true}
-        """
-        let decoded = try JSONDecoder().decode(
-            ProviderStoredProfile.self,
-            from: XCTUnwrap(legacy.data(using: .utf8))
-        )
-        XCTAssertTrue(decoded.connections.isEmpty)
-        XCTAssertEqual(decoded.baseURL, "https://api.deepseek.com")
-    }
-
     func testConnectionsSurviveAnEncodeDecodeRoundTrip() throws {
         var subject = profile()
         subject.addConnection()
@@ -192,7 +192,7 @@ final class ProviderConnectionTests: XCTestCase {
     // MARK: - What the engine is launched with
 
     func testTwoConnectionsReachTheEmittedProviderSettings() throws {
-        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let repository = providerConfigurationTestRepository(persistenceURL: persistenceURL)
         let deepseek = repository.addProfile(presetID: "deepseek")
         repository.updateProfile(deepseek) {
             $0.baseURL = "https://api.deepseek.com"
@@ -223,7 +223,7 @@ final class ProviderConnectionTests: XCTestCase {
     /// take it out of that class — otherwise the connections are dropped with
     /// no error on any surface, and the picker still looks right.
     func testAnOfficialEndpointProviderWithConnectionsIsStillEmitted() throws {
-        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let repository = providerConfigurationTestRepository(persistenceURL: persistenceURL)
         let deepseek = repository.addProfile(presetID: "deepseek")
         repository.updateProfile(deepseek) {
             $0.modelID = "deepseek-flash"
@@ -254,7 +254,7 @@ final class ProviderConnectionTests: XCTestCase {
     /// `resolve_in` matches a profile name or a group, and the mobile clients
     /// derive their model label from this id.
     func testTheModelReferenceStillNamesTheGroup() throws {
-        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let repository = providerConfigurationTestRepository(persistenceURL: persistenceURL)
         let deepseek = repository.addProfile(presetID: "deepseek")
         repository.updateProfile(deepseek) {
             $0.modelID = "deepseek-flash"

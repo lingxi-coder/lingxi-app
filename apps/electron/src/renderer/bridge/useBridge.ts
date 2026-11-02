@@ -1,3 +1,4 @@
+import type { ProviderAccountsApi } from '../../shared/providerAccounts';
 import { COMPACT_DURING_TURN, isCompactTurnRejection } from './compactRejection';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type {
@@ -23,7 +24,7 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SlashCommandTerminalRegistry } from './slashCommandTerminals.js';
 import type { SlashCommandTerminalResult } from './slashCommandTerminals.js';
-import { watchCredentialRecovery } from './credentialRecovery.js';
+import { createProviderAccountSnapshotRefresh, providerAccountRecoveryState, watchCredentialRecovery } from './credentialRecovery.js';
 import type { AudioConfigurationV4 } from '../../shared/generatedAudioConfiguration.js';
 import { hostMicrophonePermissionReader } from '../../shared/microphoneAccess.js';
 import type {
@@ -124,7 +125,6 @@ import type {
   WorkspaceFilePreview,
 } from './lingxi.js';
 import type { ProjectCreationPurpose } from '../../shared/projectCreation';
-import { saveProviderSettings } from './providerSettingsSave.js';
 import { createUiSurfaceClientId, UiSurfaceLifecycleQueue } from './uiSurfaceLifecycle.js';
 import {
   interruptConfigurationOperations,
@@ -288,6 +288,9 @@ export function useBridge(): UseBridge {
   const pendingCatalogMutations = useRef(new Map<string, PendingCatalogMutation>());
   const [catalogMutationRevision, setCatalogMutationRevision] = useState(0);
   const runtimeResourceSendSequence = useRef(0);
+  const providerAccountSourceGeneration = useRef(0);
+  const providerAccountSourceMounted = useRef(true);
+  const [providerAccountsRefreshing, setProviderAccountsRefreshing] = useState(false);
   const trackedTurnSequence = useRef(0);
   const pendingTrackedTurns = useRef(new Map<string, DesktopTurnToken[]>());
   const activeTrackedTurns = useRef(new Map<string, ActiveTrackedTurn>());
@@ -373,7 +376,7 @@ export function useBridge(): UseBridge {
   }, [host]);
 
   // Settings are captured per-CONNECTION on the engine side (`SettingsContext`
-  // is built once per `assemble_with_provider_keys` call), so a snapshot from
+  // is built once per `assemble_with_account_credentials` call), so a snapshot from
   // a previous session/project is not a valid answer for a new one — without
   // this, switching sessions would leave the old session's `project`/`local`
   // values on screen until a fresh snapshot happened to arrive.
@@ -638,6 +641,27 @@ export function useBridge(): UseBridge {
   const patchBootstrap = useCallback((patch: Partial<BootstrapState>) => {
     setBootstrap((previous) => previous ? { ...previous, ...patch } : previous);
   }, []);
+
+  const accountSnapshotRefresh = useMemo(() => createProviderAccountSnapshotRefresh({
+    read: () => host?.providerAccounts?.snapshot() ?? Promise.reject(new Error('Provider accounts unavailable.')),
+    source: () => ({ sessionId: activeSessionIdRef.current, storeScope: bootstrapRef.current?.providerAccountSnapshot?.storeScope,
+      navigation: navigationOperationRef.current, generation: providerAccountSourceGeneration.current }),
+    isCurrent: source => providerAccountSourceMounted.current && source.sessionId === activeSessionIdRef.current
+      && source.storeScope === bootstrapRef.current?.providerAccountSnapshot?.storeScope
+      && source.navigation === navigationOperationRef.current && source.generation === providerAccountSourceGeneration.current
+      && (!source.sessionId || !removedRuntimeIds.current.has(source.sessionId)),
+    apply: (providerAccountSnapshot, source) => setBootstrap(previous => previous
+      && providerAccountSourceMounted.current && source.generation === providerAccountSourceGeneration.current && source.sessionId === activeSessionIdRef.current
+      && source.navigation === navigationOperationRef.current && source.storeScope === previous.providerAccountSnapshot?.storeScope
+      && (!source.storeScope || providerAccountSnapshot.storeScope === source.storeScope)
+      && providerAccountSnapshot.configRevision >= (previous.providerAccountSnapshot?.configRevision ?? 0)
+      ? { ...previous, providerAccountSnapshot } : previous),
+    pending: setProviderAccountsRefreshing,
+  }), [host]);
+  useEffect(() => {
+    providerAccountSourceMounted.current = true;
+    return () => { providerAccountSourceMounted.current = false; providerAccountSourceGeneration.current++; };
+  }, [accountSnapshotRefresh]);
 
   // Returns the catalog it fetched as well as writing it into `bootstrap`. A
   // caller acting on a click cannot read the bootstrap it just triggered — the
@@ -1043,7 +1067,11 @@ export function useBridge(): UseBridge {
       // emit a delayed or incomplete cost snapshot. Pull it after the turn has
       // fully settled so the toolbar cannot remain pinned to the previous
       // session total.
+      if ((event.type === 'provider_model_catalog' || event.type === 'model_list') && activeSessionIdRef.current === sessionId) {
+        void accountSnapshotRefresh.refresh().catch(() => undefined);
+      }
       if (event.type === 'turn_ended' && host) {
+        void accountSnapshotRefresh.refresh().catch(() => undefined);
         void host.command(sessionId, { type: 'refresh_listings', which: [{ type: 'status' }] }).catch(() => undefined);
       }
       // A background subagent can settle after the parent turn has already
@@ -1265,7 +1293,7 @@ export function useBridge(): UseBridge {
       offComputerAccess();
       offConversationShown?.();
     };
-  }, [applyBootstrap, capture, completeTrackedSpeech, host, scheduleProjectCatalogRefresh, updateRuntime]);
+  }, [accountSnapshotRefresh, applyBootstrap, capture, completeTrackedSpeech, host, scheduleProjectCatalogRefresh, updateRuntime]);
 
   useEffect(() => {
     if (sessionLoading || !host || !activeSessionId || connection.status !== 'connected') return;
@@ -1282,7 +1310,7 @@ export function useBridge(): UseBridge {
       host.command(activeSessionId, { type: 'list_session_agents' }),
       host.command(activeSessionId, {
         type: 'refresh_listings',
-        which: [{ type: 'auth' }, { type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'hooks' }, { type: 'agents' }],
+        which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'hooks' }, { type: 'agents' }],
       }),
       host.command(activeSessionId, { type: 'refresh_listings', which: [{ type: 'mcp' }, { type: 'skills' }] }),
       host.command(activeSessionId, { type: 'skill_admin', command: { action: 'get_catalog' } }),
@@ -2021,57 +2049,6 @@ export function useBridge(): UseBridge {
     try { return await host.searchWorkspaceFiles(query); } catch (cause) { return capture(cause); }
   }, [activeBotId, capture, host]);
 
-  const setProviderCredential = useCallback(async (providerId: string, credential: string) => {
-    if (!host) throw new Error('Desktop host unavailable.');
-    try {
-      const update = await host.setProviderCredential(providerId, credential);
-      setBootstrap((previous) => previous ? {
-        ...previous, settings: update.settings,
-        providerCredentials: [...(previous.providerCredentials ?? []).filter((entry) => entry.providerId !== providerId), update.credential],
-      } : previous);
-      return update;
-    } catch (cause) { return capture(cause); }
-  }, [capture, host]);
-
-  const loginCodex = useCallback(async () => {
-    if (!host) throw new Error('Desktop host unavailable.');
-    const update = await host.loginCodex();
-    setBootstrap((previous) => previous ? {
-      ...previous, settings: update.settings,
-      providerCredentials: [...(previous.providerCredentials ?? []).filter((entry) => entry.providerId !== update.credential.providerId), update.credential],
-    } : previous);
-    return update;
-  }, [host]);
-
-  const cancelCodexLogin = useCallback(async () => {
-    if (!host) throw new Error('Desktop host unavailable.');
-    await host.cancelCodexLogin();
-  }, [host]);
-
-  const clearProviderCredential = useCallback(async (providerId: string) => {
-    if (!host) throw new Error('Desktop host unavailable.');
-    try {
-      const metadata = await host.clearProviderCredential(providerId);
-      setBootstrap((previous) => previous ? {
-        ...previous, providerCredentials: [...(previous.providerCredentials ?? []).filter((entry) => entry.providerId !== providerId), metadata],
-      } : previous);
-      return metadata;
-    } catch (cause) { return capture(cause); }
-  }, [capture, host]);
-
-  const testProviderConnection = useCallback(async (providerId: string, credentialOverride?: string) => {
-    if (!host) throw new Error('Desktop host unavailable.');
-    try { return await host.testProviderConnection(providerId, credentialOverride); }
-    catch (cause) { return capture(cause); }
-  }, [capture, host]);
-
-  const refreshProviderCredential = useCallback(async (providerId: string) => {
-    if (!host) throw new Error('Desktop host unavailable.');
-    try {
-      patchBootstrap({ providerCredentials: await host.providerCredentials(providerId) });
-    } catch (cause) { return capture(cause); }
-  }, [capture, host, patchBootstrap]);
-
   const pluginSecret = useCallback(async (pluginId: string, key: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
     try { return await host.pluginSecret(pluginId, key); }
@@ -2247,7 +2224,7 @@ export function useBridge(): UseBridge {
       command({ type: 'list_session_agents' }),
       command({
         type: 'refresh_listings',
-        which: [{ type: 'auth' }, { type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'hooks' }, { type: 'agents' }],
+        which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'hooks' }, { type: 'agents' }],
       }),
       command({ type: 'refresh_listings', which: [{ type: 'mcp' }, { type: 'skills' }] }),
       command({ type: 'skill_admin', command: { action: 'get_catalog' } }),
@@ -2439,8 +2416,6 @@ export function useBridge(): UseBridge {
     (level: NativeProactivityLevelDto, offerBypass?: boolean) => command({ type: 'set_proactivity_level', level, offer_bypass: offerBypass }),
     [command],
   );
-  const login = useCallback(() => command({ type: 'login' }), [command]);
-  const logout = useCallback(() => command({ type: 'logout' }), [command]);
   const forceCompact = useCallback(async (instructions?: string) => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
@@ -2480,21 +2455,24 @@ export function useBridge(): UseBridge {
       capture(cause);
     }
   }, [capture, host, updateRuntime]);
-  const credentialStorageUnavailable = bootstrap?.providerCredentials?.some((entry) => Boolean(entry.storageError)) ?? false;
+  const credentialStorageUnavailable = bootstrap?.credentialBrokerAvailable === false || (bootstrap?.providerAccountSnapshot?.health.some(entry => entry.status === 'storage_unavailable') ?? false);
+  const accountRecovery = providerAccountRecoveryState(bootstrap?.providerAccountSnapshot);
   useEffect(() => {
-    if (!host || !credentialStorageUnavailable) return;
+    if (!host || (!credentialStorageUnavailable && !accountRecovery.recovering)) return;
     let disposed = false;
     const stop = watchCredentialRecovery({
       windowTarget: window,
       documentTarget: document,
       isVisible: () => document.visibilityState === 'visible',
+      retryAtMs: accountRecovery.retryAtMs,
+      pollIntervalMs: credentialStorageUnavailable ? 5_000 : 30_000,
       refresh: async () => {
         const snapshot = await host.bootstrap();
         if (!disposed) applyBootstrap(snapshot);
       },
     });
     return () => { disposed = true; stop(); };
-  }, [applyBootstrap, credentialStorageUnavailable, host]);
+  }, [accountRecovery.recovering, accountRecovery.retryAtMs, applyBootstrap, credentialStorageUnavailable, host]);
 
   const clearSession = useCallback(async (name?: string) => {
     const sessionId = activeSessionIdRef.current;
@@ -2511,10 +2489,6 @@ export function useBridge(): UseBridge {
   const refreshTasks = useCallback(
     (options?: { preserve?: boolean }) => requestTaskList(activeSessionIdRef.current, options),
     [requestTaskList],
-  );
-  const refreshAuth = useCallback(
-    () => command({ type: 'refresh_listings', which: [{ type: 'auth' }] }),
-    [command],
   );
   const refreshHooks = useCallback(
     () => command({ type: 'refresh_listings', which: [{ type: 'hooks' }] }),
@@ -2536,12 +2510,26 @@ export function useBridge(): UseBridge {
     () => command({ type: 'refresh_listings', which: [{ type: 'slash_commands' }] }),
     [command],
   );
+  const providerAccountsApi = useMemo<ProviderAccountsApi | undefined>(() => {
+    const api = host?.providerAccounts;
+    if (!api) return undefined;
+    const remember = (value: Awaited<ReturnType<ProviderAccountsApi['snapshot']>>) => {
+      setBootstrap(previous => previous ? { ...previous, providerAccountSnapshot: value } : previous);
+      return value;
+    };
+    return { ...api, snapshot: () => accountSnapshotRefresh.refresh(), command: (request, credential) => api.command(request, credential).then(value => {
+      const result = remember(value);
+      void accountSnapshotRefresh.refresh().catch(() => undefined);
+      return result;
+    }) };
+  }, [accountSnapshotRefresh, host]);
   const refreshModelPicker = useCallback(async (trigger: 'settings' | 'manual' = 'settings') => {
+    await command({ type: 'refresh_provider_catalog', trigger });
     await Promise.all([
-      command({ type: 'refresh_provider_catalog', trigger }),
       command({ type: 'get_conversation_controls' }),
+      providerAccountsApi?.snapshot(),
     ]);
-  }, [command]);
+  }, [command, providerAccountsApi]);
   const refreshSessionAgents = useCallback(async () => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
@@ -2603,16 +2591,32 @@ export function useBridge(): UseBridge {
     () => command({ type: 'refresh_listings', which: [{ type: 'settings' }] }),
     [command],
   );
+  const [providerSettings, setProviderSettings] = useState<Record<string, unknown>>();
+  const [providerSettingsLocked, setProviderSettingsLocked] = useState<string[]>();
+  const [providerSettingsApplyPending, setProviderSettingsApplyPending] = useState(false);
+  const [providerSettingsError, setProviderSettingsError] = useState<string>();
+  const providerSettingsRef = useRef<Record<string, unknown>>();
+  useEffect(() => {
+    let live = true;
+    if (host?.providerSettings) void host.providerSettings().then(value => {
+      if (live) { providerSettingsRef.current = value.raw; setProviderSettings(value.effective); setProviderSettingsLocked(value.locked); setProviderSettingsError(undefined); }
+    }).catch(error => { if (live) setProviderSettingsError(error instanceof Error ? error.message : 'Provider settings unavailable.'); });
+    return () => { live = false; };
+  }, [host]);
   const updateProviderSettings = useCallback(
-    async (destination: 'user' | 'project' | 'local', patch: Record<string, unknown>) => {
-      const sessionId = activeSessionIdRef.current;
-      if (sessionLoadingRef.current || !host || !sessionId) throw new Error('Open a connected session before saving provider settings.');
+    async (patch: Record<string, unknown>) => {
+      if (!host?.providerSettings || !providerSettingsRef.current) throw new Error('Provider settings are unavailable.');
       if (providerSettingsSaves.current.size > 0) throw new Error('A provider settings save is already in progress.');
       const controller = new AbortController();
       providerSettingsSaves.current.add(controller);
       try {
-        await saveProviderSettings(host, sessionId, destination, patch, controller.signal);
-        if (activeSessionIdRef.current !== sessionId) throw new Error('Provider settings session changed.');
+        const value = await host.providerSettings(patch, providerSettingsRef.current);
+        providerSettingsRef.current = value.raw; setProviderSettings(value.effective); setProviderSettingsLocked(value.locked); setProviderSettingsError(undefined); setProviderSettingsApplyPending(false);
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('Provider settings were saved but could not be applied')) setProviderSettingsApplyPending(true);
+        const latest = await host.providerSettings().catch(() => undefined);
+        if (latest) { providerSettingsRef.current = latest.raw; setProviderSettings(latest.effective); setProviderSettingsLocked(latest.locked); }
+        throw error;
       } finally {
         providerSettingsSaves.current.delete(controller);
       }
@@ -2805,7 +2809,6 @@ export function useBridge(): UseBridge {
     connected: !sessionLoading && connection.status === 'connected',
     conversation,
     desktop,
-    authState: desktop.auth,
     hooksCatalog: desktop.hooks,
     agentCatalog: desktop.agents,
     cost: desktop.lastCost,
@@ -2868,12 +2871,12 @@ export function useBridge(): UseBridge {
     listProjectSessions,
     sessionRuntimeStatus,
     searchWorkspaceFiles,
-    setProviderCredential,
-    clearProviderCredential,
-    loginCodex,
-    cancelCodexLogin,
-    testProviderConnection,
-    refreshProviderCredential,
+    providerAccounts: providerAccountsApi,
+    providerSettings,
+    providerSettingsLocked,
+    providerSettingsApplyPending,
+    providerSettingsError,
+    providerAccountsRefreshing,
     pluginSecret,
     setPluginSecret,
     clearPluginSecret,
@@ -2915,12 +2918,9 @@ export function useBridge(): UseBridge {
     setPermissionMode,
     initializeProactivity,
     setProactivityLevel,
-    login,
-    logout,
     forceCompact,
     clearSession,
     refreshTasks,
-    refreshAuth,
     refreshHooks,
     refreshAgents,
     refreshStatus,

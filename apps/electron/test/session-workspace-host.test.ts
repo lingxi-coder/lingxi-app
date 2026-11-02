@@ -156,7 +156,7 @@ function hostFixture(t: TestContext) {
     trustDirectory: async (path) => { calls.trust.push(path); return true; },
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any,
-    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, undefined, dialogs);
+    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, dialogs);
   // The test uses the real orchestration and store; unrelated provider and OS
   // bootstrap services are replaced by their current persisted observations.
   (host as any).bootstrap = () => ({ settings: settings.getPublic(), activeSession: settings.getPublic().activeSession,
@@ -554,7 +554,7 @@ test('an exact cold selection pins its copy for engine startup and subsequent re
   f.catalog.find = async () => { uuidLookups++; return other; };
   const settings = new SettingsStore(f.userData);
   const host = new HostController(settings, f.bridge as any, new DiagnosticBuffer(), f.catalog as any,
-    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, undefined, f.dialogs);
+    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, f.dialogs);
   (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
   t.after(() => host.dispose());
   await host.openSessionAndActivate(f.ref);
@@ -934,7 +934,7 @@ for (const coldStart of [false, true]) {
     f.calls.select.length = 0;
     const settings = coldStart ? new SettingsStore(f.userData) : f.settings;
     const host = coldStart ? new HostController(settings, f.bridge as any, new DiagnosticBuffer(), f.catalog as any,
-      { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, undefined, f.dialogs) : f.host;
+      { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, f.dialogs) : f.host;
     if (coldStart) {
       (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
       t.after(() => host.dispose());
@@ -1007,7 +1007,7 @@ test('cold restore revalidates the original picker scope after the selected sour
   f.settings.removeProject(f.source);
   const settings = new SettingsStore(f.userData);
   const host = new HostController(settings, f.bridge as any, new DiagnosticBuffer(), f.catalog as any,
-    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, undefined, f.dialogs);
+    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, f.dialogs);
   (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
   t.after(() => host.dispose());
   await host.restoreProjectSession(f.target, settings.getPublic().activeSession);

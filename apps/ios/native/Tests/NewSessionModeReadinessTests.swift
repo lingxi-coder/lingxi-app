@@ -195,7 +195,7 @@ final class DurableConversationTurnCollectionTests: XCTestCase {
         first.model.activeSessionId = sessionID
         _ = try host.retain(source: first, scope: .global, mode: .chat,
                             sessionID: sessionID, workspace: "/global", draft: "keep")
-        let config = EngineConfig(apiBase: "", apiKey: "", model: "", appSandboxRoot: NSTemporaryDirectory(),
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: NSTemporaryDirectory(),
                                   projectCwd: "/p", sessionMode: .code, visionDelegationEnabled: false)
         let second = EngineConversationSource(config: config)
         _ = try host.retain(source: second, scope: .project("p"), mode: .code,
@@ -213,7 +213,7 @@ final class DurableConversationTurnCollectionTests: XCTestCase {
         let firstID = UUID().uuidString
         let otherID = UUID().uuidString
         func config(_ session: String) -> EngineConfig {
-            EngineConfig(apiBase: "", apiKey: "", model: "", appSandboxRoot: root.path,
+            EngineConfig(apiBase: "", model: "", appSandboxRoot: root.path,
                          projectCwd: "/home/global", sessionMode: .code, visionDelegationEnabled: false,
                          initialSessionId: session)
         }
@@ -236,7 +236,7 @@ final class DurableConversationTurnCollectionTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         func config(_ session: String, cwd: String = "/home/global") -> EngineConfig {
-            EngineConfig(apiBase: "", apiKey: "", model: "", appSandboxRoot: root.path,
+            EngineConfig(apiBase: "", model: "", appSandboxRoot: root.path,
                          projectCwd: cwd, sessionMode: .code, visionDelegationEnabled: false,
                          initialSessionId: session)
         }

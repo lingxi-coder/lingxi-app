@@ -21,7 +21,6 @@ private actor SettingsRoundtripListener: IosEventListener {
         }
     }
     func onWorkflowProgress(originSessionId: String, taskId: String, runId: String, progress: WorkflowProgressDto) async {}
-    func onWorkflowProgress(taskId: String, runId: String, progress: WorkflowProgressDto) async {}
     func pop() -> Reply? { replies.isEmpty ? nil : replies.removeFirst() }
 }
 
@@ -43,7 +42,7 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
             appVersion: nil, appAgentHost: false,
             brandId: directories.brandId, linuxUser: directories.linuxUser,
             configDirName: directories.configDirName, nativeConfigHome: directories.configHome,
-            apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code, initialSessionId: nil,
+            apiBase: "https://invalid.example", model: "", sessionMode: .code, initialSessionId: nil,
             visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: nil,
             projectAdditionalDirectories: [], projectMountGrants: [],
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
@@ -63,8 +62,10 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
 
     func testKeylessLayerWritesReadBackAndSurviveEngineRebuild() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("native-settings-\(UUID().uuidString)", isDirectory: true)
-        let workspace = root.appendingPathComponent("Projects/\(UUID().uuidString.lowercased())/workspace", isDirectory: true)
-        let userFile = root.appendingPathComponent(".lingxi/settings.json")
+        let directories = MobileUserStorage.directories(managedRoot: root.appendingPathComponent("runtime", isDirectory: true).path)
+        let workspace = URL(fileURLWithPath: directories.projects, isDirectory: true)
+            .appendingPathComponent("\(UUID().uuidString.lowercased())/workspace", isDirectory: true)
+        let userFile = URL(fileURLWithPath: directories.configHome, isDirectory: true).appendingPathComponent("settings.json")
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: userFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data(#"{"viewMode":"focus"}"#.utf8).write(to: userFile)
@@ -93,12 +94,12 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
             appAgentHost: false,
             brandId: directories.brandId, linuxUser: directories.linuxUser,
             configDirName: directories.configDirName, nativeConfigHome: directories.configHome,
-            apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code, initialSessionId: nil,
+            apiBase: "https://invalid.example", model: "", sessionMode: .code, initialSessionId: nil,
             visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: workspace.path,
             projectAdditionalDirectories: [],
             projectMountGrants: [],
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
-            mobileLinux: nil,
+            mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: root),
             physicalMemoryBytes: 0, hostEnvironment: nil),
             listener: listener, mediaHost: mediaHost, share: ShareImpl(),
             notifications: NotificationImpl(), clipboard: ClipboardImpl(),

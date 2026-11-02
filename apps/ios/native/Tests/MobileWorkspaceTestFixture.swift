@@ -12,4 +12,17 @@ func mobileWorkspaceTestConfiguration(sandboxRoot: URL) throws -> IosMobileLinux
         stableWorkspaceId: "projects", abi: "arm64", rootfsVersion: "test",
         archiveSha256: nil, authorizationFile: nil, appSandboxRoot: sandboxRoot.path)
 }
+/// Current structured engine launch contract for isolated native tests.
+func mobileWorkspaceTestLaunchConfiguration(sandboxRoot: URL, apiBase: String, model: String) throws -> IosEngineLaunchConfigFfi {
+    let directories = MobileUserStorage.directories(managedRoot: sandboxRoot.appendingPathComponent("runtime").path)
+    return IosEngineLaunchConfigFfi(
+        appVersion: nil, appAgentHost: false,
+        brandId: directories.brandId, linuxUser: directories.linuxUser,
+        configDirName: directories.configDirName, nativeConfigHome: directories.configHome,
+        apiBase: apiBase, model: model, sessionMode: .code, initialSessionId: nil,
+        visionDelegationEnabled: false, appSandboxRoot: sandboxRoot.path, projectCwd: nil,
+        projectAdditionalDirectories: [], projectMountGrants: [], providerConfig: nil,
+        mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandboxRoot),
+        physicalMemoryBytes: 0, hostEnvironment: nil)
+}
 #endif

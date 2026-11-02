@@ -1808,17 +1808,7 @@ mod tests {
         assert_eq!(readiness(&first), Some(MediaReadinessState::Unavailable));
         assert_eq!(readiness(&second), Some(MediaReadinessState::Unavailable));
 
-        let provider = || {
-            Arc::new(
-                crate::AudioProviderHost::new(
-                    "{}",
-                    "international",
-                    None,
-                    std::collections::BTreeMap::new(),
-                )
-                .unwrap(),
-            )
-        };
+        let provider = || Arc::new(crate::AudioProviderHost::test_empty());
         let first_provider = provider();
         let second_provider = provider();
         for (attachment, provider) in [(&first, &first_provider), (&second, &second_provider)] {
@@ -1827,7 +1817,11 @@ mod tests {
                 .register_attached_profile(&permit, "openai", provider.clone())
                 .unwrap();
             registry
-                .bind_attached_session_to_profile(&permit, "openai", "profile:openai")
+                .bind_attached_session_to_profile(
+                    &permit,
+                    "openai",
+                    lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+                )
                 .unwrap();
         }
         assert!(Arc::ptr_eq(
@@ -1836,7 +1830,7 @@ mod tests {
                     first.id(),
                     "same-session",
                     "openai",
-                    "profile:openai"
+                    lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
                 )
                 .unwrap(),
             &first_provider,
@@ -1847,7 +1841,7 @@ mod tests {
                     second.id(),
                     "same-session",
                     "openai",
-                    "profile:openai"
+                    lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
                 )
                 .unwrap(),
             &second_provider,
@@ -1855,7 +1849,11 @@ mod tests {
         assert_eq!(readiness(&first), Some(MediaReadinessState::Ready));
         assert_eq!(readiness(&second), Some(MediaReadinessState::Ready));
         assert!(registry
-            .provider_for_session("same-session", "openai", "profile:openai")
+            .provider_for_session(
+                "same-session",
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+            )
             .is_err());
 
         let (idle, _) = host
@@ -1871,7 +1869,12 @@ mod tests {
         );
         registry.unregister_attachment(first.id());
         assert!(registry
-            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .provider_for_attached_session(
+                first.id(),
+                "same-session",
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+            )
             .is_err());
         assert!(Arc::ptr_eq(
             &registry
@@ -1879,7 +1882,7 @@ mod tests {
                     second.id(),
                     "same-session",
                     "openai",
-                    "profile:openai"
+                    lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
                 )
                 .unwrap(),
             &second_provider,

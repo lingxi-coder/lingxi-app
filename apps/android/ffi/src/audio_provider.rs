@@ -19,10 +19,11 @@ pub struct AndroidAudioProviderHost {
 pub fn build_android_audio_provider_host(
     profiles_json: String,
     region: String,
+    account_home: String,
     secure_storage: Box<dyn AndroidSecureStorage>,
 ) -> Result<Arc<AndroidAudioProviderHost>, MobileEngineError> {
     Ok(Arc::new(AndroidAudioProviderHost {
-        inner: common::AudioProviderCore::new(profiles_json, region, secure_storage)?,
+        inner: common::AudioProviderCore::new(profiles_json, region, account_home, secure_storage)?,
     }))
 }
 

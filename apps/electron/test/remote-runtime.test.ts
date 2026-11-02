@@ -67,7 +67,7 @@ test('a real runtime: a viewer attaches, prompts as a device, and sees the turn;
   client.emitEvent({ type: 'turn_started', turn_id: 777 });
   client.emitEvent({ type: 'text_delta', text: 'Hi ' });
   client.emitEvent({ type: 'text_delta', text: 'there' });
-  client.emitEvent({ type: 'provider_credential_status', secret: 'sk-not-for-viewers' });
+  client.emitEvent({ type: 'provider_accounts_updated', secret: 'sk-not-for-viewers' });
   clock.advance(LIVE_BATCH_MS);
   const records = channel.records();
   assert.deepEqual(records.map((item) => item.record.type === 'event' ? item.record.event.type : item.record.type), ['prompt', 'turn_started', 'text_delta']);

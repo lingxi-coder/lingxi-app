@@ -42,7 +42,7 @@ class SideChatNativeUiTest {
         }
         val parentEvents = CopyOnWriteArrayList<ClientEvent>()
         val engine = requireNotNull(NativeEngineFactory.build(
-            context = context, apiBase = "https://invalid.example", apiKey = "", model = "",
+            context = context, apiBase = "https://invalid.example", model = "",
             sessionMode = com.lingxi.code.model.SessionMode.Code,
             providerProfilesJson = "{}", routingJson = """{"mobileEnabledProfiles":[]}""",
             visionDelegationEnabled = false,

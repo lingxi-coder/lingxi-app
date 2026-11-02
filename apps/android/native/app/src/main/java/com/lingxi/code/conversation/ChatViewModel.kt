@@ -675,6 +675,10 @@ class ChatViewModel(
             return
         }
         when (event) {
+            is ClientEvent.SystemNotice -> {
+                // Turn notices use the reply stream; keyless bootstrap errors have no turn.
+                if (event.isError && !state.value.streaming) reportHostError(event.message.displayText())
+            }
             is ClientEvent.UserTranscriptRowIdentity -> {
                 if (!event.rowToken.startsWith("client-turn:")) return
                 val rowIds = event.rowToken.removePrefix("client-turn:").split(',')

@@ -12,23 +12,23 @@ import org.junit.Test
 
 class ProviderProfileMappingTest {
     @Test
-    fun catalogEndpoint_usesStableBuiltInCredentialId() {
+    fun catalogEndpoint_usesStableBuiltInExecutionBinding() {
         val provider = provider(
             preset = "openai",
             url = "https://api.openai.com/v1",
-        )
+        ).copy(catalogBaseUrl = "https://api.openai.com/v1")
 
-        assertEquals("openai", ProviderSettingsRepository.engineCredentialIdFor(provider))
+        assertEquals("openai", ProviderSettingsRepository.profileNameFor(provider))
     }
 
     @Test
-    fun kimiCatalogEndpoint_usesStableBuiltInCredentialId() {
+    fun kimiCatalogEndpoint_usesStableBuiltInExecutionBinding() {
         val provider = provider(
             preset = "kimi",
             url = "https://api.moonshot.cn/v1",
-        )
+        ).copy(catalogBaseUrl = "https://api.moonshot.cn/v1")
 
-        assertEquals("kimi", ProviderSettingsRepository.engineCredentialIdFor(provider))
+        assertEquals("kimi", ProviderSettingsRepository.profileNameFor(provider))
     }
 
     @Test
@@ -36,9 +36,9 @@ class ProviderProfileMappingTest {
         val provider = provider(
             preset = "kimi-code",
             url = "https://api.kimi.com/coding/v1",
-        )
+        ).copy(catalogBaseUrl = "https://api.kimi.com/coding/v1")
 
-        assertEquals("kimi-code", ProviderSettingsRepository.engineCredentialIdFor(provider))
+        assertEquals("kimi-code", ProviderSettingsRepository.profileNameFor(provider))
     }
 
     @Test
@@ -49,7 +49,7 @@ class ProviderProfileMappingTest {
             url = "https://gateway.example/v1",
         )
 
-        assertEquals("l_custom_42", ProviderSettingsRepository.engineCredentialIdFor(provider))
+        assertEquals("l_custom_42", ProviderSettingsRepository.profileNameFor(provider))
     }
 
     @Test
@@ -60,7 +60,7 @@ class ProviderProfileMappingTest {
             url = "https://dashscope.aliyuncs.com/v1",
         )
 
-        assertEquals("l_qwen", ProviderSettingsRepository.engineCredentialIdFor(provider))
+        assertEquals("l_qwen", ProviderSettingsRepository.profileNameFor(provider))
     }
 
     @Test
@@ -69,17 +69,17 @@ class ProviderProfileMappingTest {
             id = "l_openai",
             preset = "openai",
             url = "https://api.openai.com/v1",
-        )
+        ).copy(catalogBaseUrl = "https://api.openai.com/v1")
         val disabled = provider(
             id = "l_deepseek",
             preset = "deepseek",
             url = "https://api.deepseek.com",
-        ).copy(enabled = false)
+        ).copy(enabled = false, catalogBaseUrl = "https://api.deepseek.com")
         val missingCredential = provider(
             id = "l_anthropic",
             preset = "anthropic",
             url = "https://api.anthropic.com",
-        ).copy(credentialConfigured = false)
+        ).copy(credentialConfigured = false, catalogBaseUrl = "https://api.anthropic.com")
 
         val allowlist = ProviderSettingsRepository.mobileEnabledProfileNames(
             listOf(enabled, disabled, missingCredential),
@@ -88,27 +88,6 @@ class ProviderProfileMappingTest {
         assertTrue("configured enabled builtin is retained", "openai" in allowlist)
         assertFalse("disabled builtin is excluded", "deepseek" in allowlist)
         assertTrue("enabled provider accepts a credential injected after boot", "anthropic" in allowlist)
-    }
-
-    @Test
-    fun legacyDeepSeekConfig_migratesToCurrentOfficialEndpointAndModel() {
-        val legacyChat = provider(
-            preset = "deepseek",
-            url = "https://api.deepseek.com/v1/",
-        ).copy(model = "deepseek-chat")
-        val legacyReasoner = legacyChat.copy(model = "deepseek-reasoner")
-
-        assertEquals(
-            legacyChat.copy(
-                url = "https://api.deepseek.com",
-                model = "deepseek-flash",
-            ),
-            ProviderSettingsRepository.migrateLegacyDeepSeek(legacyChat),
-        )
-        assertEquals(
-            "deepseek-flash",
-            ProviderSettingsRepository.migrateLegacyDeepSeek(legacyReasoner).model,
-        )
     }
 
     @Test

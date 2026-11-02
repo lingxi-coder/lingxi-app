@@ -1,5 +1,16 @@
 # Chat / Code 上下文与跨端集成交接
 
+## 2026-11-02 main 同步状态（优先于下方历史快照）
+
+按用户要求，先将各仓库的 `origin/main` 合入任务分支，保留主线账户、MCP、界面及其他修复。App 合并前的功能检查点为 `d3a32a21d`；不覆盖常规 checkout，不推送或合入 main。
+
+- llm-client 合并提交：`0c2f041e856265e093e404d9b202c4238f73ef3c`。
+- Harness 合并提交：`aad53cf713ba091c0c430d459bc92c792d5d70c4`，协议仍为 32。
+- App 三端文本冲突已解决；最终 Cargo 离线锁定依赖解析通过，84 个 SDK 包统一为上述 Harness SHA，5 个 llm 包统一为上述 llm-client SHA；TS 生成结果与暂存文件一致。App 合并提交包含本段状态。
+- 合并中修复了账户准入与 realtime handoff 的交互：分别保留捕获的 session profile、Host 选择的逻辑 audio profile、实际账户 profile/scope；不覆盖 session/mode/epoch/history。
+
+下方所有旧 pin 的测试数字均为**合并前基线**，不能作为新合并提交的验收结果。合并后的轻量检查已覆盖 Desktop 429 项通过/1 项跳过、iOS 81 项宿主测试、Web 149 项；完整编译、重生成两端 FFI、Bridge durable scheduled anchor 修复及行为回归、Android Direct 原生设备和 iOS Full 模拟器验证、最终 review 尚待完成。每个平台仅验证一个 flavor。
+
 交接日期：2026-11-01（America/Los_Angeles）。
 
 **当前结论：协议 32 的本地不可变依赖与主机绑定已经固定，最终 Rust、目标架构及设备验证尚未闭环，不能标记为已交付。**

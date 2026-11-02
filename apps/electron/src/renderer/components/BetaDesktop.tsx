@@ -1,6 +1,9 @@
+import { providerAccountSummary } from '../../shared/providerAccounts';
+import { providerAccountUnavailableReasons } from '../bridge/credentialRecovery';
 import { reasoningSelectionLabel } from '../model/reasoningLabel';
 import { tr } from '../i18n/locale';
 import { DesktopIcon } from './DesktopIcon';
+import { ImagePreview } from './ImagePreview';
 import { localAppAuthoringPrompt, localAppDraftDisposition, type LocalAppDraft } from '../bridge/localAppChat';
 import { NeedsInputBadge, sessionNeedsInput } from './NeedsInputBadge';
 import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, audioSetupGuidance, type AudioSetupGuidance } from '../audio/audioFeatureGate';
@@ -75,6 +78,7 @@ import {
   modelDisplayLabel,
   modelReference,
   resolveModelSelection,
+  accountModelAvailability,
 } from '../bridge/modelCatalog';
 import { formatSessionMetadata } from '../bridge/sessionPresentation';
 import { sessionsInLogicalScope } from '../bridge/conversationCatalog';
@@ -1937,15 +1941,16 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   }), [filePicker?.query, filePicker?.view, fileResults, contextCatalog, bridge.running, bridge.desktop.permissionMode, bridge.desktop.slashCommands, selectedFiles.length, imageAttachments.length]);
   const visibleModelReferences = useMemo(
     () => filterVisibleModelReferences(
-      bridge.desktop.models,
+      [...new Set([...bridge.desktop.models, ...(bridge.bootstrap?.providerAccountSnapshot?.modelAvailability ?? []).filter(row => row.eligibleAccountIds.length > 0).map(row => `${row.executionBindingId}/${row.modelId}`)])],
       bridge.desktop.providerModelCatalog,
       modelPickerVisibility,
+      bridge.bootstrap?.providerAccountSnapshot?.modelAvailability,
     ),
-    [bridge.desktop.models, bridge.desktop.providerModelCatalog, modelPickerVisibility],
+    [bridge.desktop.models, bridge.desktop.providerModelCatalog, modelPickerVisibility, bridge.bootstrap?.providerAccountSnapshot],
   );
   const modelGroups = useMemo(
     () => groupModelReferences(visibleModelReferences),
-    [visibleModelReferences],
+    [visibleModelReferences, bridge.bootstrap?.providerAccountSnapshot],
   );
   const filteredModelGroups = useMemo(
     () => filterModelGroups(modelGroups, modelQuery, bridge.desktop.modelDetails),
@@ -1971,7 +1976,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     ({ selection }) => selection.type !== 'automatic' && selection.type !== 'disabled',
   );
   const selectedReasoning = reasoningControls?.effective ?? reasoningControls?.requested;
-  const providerCredentials = bridge.bootstrap?.providerCredentials;
+  const providerAccountSnapshot = bridge.bootstrap?.providerAccountSnapshot;
 
   const commandContext: DesktopCommandContext = useMemo(() => ({
     setModel: (model) => bridge.setModel(model),
@@ -2001,8 +2006,6 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       await bridge.copyText(item.text);
       return true;
     },
-    login: () => bridge.login(),
-    logout: () => bridge.logout(),
     reloadPlugins: () => bridge.restartBridge(),
     openTasks: async () => {
       bridge.setRuntimeCenterOverviewOpen(true);
@@ -3439,14 +3442,15 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const permissionMode = permissionModes.find((mode) => mode.id === bridge.desktop.permissionMode) ?? permissionModes[0]!;
   const proactivity = bridge.desktop.conversationControls?.proactivity;
   const workspace = bridge.bootstrap?.workspace;
-  const providerConfigured = bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured) ?? false;
+  const providerConfigured = bridge.bootstrap?.providerAccountSnapshot?.modelAvailability?.some(model => model.eligibleAccountIds.length > 0) ?? false;
+  const accountUnavailableReason = !providerConfigured ? providerAccountUnavailableReasons(bridge.bootstrap?.providerAccountSnapshot).map(key => tr(key)).join(' · ') : '';
   const goal = composerGoalState(bridge.conversation?.items ?? []);
   const goalActive = goal.active;
   const promptPlaceholder = !ready
     ? !workspace?.path || workspace.recovery
       ? tr('desktop_prompt_project')
       : !providerConfigured
-        ? tr('desktop_prompt_provider')
+        ? accountUnavailableReason || tr('desktop_prompt_provider')
         : tr('desktop_prompt_engine')
     : goalActive
         ? tr('desktop_prompt_goal')
@@ -3577,6 +3581,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         disabled={!ready || bridge.sessionLoading || bridge.running}
         onRetry={() => bridge.sendPrompt('继续之前因磁盘空间不足而暂停的任务，沿用此会话和已有历史。')} /> : null}
       {goalActive && <GoalStatus key={`${activeSessionId}:${goal.objective}`} objective={goal.objective} disabled={!ready || bridge.sessionLoading} running={bridge.running} cancelling={bridge.isCancelling} onClear={async () => { await bridge.runSlashCommand('/goal clear', []); }} onPause={() => bridge.cancel()} onResume={() => bridge.sendPrompt('Continue pursuing the current goal.')} />}
+      {!ready && accountUnavailableReason && <div className="provider-account-unavailable" role="status" aria-live="polite" style={{ color: t.warn, fontSize: 12, padding: '4px 2px 8px' }}>{accountUnavailableReason}</div>}
       <div
         className="beta-composer"
         onDragOver={(event) => {
@@ -3599,7 +3604,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           <div aria-label={tr('desktop_chat_image_attachments')} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>
             {imageAttachments.map((attachment) => (
               <div key={attachment.id} title={attachment.name} style={{ position: 'relative', width: 74, height: 62, overflow: 'hidden', borderRadius: 10, background: t.surfaceHover, outline: `1px solid color-mix(in oklab, ${t.borderStrong} 55%, transparent)` }}>
-                <img src={attachment.previewUrl} alt={attachment.name} style={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover', outline: `1px solid color-mix(in oklab, ${t.text} 10%, transparent)`, outlineOffset: -1 }} />
+                <ImagePreview src={attachment.previewUrl} alt={attachment.name} style={{ height: '100%' }} imageStyle={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover', outline: `1px solid color-mix(in oklab, ${t.text} 10%, transparent)`, outlineOffset: -1 }} />
                 <button type="button" aria-label={tr('desktop_chat_remove_named', attachment.name)} title={tr('desktop_chat_remove_image')} onClick={() => removeImage(attachment.id)} style={{ position: 'absolute', top: 3, right: 3, width: 24, height: 24, display: 'grid', placeItems: 'center', padding: 0, border: 0, borderRadius: 99, background: 'rgba(0,0,0,.62)', color: '#fff', cursor: 'pointer' }}><Icon name="x" size={11} stroke={2} /></button>
               </div>
             ))}
@@ -3994,31 +3999,31 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                   <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '0 3px 3px', scrollbarGutter: 'stable' }}>
                     {filteredModelGroups.map((group, groupIndex) => {
                       const statusProviderId = group.providerId === 'builtin' ? 'anthropic' : group.providerId;
-                      const metadata = statusProviderId
-                        ? providerCredentials?.find((entry) => entry.providerId === statusProviderId)
-                        : undefined;
                       const knownProvider = Boolean(statusProviderId && providerById(statusProviderId));
+                      const configuration = providerAccountSnapshot && statusProviderId ? providerAccountSummary(providerAccountSnapshot, statusProviderId) : undefined;
+                      const connected = configuration?.status === 'configured';
                       const connectionLabel = knownProvider
-                        ? providerCredentials
-                          ? metadata?.configured ? tr('mcp_stat_connected') : tr('desktop_chat_not_connected')
-                          : tr('cron_reconciling_progress')
+                        ? configuration ? tr(`provider_accounts_configuration_${configuration.status}`) : tr('cron_reconciling_progress')
                         : undefined;
-                      const connected = metadata?.configured === true;
                       return (
                         <section key={group.providerId ?? 'unqualified'} aria-labelledby={`desktop-model-provider-${group.providerId ?? 'other'}`} style={groupIndex === 0 ? undefined : { marginTop: 5, paddingTop: 5, borderTop: `0.5px solid ${t.border}` }}>
                           <div id={`desktop-model-provider-${group.providerId ?? 'other'}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px 5px', color: t.text3, fontSize: 10.5, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
                             <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{group.providerLabel}</span>
                             {connectionLabel && <span title={`${group.providerLabel}: ${connectionLabel}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, color: connected ? t.ok : connectionLabel === tr('cron_reconciling_progress') ? t.text4 : t.warn, fontSize: 9.5, fontWeight: 600, letterSpacing: 0, textTransform: 'none' }}><span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: 99, background: 'currentColor' }} />{connectionLabel}</span>}
                           </div>
-                          {modelBillingGroups(group, bridge.desktop.modelDetails).map((billingGroup, billingIndex) => (
+                          {modelBillingGroups(group, bridge.desktop.modelDetails, providerAccountSnapshot?.modelAvailability).map((billingGroup, billingIndex) => (
                             <div key={billingGroup.label ?? 'all'} style={billingIndex === 0 ? undefined : { marginTop: 4, paddingTop: 4, borderTop: `0.5px solid ${t.border}` }}>
-                              {billingGroup.label && <div style={{ padding: '5px 10px 3px', color: t.text4, fontSize: 9.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>{billingGroup.label}</div>}
+                              {billingGroup.label && <div style={{ padding: '5px 10px 3px', color: t.text4, fontSize: 9.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>{billingGroup.label === 'subscription' ? tr('provider_accounts_subscription') : billingGroup.label === 'api_key' ? tr('provider_accounts_key') : billingGroup.label}</div>}
                               {billingGroup.models.map((entry) => {
                                 const active = entry.reference === bridge.desktop.currentModel;
                                 const entryDetail = modelDetailsByReference.get(entry.reference);
                                 const entrySupportsFastMode = modelReference(entry.reference).providerId === 'anthropic'
                                   && modelSupportsFastMode(entryDetail);
-                                const selection = resolveModelSelection(entry.reference, providerCredentials);
+                                const availability = accountModelAvailability(entry.reference, bridge.bootstrap?.providerAccountSnapshot?.modelAvailability);
+                                const selection = resolveModelSelection(entry.reference, bridge.providerAccountsRefreshing && !availability ? undefined : bridge.bootstrap?.providerAccountSnapshot?.modelAvailability);
+                                const binding = modelReference(entry.reference).providerId;
+                                const hasAccount = providerAccountSnapshot?.accounts.some(account => account.enabled && account.executionBindingId === (binding === 'builtin' ? 'anthropic' : binding));
+                                const accessLabel = selection.kind === 'connect' && !hasAccount ? tr('provider_accounts_configuration_unconfigured') : availability?.confirmedAccountIds.length ? tr('provider_accounts_model_confirmed') : availability?.forbiddenAccountIds.length && !availability.unverifiedAccountIds.length ? tr('provider_accounts_model_forbidden') : tr('provider_accounts_model_unverified');
                                 const unavailable = selection.kind === 'loading';
                                 const requiresConnection = selection.kind === 'connect';
                                 return (
@@ -4031,7 +4036,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                                   }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: unavailable ? t.text4 : requiresConnection ? t.text2 : t.text, textAlign: 'left', cursor: unavailable ? 'wait' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: unavailable ? .68 : 1 }} onMouseEnter={(event) => { if (!active && !unavailable) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !unavailable) event.currentTarget.style.background = 'transparent'; }}>
                                     {unavailable ? <span className="beta-spinner" aria-hidden="true" style={{ width: 11, height: 11, borderWidth: 1.5, color: t.text4 }} /> : requiresConnection ? <Icon name="lock" size={14} color={t.warn} /> : entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
                                     <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 650 : 500 }}>{modelDisplayLabel(entry, bridge.desktop.modelDetails)}</span>
-                                    {requiresConnection && <span style={{ flexShrink: 0, color: t.warn, fontSize: 10, fontWeight: 600 }}>{tr('desktop_chat_connect_settings')}</span>}
+                                    <span style={{ flexShrink: 0, color: requiresConnection ? t.warn : t.text3, fontSize: 10 }}>{accessLabel}</span>
                                     {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
                                   </button>
                                 );

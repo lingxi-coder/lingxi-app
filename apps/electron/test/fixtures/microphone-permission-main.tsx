@@ -1,3 +1,4 @@
+import { fixtureAccountSnapshot } from './provider-accounts-mock';
 /**
  * Fixture for the microphone-permission read, mounted in a REAL Electron
  * renderer by `microphone-permission-electron.mjs`.
@@ -80,7 +81,7 @@ const bridge = {
       voice: audioConfigurationDefaults(),
       voiceRevision: 0,
     },
-    providerCredentials: [{ providerId: 'anthropic', configured: true, encryptionAvailable: true }],
+    providerAccountSnapshot: fixtureAccountSnapshot(['anthropic']),
   },
   audioSnapshot: defaultNativeAudioSnapshot(),
   audioRequest,

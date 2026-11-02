@@ -465,8 +465,6 @@ export function validateClientCommand(value: unknown, workspace?: string): Valid
       if (!/^[A-Za-z0-9._-]{1,64}$/.test(client_id)) throw new Error('invalid UI client id');
       return { type, client_id };
     }
-    case 'login':
-    case 'logout':
     case 'force_compact':
       exactKeys(input, ['type']);
       return { type };
@@ -630,14 +628,12 @@ export function assertCommandAllowedDuringTurn(command: ClientCommand, turnActiv
     && (
       command.type === 'set_fast_mode'
       || (command.type === 'run_slash_command' && !/^\/btw(?:\s|$)/.test(command.raw))
-      || command.type === 'login'
-      || command.type === 'logout'
       || command.type === 'force_compact'
       || command.type === 'new_session'
       || command.type === 'resume_session'
     )
   ) {
-    throw new Error('cancel the active turn before changing session controls, authentication, compaction, or running a slash command');
+    throw new Error('cancel the active turn before changing session controls, compaction, or running a slash command');
   }
 }
 

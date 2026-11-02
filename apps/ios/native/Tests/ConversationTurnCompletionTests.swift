@@ -62,7 +62,6 @@ final class ConversationTurnCompletionTests: XCTestCase {
         private func makeSource() -> EngineConversationSource {
             let config = EngineConfig(
                 apiBase: "https://api.anthropic.com",
-                apiKey: "",
                 model: "",
                 appSandboxRoot: FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString, isDirectory: true).path,

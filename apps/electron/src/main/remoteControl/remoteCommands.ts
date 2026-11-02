@@ -1,3 +1,5 @@
+import type { DesktopProviderAccounts } from '../provider-accounts.js';
+import type { ProviderAccountCommand } from '../../shared/providerAccounts.js';
 /**
  * What a viewer may do to a session, one method per RPC. Every parameter is
  * checked here (the viewer is another computer's code), every refusal is a
@@ -56,6 +58,8 @@ export interface ImageCodec {
 }
 
 export interface RemoteCommandsDeps {
+  providerAccounts?: DesktopProviderAccounts;
+  authorizeProviderAccounts?: (viewer: RemoteViewer) => boolean;
   /** Whether "always allow" may be given remotely. */
   allowAlwaysAllow(): boolean;
   /** Told after a viewer's prompt has been sent, so the renderer can show it. */
@@ -152,6 +156,46 @@ export class RemoteCommands {
 
   constructor(private readonly deps: RemoteCommandsDeps) {
     this.randomTurnId = deps.randomTurnId ?? randomTurnIdFromCrypto;
+  }
+
+  /** Dedicated owner RPC; credentials never enter generic command routing. */
+  async providerAccounts(viewer: RemoteViewer, raw: unknown): Promise<{ snapshot_json: string }> {
+    const authorize = () => {
+      if (!viewer.account_uid || !viewer.host_id || !viewer.device_id || !this.deps.authorizeProviderAccounts?.(viewer))
+        throw new RemoteRpcError('not_approved', 'Provider account management requires the authenticated Host owner.');
+    };
+    authorize();
+    if (!this.deps.providerAccounts) throw new RemoteRpcError('forbidden', 'Secure provider account management is unavailable on this Host.');
+    const input = params(raw);
+    if (Object.keys(input).some(key => !['request_json', 'credential'].includes(key))) throw invalid('Invalid provider account parameters.');
+    const requestJson = boundedString(input['request_json'], 'request_json', 64 * 1024);
+    const credential = input['credential'];
+    if (credential !== undefined && (typeof credential !== 'string' || credential.length > 16_384 || credential.includes('\0'))) throw invalid('Invalid provider account credential.');
+    let request: Record<string, unknown>;
+    try { request = JSON.parse(requestJson); } catch { throw invalid('Invalid provider account request.'); }
+    if (!isObject(request) || !Number.isSafeInteger(request.expectedRevision) || (request.expectedRevision as number) < 0) throw invalid('Invalid account revision.');
+    if (Object.keys(request).some(key => !['action', 'expectedRevision', 'operationId', 'accountId', 'providerId', 'displayName', 'authKind', 'executionBindingId', 'accountIds', 'enabled', 'allowSubscriptionToMetered'].includes(key))) throw invalid('Invalid provider account request fields.');
+    const action = request.action;
+    if (['begin_oauth', 'complete_oauth', 'cancel_oauth', 'reconnect'].includes(String(action)) || (action === 'add' && request.authKind === 'oauth'))
+      throw new RemoteRpcError('forbidden', 'OAuth browser authorization must be completed on the execution Host.');
+    if (!['list', 'add', 'update', 'reorder', 'set_enabled', 'set_credential', 'clear_credential', 'remove', 'logout', 'test', 'set_policy'].includes(String(action))) throw invalid('Unsupported provider account operation.');
+    const normalized = { ...request, action: action === 'set_enabled' ? 'enable' : action === 'set_credential' ? 'reconnect' : action === 'clear_credential' ? 'logout' : action } as unknown as ProviderAccountCommand;
+    if (normalized.action === 'add' && normalized.authKind !== 'api_key') throw invalid('Unsupported account authentication method.');
+    if (action === 'set_credential') {
+      const snapshot = await this.deps.providerAccounts.snapshot();
+      const target = snapshot.accounts.find(account => account.accountId === normalized.accountId);
+      if (!target || target.authKind !== 'api_key') throw new RemoteRpcError('forbidden', 'OAuth browser authorization must be completed on the execution Host.');
+      authorize();
+    }
+    try {
+      const snapshot = await this.deps.providerAccounts.command(normalized, credential as string | undefined);
+      authorize();
+      return { snapshot_json: JSON.stringify(snapshot) };
+    } catch (error) {
+      if (error instanceof RemoteRpcError) throw error;
+      // Native helper errors must not echo request JSON or credential material.
+      throw new RemoteRpcError('invalid_params', 'Provider account operation failed. Refresh account status and retry.');
+    }
   }
 
   // ───────────────────────────────────────────────────────────────────────────

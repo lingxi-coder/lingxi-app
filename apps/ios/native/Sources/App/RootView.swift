@@ -239,7 +239,7 @@ struct RootView: View {
         let projects = ProjectStore.forRuntime(managedRoot: LXISHDefaultWorkspace.managedRootPath())
         let settings = SettingsStore()
         let providers = ProviderRepository.shared
-        settings.llmProviders = providers.legacyProviders()
+        settings.llmProviders = providers.settingsProviders()
         settings.searchProviders = []
         settings.fetchProviders = []
 
@@ -630,7 +630,7 @@ struct RootView: View {
                 scopedPreferences.setDraft(value, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
             }
             .onChange(of: providerRepository.syncRevision) { _, _ in
-                settingsStore.llmProviders = providerRepository.legacyProviders()
+                settingsStore.llmProviders = providerRepository.settingsProviders()
             }
         let presentationLifecycle = stateLifecycle
             .onChange(of: navigation.path) { _, _ in markHandoffNavigationChanged() }
@@ -707,7 +707,7 @@ struct RootView: View {
                     current.listSessions()
                     externalEngineReady = true
                     retryDeferredAppActions()
-                    await providerRepository.refreshCredentialStatus()
+                    await providerRepository.refreshAccounts()
                     #if canImport(harness_runtimeFFI)
                         // 只登记灵犀的插件市场，不安装任何插件；用户在设置 → 插件里自己装。
                         // 记过一次就不再加回来，用户删掉的市场保持删掉。
@@ -1438,36 +1438,27 @@ struct RootView: View {
         let generation = sourceGeneration
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: current)
-            DesktopSettingsRepository.shared.credentialCommitHandler = { [weak current] ids, configured, encrypted in
-                guard let current, source === current, generation == sourceGeneration else { return }
-                providerRepository.recordExternalCredentialCommit(
-                    providerIDs: ids, configuredProviderIDs: configured, storageEncrypted: encrypted)
-            }
+            ProviderAccountRepository.shared.configure(load: {
+                guard source === current, generation == sourceGeneration else { throw CancellationError() }
+                return try await current.providerAccountsSnapshot()
+            }, command: { request, credential in
+                // Teardown cancels only the captured Host's exact grant even
+                // after navigation has installed a replacement source.
+                let action = (try? JSONSerialization.jsonObject(with: Data(request.utf8))) as? [String: Any]
+                if action?["action"] as? String == "cancel_oauth" {
+                    return try await current.providerAccountCommand(requestJSON: request, credential: nil)
+                }
+                guard source === current, generation == sourceGeneration else { throw CancellationError() }
+                return try await current.providerAccountCommand(requestJSON: request, credential: credential)
+            }, oauthSupported: !(current is RemoteConversationSource))
+            ProviderAccountRepository.shared.setForeground(scenePhase == .active)
             providerRepository.configure(
                 submitCommand: { command in
                     guard source === current, generation == sourceGeneration else { throw CancellationError() }
                     try await current.submitEngineCommand(command)
                 },
-                testConnection: { profile, secret in
-                    guard source === current, generation == sourceGeneration else { throw CancellationError() }
-                    let result = try await current.testProviderConnection(profile: profile, credentialOverride: secret)
-                    guard source === current, generation == sourceGeneration else { throw CancellationError() }
-                    return result
-                },
                 applyReconnect: { snapshot in
                     try await rebuildSource(snapshot: snapshot)
-                },
-                oauthLogin: { provider in
-                    try await current.loginOAuth(provider: provider)
-                },
-                oauthState: { provider in
-                    try await current.authState(provider: provider)
-                },
-                oauthLogout: { provider in
-                    try await current.logoutOAuth(provider: provider)
-                },
-                testOAuthConnection: { provider, profile in
-                    try await current.testOAuthConnection(provider: provider, profile: profile)
                 },
                 providerCatalog: {
                     try await current.providerCatalog()
@@ -1475,6 +1466,7 @@ struct RootView: View {
                 resetCatalog: !preserveCatalog
             )
         #else
+            ProviderAccountRepository.shared.configure(load: nil, command: nil)
             providerRepository.configure(submitCommand: nil)
         #endif
     }
@@ -2090,6 +2082,7 @@ struct RootView: View {
 
     private func handleScenePhase(_ oldPhase: ScenePhase, _ phase: ScenePhase) {
         sessionHost.setScenePhase(phase)
+        ProviderAccountRepository.shared.setForeground(phase == .active)
         switch phase {
         case .background:
             persistConversationScope()
@@ -2370,14 +2363,6 @@ struct RootView: View {
     }
 
     private func handleIncomingURL(_ url: URL) {
-        #if canImport(harness_runtimeFFI)
-            if url.scheme?.lowercased() == "lingxi",
-               url.host?.lowercased() == "oauth",
-               url.path == "/callback" {
-                source.handleOAuthCallback(url)
-                return
-            }
-        #endif
         guard let action = LingxiDeepLink.action(from: url) else {
             // Account sign-in callbacks belong to the app delegate's SDK handlers.
             if url.scheme?.lowercased() == "lingxi" || (url.scheme == "https" && url.host == "lingxios.net") {

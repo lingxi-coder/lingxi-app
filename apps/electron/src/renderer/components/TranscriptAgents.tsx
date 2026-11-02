@@ -58,11 +58,14 @@ export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent, activeAge
     {rows.map((agent) => {
       const name = agent.name.trim() || agent.agent_type || 'Agent';
       const running = agent.status === 'running' || agent.status === 'working';
-      const failed = agent.status === 'failed' || agent.status === 'error';
-      // claude-code's word, then sentence case for this chip: a finished
-      // background agent reads `Done`, never `Completed` and never the port's
-      // old invented `Idle`.
-      const status = running ? tr('remote_status_running') : agentStatusText(agent.status);
+      const failed = agent.status === 'failed' || agent.status === 'error' || agent.report_delivery === 'withheld';
+      const delivery = agent.report_delivery;
+      const status = running ? tr('remote_status_running')
+        : delivery === 'withheld' ? tr('chat_agent_report_withheld')
+        : delivery === 'flagged' ? tr('chat_agent_report_flagged')
+        : delivery === 'pending' ? tr('chat_agent_report_pending')
+        : agent.status === 'completed' && !delivery ? tr('chat_agent_execution_ended')
+        : agentStatusText(agent.status);
       return <button
         key={agent.agent_id}
         type="button"

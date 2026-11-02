@@ -31,12 +31,12 @@ export const SETTINGS_NAV: NavPage[] = [
   { id: 'projects', label: '项目与信任', group: '个人', icon: 'folder', needsEngine: false, layered: false, searchKeys: ['project', '项目', 'trust', '信任', 'pinned'], implemented: true },
   { id: 'remote-control', label: '远程控制', group: '个人', icon: 'share', needsEngine: false, layered: false, searchKeys: ['remote', 'remote-control', 'rc', '远程', '远程控制', '设备', 'device', '手机', 'phone', '配对', 'pairing'], implemented: true },
 
-  // Account credentials are device-local; the request-format card edits settings.routing.
-  { id: 'provider-credentials', label: 'Provider 凭据', group: '模型与服务', icon: 'key', needsEngine: false, layered: true, searchKeys: ['provider', 'credential', '凭据', 'API Key', 'keychain', 'defaultProtocols', '默认格式', '请求格式'], implemented: true },
+  // Account credentials are managed by the current Host independently of a session.
+  { id: 'provider-credentials', label: '提供方与账号', group: '模型与服务', icon: 'key', needsEngine: false, layered: false, searchKeys: ['provider', 'credential', '凭据', 'API Key', 'keychain', 'defaultProtocols', '默认格式', '请求格式'], implemented: true },
   // 组↔layered 的例外 1/3：不在 编码 组，但是 layered。settings.providers /
   // settings.routing 是活在四层设置文件里的普通设置键，写入前必须选定目标层——
   // 与它挂在哪个导航分组下无关。
-  { id: 'custom-providers', label: '自定义 Provider 与路由', group: '模型与服务', icon: 'plug', needsEngine: true, layered: true, searchKeys: ['providers', 'routing', 'baseUrl', 'apiKeyEnv', 'models', 'aliases', 'fallback', 'retry'], implemented: true },
+  { id: 'custom-providers', label: '自定义 Provider 与路由', group: '模型与服务', icon: 'plug', needsEngine: false, layered: false, searchKeys: ['providers', 'routing', 'baseUrl', 'apiKeyEnv', 'models', 'aliases', 'fallback', 'retry'], implemented: true },
 
   // Fusion lists strategies from all three settings scopes and owns its scope filter.
   { id: 'fusion', label: 'Fusion 多模型合议', group: '模型与服务', icon: 'sparkle', needsEngine: true, layered: false, searchKeys: ['fusion', '合议', '策略', 'scope', 'panelModels', 'analystModel', 'panel', 'analyst', '多模型'], implemented: true },
@@ -71,7 +71,7 @@ const NAV_LABEL_KEYS: Record<string, string> = {
   general: 'settings_group_general', account: 'settings_title_account', appearance: 'settings_appearance',
   notifications: 'settings_notifications', voice: 'settings_group_voice',
   'archived-chats': 'settings_parity_archived', projects: 'desktop_project_trust', 'remote-control': 'remote_title',
-  'provider-credentials': 'desktop_provider_credentials', 'custom-providers': 'desktop_custom_providers', fusion: 'desktop_fusion',
+  'provider-credentials': 'model_detail_provider', 'custom-providers': 'desktop_custom_providers', fusion: 'desktop_fusion',
   'computer-use': 'settings_title_computer_use', permissions: 'settings_parity_permissions', 'tools-agent': 'desktop_tools_agent',
   skills: 'settings_title_skills', mcp: 'settings_mcp_servers', plugins: 'desktop_plugins', diagnostics: 'desktop_diagnostics', about: 'settings_group_about',
 };

@@ -68,6 +68,9 @@ pub type AudioConfigurationSnapshot = Arc<dyn Fn() -> Result<String, String> + S
 type AttachmentResolver = dyn Fn(&MediaAttachmentId) -> Option<MediaAttachmentHandle> + Send + Sync;
 
 struct MediaPreparedProvider {
+    audio_profile_name: String,
+    provider_profile: String,
+    provider_account_scope: String,
     control: RealtimeControl,
     events: RealtimeEvents,
     driver: RealtimeDriver,
@@ -82,9 +85,12 @@ struct MediaPreparedProvider {
     registration: Option<Arc<Registration>>,
 }
 
-impl From<PreparedRealtimeProvider> for MediaPreparedProvider {
-    fn from(value: PreparedRealtimeProvider) -> Self {
+impl TryFrom<PreparedRealtimeProvider> for MediaPreparedProvider {
+    type Error = serde_json::Value;
+
+    fn try_from(value: PreparedRealtimeProvider) -> Result<Self, Self::Error> {
         let PreparedRealtimeProvider {
+            prepared,
             control,
             events,
             driver,
@@ -99,7 +105,28 @@ impl From<PreparedRealtimeProvider> for MediaPreparedProvider {
             _registration,
             ..
         } = value;
-        Self {
+        let provider_profile = prepared
+            .profile_name
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                crate::failure("unavailable", "selected audio profile is unavailable")
+            })?;
+        let provider_account_scope = prepared
+            .account_scope
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                crate::failure("unavailable", "selected audio account is unavailable")
+            })?;
+        if prepared.audio_profile_name.trim().is_empty() {
+            return Err(crate::failure(
+                "unavailable",
+                "logical audio profile is unavailable",
+            ));
+        }
+        Ok(Self {
+            audio_profile_name: prepared.audio_profile_name,
+            provider_profile,
+            provider_account_scope,
             control,
             events,
             driver,
@@ -112,7 +139,7 @@ impl From<PreparedRealtimeProvider> for MediaPreparedProvider {
             completion_boundary,
             cancel,
             registration: Some(_registration),
-        }
+        })
     }
 }
 
@@ -303,7 +330,34 @@ impl AppMediaConversationAttachment {
         }
         prepare_provider_realtime(&provider, request, prepared)
             .await
-            .map(MediaPreparedProvider::from)
+            .and_then(MediaPreparedProvider::try_from)
+    }
+
+    /// Resolve an unbound Agent intent through the exact attachment's trusted
+    /// session route. A concrete supplied scope must still match that route.
+    fn provider_for_agent_context(
+        &self,
+        attachment_id: &MediaAttachmentId,
+        session_id: &str,
+        profile_name: &str,
+        account_scope: &str,
+    ) -> Option<(Arc<AudioProviderHost>, String)> {
+        let owner = MediaOwner::Session {
+            session_id: session_id.to_owned(),
+        }
+        .in_attachment(attachment_id.clone());
+        let (bound_profile, bound_scope) = self.providers.session_identity_for_owner(&owner)?;
+        if bound_profile != profile_name
+            || (account_scope != lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+                && account_scope != bound_scope)
+        {
+            return None;
+        }
+        let provider = self
+            .providers
+            .provider_for_attached_session(attachment_id, session_id, profile_name, &bound_scope)
+            .ok()?;
+        Some((provider, bound_scope))
     }
 
     fn configured_route(
@@ -325,15 +379,12 @@ impl AppMediaConversationAttachment {
         }
         let attachment_id = context.attachment_id.as_ref()?;
         let media = self.media_for_attachment(attachment_id)?;
-        let provider = self
-            .providers
-            .provider_for_attached_session(
-                attachment_id,
-                &context.session_id,
-                profile_name,
-                account_scope,
-            )
-            .ok()?;
+        let (provider, bound_scope) = self.provider_for_agent_context(
+            attachment_id,
+            &context.session_id,
+            profile_name,
+            account_scope,
+        )?;
         let configuration = (self.configuration)().ok()?;
         if configuration.len() > 512 * 1024 {
             return None;
@@ -344,7 +395,9 @@ impl AppMediaConversationAttachment {
             session_id: context.session_id.clone(),
             attachment_id: context.attachment_id.clone(),
             profile_name: context.profile_name.clone(),
-            account_scope: context.account_scope.clone(),
+            session_profile_name: profile_name.to_owned(),
+            audio_profile_name: profile_name.to_owned(),
+            account_scope: Some(bound_scope),
             // This is a route-capability probe, never an admitted Agent query.
             // request_from_snapshot reads identity/configuration, not behavior.
             conversation_mode: lingxi_core::host::session_context::SessionModeSnapshot {
@@ -698,13 +751,13 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
     async fn open(
         &self,
         request: MediaAgentHandoffRequest,
-        prepared: RealtimeAgentContext,
+        mut prepared: RealtimeAgentContext,
         audio: Arc<dyn MediaAudioChannel>,
     ) -> Result<RealtimeAgentSessionIo, String> {
-        let attachment_id = prepared.attachment_id.as_ref().ok_or_else(|| {
+        let attachment_id = prepared.attachment_id.clone().ok_or_else(|| {
             "the current Agent engine attachment identity is unavailable".to_owned()
         })?;
-        let attachment = (self.attachment_for_id)(attachment_id)
+        let attachment = (self.attachment_for_id)(&attachment_id)
             .ok_or_else(|| "the current Agent attachment is no longer active".to_owned())?;
         let owner = MediaOwner::Session {
             session_id: prepared.session_id.clone(),
@@ -729,12 +782,6 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
         }
         let snapshot: AudioConfigurationV4 = serde_json::from_str(&configuration)
             .map_err(|_| "audio configuration snapshot is invalid".to_owned())?;
-        let request_context = request_from_snapshot(
-            &request.operation_id,
-            &prepared,
-            snapshot,
-            capabilities.max_payload_bytes,
-        )?;
         let profile_name = prepared
             .profile_name
             .as_deref()
@@ -745,17 +792,23 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
             .as_deref()
             .filter(|scope| !scope.trim().is_empty())
             .ok_or_else(|| "the current Agent account scope is unavailable".to_owned())?;
-        let provider = self
-            .providers
-            .provider_for_attached_session(
-                attachment_id,
+        let (provider, bound_scope) = self
+            .provider_for_agent_context(
+                &attachment_id,
                 &prepared.session_id,
                 profile_name,
                 account_scope,
             )
-            .map_err(|_| {
+            .ok_or_else(|| {
                 "the current Agent attachment has no matching provider binding".to_owned()
             })?;
+        prepared.account_scope = Some(bound_scope);
+        let request_context = request_from_snapshot(
+            &request.operation_id,
+            &prepared,
+            snapshot,
+            capabilities.max_payload_bytes,
+        )?;
         let image_input_supported = image_input_supported_for_request(&provider, &request_context)
             .ok_or_else(|| "the selected realtime profile or model is unsupported".to_owned())?;
         if requests_video && !image_input_supported {
@@ -825,6 +878,9 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
             permit,
         } = connected;
         let MediaPreparedProvider {
+            audio_profile_name,
+            provider_profile,
+            provider_account_scope,
             control,
             events,
             driver,
@@ -1001,6 +1057,9 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
             usize::try_from(MAX_IMAGE_INPUT_BYTES).unwrap_or(usize::MAX);
         limits.max_image_bytes_per_session = MAX_IMAGE_TOTAL_BYTES;
         Ok(RealtimeAgentSessionIo {
+            audio_profile_name,
+            provider_profile,
+            provider_account_scope,
             control,
             events,
             inputs,
@@ -2280,29 +2339,18 @@ mod tests {
             session_id: "parent-session".into(),
         };
         let wire = Arc::new(ScheduledAudioWire::default());
-        let profiles = sdk::builtin_providers()
-            .unwrap()
-            .into_iter()
-            .filter(|profile| profile.profile_name == "openai")
-            .collect::<Vec<_>>();
-        let client = sdk::LlmClientBuilder::with_transport(wire.clone(), &profiles)
-            .with_region(sdk::protocol::Region::International)
-            .build()
-            .unwrap();
-        let provider = Arc::new(AudioProviderHost {
-            client,
-            credential_ids: std::collections::BTreeMap::from([("openai".into(), "openai".into())]),
-            storage: None,
-            bound_services: None,
-            keys: std::collections::BTreeMap::from([(
-                "openai".into(),
-                sdk::protocol::Secret::new("host-test-key".into()),
-            )]),
-            pending: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-        });
+        let provider = Arc::new(AudioProviderHost::test_with_transport(
+            wire.clone(),
+            Some("host-test-key"),
+        ));
         let parent_permit = parent.authorize_owner(&parent_owner).unwrap();
         registry
-            .register_attached_session(&parent_permit, "openai", "profile:openai", provider.clone())
+            .register_attached_session(
+                &parent_permit,
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+                provider.clone(),
+            )
             .unwrap();
         drop(parent_permit);
         let configuration: AudioConfigurationSnapshot = Arc::new(|| Ok("{}".into()));
@@ -2347,7 +2395,7 @@ mod tests {
                 "parent-session",
                 "parent-session",
                 "other",
-                "profile:other",
+                "different-account-scope",
                 Arc::new(|| true)
             )
             .is_err());
@@ -2356,7 +2404,7 @@ mod tests {
                 "wrong-parent-session",
                 "parent-session",
                 "openai",
-                "profile:openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
                 Arc::new(|| true),
             )
             .is_err());
@@ -2365,7 +2413,7 @@ mod tests {
                 "parent-session",
                 "parent-session",
                 "openai",
-                "profile:other",
+                "different-account-scope",
                 Arc::new(|| true),
             )
             .is_err());
@@ -2379,7 +2427,7 @@ mod tests {
                 "parent-session",
                 "parent-session",
                 "openai",
-                "profile:openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
                 current_check.clone(),
             )
             .unwrap();
@@ -2388,7 +2436,7 @@ mod tests {
                 "parent-session",
                 "new-scheduled-session",
                 "openai",
-                "profile:openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
                 current_check,
             )
             .unwrap();
@@ -2436,6 +2484,13 @@ mod tests {
             Ok(MediaResult::Transcript { .. })
         ));
         assert_eq!(wire.requests.load(Ordering::SeqCst), 1);
+        let (_, selected_scope) = registry
+            .session_identity_for_owner(&child_owner.clone().in_attachment(child.id().clone()))
+            .unwrap();
+        assert_ne!(
+            selected_scope,
+            lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+        );
         assert!(CloudAudioHost::resolve(
             registry.as_ref(),
             &child_owner.clone().in_attachment(child.id().clone()),
@@ -2446,16 +2501,9 @@ mod tests {
         .is_err());
         child.begin_revoke();
         assert!(route.release_after_media_drain().is_err());
-        assert!(
-            registry
-                .provider_for_attached_session(
-                    child.id(),
-                    "parent-session",
-                    "openai",
-                    "profile:openai",
-                )
-                .is_ok()
-        );
+        assert!(registry
+            .provider_for_attached_session(child.id(), "parent-session", "openai", &selected_scope,)
+            .is_ok());
         assert_eq!(
             child.drain_media(Duration::from_secs(2)).await,
             MediaAttachmentRevocation::Confirmed
@@ -2466,22 +2514,15 @@ mod tests {
             child.revoke(Duration::from_secs(2)).await,
             MediaAttachmentRevocation::Confirmed
         );
-        assert!(
-            registry
-                .provider_for_attached_session(
-                    child.id(),
-                    "parent-session",
-                    "openai",
-                    "profile:openai",
-                )
-                .is_err()
-        );
+        assert!(registry
+            .provider_for_attached_session(child.id(), "parent-session", "openai", &selected_scope,)
+            .is_err());
         assert!(registry
             .provider_for_attached_session(
                 parent.id(),
                 "parent-session",
                 "openai",
-                "profile:openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
             )
             .is_ok());
         assert!(registry
@@ -2489,7 +2530,7 @@ mod tests {
                 sibling.id(),
                 "new-scheduled-session",
                 "openai",
-                "profile:openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
             )
             .is_ok());
         assert_eq!(
@@ -2502,6 +2543,13 @@ mod tests {
             Ok(MediaResult::Transcript { .. })
         ));
         assert_eq!(wire.requests.load(Ordering::SeqCst), 2);
+        let (_, parent_scope) = registry
+            .session_identity_for_owner(&parent_owner.clone().in_attachment(parent.id().clone()))
+            .unwrap();
+        assert_ne!(
+            parent_scope,
+            lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+        );
 
         // Even a route resolved before the change cannot fetch credentials
         // after its exact parent binding generation has been replaced.
@@ -2548,15 +2596,29 @@ mod tests {
         // even if the logical profile strings happen to remain the same.
         let permit = parent.authorize_owner(&parent_owner).unwrap();
         registry
-            .register_attached_session(&permit, "openai", "profile:openai", provider)
+            .register_attached_session(
+                &permit,
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+                provider,
+            )
             .unwrap();
         drop(permit);
+        assert_eq!(
+            registry
+                .session_identity_for_owner(
+                    &parent_owner.clone().in_attachment(parent.id().clone())
+                )
+                .unwrap()
+                .1,
+            parent_scope
+        );
         assert!(registry
             .provider_for_attached_session(
                 sibling.id(),
                 "new-scheduled-session",
                 "openai",
-                "profile:openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
             )
             .is_err());
         assert_eq!(
@@ -2582,12 +2644,7 @@ mod tests {
             MediaAttachmentRevocation::Confirmed
         );
         assert!(registry
-            .provider_for_attached_session(
-                parent.id(),
-                "parent-session",
-                "openai",
-                "profile:openai",
-            )
+            .provider_for_attached_session(parent.id(), "parent-session", "openai", &parent_scope,)
             .is_ok());
         assert_eq!(
             parent.revoke(Duration::from_secs(2)).await,
@@ -2616,7 +2673,7 @@ mod tests {
                 "open-session",
                 "child-session",
                 "openai",
-                "profile:openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
                 Arc::new(|| true),
             )
             .unwrap();
@@ -2632,7 +2689,12 @@ mod tests {
         assert!(route.release_after_media_drain().is_err());
         assert!(adapter
             .providers
-            .provider_for_attached_session(child.id(), "child-session", "openai", "profile:openai",)
+            .provider_for_attached_session(
+                child.id(),
+                "child-session",
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+            )
             .is_ok());
         drop(permit);
         assert_eq!(
@@ -2647,11 +2709,21 @@ mod tests {
         );
         assert!(adapter
             .providers
-            .provider_for_attached_session(child.id(), "child-session", "openai", "profile:openai",)
+            .provider_for_attached_session(
+                child.id(),
+                "child-session",
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+            )
             .is_err());
         assert!(adapter
             .providers
-            .provider_for_attached_session(parent.id(), "open-session", "openai", "profile:openai",)
+            .provider_for_attached_session(
+                parent.id(),
+                "open-session",
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+            )
             .is_ok());
         assert_eq!(
             parent.revoke(Duration::from_secs(2)).await,
@@ -2696,21 +2768,18 @@ mod tests {
         let host = MediaAttachmentHost::new();
         let parent = host.attach(Arc::new(FailingScheduledStatus)).unwrap();
         let registry = Arc::new(AudioProviderCloudRegistry::new("wav"));
-        let provider = Arc::new(
-            AudioProviderHost::new(
-                "{}",
-                "international",
-                None,
-                std::collections::BTreeMap::new(),
-            )
-            .unwrap(),
-        );
+        let provider = Arc::new(AudioProviderHost::test_empty());
         let parent_owner = MediaOwner::Session {
             session_id: "parent-session".into(),
         };
         let permit = parent.authorize_owner(&parent_owner).unwrap();
         registry
-            .register_attached_session(&permit, "openai", "profile:openai", provider)
+            .register_attached_session(
+                &permit,
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+                provider,
+            )
             .unwrap();
         drop(permit);
         let adapter = AppMediaConversationAttachment::new(
@@ -2728,7 +2797,7 @@ mod tests {
                 "parent-session",
                 "child-session",
                 "openai",
-                "profile:openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
                 Arc::new(|| true),
             )
             .unwrap();
@@ -2752,14 +2821,19 @@ mod tests {
         assert!(route.release_after_media_drain().is_err());
         assert!(fence.confirm().is_err());
         assert!(registry
-            .provider_for_attached_session(child.id(), "child-session", "openai", "profile:openai",)
+            .provider_for_attached_session(
+                child.id(),
+                "child-session",
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+            )
             .is_ok());
         assert!(registry
             .provider_for_attached_session(
                 parent.id(),
                 "parent-session",
                 "openai",
-                "profile:openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
             )
             .is_ok());
     }
@@ -2905,6 +2979,7 @@ mod tests {
 
     struct ProviderTestState {
         cancel: CancellationToken,
+        requested_scopes: Mutex<Option<(String, String)>>,
         supervisor_observed_output: Arc<Notify>,
         hold_connect: bool,
         connect_started: Notify,
@@ -2923,6 +2998,7 @@ mod tests {
         fn new(hold_connect: bool, hold_abort: bool) -> Arc<Self> {
             Arc::new(Self {
                 cancel: CancellationToken::new(),
+                requested_scopes: Mutex::new(None),
                 supervisor_observed_output: Arc::new(Notify::new()),
                 hold_connect,
                 connect_started: Notify::new(),
@@ -3061,17 +3137,14 @@ mod tests {
             session_id: "open-session".into(),
         };
         let permit = attachment.authorize_owner(&owner).unwrap();
-        let provider_host = Arc::new(
-            AudioProviderHost::new(
-                "{}",
-                "international",
-                None,
-                std::collections::BTreeMap::new(),
-            )
-            .unwrap(),
-        );
+        let provider_host = Arc::new(AudioProviderHost::test_empty());
         providers
-            .register_attached_session(&permit, "openai", "profile:openai", provider_host)
+            .register_attached_session(
+                &permit,
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+                provider_host,
+            )
             .unwrap();
         drop(permit);
         let configuration: AudioConfigurationSnapshot = Arc::new(|| {
@@ -3088,12 +3161,33 @@ mod tests {
         let provider_for_connect = provider.clone();
         Arc::get_mut(&mut adapter).unwrap().test_provider_connector = Some(Arc::new(
             move |_host: Arc<AudioProviderHost>,
-                  _request: AudioRequest,
-                  _prepared: RealtimeAgentContext|
+                  request: AudioRequest,
+                  prepared: RealtimeAgentContext|
                   -> Pin<
                 Box<dyn Future<Output = Result<MediaPreparedProvider, serde_json::Value>> + Send>,
             > {
                 let provider = provider_for_connect.clone();
+                let audio_profile_name = match request.cloud.binding.as_str() {
+                    "explicit_profile" => request.cloud.profile_id.clone().unwrap(),
+                    _ => prepared.audio_profile_name.clone(),
+                };
+                let prepared_scope = prepared.account_scope.unwrap();
+                *provider.requested_scopes.lock().unwrap() = Some((
+                    request.session.unwrap().account_scope,
+                    prepared_scope.clone(),
+                ));
+                let selected_profile = serde_json::from_str::<
+                    llm_runtime::accounts::AccountResourceScope,
+                >(&prepared_scope)
+                .map(|scope| format!("account.{}", scope.account_id))
+                .unwrap_or_else(|_| prepared.profile_name.unwrap());
+                let selected_scope = if prepared_scope
+                    == lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+                {
+                    "explicit-service.fixture".into()
+                } else {
+                    prepared_scope
+                };
                 Box::pin(async move {
                     let transport = TestRealtimeTransport(provider.clone());
                     let (session, driver) = sdk::realtime::RealtimeSession::connect(
@@ -3111,6 +3205,9 @@ mod tests {
                     let (control, events) = session.into_parts();
                     let (input, inputs) = mpsc::channel(32);
                     Ok(MediaPreparedProvider {
+                        audio_profile_name,
+                        provider_profile: selected_profile,
+                        provider_account_scope: selected_scope,
                         control,
                         events,
                         driver,
@@ -3139,7 +3236,9 @@ mod tests {
         let prepared = RealtimeAgentContext {
             session_id: "open-session".into(),
             profile_name: Some("openai".into()),
-            account_scope: Some("profile:openai".into()),
+            session_profile_name: "openai".into(),
+            audio_profile_name: "openai".into(),
+            account_scope: Some(lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.into()),
             conversation_mode: lingxi_core::host::session_context::SessionModeSnapshot {
                 session_id: "open-session".into(),
                 mode: lingxi_core::host::session_context::ConversationMode::Code,
@@ -3163,6 +3262,87 @@ mod tests {
             audio,
             provider,
         }
+    }
+
+    #[tokio::test]
+    async fn unbound_agent_intent_uses_the_selected_attachment_account() {
+        let fixture = open_fixture(false, false, false);
+        let scope = serde_json::to_string(&llm_runtime::accounts::AccountResourceScope {
+            store_scope: "fixture-domain".into(),
+            account_id: "selected".into(),
+            identity_generation: 4,
+        })
+        .unwrap();
+        let owner = MediaOwner::Session {
+            session_id: "open-session".into(),
+        };
+        let permit = fixture.attachment.authorize_owner(&owner).unwrap();
+        fixture
+            .adapter
+            .providers
+            .register_attached_session(
+                &permit,
+                "openai",
+                &scope,
+                Arc::new(AudioProviderHost::test_empty()),
+            )
+            .unwrap();
+        drop(permit);
+
+        let unbound = lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE;
+        assert!(fixture
+            .adapter
+            .provider_for_agent_context(fixture.attachment.id(), "open-session", "openai", unbound)
+            .is_some_and(|(_, actual)| actual == scope));
+        assert!(fixture
+            .adapter
+            .provider_for_agent_context(fixture.attachment.id(), "other-session", "openai", unbound)
+            .is_none());
+        assert!(fixture
+            .adapter
+            .provider_for_agent_context(fixture.attachment.id(), "open-session", "other", unbound)
+            .is_none());
+        assert!(fixture
+            .adapter
+            .provider_for_agent_context(
+                fixture.attachment.id(),
+                "open-session",
+                "openai",
+                "other-account"
+            )
+            .is_none());
+
+        let context = MediaAgentCapabilityContext {
+            session_id: "open-session".into(),
+            model: "gpt-4o".into(),
+            profile_name: Some("openai".into()),
+            account_scope: Some(unbound.into()),
+            attachment_id: Some(fixture.attachment.id().clone()),
+        };
+        let (_, request, _, _) = fixture
+            .adapter
+            .configured_route(&context)
+            .expect("the selected account remains available to capability checks");
+        assert_eq!(request.session.unwrap().account_scope, scope);
+
+        let io = fixture
+            .adapter
+            .open(fixture.request, fixture.prepared, fixture.audio)
+            .await
+            .unwrap();
+        assert_eq!(io.audio_profile_name, "openai");
+        assert_eq!(io.provider_profile, "account.selected");
+        assert_eq!(io.provider_account_scope, scope);
+        assert_eq!(
+            fixture.provider.requested_scopes.lock().unwrap().as_ref(),
+            Some(&(scope.clone(), scope.clone()))
+        );
+        fixture.attachment.begin_revoke();
+        assert_eq!(
+            fixture.attachment.revoke(Duration::from_secs(2)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+        drop(io);
     }
 
     #[tokio::test]
@@ -3263,6 +3443,8 @@ mod tests {
             provider,
         } = fixture;
         let io = adapter.open(request, prepared, audio).await.unwrap();
+        assert_eq!(io.provider_profile, "openai");
+        assert_eq!(io.provider_account_scope, "explicit-service.fixture");
         attachment.begin_revoke();
         let abort_started =
             tokio::time::timeout(Duration::from_secs(1), provider.abort_started.notified()).await;

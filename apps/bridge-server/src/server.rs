@@ -335,7 +335,6 @@ impl QueuedPromptPayload {
 /// [`Frame::Event`] on the connection's outbound channel.
 struct FrameEventSink {
     out: SharedFrameSink,
-    pending_openai_oauth: Arc<Mutex<Option<ClientEvent>>>,
     cron_requests: Arc<crate::cron_host::HostCronRequests>,
     handshaken: Arc<AtomicBool>,
     active_turn: ActiveTurnControl,
@@ -395,22 +394,6 @@ impl ClientEventSink for FrameEventSink {
                 .await;
             return;
         }
-        if matches!(&event, ClientEvent::OpenAiOAuthUpdated { .. }) {
-            let out = self.out.lock().await;
-            let mut pending = self.pending_openai_oauth.lock().await;
-            if self.handshaken.load(Ordering::SeqCst) {
-                if let Some(sink) = out.as_ref() {
-                    if sink.send(Frame::Event(event.clone())) {
-                        *pending = None;
-                        return;
-                    }
-                }
-            }
-            // Boot may rotate an expired token before the host handshakes.
-            *pending = Some(event);
-            return;
-        }
-
         // AskUserQuestion is parked in the broker before this event reaches
         // the sink. Resolve it fail-closed before applying the generic event
         // filter, otherwise an unowned/terminal request would be dropped while
@@ -711,7 +694,6 @@ pub struct BridgeConnection {
     /// Serialize socket admission with teardown without holding the send lock
     /// across brokers whose cleanup emits an event back through that lock.
     connection_admission: Mutex<()>,
-    pending_openai_oauth: Arc<Mutex<Option<ClientEvent>>>,
     cron_requests: Arc<crate::cron_host::HostCronRequests>,
     queued_prompt_payloads: QueuedPromptPayloads,
     tool_names: Arc<Mutex<HashMap<u64, String>>>,
@@ -2738,7 +2720,6 @@ impl BridgeConnection {
         Self {
             out: Arc::new(Mutex::new(None)),
             connection_admission: Mutex::new(()),
-            pending_openai_oauth: Arc::new(Mutex::new(None)),
             cron_requests: Arc::new(crate::cron_host::HostCronRequests::default()),
             queued_prompt_payloads: Arc::new(Mutex::new(HashMap::new())),
             tool_names: Arc::new(Mutex::new(HashMap::new())),
@@ -3071,7 +3052,6 @@ impl BridgeConnection {
     pub fn event_sink(&self) -> Arc<dyn ClientEventSink> {
         Arc::new(FrameEventSink {
             out: self.out.clone(),
-            pending_openai_oauth: self.pending_openai_oauth.clone(),
             cron_requests: self.cron_requests.clone(),
             handshaken: self.handshaken.clone(),
             active_turn: self.active_turn.clone(),
@@ -3544,12 +3524,6 @@ impl BridgeConnection {
         if let Some(sink) = self.out.lock().await.as_ref() {
             let _ = sink.send(Frame::Response(response));
             if self.handshaken.load(Ordering::SeqCst) {
-                let mut pending = self.pending_openai_oauth.lock().await;
-                if let Some(event) = pending.take() {
-                    if !sink.send(Frame::Event(event.clone())) {
-                        *pending = Some(event);
-                    }
-                }
                 self.cron_requests
                     .replay(|event| sink.send(Frame::Event(event)))
                     .await;
@@ -5933,29 +5907,6 @@ mod tests {
     #[async_trait]
     impl PermissionRequestSink for NoopPermissionSink {
         async fn emit_request(&self, _request: PermissionRequest) {}
-    }
-
-    #[tokio::test]
-    async fn codex_rotation_before_host_connect_is_retained_without_turn() {
-        let connection = BridgeConnection::new();
-        let session = client::protocol::events::OpenAiOAuthSessionDto {
-            access_token: "rotated".into(),
-            refresh_token: Some("next-refresh".into()),
-            expires_at: 2_000_000_000,
-            account_id: Some("acct".into()),
-            fedramp: false,
-            email: Some("acct@example.com".into()),
-        };
-        connection
-            .event_sink()
-            .emit(ClientEvent::OpenAiOAuthUpdated {
-                session: session.clone(),
-            })
-            .await;
-        assert_eq!(
-            *connection.pending_openai_oauth.lock().await,
-            Some(ClientEvent::OpenAiOAuthUpdated { session })
-        );
     }
 
     #[tokio::test]

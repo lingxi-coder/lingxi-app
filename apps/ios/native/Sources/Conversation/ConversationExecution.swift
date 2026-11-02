@@ -898,6 +898,29 @@ struct ConversationToolTrace: Identifiable, Equatable {
     var questionAnswers: [ConversationAnsweredQuestion]? = nil
     /// The app a `LocalApp` publish stored; the row is drawn as its card.
     var localApp: PublishedLocalApp? = nil
+    /// Original body identifies the skill's adjacent injected prompt.
+    var skillBody: String? = nil
+}
+
+enum ConversationSkillInstructions {
+    static func body(tool: String, json: String) -> String? {
+        guard tool.caseInsensitiveCompare("Skill") == .orderedSame,
+              let data = json.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let body = object["body"] as? String, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return body
+    }
+
+    static func matches(_ message: Message, tool: ConversationToolTrace) -> Bool {
+        guard message.role == .user, message.images.isEmpty, tool.status == .completed,
+              tool.tool.caseInsensitiveCompare("Skill") == .orderedSame else { return false }
+        let text = message.text.replacingOccurrences(of: "^Base directory for this skill: [^\\n]*\\r?\\n\\r?\\n", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = tool.skillBody?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (!body.isEmpty && (text == body || text.hasPrefix(body + "\n"))) ||
+            (tool.header?.primary == "local-app" && text.hasPrefix("# Desktop Local Apps\n"))
+    }
 }
 
 enum ConversationShellStatus: Equatable {

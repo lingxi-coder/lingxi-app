@@ -58,6 +58,7 @@ orchestrator = { workspace = true }
 # the CLI/mobile hosts, then adopt the replayed protocol history in place.
 session = { workspace = true }
 secret = { workspace = true }
+http-client = { workspace = true }
 platform-posix = { workspace = true }
 platform-pty = { workspace = true }
 uuid = "1.10"

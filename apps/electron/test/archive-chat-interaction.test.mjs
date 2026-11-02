@@ -72,6 +72,11 @@ test('archive chat dialog guards pending work, confirms once, and restores keybo
     assert.equal(result.sidebarHitTarget, true);
     assert.equal(result.retryEnabled, true);
     assert.equal(result.sidebarCalls, 2);
+    assert.equal(result.metadata.captures, 2);
+    assert.deepEqual(result.metadata.preflights, ['token-1', 'token-1']);
+    assert.deepEqual(result.metadata.archives, ['token-1', 'token-1']);
+    assert.deepEqual(result.metadata.renames, ['token-2']);
+    assert.deepEqual(result.metadata.releases, ['token-1', 'token-2']);
     assert.match(result.content, /Weekly project summary/);
     assert.match(result.content, /Archive and pause/);
     assert.match(result.content, /chat history will be kept/);

@@ -1,3 +1,4 @@
+import type { SessionMetadataSelection } from '../../shared/sessionWorkspace.js';
 import type { ProviderAccountsApi } from '../../shared/providerAccounts';
 import { COMPACT_DURING_TURN, isCompactTurnRejection } from './compactRejection';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
@@ -1853,15 +1854,23 @@ export function useBridge(): UseBridge {
     catch (cause) { if (isCurrentNavigationOperation(operationId)) capture(cause); }
   }, [applyBootstrap, beginNavigationOperation, capture, host, isCurrentNavigationOperation]);
 
-  const preflightSessionArchive = useCallback((projectPath: string, sessionId: string) => {
+  const prepareSessionMetadata = useCallback((projectPath: string, sessionId: string, selection?: SessionOpenSelection) => {
     if (!host) return Promise.reject(new Error('Desktop host unavailable.'));
-    return host.preflightSessionArchive(projectPath, sessionId);
+    return host.prepareSessionMetadata(projectPath, sessionId, selection);
   }, [host]);
-  const archiveSession = useCallback(async (projectPath: string, sessionId: string) => {
+  const releaseSessionMetadata = useCallback((selection: SessionMetadataSelection) => {
+    if (!host) return Promise.resolve();
+    return host.releaseSessionMetadata(selection);
+  }, [host]);
+  const preflightSessionArchive = useCallback((projectPath: string, sessionId: string, selection: SessionMetadataSelection) => {
+    if (!host) return Promise.reject(new Error('Desktop host unavailable.'));
+    return host.preflightSessionArchive(projectPath, sessionId, selection);
+  }, [host]);
+  const archiveSession = useCallback(async (projectPath: string, sessionId: string, selection: SessionMetadataSelection) => {
     if (!host) throw new Error('Desktop host unavailable.');
     const operationId = beginNavigationOperation();
     try {
-      const snapshot = await host.archiveSession(projectPath, sessionId);
+      const snapshot = await host.archiveSession(projectPath, sessionId, selection);
       if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot);
     } catch (error) {
       try { const snapshot = await host.bootstrap(); if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot); } catch { /* Preserve the original archival error. */ }
@@ -1883,16 +1892,16 @@ export function useBridge(): UseBridge {
     try { patchBootstrap({ settings: await host.updateSettings({ sidebar }) }); }
     catch (cause) { capture(cause); }
   }, [capture, host, patchBootstrap]);
-  const touchSession = useCallback(async (projectPath: string, sessionId: string) => {
+  const touchSession = useCallback(async (projectPath: string, sessionId: string, selection?: SessionOpenSelection) => {
     if (!host) return;
     try {
-      await mutateSessionCatalog(projectPath, () => host.touchSession(projectPath, sessionId));
+      await mutateSessionCatalog(projectPath, () => host.touchSession(projectPath, sessionId, selection));
     } catch (cause) { setError(messageFrom(cause)); }
   }, [host, mutateSessionCatalog]);
-  const renameSession = useCallback(async (projectPath: string, sessionId: string, title: string) => {
+  const renameSession = useCallback(async (projectPath: string, sessionId: string, title: string, selection: SessionMetadataSelection) => {
     if (!host) throw new Error('Desktop host unavailable.');
     try {
-      await mutateSessionCatalog(projectPath, () => host.renameSession(projectPath, sessionId, title));
+      await mutateSessionCatalog(projectPath, () => host.renameSession(projectPath, sessionId, title, selection));
     } catch (cause) {
       capture(cause);
       throw cause;
@@ -2876,6 +2885,8 @@ export function useBridge(): UseBridge {
     removeProject,
     updateSidebarPreferences,
     archiveSession,
+    prepareSessionMetadata,
+    releaseSessionMetadata,
     preflightSessionArchive,
     setSessionPinned,
     touchSession,

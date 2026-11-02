@@ -76,6 +76,13 @@ async function main() {
     await run(`${confirm}.click()`);
     await wait(`!${dialog}`);
     result.sidebarCalls = (await state()).sidebarCalls;
+    await run(`document.querySelector('[data-session-project-path="/fixture"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 300 }))`);
+    await wait('Boolean(document.querySelector("[role=menuitem]"))');
+    await run('document.querySelector("[role=menuitem]").click()');
+    await wait(`Boolean(${dialog}) && !${confirm}.disabled`);
+    await run(`${confirm}.click()`);
+    await wait(`!${dialog}`);
+    result.metadata = (await state()).metadata;
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally { window.destroy(); app.quit(); }
 }

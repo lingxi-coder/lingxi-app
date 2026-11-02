@@ -10,7 +10,7 @@ import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, a
 import { AudioSetupGuide } from './AudioSetupGuide';
 import { ComposerSlashArgumentHint } from './ComposerSlashArgumentHint';
 import { defaultNativeAudioSnapshot } from '../../shared/nativeAudio';
-import { SESSION_PICKER_EVENT } from '../../shared/sessionWorkspace';
+import { SESSION_PICKER_EVENT, type SessionMetadataSelection, type SessionOpenSelection } from '../../shared/sessionWorkspace';
 import { composerGoalState } from './goalPresentation';
 import { GoalStatus } from './GoalStatus';
 import { SessionStorageNotice } from './SessionStorageNotice';
@@ -548,41 +548,97 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const projectActionsHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [openingSessionKey, setOpeningSessionKey] = useState<string | null>(null);
   const [editingProject, setEditingProject] = useState<string | null>(null);
-  const [archiveTarget, setArchiveTarget] = useState<{projectPath: string; sessionId: string; title: string} | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<{projectPath: string; sessionId: string; title: string; inputSelection?: SessionOpenSelection; selection?: SessionMetadataSelection} | null>(null);
   const [archiveJobs, setArchiveJobs] = useState<ScheduledCronJob[]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [archiveError, setArchiveError] = useState('');
-  const [renameTarget, setRenameTarget] = useState<{ projectPath: string; sessionId: string; title: string } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<{ projectPath: string; sessionId: string; title: string; inputSelection?: SessionOpenSelection; selection?: SessionMetadataSelection } | null>(null);
   const [renamingSession, setRenamingSession] = useState(false);
+  const [renameLoading, setRenameLoading] = useState(false);
   const [renameError, setRenameError] = useState('');
   const archiveRequest = useRef(0);
-  const closeArchive = () => { archiveRequest.current++; setArchiveTarget(null); };
-  const prepareArchive = async (projectPath: string, sessionId: string, title: string) => {
+  const renameRequest = useRef(0);
+  const archiveSelection = useRef<SessionMetadataSelection | null>(null);
+  const renameSelection = useRef<SessionMetadataSelection | null>(null);
+  const releaseMetadata = useRef(bridge.releaseSessionMetadata);
+  releaseMetadata.current = bridge.releaseSessionMetadata;
+  const releaseSelection = (selection: SessionMetadataSelection | null) => {
+    if (selection) void releaseMetadata.current(selection).catch(() => {});
+  };
+  useEffect(() => () => {
+    archiveRequest.current++; renameRequest.current++;
+    releaseSelection(archiveSelection.current); releaseSelection(renameSelection.current);
+    archiveSelection.current = null; renameSelection.current = null;
+  }, []);
+  const closeArchive = () => {
+    archiveRequest.current++;
+    releaseSelection(archiveSelection.current); archiveSelection.current = null;
+    setArchiveTarget(null);
+  };
+  const prepareArchive = async (projectPath: string, sessionId: string, title: string, selection?: SessionOpenSelection) => {
     const version = ++archiveRequest.current;
-    setArchiveTarget({ projectPath, sessionId, title });
+    releaseSelection(archiveSelection.current); archiveSelection.current = null;
+    setArchiveTarget({ projectPath, sessionId, title, inputSelection: selection });
     setArchiveJobs([]); setArchiveError(''); setArchiveLoading(true);
-    try { const jobs = await bridge.preflightSessionArchive(projectPath, sessionId); if (version === archiveRequest.current) setArchiveJobs(jobs); }
+    try {
+      const captured = await bridge.prepareSessionMetadata(projectPath, sessionId, selection);
+      if (version !== archiveRequest.current) { releaseSelection(captured); return; }
+      archiveSelection.current = captured;
+      setArchiveTarget({ projectPath, sessionId, title, inputSelection: selection, selection: captured });
+      const jobs = await bridge.preflightSessionArchive(projectPath, sessionId, captured);
+      if (version === archiveRequest.current) setArchiveJobs(jobs);
+    }
     catch (cause) { if (version === archiveRequest.current) setArchiveError(cause instanceof Error ? cause.message : String(cause)); }
     finally { if (version === archiveRequest.current) setArchiveLoading(false); }
   };
+  const retryArchive = async () => {
+    if (!archiveTarget) return;
+    const selection = archiveSelection.current;
+    if (!selection) return prepareArchive(archiveTarget.projectPath, archiveTarget.sessionId, archiveTarget.title, archiveTarget.inputSelection);
+    const version = ++archiveRequest.current;
+    setArchiveError(''); setArchiveLoading(true);
+    try {
+      const jobs = await bridge.preflightSessionArchive(archiveTarget.projectPath, archiveTarget.sessionId, selection);
+      if (version === archiveRequest.current) setArchiveJobs(jobs);
+    } catch (cause) { if (version === archiveRequest.current) setArchiveError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { if (version === archiveRequest.current) setArchiveLoading(false); }
+  };
   const confirmArchive = async () => {
-    if (!archiveTarget || archiving) return;
+    if (!archiveTarget?.selection || archiving) return;
     setArchiving(true); setArchiveError('');
-    try { await bridge.archiveSession(archiveTarget.projectPath, archiveTarget.sessionId); closeArchive(); }
+    try { await bridge.archiveSession(archiveTarget.projectPath, archiveTarget.sessionId, archiveTarget.selection); closeArchive(); }
     catch (cause) { setArchiveError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setArchiving(false); }
   };
-  const prepareRename = (projectPath: string, sessionId: string, title: string) => {
-    setRenameTarget({ projectPath, sessionId, title });
-    setRenameError('');
+  const closeRename = () => {
+    renameRequest.current++;
+    releaseSelection(renameSelection.current); renameSelection.current = null;
+    setRenameTarget(null);
+  };
+  const prepareRename = async (projectPath: string, sessionId: string, title: string, selection?: SessionOpenSelection) => {
+    const version = ++renameRequest.current;
+    releaseSelection(renameSelection.current); renameSelection.current = null;
+    setRenameTarget({ projectPath, sessionId, title, inputSelection: selection });
+    setRenameError(''); setRenameLoading(true);
+    try {
+      const captured = await bridge.prepareSessionMetadata(projectPath, sessionId, selection);
+      if (version !== renameRequest.current) { releaseSelection(captured); return; }
+      renameSelection.current = captured;
+      setRenameTarget({ projectPath, sessionId, title, inputSelection: selection, selection: captured });
+    } catch (cause) { if (version === renameRequest.current) setRenameError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { if (version === renameRequest.current) setRenameLoading(false); }
   };
   const confirmRename = async (title: string) => {
     if (!renameTarget || renamingSession) return;
+    if (!renameTarget.selection) {
+      await prepareRename(renameTarget.projectPath, renameTarget.sessionId, renameTarget.title, renameTarget.inputSelection);
+      return;
+    }
     setRenamingSession(true); setRenameError('');
     try {
-      await bridge.renameSession(renameTarget.projectPath, renameTarget.sessionId, title);
-      setRenameTarget(null);
+      await bridge.renameSession(renameTarget.projectPath, renameTarget.sessionId, title, renameTarget.selection);
+      closeRename();
     } catch (cause) {
       setRenameError(cause instanceof Error ? cause.message : String(cause));
     } finally { setRenamingSession(false); }
@@ -801,7 +857,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     order.splice(destinationIndex, 0, sessionId);
     setChatSort('manual');
     persistSidebarPreferences({ chatSort: 'manual', manualSessionOrder: { ...manualSessionOrder, [projectPath]: order } });
-    void bridge.touchSession(projectPath, sessionId);
+    void bridge.touchSession(projectPath, sessionId, { scope: 'current', transcriptPath: sessions[sourceIndex].path });
   }, [bridge, manualSessionOrder, persistSidebarPreferences, sortedSessions]);
   const handleSessionDragEnd = useCallback((event: DragEndEvent) => {
     const { source, target } = event.operation;
@@ -958,9 +1014,9 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                   active={active} pinned pinnedSection opening={opening} status={bridge.sessionRuntimeStatus(pinned.sessionId)}
                   metadata={`${basename(pinned.projectPath)} · ${metadata}`}
                   onClick={() => openSidebarSession(pinned.projectPath, pinned.sessionId)}
-                  onRename={() => prepareRename(pinned.projectPath, pinned.sessionId, title)}
+                  onRename={() => prepareRename(pinned.projectPath, pinned.sessionId, title, current ? { scope: 'current', transcriptPath: current.path } : undefined)}
                   onPin={() => invoke(() => bridge.setSessionPinned(pinInput(pinned.projectPath, pinned.sessionId, title), false))}
-                  onArchive={() => void prepareArchive(pinned.projectPath, pinned.sessionId, title)} />
+                  onArchive={() => void prepareArchive(pinned.projectPath, pinned.sessionId, title, current ? { scope: 'current', transcriptPath: current.path } : undefined)} />
               );
             })}
           </section>
@@ -986,8 +1042,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
               pinned={pinned} opening={openingSessionKey === `${workspace}\0${session.uuid}`}
               status={bridge.sessionRuntimeStatus(session.uuid)}
               onClick={() => openSidebarSession(workspace, session.uuid)}
-              onArchive={() => void prepareArchive(workspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
-              onRename={() => prepareRename(workspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+              onArchive={() => void prepareArchive(workspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'), { scope: 'current', transcriptPath: session.path })}
+              onRename={() => prepareRename(workspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'), { scope: 'current', transcriptPath: session.path })}
               onPin={() => invoke(() => bridge.setSessionPinned(pinInput(workspace, session.uuid, session.title || tr('remote_untitled')), !pinned))} />;
           })}
           {!normalizedSearch && globalSessions.length > 5 && <button type="button" onClick={() => setShowAllSessions((current) => ({ ...current, global: !current.global }))} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
@@ -1093,8 +1149,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                 active={!scheduled && visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
                 pinned={pinned} opening={opening} status={bridge.sessionRuntimeStatus(session.uuid)}
                   onClick={() => openSidebarSession(projectPath, session.uuid)}
-                onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
-                onRename={() => prepareRename(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+                onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'), { scope: 'current', transcriptPath: session.path })}
+                onRename={() => prepareRename(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'), { scope: 'current', transcriptPath: session.path })}
                 onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || tr('remote_untitled')), !pinned))}
                 reorderable={!opening && projectPath === projectId}
                 sortableIndex={projectSessionIndices.get(`${projectPath}\0${session.uuid}`) ?? 0} />;
@@ -1198,8 +1254,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                           opening={opening}
                           status={bridge.sessionRuntimeStatus(session.uuid)}
                           onClick={() => openSidebarSession(sessionPath, session.uuid)}
-                          onArchive={() => void prepareArchive(sessionPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
-                          onRename={() => prepareRename(sessionPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+                          onArchive={() => void prepareArchive(sessionPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'), { scope: 'current', transcriptPath: session.path })}
+                          onRename={() => prepareRename(sessionPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'), { scope: 'current', transcriptPath: session.path })}
                           onPin={() => invoke(() => bridge.setSessionPinned(pinInput(sessionPath, session.uuid, session.title || tr('remote_untitled')), !pinned))}
                           reorderable={!opening && sessionPath === projectPath}
                           sortableIndex={sortableIndex}
@@ -1278,8 +1334,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     </div>
     </div>
     </div>
-    {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} onRetry={() => void prepareArchive(archiveTarget.projectPath, archiveTarget.sessionId, archiveTarget.title)} />}
-    {renameTarget && <RenameSessionDialog title={renameTarget.title} busy={renamingSession} error={renameError} onClose={() => { if (!renamingSession) setRenameTarget(null); }} onConfirm={(title) => void confirmRename(title)} />}
+    {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} onRetry={() => void retryArchive()} />}
+    {renameTarget && <RenameSessionDialog title={renameTarget.title} busy={renamingSession || renameLoading} error={renameError} onClose={closeRename} onConfirm={(title) => void confirmRename(title)} />}
     </>
   );
 }

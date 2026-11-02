@@ -40,7 +40,7 @@ import type {
 import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
 import type { AudioConfigurationV4 } from '../../shared/generatedAudioConfiguration.js';
-import type { SessionCatalogRow, SessionCatalogScope, SessionOpenSelection, SessionWorkspaceOperation } from '../../shared/sessionWorkspace.js';
+import type { SessionCatalogRow, SessionCatalogScope, SessionOpenSelection, SessionMetadataSelection, SessionWorkspaceOperation } from '../../shared/sessionWorkspace.js';
 import type { ConversationSpace, ConversationSpacesSnapshot } from '../../shared/conversationSpaces.js';
 
 export interface WorkspaceFilePreview {
@@ -235,10 +235,12 @@ export interface LingxiApi {
   cancelSessionHandoff(requestId: string): Promise<void>;
   onConversationShown?(callback: (snapshot: BootstrapState) => void): Unsubscribe;
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace): Promise<BootstrapState>;
-  preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
-  archiveSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
-  touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
-  renameSession(projectPath: string, sessionId: string, title: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
+  releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
+  preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;
+  archiveSession(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<BootstrapState>;
+  touchSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  renameSession(projectPath: string, sessionId: string, title: string, selection: SessionMetadataSelection): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   clearSession(sessionId: string, name?: string): Promise<void>;
   sendPrompt(sessionId: string, text: string, images?: ImageRefDto[], turnId?: number, visualizationContext?: VisualizationReference): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;

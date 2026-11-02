@@ -40,7 +40,7 @@ import type { NotificationPreferences } from '../../shared/notificationPreferenc
 import type { HostPermissionRequest } from '../../shared/permission.js';
 import type { ScheduledContext, ScheduledScope } from '../../shared/scheduled.js';
 import type { ModelPickerVisibilitySettings } from '../../shared/settings.js';
-import type { SessionCatalogScope, SessionOpenSelection, SessionWorkspaceOperation } from '../../shared/sessionWorkspace.js';
+import type { SessionCatalogScope, SessionOpenSelection, SessionMetadataSelection, SessionWorkspaceOperation } from '../../shared/sessionWorkspace.js';
 import type { VoicePreferences } from '../../shared/voicePreferences.js';
 import type { VisualizationContextChip, VisualizationFollowup } from '../model/runItem.js';
 import type { ConversationState, UsageSnapshot } from './conversation.js';
@@ -214,10 +214,12 @@ export interface UseBridge {
   activateProject(path: string): Promise<WorkspaceMetadata | null>;
   removeProject(path: string): Promise<void>;
   updateSidebarPreferences(preferences: import('../../shared/settings').SidebarPreferences): Promise<void>;
-  preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
-  archiveSession(projectPath: string, sessionId: string): Promise<void>;
-  touchSession(projectPath: string, sessionId: string): Promise<void>;
-  renameSession(projectPath: string, sessionId: string, title: string): Promise<void>;
+  prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
+  releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
+  preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;
+  archiveSession(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<void>;
+  touchSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<void>;
+  renameSession(projectPath: string, sessionId: string, title: string, selection: SessionMetadataSelection): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace): Promise<SessionRef | false>;
   /** Show a chat of a Bot in the chat view; a new one when `sessionId` is absent. Rejects with the reason it could not start. */

@@ -45,10 +45,9 @@ import {
   rmdirSync,
   writeFileSync,
 } from 'node:fs';
-import { open } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
-import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-client';
+import type { AskUserQuestionRequestDto, CronJobDto, SessionRowDto } from '@lingxi/bridge-client';
 import type {
   BridgeRuntimeVersions,
   ConnectionState,
@@ -60,7 +59,7 @@ import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import type { SessionRuntime } from './bridge.js';
 import { isSessionId } from './sessionIdentity.js';
 import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectFolderSelection } from '../shared/projectCreation.js';
-import { CH_SESSION_WORKSPACE, sessionCatalogScope, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
+import { CH_SESSION_WORKSPACE, sessionCatalogScope, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionMetadataSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
 import { CH_CONVERSATION_SHOWN, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, type ConversationSpace, type ConversationSpacesSnapshot, type OwnedConversation } from '../shared/conversationSpaces.js';
 import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
@@ -139,6 +138,8 @@ export const CH_SESSION_ARCHIVE_PREFLIGHT = 'lingxi:session:archive-preflight';
 export const CH_SESSION_CLEAR = 'lingxi:session:clear';
 export const CH_SESSION_TOUCH = 'lingxi:session:touch';
 export const CH_SESSION_RENAME = 'lingxi:session:rename';
+export const CH_SESSION_METADATA_CAPTURE = 'lingxi:session:metadata-capture';
+export const CH_SESSION_METADATA_RELEASE = 'lingxi:session:metadata-release';
 export const CH_WORKSPACE_FILE_PREVIEW = 'lingxi:workspace-file:preview';
 
 export interface WorkspaceFilePreview {
@@ -512,7 +513,43 @@ async function resolveSavedConversationTranscriptRow(
   return row;
 }
 
+type ResolvedMetadataSource = { ref: SessionRef; row?: ProjectSessionCatalogRow; transcriptPath?: string };
+type MetadataAction = 'rename' | 'touch' | 'verify';
+type CapturedMetadataSource = {
+  requested: SessionRef;
+  source: ResolvedMetadataSource;
+  owner: OwnedConversation;
+  selection: SessionMetadataSelection;
+  sender?: WebContents;
+  runtime?: SessionRuntime;
+  apply(action: MetadataAction, title?: string): Promise<void>;
+  release(): void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+function metadataOpenSelection(value: unknown): SessionOpenSelection | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid session metadata selection.');
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some(key => !['scope', 'transcriptPath'].includes(key))
+    || input.scope === undefined || typeof input.transcriptPath !== 'string' || !isAbsolute(input.transcriptPath)
+    || input.transcriptPath.includes('\0') || input.transcriptPath.length > 32_768) throw new Error('Invalid session metadata selection.');
+  return { scope: sessionCatalogScope(input.scope), transcriptPath: input.transcriptPath };
+}
+
+function metadataSelection(value: unknown): SessionMetadataSelection {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Capture the session source before continuing.');
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some(key => !['scope', 'transcriptPath', 'sourceToken'].includes(key))
+    || !isSessionId(input.sourceToken)) throw new Error('Invalid session metadata selection.');
+  const selected = metadataOpenSelection({ scope: input.scope, transcriptPath: input.transcriptPath });
+  return { scope: selected!.scope, transcriptPath: selected!.transcriptPath!, sourceToken: input.sourceToken };
+}
+
 export class HostController {
+  private readonly metadataSources = new Map<string, CapturedMetadataSource>();
+  private readonly metadataSenderGenerations = new WeakMap<WebContents, number>();
+  private metadataLifecycleEpoch = 0;
   private git?: GitService;
   private offGit?: () => void;
   private remoteControlUi?: RemoteControlUi;
@@ -759,13 +796,14 @@ export class HostController {
     // A replacement renderer will subscribe afresh. Its predecessor cannot
     // keep the PTY paused waiting for acknowledgements that will never arrive.
     webContents.on?.('did-start-navigation', (_event, _url, inPlace, mainFrame) => {
-      if (mainFrame && !inPlace) { detachTerminals(); detachAudio(); }
+      if (mainFrame && !inPlace) { detachTerminals(); detachAudio(); this.releaseMetadataSourcesFor(webContents); }
     });
-    webContents.on?.('render-process-gone', () => { detachTerminals(); detachAudio(); });
+    webContents.on?.('render-process-gone', () => { detachTerminals(); detachAudio(); this.releaseMetadataSourcesFor(webContents); });
     webContents.once('destroyed', () => {
       this.targets.delete(webContents);
       detachTerminals();
       detachAudio();
+      this.releaseMetadataSourcesFor(webContents);
     });
   }
 
@@ -1232,19 +1270,40 @@ export class HostController {
       }
       throw new Error('Invalid scheduled action');
     });
-    this.ipc.handle(CH_SESSION_ARCHIVE_PREFLIGHT, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
+    this.ipc.handle(CH_SESSION_METADATA_CAPTURE, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, selection?: unknown) => {
+      this.assertSender(event);
+      const parsed = metadataOpenSelection(selection);
+      return this.prepareMetadataSource(this.archiveRef(projectPath, sessionId), parsed, event.sender);
+    });
+    this.ipc.handle(CH_SESSION_METADATA_RELEASE, (event: IpcMainInvokeEvent, selection: unknown) => {
+      this.assertSender(event);
+      const parsed = metadataSelection(selection);
+      const captured = this.metadataSources.get(parsed.sourceToken);
+      if (captured && captured.sender === event.sender && captured.selection.transcriptPath === parsed.transcriptPath
+        && captured.selection.scope === parsed.scope) this.releaseMetadataSource(parsed.sourceToken);
+    });
+    this.ipc.handle(CH_SESSION_ARCHIVE_PREFLIGHT, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, selection?: unknown) => {
+      this.assertSender(event);
+      const captured = await this.metadataSource(this.archiveRef(projectPath, sessionId), metadataSelection(selection), event.sender);
+      await captured.apply('verify');
+      const jobs = await this.sessionArchiveJobs(captured);
+      await captured.apply('verify');
+      return jobs;
+    });
+    this.ipc.handle(CH_SESSION_ARCHIVE, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, selection?: unknown) => {
       this.assertSender(event);
       const ref = this.archiveRef(projectPath, sessionId);
-      const source = await this.resolveSessionSource(ref);
-      await this.trustSessionSource(source.ref);
-      return this.bridge.withBackgroundSession(source.ref, source.row?.empty_session === true, source.row?.resume_model, async (runtime) => {
-        const jobs = await runtime.manageCron({ action: 'list' });
-        return jobs.filter((job) => job.automation?.targetSessionId === ref.sessionId || job.automation?.ownedSessionId === ref.sessionId);
-      }, source.transcriptPath);
-    });
-    this.ipc.handle(CH_SESSION_ARCHIVE, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
-      this.assertSender(event);
-      return this.enqueueNavigation(() => this.archiveSessionInternal(this.archiveRef(projectPath, sessionId)));
+      const captured = await this.metadataSource(ref, metadataSelection(selection), event.sender);
+      return this.enqueueNavigation(async () => {
+        try {
+          const result = await this.archiveSessionInternal(ref, captured);
+          this.releaseMetadataSource(captured.selection.sourceToken);
+          return result;
+        } catch (error) {
+          if (this.settings.isSessionArchived(captured.source.ref)) this.releaseMetadataSource(captured.selection.sourceToken);
+          throw error;
+        }
+      });
     });
     this.ipc.handle(CH_SESSION_CLEAR, async (event: IpcMainInvokeEvent, sessionId: unknown, name?: unknown) => {
       this.assertSender(event);
@@ -1256,35 +1315,33 @@ export class HostController {
       }
       await this.enqueueNavigation(() => this.clearActiveSession(sessionId, clearName || undefined));
     });
-    this.ipc.handle(CH_SESSION_TOUCH, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
+    this.ipc.handle(CH_SESSION_TOUCH, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, selection?: unknown) => {
       this.assertSender(event);
       return this.enqueueNavigation(async () => {
         const ref = this.archiveRef(projectPath, sessionId);
-        const source = await this.resolveSessionSource(ref, true);
-        if (!source.transcriptPath) throw new Error('session must be persisted before it can be reordered');
-        const file = await open(source.transcriptPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        const prepared = await this.prepareMetadataSource(ref, metadataOpenSelection(selection), event.sender);
+        const captured = await this.metadataSource(ref, prepared, event.sender);
         try {
-          if (!(await file.stat()).isFile()) throw new Error('session path is not a file');
-          const now = new Date();
-          await file.utimes(now, now);
-        } finally { await file.close(); }
-        this.sessionCatalog.invalidate(source.ref.projectPath);
-        if (source.ref.projectPath !== ref.projectPath) await this.loadProjectSessions(source.ref.projectPath);
-        const catalog = await this.loadProjectSessions(ref.projectPath);
-        return { projectPath: ref.projectPath, ...catalog };
+          await captured.apply('touch');
+          this.sessionCatalog.invalidate(captured.source.ref.projectPath);
+          if (captured.source.ref.projectPath !== ref.projectPath) await this.loadProjectSessions(captured.source.ref.projectPath);
+          return { projectPath: ref.projectPath, ...await this.loadProjectSessions(ref.projectPath) };
+        } finally { this.releaseMetadataSource(captured.selection.sourceToken!); }
       });
     });
-    this.ipc.handle(CH_SESSION_RENAME, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, title: unknown) => {
+    this.ipc.handle(CH_SESSION_RENAME, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, title: unknown, selection?: unknown) => {
       this.assertSender(event);
       return this.enqueueNavigation(async () => {
         const ref = this.archiveRef(projectPath, sessionId);
         if (typeof title !== 'string') throw new Error('invalid session title');
         const customTitle = title.trim();
-        if (!customTitle || customTitle.length > 200 || /[\u0000-\u001f\u007f]/.test(customTitle)) {
-          throw new Error('session title must be 1–200 printable characters');
-        }
-        const catalog = await this.persistSessionTitle(ref, customTitle);
-        return { projectPath: ref.projectPath, ...catalog };
+        if (!customTitle || customTitle.length > 200 || /[\u0000-\u001f\u007f]/.test(customTitle)) throw new Error('session title must be 1–200 printable characters');
+        const captured = await this.metadataSource(ref, metadataSelection(selection), event.sender);
+        await captured.apply('rename', customTitle);
+        this.releaseMetadataSource(captured.selection.sourceToken);
+        this.sessionCatalog.invalidate(captured.source.ref.projectPath);
+        if (captured.source.ref.projectPath !== ref.projectPath) await this.refreshSessionTitleCatalog(captured.source.ref, customTitle, captured);
+        return { projectPath: ref.projectPath, ...await this.refreshSessionTitleCatalog(ref, customTitle, captured) };
       });
     });
     this.ipc.handle(CH_PROJECT_REMOVE, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
@@ -2243,7 +2300,7 @@ export class HostController {
   }
 
   /** Resolve metadata ownership without changing the caller's sidebar scope. */
-  private async resolveSessionSource(ref: SessionRef, requirePersisted = false): Promise<{ ref: SessionRef; row?: ProjectSessionCatalogRow; transcriptPath?: string }> {
+  private async resolveSessionSource(ref: SessionRef, requirePersisted = false, selection?: SessionOpenSelection): Promise<ResolvedMetadataSource> {
     const project = this.requireProject(ref.projectPath);
     if (!isSessionId(ref.sessionId)) throw new Error('invalid session id');
     if (this.isProjectClosing(project)) throw new Error('project is closing');
@@ -2253,7 +2310,7 @@ export class HostController {
     // The manager keys runtimes by stable session UUID. A connected engine
     // already proves its own source directory, including an unpersisted chat.
     if (runtime?.connectionState.status === 'connected') {
-      const sourceRef = { projectPath: source, sessionId: ref.sessionId };
+      const sourceRef = { projectPath: source, sessionId: ref.sessionId, mode: runtime.sessionMode };
       if (!requirePersisted) return { ref: sourceRef };
       // Same-UUID copies can share a workspace. Only the writer's live target
       // identifies the selected copy, so metadata must never resolve it again.
@@ -2267,6 +2324,7 @@ export class HostController {
         throw new Error('session must have an authoritative transcript before its metadata can be changed');
       }
       if (!lstatSync(path).isFile()) throw new Error('session path is not a file');
+      if (selection?.transcriptPath && selection.transcriptPath !== path) throw new Error('The displayed transcript is not this chat owner. Refresh the session list.');
       return { ref: sourceRef, transcriptPath: path };
     }
     if (runtime) throw new Error('Reconnect this chat before changing its metadata.');
@@ -2275,10 +2333,18 @@ export class HostController {
     // metadata actions. A first discovery may use the displayed Current row.
     const lookupRef = { ...ref, projectPath: source };
     const savedSource = this.settings.getSessionTranscriptSelection(lookupRef);
-    const row = savedSource
+    if (selection?.transcriptPath && savedSource && savedSource.transcriptPath !== selection.transcriptPath) {
+      throw new Error('The displayed transcript differs from the saved owner. Refresh the session list.');
+    }
+    if (!savedSource && !selection?.transcriptPath) throw new Error('Choose an exact transcript before changing its metadata.');
+    const row = selection?.transcriptPath
+      ? await this.sessionCatalog.select(project, ref.sessionId, selection)
+      : savedSource
       ? await resolveSavedConversationTranscriptRow(this.settings, this.sessionCatalog, lookupRef)
-      : await this.sessionCatalog.select(source, ref.sessionId, { scope: 'current' });
+      : undefined;
     if (!row) throw new Error('session does not belong to this project');
+    const known = this.settings.conversationSpaces.findBySessionId(ref.sessionId);
+    if (known && known.mode !== row.mode) throw new Error('The transcript mode differs from its fixed owner.');
     if (row.workspace_path) {
       try { source = canonicalWorkspace(row.workspace_path); }
       catch (error) {
@@ -2289,7 +2355,95 @@ export class HostController {
       }
     }
     if (this.isProjectClosing(source)) throw new Error('project is closing');
-    return { ref: { projectPath: source, sessionId: ref.sessionId }, row, transcriptPath: row.path };
+    return { ref: { projectPath: source, sessionId: ref.sessionId, mode: row.mode }, row, transcriptPath: row.path };
+  }
+
+  private releaseMetadataSource(token: string): void {
+    const captured = this.metadataSources.get(token);
+    if (!captured) return;
+    this.metadataSources.delete(token);
+    clearTimeout(captured.timer);
+    captured.release();
+  }
+
+  private releaseMetadataSourcesFor(sender: WebContents): void {
+    this.metadataSenderGenerations.set(sender, (this.metadataSenderGenerations.get(sender) ?? 0) + 1);
+    for (const [token, captured] of this.metadataSources) {
+      if (captured.sender === sender) this.releaseMetadataSource(token);
+    }
+  }
+
+  private async prepareMetadataSource(ref: SessionRef, selection?: SessionOpenSelection, sender?: WebContents): Promise<SessionMetadataSelection> {
+    const lifecycleEpoch = this.metadataLifecycleEpoch;
+    const senderGeneration = sender ? this.metadataSenderGenerations.get(sender) ?? 0 : undefined;
+    const source = await this.resolveSessionSource(ref, true, selection);
+    const path = source.transcriptPath;
+    const runtime = this.bridge.get(ref.sessionId);
+    const mode = source.ref.mode ?? source.row?.mode ?? runtime?.sessionMode;
+    if (!path || (mode !== 'chat' && mode !== 'code')) throw new Error('The metadata source is unavailable.');
+    const existing = this.settings.conversationSpaces.findBySessionId(ref.sessionId);
+    if (existing && (existing.mode !== mode || existing.projectPath !== source.ref.projectPath)) throw new Error('The session owner changed. Reopen this action.');
+    const owner: OwnedConversation = existing ?? { ...source.ref, mode,
+      projectId: this.settings.hasProject(ref.projectPath) ? ref.projectPath : null };
+    const assertOwner = () => {
+      const current = this.settings.conversationSpaces.findBySessionId(ref.sessionId);
+      if ((!current && existing) || (current && (current.mode !== owner.mode || current.projectPath !== owner.projectPath
+        || current.projectId !== owner.projectId))) throw new Error('The session owner changed. Reopen this action.');
+    };
+    if (runtime && (runtime.projectPath !== source.ref.projectPath || runtime.sessionMode !== mode
+      || runtime.connectionState.status !== 'connected')) throw new Error('The metadata runtime owner changed during capture.');
+    const releaseLease = runtime ? this.bridge.retainBackgroundSession(source.ref) : () => {};
+    let released = false;
+    let inFlight = 0;
+    const release = () => { if (!released) { released = true; if (!inFlight) releaseLease(); } };
+    try {
+      const apply = runtime
+        ? await runtime.captureSessionMetadataOwner(path, mode)
+        : await (async () => {
+          const receipt = await this.sessionCatalog.captureMetadataSource(source.ref.projectPath, ref.sessionId, path, mode);
+          return async (action: MetadataAction, title?: string) => {
+            if (this.bridge.get(ref.sessionId)) throw new Error('The metadata source acquired another runtime. Reopen this action.');
+            await this.sessionCatalog.mutateMetadataSource(source.ref.projectPath, receipt, action, title);
+          };
+        })();
+      if (this.metadataLifecycleEpoch !== lifecycleEpoch || this.bridge.get(ref.sessionId) !== runtime || (sender && (!this.targets.has(sender) || sender.isDestroyed()
+        || (this.metadataSenderGenerations.get(sender) ?? 0) !== senderGeneration))) throw new Error('The metadata owner changed during capture.');
+      assertOwner();
+      while (this.metadataSources.size >= 16) this.releaseMetadataSource(this.metadataSources.keys().next().value!);
+      const token = randomUUID();
+      const capturedSelection = { scope: selection?.scope ?? 'current', transcriptPath: path, sourceToken: token } satisfies SessionMetadataSelection;
+      const timer = setTimeout(() => this.releaseMetadataSource(token), 5 * 60_000);
+      timer.unref();
+      this.metadataSources.set(token, { requested: { ...ref }, source, owner, selection: capturedSelection, sender, runtime,
+        apply: async (action, title) => {
+          if (released || (runtime && (this.bridge.get(ref.sessionId) !== runtime || runtime.projectPath !== source.ref.projectPath
+            || runtime.sessionMode !== mode))) throw new Error('The captured metadata owner was released or replaced.');
+          assertOwner();
+          inFlight++;
+          try {
+            await apply(action, title);
+            try {
+              if (action === 'verify' && released) throw new Error('The captured metadata owner was released.');
+              if (this.bridge.get(ref.sessionId) !== runtime || (runtime && (runtime.projectPath !== source.ref.projectPath
+                || runtime.sessionMode !== mode))) throw new Error('The session runtime owner changed.');
+              assertOwner();
+            } catch (error) {
+              const detail = error instanceof Error ? error.message : String(error);
+              throw new Error(action === 'verify' ? detail : `The metadata may have been applied, but its owner changed: ${detail}`);
+            }
+          }
+          finally { if (!--inFlight && released) releaseLease(); }
+        }, release, timer });
+      return capturedSelection;
+    } catch (error) { release(); throw error; }
+  }
+
+  private async metadataSource(ref: SessionRef, prepared: SessionMetadataSelection, sender?: WebContents): Promise<CapturedMetadataSource> {
+    const captured = this.metadataSources.get(prepared.sourceToken);
+    if (!captured || captured.sender !== sender || captured.requested.projectPath !== ref.projectPath
+      || captured.requested.sessionId !== ref.sessionId || captured.selection.transcriptPath !== prepared.transcriptPath
+      || captured.selection.scope !== prepared.scope) throw new Error('The metadata selection expired or changed. Reopen this action.');
+    return captured;
   }
 
   private async trustSessionSource(ref: SessionRef): Promise<void> {
@@ -2553,36 +2707,67 @@ export class HostController {
     return { projectPath: project, sessionId };
   }
 
-  private async archiveSessionInternal(ref: SessionRef): Promise<BootstrapState> {
+  private archiveOwner(captured: CapturedMetadataSource): OwnedConversation {
+    const owner = captured.owner;
+    const current = this.settings.conversationSpaces.findBySessionId(owner.sessionId);
+    if (current && (current.mode !== owner.mode || current.projectPath !== owner.projectPath
+      || current.projectId !== owner.projectId)) throw new Error('The session owner changed. Reopen this action.');
+    return owner;
+  }
+
+  private async sessionArchiveJobs(captured: CapturedMetadataSource): Promise<CronJobDto[]> {
+    if (!this.scheduled) throw new Error('Scheduled tasks are unavailable. Try again when they are ready.');
+    const owner = this.archiveOwner(captured);
+    const scope = owner.projectId ?? 'global';
+    const path = captured.source.transcriptPath;
+    if (!path) throw new Error('The session source is unavailable.');
+    const sameId = (value: string | undefined) => value?.replace(/^sess:/i, '').toLowerCase() === owner.sessionId.toLowerCase();
+    const jobs = await this.scheduled.manage(scope, { action: 'list' }, owner.mode);
+    return jobs.filter(({ automation }) => {
+      if (!automation || automation.status === 'completed') return false;
+      if (automation.runMode === 'selected_session') return sameId(automation.targetSessionId)
+        && automation.targetSessionTranscriptPath === path && automation.targetSessionMode === owner.mode
+        && automation.targetSessionScopeKey === scope;
+      if (automation.runMode === 'task_session') return sameId(automation.ownedSessionId)
+        && automation.ownedSessionTranscriptPath === path && automation.ownedSessionMode === owner.mode
+        && automation.ownedSessionScopeKey === scope;
+      return false;
+    });
+  }
+
+  private async archiveSessionInternal(ref: SessionRef, captured: CapturedMetadataSource): Promise<BootstrapState> {
     const generation = this.navigationGeneration;
-    const source = await this.resolveSessionSource(ref);
-    await this.trustSessionSource(source.ref);
+    const source = captured.source;
     const sourceRef = source.ref;
-    const known = this.settings.conversationSpaces.find(sourceRef) ?? this.settings.conversationSpaces.find(ref);
-    const mode = known?.mode ?? source.row?.mode ?? this.bridge.get(ref.sessionId)?.sessionMode;
-    if (!mode) throw new Error('The session mode is unavailable.');
-    const owner: OwnedConversation = known ?? { ...sourceRef, mode,
-      projectId: this.settings.hasProject(ref.projectPath) ? ref.projectPath : null };
-    if (!known) this.settings.conversationSpaces.register(owner);
-    return this.bridge.withBackgroundSession(sourceRef, source.row?.empty_session === true, source.row?.resume_model, async (runtime) => {
-      const release = runtime.beginArchive();
+    const owner = this.archiveOwner(captured);
+    const known = this.settings.conversationSpaces.findBySessionId(ref.sessionId);
+    const scope = owner.projectId ?? 'global';
+    const runtime = captured.runtime;
+    const release = runtime?.beginArchive() ?? (() => {});
       let removed = 0;
       try {
-        const jobs = (await runtime.manageCron({ action: 'list' })).filter((job) => job.automation?.targetSessionId === ref.sessionId || job.automation?.ownedSessionId === ref.sessionId);
+        await captured.apply('verify');
+        await this.trustSessionSource(sourceRef);
+        await captured.apply('verify');
+        const jobs = await this.sessionArchiveJobs(captured);
         for (const job of jobs) {
-          if (job.automation && job.automation.status !== 'completed') await runtime.manageCron({ action: 'pause', id: job.id, automation: { ...job.automation, status: 'paused', statusReason: 'Target chat was archived. Select another chat to resume.' } });
+          await captured.apply('verify');
+          if (job.automation) await this.scheduled!.manage(scope, { action: 'pause', id: job.id, automation: { ...job.automation, status: 'paused', statusReason: 'Target chat was archived. Select another chat to resume.' } }, owner.mode);
           removed++;
         }
+        await captured.apply('verify');
         const active = this.settings.getPublic().activeSession?.sessionId === ref.sessionId;
-        const title = source.row?.title ?? this.catalogs.get(sourceRef.projectPath)?.sessions.find((item) => item.uuid === ref.sessionId)?.title
-          ?? this.catalogs.get(ref.projectPath)?.sessions.find((item) => item.uuid === ref.sessionId)?.title;
-        if (runtime.hasActiveWork) throw new Error('Wait for active work and pending interactions before archiving this chat.');
+        const catalogTitle = (projectPath: string) => this.catalogs.get(projectPath)?.sessions.find((item) =>
+          item.uuid.toLowerCase() === ref.sessionId.toLowerCase() && item.path === source.transcriptPath && item.mode === owner.mode)?.title;
+        const title = source.row?.title ?? catalogTitle(sourceRef.projectPath) ?? catalogTitle(ref.projectPath);
+        if (runtime?.hasActiveWork) throw new Error('Wait for active work and pending interactions before archiving this chat.');
+        if (!known) this.settings.conversationSpaces.register(owner);
         this.settings.setSessionArchived(sourceRef, true, title);
         const selected = this.settings.conversationSpaces.snapshot().navigation[owner.mode].session;
         if (selected?.sessionId === owner.sessionId) this.settings.conversationSpaces.setNavigation(owner.mode, owner.projectId);
         this.remoteControlUi?.sessionsChanged();
         await this.terminals?.closeScope(sourceRef);
-        await this.bridge.closeSession(sourceRef);
+        if (runtime && this.bridge.get(ref.sessionId) === runtime) await this.bridge.closeSession(sourceRef);
         this.sessionCatalog.invalidate(sourceRef.projectPath);
         await this.loadProjectSessions(sourceRef.projectPath);
         if (sourceRef.projectPath !== ref.projectPath) await this.loadProjectSessions(ref.projectPath);
@@ -2603,7 +2788,6 @@ export class HostController {
         if (!this.settings.isSessionArchived(sourceRef)) throw new Error(`Chat was not archived. ${removed ? `${removed} scheduled task(s) were already paused. ` : ''}${error instanceof Error ? error.message : String(error)}`);
         throw new Error(`Chat was archived, but opening the next chat failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally { release(); }
-    }, source.transcriptPath);
   }
 
   private hasRetainedProjectForDirectory(project: string): boolean {
@@ -2765,26 +2949,17 @@ export class HostController {
   }
 
   private async persistSessionTitle(ref: SessionRef, customTitle: string): Promise<ProjectSessionCatalogState> {
-    const source = await this.resolveSessionSource(ref, true);
-    if (!source.transcriptPath) throw new Error('session must be persisted before it can be renamed');
-    // Renaming is persisted metadata, not a model operation. Starting or
-    // resuming an engine here can wait on credentials or an active turn.
-    // Use the same append-only side record as JsonlWriter::append_custom_title;
-    // its metadata backstop adopts the newest on-disk title on later writes.
-    const file = await open(source.transcriptPath, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
+    const selection = await this.prepareMetadataSource(ref);
+    const captured = await this.metadataSource(ref, selection);
     try {
-      if (!(await file.stat()).isFile()) throw new Error('session path is not a file');
-      await file.writeFile(`${JSON.stringify({ type: 'custom-title', customTitle, sessionId: ref.sessionId })}\n`);
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    this.sessionCatalog.invalidate(source.ref.projectPath);
-    if (source.ref.projectPath !== ref.projectPath) await this.refreshSessionTitleCatalog(source.ref, customTitle);
-    return this.refreshSessionTitleCatalog(ref, customTitle);
+      await captured.apply('rename', customTitle);
+      this.sessionCatalog.invalidate(captured.source.ref.projectPath);
+      if (captured.source.ref.projectPath !== ref.projectPath) await this.refreshSessionTitleCatalog(captured.source.ref, customTitle, captured);
+      return this.refreshSessionTitleCatalog(ref, customTitle, captured);
+    } finally { this.releaseMetadataSource(captured.selection.sourceToken!); }
   }
 
-  private async refreshSessionTitleCatalog(ref: SessionRef, customTitle: string): Promise<ProjectSessionCatalogState> {
+  private async refreshSessionTitleCatalog(ref: SessionRef, customTitle: string, source: CapturedMetadataSource): Promise<ProjectSessionCatalogState> {
     const previousCatalog = this.catalogs.get(ref.projectPath);
     const catalog = await this.loadProjectSessions(ref.projectPath);
     if (catalog.error && previousCatalog) {
@@ -2793,6 +2968,7 @@ export class HostController {
       // retryable error (and a duplicate custom-title record).
       const fallback = {
         sessions: previousCatalog.sessions.map((session) => session.uuid === ref.sessionId
+          && session.path === source.selection.transcriptPath && session.mode === source.owner.mode
           ? { ...session, title: customTitle }
           : session),
         error: catalog.error,
@@ -2851,6 +3027,8 @@ export class HostController {
   }
 
   dispose(): void {
+    this.metadataLifecycleEpoch++;
+    for (const token of this.metadataSources.keys()) this.releaseMetadataSource(token);
     this.realtimeAudioStartToken = undefined;
     for (const lease of this.audioFlowLeases.values()) lease.release();
     this.audioFlowLeases.clear();
@@ -2885,6 +3063,7 @@ export class HostController {
       CH_PROJECT_FOLDER_PICK, CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL,
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
+      CH_SESSION_METADATA_CAPTURE, CH_SESSION_METADATA_RELEASE, CH_SESSION_TOUCH, CH_SESSION_RENAME,
       CH_SESSION_WORKSPACE, CH_NATIVE_AUDIO_FLOW_LEASE,
       CH_WORKSPACE_FILES_SEARCH, CH_COMPUTER_SETTINGS,
       CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, 'lingxi:provider-accounts:routing:get', 'lingxi:provider-settings',

@@ -101,7 +101,7 @@ import type {
 import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
 import type { AudioConfigurationV4 } from '../shared/generatedAudioConfiguration.js';
-import { CH_SESSION_WORKSPACE, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
+import { CH_SESSION_WORKSPACE, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionMetadataSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
 import { CH_CONVERSATION_SHOWN, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, type ConversationSpace, type ConversationSpacesSnapshot } from '../shared/conversationSpaces.js';
 import type { PluginSecretCleanupResult, PluginSecretMetadata, WorkspaceFilePreview } from '../main/host.js';
 
@@ -161,6 +161,8 @@ const CH_SESSION_ARCHIVE_PREFLIGHT = 'lingxi:session:archive-preflight';
 const CH_SESSION_CLEAR = 'lingxi:session:clear';
 const CH_SESSION_TOUCH = 'lingxi:session:touch';
 const CH_SESSION_RENAME = 'lingxi:session:rename';
+const CH_SESSION_METADATA_CAPTURE = 'lingxi:session:metadata-capture';
+const CH_SESSION_METADATA_RELEASE = 'lingxi:session:metadata-release';
 const CH_WORKSPACE_FILE_PREVIEW = 'lingxi:workspace-file:preview';
 
 export type ConnectionState =
@@ -321,10 +323,12 @@ export interface LingxiApi {
   cancelSessionHandoff(requestId: string): Promise<void>;
   onConversationShown(callback: (snapshot: BootstrapState) => void): Unsubscribe;
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: ConversationSpace): Promise<BootstrapState>;
-  preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
-  archiveSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
-  touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
-  renameSession(projectPath: string, sessionId: string, title: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
+  releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
+  preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;
+  archiveSession(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<BootstrapState>;
+  touchSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  renameSession(projectPath: string, sessionId: string, title: string, selection: SessionMetadataSelection): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   clearSession(sessionId: string, name?: string): Promise<void>;
   sendPrompt(sessionId: string, text: string, images?: ImageRefDto[], turnId?: number, visualizationContext?: VisualizationReference): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;
@@ -581,10 +585,12 @@ const api: LingxiApi = {
     : selection === undefined
     ? ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId)
     : ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId, selection)) as Promise<BootstrapState>,
-  preflightSessionArchive: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_ARCHIVE_PREFLIGHT, projectPath, sessionId) as Promise<CronJobDto[]>,
-  archiveSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_ARCHIVE, projectPath, sessionId) as Promise<BootstrapState>,
-  touchSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_TOUCH, projectPath, sessionId) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
-  renameSession: (projectPath, sessionId, title) => ipcRenderer.invoke(CH_SESSION_RENAME, projectPath, sessionId, title) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
+  prepareSessionMetadata: (projectPath, sessionId, selection) => ipcRenderer.invoke(CH_SESSION_METADATA_CAPTURE, projectPath, sessionId, selection) as Promise<SessionMetadataSelection>,
+  releaseSessionMetadata: (selection) => ipcRenderer.invoke(CH_SESSION_METADATA_RELEASE, selection) as Promise<void>,
+  preflightSessionArchive: (projectPath, sessionId, selection) => ipcRenderer.invoke(CH_SESSION_ARCHIVE_PREFLIGHT, projectPath, sessionId, selection) as Promise<CronJobDto[]>,
+  archiveSession: (projectPath, sessionId, selection) => ipcRenderer.invoke(CH_SESSION_ARCHIVE, projectPath, sessionId, selection) as Promise<BootstrapState>,
+  touchSession: (projectPath, sessionId, selection) => ipcRenderer.invoke(CH_SESSION_TOUCH, projectPath, sessionId, selection) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
+  renameSession: (projectPath, sessionId, title, selection) => ipcRenderer.invoke(CH_SESSION_RENAME, projectPath, sessionId, title, selection) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
   clearSession: (sessionId, name) => ipcRenderer.invoke(CH_SESSION_CLEAR, sessionId, name) as Promise<void>,
   sendPrompt: (sessionId, text, images, turnId, visualizationContext) => ipcRenderer.invoke(CH_SEND_PROMPT, sessionId, text, images ?? [], turnId, visualizationContext) as Promise<void>,
   approve: (sessionId, requestId, response) => ipcRenderer.invoke(CH_APPROVE, sessionId, requestId, response) as Promise<void>,

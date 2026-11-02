@@ -8,6 +8,12 @@ export interface SessionOpenSelection {
   transcriptPath?: string;
 }
 
+/** A metadata dialog retains its first host-owned capture through confirmation. */
+export interface SessionMetadataSelection extends SessionOpenSelection {
+  transcriptPath: string;
+  sourceToken: string;
+}
+
 /** Claude Code session discovery scopes, independent of sidebar project selection. */
 export type SessionCatalogScope = 'current' | 'repository' | 'all';
 

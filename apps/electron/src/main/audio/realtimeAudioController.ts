@@ -124,7 +124,12 @@ export class RealtimeAudioController {
       case 'usage':
         {
           const context = parseAudioUsageContext(event.usageContext);
-          if (this.usageContext && context && context.operationId === this.operationId) this.options.recordUsage?.({ ...this.usageContext, ...context, ...(typeof event.turnId === 'string' ? { turnId: event.turnId } : {}) }, event);
+          if (this.usageContext && context && context.operationId === this.operationId) {
+            // The preflight route can differ from the account selected by the
+            // actual realtime operation. Only its usage event attests scope.
+            const { accountScope: _preflightScope, ...admission } = this.usageContext;
+            this.options.recordUsage?.({ ...admission, ...context, ...(typeof event.turnId === 'string' ? { turnId: event.turnId } : {}) }, event);
+          }
         }
         break;
       case 'session_ready':

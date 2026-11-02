@@ -102,6 +102,7 @@ import type {
   HostTurnOptions,
   HostTurnResult,
   InteractionRecord,
+  PromptAdmission,
   PromptJournalEntry,
   PromptSource,
   RemoteObservation,
@@ -402,7 +403,7 @@ export class SessionRuntime {
     }
   }
 
-  private switchModel(model: string, persist = true, slashCommand?: Extract<ClientCommand, { type: 'run_slash_command' }>): Promise<void> {
+  private switchModel(model: string, persist = true, slashCommand?: Extract<ClientCommand, { type: 'run_slash_command' }>, authorize?: () => void): Promise<void> {
     if (this.pendingModelSwitch) return Promise.reject(new Error('A model switch is already in progress.'));
     const generation = this.generation;
     const client = this.requireClient();
@@ -439,6 +440,7 @@ export class SessionRuntime {
           throw new Error('Model switch was interrupted.');
         }
         if (slashCommand) this.assertModeReadyForSlashCommand();
+        authorize?.();
         pending.sent = true;
         if (slashCommand) this.sendTrackedSlashCommand(client, slashCommand);
         else client.sendCommand({ type: 'set_model', model });
@@ -2975,13 +2977,14 @@ export class SessionRuntime {
     this.audioCleanupGenerations.delete(generation);
   }
 
-  sendPrompt(text: unknown, images: unknown = [], turnId?: unknown, visualizationContext?: unknown, source?: PromptSource): void | Promise<void> {
+  sendPrompt(text: unknown, images: unknown = [], turnId?: unknown, visualizationContext?: unknown, source?: PromptSource, admission?: PromptAdmission): void | Promise<void> {
     const id = validateOptionalTurnId(turnId);
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
     if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
     if (this.ownedSessionResumeRequired) throw new Error('Resume this chat before sending another prompt.');
     if (this.draftModeRestorationRequired) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
     if (this.archiving) throw new Error('This chat is being archived.');
+    if (admission?.requireIdleFor && this.turnActive) throw new Error(`${admission.requireIdleFor} cannot be sent while a turn is running`);
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
     const context = visualizationContext === undefined || visualizationContext === null
@@ -2999,14 +3002,14 @@ export class SessionRuntime {
           if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
           if (this.selectedModelReference) await this.ensureModelProviderCredential(this.selectedModelReference);
           if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) throw new Error('Prompt credential loading was interrupted.');
-          this.sendPreparedPrompt(prompt, validatedImages, id, context, source);
+          this.sendPreparedPrompt(prompt, validatedImages, id, context, source, admission, token);
         } finally {
           this.pendingPromptHydrations.delete(token);
           this.notifyActivityChanged();
         }
       })();
     }
-    this.sendPreparedPrompt(prompt, validatedImages, id, context, source);
+    this.sendPreparedPrompt(prompt, validatedImages, id, context, source, admission);
   }
 
   private sendPreparedPrompt(
@@ -3015,8 +3018,18 @@ export class SessionRuntime {
     turnId?: number,
     visualizationContext?: VisualizationReference,
     source?: PromptSource,
+    admission?: PromptAdmission,
+    hydrationToken?: symbol,
   ): void {
     if (this.draftModeRestorationRequired) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
+    // Credential hydration may yield after the gateway's admission check.
+    // Verify the owner and competing turns immediately before the synchronous
+    // bridge send, excluding only this prompt's own hydration lease.
+    admission?.authorize?.();
+    if (admission?.requireIdleFor && (this.activeTurn || this.pendingModelSwitch !== undefined
+      || [...this.pendingPromptHydrations.keys()].some(token => token !== hydrationToken))) {
+      throw new Error(`${admission.requireIdleFor} cannot be sent while a turn is running`);
+    }
     const needsIdentityCommit = !this.sessionIdentityCommitted;
     const traceContext = this.telemetryRevoked ? undefined : this.telemetry?.beginTurn(turnId);
     try {
@@ -3260,7 +3273,7 @@ export class SessionRuntime {
    * never reaches the engine; the renderer's mode display reads the engine's
    * actual (unchanged) mode, so nothing to revert.
    */
-  async dispatchCommand(command: unknown, source?: PromptSource): Promise<void> {
+  async dispatchCommand(command: unknown, source?: PromptSource, authorize?: () => void): Promise<void> {
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
     if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
     if (this.ownedSessionResumeRequired) throw new Error('Resume this chat before sending another command.');
@@ -3340,6 +3353,7 @@ export class SessionRuntime {
           return;
         }
         this.assertModeReadyForSlashCommand();
+        authorize?.();
         this.sendTrackedSlashCommand(client, { ...validated, raw: pinnedRaw });
         this.commitFusionHistory(validated);
         this.journalSlashCommand(validated, source);
@@ -3352,7 +3366,7 @@ export class SessionRuntime {
     // Preserve slash hook provenance and confirm the actual model before saving.
     if (validated.type === 'run_slash_command' && this.opts.onModelSelected) {
       const model = /^\/model\s+([\s\S]+)$/.exec(validated.raw.trim())?.[1]?.trim();
-      if (model) return this.switchModel(model, true, validated);
+      if (model) return this.switchModel(model, true, validated, authorize);
     }
     if (validated.type === 'set_permission_mode' && validated.mode === 'bypassPermissions') {
       const accepted = (await this.opts.confirmBypassPermissions?.()) ?? false;
@@ -3370,6 +3384,7 @@ export class SessionRuntime {
       return this.applyFastMode(validated.enabled, true);
     }
     if (validated.type === 'run_slash_command') this.assertModeReadyForSlashCommand();
+    authorize?.();
     const client = this.requireClient();
     if (validated.type === 'run_slash_command') this.sendTrackedSlashCommand(client, validated);
     else client.sendCommand(validated);

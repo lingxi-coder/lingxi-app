@@ -14,7 +14,7 @@ function setup(options: {
 } = {}) {
   let event: ((eventJson: string) => void) | undefined;
   let device: ((event: NativeAudioEvent) => void) | undefined;
-  const inputs: any[] = []; const starts: any[] = []; const states: NativeRealtimeAudioState[] = [];
+  const inputs: any[] = []; const starts: any[] = []; const states: NativeRealtimeAudioState[] = []; const usage: any[] = [];
   const playback = deferred<{ type: 'playback_completed'; duration_ms: number }>();
   const runtime: RealtimeAudioRuntime = { sessionId: 's', realtimeAudioSupported: true,
     onRealtimeAudioEvent: (callback) => { event = callback; return () => { event = undefined; }; },
@@ -26,8 +26,8 @@ function setup(options: {
     startRealtimeCapture: async () => { captureCount++; return options.startCapture ? options.startCapture() : { type: 'recording_started', handle: 'h' }; },
     stopRealtimeCapture: async () => { stopCount++; return options.stopCapture?.(); },
     playRealtimeAudio: async (_session, pcm) => { played.push(pcm); return playback.promise; },
-  }, inputCloseObserverMs: options.inputCloseObserverMs, retainRuntime: options.retainRuntime });
-  return { controller, runtime, inputs, starts, states, played, playback, send: (item: unknown) => event?.(JSON.stringify({ operationId: starts.at(-1)?.operationId, ...(item as object) })), capture: (item: NativeAudioEvent) => device?.(item), setCurrent: (value?: RealtimeAudioRuntime) => { current = value; }, captures: () => captureCount, stops: () => stopCount };
+  }, inputCloseObserverMs: options.inputCloseObserverMs, retainRuntime: options.retainRuntime, recordUsage: (metadata, value) => usage.push({ metadata, value }) });
+  return { controller, runtime, inputs, starts, states, played, playback, usage, send: (item: unknown) => event?.(JSON.stringify({ operationId: starts.at(-1)?.operationId, ...(item as object) })), capture: (item: NativeAudioEvent) => device?.(item), setCurrent: (value?: RealtimeAudioRuntime) => { current = value; }, captures: () => captureCount, stops: () => stopCount };
 }
 const ready = { type: 'session_ready', model: 'realtime', inputFormat: { encoding: 'pcm16', sampleRateHz: 24_000, channels: 1 }, outputFormat: { encoding: 'pcm16', sampleRateHz: 24_000, channels: 1 }, capabilities: {} };
 const delta = { type: 'audio_delta', audioBase64: 'AAA=', sampleRateHz: 24_000, channels: 1, encoding: 'pcm16', itemId: 'item' };
@@ -61,6 +61,23 @@ test('navigation keeps realtime audio on its captured owner until explicitly sto
   assert.equal(f.captures(), 2);
   await f.controller.stop(); assert.equal(released, 1);
   assert.equal(f.states.at(-1)?.sessionId, 's');
+});
+
+test('realtime usage records only the operation-reported account across navigation', async () => {
+  const f = setup();
+  await f.controller.start(audioConfigurationDefaults(), { kind: 'realtime', configurationRevision: 4,
+    profileId: 'logical-pool', providerId: 'openai', accountScope: 'profile:guessed', sessionId: 's' });
+  f.setCurrent({ ...f.runtime, sessionId: 'other' });
+  const operationId = f.starts[0].operationId;
+  f.send({ type: 'usage', usageContext: { operationId, profileId: 'account.selected', providerId: 'openai', modelId: 'm' } });
+  assert.equal(f.usage[0].metadata.sessionId, 's');
+  assert.equal(f.usage[0].metadata.profileId, 'account.selected');
+  assert.equal('accountScope' in f.usage[0].metadata, false, 'a preflight guess cannot become the executed account');
+  const accountScope = '{"store_scope":"host","account_id":"selected","identity_generation":2}';
+  f.send({ type: 'usage', usageContext: { operationId, profileId: 'account.selected', providerId: 'openai', modelId: 'm', accountScope } });
+  assert.equal(f.usage[1].metadata.accountScope, accountScope);
+  assert.equal(f.usage[1].metadata.sessionId, 's');
+  await f.controller.stop();
 });
 
 test('a timed-out capture close retains its runtime until the exact device close finishes', async () => {

@@ -232,6 +232,12 @@ export interface PromptSource {
   fromBotName?: string;
 }
 
+/** Recheck remote prompt ownership and attachment admission before the bridge send. */
+export interface PromptAdmission {
+  requireIdleFor?: 'images' | 'files';
+  authorize?: () => void;
+}
+
 /** How {@link SessionRuntime.runHostTurn} is asked to run a turn. */
 export interface HostTurnOptions {
   /** Who the prompt shows as coming from; the host's own by default. */

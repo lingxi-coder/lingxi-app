@@ -50,8 +50,12 @@ class TestWindow extends EventEmitter {
 async function loadHost(mockElectron: unknown): Promise<any> {
   const result = await bundledHost;
   const module = { exports: {} };
-  runInNewContext(result.outputFiles[0]!.text, { module, exports: module.exports, require: (id: string) => id === 'electron' ? mockElectron : require(id),
-    Buffer, process, console, structuredClone, URL, Response, Headers, fetch, AbortController, setTimeout, clearTimeout });
+  const sandbox: Record<string, unknown> = { module, exports: module.exports, require: (id: string) => id === 'electron' ? mockElectron : require(id),
+    Buffer, process, console, structuredClone, URL, Response, Request, Headers, fetch, crypto: globalThis.crypto,
+    ReadableStream, WritableStream, TransformStream, TextEncoder, TextDecoder, Blob, FormData, Event, EventTarget, MessageEvent, DOMException,
+    AbortController, AbortSignal, setTimeout, clearTimeout };
+  sandbox.global = sandbox;
+  runInNewContext(result.outputFiles[0]!.text, sandbox);
   return (module.exports as any).LocalAppHost;
 }
 async function fixture(t: { after(fn: () => Promise<void>): void }) {

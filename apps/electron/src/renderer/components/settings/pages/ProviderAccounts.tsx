@@ -115,7 +115,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
     <header className="pa-section-heading">
       <div><h3>{tr('provider_accounts_accounts')} {snapshot && <span className="pa-count">{accounts.length}</span>}</h3><p>{tr('provider_accounts_priority_desc')}</p></div>
       <div className="pa-toolbar">
-        <button className="pa-icon-button" aria-label={tr('provider_accounts_refresh')} title={tr('provider_accounts_refresh')} disabled={busy} onClick={() => void api.snapshot().then(setSnapshot).catch(() => setError(tr('provider_accounts_status_error')))}><Icon name="refresh" size={16} /></button>
+        <button className="pa-icon-button" aria-label={tr('provider_accounts_refresh')} disabled={busy} onClick={() => void api.snapshot().then(setSnapshot).catch(() => setError(tr('provider_accounts_status_error')))}><Icon name="refresh" size={16} /></button>
         {provider.available && <button ref={addButton} className="pa-button pa-primary" disabled={locked} onClick={() => openForm()}><Icon name="plus" size={15} />{tr('provider_accounts_add')}</button>}
       </div>
     </header>

@@ -1586,7 +1586,7 @@ export class HostController {
         const voice = configuration.conversation.voice;
         if (voice && (voice.source !== 'provider' || voice.profileId !== capability.profileId || (voice.modelId ?? null) !== (configuration.conversation.cloud.modelId ?? capability.defaultModelId ?? null))) throw new Error('实时音色属于其他 profile 或音频模型，请重新选择。');
         const context = runtime.audioSessionContext;
-        await this.realtimeAudioController.start(configuration, capability.profileId && capability.providerId ? { kind: 'realtime', configurationRevision: revision, profileId: capability.profileId, providerId: capability.providerId, sessionId: context?.sessionId, accountScope: configuration.conversation.cloud.binding === 'explicit_profile' ? `profile:${capability.profileId}` : context?.accountScope } : undefined, runtime);
+        await this.realtimeAudioController.start(configuration, capability.profileId && capability.providerId ? { kind: 'realtime', configurationRevision: revision, profileId: capability.profileId, providerId: capability.providerId, sessionId: context?.sessionId } : undefined, runtime);
         } finally {
           release();
           this.realtimeAudioStartingSession = undefined;

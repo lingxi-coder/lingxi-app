@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { inviteCode, inviteLink, type TeamCommand, type TeamDetail, type TeamSummary, type TeamsApi } from './index';
 import './teams.css';
+import { teamsErrorText } from './errors';
 import { MessagesPanel } from './MessagesPanel';
 
 export function TeamsPanel({ api, uid, zh, initialInvite, onInviteHandled }: {
@@ -23,18 +24,7 @@ export function TeamsPanel({ api, uid, zh, initialInvite, onInviteHandled }: {
   const [inviteRole, setInviteRole] = useState<'member' | 'admin'>('member');
   const [confirmation, setConfirmation] = useState<{ command: TeamCommand; title: string } | null>(null);
   const epoch = useRef(0), authority = useRef(0), selection = useRef('');
-  const translateError = (error: unknown) => {
-    const code = error instanceof Error ? error.message : '';
-    const labels: Record<string, [string, string]> = {
-      INVITE_UNAVAILABLE: ['This invite has expired, was revoked or has no uses left.', '邀请已过期、撤销或用尽。'],
-      MEMBERSHIP_REQUIRED: ['Your membership has ended. Refresh or join with a new invite.', '你已不在此团队，请刷新或通过新邀请加入。'],
-      STALE_MEMBERSHIP: ['Membership changed. Refresh before trying again.', '成员身份已变化，请刷新后重试。'],
-      ROLE_REQUIRED: ['Your role cannot perform this action.', '当前角色无权执行此操作。'],
-      TEAM_LIMIT: ['You can join up to 20 teams.', '最多可加入 20 个团队。'],
-      MEMBER_LIMIT: ['This team has reached 200 members.', '团队已达到 200 人上限。'],
-    };
-    return labels[code]?.[zh ? 1 : 0] ?? t('Could not connect to Teams. Check your connection and try again.', '无法连接团队服务，请检查网络后重试。');
-  };
+  const translateError = (error: unknown) => teamsErrorText(error instanceof Error ? error.message : '', zh);
   const refresh = useCallback(async () => {
     const request = ++epoch.current, teamId = selection.current;
     try {

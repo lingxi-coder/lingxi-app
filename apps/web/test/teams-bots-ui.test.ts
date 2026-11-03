@@ -7,6 +7,7 @@ import { JsxEmit, ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 import type { TeamsApi } from '../../../packages/teams';
 import type { TeamBotCard } from '../../../packages/teams/bots';
 import * as botsModule from '../../../packages/teams/bots';
+import * as errorsModule from '../../../packages/teams/errors';
 import * as messagesModule from '../../../packages/teams/messages';
 import type { MessageCommand, PendingCommands, CommandStorage, TeamMessage } from '../../../packages/teams/messages';
 import { textOf } from './support/render';
@@ -29,6 +30,8 @@ function loadPanel(storage: CommandStorage): typeof import('../../../packages/te
         return messagesModule;
       case './bots.js':
         return botsModule;
+      case './errors.js':
+        return errorsModule;
       case './command-storage.js':
         return { indexedDbCommandStorage: () => storage };
       default:

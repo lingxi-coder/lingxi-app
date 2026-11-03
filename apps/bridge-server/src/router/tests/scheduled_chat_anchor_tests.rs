@@ -87,16 +87,19 @@ async fn scheduled_chat_anchor_is_listed_without_messages_and_is_idempotent() {
             let (first, second) = tokio::join!(
                 fixture
                     .store
-                    .ensure_scheduled_chat(&prefixed, mode, &fixture.cwd),
-                fixture.store.ensure_scheduled_chat(&id, mode, &fixture.cwd),
+                    .ensure_scheduled_chat(&prefixed, mode, &fixture.cwd, "Captured task"),
+                fixture
+                    .store
+                    .ensure_scheduled_chat(&id, mode, &fixture.cwd, "Captured task"),
             );
             first.unwrap();
             second.unwrap();
             let content = std::fs::read_to_string(&fixture.path).unwrap();
             assert_eq!(content.matches("\"mobileEmptySession\":1").count(), 1);
+            assert!(content.contains("\"customTitle\":\"Captured task\""));
             fixture
                 .store
-                .ensure_scheduled_chat(&id, mode, &fixture.cwd)
+                .ensure_scheduled_chat(&id, mode, &fixture.cwd, "Captured task")
                 .await
                 .unwrap();
             assert_eq!(std::fs::read_to_string(&fixture.path).unwrap(), content);
@@ -139,7 +142,7 @@ async fn scheduled_anchor_preserves_existing_conversation_without_an_empty_marke
     let before = std::fs::read(&fixture.path).unwrap();
     fixture
         .store
-        .ensure_scheduled_chat(&id, ConversationMode::Code, &fixture.cwd)
+        .ensure_scheduled_chat(&id, ConversationMode::Code, &fixture.cwd, "Captured task")
         .await
         .unwrap();
     assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
@@ -151,7 +154,7 @@ async fn scheduled_anchor_rejects_missing_wrong_mode_and_foreign_owner_without_w
     let id = fixture.id.as_uuid().to_string();
     assert!(fixture
         .store
-        .ensure_scheduled_chat(&id, ConversationMode::Chat, &fixture.cwd)
+        .ensure_scheduled_chat(&id, ConversationMode::Chat, &fixture.cwd, "Captured task")
         .await
         .is_err());
     assert!(!fixture.path.exists());
@@ -161,7 +164,7 @@ async fn scheduled_anchor_rejects_missing_wrong_mode_and_foreign_owner_without_w
     std::fs::write(&fixture.path, &no_header).unwrap();
     assert!(fixture
         .store
-        .ensure_scheduled_chat(&id, ConversationMode::Chat, &fixture.cwd)
+        .ensure_scheduled_chat(&id, ConversationMode::Chat, &fixture.cwd, "Captured task")
         .await
         .is_err());
     assert_eq!(std::fs::read_to_string(&fixture.path).unwrap(), no_header);
@@ -170,14 +173,14 @@ async fn scheduled_anchor_rejects_missing_wrong_mode_and_foreign_owner_without_w
     std::fs::write(&fixture.path, &valid).unwrap();
     assert!(fixture
         .store
-        .ensure_scheduled_chat(&id, ConversationMode::Code, &fixture.cwd)
+        .ensure_scheduled_chat(&id, ConversationMode::Code, &fixture.cwd, "Captured task")
         .await
         .is_err());
     assert_eq!(std::fs::read_to_string(&fixture.path).unwrap(), valid);
     let wrong_cwd = fixture.cwd.join("different");
     assert!(fixture
         .store
-        .ensure_scheduled_chat(&id, ConversationMode::Chat, &wrong_cwd)
+        .ensure_scheduled_chat(&id, ConversationMode::Chat, &wrong_cwd, "Captured task")
         .await
         .is_err());
     assert_eq!(std::fs::read_to_string(&fixture.path).unwrap(), valid);
@@ -186,7 +189,7 @@ async fn scheduled_anchor_rejects_missing_wrong_mode_and_foreign_owner_without_w
     std::fs::write(&fixture.path, &foreign).unwrap();
     assert!(fixture
         .store
-        .ensure_scheduled_chat(&id, ConversationMode::Chat, &fixture.cwd)
+        .ensure_scheduled_chat(&id, ConversationMode::Chat, &fixture.cwd, "Captured task")
         .await
         .is_err());
     assert_eq!(std::fs::read_to_string(&fixture.path).unwrap(), foreign);
@@ -198,7 +201,7 @@ async fn scheduled_anchor_rejects_missing_wrong_mode_and_foreign_owner_without_w
     std::fs::write(&fixture.path, &corrupt).unwrap();
     assert!(fixture
         .store
-        .ensure_scheduled_chat(&id, ConversationMode::Chat, &fixture.cwd)
+        .ensure_scheduled_chat(&id, ConversationMode::Chat, &fixture.cwd, "Captured task")
         .await
         .is_err());
     assert_eq!(std::fs::read_to_string(&fixture.path).unwrap(), corrupt);
@@ -238,7 +241,12 @@ async fn scheduled_anchor_never_follows_a_retargeted_writer_to_another_owner() {
 
     assert!(fixture
         .store
-        .ensure_scheduled_chat(&old_id, ConversationMode::Chat, &fixture.cwd)
+        .ensure_scheduled_chat(
+            &old_id,
+            ConversationMode::Chat,
+            &fixture.cwd,
+            "Captured task"
+        )
         .await
         .is_err());
     assert_eq!(std::fs::read(&fixture.path).unwrap(), old_before);
@@ -315,7 +323,15 @@ async fn scheduled_create_ack_follows_anchor_and_rejects_wrong_mode_without_a_jo
                 ClientCommand::CronManage {
                     request_id: "create".into(),
                     request: CronRequestDto {
-                        automation: None,
+                        automation: Some(
+                            serde_json::from_value(serde_json::json!({
+                                "version":2,"name":"Weekly report","status":"active",
+                                "model":"openai/gpt-test","reasoning":{"type":"automatic"},
+                                "runMode":"new_session","sessionMode":"code",
+                                "sessionScopeKey":"project.test","notificationPolicy":"all"
+                            }))
+                            .unwrap(),
+                        ),
                         action: "create".into(),
                         id: None,
                         cron: Some("0 9 * * 1".into()),
@@ -340,6 +356,10 @@ async fn scheduled_create_ack_follows_anchor_and_rejects_wrong_mode_without_a_jo
                     .as_deref()
                     .unwrap()
                     .contains("\"mobileEmptySession\":1"));
+                assert!(source
+                    .as_deref()
+                    .unwrap()
+                    .contains("\"customTitle\":\"Weekly report\""));
                 assert!(cron::scheduled_tasks_path(&cwd).exists());
             }
             (ClientEvent::CronResult { jobs, error, .. }, source) => {

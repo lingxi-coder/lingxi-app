@@ -145,8 +145,8 @@ pub struct BridgeArgs {
     pub session_transcript_path: Option<PathBuf>,
     /// Restore an owned, unsent desktop draft from its canonical metadata source.
     pub restore_draft: bool,
-    /// Retain a newly created scheduled task session before accepting a run.
-    pub scheduled_durable_anchor: bool,
+    /// Retain a newly created owned draft under its explicit display title.
+    pub durable_draft_title: Option<String>,
     /// Device default for an uninitialized draft, applied before startup hooks.
     pub initial_conversation_mode: Option<ConversationMode>,
     /// Required ownership for an explicitly selected persisted transcript.
@@ -316,7 +316,14 @@ impl BridgeArgs {
                     out.session_transcript_path = Some(path);
                 }
                 "--restore-draft" => out.restore_draft = true,
-                "--scheduled-durable-anchor" => out.scheduled_durable_anchor = true,
+                "--durable-draft-title" => {
+                    let title = it.next().ok_or("--durable-draft-title requires a title")?;
+                    let title = title.as_ref();
+                    if title.trim().is_empty() || title.contains('\0') {
+                        return Err("--durable-draft-title requires a nonempty title".into());
+                    }
+                    out.durable_draft_title = Some(title.to_owned());
+                }
                 "--initial-conversation-mode" => {
                     let value = it
                         .next()
@@ -438,10 +445,10 @@ impl BridgeArgs {
                 return Err("initial and expected conversation modes must match".into());
             }
         }
-        if out.scheduled_durable_anchor
+        if out.durable_draft_title.is_some()
             && (!out.restore_draft || out.expected_conversation_mode.is_some())
         {
-            return Err("--scheduled-durable-anchor requires a new owned draft".into());
+            return Err("--durable-draft-title requires a new owned draft".into());
         }
         if out.expected_conversation_mode.is_some() && out.session_id.is_none() {
             return Err("--expected-conversation-mode requires --session-id".into());
@@ -824,7 +831,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> Result<DesktopConfig, String
         __desktop_config.session_transcript_path = args.session_transcript_path.clone();
         __desktop_config.session_transcript_authority = None;
         __desktop_config.restore_draft = args.restore_draft;
-        __desktop_config.scheduled_durable_anchor = args.scheduled_durable_anchor;
+        __desktop_config.durable_draft_title = args.durable_draft_title.clone();
         __desktop_config.session_resume_snapshot = None;
         __desktop_config.session_resume_cost = None;
         __desktop_config.max_structured_output_retries = 5;
@@ -3162,7 +3169,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_durable_anchor_requires_a_new_owned_draft() {
+    fn durable_draft_title_requires_a_new_owned_draft() {
         let id = "11111111-2222-4333-8444-555555abcdef";
         for mode in ["chat", "code"] {
             let args = BridgeArgs::parse([
@@ -3171,30 +3178,36 @@ mod tests {
                 "--restore-draft",
                 "--initial-conversation-mode",
                 mode,
-                "--scheduled-durable-anchor",
+                "--durable-draft-title",
+                "Local App",
             ])
             .unwrap();
-            assert!(args.scheduled_durable_anchor);
-            assert!(
+            assert_eq!(args.durable_draft_title.as_deref(), Some("Local App"));
+            assert_eq!(
                 resolve_desktop_config(&args)
                     .unwrap()
-                    .scheduled_durable_anchor
+                    .durable_draft_title
+                    .as_deref(),
+                Some("Local App")
             );
         }
         for flags in [
-            vec!["--scheduled-durable-anchor"],
-            vec!["--session-id", id, "--scheduled-durable-anchor"],
+            vec!["--durable-draft-title"],
+            vec!["--durable-draft-title", "Local App"],
+            vec!["--session-id", id, "--durable-draft-title", "Local App"],
             vec![
                 "--restore-draft",
                 "--initial-conversation-mode",
                 "code",
-                "--scheduled-durable-anchor",
+                "--durable-draft-title",
+                "Local App",
             ],
             vec![
                 "--session-id",
                 id,
                 "--restore-draft",
-                "--scheduled-durable-anchor",
+                "--durable-draft-title",
+                "Local App",
             ],
             vec![
                 "--session-id",
@@ -3204,7 +3217,8 @@ mod tests {
                 "code",
                 "--expected-conversation-mode",
                 "chat",
-                "--scheduled-durable-anchor",
+                "--durable-draft-title",
+                "Local App",
             ],
             vec![
                 "--session-id",
@@ -3213,16 +3227,33 @@ mod tests {
                 "--initial-conversation-mode",
                 "chat",
                 "--list-sessions-json",
+                "--durable-draft-title",
+                "Local App",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "code",
+                "--durable-draft-title",
+                "  ",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "code",
                 "--scheduled-durable-anchor",
             ],
         ] {
             assert!(BridgeArgs::parse(flags).is_err());
         }
-        assert!(
-            !resolve_desktop_config(&BridgeArgs::default())
-                .unwrap()
-                .scheduled_durable_anchor
-        );
+        assert!(resolve_desktop_config(&BridgeArgs::default())
+            .unwrap()
+            .durable_draft_title
+            .is_none());
     }
 
     #[test]
@@ -3242,7 +3273,9 @@ mod tests {
             .unwrap();
             assert_eq!(parsed.initial_conversation_mode, Some(expected));
             assert_eq!(
-                resolve_desktop_config(&parsed).unwrap().initial_conversation_mode,
+                resolve_desktop_config(&parsed)
+                    .unwrap()
+                    .initial_conversation_mode,
                 Some(expected)
             );
         }
@@ -3274,7 +3307,9 @@ mod tests {
             assert!(BridgeArgs::parse(flags).is_err());
         }
         assert_eq!(
-            resolve_desktop_config(&BridgeArgs::default()).unwrap().initial_conversation_mode,
+            resolve_desktop_config(&BridgeArgs::default())
+                .unwrap()
+                .initial_conversation_mode,
             None
         );
     }
@@ -3312,7 +3347,9 @@ mod tests {
             assert_eq!(parsed.initial_conversation_mode, Some(mode));
             assert_eq!(parsed.expected_conversation_mode, Some(mode));
             assert_eq!(
-                resolve_desktop_config(&parsed).unwrap().initial_conversation_mode,
+                resolve_desktop_config(&parsed)
+                    .unwrap()
+                    .initial_conversation_mode,
                 Some(mode)
             );
         }

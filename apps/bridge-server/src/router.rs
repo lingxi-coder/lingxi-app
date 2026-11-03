@@ -362,6 +362,7 @@ impl SessionStoreContext {
         session_id: &str,
         mode: ConversationMode,
         cwd: &std::path::Path,
+        title: &str,
     ) -> Result<(), String> {
         let session_id = lingxi_core::types::SessionId::parse_prefixed(session_id)
             .ok_or("Invalid scheduled task chat identity")?;
@@ -370,7 +371,7 @@ impl SessionStoreContext {
             .as_ref()
             .ok_or("Scheduled task chat storage is unavailable")?;
         writer
-            .ensure_scheduled_anchor(session_id, mode, cwd)
+            .ensure_draft_anchor(session_id, mode, cwd, title)
             .await
             .map(|_| ())
             .map_err(|error| format!("Cannot retain the scheduled task's chat: {error}"))
@@ -2725,13 +2726,19 @@ impl CommandRouter for EngineCommandRouter {
                 if request.action == "create" {
                     let owner = lingxi_core::types::SessionId::parse_prefixed(&owner_id);
                     let mode = self.handle.conversation_mode().await;
+                    let title = request
+                        .automation
+                        .as_ref()
+                        .and_then(|automation| automation.name.as_deref())
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or("Scheduled task");
                     let anchor = match (owner, self.session_store.as_ref()) {
                         (Some(owner), Some(store))
                             if lingxi_core::types::SessionId::parse_prefixed(&mode.session_id)
                                 == Some(owner) =>
                         {
                             store
-                                .ensure_scheduled_chat(&owner_id, mode.mode, &status.cwd)
+                                .ensure_scheduled_chat(&owner_id, mode.mode, &status.cwd, title)
                                 .await
                         }
                         (_, None) => Err("Scheduled task chat storage is unavailable".into()),

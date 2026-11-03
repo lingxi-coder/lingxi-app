@@ -1194,7 +1194,7 @@ async fn cold_draft_boot_restores_fixed_mode_and_instruction_epoch() {
 }
 
 #[tokio::test]
-async fn scheduled_draft_is_discoverable_and_resumable_before_first_turn() {
+async fn durable_draft_is_discoverable_and_resumable_before_first_turn() {
     use lingxi_core::host::OrchestratorHandle;
     let _serial = crate::driver::LOOP_KA_TEST_SERIAL
         .lock()
@@ -1203,6 +1203,11 @@ async fn scheduled_draft_is_discoverable_and_resumable_before_first_turn() {
         ("chat", ConversationMode::Chat),
         ("code", ConversationMode::Code),
     ] {
+        let title = if mode == "code" {
+            "Local App development"
+        } else {
+            "Scheduled task"
+        };
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().canonicalize().unwrap();
         let home = cwd.join("config");
@@ -1214,7 +1219,8 @@ async fn scheduled_draft_is_discoverable_and_resumable_before_first_turn() {
             "--restore-draft",
             "--initial-conversation-mode",
             mode,
-            "--scheduled-durable-anchor",
+            "--durable-draft-title",
+            title,
         ])
         .unwrap();
         let resolved = resolve_desktop_config(&args).unwrap();
@@ -1224,7 +1230,7 @@ async fn scheduled_draft_is_discoverable_and_resumable_before_first_turn() {
             cfg.session_id_override = resolved.session_id_override;
             cfg.restore_draft = resolved.restore_draft;
             cfg.initial_conversation_mode = resolved.initial_conversation_mode;
-            cfg.scheduled_durable_anchor = resolved.scheduled_durable_anchor;
+            cfg.durable_draft_title = resolved.durable_draft_title;
             let bound = Box::pin(assemble(cfg)).await.unwrap();
             let lifecycle = bound.session_lifecycle();
             let (endpoint, mut socket) = connect(bound.connection).await;
@@ -1238,6 +1244,10 @@ async fn scheduled_draft_is_discoverable_and_resumable_before_first_turn() {
             assert_eq!(rows[0]["type"], "fixed-session-mode");
             assert_eq!(rows[0]["sessionId"], id_text);
             assert_eq!(rows[0]["sessionMode"], mode);
+            assert!(rows.iter().any(|row| row["mobileEmptySession"] == 1
+                && row["customTitle"] == title
+                && row["sessionId"] == id_text
+                && row["cwd"].as_str() == cwd.to_str()));
             assert_eq!(
                 rows.iter()
                     .filter(|row| row["mobileEmptySession"] == 1)
@@ -1268,7 +1278,7 @@ async fn scheduled_draft_is_discoverable_and_resumable_before_first_turn() {
             cfg.session_id_override = Some(id_text.clone());
             cfg.restore_draft = true;
             cfg.initial_conversation_mode = Some(expected);
-            cfg.scheduled_durable_anchor = true;
+            cfg.durable_draft_title = Some(title.to_owned());
             let bound = Box::pin(assemble(cfg)).await.unwrap();
             assert_eq!(
                 bound.runtime.orchestrator.conversation_mode().await.mode,
@@ -1312,7 +1322,7 @@ async fn scheduled_draft_is_discoverable_and_resumable_before_first_turn() {
 }
 
 #[tokio::test]
-async fn scheduled_draft_cannot_adopt_an_existing_conversation() {
+async fn durable_draft_cannot_adopt_an_existing_conversation() {
     let root = tempfile::tempdir().unwrap();
     let cwd = root.path().canonicalize().unwrap();
     let home = cwd.join("config");
@@ -1329,7 +1339,7 @@ async fn scheduled_draft_cannot_adopt_an_existing_conversation() {
     let mut cfg = isolated_config(&cwd, &home);
     cfg.session_id_override = Some(id.to_string());
     cfg.restore_draft = true;
-    cfg.scheduled_durable_anchor = true;
+    cfg.durable_draft_title = Some("Local App development".into());
     assert!(Box::pin(assemble(cfg)).await.is_err());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
 }

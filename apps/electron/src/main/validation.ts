@@ -300,6 +300,12 @@ export function validateClientCommand(value: unknown, workspace?: string): Valid
       const child = object(JSON.parse(command_json));
       const childType = child['type'];
       if (typeof childType !== 'string' || !SIDE_CHAT_COMMAND_TYPES.has(childType)) throw new Error('command is not allowed in Side Chat');
+      if (childType === 'refresh_listings') {
+        const listing = validateClientCommand(child);
+        if (listing.type !== 'refresh_listings' || listing.which.some((entry) => entry.type !== 'slash_commands')) {
+          throw new Error('listing is not allowed in Side Chat');
+        }
+      }
       if (childType === 'run_slash_command' && !/^\/(?:help|model|compact)(?:\s|$)/.test(String(child['raw']))) throw new Error('slash command is not allowed in Side Chat');
       if (childType === 'send_prompt' && /^\s*\/side(?:\s|$)/i.test(String(child['text']))) throw new Error('nested Side Chat is not allowed');
       // The runtime validates the full ordinary command DTO and owns the child permission broker.
@@ -682,4 +688,4 @@ export function isAllowedIpcSender(
   }
 }
 
-const SIDE_CHAT_COMMAND_TYPES = new Set(['send_prompt', 'cancel', 'approve_permission', 'deny_permission', 'answer_ask_user_question', 'cancel_ask_user_question', 'set_model', 'list_models', 'get_conversation_controls', 'set_reasoning_selection', 'set_fast_mode', 'set_permission_mode', 'run_slash_command', 'force_compact']);
+const SIDE_CHAT_COMMAND_TYPES = new Set(['send_prompt', 'cancel', 'approve_permission', 'deny_permission', 'answer_ask_user_question', 'cancel_ask_user_question', 'set_model', 'list_models', 'get_conversation_controls', 'refresh_listings', 'set_reasoning_selection', 'set_fast_mode', 'set_permission_mode', 'run_slash_command', 'force_compact']);

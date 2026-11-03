@@ -541,6 +541,16 @@ class ChatViewModelReducerTest {
         }
     }
 
+    /** Uses the same owner-local recovery gate and event stream as the native source. */
+    private class GuardedRecoverySource : ConversationSource {
+        val active = MutableStateFlow<ActivatedSession?>(null)
+        private val events = MutableSharedFlow<ClientEvent>(extraBufferCapacity = 16)
+        private val gate = DurableTurnReplayGate()
+        override val activeSessionState = active.asStateFlow()
+        override val clientEvents: Flow<ClientEvent> = events.asSharedFlow()
+        fun publish(event: ClientEvent): Boolean = gate.forward(event, events::tryEmit)
+    }
+
     private class FailingDurableAttachSource : ConversationSource {
         val active = MutableStateFlow<ActivatedSession?>(null)
         val events = MutableSharedFlow<ClientEvent>(extraBufferCapacity = 16)
@@ -1420,6 +1430,46 @@ class ChatViewModelReducerTest {
         vm.send("after discard")
         runCurrent()
         assertEquals(listOf("after discard"), source.submitted)
+    }
+
+    @Test
+    fun latePausedAfterCancelledDoesNotReopenItsOwnerButOtherTurnsStillPause() = runTest(dispatcher) {
+        val session = "12345678-1234-1234-1234-123456789abc"
+        val source = GuardedRecoverySource()
+        val otherSource = GuardedRecoverySource()
+        val vm = ChatViewModel(source)
+        val otherVm = ChatViewModel(otherSource)
+        val activation = ActivatedSession(session, emptyList(), SessionActivationKind.Resumed,
+            com.lingxi.code.model.SessionMode.Code)
+        source.active.value = activation
+        otherSource.active.value = activation
+        runCurrent()
+
+        val paused = TurnRecoverySnapshotDto(
+            sessionId = session, turnId = 94u, state = TurnRecoveryStateDto.PAUSED_RECOVERABLE,
+            firstSequence = 0u, lastSequence = 0u, safeToResume = true, reason = "paused",
+        )
+        assertTrue(source.publish(ClientEvent.TurnRecoveryState(paused)))
+        runCurrent()
+        assertTrue(vm.state.value.durableRecoveryBlocked)
+        assertTrue(source.publish(ClientEvent.TurnRecoveryState(paused.copy(
+            state = TurnRecoveryStateDto.CANCELLED, safeToResume = false,
+        ))))
+        runCurrent()
+        assertFalse(vm.state.value.durableRecoveryBlocked)
+        assertNull(vm.state.value.statusLine)
+        val settled = vm.state.value
+
+        // The delayed native notification uses the SDK's alternate UUID spelling.
+        assertFalse(source.publish(ClientEvent.TurnRecoveryState(paused.copy(sessionId = "sess:${session.uppercase()}"))))
+        runCurrent()
+        assertEquals(settled, vm.state.value)
+
+        assertTrue(source.publish(ClientEvent.TurnRecoveryState(paused.copy(turnId = 95u))))
+        assertTrue(otherSource.publish(ClientEvent.TurnRecoveryState(paused)))
+        runCurrent()
+        assertTrue("a different turn can still be paused", vm.state.value.durableRecoveryBlocked)
+        assertTrue("another source has its own lifecycle", otherVm.state.value.durableRecoveryBlocked)
     }
 
     @Test

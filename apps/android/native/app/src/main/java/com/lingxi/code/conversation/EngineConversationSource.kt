@@ -1039,9 +1039,8 @@ class EngineConversationSource internal constructor(
                             // catalog + live-resume events into the StateFlows the picker /
                             // drawer / conversation observe, BEFORE forwarding to the
                             // per-turn stream. Every reducer is a no-op for unrelated
-                            // events, so every event still reaches `events` unchanged
-                            // (lifecycle events like SessionStarted ride the per-turn
-                            // stream; the ViewModel acts on them there).
+                            // events. Lifecycle events such as SessionStarted ride
+                            // the per-turn stream; the ViewModel acts on them there.
                             models.value = reduceModelEvent(models.value, event)
                             sessions.value = reduceSessionEvent(sessions.value, event, strings = sessionCatalogStrings(context))
                             val previousActiveSessionId = activeSession.value?.sessionId
@@ -1128,9 +1127,7 @@ class EngineConversationSource internal constructor(
                                 (event is ClientEvent.Error && !isCompactTurnRejection(event.message.displayText()))) {
                                 permissionIngress.endTurn()
                             }
-                            if (durableReplayGate.shouldForward(event)) {
-                                eventRelay.offer(event)
-                            }
+                            durableReplayGate.forward(event, eventRelay::offer)
                         },
                         onWorkflowProgress = { originSessionId, taskId, runId, progress ->
                             workflowRelay.offer(

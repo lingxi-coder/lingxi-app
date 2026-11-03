@@ -610,6 +610,75 @@ class ConversationSourceRecoveryTest {
     }
 
     @Test
+    fun terminalRecoveryStateRejectsOnlyLaterNonterminalStatesForItsExactOwner() {
+        val session = "12345678-1234-1234-1234-123456789abc"
+        for (terminal in listOf(TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED)) {
+            val gate = DurableTurnReplayGate()
+            val ended = ClientEvent.TurnRecoveryState(snapshot(terminal, 88u, 3u).copy(sessionId = session))
+            assertTrue(gate.shouldForward(ended))
+            // Repeated terminal confirmations remain available to the replay reducer.
+            assertTrue(gate.shouldForward(ended))
+            for (state in listOf(TurnRecoveryStateDto.RUNNING, TurnRecoveryStateDto.WAITING_FOR_USER, TurnRecoveryStateDto.PAUSED_RECOVERABLE)) {
+                assertFalse(gate.shouldForward(ClientEvent.TurnRecoveryState(snapshot(state, 88u, 3u).copy(
+                    sessionId = "sess:${session.uppercase()}",
+                ))))
+            }
+            assertTrue(gate.shouldForward(ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.PAUSED_RECOVERABLE, 89u, 3u).copy(sessionId = session))))
+            assertTrue(gate.shouldForward(ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.PAUSED_RECOVERABLE, 88u, 3u).copy(sessionId = "session-b"))))
+            assertTrue(DurableTurnReplayGate().shouldForward(ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.PAUSED_RECOVERABLE, 88u, 3u).copy(sessionId = session))))
+        }
+        // A recoverable pause itself does not bar a later running state.
+        val paused = DurableTurnReplayGate()
+        assertTrue(paused.shouldForward(ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.PAUSED_RECOVERABLE, 88u, 3u))))
+        assertTrue(paused.shouldForward(ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.RUNNING, 88u, 3u))))
+        val error = DurableTurnReplayGate()
+        assertTrue(error.shouldForward(ClientEvent.Error(
+            kind = com.lingxi.code.bindings.client.ErrorKindDto.TRANSPORT,
+            message = "transport error".toClientTextDto(),
+        )))
+        assertTrue(error.shouldForward(ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.PAUSED_RECOVERABLE, 88u, 3u))))
+    }
+
+    @Test
+    fun concurrentRecoveryCallbacksCannotEnqueueTerminalBeforeAnEarlierPausedDecision() {
+        val gate = DurableTurnReplayGate()
+        val paused = ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.PAUSED_RECOVERABLE, 88u, 3u))
+        val cancelled = ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.CANCELLED, 88u, 3u))
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val terminalStarted = java.util.concurrent.CountDownLatch(1)
+        val terminalDone = java.util.concurrent.CountDownLatch(1)
+        val queued = java.util.concurrent.ConcurrentLinkedQueue<ClientEvent>()
+        val pauseThread = Thread {
+            gate.forward(paused) {
+                entered.countDown()
+                check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                queued.add(it)
+            }
+        }
+        val terminalThread = Thread {
+            terminalStarted.countDown()
+            gate.forward(cancelled) { queued.add(it) }
+            terminalDone.countDown()
+        }
+        try {
+            pauseThread.start()
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            terminalThread.start()
+            assertTrue(terminalStarted.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertFalse(terminalDone.await(100, java.util.concurrent.TimeUnit.MILLISECONDS))
+        } finally {
+            release.countDown()
+            pauseThread.join(5_000)
+            if (terminalThread.isAlive) terminalThread.join(5_000)
+        }
+        assertFalse(pauseThread.isAlive)
+        assertFalse(terminalThread.isAlive)
+        assertEquals(listOf(paused, cancelled), queued.toList())
+        assertFalse(gate.forward(paused) { queued.add(it) })
+    }
+
+    @Test
     fun terminalReplayIsNotSuppressedForAPartialRetainedTranscript() {
         val gate = DurableTurnReplayGate()
         gate.noteAttachRequested(

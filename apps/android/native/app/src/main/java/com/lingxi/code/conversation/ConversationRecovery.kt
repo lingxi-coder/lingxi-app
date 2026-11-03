@@ -222,6 +222,9 @@ internal class DurableTurnReplayGate {
     private var pendingColdResumeAttachTurnId: Long? = null
     private var suppressingRetainedReplayTurnId: Long? = null
     private var awaitingTerminalConfirmationTurnId: Long? = null
+    // A source can outlive its UI. Keep terminal identities for that source's
+    // lifetime so an arbitrarily delayed callback cannot reopen an ended turn.
+    private val terminalTurns = mutableSetOf<Pair<String, ULong>>()
 
     @Synchronized
     fun noteAttachRequested(
@@ -245,36 +248,52 @@ internal class DurableTurnReplayGate {
     }
 
     @Synchronized
-    fun shouldForward(event: ClientEvent): Boolean = when (event) {
-        is ClientEvent.TurnRecoveryState -> {
-            val turnId = event.snapshot.turnId.toLong()
-            val terminal = event.snapshot.state in terminalStates
-            when {
-                pendingColdResumeAttachTurnId == turnId -> {
-                    pendingColdResumeAttachTurnId = null
-                    if (terminal) {
-                        suppressingRetainedReplayTurnId = turnId
-                        awaitingTerminalConfirmationTurnId = turnId
-                    } else {
-                        clearTurn(turnId)
-                    }
-                }
-                awaitingTerminalConfirmationTurnId == turnId && terminal -> clearTurn(turnId)
+    fun shouldForward(event: ClientEvent): Boolean {
+        if (event is ClientEvent.TurnRecoveryState) {
+            val snapshot = event.snapshot
+            val key = canonicalSessionId(snapshot.sessionId) to snapshot.turnId
+            if (snapshot.state in terminalStates) {
+                terminalTurns += key
+            } else if (key in terminalTurns) {
+                return false
             }
-            true
         }
-        is ClientEvent.TurnEventReplay ->
-            suppressingRetainedReplayTurnId != event.turnId.toLong()
-        is ClientEvent.Error -> {
-            if (!isCompactTurnRejection(event.message.displayText())) clearAll()
-            true
+        return when (event) {
+            is ClientEvent.TurnRecoveryState -> {
+                val turnId = event.snapshot.turnId.toLong()
+                val terminal = event.snapshot.state in terminalStates
+                when {
+                    pendingColdResumeAttachTurnId == turnId -> {
+                        pendingColdResumeAttachTurnId = null
+                        if (terminal) {
+                            suppressingRetainedReplayTurnId = turnId
+                            awaitingTerminalConfirmationTurnId = turnId
+                        } else {
+                            clearTurn(turnId)
+                        }
+                    }
+                    awaitingTerminalConfirmationTurnId == turnId && terminal -> clearTurn(turnId)
+                }
+                true
+            }
+            is ClientEvent.TurnEventReplay ->
+                suppressingRetainedReplayTurnId != event.turnId.toLong()
+            is ClientEvent.Error -> {
+                if (!isCompactTurnRejection(event.message.displayText())) clearAll()
+                true
+            }
+            is ClientEvent.TurnEnded -> {
+                clearAll()
+                true
+            }
+            else -> true
         }
-        is ClientEvent.TurnEnded -> {
-            clearAll()
-            true
-        }
-        else -> true
     }
+
+    /** Serialize the decision and enqueue, so concurrent callbacks cannot invert them. */
+    @Synchronized
+    fun forward(event: ClientEvent, enqueue: (ClientEvent) -> Boolean): Boolean =
+        shouldForward(event) && enqueue(event)
 
     private fun clearTurn(turnId: Long) {
         if (pendingColdResumeAttachTurnId == turnId) pendingColdResumeAttachTurnId = null

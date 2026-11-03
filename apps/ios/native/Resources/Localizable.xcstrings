@@ -80463,31 +80463,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "此旁聊已过期。以下未发送内容仅供查看和复制。"
+            "value": "此旁聊已过期。以下内容仅供查看和复制。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "此旁聊已過期。以下未傳送內容僅供檢視與複製。"
+            "value": "此旁聊已過期。以下內容僅供檢視與複製。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This side chat has expired. Unsent content is available to view and copy."
+            "value": "This side chat has expired. Content below is available to view and copy."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "このサイドチャットは期限切れです。未送信の内容は表示とコピーのみ可能です。"
+            "value": "このサイドチャットは期限切れです。以下の内容は表示とコピーのみ可能です。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "이 사이드 채팅은 만료되었습니다. 보내지 않은 내용은 확인하고 복사할 수 있습니다."
+            "value": "이 사이드 채팅은 만료되었습니다. 아래 내용은 확인하고 복사할 수 있습니다."
           }
         }
       }

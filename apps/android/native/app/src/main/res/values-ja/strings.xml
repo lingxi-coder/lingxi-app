@@ -2580,6 +2580,6 @@
     <string name="local_app_publication_review_prepared">公開予定の内容を確認</string>
     <string name="local_app_market_remix">編集可能なコピーを作成</string>
     <string name="local_app_market_remix_confirm">このバージョンから編集可能なソースのコピーを作成しますか？</string>
-    <string name="side_chat_expired_read_only">このサイドチャットは期限切れです。未送信の内容は表示とコピーのみ可能です。</string>
+    <string name="side_chat_expired_read_only">このサイドチャットは期限切れです。以下の内容は表示とコピーのみ可能です。</string>
     <string name="side_chat_delivery_unconfirmed">送信状況は未確認です</string>
 </resources>

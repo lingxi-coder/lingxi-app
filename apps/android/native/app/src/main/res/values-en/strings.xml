@@ -2580,6 +2580,6 @@
     <string name="local_app_publication_review_prepared">Review prepared publication</string>
     <string name="local_app_market_remix">Create editable copy</string>
     <string name="local_app_market_remix_confirm">Create an editable source copy from this release?</string>
-    <string name="side_chat_expired_read_only">This side chat has expired. Unsent content is available to view and copy.</string>
+    <string name="side_chat_expired_read_only">This side chat has expired. Content below is available to view and copy.</string>
     <string name="side_chat_delivery_unconfirmed">Delivery status unconfirmed</string>
 </resources>

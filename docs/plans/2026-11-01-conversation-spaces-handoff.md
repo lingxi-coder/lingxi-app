@@ -1,6 +1,18 @@
 # Chat / Code 上下文与跨端集成交接
 
-## 2026-11-02 合并后续作（当前状态，优先于全部旧快照）
+## 2026-11-02 最终 SDK 与原生绑定续作（优先于下方旧记录）
+
+Harness 最终提交为 `d4a6af84d0523102590622472e4d4a1149ba933d`，工作区干净；App 的 47 个 manifest pin 与 locked resolver 的 84 个 SDK crate 均对齐该提交。LLM 固定为 `0c2f041e856265e093e404d9b202c4238f73ef3c`。最终 source identity 校验、官方 TS 生成与 `--check` 均通过，协议为 32。此前 9c8f/186ecf40 均仅为历史基线。
+
+SDK 最终 session 为 487 unit + 177 integration，共 664 项通过；client adapter 416、rooted-fs 36、WriteTool 34 项通过。runtime 受影响定向 7 项通过，复用的可执行文件与最终 production 源码一致，仅两处 `cfg(test)` fixture 有差异，不能描述成最终 diff 的全新 runtime 重编译。原始证据分布在 `sdk/successor-577f1050/`、`sdk/successor-d5641ff1/` 与 `sdk/successor-c623e277/`。修复包含空锚点 metadata、发布后不确定状态的持久 writer fence、FileHistory 原路径/parent authority、captured rewind 与 fork 目标首次 mount 收据。
+
+最终 d4a6 iOS host staticlib 与真实 Swift metadata 生成均退出 0；7 个 Swift/header/modulemap 文件已推广到 `apps/ios/native/Generated`，输入指纹前后一致。这不等于 simulator 目标架构库、Full 链接或 XCTest 已完成。Android host metadata、实际 Direct JNI/Gradle/设备与 iOS Full 仍在闭环。
+
+Desktop 最新完整 default suite 为 3880 pass / 4 fail / 16 skip。提交 `c8c8a3b8e` 修复其中两个 fixture 合同问题，相关文件 29/29 通过；另外两项依赖真实 Bridge binary 与 Rust producer Cron fixture，仍待最终产物。该完整运行使用 provisional pin，不能充当最终原生联调结果。
+
+移动端当前仍有授权范围内未提交实现：Android admission/恢复与异步导航；iOS async send、durable recovery、草稿 revision、原 owner 音频、guarded Project/Cron 存储及 exact selected transcript path。隔离 JVM、宿主 Swift、parse 与类型检查分别记录，不互相替代。独立审查与真实单 flavor 验证继续进行，未推送，未合入 main。
+
+## 2026-11-02 先前合并后续作（历史检查点）
 
 当前 App 包含 main 合并 `0b2c85ceac1568fe76c084eaecaaf64a8dc74766`、Desktop 调度与导航修复 `484104889`、精确目录来源 `c4adeaa69`，以及 metadata writer/连接归属修复 `767993fca`。Harness 当前 SDK pin 为 `9c8f4f6c4c6cffd2d14056225ebd80d2210b0efe`，LLM 为 `0c2f041e856265e093e404d9b202c4238f73ef3c`；App 已更新 pin 与 lockfile。**独立复审发现 rename 空锚点丢失、retry/compaction 发布后错误被吞的缺口，SDK 正在集中修复，9c8f 现仅为 provisional pin。App 仍有授权范围内三端与协议修复待验证提交。未推送。**
 

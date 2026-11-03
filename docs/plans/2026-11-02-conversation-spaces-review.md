@@ -62,3 +62,12 @@ Desktop Host/UI 收口提交 `4b14b4735`：重命名与归档确认复用首次�
 独立复审继续确认两组必须先修的来源风险，最终 native 构建继续等待：Desktop audio reservation 原先只防 cache eviction，同 UUID 来源替换或 `/cd` 仍可重挂录音 owner；单次听写也须捕获原 runtime。SDK FileHistory 把旧目录 A 的相对文件名在当前 cwd B 展开，可能删除或覆盖 B 的同名业务文件；新格式须保留原绝对来源，无法证明出处的相对记录直接拒绝。SDK durable side-record 和 metadata backstop 也必须受原 authority/uncertain fence 保护，不得绕过或先污染缓存。上述修复正在同一轮集中推进，不能把 9c8f 或历史通过数字视为最终验收。
 
 Desktop 音频源码检查点为 `7305467d6` 与 `4df650e07`：runtime reservation 覆盖 dictation/flow/realtime 启动和运行，同 UUID 来源替换、`/cd`、archive、clear、close/restart 不能重挂原音频 owner。operation promise 返回 failed 仍不视为资源已关闭；原 native manager 汇总 parent/child identity，只有 never-admitted 或全部任务/精确关闭完成才释放，错误 flight 回执不能释放。最终定向 258/258、Node/Web 类型、diff-check 通过；此前真实 Electron dictation 1/1。独立静态复审本组无剩余确定性阻断。旧 archive 生命周期 fixture 更新 `461367206` 两文件 15/15。完整 default Desktop suite 正在按当前源码执行，仍需区分 provisional SDK pin 与待到位的真实 Rust producer/binary。
+
+
+## 最终 SDK d4a6 与原生绑定检查点
+
+最终 SDK `d4a6af84d0523102590622472e4d4a1149ba933d` 已提交并固定；App locked resolver/source identity 与官方 TS 生成/检查通过。session 664、client adapter 416、rooted-fs 36、WriteTool 34 项通过，runtime 受影响定向 7 项通过；runtime 可执行文件复用的生产源码一致性与两处 test-only fixture 差异见 `sdk/successor-c623e277/closed-runtime-binary.json`。不把复用结果描述为最终源码全量重编译。
+
+iOS 最终 host staticlib 和 Swift metadata 生成已成功，7 个生成文件推广完毕。Android metadata、目标架构库与移动端整体验收尚未完成。独立审查正在覆盖 async admission 前的持久化、失败输入保留、草稿 ABA、导航/音频 owner 固定，以及列表显示来源到 native resume 的 exact path 校验。
+
+Desktop 最新完整运行 3880 pass / 4 fail / 16 skip；两项 fixture 已由 `c8c8a3b8e` 修复并完成 29 项定向复测，真实 Bridge binary 与 Cron producer 相关两项仍待最终产物。完整运行的 provisional pin 边界继续保留。

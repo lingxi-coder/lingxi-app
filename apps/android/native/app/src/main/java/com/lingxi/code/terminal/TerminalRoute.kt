@@ -7,9 +7,6 @@ package com.lingxi.code.terminal
 
 import com.lingxi.code.R
 
-import android.app.Activity
-import android.content.Context
-import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -55,7 +52,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -81,35 +78,31 @@ private val KeyBackground = Color(0xff404040)
 fun TerminalRoute(
     args: TerminalRouteArgs,
     instanceKey: String,
+    launchGeneration: Int,
     gateway: TerminalSessionGateway,
     onBack: () -> Unit,
     onOpenUrl: (String) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: TerminalViewModel = viewModel(
-        key = "terminal:${args.sessionId}:$instanceKey",
+        key = "terminal:$instanceKey",
         factory = TerminalViewModel.Factory(args, gateway),
     ),
 ) {
     val state by viewModel.uiState.collectAsState()
-    val context = LocalContext.current
     val emulator = viewModel.emulator
+    val currentOpenUrl by rememberUpdatedState(onOpenUrl)
 
-    LaunchedEffect(viewModel) { viewModel.dispatch(TerminalAction.Start) }
-    DisposableEffect(viewModel, onOpenUrl) {
-        emulator.onResponse = { viewModel.dispatch(TerminalAction.SendBytes(it)) }
-        emulator.onOpenUrl = { viewModel.dispatch(TerminalAction.OpenUrl(it)); onOpenUrl(it) }
+    LaunchedEffect(viewModel, launchGeneration) {
+        viewModel.acceptLaunch(launchGeneration, args.initCommand)
+        viewModel.dispatch(TerminalAction.Start)
+    }
+    DisposableEffect(viewModel) {
+        emulator.onOpenUrl = { viewModel.dispatch(TerminalAction.OpenUrl(it)); currentOpenUrl(it) }
         onDispose {
-            emulator.onResponse = null
             emulator.onOpenUrl = null
-            if (context.findActivity()?.isChangingConfigurations != true) {
-                viewModel.dispatch(TerminalAction.Close)
-            }
         }
     }
-    BackHandler {
-        viewModel.dispatch(TerminalAction.Close)
-        onBack()
-    }
+    BackHandler { onBack() }
 
     TerminalScreen(
         state = state.copy(title = emulator.title.ifBlank { state.title }),
@@ -123,13 +116,6 @@ fun TerminalRoute(
     )
 }
 
-private tailrec fun Context.findActivity(): Activity? =
-    when (this) {
-        is Activity -> this
-        is ContextWrapper -> baseContext.findActivity()
-        else -> null
-    }
-
 @Composable
 fun TerminalScreen(
     state: TerminalUiState,
@@ -141,7 +127,13 @@ fun TerminalScreen(
         AlertDialog(
             onDismissRequest = { onAction(TerminalAction.DismissCommand) },
             title = { Text(stringResource(R.string.terminal_review_command)) },
-            text = { OutlinedTextField(value = draft, onValueChange = { onAction(TerminalAction.EditCommand(it)) }, label = { Text(stringResource(R.string.terminal_command)) }) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(stringResource(R.string.workspace_browser_current_folder) + ": " + state.args.cwd)
+                    OutlinedTextField(value = draft, onValueChange = { onAction(TerminalAction.EditCommand(it)) },
+                        label = { Text(stringResource(R.string.terminal_command)) })
+                }
+            },
             confirmButton = { TextButton(enabled = state.connectionState == TerminalConnectionState.CONNECTED && draft.isNotBlank(), onClick = { onAction(TerminalAction.ConfirmCommand) }) { Text(stringResource(R.string.terminal_run)) } },
             dismissButton = { TextButton(onClick = { onAction(TerminalAction.DismissCommand) }) { Text(stringResource(R.string.common_cancel)) } },
         )

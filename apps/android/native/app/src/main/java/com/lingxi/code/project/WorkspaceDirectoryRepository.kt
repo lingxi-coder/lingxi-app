@@ -10,6 +10,12 @@ import java.util.UUID
 internal data class WorkspaceLocation(val id: String, val name: String, val path: String)
 internal class WorkspaceDirectoryException(val messageResource: Int) : Exception()
 
+internal fun workspaceOwnerStoreMatches(
+    scopeValid: Boolean,
+    current: ProjectStoreState,
+    verifiedProjects: List<ProjectSnapshot>,
+): Boolean = scopeValid && !current.loading && !current.storageUnavailable && current.projects == verifiedProjects
+
 /** Native backing files of the SDK's Linux home. No shell or rootfs access. Call on IO. */
 internal class WorkspaceDirectoryRepository(
     internal val home: File,
@@ -17,6 +23,7 @@ internal class WorkspaceDirectoryRepository(
     val workspace: String,
     private val projects: String,
     internal val config: File,
+    private val managedWorkspaces: List<String>,
 ) {
     private val store get() = File(config, "workspace-locations.properties")
     private fun fail(resource: Int): Nothing = throw WorkspaceDirectoryException(resource)
@@ -80,8 +87,23 @@ internal class WorkspaceDirectoryRepository(
     private fun name(value: String): String = value.trim().also {
         if (it.isEmpty() || it == "." || it == ".." || it.contains('/') || it.any(Char::isISOControl)) fail(R.string.workspace_browser_invalid_name)
     }
-    internal fun writable(path: String): File = resolve(path, false).also {
-        if (within(it, config.canonicalFile)) fail(R.string.workspace_browser_in_use)
+    /** A managed root must not be redirected into private configuration by a symlink. */
+    private fun managedRoot(path: String): File? {
+        if (!path.startsWith("$guestHome/")) return null
+        val components = path.removePrefix("$guestHome/").split('/')
+        if (components.any { it.isEmpty() || it == "." || it == ".." }) return null
+        var current = home.canonicalFile
+        for (component in components) {
+            current = File(current, component)
+            if (Files.isSymbolicLink(current.toPath())) return null
+        }
+        if (!current.isDirectory) return null
+        return current.canonicalFile.takeIf { within(it, home.canonicalFile) }
+    }
+    internal fun writable(path: String): File = resolve(path, false).also { target ->
+        if (within(target, config.canonicalFile) && managedWorkspaces.none { root ->
+                managedRoot(root)?.let { within(target, it) } == true
+            }) fail(R.string.workspace_browser_in_use)
     }
     fun create(parent: String, name: String): String {
         val target = File(writable(parent), name(name))
@@ -93,7 +115,7 @@ internal class WorkspaceDirectoryRepository(
         val target = writable(path)
         val original = File(home, path.removePrefix(guestHome).trimStart('/'))
         if (Files.isSymbolicLink(original.toPath())) fail(R.string.workspace_browser_in_use)
-        (listOf(guestHome, workspace, projects) + protected).forEach { item ->
+        (listOf(guestHome, workspace, projects) + managedWorkspaces + protected).forEach { item ->
             val protectedFile = runCatching { resolve(item) }.getOrNull()
             if (protectedFile != null && within(protectedFile, target)) fail(R.string.workspace_browser_in_use)
         }

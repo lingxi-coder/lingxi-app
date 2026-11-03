@@ -162,6 +162,40 @@ class ChatViewModel(
         conversationDraftWriter.await()
     }
     internal val sideChats = SideChatManager(viewModelScope)
+    private var pendingAuthoringRetry: (suspend () -> Unit)? = null
+    private var authoringRetryJob: Job? = null
+    private val _authoringRetryAvailable = MutableStateFlow(false)
+    internal val authoringRetryAvailable: StateFlow<Boolean> = _authoringRetryAvailable.asStateFlow()
+
+    internal fun installAuthoringRetry(action: suspend () -> Unit) {
+        pendingAuthoringRetry = action
+        _authoringRetryAvailable.value = false
+    }
+
+    internal fun finishAuthoringBinding() {
+        pendingAuthoringRetry = null
+        _authoringRetryAvailable.value = false
+    }
+
+    internal fun reportAuthoringBindingFailure(error: Throwable) {
+        _authoringRetryAvailable.value = pendingAuthoringRetry != null
+        reportHostError(if (com.lingxi.code.apps.isAppDevelopmentCodeRequired(error))
+            strings.resolve(R.string.local_app_development_requires_code, "Chat mode does not support Local App development. Switch to Code mode to continue.")
+        else error.message ?: "Authoring registration failed")
+    }
+
+    internal fun retryAuthoringBinding() {
+        val action = pendingAuthoringRetry ?: return
+        if (authoringRetryJob?.isActive == true) return
+        _authoringRetryAvailable.value = false
+        authoringRetryJob = viewModelScope.launch {
+            try {
+                action()
+                if (pendingAuthoringRetry === action) finishAuthoringBinding()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (failure: Exception) { if (pendingAuthoringRetry === action) reportAuthoringBindingFailure(failure) }
+        }
+    }
 
     internal val supportsSideChats: Boolean get() = source is EngineConversationSource
 
@@ -173,6 +207,10 @@ class ChatViewModel(
     internal fun createSideChat() {
         if (sessionOwnerRejected || sideChats.isCreating.value) return
         val parent = source as? EngineConversationSource ?: return
+        if (!parent.turnAdmissionReady) {
+            reportHostError(strings.resolve(R.string.chat_turn_preparing_retry, "会话正在准备，请稍后重试。"))
+            return
+        }
         sideChats.create(input = "", draftOnFailure = null, newSource = parent::newSideChatSource) {
             reportHostError(sideChats.error.value ?: "Unable to create side chat")
         }
@@ -242,12 +280,12 @@ class ChatViewModel(
      */
     private val _sourceScope = MutableStateFlow<ConversationScope>(ConversationScope.Global)
     val sourceScope: StateFlow<ConversationScope> = _sourceScope.asStateFlow()
-    private var sessionOwnerAdmission: ((ConversationScope, String, SessionMode) -> Boolean)? = null
+    private var sessionOwnerAdmission: ((ConversationScope, String, SessionMode) -> SessionOwnerAdmission)? = null
     internal var sessionOwnerRejected: Boolean = false
         private set
 
     /** The host claims a confirmed identity before it is made visible or writable. */
-    internal fun setSessionOwnerAdmission(admit: (ConversationScope, String, SessionMode) -> Boolean) {
+    internal fun setSessionOwnerAdmission(admit: (ConversationScope, String, SessionMode) -> SessionOwnerAdmission) {
         sessionOwnerAdmission = admit
     }
 
@@ -316,6 +354,17 @@ class ChatViewModel(
 
     /** Collector for the active reply stream. */
     private var turnJob: Job? = null
+    private var pendingSubmission: NativeSubmissionGate? = null
+    private val pendingFollowUps = mutableMapOf<Long, NativeSubmissionGate>()
+    private val nativeTurnAdmission = NativeTurnAdmission()
+    private var visualizationDraftRevision = 0L
+    internal fun visualizationDraftRevision(): Long = visualizationDraftRevision
+
+    internal fun restoreVisualizationDraft(chip: VisualizationContextChip?) {
+        if (chip == null) return
+        visualizationDraftRevision++
+        _state.update { it.copy(visualizationChip = chip) }
+    }
     private var backgroundTurnActive = false
 
     /** Best-effort explicit Stop operation that a later session switch must await. */
@@ -506,6 +555,8 @@ class ChatViewModel(
      * source being replaced during provider reconnect.
      */
     private fun bindSource() {
+        pendingAuthoringRetry = null
+        _authoringRetryAvailable.value = false
         optimisticRowsByToken.clear()
         assistantTranscriptUuidsByIdentity.clear()
         pendingAssistantTranscriptUuids.clear()
@@ -514,6 +565,23 @@ class ChatViewModel(
         val boundSource = source
         val generation = sourceGeneration
         sourceBindingJob = viewModelScope.launch {
+            boundSource.coldAuthoringRecoveryState?.let { recovery ->
+                launch {
+                    val retry: suspend () -> Unit = { boundSource.retryColdAuthoringRecovery() }
+                    recovery.collect { status ->
+                        if (sourceGeneration != generation) return@collect
+                        when (status) {
+                            ColdAuthoringRecoveryState.Failed -> if (pendingAuthoringRetry == null || pendingAuthoringRetry === retry) {
+                                installAuthoringRetry(retry)
+                                reportAuthoringBindingFailure(IllegalStateException(strings.resolve(
+                                    R.string.chat_turn_preparing_retry, "会话正在准备，请稍后重试。")))
+                            }
+                            ColdAuthoringRecoveryState.Ready -> if (pendingAuthoringRetry === retry) finishAuthoringBinding()
+                            else -> Unit
+                        }
+                    }
+                }
+            }
             val eventsSubscribed = CompletableDeferred<Unit>()
             launch(start = CoroutineStart.UNDISPATCHED) {
                 try {
@@ -543,6 +611,15 @@ class ChatViewModel(
                 }
             }
             launch {
+                boundSource.workspaceState.collect { workspace ->
+                    if (sourceGeneration == generation && workspace != null &&
+                        canonicalSessionId(workspace.sessionId) == canonicalSessionId(_state.value.session.id) &&
+                        backgroundTurnActive) {
+                        reportBackgroundTurnState()
+                    }
+                }
+            }
+            launch {
                 boundSource.activeSessionState.collect { activated ->
                     if (sourceGeneration == generation) {
                         activated?.let {
@@ -554,7 +631,10 @@ class ChatViewModel(
                             val restoringOwner = _state.value.sessionTransitioning && pendingResumeId != null &&
                                 canonicalSessionId(pendingResumeId.orEmpty()) == canonicalSessionId(it.sessionId)
                             val activation = if (restoringOwner) boundSource.retainedUiActivation(it) else it
-                            applyActivatedSession(activation)
+                            while (sourceGeneration == generation && !applyActivatedSession(activation)) {
+                                SessionAdmissionGate.awaitPublication(canonicalSessionId(activation.sessionId))
+                            }
+                            if (sourceGeneration != generation) return@collect
                             if (sessionOwnerRejected || _state.value.sessionTransitioning ||
                                 canonicalSessionId(_state.value.session.id) != canonicalSessionId(activation.sessionId)) return@collect
                             val activationToken = sessionToken
@@ -610,7 +690,10 @@ class ChatViewModel(
                 // source following its session when it is collected.
                 launch(start = CoroutineStart.UNDISPATCHED) {
                     external.externalFeed.collect { item ->
-                        if (sourceGeneration == generation) ingestExternal(item)
+                        while (sourceGeneration == generation && !ingestExternal(item)) {
+                            val id = (item as? ExternalFeedItem.Base)?.session?.sessionId ?: break
+                            SessionAdmissionGate.awaitPublication(canonicalSessionId(id))
+                        }
                     }
                 }
             }
@@ -713,6 +796,7 @@ class ChatViewModel(
                 })
             }
             is ClientEvent.TurnStarted -> {
+                nativeTurnAdmission.confirm(event.turnId?.toLong())
                 pendingAssistantTranscriptUuids.clear()
                 _state.update { it.copy(promptSuggestion = null, promptSuggestionUuid = null, suggestionTurn = it.suggestionTurn + 1) }
                 if (source is ExternalTurnConversationSource) beginExternalTurn()
@@ -804,28 +888,31 @@ class ChatViewModel(
                     }
                 }
             }
-                is ClientEvent.TaskRow -> _state.update {
+            is ClientEvent.TaskRow -> {
+                _state.update {
                     val task = event.task.toBackgroundTaskUi()
                     it.copy(
                         backgroundTasks = it.backgroundTasks + (task.taskId to task),
-                        activeBackgroundTaskIds = it.activeBackgroundTaskIds.withTaskStatus(
-                            task.taskId,
-                            task.status,
-                        ),
+                        activeBackgroundTaskIds = it.activeBackgroundTaskIds.withTaskStatus(task.taskId, task.status),
                     )
                 }
-            is ClientEvent.WorkflowResumed -> _state.update { state ->
-                val origin = event.originSessionId?.let(::canonicalSessionId)
-                if (origin != null && origin != canonicalSessionId(state.session.id)) return@update state
-                val task = event.task.toBackgroundTaskUi()
-                state.copy(
-                    backgroundTasks = state.backgroundTasks - event.previousTaskId + (task.taskId to task),
-                    activeBackgroundTaskIds = state.activeBackgroundTaskIds
-                        .minus(event.previousTaskId)
-                        .withTaskStatus(task.taskId, task.status),
-                    workflowResumeState = WorkflowResumeUiState.Succeeded,
-                    statusLine = "Workflow resumed: ${event.runId}",
-                )
+                if (backgroundTurnActive) reportBackgroundTurnState()
+            }
+            is ClientEvent.WorkflowResumed -> {
+                _state.update { state ->
+                    val origin = event.originSessionId?.let(::canonicalSessionId)
+                    if (origin != null && origin != canonicalSessionId(state.session.id)) return@update state
+                    val task = event.task.toBackgroundTaskUi()
+                    state.copy(
+                        backgroundTasks = state.backgroundTasks - event.previousTaskId + (task.taskId to task),
+                        activeBackgroundTaskIds = state.activeBackgroundTaskIds
+                            .minus(event.previousTaskId)
+                            .withTaskStatus(task.taskId, task.status),
+                        workflowResumeState = WorkflowResumeUiState.Succeeded,
+                        statusLine = "Workflow resumed: ${event.runId}",
+                    )
+                }
+                if (backgroundTurnActive) reportBackgroundTurnState()
             }
             is ClientEvent.SessionAgentList -> _state.update { state ->
                 if (canonicalSessionId(event.sessionId) != canonicalSessionId(state.session.id)) {
@@ -896,6 +983,7 @@ class ChatViewModel(
                         ),
                     )
                 }
+                if (backgroundTurnActive) reportBackgroundTurnState()
                 event.originSessionId?.let { origin ->
                     updateWorkflowTaskStatus(origin, event.taskId, event.status)
                 }
@@ -1325,13 +1413,14 @@ class ChatViewModel(
      * did not start has no collector of its own, so its events take the same path
      * a re-attached turn does (the tail of [reduceClientEvent]).
      */
-    internal fun ingestExternal(item: ExternalFeedItem) {
-        if (sessionOwnerRejected) return
+    internal fun ingestExternal(item: ExternalFeedItem): Boolean {
+        if (sessionOwnerRejected) return true
         when (item) {
             is ExternalFeedItem.Base -> {
+                if (!applyActivatedSession(item.session)) return false
+                if (sessionOwnerRejected) return true
                 externalPromptRows.clear()
                 externalOutgoingRows.clear()
-                applyActivatedSession(item.session)
                 item.title?.let { title ->
                     _state.update { it.copy(session = it.session.copy(title = title)) }
                 }
@@ -1357,6 +1446,7 @@ class ChatViewModel(
             }
             is ExternalFeedItem.Notice -> _state.update { it.copy(statusLine = item.text) }
         }
+        return true
     }
 
     /** A turn of the followed session started; idle means nothing else owns the reducer. */
@@ -1825,7 +1915,9 @@ class ChatViewModel(
         generation: Int,
         dispatcher: CoroutineDispatcher = Dispatchers.IO,
         awaitRelease: suspend (String) -> Boolean = { true },
+        awaitMediaDrain: suspend () -> Boolean = { true },
         canReplace: () -> Boolean = { true },
+        beginReplacement: suspend () -> AutoCloseable? = { AutoCloseable { } },
         createSource: () -> ConversationSource,
     ) {
         if (generation <= reconnectGeneration || generation <= (requestedSourceGeneration ?: Int.MIN_VALUE)) return
@@ -1833,7 +1925,7 @@ class ChatViewModel(
         if (source !is ConnectingConversationSource && _state.value.blocksEngineReconnect(_pendingPermission.value != null)) return
         if (sideChats.hasLiveChats) {
             reportHostError(strings.resolve(R.string.side_chat_end_before_reconnect, "请先结束旁聊，再重新连接引擎。"))
-            sideChats.whenVacant = { ensureSourceInBackground(generation, dispatcher, awaitRelease, canReplace, createSource) }
+            sideChats.whenVacant = { ensureSourceInBackground(generation, dispatcher, awaitRelease, awaitMediaDrain, canReplace, beginReplacement, createSource) }
             return
         }
         requestedSourceGeneration = generation
@@ -1841,12 +1933,23 @@ class ChatViewModel(
         viewModelScope.launch {
             workspaceSwitchMutex.withLock {
                 var prepared: ConversationSource? = null
+                var replacementLease: AutoCloseable? = null
                 try {
                     if (requestedSourceGeneration != generation || generation <= reconnectGeneration || source !== expectedSource) return@launch
                     if (!canReplace()) return@launch
                     if (source !is ConnectingConversationSource && _state.value.blocksEngineReconnect(_pendingPermission.value != null)) return@launch
                     if (sideChats.hasLiveChats) {
-                        sideChats.whenVacant = { ensureSourceInBackground(generation, dispatcher, awaitRelease, canReplace, createSource) }
+                        sideChats.whenVacant = { ensureSourceInBackground(generation, dispatcher, awaitRelease, awaitMediaDrain, canReplace, beginReplacement, createSource) }
+                        return@launch
+                    }
+                    // A Cron reservation can be in flight for this same UUID.
+                    // Keep the old source alive while waiting and recheck work
+                    // before replacing it.
+                    replacementLease = beginReplacement() ?: return@launch
+                    if (requestedSourceGeneration != generation || generation <= reconnectGeneration || source !== expectedSource || !canReplace()) return@launch
+                    if (source !is ConnectingConversationSource && _state.value.blocksEngineReconnect(_pendingPermission.value != null)) return@launch
+                    if (sideChats.hasLiveChats) {
+                        sideChats.whenVacant = { ensureSourceInBackground(generation, dispatcher, awaitRelease, awaitMediaDrain, canReplace, beginReplacement, createSource) }
                         return@launch
                     }
                     if (source !is ConnectingConversationSource) {
@@ -1874,6 +1977,18 @@ class ChatViewModel(
                         }
                         pendingReconnectRelease = null
                     }
+                    // Session ownership and the host media attachment have
+                    // independent async drains. Do not construct a replacement
+                    // while the old attachment remains unconfirmed, including
+                    // reconnects whose old source had no session ID yet.
+                    if (!awaitMediaDrain()) {
+                        if (requestedSourceGeneration == generation) _state.update {
+                            it.copy(sessionTransitioning = false, sessionReady = false, statusLine = null,
+                                error = ChatError(strings.resolve(R.string.chat_engine_unavailable,
+                                    "移动端引擎当前不可用"), ChatErrorKind.GENERIC))
+                        }
+                        return@launch
+                    }
                     if (requestedSourceGeneration != generation) return@launch
                     // UniFFI construction is synchronous and cannot be interrupted.
                     // Retain the returned handle even after cancellation so it can
@@ -1883,7 +1998,7 @@ class ChatViewModel(
                     if (requestedSourceGeneration != generation || generation <= reconnectGeneration || source !is ConnectingConversationSource) return@launch
                     if (source !is ConnectingConversationSource && _state.value.blocksEngineReconnect(_pendingPermission.value != null)) return@launch
                     if (sideChats.hasLiveChats) {
-                        sideChats.whenVacant = { ensureSourceInBackground(generation, dispatcher, awaitRelease, canReplace, createSource) }
+                        sideChats.whenVacant = { ensureSourceInBackground(generation, dispatcher, awaitRelease, awaitMediaDrain, canReplace, beginReplacement, createSource) }
                         return@launch
                     }
                     val replacement = checkNotNull(prepared)
@@ -1896,8 +2011,12 @@ class ChatViewModel(
                     }
                 } finally {
                     val abandoned = prepared
-                    if (abandoned != null && abandoned !== source) withContext(dispatcher + NonCancellable) { abandoned.close() }
-                    if (requestedSourceGeneration == generation) requestedSourceGeneration = null
+                    try {
+                        if (abandoned != null && abandoned !== source) withContext(dispatcher + NonCancellable) { abandoned.close() }
+                    } finally {
+                        replacementLease?.close()
+                        if (requestedSourceGeneration == generation) requestedSourceGeneration = null
+                    }
                 }
             }
         }
@@ -2268,8 +2387,9 @@ class ChatViewModel(
      * bar never reverts to a placeholder on a real resume. Extracted (internal)
      * so the rehydration is exercised directly in unit tests with a fake source.
      */
-    internal fun applyActivatedSession(restored: ActivatedSession) {
-        if (sessionOwnerRejected) return
+    /** False only while this UUID is in a transient disk publication. */
+    internal fun applyActivatedSession(restored: ActivatedSession): Boolean {
+        if (sessionOwnerRejected) return true
         val current = _state.value
         val retained = restored.retainedProjection
         if (retained != null &&
@@ -2277,13 +2397,13 @@ class ChatViewModel(
                 canonicalSessionId(retained.state.session.id) != canonicalSessionId(restored.sessionId) ||
                 retained.state.sessionMode != restored.mode)) {
             rejectSessionOwner()
-            return
+            return true
         }
         if (!current.sessionTransitioning && current.sessionMode != null &&
             canonicalSessionId(current.session.id) == canonicalSessionId(restored.sessionId) &&
             current.sessionMode != restored.mode) {
             rejectSessionOwner()
-            return
+            return true
         }
         if (current.sessionTransitioning) {
             val matchesPendingResume =
@@ -2292,16 +2412,23 @@ class ChatViewModel(
                     canonicalSessionId(restored.sessionId) == canonicalSessionId(pendingResumeId.orEmpty())
             val matchesPendingNew =
                 pendingNewSession && restored.kind == SessionActivationKind.Started
-            if (!matchesPendingResume && !matchesPendingNew) return
+            if (!matchesPendingResume && !matchesPendingNew) return true
         }
         if (!current.sessionTransitioning && current.session.id != "new" &&
             (restored.kind == SessionActivationKind.Started ||
-                canonicalSessionId(current.session.id) != canonicalSessionId(restored.sessionId))) return
+                canonicalSessionId(current.session.id) != canonicalSessionId(restored.sessionId))) return true
         val ownerId = canonicalSessionId(restored.sessionId)
-        if (ownerId.isBlank() || ownerId == "new" ||
-            sessionOwnerAdmission?.invoke(_sourceScope.value, ownerId, restored.mode) == false) {
+        if (ownerId.isBlank() || ownerId == "new") {
             rejectSessionOwner()
-            return
+            return true
+        }
+        when (sessionOwnerAdmission?.invoke(_sourceScope.value, ownerId, restored.mode) ?: SessionOwnerAdmission.Accepted) {
+            SessionOwnerAdmission.Deferred -> return false
+            SessionOwnerAdmission.Conflict -> {
+                rejectSessionOwner()
+                return true
+            }
+            SessionOwnerAdmission.Accepted -> Unit
         }
         if (restored.kind == SessionActivationKind.Started && !current.sessionTransitioning) {
             // The first prompt can already be streaming when engine bootstrap
@@ -2317,7 +2444,7 @@ class ChatViewModel(
                         sessionReady = true, sessionMode = restored.mode)
                 }
                 reportBackgroundTurnState()
-                return
+                return true
             }
         }
         abandonLocalTurn()
@@ -2370,9 +2497,10 @@ class ChatViewModel(
             )
             acknowledgedTurnProjection = retainedProjection(_state.value, activeTurnId, retained.afterSequence)
             reportBackgroundTurnState()
-            return
+            return true
         }
         setNavigationOwner(restored.sessionId, _sourceScope.value)
+        visualizationDraftRevision++
         _state.update {
             it.copy(
                 session = SessionRef(id = restored.sessionId, title = title),
@@ -2408,6 +2536,7 @@ class ChatViewModel(
             )
         }
         reportBackgroundTurnState()
+        return true
     }
 
     /** Confirm the ordinary engine's UUID and actual cwd before associating
@@ -2423,7 +2552,8 @@ class ChatViewModel(
                 val current = _state.value
                 val workspace = owner.workspaceState.value
                 if (current.sessionReady && !current.sessionTransitioning && current.session.id != "new" &&
-                    workspace != null && canonicalSessionId(workspace.sessionId) == canonicalSessionId(current.session.id)) {
+                    workspace != null && workspace.transcriptPath.isNotBlank() &&
+                    canonicalSessionId(workspace.sessionId) == canonicalSessionId(current.session.id)) {
                     check(expectedSessionId == null || canonicalSessionId(workspace.sessionId) == canonicalSessionId(expectedSessionId)) { "引擎打开了其他会话，请重新打开应用源码。" }
                     check(workspace.cwd == directory) { "来源会话已切换目录，请刷新应用详情。" }
                     return@withTimeout workspace
@@ -2562,6 +2692,7 @@ class ChatViewModel(
      */
     private fun abandonLocalTurn(): Job? {
         turnToken++
+        nativeTurnAdmission.clear()
         recoveredTurnToken = null
         recoveryReplayTurnId = null
         replayThroughSequence = null
@@ -2622,6 +2753,7 @@ class ChatViewModel(
         pendingNewSession = newSession
         val detachedTurn = abandonLocalTurn()
         setNavigationOwner(target.id, _sourceScope.value)
+        visualizationDraftRevision++
         _state.update {
             it.copy(
                 session = target,
@@ -2758,6 +2890,7 @@ class ChatViewModel(
 
     /** The composer took the offered follow-up; its chip now rides the next send. */
     fun acceptVisualizationFollowup(followup: VisualizationFollowup) {
+        visualizationDraftRevision++
         _state.update {
             if (it.visualizationFollowup != followup) it
             else it.copy(visualizationFollowup = null, visualizationChip = followup.chip)
@@ -2765,6 +2898,7 @@ class ChatViewModel(
     }
 
     fun clearVisualizationChip() {
+        visualizationDraftRevision++
         _state.update { it.copy(visualizationChip = null) }
     }
 
@@ -2781,8 +2915,27 @@ class ChatViewModel(
     fun admitComposerSend(text: String, hasImages: Boolean): Boolean {
         val current = _state.value
         if (sessionOwnerRejected || !current.sessionReady || current.sessionTransitioning) return false
+        if (!source.turnAdmissionReady) {
+            reportHostError(strings.resolve(R.string.chat_turn_preparing_retry, "会话正在准备，请稍后重试。"))
+            return false
+        }
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return false
+        if (trimmed.split(Regex("\\s+"), limit = 2).first().equals("/compact", ignoreCase = true) && current.streaming) {
+            showCompactRejection()
+            return false
+        }
         if (source is ExternalTurnConversationSource) return true
-        val rejection = sideChatSendRejection(text, hasImages, source is SideChatSource) ?: return true
+        if (nativeTurnAdmission.blocksFollowUp(current.streaming)) {
+            reportHostError(strings.resolve(R.string.chat_turn_preparing_retry, "会话正在准备，请稍后重试。"))
+            return false
+        }
+        if (refuseWhileDurableTurnParked() || explicitCancellation?.isActive == true ||
+            current.compaction?.status == CompactionProgressStatus.Running ||
+            (isManualCompactCommand(trimmed) && hasImages)
+        ) return false
+        val rejection = sideChatSendRejection(text, hasImages, source is SideChatSource)
+            ?: if (sideChatInput(text) != null && source !is EngineConversationSource) SideChatSendRejection.Nested else return true
         reportHostError(when (rejection) {
             SideChatSendRejection.Attachment -> strings.resolve(R.string.side_chat_attachment_rejected, "创建旁聊时请先移除图片附件。")
             SideChatSendRejection.Nested -> strings.resolve(R.string.side_chat_nested_unavailable, "旁聊中无法创建新的旁聊")
@@ -2794,11 +2947,13 @@ class ChatViewModel(
         text: String,
         images: List<ImageRefDto> = emptyList(),
         origin: ConversationTurnOrigin = ConversationTurnOrigin.Ordinary,
+        onNotAdmitted: (() -> Unit)? = null,
     ) {
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return
+        if (trimmed.isEmpty()) { onNotAdmitted?.invoke(); return }
         if (trimmed.split(Regex("\\s+"), limit = 2).first().equals("/compact", ignoreCase = true) && _state.value.streaming) {
             showCompactRejection()
+            onNotAdmitted?.invoke()
             return
         }
         (source as? ExternalTurnConversationSource)?.let { external ->
@@ -2810,44 +2965,55 @@ class ChatViewModel(
         val isBashInput = text.startsWith("!")
         val submittedText = if (isBashInput) text.substring(1) else trimmed
         val promptMode = if (isBashInput) PromptModeDto.BASH else null
-        if (!admitComposerSend(trimmed, images.isNotEmpty())) return
-        if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
+        if (!admitComposerSend(trimmed, images.isNotEmpty())) { onNotAdmitted?.invoke(); return }
+        if (!_state.value.sessionReady || _state.value.sessionTransitioning) { onNotAdmitted?.invoke(); return }
         sideChatInput(trimmed)?.let { input ->
             val parent = source as? EngineConversationSource
             if (parent == null) {
                 reportHostError(strings.resolve(R.string.side_chat_nested_unavailable, "旁聊中无法创建新的旁聊"))
+                onNotAdmitted?.invoke()
                 return
             }
             sideChats.create(input = input, draftOnFailure = text, newSource = parent::newSideChatSource) {
-                onDraftChanged(text)
                 reportHostError(sideChats.error.value ?: "Unable to create side chat")
+                if (onNotAdmitted != null) onNotAdmitted() else onDraftChanged(text)
             }
             return
         }
-        if (refuseWhileDurableTurnParked()) return
-        if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
-        if (explicitCancellation?.isActive == true) return
-        if (_state.value.compaction?.status == CompactionProgressStatus.Running) return
+        if (refuseWhileDurableTurnParked()) { onNotAdmitted?.invoke(); return }
+        if (!_state.value.sessionReady || _state.value.sessionTransitioning) { onNotAdmitted?.invoke(); return }
+        if (explicitCancellation?.isActive == true) { onNotAdmitted?.invoke(); return }
+        if (_state.value.compaction?.status == CompactionProgressStatus.Running) { onNotAdmitted?.invoke(); return }
 
         if (isManualCompactCommand(trimmed)) {
-            if (images.isNotEmpty() || _state.value.streaming) return
+            if (images.isNotEmpty() || _state.value.streaming) { onNotAdmitted?.invoke(); return }
+            val compactSource = source
+            val compactMessage = Message(role = Role.User, sentAtMs = System.currentTimeMillis(), text = trimmed)
             savedState?.set(KEY_DRAFT, "")
             _state.update {
                 it.copy(
                     isNew = false,
                     statusLine = null,
                     error = null,
-                    messages = it.messages + Message(role = Role.User, sentAtMs = System.currentTimeMillis(), text = trimmed),
+                    messages = it.messages + compactMessage,
                     compaction = CompactionProgressUi(
                         status = CompactionProgressStatus.Running,
                     ),
                 )
             }
             viewModelScope.launch {
-                runCatching { source.submitClientCommand(ClientCommand.ForceCompact) }
+                runCatching { compactSource.submitClientCommand(ClientCommand.ForceCompact) }
                     .onFailure { failure ->
+                        if (failure is CancellationException) throw failure
+                        val refused = if (compactSource is SideChatSource) isKnownSideChatRejection(failure)
+                            else failure is com.lingxi.code.bindings.client.ClientException.Rejected ||
+                                isCompactTurnRejection(failure.message.orEmpty())
+                        if (refused) {
+                            _state.update { state -> state.copy(messages = state.messages.filterNot { it.id == compactMessage.id }) }
+                            onNotAdmitted?.invoke()
+                        }
                         if (isCompactTurnRejection(failure.message.orEmpty())) {
-                            showCompactRejection()
+                            showCompactRejection(removeOptimistic = false)
                             return@onFailure
                         }
                         _state.update { state ->
@@ -2871,7 +3037,15 @@ class ChatViewModel(
             val queuedTurnId = DurableConversationTurnIds.next()
             val queuedUserMessage = Message(role = Role.User, sentAtMs = System.currentTimeMillis(), text = trimmed, images = images, visualizationContext = visualizationChip)
             optimisticRowsByToken["client-turn:$queuedTurnId"] = queuedUserMessage.id
+            val queuedSource = source
+            val queuedAdmission = NativeSubmissionGate {
+                optimisticRowsByToken.remove("client-turn:$queuedTurnId")
+                _state.update { it.copy(messages = it.messages.filterNot { row -> row.id == queuedUserMessage.id }) }
+                onNotAdmitted?.invoke()
+            }
+            pendingFollowUps[queuedTurnId] = queuedAdmission
             savedState?.set(KEY_DRAFT, "")
+            visualizationDraftRevision++
             _state.update {
                 it.copy(
                     isNew = false,
@@ -2881,17 +3055,19 @@ class ChatViewModel(
                 )
             }
             viewModelScope.launch {
-                runCatching {
-                    source.submitClientCommand(
-                        ClientCommand.SendPrompt(
-                            text = submittedText.toClientTextDto(),
-                            promptMode = promptMode,
-                            images = images,
-                            turnId = queuedTurnId.toULong(),
-                            visualizationContext = visualizationChip?.reference?.toDto(),
-                        ),
+                try {
+                    val command = ClientCommand.SendPrompt(
+                        text = submittedText.toClientTextDto(), promptMode = promptMode, images = images,
+                        turnId = queuedTurnId.toULong(), visualizationContext = visualizationChip?.reference?.toDto(),
                     )
-                }.onFailure { failure ->
+                    if (queuedSource is SideChatSource) queuedSource.submitQueuedPrompt(command, queuedAdmission::enter)
+                    else {
+                        if (!queuedAdmission.enter()) return@launch
+                        queuedSource.submitClientCommand(command)
+                    }
+                } catch (failure: Throwable) {
+                    if (failure is CancellationException) throw failure
+                    if (queuedSource is SideChatSource && isKnownSideChatRejection(failure)) queuedAdmission.rejectKnown()
                     _state.update {
                         it.copy(
                             error = ChatError(
@@ -2900,6 +3076,8 @@ class ChatViewModel(
                             ),
                         )
                     }
+                } finally {
+                    pendingFollowUps.remove(queuedTurnId)
                 }
             }
             return
@@ -2911,8 +3089,19 @@ class ChatViewModel(
         turnToken++
         val token = turnToken
         val submittedTurnId = DurableConversationTurnIds.next()
+        if (source is EngineConversationSource || source is RecoveringConversationSource) {
+            nativeTurnAdmission.start(submittedTurnId)
+        } else {
+            nativeTurnAdmission.clear()
+        }
         val userMessage = Message(role = Role.User, sentAtMs = System.currentTimeMillis(), text = trimmed, images = images, visualizationContext = visualizationChip)
         optimisticRowsByToken["client-turn:$submittedTurnId"] = userMessage.id
+        val admission = NativeSubmissionGate {
+            optimisticRowsByToken.remove("client-turn:$submittedTurnId")
+            _state.update { state -> state.copy(messages = state.messages.filterNot { it.id == userMessage.id }) }
+            onNotAdmitted?.invoke()
+        }
+        pendingSubmission = admission
         durableTurnId = submittedTurnId
         recoveredTurnToken = null
         recoveryReplayTurnId = null
@@ -2923,6 +3112,7 @@ class ChatViewModel(
         currentTurnOrigin = origin
         // The draft was just sent — clear the persisted copy.
         savedState?.set(KEY_DRAFT, "")
+        visualizationDraftRevision++
         _state.update {
             it.copy(
                 isNew = false,
@@ -2947,12 +3137,51 @@ class ChatViewModel(
         val turnSource = source
         val slashCommandSource = turnSource as? SlashCommandConversationSource
         turnJob = viewModelScope.launch {
-            val replyStream = if (
-                !isBashInput && isSlashCommandLine(text) && slashCommandSource != null
-            ) {
-                slashCommandSource.submitSlashCommand(text.toClientTextDto(), images, submittedTurnId)
-            } else {
-                turnSource.submit(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode)
+            try {
+                val awaitPath: (suspend () -> String)? = when (turnSource) {
+                    is DurableTranscriptSource -> { { turnSource.awaitTurnTranscriptPath() } }
+                    else -> null
+                }
+                if (awaitPath != null) {
+                    prepareTurnRecovery(
+                        sessionId = _state.value.session.id,
+                        turnId = submittedTurnId,
+                        awaitTranscriptPath = awaitPath,
+                        isCurrent = { source === turnSource && turnToken == token && durableTurnId == submittedTurnId },
+                        snapshot = ::currentBackgroundSnapshot,
+                        persist = backgroundExecution::prepareSubmission,
+                    )
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                admission.reject()
+                throw cancelled
+            } catch (failure: Exception) {
+                admission.reject()
+                reduce(ReplyEvent.Error(failure.message ?: failure::class.simpleName.orEmpty()), token)
+                return@launch
+            }
+            val rejected = { admission.reject(); Unit }
+            val knownRejected = { admission.rejectKnown(); Unit }
+            val isSlash = !isBashInput && isSlashCommandLine(text) && slashCommandSource != null
+            val replyStream = when {
+                isSlash && turnSource is EngineConversationSource ->
+                    turnSource.submitSlashForComposer(text.toClientTextDto(), images, submittedTurnId, rejected, admission::enter)
+                isSlash && turnSource is RecoveringConversationSource ->
+                    turnSource.submitSlashForComposer(text.toClientTextDto(), images, submittedTurnId, rejected, admission::enter)
+                isSlash -> {
+                    if (!admission.enter()) throw CancellationException("Turn cancelled before submission")
+                    slashCommandSource!!.submitSlashCommand(text.toClientTextDto(), images, submittedTurnId)
+                }
+                turnSource is EngineConversationSource ->
+                    turnSource.submitForComposer(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode, rejected, admission::enter)
+                turnSource is RecoveringConversationSource ->
+                    turnSource.submitForComposer(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode, rejected, admission::enter)
+                turnSource is SideChatSource ->
+                    turnSource.submitForComposer(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode, knownRejected, admission::enter)
+                else -> {
+                    if (!admission.enter()) throw CancellationException("Turn cancelled before submission")
+                    turnSource.submit(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode)
+                }
             }
             replyStream.collect { event ->
                 reduce(event, token)
@@ -2988,6 +3217,8 @@ class ChatViewModel(
             return
         }
         if (!_state.value.streaming && !_state.value.liveTurnWaitingForUser) return
+        pendingSubmission?.reject()
+        pendingFollowUps.values.toList().forEach { it.reject() }
         val cancelledToken = turnToken
         val cancelledText = _state.value.streamingMessage?.text.orEmpty()
         // Supersede the turn: a late event arriving after the engine's Cancel
@@ -3065,7 +3296,7 @@ class ChatViewModel(
         }
     }
 
-    private fun showCompactRejection() {
+    private fun showCompactRejection(removeOptimistic: Boolean = true) {
         _state.update { state ->
             val optimistic = state.compaction?.let {
                 it.status == CompactionProgressStatus.Running && it.phase == "queued"
@@ -3073,7 +3304,7 @@ class ChatViewModel(
             state.copy(
                 compactRejectionId = java.util.UUID.randomUUID().toString(),
                 compaction = if (optimistic) null else state.compaction,
-                messages = if (optimistic && state.messages.lastOrNull()?.let {
+                messages = if (removeOptimistic && optimistic && state.messages.lastOrNull()?.let {
                     it.role == Role.User && isManualCompactCommand(it.text)
                 } == true) state.messages.dropLast(1) else state.messages,
             )
@@ -3285,6 +3516,7 @@ class ChatViewModel(
             }
 
             is ReplyEvent.CommandOutput -> {
+                nativeTurnAdmission.clear()
                 if (event.turnId != null && event.turnId != durableTurnId?.toULong()) return
                 turnJob = null
                 emitTurnCompletion(
@@ -3443,6 +3675,7 @@ class ChatViewModel(
             is ReplyEvent.DurableTurnReplayAcknowledged -> Unit
 
             is ReplyEvent.Error -> {
+                nativeTurnAdmission.clear()
                 turnJob = null
                 emitTurnCompletion(
                     token = token,
@@ -3474,6 +3707,7 @@ class ChatViewModel(
             }
 
             is ReplyEvent.Completed -> {
+                nativeTurnAdmission.clear()
                 turnJob = null
                 emitTurnCompletion(
                     token = token,
@@ -3507,6 +3741,7 @@ class ChatViewModel(
             }
 
             is ReplyEvent.End -> {
+                nativeTurnAdmission.clear()
                 turnJob = null
                 emitTurnCompletion(
                     token = token,
@@ -3540,6 +3775,7 @@ class ChatViewModel(
     }
 
     override fun onCleared() {
+        pendingAuthoringRetry = null
         sideChats.release()
         val backgroundSnapshot = currentBackgroundSnapshot().takeIf { _state.value.requiresBackgroundExecution }
         if (backgroundSnapshot != null) {

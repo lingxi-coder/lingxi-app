@@ -156,11 +156,11 @@ class RetainedConversationTakeoverTest {
         durable.begin("session-a", 42L)
         val spec = ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux)
         val source = EngineConversationSource(
-            handle = handle, mediaHost = media, mediaContextBindings = MediaAudioSessionContextBindings(media),
+            handle = handle, mediaHost = media, mediaContextBindings = MediaAudioSessionContextBindings<MobileEngineHandle> { _, _ -> },
             events = relay.events, eventRelay = relay, workflowEvents = workflows.events, workflowRelay = workflows,
             eventScope = sourceScope, permissions = permissions, permissionIngress = PermissionIngress(permissions),
             models = MutableStateFlow(EngineModelState()), sessions = MutableStateFlow(EngineSessionState.loading()),
-            workspace = MutableStateFlow(null),
+            workspace = MutableStateFlow(com.lingxi.code.project.SessionWorkspaceState("session-a", "/home", "/home", emptyList(), "/home/session-a.jsonl")),
             activeSession = MutableStateFlow(ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed, SessionMode.Code)),
             mcp = MutableStateFlow(emptyList()), strings = DefaultConversationStrings,
             durableTurns = durable, durableReplayGate = DurableTurnReplayGate(), autoAttachDurableTurns = false,
@@ -234,11 +234,11 @@ class RetainedConversationTakeoverTest {
         val durable = DurableConversationTurnClientStore(FakeSharedPreferences(), "global#code", initialSessionId = "session-a")
         durable.begin("session-a", 42L)
         return EngineConversationSource(
-            handle = handle, mediaHost = media, mediaContextBindings = MediaAudioSessionContextBindings(media),
+            handle = handle, mediaHost = media, mediaContextBindings = MediaAudioSessionContextBindings<MobileEngineHandle> { _, _ -> },
             events = relay.events, eventRelay = relay, workflowEvents = workflows.events, workflowRelay = workflows,
             eventScope = sourceScope, permissions = permissions, permissionIngress = PermissionIngress(permissions),
             models = MutableStateFlow(EngineModelState()), sessions = MutableStateFlow(EngineSessionState.loading()),
-            workspace = MutableStateFlow(null),
+            workspace = MutableStateFlow(com.lingxi.code.project.SessionWorkspaceState("session-a", "/home", "/home", emptyList(), "/home/session-a.jsonl")),
             activeSession = MutableStateFlow(ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed, SessionMode.Code)),
             mcp = MutableStateFlow(emptyList()), strings = DefaultConversationStrings,
             durableTurns = durable, durableReplayGate = DurableTurnReplayGate(), autoAttachDurableTurns = false,
@@ -358,7 +358,7 @@ class RetainedConversationTakeoverTest {
         val source = EngineConversationSource(
             handle = handle,
             mediaHost = media,
-            mediaContextBindings = MediaAudioSessionContextBindings(media),
+            mediaContextBindings = MediaAudioSessionContextBindings<MobileEngineHandle> { _, _ -> },
             events = relay.events,
             eventRelay = relay,
             workflowEvents = workflows.events,
@@ -368,7 +368,7 @@ class RetainedConversationTakeoverTest {
             permissionIngress = PermissionIngress(permissions),
             models = MutableStateFlow(EngineModelState()),
             sessions = MutableStateFlow(EngineSessionState.loading()),
-            workspace = MutableStateFlow(null),
+            workspace = MutableStateFlow(com.lingxi.code.project.SessionWorkspaceState("session-a", "/home", "/home", emptyList(), "/home/session-a.jsonl")),
             activeSession = MutableStateFlow(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, SessionMode.Code)),
             mcp = MutableStateFlow(emptyList()),
             strings = DefaultConversationStrings,

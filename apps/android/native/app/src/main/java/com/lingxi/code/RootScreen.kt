@@ -73,6 +73,12 @@ import com.lingxi.code.conversation.ComputerUseSetupStatus
 import com.lingxi.code.conversation.ComposerAttachment
 import com.lingxi.code.conversation.toImageRef
 import com.lingxi.code.conversation.EngineConversationSource
+import com.lingxi.code.conversation.verifiedAuthoringSource
+import com.lingxi.code.conversation.pendingAuthoringSourceIdentity
+import com.lingxi.code.conversation.reserveAuthoringSelection
+import com.lingxi.code.conversation.authoritativeAuthoringWorkspace
+import com.lingxi.code.conversation.releaseAuthoringSelection
+import com.lingxi.code.conversation.reserveValidatedAuthoringSelection
 import com.lingxi.code.conversation.conversationStrings
 import com.lingxi.code.conversation.PermissionPromptDialog
 import com.lingxi.code.computeruse.ComputerUseApprovalDialog
@@ -103,6 +109,7 @@ import com.lingxi.code.apps.UnifiedAppDetailsPage
 import com.lingxi.code.apps.AppAuthoringSessionContext
 import com.lingxi.code.apps.AppProjectRef
 import com.lingxi.code.apps.isCanonicalUuidValue
+import com.lingxi.code.apps.matchesOwner
 import com.lingxi.code.conversation.LocalAppCardLinks
 import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.ConversationScope
@@ -132,6 +139,10 @@ import com.lingxi.code.project.ProjectSnapshot
 import com.lingxi.code.project.ProjectStore
 import com.lingxi.code.project.ProjectStoreState
 import com.lingxi.code.project.ScopeStateStore
+import com.lingxi.code.project.globalGuestCwd
+import com.lingxi.code.project.projectGrantRoots
+import com.lingxi.code.project.workspaceDirectoryRepository
+import com.lingxi.code.project.workspaceOwnerStoreMatches
 import com.lingxi.code.project.toDrawerProject
 import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.settings.SettingsStore
@@ -211,16 +222,6 @@ private data class PendingHandoffRequest(
     val sourceSessionTitle: String,
 )
 
-internal enum class SessionCatalogLookupState {
-    Pending,
-    Ready,
-}
-
-internal data class SessionCatalogLookup<T>(
-    val state: SessionCatalogLookupState,
-    val value: T? = null,
-)
-
 internal fun isBoundToScope(
     boundScope: ConversationScope,
     targetScope: ConversationScope,
@@ -229,10 +230,7 @@ internal fun isBoundToScope(
 internal fun isRestorableSession(
     expectedId: String,
     candidateId: String,
-    candidateDirectory: String? = null,
-    activeDirectory: String? = null,
-): Boolean = canonicalSessionId(expectedId) == canonicalSessionId(candidateId) &&
-    (activeDirectory == null || candidateDirectory == activeDirectory)
+): Boolean = canonicalSessionId(expectedId) == canonicalSessionId(candidateId)
 
 internal fun shouldAttemptModeRestore(
     ready: Boolean,
@@ -301,7 +299,7 @@ fun RootScreen(
     onOpenCronSettings: (String?) -> Unit = { onOpenSettings() },
     /** Open the scheduled-task page on a new task prefilled with the given prompt. */
     onOpenCronCreate: (prompt: String) -> Unit = { onOpenCronSettings(null) },
-    onOpenTerminal: (sessionId: String, initCommand: String?) -> Unit = { _, _ -> },
+    onOpenTerminal: (sessionId: String, initCommand: String?, cwd: String, ownerKey: String) -> Unit = { _, _, _, _ -> },
     /** Open the Remote Control screens, which the host draws above this one. */
     onOpenRemoteControl: () -> Unit = {},
     onOpenTeams: () -> Unit = {},
@@ -325,7 +323,7 @@ fun RootScreen(
     onDeepLinkHandled: (com.lingxi.code.navigation.DeepLink) -> Unit = {},
     onDeepLinkBlockingChanged: (Boolean) -> Unit = {},
     onDeepLinkImportReady: (com.lingxi.code.navigation.DeepLink) -> Unit = {},
-    onDeepLinkNativeReady: (com.lingxi.code.navigation.DeepLink) -> Unit = {},
+    onDeepLinkNativeReady: (com.lingxi.code.navigation.DeepLink, com.lingxi.code.conversation.ConversationSource) -> Unit = { _, _ -> },
     requestedConversationLaunch: ConversationLaunchRequest? = null,
     onConversationLaunchHandled: () -> Unit = {},
     // 设置页请求切换到的项目 id。设置页自己做不了这件事：项目层/本地层写到哪个目录
@@ -406,6 +404,17 @@ fun RootScreen(
     }
     val cronRepository = remember(context) { AndroidCronRepository.get(context) }
     val cronState by cronRepository.state.collectAsState()
+    val cronAdmissionRevision by com.lingxi.code.conversation.SessionAdmissionGate.revision.collectAsState()
+    LaunchedEffect(cronAdmissionRevision) {
+        if (com.lingxi.code.conversation.SessionAdmissionGate.hasBarrierFailure()) {
+            projectStore.reportOwnerStateFailure(IllegalStateException("Scheduled owner admission could not be verified"), "scheduled")
+            return@LaunchedEffect
+        }
+        if (com.lingxi.code.conversation.SessionAdmissionGate.needsOwnerScan()) {
+            runCatching { projectStore.validateOwnerIndexes() }
+                .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+        }
+    }
     val projectScopeSignature = remember(projectState.activeProjectId, projectState.projects) {
         buildString {
             append(projectState.activeProjectId.orEmpty())
@@ -424,7 +433,6 @@ fun RootScreen(
     // source inside that same ViewModel instead of accumulating keyed VMs.
     val lifecycleOwner = LocalLifecycleOwner.current
     var activeSessionMode by rememberSaveable { mutableStateOf(chatViewModel.state.value.sessionMode ?: SessionMode.Code) }
-    var lastSelectedMode by rememberSaveable { mutableStateOf(SessionMode.Code) }
     // Only a deliberately started session may inherit the temporary new-chat draft.
     var newDraftScope by remember { mutableStateOf<ConversationScope?>(null) }
     if (com.lingxi.code.conversation.shouldBlockForOwnerStateValidation(
@@ -445,6 +453,12 @@ fun RootScreen(
         onDispose { if (viewModel != null) voiceSpeechPlayer.dispose() }
     }
     val navigationSequence = remember { java.util.concurrent.atomic.AtomicLong() }
+    fun nextNavigationIntent(): Long = com.lingxi.code.conversation.nextNavigationIntent(navigationSequence)
+    val appPageSequence = remember { java.util.concurrent.atomic.AtomicLong() }
+    val rootCompositionAlive = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
+    DisposableEffect(rootCompositionAlive) {
+        onDispose { rootCompositionAlive.set(false) }
+    }
     var pendingModeNavigation by remember { mutableStateOf<Pair<SessionMode, Long>?>(null) }
     val navigationMutex = remember { Mutex() }
     LaunchedEffect(chatViewModel, reconnectToken, drawerBootstrapComplete, projectState.loading, projectState.activeProjectId, projectState.storageUnavailable, scopeStateValid) {
@@ -494,6 +508,12 @@ fun RootScreen(
                     }
                     val launchLinuxMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
                         ?: com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux
+                    val launchCronRows = if (launchScope == ConversationScope.Scheduled && launchSessionId != null)
+                        cronRepository.state.first { !it.loading }.generatedSessions else cronRepository.state.value.generatedSessions
+                    val launchTranscriptPath = launchSessionId?.let { id ->
+                        com.lingxi.code.conversation.sessionTranscriptPath(launchScope, id, ownerMode,
+                            projectStore.state.value, launchCronRows)
+                    }
                     val createSource: suspend () -> ConversationSource = {
                         EngineConversationSource.createInBackground(
                             context = appContext,
@@ -503,6 +523,7 @@ fun RootScreen(
                             linuxRuntimeMode = launchLinuxMode,
                             reuseProcessSource = launchSessionId != null,
                             expectedSessionId = launchSessionId,
+                            initialSessionTranscriptPath = launchTranscriptPath,
                         )
                     }
                     if (initialBinding) {
@@ -513,7 +534,7 @@ fun RootScreen(
                                     (launchSessionId == null || canonicalSessionId(it.session.id) == canonicalSessionId(launchSessionId)))
                             }
                         }
-                        if (confirmed != null && !chatViewModel.sessionOwnerRejected && !projectStore.state.value.storageUnavailable &&
+                        if (confirmed != null && !chatViewModel.sessionOwnerRejected && validateOwnerIndexes() && !projectStore.state.value.storageUnavailable &&
                             scopeStore.claimSessionOwner(confirmed.session.id, launchWorkspaceKey, ownerMode) { scopeStateValid == true && !projectStore.state.value.storageUnavailable }) {
                             sessionHost.register(chatViewModel, launchScope, ownerMode)
                             if (!scopeStore.persistActiveSelection(launchWorkspaceKey, ownerMode) { scopeStateValid == true && !projectStore.state.value.storageUnavailable }) {
@@ -529,11 +550,20 @@ fun RootScreen(
                                 sessionId = sessionId,
                                 timeoutMs = 8000u,
                             )
+                        }, awaitMediaDrain = {
+                            val status = com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider.get(appContext)
+                                .waitForAttachmentDrain(8000u)
+                            if (status != com.lingxi.code.bindings.android.AndroidMediaDrainStatus.READY) {
+                                android.util.Log.w("RootScreen", "Engine reconnect blocked by media attachment drain: $status")
+                            }
+                            status == com.lingxi.code.bindings.android.AndroidMediaDrainStatus.READY
                         }, canReplace = {
                             val owner = chatViewModel.engineSource.value.recoverySpec?.ownerKey
-                            voiceCaptureOwner !== chatViewModel && !sessionHost.ownerHasVoiceWork(chatViewModel) &&
+                            scopeStateValid == true && !projectStore.state.value.storageUnavailable &&
+                                chatViewModel.engineSource.value.turnAdmissionReady &&
+                                voiceCaptureOwner !== chatViewModel && !sessionHost.ownerHasVoiceWork(chatViewModel) &&
                                 (owner == null || owner !in ComputerUseFeatureProvider.activeEngineOwners())
-                        }) {
+                        }, beginReplacement = { sessionHost.awaitSourceReplacement(chatViewModel) }) {
                             EngineConversationSource.create(
                                 context = appContext,
                                 projectWorkspace = launchWorkspace,
@@ -542,6 +572,7 @@ fun RootScreen(
                                 linuxRuntimeMode = launchLinuxMode,
                                 replaceProcessSource = true,
                                 expectedSessionId = launchSessionId,
+                                initialSessionTranscriptPath = launchTranscriptPath,
                             )
                         }
                     }
@@ -569,6 +600,7 @@ fun RootScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     val state by chatViewModel.state.collectAsState()
+    val authoringRetryAvailable by chatViewModel.authoringRetryAvailable.collectAsState()
     val pendingPermission by chatViewModel.pendingPermission.collectAsState()
     val sideChats by chatViewModel.sideChats.chats.collectAsState()
     val hostBusy by sessionHost.busy.collectAsState()
@@ -606,7 +638,6 @@ fun RootScreen(
 
     fun rememberModeSelection(mode: SessionMode) {
         if (scopeStateValid != true || projectStore.state.value.loading || projectStore.state.value.storageUnavailable) return
-        lastSelectedMode = mode
         if (viewModel == null) sessionHost.rememberModeSelection(scopeStore, mode)
         else chatViewModel.rememberModeSelection(scopeStore, mode)
     }
@@ -614,7 +645,7 @@ fun RootScreen(
     fun selectSessionMode(mode: SessionMode) {
         if (scopeStateValid != true || projectStore.state.value.loading || projectStore.state.value.storageUnavailable) return
         rememberModeSelection(mode)
-        val intent = navigationSequence.incrementAndGet()
+        val intent = nextNavigationIntent()
         pendingModeNavigation = if (mode != activeSessionMode) mode to intent else null
     }
 
@@ -716,7 +747,8 @@ fun RootScreen(
         }
     }
     var catalogOwners by remember(chatViewModel, sourceScope) { mutableStateOf<Map<String, ScopeStateStore.SessionOwner>?>(null) }
-    LaunchedEffect(rawSessionState.rows, sourceScope, state.session.id, state.sessionReady, scopeStateValid, projectState.storageUnavailable) {
+    val ownerRevision by scopeStore.ownerChanges.collectAsState()
+    LaunchedEffect(rawSessionState.rows, sourceScope, state.session.id, state.sessionReady, scopeStateValid, projectState.storageUnavailable, ownerRevision) {
         if (scopeStateValid != true || projectState.storageUnavailable) return@LaunchedEffect
         try {
             catalogOwners = scopeStore.readSessionOwners()
@@ -724,6 +756,66 @@ fun RootScreen(
             throw cancelled
         } catch (_: Exception) {
             projectStore.reload()
+        }
+    }
+    LaunchedEffect(cronState.generatedSessions, projectState.loading, projectState.storageUnavailable, scopeStateValid, cronAdmissionRevision) {
+        if (projectState.loading || projectState.storageUnavailable || scopeStateValid != true) return@LaunchedEffect
+        if (!com.lingxi.code.conversation.SessionAdmissionGate.permitsNewOwnersGlobally()) return@LaunchedEffect
+        try {
+            scopeStore.validate()
+            projectStore.validateOwnerIndexes()
+            val rows = cronState.generatedSessions.filter {
+                (it.sessionScopeKey == "scheduled" || it.sessionScopeKey?.startsWith("project.") == true) && !it.sessionId.isNullOrBlank() &&
+                    !it.sessionTranscriptPath.isNullOrBlank() &&
+                    SessionMode.entries.any { mode -> mode.wireValue == it.sessionMode }
+            }
+            rows.groupBy { canonicalSessionId(it.sessionId!!) }.forEach { (id, group) ->
+                if (!com.lingxi.code.conversation.SessionAdmissionGate.permitsNewOwner(id)) return@forEach
+                val identities = group.map { Triple(it.sessionScopeKey, it.sessionMode, it.sessionTranscriptPath) }.distinct()
+                check(identities.size == 1) { "Scheduled session $id has conflicting transcript identities" }
+                val run = group.first()
+                val mode = SessionMode.entries.single { it.wireValue == run.sessionMode }
+                val key = checkNotNull(run.sessionScopeKey)
+                val owner = ScopeStateStore.SessionOwner(key, mode)
+                if (key.startsWith("project.")) {
+                    val projectId = key.removePrefix("project.")
+                    val project = projectStore.state.value.projects.firstOrNull { it.record.id == projectId }
+                        ?: return@forEach
+                    val existing = project.sessions.firstOrNull { canonicalSessionId(it.sessionId) == id }
+                    check(existing?.transcriptPath == null || existing.transcriptPath == run.sessionTranscriptPath) {
+                        "Project session $id has conflicting transcript identities"
+                    }
+                    if (existing == null || existing.transcriptPath != run.sessionTranscriptPath) {
+                        projectStore.recordStartedSession(projectId, id, run.prompt.take(120), mode,
+                            transcriptPath = run.sessionTranscriptPath, markActive = { false })
+                    }
+                } else {
+                    val state = projectStore.state.value
+                    val indexed = state.globalSessions.firstOrNull { canonicalSessionId(it.sessionId) == id }
+                        ?.let { ScopeStateStore.SessionOwner("global", it.mode) }
+                        ?: state.projects.firstNotNullOfOrNull { project ->
+                            project.sessions.firstOrNull { canonicalSessionId(it.sessionId) == id }
+                                ?.let { ScopeStateStore.SessionOwner("project.${project.record.id}", it.mode) }
+                        }
+                    if (indexed != null) {
+                        projectStore.reportOwnerConflict(id, owner, indexed)
+                        return@LaunchedEffect
+                    }
+                }
+                if (!scopeStore.claimSessionOwner(id, owner.scopeKey, owner.mode) {
+                        scopeStateValid == true && !projectStore.state.value.storageUnavailable
+                    }) {
+                    if (!com.lingxi.code.conversation.SessionAdmissionGate.permitsNewOwner(id)) return@forEach
+                    projectStore.reportOwnerConflict(id, owner, scopeStore.readSessionOwners()[id])
+                    return@LaunchedEffect
+                }
+            }
+            if (!com.lingxi.code.conversation.SessionAdmissionGate.permitsNewOwnersGlobally()) return@LaunchedEffect
+            catalogOwners = scopeStore.readSessionOwners()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            projectStore.reportOwnerStateFailure(failure, "scheduled")
         }
     }
     val sessionState = rawSessionState.copy(
@@ -738,9 +830,11 @@ fun RootScreen(
     // across process death.
 
     var cronResultsSeenAt by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(scopeStore, projectState.loading, projectState.storageUnavailable, scopeStateValid) {
+    LaunchedEffect(scopeStore, projectState.loading, projectState.storageUnavailable, scopeStateValid, cronAdmissionRevision) {
         if (projectState.loading || projectState.storageUnavailable || scopeStateValid != true) return@LaunchedEffect
+        if (!com.lingxi.code.conversation.SessionAdmissionGate.permitsNewOwnersGlobally()) return@LaunchedEffect
         try {
+            if (!validateOwnerIndexes()) return@LaunchedEffect
             // Seed owners only from an unambiguous existing logical index. A cwd
             // catalog alone cannot establish which workspace owns a session.
             val indexed = projectState.globalSessions.map { it.sessionId to ScopeStateStore.SessionOwner("global", it.mode) } +
@@ -750,30 +844,33 @@ fun RootScreen(
             indexed.groupBy { canonicalSessionId(it.first) }.forEach { (id, claims) ->
                 val owners = claims.map { it.second }.distinct()
                 if (id.isBlank() || id == "new") return@forEach
+                if (!com.lingxi.code.conversation.SessionAdmissionGate.permitsNewOwner(id)) return@forEach
                 val owner = owners.first()
                 if (owners.size != 1 || !scopeStore.claimSessionOwner(id, owner.scopeKey, owner.mode) { scopeStateValid == true && !projectStore.state.value.storageUnavailable }) {
                     if (projectStore.state.value.storageUnavailable) return@LaunchedEffect
+                    if (!com.lingxi.code.conversation.SessionAdmissionGate.permitsNewOwner(id)) return@forEach
                     val recorded = if (owners.size != 1) owners.last() else scopeStore.readSessionOwners()[id]
                     projectStore.reportOwnerConflict(id, owner, recorded)
                     return@LaunchedEffect
                 }
             }
-            val restoredMode = scopeStore.readActiveMode() ?: SessionMode.Code
-            activeSessionMode = restoredMode
-            lastSelectedMode = (if (viewModel == null) sessionHost.readSelectedMode(scopeStore)
-                else chatViewModel.readSelectedMode(scopeStore)) ?: SessionMode.Code
-            drawerUi.replaceSessionPins(scopeStore.readPinnedSessions())
-            // Results that already exist when this first runs are not "new".
-            cronResultsSeenAt = scopeStore.readCronResultsSeenAt().takeIf { it > 0L }
-                ?: System.currentTimeMillis().also { scopeStore.persistCronResultsSeenAt(it) }
-            val presentation = scopeStore.readWorkspacePresentation()
-            drawerUi.replaceWorkspacePresentation(
-                collapsed = presentation.filterValues { it.collapsed }.keys,
-                pinned = presentation.mapNotNull { (key, state) ->
-                    state.pinnedAtEpochMillis?.let { key to it }
-                }.toMap(),
-            )
-            drawerBootstrapComplete = true
+            if (!com.lingxi.code.conversation.SessionAdmissionGate.permitsNewOwnersGlobally()) return@LaunchedEffect
+            if (!drawerBootstrapComplete) {
+                val restoredMode = scopeStore.readActiveMode() ?: SessionMode.Code
+                activeSessionMode = restoredMode
+                drawerUi.replaceSessionPins(scopeStore.readPinnedSessions())
+                // Results that already exist when this first runs are not "new".
+                cronResultsSeenAt = scopeStore.readCronResultsSeenAt().takeIf { it > 0L }
+                    ?: System.currentTimeMillis().also { scopeStore.persistCronResultsSeenAt(it) }
+                val presentation = scopeStore.readWorkspacePresentation()
+                drawerUi.replaceWorkspacePresentation(
+                    collapsed = presentation.filterValues { it.collapsed }.keys,
+                    pinned = presentation.mapNotNull { (key, state) ->
+                        state.pinnedAtEpochMillis?.let { key to it }
+                    }.toMap(),
+                )
+                drawerBootstrapComplete = true
+            }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (_: Exception) {
@@ -844,11 +941,13 @@ fun RootScreen(
             when (event) {
                 Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> {
                     appInForeground = true
+                    if (viewModel == null) sessionHost.setAutomaticSpeechForeground(true)
                     chatViewModel.sideChats.resumeForeground()
                 }
                 Lifecycle.Event.ON_STOP -> {
                     chatViewModel.sideChats.cancelCurrentTurns()
                     appInForeground = false
+                    if (viewModel == null) sessionHost.setAutomaticSpeechForeground(false)
                     catalogLifecycleScope.launch { runCatching { chatViewModel.engineSource.value.submitClientCommand(ClientCommand.RefreshProviderCatalog("background")) } }
                     flowVoiceController.pause()
                     cancelActiveHeldVoiceSession()
@@ -882,6 +981,7 @@ fun RootScreen(
         chatViewModel.setNotificationPreferences(settingsState.notifs)
     }
     val currentEngineSource by chatViewModel.engineSource.collectAsStateWithLifecycle()
+    val currentWorkspace by currentEngineSource.workspaceState.collectAsStateWithLifecycle()
     LaunchedEffect(currentEngineSource, flowVoiceController, voiceSpeechPlayer) {
         currentEngineSource.bindAudioOwner(flowVoiceController.audioOwner)
         currentEngineSource.bindAudioOwner(voiceSpeechPlayer.audioOwner)
@@ -909,9 +1009,27 @@ fun RootScreen(
     val currentAutoPlayReplies = rememberUpdatedState(settingsState.voice.autoPlayReplies)
     val currentFlowActive = rememberUpdatedState(flowActive)
     val currentAppInForeground = rememberUpdatedState(appInForeground)
-    LaunchedEffect(chatViewModel, voiceSpeechPlayer) {
+    LaunchedEffect(sessionHost, viewModel, settingsState.voice.autoPlayReplies, appInForeground) {
+        if (viewModel == null) sessionHost.configureAutomaticSpeech(settingsState.voice.autoPlayReplies, appInForeground)
+    }
+    LaunchedEffect(sessionHost, viewModel, flowActive) {
+        if (viewModel == null) sessionHost.automaticSpeechStateChanged()
+    }
+    DisposableEffect(sessionHost, viewModel) {
+        onDispose { if (viewModel == null) sessionHost.setAutomaticSpeechForeground(false) }
+    }
+    LaunchedEffect(sessionHost, viewModel) {
+        if (viewModel != null) return@LaunchedEffect
+        sessionHost.automaticSpeechErrors.collect { (owner, error) ->
+            if (sessionHost.selected.value === owner) {
+                audioGuidance = com.lingxi.code.voice.AudioSetupGuidance.fromError(error.kind.name, error.message)
+            }
+        }
+    }
+    LaunchedEffect(chatViewModel, voiceSpeechPlayer, viewModel) {
+        if (viewModel == null) return@LaunchedEffect
         chatViewModel.turnCompletions.collect { completion ->
-            if (viewModel != null && completion.origin == ConversationTurnOrigin.Flow) {
+            if (completion.origin == ConversationTurnOrigin.Flow) {
                 flowVoiceController.updateReply(
                     completion.finalAssistantText.takeIf { completion.outcome == ConversationTurnOutcome.Completed }.orEmpty(),
                     false,
@@ -992,7 +1110,8 @@ fun RootScreen(
     // input the user is about to send. Drafts follow the conversation owner,
     // including when its profile changes, rather than a workspace/mode slot.
     val initialSavedDraft = remember(chatViewModel) { chatViewModel.restoredDraft }
-    var draft by remember(chatViewModel) { if (viewModel == null) sessionHost.draftState(chatViewModel) else mutableStateOf("") }
+    val draftCell = remember(chatViewModel) { if (viewModel == null) sessionHost.draftState(chatViewModel) else mutableStateOf("") }
+    var draft by draftCell
     val conversationSource by chatViewModel.engineSource.collectAsState()
     val visualizationHost = conversationSource.visualizationHost
     var voiceDraftBase by remember { mutableStateOf("") }
@@ -1043,9 +1162,20 @@ fun RootScreen(
         if (ownerScope != null && ownerId != null) chatViewModel.onDraftChanged(text, ownerScope, ownerId)
     }
 
-    LaunchedEffect(chatViewModel) {
-        chatViewModel.sideChats.failedDraft.collect { failed ->
-            if (failed != null && draft.isEmpty()) updateCurrentDraft(failed)
+    // All owners use their own ordered writer, including updates arriving while
+    // they are hidden. Update the in-memory revision before any storage I/O so
+    // a pending restore or an older write cannot replace newer user input.
+    fun publishOwnerDraft(owner: ChatViewModel, ownerScope: ConversationScope, sessionId: String, text: String) {
+        val ownership = sessionHost.draftOwnership(owner)
+        ownership.scope.value = ownerScope
+        ownership.sessionId.value = canonicalSessionId(sessionId)
+        ownership.revision.longValue++
+        ownership.loaded.value = true
+        ownership.mayRestoreSaved.value = false
+        sessionHost.draftState(owner).value = text
+        owner.onDraftChanged(text, ownerScope, sessionId)
+        if (canonicalSessionId(sessionId) != "new") {
+            owner.persistConversationDraft(scopeStore, ownerScope, sessionId, text, ::reportScopeStateFailure)
         }
     }
 
@@ -1104,11 +1234,9 @@ fun RootScreen(
         val text = appendVoiceTranscript(voiceDraftBase, transcript)
         if (owner === chatViewModel) updateCurrentDraft(text)
         else if (viewModel == null) {
-            sessionHost.draftState(owner).value = text
             val ownerScope = owner.sourceScope.value
             val ownerId = canonicalSessionId(owner.state.value.session.id)
-            owner.onDraftChanged(text, ownerScope, ownerId)
-            if (ownerId != "new") owner.persistConversationDraft(scopeStore, ownerScope, ownerId, text, ::reportScopeStateFailure)
+            publishOwnerDraft(owner, ownerScope, ownerId, text)
         }
     }
     val (startVoiceCapture, stopVoiceCapture) = rememberVoiceCapture(
@@ -1127,6 +1255,7 @@ fun RootScreen(
             voiceCaptureOwner = null
         },
         bindOwner = { owner -> chatViewModel.engineSource.value.bindAudioOwner(owner) },
+        audioAdmission = if (viewModel == null) sessionHost.voiceAdmission else null,
     )
     val onVoiceHoldStart: () -> Unit = {
         if (voiceCaptureOwner != null) {
@@ -1139,6 +1268,7 @@ fun RootScreen(
             voiceGestureOwner = chatViewModel
             voiceDraftBase = draft
             startVoiceCapture()
+            if (viewModel == null) sessionHost.yieldOtherOwnersAutomaticSpeech(chatViewModel)
         }
     }
     val onVoiceHoldRelease: () -> Unit = {
@@ -1163,7 +1293,9 @@ fun RootScreen(
     // the same CameraController the engine bridges onto `traits::CameraControl`,
     // and the resulting JPEG surfaces as a composer thumbnail (the device-vision
     // analog of how onTranscript surfaces a recognized utterance).
-    var attachment by remember(chatViewModel) { if (viewModel == null) sessionHost.attachmentState(chatViewModel) else mutableStateOf<ComposerAttachment?>(null) }
+    val attachmentCell = remember(chatViewModel) { if (viewModel == null) sessionHost.attachmentState(chatViewModel) else mutableStateOf<ComposerAttachment?>(null) }
+    var attachment by attachmentCell
+    var pendingComposerRestore by remember(chatViewModel) { mutableStateOf<com.lingxi.code.conversation.ComposerRestoreGate?>(null) }
 
     var cameraRequestOwner by remember { mutableStateOf<ChatViewModel?>(null) }
     val launchCamera = rememberCameraCapture(
@@ -1178,8 +1310,13 @@ fun RootScreen(
                     base64 = Base64.encodeToString(image.jpegBytes, Base64.NO_WRAP),
                 )
                 val owner = cameraRequestOwner
-                if (viewModel == null && owner != null) sessionHost.attachmentState(owner).value = captured
-                else attachment = captured
+                if (viewModel == null && owner != null) {
+                    sessionHost.attachmentState(owner).value = captured
+                    sessionHost.draftOwnership(owner).attachmentRevision.longValue++
+                } else {
+                    attachment = captured
+                    draftOwnership.attachmentRevision.longValue++
+                }
                 cameraRequestOwner = null
             }
         },
@@ -1219,108 +1356,296 @@ fun RootScreen(
         newSession: Boolean,
         sessionModeOverride: SessionMode = activeSessionMode,
         expectedRuntimeGeneration: String? = null,
-        navigationIntent: Long = navigationSequence.incrementAndGet(),
-    ): Boolean = try {
-        navigationMutex.withLock {
+        navigationIntent: Long = nextNavigationIntent(),
+        selectedTranscriptPath: String? = null,
+        requireSelectedTranscript: Boolean = false,
+        preparedAuthoringGrant: com.lingxi.code.project.PreparedAuthoringGrant? = null,
+        authoringIntent: com.lingxi.code.apps.AuthoringIntent? = null,
+        onActivated: (ChatViewModel, Boolean) -> Unit = { _, _ -> },
+    ): Boolean {
+        return try {
             val destination = target ?: SessionRef("new", resources.getString(R.string.chat_new_conversation))
-            if (viewModel != null || navigationIntent != navigationSequence.get()) return@withLock false
+            if (viewModel != null || navigationIntent != navigationSequence.get()) return false
+            val sessionId = destination.id.takeUnless { newSession || it == "new" }
+            if (requireSelectedTranscript && (sessionId == null || selectedTranscriptPath?.startsWith('/') != true)) return false
+            fun savedPathMatchesSelection(): Boolean = !requireSelectedTranscript || (sessionId != null &&
+                com.lingxi.code.conversation.selectedTranscriptPathMatches(selectedTranscriptPath,
+                    com.lingxi.code.conversation.sessionTranscriptPath(engineScope, sessionId, sessionModeOverride,
+                        projectStore.state.value, cronRepository.state.value.generatedSessions)))
+            if (!savedPathMatchesSelection()) return false
+            if (sessionId != null) {
+                val retained = sessionHost.acquireRetained(engineScope, sessionModeOverride, sessionId, expectedRuntimeGeneration,
+                    selectedTranscriptPath.takeIf { requireSelectedTranscript })
+                if (retained != null) {
+                    var fencedSource: ConversationSource? = null
+                    try {
+                        fun retainedAuthoringMatches(): Boolean {
+                            val grant = preparedAuthoringGrant ?: return true
+                            val source = retained.viewModel.engineSource.value
+                            val recovery = source.recoverySpec
+                            val sourceIdentity = source.pendingAuthoringSourceIdentity()
+                            return (fencedSource == null || source === fencedSource) &&
+                                !retained.viewModel.state.value.blocksEngineReconnect(retained.viewModel.pendingPermission.value != null) &&
+                                !retained.viewModel.sideChats.hasLiveChats && !sessionHost.ownerHasVoiceWork(retained.viewModel) &&
+                                sourceIdentity != null && com.lingxi.code.project.sameAuthoringSource(sourceIdentity, grant.identity) &&
+                                com.lingxi.code.project.retainedAuthoringSourceMatches(
+                                grant.identity, sessionId, sessionModeOverride, source.activeSessionState.value?.sessionId,
+                                source.workspaceState.value, recovery?.transcriptPath, recovery?.hostPath, recovery?.guestPath,
+                                recovery?.projectId, recovery?.workspaceKey, recovery?.sessionMode)
+                        }
+                        if (!retainedAuthoringMatches()) return false
+                        if (preparedAuthoringGrant != null) {
+                            val source = retained.viewModel.engineSource.value
+                            reserveValidatedAuthoringSelection(
+                                reserve = { source.reserveAuthoringSelection().also { if (it) fencedSource = source } },
+                                readWorkspace = { source.authoritativeAuthoringWorkspace() },
+                                matches = { it == source.workspaceState.value && retainedAuthoringMatches() },
+                                release = { source.releaseAuthoringSelection(); fencedSource = null },
+                            ) ?: return false
+                            val selection = checkNotNull(authoringIntent)
+                            check(selection.projectId == preparedAuthoringGrant.identity.projectId &&
+                                selection.sourceDirectory == preparedAuthoringGrant.identity.guestPath)
+                            val retainedPath = retained.viewModel.engineSource.value.recoverySpec?.transcriptPath
+                            check(!retainedPath.isNullOrBlank()) { "Authoring transcript is unavailable" }
+                            com.lingxi.code.apps.AuthoringIntentStore(appContext).attach(selection.selectionId,
+                                canonicalSessionId(sessionId), retainedPath, sessionModeOverride, trackLive = false)
+                            com.lingxi.code.apps.AuthoringIntentStore(appContext).markCatalogued(canonicalSessionId(sessionId))
+                        }
+                        val projectId = (engineScope as? ConversationScope.Project)?.projectId
+                        val stillSelected = {
+                            navigationIntent == navigationSequence.get() && sessionHost.selected.value === retained.viewModel
+                        }
+                        val selected = projectStore.publishRetainedActive(projectId, allowCommit = {
+                            navigationIntent == navigationSequence.get() && retainedAuthoringMatches() && savedPathMatchesSelection() && sessionHost.isRetainedLeaseCurrent(
+                                retained, engineScope, sessionModeOverride, sessionId, expectedRuntimeGeneration,
+                                selectedTranscriptPath.takeIf { requireSelectedTranscript })
+                        }) {
+                            sessionHost.activate(retained)
+                            onActivated(retained.viewModel, true)
+                            drawerUi.selectSession(sessionId)
+                            restoredModeSessionKey = engineScope.sessionStateKey(sessionModeOverride)
+                            newDraftScope = null
+                            activeSessionMode = sessionModeOverride
+                        }
+                        if (selected) {
+                            scope.launch {
+                                if (!stillSelected() || scopeStateValid != true || projectStore.state.value.storageUnavailable) return@launch
+                                runCatching {
+                                    projectStore.persistActive(projectId) { stillSelected() && scopeStateValid == true }
+                                    if (stillSelected()) scopeStore.persistActiveSelection(engineScope.persistenceKey(), sessionModeOverride) {
+                                        stillSelected() && scopeStateValid == true && !projectStore.state.value.storageUnavailable
+                                    }
+                                }.onFailure { if (stillSelected()) retained.viewModel.reportHostError(it.message.orEmpty()) }
+                            }
+                            return true
+                        }
+                    } finally {
+                        fencedSource?.releaseAuthoringSelection()
+                        sessionHost.release(retained)
+                    }
+                    if (navigationIntent != navigationSequence.get()) return false
+                }
+                // A mismatching retained owner must not be reacquired through the cold path.
+                if (requireSelectedTranscript && sessionHost.find(engineScope, sessionId) != null) return false
+            }
             if (projectStore.state.value.storageUnavailable) {
                 projectStore.reload()
-                return@withLock false
+                return false
             }
-            if (!validateOwnerIndexes()) return@withLock false
-            val sessionId = destination.id.takeUnless { newSession || it == "new" }
-            if (sessionId != null && !scopeStore.matchesSessionOwner(sessionId, engineScope.persistenceKey(), sessionModeOverride)) return@withLock false
-            val lease = sessionHost.acquire(engineScope, sessionModeOverride, sessionId?.let { destination }, reconnectToken, expectedRuntimeGeneration) {
-                EngineConversationSource.createInBackground(
-                    context = appContext,
-                    projectWorkspace = when (engineScope) {
-                        ConversationScope.Global -> null
-                        ConversationScope.Scheduled -> workspaceForScope(engineScope, sessionId)
-                        is ConversationScope.Project -> project?.workspace
-                    },
-                    workspaceKey = engineScope.persistenceKey(),
-                    sessionMode = sessionModeOverride,
-                    linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
-                    reuseProcessSource = sessionId != null,
-                    expectedSessionId = sessionId,
-                    runtimeGeneration = expectedRuntimeGeneration ?: java.util.UUID.randomUUID().toString(),
-                    strictRuntimeGeneration = expectedRuntimeGeneration != null,
-                )
-            } ?: return@withLock false
+            if (!validateOwnerIndexes()) return false
+            if (sessionId != null && !scopeStore.matchesSessionOwner(sessionId, engineScope.persistenceKey(), sessionModeOverride)) return false
             var committed = false
-            try {
-                if (projectStore.state.value.storageUnavailable) return@withLock false
-                val owner = lease.viewModel
-                val confirmed = kotlinx.coroutines.withTimeoutOrNull(20_000L) {
-                    owner.state.first {
-                        owner.sessionOwnerRejected || (it.sessionReady && it.session.id != "new" && it.sessionMode == sessionModeOverride &&
-                            (sessionId == null || canonicalSessionId(it.session.id) == canonicalSessionId(sessionId)))
+            var ownerAdmitted = false
+            data class PreparedTarget(val source: ConversationSource, val session: SessionRef, val path: String?)
+            com.lingxi.code.conversation.withPreparedNavigation(
+                mutex = navigationMutex,
+                isCurrent = { navigationIntent == navigationSequence.get() },
+                acquire = {
+                    sessionHost.acquire(engineScope, sessionModeOverride, sessionId?.let { destination }, reconnectToken,
+                        expectedRuntimeGeneration, isCurrent = { navigationIntent == navigationSequence.get() }) {
+                        val indexedPath = sessionId?.let { id ->
+                            com.lingxi.code.conversation.sessionTranscriptPath(engineScope, id, sessionModeOverride,
+                                projectStore.state.value, cronRepository.state.value.generatedSessions)
+                        }
+                        val pathForConstruction = com.lingxi.code.conversation.selectedTranscriptPathForCreation(
+                            selectedTranscriptPath, indexedPath, requireSelectedTranscript)
+                        val pendingAuthoring = preparedAuthoringGrant?.let { grant ->
+                            check(engineScope is ConversationScope.Project && sessionModeOverride == SessionMode.Code &&
+                                grant.identity.projectId == engineScope.projectId &&
+                                project?.workspace?.guestPath == grant.identity.guestPath &&
+                                project?.workspace?.hostPath == grant.identity.hostPath) { "Authoring source changed" }
+                            checkNotNull(grant.consume(grant.identity, navigationIntent, navigationIntent == navigationSequence.get())) {
+                                "Authoring source selection expired"
+                            }
+                        }
+                        EngineConversationSource.createInBackground(
+                            context = appContext,
+                            projectWorkspace = when (engineScope) {
+                                ConversationScope.Global -> null
+                                ConversationScope.Scheduled -> workspaceForScope(engineScope, sessionId)
+                                is ConversationScope.Project -> project?.workspace
+                            },
+                            workspaceKey = engineScope.persistenceKey(),
+                            sessionMode = sessionModeOverride,
+                            linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
+                            reuseProcessSource = sessionId != null,
+                            expectedSessionId = sessionId,
+                            initialSessionTranscriptPath = pathForConstruction,
+                            runtimeGeneration = expectedRuntimeGeneration ?: java.util.UUID.randomUUID().toString(),
+                            strictRuntimeGeneration = expectedRuntimeGeneration != null,
+                            pendingAuthoringAdmission = pendingAuthoring,
+                        )
                     }
-                } ?: return@withLock false
-                if (owner.sessionOwnerRejected) {
-                    sessionHost.selected.value.reportConversationLaunchFailed()
-                    return@withLock false
-                }
-                if (!validateOwnerIndexes()) return@withLock false
-                if (projectStore.state.value.storageUnavailable ||
-                    !scopeStore.claimSessionOwner(confirmed.session.id, engineScope.persistenceKey(), sessionModeOverride) { scopeStateValid == true && !projectStore.state.value.storageUnavailable }) return@withLock false
-                sessionHost.register(owner, engineScope, sessionModeOverride)
-                if (newSession && engineScope != ConversationScope.Scheduled) {
-                    projectStore.recordStartedSession((engineScope as? ConversationScope.Project)?.projectId,
-                        confirmed.session.id, confirmed.session.title, sessionModeOverride)
-                }
-                if (engineScope is ConversationScope.Project) projectStore.addVisibleMode(engineScope.projectId, sessionModeOverride)
-                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                    if (projectStore.state.value.storageUnavailable || navigationIntent != navigationSequence.get()) return@withContext
-                    val previousOwner = sessionHost.selected.value
-                    val previousScope = previousOwner.sourceScope.value
-                    val previousProject = (previousScope as? ConversationScope.Project)?.projectId
-                    val previousMode = previousOwner.state.value.sessionMode ?: activeSessionMode
-                    try {
-                        val persisted = projectStore.persistActive((engineScope as? ConversationScope.Project)?.projectId)
-                        if (navigationIntent != navigationSequence.get()) {
-                            projectStore.persistActive(previousProject)
-                            return@withContext
+                },
+                prepare = prepare@{ lease ->
+                    if (projectStore.state.value.storageUnavailable || !savedPathMatchesSelection()) return@prepare null
+                    val owner = lease.viewModel
+                    val confirmed = kotlinx.coroutines.withTimeoutOrNull(20_000L) {
+                        owner.state.first {
+                            owner.sessionOwnerRejected || (it.sessionReady && it.session.id != "new" && it.sessionMode == sessionModeOverride &&
+                                (sessionId == null || canonicalSessionId(it.session.id) == canonicalSessionId(sessionId)))
                         }
-                        if (!scopeStore.persistActiveSelection(engineScope.persistenceKey(), sessionModeOverride) {
-                                scopeStateValid == true && !projectStore.state.value.storageUnavailable && navigationIntent == navigationSequence.get()
-                            }) {
-                            runCatching { projectStore.persistActive(previousProject) }
-                            return@withContext
-                        }
-                        if (navigationIntent != navigationSequence.get()) {
-                            scopeStore.persistActiveSelection(previousScope.persistenceKey(), previousMode)
-                            projectStore.persistActive(previousProject)
-                            return@withContext
-                        }
-                        if (!projectStore.publishActive(persisted) { sessionHost.activate(lease) }) {
-                            runCatching { scopeStore.persistActiveSelection(previousScope.persistenceKey(), previousMode) }
-                            runCatching { projectStore.persistActive(previousProject) }
-                            return@withContext
-                        }
-                        drawerUi.selectSession(confirmed.session.id)
-                        restoredModeSessionKey = engineScope.sessionStateKey(sessionModeOverride)
-                        newDraftScope = engineScope.takeIf { newSession }
-                        activeSessionMode = sessionModeOverride
-                        committed = true
-                    } catch (failure: Exception) {
-                        runCatching { projectStore.persistActive(previousProject) }
-                        runCatching { scopeStore.persistActiveSelection(previousScope.persistenceKey(), previousMode) }
-                        throw failure
+                    } ?: return@prepare null
+                    if (owner.sessionOwnerRejected) {
+                        sessionHost.selected.value.reportConversationLaunchFailed()
+                        return@prepare null
                     }
-                }
-                committed
-            } finally {
-                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { sessionHost.release(lease, discard = !committed) }
-            }
+                    val source = owner.engineSource.value
+                    if (requireSelectedTranscript && !com.lingxi.code.conversation.selectedTranscriptPathMatches(
+                            selectedTranscriptPath, source.recoverySpec?.transcriptPath)) return@prepare null
+                    val preparedPath = if (newSession && engineScope != ConversationScope.Scheduled) {
+                        kotlinx.coroutines.withTimeoutOrNull(20_000L) {
+                            source.workspaceState.first { workspace -> workspace != null &&
+                                canonicalSessionId(workspace.sessionId) == canonicalSessionId(confirmed.session.id) &&
+                                workspace.transcriptPath.isNotBlank() }
+                        }?.transcriptPath ?: return@prepare null
+                    } else null
+                    if (preparedAuthoringGrant != null && !source.turnAdmissionReady) {
+                        val intent = checkNotNull(authoringIntent)
+                        check(intent.projectId == (engineScope as? ConversationScope.Project)?.projectId &&
+                            intent.sourceDirectory == preparedAuthoringGrant.identity.guestPath)
+                        val sourcePath = preparedPath ?: source.recoverySpec?.transcriptPath
+                        check(!sourcePath.isNullOrBlank()) { "Authoring transcript is unavailable" }
+                        com.lingxi.code.apps.AuthoringIntentStore(appContext).attach(intent.selectionId, canonicalSessionId(confirmed.session.id),
+                            sourcePath, checkNotNull(confirmed.sessionMode))
+                    }
+                    PreparedTarget(source, confirmed.session, preparedPath)
+                },
+                commit = commit@{ lease, prepared ->
+                    val owner = lease.viewModel
+                    val source = prepared.source
+                    val confirmed = prepared.session
+                    if (owner.engineSource.value !== source || navigationIntent != navigationSequence.get() || !savedPathMatchesSelection()) return@commit false
+                    if (requireSelectedTranscript && !com.lingxi.code.conversation.selectedTranscriptPathMatches(
+                            selectedTranscriptPath, source.recoverySpec?.transcriptPath)) return@commit false
+                    if (navigationIntent != navigationSequence.get() || !validateOwnerIndexes()) return@commit false
+                    if (projectStore.state.value.storageUnavailable ||
+                        !scopeStore.claimSessionOwner(confirmed.id, engineScope.persistenceKey(), sessionModeOverride) {
+                            scopeStateValid == true && !projectStore.state.value.storageUnavailable && navigationIntent == navigationSequence.get()
+                        }) return@commit false
+                    sessionHost.register(owner, engineScope, sessionModeOverride)
+                    ownerAdmitted = true
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                        if (projectStore.state.value.storageUnavailable || navigationIntent != navigationSequence.get()) return@withContext
+                        if (newSession && preparedAuthoringGrant != null) {
+                            check(projectStore.recordStartedSession((engineScope as ConversationScope.Project).projectId,
+                                confirmed.id, confirmed.title, sessionModeOverride, transcriptPath = prepared.path,
+                                allowCommit = { navigationIntent == navigationSequence.get() }, markActive = { false })) {
+                                "Unable to save the authoring session"
+                            }
+                        }
+                        if (preparedAuthoringGrant != null && !source.turnAdmissionReady)
+                            com.lingxi.code.apps.AuthoringIntentStore(appContext).markCatalogued(canonicalSessionId(confirmed.id))
+                        val previousOwner = sessionHost.selected.value
+                        val previousScope = previousOwner.sourceScope.value
+                        val previousProject = (previousScope as? ConversationScope.Project)?.projectId
+                        val previousMode = previousOwner.state.value.sessionMode ?: activeSessionMode
+                        try {
+                            val persisted = projectStore.persistActive((engineScope as? ConversationScope.Project)?.projectId) {
+                                navigationIntent == navigationSequence.get()
+                            }
+                            if (navigationIntent != navigationSequence.get()) {
+                                projectStore.persistActive(previousProject) { sessionHost.selected.value === previousOwner }
+                                return@withContext
+                            }
+                            if (!scopeStore.persistActiveSelection(engineScope.persistenceKey(), sessionModeOverride) {
+                                    scopeStateValid == true && !projectStore.state.value.storageUnavailable && navigationIntent == navigationSequence.get()
+                                }) {
+                                runCatching { projectStore.persistActive(previousProject) { sessionHost.selected.value === previousOwner } }
+                                return@withContext
+                            }
+                            if (navigationIntent != navigationSequence.get()) {
+                                scopeStore.persistActiveSelection(previousScope.persistenceKey(), previousMode) { sessionHost.selected.value === previousOwner }
+                                projectStore.persistActive(previousProject) { sessionHost.selected.value === previousOwner }
+                                return@withContext
+                            }
+                            val published = synchronized(com.lingxi.code.conversation.SessionAdmissionGate.lock) {
+                                if (!projectStore.publishActive(persisted, allowCommit = { navigationIntent == navigationSequence.get() }) {
+                                        sessionHost.activate(lease)
+                                        onActivated(owner, false)
+                                    }) false
+                                else {
+                                    drawerUi.selectSession(confirmed.id)
+                                    restoredModeSessionKey = engineScope.sessionStateKey(sessionModeOverride)
+                                    newDraftScope = engineScope.takeIf { newSession }
+                                    activeSessionMode = sessionModeOverride
+                                    committed = true
+                                    true
+                                }
+                            }
+                            if (!published) {
+                                runCatching { scopeStore.persistActiveSelection(previousScope.persistenceKey(), previousMode) { sessionHost.selected.value === previousOwner } }
+                                runCatching { projectStore.persistActive(previousProject) { sessionHost.selected.value === previousOwner } }
+                                return@withContext
+                            }
+                        } catch (failure: Exception) {
+                            runCatching { projectStore.persistActive(previousProject) { sessionHost.selected.value === previousOwner } }
+                            runCatching { scopeStore.persistActiveSelection(previousScope.persistenceKey(), previousMode) { sessionHost.selected.value === previousOwner } }
+                            throw failure
+                        }
+                    }
+                    committed
+                },
+                afterCommit = { lease, prepared ->
+                    val owner = lease.viewModel
+                    val confirmed = prepared.session
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                        // Publication has already selected this owner. A later storage
+                        // error must be reported without making the caller believe the
+                        // navigation failed or releasing the selected source.
+                        if (newSession && engineScope != ConversationScope.Scheduled) {
+                            runCatching {
+                                projectStore.recordStartedSession((engineScope as? ConversationScope.Project)?.projectId,
+                                    confirmed.id, confirmed.title, sessionModeOverride, transcriptPath = prepared.path,
+                                    allowCommit = { navigationIntent == navigationSequence.get() || owner.state.value.requiresBackgroundExecution ||
+                                        owner.state.value.messages.any { it.role == com.lingxi.code.model.Role.User } },
+                                    markActive = { sessionHost.selected.value === owner })
+                            }.onFailure { owner.reportHostError(it.message.orEmpty()) }
+                        }
+                        if (engineScope is ConversationScope.Project) {
+                            runCatching { projectStore.addVisibleMode(engineScope.projectId, sessionModeOverride) }
+                                .onFailure { owner.reportHostError(it.message.orEmpty()) }
+                        }
+                    }
+                },
+                release = { lease ->
+                    val abandonedSession = lease.viewModel.engineSource.value.activeSessionState.value?.sessionId
+                    sessionHost.release(lease, discard = !committed && (!ownerAdmitted || preparedAuthoringGrant != null))
+                    if (!committed && preparedAuthoringGrant != null) {
+                        abandonedSession?.let { session ->
+                            com.lingxi.code.apps.AuthoringIntentStore(appContext).releaseLive(canonicalSessionId(session))
+                            projectStore.reload()
+                        }
+                    }
+                },
+            )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            projectStore.reload()
+            chatViewModel.reportHostError(failure.message.orEmpty())
+            false
         }
-    } catch (cancelled: kotlinx.coroutines.CancellationException) {
-        throw cancelled
-    } catch (failure: Exception) {
-        projectStore.reload()
-        chatViewModel.reportHostError(failure.message.orEmpty())
-        false
     }
 
     /** Project-flow convenience: derive the scope from the snapshot. */
@@ -1329,7 +1654,9 @@ fun RootScreen(
         target: SessionRef?,
         newSession: Boolean,
         sessionModeOverride: SessionMode = activeSessionMode,
-        navigationIntent: Long = navigationSequence.incrementAndGet(),
+        navigationIntent: Long = nextNavigationIntent(),
+        selectedTranscriptPath: String? = null,
+        requireSelectedTranscript: Boolean = false,
     ): Boolean = switchEngineScope(
         engineScope = project?.let { ConversationScope.Project(it.record.id) } ?: ConversationScope.Global,
         project = project,
@@ -1337,15 +1664,32 @@ fun RootScreen(
         newSession = newSession,
         sessionModeOverride = sessionModeOverride,
         navigationIntent = navigationIntent,
+        selectedTranscriptPath = selectedTranscriptPath,
+        requireSelectedTranscript = requireSelectedTranscript,
     )
 
     LaunchedEffect(pendingModeNavigation) {
         val (mode, intent) = pendingModeNavigation ?: return@LaunchedEffect
-        if (!validateOwnerIndexes()) {
-            pendingModeNavigation = null
-            return@LaunchedEffect
-        }
         try {
+            // The prior mode's exact in-process owner is already admitted. Do
+            // not make returning to it wait for an unrelated fsync or draft write.
+            val retained = if (viewModel == null) sessionHost.retainedDestination(mode) else null
+            val retainedArchived = retained?.let { target ->
+                when (val targetScope = target.scope) {
+                    is ConversationScope.Project -> projectSnapshotForScope(targetScope)?.sessions
+                        ?.any { canonicalSessionId(it.sessionId) == canonicalSessionId(target.session.id) && it.isArchived } == true
+                    ConversationScope.Global -> projectState.globalSessions
+                        .any { canonicalSessionId(it.sessionId) == canonicalSessionId(target.session.id) && it.isArchived }
+                    ConversationScope.Scheduled -> false
+                }
+            } ?: false
+            if (retained != null && !retainedArchived) {
+                queueCurrentDraft()
+                if (switchEngineScope(retained.scope, projectSnapshotForScope(retained.scope), retained.session, false,
+                        sessionModeOverride = mode, navigationIntent = intent)) return@LaunchedEffect
+                if (intent != navigationSequence.get()) return@LaunchedEffect
+            }
+            if (!validateOwnerIndexes()) return@LaunchedEffect
             val targetScope = resolveLinkedScope(scopeStore.readActiveScopeKey(mode)) ?: ConversationScope.Global
             val slot = scopeStore.read(targetScope.sessionStateKey(mode))?.lastActiveSessionId
             val summary = when (targetScope) {
@@ -1366,7 +1710,7 @@ fun RootScreen(
             val resume = summary?.let { SessionRef(it.sessionId, it.title) } ?: slot
                 ?.takeIf { !isArchived && knownOwner == ScopeStateStore.SessionOwner(targetScope.persistenceKey(), mode) }
                 ?.let { SessionRef(it, "") }
-            queueCurrentDraft()?.join()
+            queueCurrentDraft()
             if (resume == null) {
                 switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true,
                     sessionModeOverride = mode, navigationIntent = intent)
@@ -1398,6 +1742,7 @@ fun RootScreen(
     LaunchedEffect(
         requestedConversationLaunch,
         projectState.loading,
+        cronState.loading,
     ) {
         val request = requestedConversationLaunch ?: return@LaunchedEffect
         val targetScope = request.workspaceKey?.let(::conversationScopeFromKey) ?: sourceScope
@@ -1406,7 +1751,7 @@ fun RootScreen(
             onConversationLaunchHandled()
             return@LaunchedEffect
         }
-        if (targetScope is ConversationScope.Project && projectState.loading) return@LaunchedEffect
+        if (!com.lingxi.code.conversation.canResolveConversationNotification(projectState.loading, cronState.loading)) return@LaunchedEffect
         if (targetScope is ConversationScope.Project && projectSnapshotForScope(targetScope) == null) {
             chatViewModel.reportConversationLaunchFailed()
             onConversationLaunchHandled()
@@ -1420,6 +1765,8 @@ fun RootScreen(
             newSession = false,
             sessionModeOverride = targetMode,
             expectedRuntimeGeneration = request.runtimeGeneration,
+            selectedTranscriptPath = request.transcriptPath,
+            requireSelectedTranscript = true,
         )
         if (!routed) chatViewModel.reportConversationLaunchFailed()
         onConversationLaunchHandled()
@@ -1441,12 +1788,20 @@ fun RootScreen(
         var summarySource: ConversationSource? = null
         var sourceLease: SessionHost.Lease? = null
         var targetLease: SessionHost.Lease? = null
-        var handoffSaved = false
+        var targetIndexed = false
+        var sourceHandoffAdmitted = false
         try {
+            fun savedSourceMatches(): Boolean = com.lingxi.code.conversation.selectedTranscriptPathMatches(
+                row.transcriptPath, com.lingxi.code.conversation.sessionTranscriptPath(
+                    sessionScope, row.uuid, row.mode, projectStore.state.value, cronRepository.state.value.generatedSessions))
             projectStore.validateOwnerIndexes()
             check(!projectStore.state.value.storageUnavailable &&
-                scopeStore.matchesSessionOwner(row.uuid, sessionScope.persistenceKey(), row.mode))
+                scopeStore.matchesSessionOwner(row.uuid, sessionScope.persistenceKey(), row.mode) && savedSourceMatches())
             sourceLease = sessionHost.acquire(sessionScope, row.mode, SessionRef(row.uuid, row.title), reconnectToken) {
+                val indexedPath = com.lingxi.code.conversation.sessionTranscriptPath(
+                    sessionScope, row.uuid, row.mode, projectStore.state.value, cronRepository.state.value.generatedSessions)
+                val pathForConstruction = com.lingxi.code.conversation.selectedTranscriptPathForCreation(
+                    row.transcriptPath, indexedPath, required = true)
                 EngineConversationSource.createInBackground(
                     context = appContext,
                     projectWorkspace = workspaceForScope(sessionScope, row.uuid),
@@ -1455,6 +1810,7 @@ fun RootScreen(
                     linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
                     reuseProcessSource = true,
                     expectedSessionId = row.uuid,
+                    initialSessionTranscriptPath = pathForConstruction,
                 )
             } ?: return
             val owner = checkNotNull(sourceLease).viewModel
@@ -1465,8 +1821,16 @@ fun RootScreen(
                 owner.state.first { it.sessionReady && it.sessionMode == row.mode &&
                     canonicalSessionId(it.session.id) == canonicalSessionId(row.uuid) }
             }
+            fun sourceStillMatches(): Boolean = owner.engineSource.value === source && savedSourceMatches() &&
+                sessionHost.isRetainedLeaseCurrent(checkNotNull(sourceLease), sessionScope, row.mode, row.uuid,
+                    expectedTranscriptPath = row.transcriptPath)
+            check(sourceStillMatches()) { "Selected conversation source changed" }
+            projectStore.validateOwnerIndexes()
             check(!projectStore.state.value.storageUnavailable &&
-                scopeStore.claimSessionOwner(row.uuid, sessionScope.persistenceKey(), row.mode) { scopeStateValid == true && !projectStore.state.value.storageUnavailable })
+                scopeStore.claimSessionOwner(row.uuid, sessionScope.persistenceKey(), row.mode) {
+                    sourceStillMatches() && scopeStateValid == true && !projectStore.state.value.storageUnavailable
+                })
+            check(sourceStillMatches()) { "Selected conversation source changed" }
             coroutineScope {
                 val response = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
                     withTimeoutOrNull(120_000L) {
@@ -1476,11 +1840,13 @@ fun RootScreen(
                         }
                     }
                 }
+                sourceHandoffAdmitted = true
                 source.submitClientCommand(ClientCommand.PrepareSessionHandoff(requestId, targetMode.toDto()))
                 handoffCanCancel = true
                 when (val event = response.await()) {
                     is ClientEvent.SessionHandoffPrepared -> {
                         handoffCanCancel = false
+                        check(sourceStillMatches()) { "Selected conversation source changed" }
                         check(canonicalSessionId(event.sourceSessionId) == canonicalSessionId(row.uuid) &&
                             event.sourceMode.toUi() == row.mode && event.targetMode.toUi() == targetMode)
                         val summary = event.summary.sourceText()
@@ -1500,15 +1866,43 @@ fun RootScreen(
                             targetVm.state.first { it.sessionReady && it.session.id != "new" && it.sessionMode == targetMode }
                         }
                         val targetId = canonicalSessionId(confirmed.session.id)
-                        check(!projectStore.state.value.storageUnavailable &&
-                            scopeStore.claimSessionOwner(targetId, ConversationScope.Global.persistenceKey(), targetMode) { scopeStateValid == true && !projectStore.state.value.storageUnavailable })
-                        sessionHost.register(targetVm, ConversationScope.Global, targetMode)
-                        scopeStore.persistHandoffDraft(ConversationScope.Global.persistenceKey(), targetId, summary,
-                            ScopeStateStore.ConversationHandoff(sessionScope.persistenceKey(), row.uuid,
-                                row.mode, targetMode, event.cutoff, requestId))
-                        projectStore.recordStartedSession(null, targetId, confirmed.session.title, targetMode)
-                        sessionHost.draftState(targetVm).value = summary
-                        handoffSaved = true
+                        val targetSource = targetVm.engineSource.value
+                        val targetWorkspace = kotlinx.coroutines.withTimeout(20_000L) {
+                            targetSource.workspaceState.first { workspace -> workspace != null &&
+                                canonicalSessionId(workspace.sessionId) == targetId && workspace.transcriptPath.isNotBlank() }
+                        }
+                        check(targetVm.engineSource.value === targetSource)
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                            projectStore.validateOwnerIndexes()
+                            val targetStillMatches = {
+                                targetVm.engineSource.value === targetSource &&
+                                    targetSource.workspaceState.value == targetWorkspace &&
+                                    canonicalSessionId(targetVm.state.value.session.id) == targetId &&
+                                    targetVm.state.value.sessionMode == targetMode
+                            }
+                            check(targetStillMatches())
+                            check(!projectStore.state.value.storageUnavailable &&
+                                scopeStore.claimSessionOwner(targetId, ConversationScope.Global.persistenceKey(), targetMode) {
+                                    targetStillMatches() && scopeStateValid == true && !projectStore.state.value.storageUnavailable
+                                })
+                            sessionHost.register(targetVm, ConversationScope.Global, targetMode)
+                            check(projectStore.recordStartedSession(null, targetId, confirmed.session.title, targetMode,
+                                transcriptPath = checkNotNull(targetWorkspace).transcriptPath, allowCommit = targetStillMatches))
+                            targetIndexed = true
+                            val targetScope = ConversationScope.Global
+                            com.lingxi.code.conversation.completeHandoffDraft(
+                                summary = summary,
+                                persistHandoff = { text -> scopeStore.persistHandoffDraft(targetScope.persistenceKey(), targetId, text,
+                                    ScopeStateStore.ConversationHandoff(sessionScope.persistenceKey(), row.uuid,
+                                        row.mode, targetMode, event.cutoff, requestId)) },
+                                currentDraft = {
+                                    check(targetStillMatches())
+                                    val current = sessionHost.draftState(targetVm).value
+                                    current.takeIf { it.isNotEmpty() || sessionHost.draftOwnership(targetVm).loaded.value }
+                                },
+                                publishDraft = { text -> publishOwnerDraft(targetVm, targetScope, targetId, text) },
+                            )
+                        }
                         if (navigationIntent == navigationSequence.get() && switchEngineScope(
                                 ConversationScope.Global, null, SessionRef(targetId, confirmed.session.title), false,
                                 sessionModeOverride = targetMode, navigationIntent = navigationIntent,
@@ -1531,8 +1925,8 @@ fun RootScreen(
             chatViewModel.reportHostError(error.message ?: error::class.simpleName.orEmpty())
         } finally {
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                targetLease?.let { sessionHost.release(it, discard = !handoffSaved) }
-                sourceLease?.let { sessionHost.release(it) }
+                targetLease?.let { sessionHost.release(it, discard = !targetIndexed) }
+                sourceLease?.let { sessionHost.release(it, discard = !sourceHandoffAdmitted) }
             }
             handoffCanCancel = false
             pendingHandoffRequest = null
@@ -1541,7 +1935,7 @@ fun RootScreen(
 
     fun launchHandoff(ownerScope: ConversationScope, row: SessionRow, mode: SessionMode) {
         if (handoffJob?.isActive == true) return
-        val intent = navigationSequence.incrementAndGet()
+        val intent = nextNavigationIntent()
         handoffJob = scope.launch { continueSessionInMode(ownerScope, row, mode, intent) }
     }
 
@@ -1554,25 +1948,51 @@ fun RootScreen(
         state.sessionReady,
         restoredModeSessionKey,
         projectState.storageUnavailable,
+        projectState.globalSessions,
+        projectState.projects,
+        cronState.generatedSessions,
     ) {
         val active = sourceScope
         val engineMode = currentEngineMode()
-        if (!projectStore.state.value.storageUnavailable && shouldPersistActiveSession(state.sessionReady, state.session.id, engineMode, activeSessionMode,
+        val owner = chatViewModel
+        val source = currentEngineSource
+        val sessionId = canonicalSessionId(state.session.id)
+        val intent = navigationSequence.get()
+        val indexedPath = com.lingxi.code.conversation.sessionTranscriptPath(active, sessionId, activeSessionMode,
+            projectStore.state.value, cronRepository.state.value.generatedSessions)
+        if (indexedPath != null && !projectStore.state.value.storageUnavailable && shouldPersistActiveSession(state.sessionReady, state.session.id, engineMode, activeSessionMode,
                 active.sessionStateKey(activeSessionMode), restoredModeSessionKey)) {
             runCatching {
                 scopeStore.persistLastActiveSession(
                     active.sessionStateKey(activeSessionMode),
-                    state.session.id,
+                    sessionId,
+                    allowCommit = { navigationSequence.get() == intent && owner.engineSource.value === source &&
+                        owner.sourceScope.value == active && owner.state.value.sessionMode == activeSessionMode &&
+                        !projectStore.state.value.storageUnavailable && canonicalSessionId(owner.state.value.session.id) == sessionId },
                 )
             }
         }
     }
 
-    LaunchedEffect(currentEngineSource, sourceProjectId) {
-        val projectId = currentEngineSource.recoverySpec?.projectId ?: return@LaunchedEffect
-        currentEngineSource.workspaceState.collect { workspace ->
-            if (workspace != null) {
-                runCatching { projectStore.recordWorkspace(projectId, workspace) }
+    LaunchedEffect(currentEngineSource, sourceProjectId, sourceScope, state.session.id, state.sessionMode, cronAdmissionRevision) {
+        if (sourceScope == ConversationScope.Scheduled) return@LaunchedEffect
+        val owner = chatViewModel
+        val source = currentEngineSource
+        val scopeKey = sourceScope
+        val mode = state.sessionMode
+        val generation = source.recoverySpec?.runtimeGeneration
+        source.workspaceState.collect { workspace ->
+            if (workspace != null && mode != null && canonicalSessionId(workspace.sessionId) == canonicalSessionId(owner.state.value.session.id)) {
+                val id = canonicalSessionId(workspace.sessionId)
+                val stored = projectStore.state.value.let { current ->
+                    if (sourceProjectId == null) current.globalSessions else current.projects.firstOrNull { it.record.id == sourceProjectId }?.sessions.orEmpty()
+                }.firstOrNull { canonicalSessionId(it.sessionId) == id && it.mode == mode }
+                runCatching { projectStore.recordWorkspace(sourceProjectId, workspace, expectedPreviousPath = stored?.transcriptPath, checkPreviousPath = true,
+                    allowCommit = { owner.engineSource.value === source && owner.sourceScope.value == scopeKey &&
+                        owner.state.value.sessionMode == mode && canonicalSessionId(owner.state.value.session.id) == id &&
+                        source.recoverySpec?.runtimeGeneration == generation && source.workspaceState.value == workspace &&
+                        (viewModel != null || sessionHost.hasRegisteredOwner(owner)) },
+                    updateProjectDirectory = { viewModel != null || sessionHost.selected.value === owner }) }
                     .onFailure { chatViewModel.reportHostError(it.message.orEmpty()) }
             }
         }
@@ -1589,6 +2009,7 @@ fun RootScreen(
         state.sessionReady,
         state.messages.firstOrNull { it.role == com.lingxi.code.model.Role.User },
         sourceScope,
+        cronAdmissionRevision,
     ) {
         if (
             sessionState.phase == SessionCatalogPhase.Ready &&
@@ -1615,17 +2036,25 @@ fun RootScreen(
         state.messages.firstOrNull { it.role == com.lingxi.code.model.Role.User }?.id,
         sourceScope,
         currentEngineSource,
+        currentWorkspace,
+        cronAdmissionRevision,
     ) {
         val engineMode = currentEngineMode()
         if (
             engineMode == activeSessionMode &&
             state.sessionReady &&
             state.session.id != "new" &&
+            currentWorkspace?.let { canonicalSessionId(it.sessionId) == canonicalSessionId(state.session.id) && it.transcriptPath.isNotBlank() } == true &&
             (if (sourceProjectId == null) projectState.globalSessions else projectState.projects.firstOrNull { it.record.id == sourceProjectId }?.sessions.orEmpty()).none {
-                it.sessionId == state.session.id && (it.messageCount > 0 || state.messages.none { message -> message.role == com.lingxi.code.model.Role.User })
+                it.sessionId == state.session.id && !it.transcriptPath.isNullOrBlank() &&
+                    (it.messageCount > 0 || state.messages.none { message -> message.role == com.lingxi.code.model.Role.User })
             } &&
             sourceScope != ConversationScope.Scheduled
         ) {
+            val owner = chatViewModel
+            val source = currentEngineSource
+            val ownerScope = sourceScope
+            val ownerId = canonicalSessionId(state.session.id)
             runCatching {
                 projectStore.recordStartedSession(
                     projectId = sourceProjectId,
@@ -1633,14 +2062,22 @@ fun RootScreen(
                     title = state.messages.firstOrNull { it.role == com.lingxi.code.model.Role.User }?.text?.take(120) ?: state.session.title,
                     mode = activeSessionMode,
                     initialMessageCount = if (state.messages.any { it.role == com.lingxi.code.model.Role.User }) 1 else 0,
+                    transcriptPath = currentWorkspace?.transcriptPath,
+                    allowCommit = { owner.engineSource.value === source && owner.sourceScope.value == ownerScope &&
+                        owner.state.value.sessionMode == engineMode && canonicalSessionId(owner.state.value.session.id) == ownerId &&
+                        source.workspaceState.value == currentWorkspace },
+                    markActive = { viewModel != null || sessionHost.selected.value === owner },
                 )
                 // The first prompt can follow /cd, before there was any row
                 // for WorkspaceChanged to annotate. Preserve the engine's
                 // original root and exact transcript instead of guessing them.
-                currentEngineSource.workspaceState.value?.takeIf {
+                source.workspaceState.value?.takeIf {
                     canonicalSessionId(it.sessionId) == canonicalSessionId(state.session.id)
                 }?.let { workspace ->
-                    sourceProjectId?.let { projectStore.recordWorkspace(it, workspace) }
+                    projectStore.recordWorkspace(sourceProjectId, workspace,
+                        allowCommit = { owner.engineSource.value === source && owner.sourceScope.value == ownerScope &&
+                            canonicalSessionId(owner.state.value.session.id) == ownerId && source.workspaceState.value == workspace },
+                        updateProjectDirectory = { viewModel != null || sessionHost.selected.value === owner })
                 }
             }.onFailure {
                 chatViewModel.reportHostError(resources.getString(R.string.session_index_save_new_failed_fmt, it.message.orEmpty()))
@@ -1688,16 +2125,18 @@ fun RootScreen(
             relativeTime = cached.relativeTime,
             mode = cached.mode,
             modifiedAtEpochSeconds = cached.updatedAtEpochMillis / 1000L,
+            transcriptPath = cached.transcriptPath,
         )
     }
-    val scheduledSessionRows = cronState.generatedSessions.filter { it.projectId == null && it.sessionId != null }
+    val scheduledSessionRows = cronState.generatedSessions.filter { it.sessionScopeKey == "scheduled" && it.sessionId != null && !it.sessionTranscriptPath.isNullOrBlank() }
         .distinctBy { it.sessionId }.mapNotNull { run ->
             val id = canonicalSessionId(run.sessionId!!)
-            val owner = catalogOwners?.get(id)?.takeIf { it.scopeKey == ConversationScope.Scheduled.persistenceKey() }
+            val owner = catalogOwners?.get(id)?.takeIf { it.scopeKey == ConversationScope.Scheduled.persistenceKey() && it.mode.wireValue == run.sessionMode }
                 ?: return@mapNotNull null
             SessionRow(uuid = id, title = run.prompt.take(120), messageCount = 2, mode = owner.mode,
                 relativeTime = formatCronTime(run.finishedAtMs ?: run.triggeredAtMs),
-                modifiedAtEpochSeconds = (run.finishedAtMs ?: run.triggeredAtMs) / 1000L)
+                modifiedAtEpochSeconds = (run.finishedAtMs ?: run.triggeredAtMs) / 1000L,
+                transcriptPath = run.sessionTranscriptPath)
         }
     val globalDrawerSessions = (if (sourceScope == ConversationScope.Global) {
         sessionState.withCachedRows(cachedGlobalRows, projectState.globalSessions.filter { it.pendingCatalogConfirmation }.map { it.sessionId }.toSet()).let { catalog ->
@@ -1707,44 +2146,6 @@ fun RootScreen(
     } else {
         EngineSessionState.ready(cachedGlobalRows)
     }).let { it.copy(rows = (it.rows + scheduledSessionRows).distinctBy(SessionRow::uuid)) }
-    fun sessionRowLookup(
-        scope: ConversationScope,
-        sessionId: String,
-    ): SessionCatalogLookup<SessionRow> {
-        val row = when (scope) {
-            ConversationScope.Scheduled -> scheduledSessionRows.firstOrNull { isRestorableSession(sessionId, it.uuid) }
-            ConversationScope.Global -> globalDrawerSessions.rows
-                .firstOrNull { isRestorableSession(sessionId, it.uuid) }
-            is ConversationScope.Project -> projectState.projects
-                .firstOrNull { it.record.id == scope.projectId }
-                ?.let { project -> project.sessions.firstOrNull {
-                    isRestorableSession(sessionId, it.sessionId, it.workspaceDirectory, project.record.activeDirectory)
-                } }
-                ?.let {
-                    SessionRow(
-                        uuid = it.sessionId,
-                        title = it.title,
-                        messageCount = it.messageCount,
-                        relativeTime = it.relativeTime,
-                        mode = it.mode,
-                        modifiedAtEpochSeconds = it.updatedAtEpochMillis / 1000L,
-                    )
-                }
-        }
-        return when (scope) {
-            ConversationScope.Scheduled -> SessionCatalogLookup(SessionCatalogLookupState.Ready, row)
-            ConversationScope.Global -> if (row != null || globalDrawerSessions.phase != SessionCatalogPhase.Loading) {
-                SessionCatalogLookup(SessionCatalogLookupState.Ready, row)
-            } else {
-                SessionCatalogLookup(SessionCatalogLookupState.Pending)
-            }
-            is ConversationScope.Project -> if (row != null || !projectState.loading) {
-                SessionCatalogLookup(SessionCatalogLookupState.Ready, row)
-            } else {
-                SessionCatalogLookup(SessionCatalogLookupState.Pending)
-            }
-        }
-    }
     val drawerProductionData = DrawerProductionData(
         workspaces = listOf(LocalProjectWorkspace.copy(name = stringResource(R.string.project_storage_local))),
         projects = projectState.projects.filter { activeSessionMode in it.record.visibleModes }.map { project ->
@@ -1808,6 +2209,43 @@ fun RootScreen(
             action()
         }
     }
+
+    fun submitComposer(text: String, image: ComposerAttachment?) {
+        val owner = chatViewModel
+        val ownerScope = sourceScope
+        val ownerId = canonicalSessionId(state.session.id)
+        val ownership = draftOwnership
+        val rejected = com.lingxi.code.conversation.RejectedComposerDraft(text, image, state.visualizationChip, ownerScope, ownerId)
+        val gate = com.lingxi.code.conversation.ComposerRestoreGate(
+            revision = { Triple(ownership.revision.longValue, ownership.attachmentRevision.longValue, owner.visualizationDraftRevision()) },
+            restore = {
+                if (owner.sourceScope.value == ownerScope && canonicalSessionId(owner.state.value.session.id) == ownerId &&
+                    ownership.scope.value == ownerScope && canonicalSessionId(ownership.sessionId.value.orEmpty()) == ownerId
+                ) {
+                    if (viewModel == null) publishOwnerDraft(owner, ownerScope, ownerId, text)
+                    else {
+                        ownership.revision.longValue++
+                        ownership.loaded.value = true
+                        draftCell.value = text
+                        owner.onDraftChanged(text, ownerScope, ownerId)
+                    }
+                    attachmentCell.value = image
+                    ownership.attachmentRevision.longValue++
+                    owner.restoreVisualizationDraft(rejected.visualization)
+                } else ownership.rejected.add(rejected)
+            },
+            preserve = { ownership.rejected.add(rejected) },
+        )
+        pendingComposerRestore = gate
+        if (activeProjectSyncing) {
+            owner.reportHostError(resources.getString(R.string.project_sync_in_progress_notice))
+            gate.rejected()
+        } else {
+            voiceSpeechPlayer.stop()
+            owner.send(text, images = image?.toImageRef()?.let(::listOf).orEmpty(),
+                origin = ConversationTurnOrigin.Ordinary, onNotAdmitted = gate::rejected)
+        }
+    }
     fun runProjectSync(projectId: String, action: () -> Unit): Boolean {
         val activeProjectIsExecuting =
             projectId == sourceProjectId && (state.streaming || state.sessionTransitioning)
@@ -1868,7 +2306,7 @@ fun RootScreen(
             linkedMessageSource = currentEngineSource
         }
     }
-    LaunchedEffect(requestedDeepLink, projectState.loading, state.sessionReady, state.sessionTransitioning, state.streaming, approvedDraftLink, sourceScope, currentEngineSource, runtimeAppId, flowActive, voiceActive, captureState.phase, attachment, showCreateProject, activeProjectSyncing, workspacePickerOpen, routingDeepLink, draftLinkReview, linkedTargetError, linkedMessageUuid) {
+    LaunchedEffect(requestedDeepLink, projectState.loading, cronState.loading, state.sessionReady, state.sessionTransitioning, state.streaming, approvedDraftLink, sourceScope, currentEngineSource, runtimeAppId, flowActive, voiceActive, captureState.phase, attachment, showCreateProject, activeProjectSyncing, workspacePickerOpen, routingDeepLink, draftLinkReview, linkedTargetError, linkedMessageUuid) {
         val link = requestedDeepLink ?: return@LaunchedEffect
         if (runtimeAppId != null && link.route == "apps/$runtimeAppId" && link.params["review"] == "agent") {
             try {
@@ -1890,6 +2328,7 @@ fun RootScreen(
             return@LaunchedEffect
         }
         if (routingDeepLink || draftLinkReview != null || linkedTargetError != null || linkedMessageUuid != null) return@LaunchedEffect
+        if (cronState.loading && link.route.startsWith("session/")) return@LaunchedEffect
         if (projectState.loading || !state.sessionReady || state.sessionTransitioning || state.streaming || runtimeAppId != null || flowActive || voiceActive || attachment != null || showCreateProject || activeProjectSyncing || workspacePickerOpen) return@LaunchedEffect
         if (captureState.phase in setOf(com.lingxi.code.voice.VoiceCapturePhase.Starting, com.lingxi.code.voice.VoiceCapturePhase.Listening, com.lingxi.code.voice.VoiceCapturePhase.Stopping)) return@LaunchedEffect
         routingDeepLink = true
@@ -1904,26 +2343,27 @@ fun RootScreen(
                     if (parts.first() == "new") return sourceScope
                     val matches = buildList {
                         if (projectState.globalSessions.any { it.sessionId.removePrefix("sess:") == id.removePrefix("sess:") }) add(ConversationScope.Global)
-                        if (cronState.generatedSessions.any { it.projectId == null && it.sessionId?.removePrefix("sess:") == id.removePrefix("sess:") }) add(ConversationScope.Scheduled)
+                        if (cronState.generatedSessions.any { it.sessionScopeKey == "scheduled" && it.sessionId?.let(::canonicalSessionId) == canonicalSessionId(id) }) add(ConversationScope.Scheduled)
                         projectState.projects.filter { project -> project.sessions.any { it.sessionId.removePrefix("sess:") == id.removePrefix("sess:") } }.forEach { add(ConversationScope.Project(it.record.id)) }
                     }
                     return matches.singleOrNull()
                 }
                 try {
                     if (parts.first() !in setOf("project", "apps", "market")) {
+                        appPageSequence.incrementAndGet()
                         projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; sessionPanelOpen = false
                     }
                     if (parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal", "runtime", "import") && link.params["workspace"] != null) {
                         val targetScope = resolveLinkedScope(link.params["workspace"])
                             ?: error(resources.getString(R.string.deep_link_workspace_missing))
                         if (sourceScope != targetScope) {
-                            queueCurrentDraft()?.join()
+                            queueCurrentDraft()
                             check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true)) { resources.getString(R.string.deep_link_busy) }
                             return@launch
                         }
                     }
                     when (parts.first()) {
-                        "settings", "provider", "extensions", "cron", "terminal" -> onDeepLinkNativeReady(link)
+                        "settings", "provider", "extensions", "cron", "terminal" -> onDeepLinkNativeReady(link, currentEngineSource)
                         "session" -> {
                             val targetScope = resolveScope() ?: error(resources.getString(R.string.deep_link_conversation_ambiguous))
                             val rows = when (targetScope) {
@@ -1931,8 +2371,8 @@ fun RootScreen(
                                 ConversationScope.Global -> projectState.globalSessions
                                 ConversationScope.Scheduled -> emptyList()
                             }
-                            val row = rows.firstOrNull { it.sessionId.removePrefix("sess:") == id.removePrefix("sess:") }
-                            val scheduled = if (targetScope == ConversationScope.Scheduled) cronState.generatedSessions.firstOrNull { it.projectId == null && it.sessionId?.removePrefix("sess:") == id.removePrefix("sess:") } else null
+                            val row = rows.firstOrNull { isRestorableSession(id, it.sessionId) }
+                            val scheduled = if (targetScope == ConversationScope.Scheduled) cronState.generatedSessions.firstOrNull { it.sessionScopeKey == "scheduled" && it.sessionId?.let(::canonicalSessionId) == canonicalSessionId(id) } else null
                             check(row != null || scheduled != null) { resources.getString(R.string.deep_link_conversation_workspace_missing) }
                             val sameSession = targetScope == sourceScope && canonicalSessionId(state.session.id) == canonicalSessionId(id)
                             val mode = link.params["mode"]?.let { com.lingxi.code.model.sessionModeFromWireValue(it) }
@@ -1944,7 +2384,7 @@ fun RootScreen(
                             check(!sameSession || generation == null || currentEngineSource.recoverySpec?.runtimeGeneration == generation) {
                                 resources.getString(R.string.deep_link_conversation_open_failed)
                             }
-                            queueCurrentDraft()?.join()
+                            queueCurrentDraft()
                             if (!sameSession) {
                                 check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope),
                                     SessionRef(id, row?.title ?: scheduled?.prompt.orEmpty().take(120)), false,
@@ -1966,11 +2406,18 @@ fun RootScreen(
                                 draftLinkReview = link
                                 return@launch
                             }
-                            queueCurrentDraft()?.join()
+                            queueCurrentDraft()
                             val prompt = link.payload["prompt"] as? String ?: ""
-                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true, sessionModeOverride = mode)) { resources.getString(R.string.deep_link_busy) }
+                            val intent = nextNavigationIntent()
+                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true,
+                                sessionModeOverride = mode, navigationIntent = intent) && intent == navigationSequence.get()) {
+                                resources.getString(R.string.deep_link_busy)
+                            }
                             setConversationMode(mode)
-                            sessionHost.draftState(sessionHost.selected.value).value = prompt
+                            val owner = sessionHost.selected.value
+                            val current = sessionHost.draftState(owner).value
+                            val combined = if (prompt.isEmpty()) current else com.lingxi.code.conversation.mergeHandoffDraft(prompt, current)
+                            publishOwnerDraft(owner, targetScope, owner.state.value.session.id, combined)
                             approvedDraftLink = null
                         }
                         "import" -> onDeepLinkImportReady(link)
@@ -1981,6 +2428,7 @@ fun RootScreen(
                             projectPageId = project
                         }
                         "market" -> {
+                            appPageSequence.incrementAndGet()
                             projectsPageOpen = false; projectPageId = null; sessionPanelOpen = false
                             appsPageOpen = true; runtimeAppId = null; localAppDetailsId = null; marketInstallId = id
                         }
@@ -2107,7 +2555,31 @@ fun RootScreen(
     // A scheduled-task workspace is not a place to start chatting: new chats from
     // there go to the global workspace.
     val newChatScope = sourceScope
-    val liveWorkspace by currentEngineSource.workspaceState.collectAsStateWithLifecycle()
+    val liveWorkspace = currentWorkspace
+    val workspaceStorageHealthy = scopeStateValid == true && !projectState.loading && !projectState.storageUnavailable
+    val verifiedWorkspaceProjects = if (workspaceStorageHealthy) projectState.projects else emptyList()
+    val verifiedScheduledWorkspace = remember(context, sourceScope, state.session.id, currentEngineSource, liveWorkspace) {
+        if (sourceScope == ConversationScope.Scheduled && liveWorkspace != null &&
+            currentEngineSource.recoverySpec?.workspaceKey == "scheduled" &&
+            canonicalSessionId(liveWorkspace.sessionId) == canonicalSessionId(state.session.id) &&
+            currentEngineSource.activeSessionState.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(state.session.id)) {
+            runCatching {
+                com.lingxi.code.project.MobileUserStorage.verifiedScheduledWorkspace(context, canonicalSessionId(state.session.id))
+            }.getOrNull()?.takeIf { it.guestPath == liveWorkspace.projectRoot }
+        } else null
+    }
+    fun openCurrentOwnerTerminal(sessionId: String, command: String?) {
+        val owner = chatViewModel.state.value.session.id
+        val source = chatViewModel.engineSource.value
+        val workspace = source.workspaceState.value
+        if (source !== currentEngineSource || owner.isBlank() || owner == "new" || workspace == null ||
+            canonicalSessionId(workspace.sessionId) != canonicalSessionId(owner) || workspace.cwd.isBlank() ||
+            (sessionId != "interactive" && canonicalSessionId(sessionId) != canonicalSessionId(owner))) {
+            chatViewModel.reportHostError(resources.getString(R.string.workspace_session_changed))
+            return
+        }
+        onOpenTerminal(sessionId, command, workspace.cwd, "conversation:${canonicalSessionId(owner)}")
+    }
     val currentWorkspaceName = liveWorkspace?.cwd?.takeIf { it.isNotBlank() }?.let { path ->
         if (path == com.lingxi.code.project.MobileUserStorage.directories(context).guestHome) "~"
         else path.substringAfterLast('/').ifBlank { path }
@@ -2124,15 +2596,14 @@ fun RootScreen(
      * rebind the mode is set explicitly, or the mode effect would bounce the
      * engine back to the previous mode.
      */
-    fun openProjectSession(projectId: String, ref: SessionRef) {
+    fun openProjectSession(projectId: String, selected: com.lingxi.code.model.ProjectSession) {
         val project = projectState.projects.firstOrNull { it.record.id == projectId } ?: return
-        val session = project.sessions.firstOrNull { it.sessionId == ref.id } ?: return
-        val resumeTarget = SessionRef(session.sessionId, session.title)
-        val targetScope = ConversationScope.Project(projectId)
-        val intent = navigationSequence.incrementAndGet()
+        val resumeTarget = SessionRef(selected.id, selected.title)
+        val intent = nextNavigationIntent()
         scope.launch {
             if (switchEngineScope(project = project, target = resumeTarget, newSession = false,
-                    sessionModeOverride = session.mode, navigationIntent = intent)) {
+                    sessionModeOverride = selected.mode, navigationIntent = intent,
+                    selectedTranscriptPath = selected.transcriptPath, requireSelectedTranscript = true)) {
                 closeDrawer()
                 closeProjectPages()
             }
@@ -2145,33 +2616,104 @@ fun RootScreen(
      */
     fun startNewSessionIn(
         target: ConversationScope,
-        mode: SessionMode = lastSelectedMode,
+        mode: SessionMode = activeSessionMode,
         carryDraft: Boolean = false,
     ) {
         val project = projectSnapshotForScope(target)
         if (target is ConversationScope.Project && project == null) return
         val carried = draft
-        val intent = navigationSequence.incrementAndGet()
+        val intent = nextNavigationIntent()
         scope.launch {
-            queueCurrentDraft()?.join()
+            queueCurrentDraft()
             if (switchEngineScope(engineScope = target, project = project, target = null,
-                    newSession = true, sessionModeOverride = mode, navigationIntent = intent)) {
-                if (carryDraft) sessionHost.draftState(sessionHost.selected.value).value = carried
+                    newSession = true, sessionModeOverride = mode, navigationIntent = intent) && intent == navigationSequence.get()) {
+                if (carryDraft) {
+                    val owner = sessionHost.selected.value
+                    val current = sessionHost.draftState(owner).value
+                    val combined = if (carried.isEmpty()) current else com.lingxi.code.conversation.mergeHandoffDraft(carried, current)
+                    publishOwnerDraft(owner, target, owner.state.value.session.id, combined)
+                }
                 closeDrawer()
                 closeProjectPages()
             }
         }
     }
 
-    /** Start a new conversation in a project, in the last explicitly selected mode. */
-    fun startProjectSession(projectId: String, mode: SessionMode = lastSelectedMode) =
+    /** Start a new conversation in a project, in the current or explicitly selected mode. */
+    fun startProjectSession(projectId: String, mode: SessionMode = activeSessionMode) =
         startNewSessionIn(ConversationScope.Project(projectId), mode)
 
-    fun openAppAuthoring(appId: String?, name: String, createdDirectory: String) {
-        val intent = navigationSequence.incrementAndGet()
+    fun authoringEntryMode(): SessionMode? {
+        val owner = chatViewModel.state.value
+        val source = chatViewModel.engineSource.value
+        val activation = source.activeSessionState.value
+        val confirmed = owner.sessionReady && !owner.sessionTransitioning && activation != null &&
+            activation.mode == owner.sessionMode && canonicalSessionId(activation.sessionId) == canonicalSessionId(owner.session.id)
+        return if (com.lingxi.code.apps.authoringEntryAllowed(activeSessionMode, owner.sessionMode,
+                source.recoverySpec?.sessionMode, confirmed)) owner.sessionMode else null
+    }
+
+    fun captureAppAuthoringOperation(pageIsVisible: () -> Boolean): com.lingxi.code.apps.AppAuthoringOperationHost? {
+        if (authoringEntryMode() == null) return null
+        val owner = chatViewModel
+        val navigation = navigationSequence.get()
+        val pageNavigation = appPageSequence.get()
+        return object : com.lingxi.code.apps.AppAuthoringOperationHost {
+            override fun <T> launch(work: suspend () -> T, complete: (Result<T>, Boolean) -> Unit) {
+                sessionHost.launchAuthoringOperation(work,
+                    isCurrent = { rootCompositionAlive.get() && navigation == navigationSequence.get() && pageNavigation == appPageSequence.get() &&
+                        sessionHost.selected.value === owner && pageIsVisible() },
+                    hiddenFailure = { failure -> owner.reportHostError(if (com.lingxi.code.apps.isAppDevelopmentCodeRequired(failure))
+                        resources.getString(R.string.local_app_development_requires_code) else failure.message ?: "App operation failed") }, complete = complete)
+            }
+        }
+    }
+
+    fun openAppAuthoring(appId: String?, name: String, createdDirectory: com.lingxi.code.apps.AuthoringDirectory?,
+        recoverySelection: com.lingxi.code.apps.AuthoringIntent? = null,
+        recoveryRequest: com.lingxi.code.apps.AuthoringRequest? = null,
+        sourceOperation: String? = null, sourceRevision: Long? = null) {
+        val entryMode = authoringEntryMode() ?: run {
+            chatViewModel.reportHostError(resources.getString(R.string.local_app_development_requires_code))
+            return
+        }
+        val intent = nextNavigationIntent()
         scope.launch {
+            var activatedOwner: ChatViewModel? = null
+            var activatedRetained = false
             try {
-                val appRecord = appId?.let { localApps.get(it) }
+                val intentStore = com.lingxi.code.apps.AuthoringIntentStore(appContext)
+                val newOperation = sourceOperation ?: if (appId == null && createdDirectory == null && recoverySelection == null) "create" else null
+                val sourceRequest = recoveryRequest ?: newOperation?.let { operation ->
+                    com.lingxi.code.apps.AuthoringRequest(java.util.UUID.randomUUID().toString(), operation, name,
+                        java.util.UUID.randomUUID().toString(), java.util.UUID.randomUUID().toString(),
+                        appId.takeUnless { operation == "create" }, revision = sourceRevision).also {
+                        intentStore.saveRequest(it, entryMode)
+                        projectStore.createAuthoringPlaceholder(it.name, SessionMode.Code, it.projectId, it.selectionId)
+                    }
+                }
+                var generatedApp: com.lingxi.code.apps.AppRecord? = null
+                var generated = sourceRequest?.let { request ->
+                    if (intent != navigationSequence.get()) return@launch
+                    check(request.operation in setOf("create", "restore", "remix", "bind") &&
+                        projectStore.state.value.projects.any { it.record.id == request.projectId && it.record.authoringIntentId == request.selectionId }) {
+                        "应用源码选择已失效。"
+                    }
+                    com.lingxi.code.apps.awaitAdmittedAuthoringSource(
+                        submit = {
+                            when (request.operation) {
+                                "create" -> localApps.createAuthoringDirectory(request.name, request.selectionId, entryMode)
+                                "bind" -> localApps.bindAuthoringSource(request, entryMode)
+                                else -> localApps.restoreAuthoringDirectory(request, entryMode).let { restored ->
+                                    generatedApp = restored.record
+                                    restored.directory
+                                }
+                            }
+                        }, navigationIsCurrent = { intent == navigationSequence.get() },
+                    ) ?: return@launch
+                }
+                val effectiveAppId = com.lingxi.code.apps.authoringResultAppId(generatedApp, appId)
+                val appRecord = if (recoverySelection == null && sourceRequest == null) effectiveAppId?.let { localApps.get(it) } else null
                 val oldBinding = appRecord?.authoring
                 val oldProjectRef = oldBinding?.projectRef?.takeIf { it.kind == "mobileProject" }?.projectId
                 val boundProject = if (oldBinding != null && appRecord != null && isCanonicalUuidValue(oldProjectRef) &&
@@ -2193,101 +2735,251 @@ fun RootScreen(
                         )
                     }
                 } else emptyMap()
-                val resolution = appId?.let { localApps.prepareAuthoring(it, sessionBindings) }
+                val resolution = if (recoverySelection == null && sourceRequest == null) effectiveAppId?.let { localApps.prepareAuthoring(it, sessionBindings) } else null
                 check(resolution?.action != "sourceMissing") { "源码目录已不可用，请从应用管理中恢复源码或创建获许可的副本。" }
-                val directory = resolution?.sourceDirectory ?: createdDirectory
-                val ownedProject = boundProject?.takeIf { it.record.directory == directory }
-                    ?: projectStore.registerAuthoringWorkspace(name, directory, SessionMode.Code)
-                val project = ownedProject.copy(workspace = com.lingxi.code.project.ProjectWorkspace(ownedProject.record.id, localApps.hostFile(directory).absolutePath, directory))
-                val targetSessionId = resolution?.authoring?.authoringSessionId
-                    ?.takeIf { resolution.action == "resumeSession" && boundProject?.record?.id == ownedProject.record.id }
+                var effectiveRequest = sourceRequest
+                if (resolution != null) {
+                    val preparedSource = checkNotNull(resolution.sourceId)
+                    val directory = resolution.sourceDirectory
+                    val host = checkNotNull(resolution.sourcePath)
+                    val existing = boundProject ?: projectStore.state.value.projects.firstOrNull { it.record.directory == directory }
+                    val roots = com.lingxi.code.project.MobileUserStorage.directories(appContext).projectGrantRoots()
+                    check(host == localApps.hostFile(directory).absolutePath && isCanonicalUuidValue(preparedSource) &&
+                        com.lingxi.code.project.isSafeProjectWorkspace(roots, directory, host, existing, preparedAppDirectory = directory)) {
+                        "应用源码身份不匹配。"
+                    }
+                    val projectId = existing?.record?.id ?: java.util.UUID.randomUUID().toString()
+                    val workspaceId = oldBinding?.workspaceId?.takeIf { boundProject?.record?.id == projectId && oldBinding.sourceDirectory == directory }
+                        ?: java.util.UUID.randomUUID().toString()
+                    val targetRow = resolution.authoring?.authoringSessionId?.takeIf { resolution.action == "resumeSession" }
+                        ?.let { id -> existing?.sessions?.firstOrNull { canonicalSessionId(it.sessionId) == canonicalSessionId(id) && it.mode == SessionMode.Code } }
+                    if (resolution.action == "resumeSession") check(targetRow?.transcriptPath?.startsWith('/') == true)
+                    val request = com.lingxi.code.apps.AuthoringRequest(java.util.UUID.randomUUID().toString(), "bind", name,
+                        projectId, workspaceId, checkNotNull(effectiveAppId), sourceId = preparedSource, sourceDirectory = directory,
+                        targetSessionId = targetRow?.sessionId?.let(::canonicalSessionId), targetTranscriptPath = targetRow?.transcriptPath)
+                    intentStore.saveRequest(request, entryMode)
+                    if (existing == null) projectStore.createAuthoringPlaceholder(name, SessionMode.Code, projectId, request.selectionId)
+                    else projectStore.registerAuthoringWorkspace(name, directory, SessionMode.Code, projectId, request.selectionId) {
+                        intent == navigationSequence.get()
+                    }
+                    check(intent == navigationSequence.get()) { "应用源码选择已失效。" }
+                    generated = com.lingxi.code.apps.awaitAdmittedAuthoringSource(
+                        submit = { localApps.bindAuthoringSource(request, entryMode) },
+                        navigationIsCurrent = { intent == navigationSequence.get() },
+                    ) ?: return@launch
+                    effectiveRequest = request
+                }
+                val selectedDirectory = checkNotNull(generated ?: createdDirectory)
+                val directory = resolution?.sourceDirectory ?: selectedDirectory.path
+                val sourceId = resolution?.sourceId ?: selectedDirectory.sourceId
+                val sourceRequestId = selectedDirectory.requestId
+                val nativeSourcePath = resolution?.sourcePath ?: selectedDirectory.sourcePath
+                check(selectedDirectory.path == directory && selectedDirectory.sourceId == sourceId &&
+                    selectedDirectory.sourcePath == nativeSourcePath) { "应用源码身份已变化。" }
+                check(!projectStore.state.value.storageUnavailable && intent == navigationSequence.get()) {
+                    "应用源码选择已失效。"
+                }
+                val roots = com.lingxi.code.project.MobileUserStorage.directories(appContext).projectGrantRoots()
+                val existingProject = effectiveRequest?.let { request -> projectStore.state.value.projects.firstOrNull { it.record.id == request.projectId } }
+                    ?: recoverySelection?.let { selection -> projectStore.state.value.projects.firstOrNull {
+                        it.record.id == selection.projectId && it.record.authoringIntentId == selection.selectionId
+                    } } ?: boundProject ?: projectStore.state.value.projects.firstOrNull { it.record.directory == directory }
+                if (recoverySelection != null) check(existingProject?.record?.authoringIntentId == recoverySelection.selectionId) {
+                    "应用源码选择已变化。"
+                }
+                val hostPath = localApps.hostFile(directory).absolutePath
+                check(nativeSourcePath == hostPath && isCanonicalUuidValue(sourceId) && isCanonicalUuidValue(sourceRequestId)) { "应用源码身份不匹配。" }
+                check(com.lingxi.code.project.isSafeProjectWorkspace(roots, directory, hostPath, existingProject,
+                    preparedAppDirectory = directory)) { "应用源码目录不可用或未获授权。" }
+                val projectId = recoverySelection?.projectId ?: effectiveRequest?.projectId ?: existingProject?.record?.id ?: java.util.UUID.randomUUID().toString()
+                val workspaceId = recoverySelection?.workspaceId ?: effectiveRequest?.workspaceId ?: oldBinding?.workspaceId
+                    ?.takeIf { boundProject?.record?.id == projectId && oldBinding.sourceDirectory == directory }
+                    ?: java.util.UUID.randomUUID().toString()
+                val targetSessionId = recoverySelection?.sessionId ?: effectiveRequest?.targetSessionId ?: resolution?.authoring?.authoringSessionId
+                    ?.takeIf { resolution.action == "resumeSession" && boundProject?.record?.id == projectId }
+                val previousSelection = targetSessionId?.let { intentStore.read(canonicalSessionId(it)) }
+                if (previousSelection != null) check(previousSelection.sourceId == sourceId && previousSelection.projectId == projectId &&
+                    previousSelection.sourceDirectory == directory &&
+                    previousSelection.workspaceId == workspaceId) { "应用源码会话身份已变化。" }
+                val selection = recoverySelection ?: previousSelection ?: com.lingxi.code.apps.AuthoringIntent(
+                    effectiveRequest?.selectionId ?: java.util.UUID.randomUUID().toString(), sourceId, sourceRequestId, directory, projectId, workspaceId, effectiveAppId)
+                check(selection.sourceId == sourceId && (previousSelection != null || selection.sourceRequestId == sourceRequestId) &&
+                    selection.sourceDirectory == directory && selection.projectId == projectId &&
+                    selection.workspaceId == workspaceId) { "应用源码选择身份不匹配。" }
+                if (recoverySelection == null && previousSelection == null) intentStore.savePrepared(selection, entryMode)
+                // A rebind may reuse an existing owner while its new request still needs recovery.
+                val projectSelectionId = effectiveRequest?.selectionId ?: selection.selectionId
+                val ownedProject = projectStore.registerAuthoringWorkspace(name, directory, SessionMode.Code, projectId, projectSelectionId) {
+                    intent == navigationSequence.get() && (recoverySelection == null || projectStore.state.value.projects.any {
+                        it.record.id == projectId && it.record.authoringIntentId == selection.selectionId
+                    })
+                }
+                val project = ownedProject.copy(workspace = com.lingxi.code.project.ProjectWorkspace(ownedProject.record.id, hostPath, directory))
+                val sourceIdentity = com.lingxi.code.project.AuthoringSourceIdentity(effectiveAppId, project.record.id, hostPath, directory)
+                fun freshAuthoringGrant() = com.lingxi.code.project.PreparedAuthoringGrant(sourceIdentity, intent)
                 val target = targetSessionId?.let { id -> project.sessions.firstOrNull { row ->
                     canonicalSessionId(row.sessionId) == canonicalSessionId(id) && row.mode == SessionMode.Code &&
                         (row.workspaceDirectory ?: project.record.activeDirectory) == directory
                 } }
+                check(targetSessionId == null || target != null) { "应用源码会话目录已变化，请重新打开。" }
                 // App authoring explicitly creates or resumes a Code session.
                 val mode = SessionMode.Code
-                val workspaceId = oldBinding?.workspaceId
-                    ?.takeIf { boundProject?.record?.id == ownedProject.record.id && oldBinding.sourceDirectory == directory }
-                    ?: java.util.UUID.randomUUID().toString()
-                queueCurrentDraft()?.join()
+                queueCurrentDraft()
                 val authoringScope = ConversationScope.Project(project.record.id)
+                val requestedTranscript = effectiveRequest?.targetTranscriptPath ?: recoverySelection?.transcriptPath
+                fun captureAuthoringOwner(owner: ChatViewModel, fresh: Boolean) {
+                    activatedOwner = owner
+                    val ownership = sessionHost.draftOwnership(owner)
+                    val ownerId = canonicalSessionId(owner.state.value.session.id)
+                    val sameOwner = sameDraftOwner(ownership.scope.value, ownership.sessionId.value, authoringScope, ownerId)
+                    if ((ownership.loaded.value && sameOwner) ||
+                        (fresh && !ownership.loaded.value && ownership.revision.longValue == 0L &&
+                            sessionHost.draftState(owner).value.isEmpty() && sessionHost.attachmentState(owner).value == null)) {
+                        val current = sessionHost.draftState(owner).value
+                        publishOwnerDraft(owner, authoringScope, ownerId, LocalAppAuthoringPrompt.compose(name, effectiveAppId, current))
+                    }
+                }
                 check(switchEngineScope(authoringScope, project,
                     target?.let { SessionRef(it.sessionId, it.title) }, target == null,
                     sessionModeOverride = mode,
-                    navigationIntent = intent)) { "无法切换到应用源码会话。" }
-                setConversationMode(mode)
-                var authoringVm = sessionHost.selected.value
-                val attemptedAuthoringSource = authoringVm.engineSource.value
-                var confirmed = try {
-                    authoringVm.awaitAppAuthoringSession(directory, target?.sessionId)
-                } catch (resumeFailure: Exception) {
-                    if (resumeFailure is kotlinx.coroutines.CancellationException) throw resumeFailure
-                    if (target == null) throw resumeFailure
-                    // The stored catalogue can lag an engine-side cwd change.
-                    // A failed real-cwd check replaces that session in the same
-                    // App-owned Project; it never falls back to a global project.
-                    check(authoringVm.engineSource.value === attemptedAuthoringSource &&
-                        authoringVm.sourceScope.value == authoringScope) { "开发会话已切换，请重新打开应用源码。" }
-                    check(switchEngineScope(authoringScope, project, null, true,
-                        sessionModeOverride = SessionMode.Code, navigationIntent = intent)) { "无法恢复应用源码会话。" }
-                    setConversationMode(SessionMode.Code)
-                    authoringVm = sessionHost.selected.value
-                    authoringVm.awaitAppAuthoringSession(directory)
-                }
+                    navigationIntent = intent, selectedTranscriptPath = requestedTranscript,
+                    requireSelectedTranscript = requestedTranscript != null,
+                    preparedAuthoringGrant = freshAuthoringGrant(), authoringIntent = selection,
+                    onActivated = { owner, retained ->
+                        activatedRetained = retained
+                        captureAuthoringOwner(owner, target == null)
+                    })) { "无法切换到应用源码会话。" }
+                val authoringVm = checkNotNull(activatedOwner)
                 val authoringSource = authoringVm.engineSource.value
-                check(authoringVm.engineSource.value === authoringSource &&
-                    authoringVm.sourceScope.value == ConversationScope.Project(project.record.id)) { "开发会话已切换，请重新打开应用源码。" }
-                // Empty confirmed sessions also need the existing catalog
-                // entry so reopening the app can reuse this recovery UUID.
-                projectStore.recordStartedSession(project.record.id, confirmed.sessionId, name, mode)
-                projectStore.recordWorkspace(project.record.id, confirmed)
-                check(authoringVm.engineSource.value === authoringSource &&
-                    authoringSource.workspaceState.value == confirmed &&
-                    canonicalSessionId(authoringVm.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) { "开发目录已变化，没有插入草稿。" }
-                val authoring = org.json.JSONObject()
-                    .put("workspaceId", workspaceId)
-                    .put("sourceDirectory", directory)
-                    .put("projectRef", AppProjectRef("mobileProject", projectId = project.record.id).toJson())
-                    .put("authoringSessionId", canonicalSessionId(confirmed.sessionId))
-                if (appId != null) {
-                    localApps.request("bindAuthoring", appId) {
-                        put("authoring", org.json.JSONObject(authoring.toString()).put("appId", appId))
+                val firstRegistration = java.util.concurrent.atomic.AtomicBoolean(recoverySelection == null && recoveryRequest == null)
+                val bindOwner: suspend () -> Unit = {
+                    check(authoringVm.engineSource.value === authoringSource && authoringVm.sourceScope.value == authoringScope)
+                    val confirmed = authoringVm.awaitAppAuthoringSession(directory, target?.sessionId)
+                    val ownerMode = checkNotNull(authoringVm.state.value.sessionMode)
+                    val activation = checkNotNull(authoringSource.activeSessionState.value)
+                    check(ownerMode == SessionMode.Code && activation.mode == ownerMode &&
+                        canonicalSessionId(activation.sessionId) == canonicalSessionId(confirmed.sessionId) &&
+                        (target == null || activatedRetained || activation.kind == com.lingxi.code.conversation.SessionActivationKind.Resumed) &&
+                        authoringSource.recoverySpec?.sessionMode == ownerMode)
+                    val savedIntent = checkNotNull(intentStore.readSelection(selection.selectionId))
+                    check(savedIntent.sourceId == sourceId && savedIntent.projectId == project.record.id &&
+                        savedIntent.sourceDirectory == directory && savedIntent.workspaceId == workspaceId &&
+                        savedIntent.sessionId == canonicalSessionId(confirmed.sessionId) && savedIntent.sessionMode == ownerMode &&
+                        savedIntent.transcriptPath == confirmed.transcriptPath) { "应用源码会话来源已变化。" }
+                    val authoringStillMatches = {
+                        authoringVm.engineSource.value === authoringSource &&
+                            authoringVm.sourceScope.value == authoringScope &&
+                            authoringSource.activeSessionState.value?.let { active -> active.mode == ownerMode &&
+                                canonicalSessionId(active.sessionId) == canonicalSessionId(confirmed.sessionId) &&
+                                (target == null || activatedRetained || active.kind == com.lingxi.code.conversation.SessionActivationKind.Resumed) } == true &&
+                            authoringSource.workspaceState.value == confirmed &&
+                            canonicalSessionId(authoringVm.state.value.session.id) == canonicalSessionId(confirmed.sessionId)
                     }
-                } else {
-                    val saved = localApps.registerAuthoring(authoring)
-                    check(saved.appId == null && saved.sourceDirectory == directory &&
-                        saved.workspaceId == workspaceId && saved.projectRef == AppProjectRef("mobileProject", projectId = project.record.id) &&
-                        saved.authoringSessionId?.let(::canonicalSessionId) == canonicalSessionId(confirmed.sessionId)) {
-                        "应用源码会话绑定没有保存，未插入草稿。"
+                    check(authoringStillMatches()) { "开发会话已切换，请重新打开应用源码。" }
+                    check(projectStore.recordStartedSession(project.record.id, confirmed.sessionId, name, mode,
+                        transcriptPath = confirmed.transcriptPath, allowCommit = authoringStillMatches,
+                        markActive = { sessionHost.selected.value === authoringVm }))
+                    projectStore.recordWorkspace(project.record.id, confirmed, allowCommit = authoringStillMatches,
+                        updateProjectDirectory = { sessionHost.selected.value === authoringVm })
+                    check(authoringStillMatches()) { "开发目录已变化。" }
+                    val authoring = org.json.JSONObject()
+                        .put("workspaceId", workspaceId)
+                        .put("sourceDirectory", directory)
+                        .put("projectRef", AppProjectRef("mobileProject", projectId = project.record.id).toJson())
+                        .put("authoringSessionId", canonicalSessionId(confirmed.sessionId))
+                    effectiveAppId?.let { authoring.put("appId", it) }
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                        localApps.withAuthoringCurrentLock(effectiveAppId) {
+                            com.lingxi.code.apps.registerAuthoringWithReceipt(
+                                submit = {
+                                    val setCurrent = firstRegistration.getAndSet(false) && navigationSequence.get() == intent
+                                    localApps.registerAuthoring(sourceId, sourceRequestId, setCurrent, ownerMode, authoring); Unit
+                                },
+                                lookup = { localApps.getAuthoringGrant(directory, project.record.id, canonicalSessionId(confirmed.sessionId), ownerMode) },
+                                isNotFound = { it is com.lingxi.code.apps.AppServiceException && it.code == "notFound" },
+                                matches = { saved -> saved.matchesOwner(sourceId, directory, project.record.id, workspaceId,
+                                    canonicalSessionId(confirmed.sessionId)) },
+                                lookupBeforeSubmit = !firstRegistration.get(),
+                                receiptProvesSubmission = effectiveRequest?.operation != "bind",
+                            )
+                        }
+                        check(authoringStillMatches()) { "开发目录或会话已变化。" }
+                        intentStore.markBindingConfirmed(selection.selectionId, canonicalSessionId(confirmed.sessionId))
+                        effectiveRequest?.let { intentStore.markRequestCompleted(it.selectionId) }
+                        check(authoringStillMatches()) { "开发目录或会话已变化。" }
+                        if (!authoringSource.turnAdmissionReady) {
+                            val admitted = when (authoringSource) {
+                                is EngineConversationSource -> authoringSource.acknowledgeAuthoringBinding(sourceIdentity, confirmed.sessionId)
+                                is com.lingxi.code.conversation.RecoveringConversationSource ->
+                                    authoringSource.acknowledgeAuthoringBinding(sourceIdentity, confirmed.sessionId)
+                                else -> false
+                            }
+                            check(admitted) { "应用源码会话绑定与来源不匹配。" }
+                        }
                     }
                 }
-                check(authoringVm.engineSource.value === authoringSource &&
-                    authoringSource.workspaceState.value == confirmed &&
-                    canonicalSessionId(authoringVm.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) {
-                    "开发目录已变化，没有插入草稿。"
+                authoringVm.installAuthoringRetry(bindOwner)
+                try {
+                    bindOwner()
+                    authoringVm.finishAuthoringBinding()
+                } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                catch (failure: Exception) {
+                    authoringVm.reportAuthoringBindingFailure(failure)
                 }
-                authoringVm.awaitConversationDraftWrites()
-                val storedDraft = scopeStore.readConversationDraft(
-                    authoringScope.persistenceKey(), confirmed.sessionId,
-                ).orEmpty()
-                check(authoringVm.engineSource.value === authoringSource &&
-                    authoringVm.sourceScope.value == authoringScope &&
-                    authoringSource.workspaceState.value == confirmed &&
-                    canonicalSessionId(authoringVm.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) {
-                    "开发目录已变化，没有插入草稿。"
+                if (sessionHost.selected.value === authoringVm && intent == navigationSequence.get()) {
+                    appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; runtimeAppId = null
+                    closeDrawer(); closeProjectPages()
                 }
-                // If the owner is already visible, keep edits made while the
-                // persisted draft was being read; otherwise use that owner's saved draft.
-                val existingDraft = if (draftLoaded && sameDraftOwner(
-                        draftOwnerScope, draftOwnerSessionId, authoringScope, confirmed.sessionId,
-                    )) draft else storedDraft
-                val prompt = LocalAppAuthoringPrompt.compose(name, appId, existingDraft)
-                scopeStore.persistConversationDraft(authoringScope.persistenceKey(), confirmed.sessionId, prompt)
-                sessionHost.draftState(authoringVm).value = prompt
-                appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; runtimeAppId = null
-                closeDrawer(); closeProjectPages()
-            } catch (error: Exception) { chatViewModel.reportHostError(error.message ?: "无法打开应用源码会话。") }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (error: Exception) {
+                val message = when {
+                    error is com.lingxi.code.apps.InvalidAuthoringNameException -> resources.getString(R.string.local_app_authoring_name_invalid)
+                    com.lingxi.code.apps.isAppDevelopmentCodeRequired(error) -> resources.getString(R.string.local_app_development_requires_code)
+                    else -> error.message ?: "无法打开应用源码会话。"
+                }
+                (activatedOwner ?: chatViewModel).reportHostError(message)
+            }
+        }
+    }
+
+    fun recoverProjectAuthoring(projectId: String, selectionId: String) {
+        val entryMode = authoringEntryMode() ?: run {
+            chatViewModel.reportHostError(resources.getString(R.string.local_app_development_requires_code))
+            return
+        }
+        val recoveryNavigation = nextNavigationIntent()
+        scope.launch {
+            try {
+                fun currentProject() = projectStore.state.value.projects.singleOrNull {
+                    !projectStore.state.value.storageUnavailable && it.record.id == projectId && it.record.authoringIntentId == selectionId
+                }
+                var project = checkNotNull(currentProject()) { "应用源码选择已变化。" }
+                val intents = com.lingxi.code.apps.AuthoringIntentStore(appContext)
+                val selection = intents.readSelection(selectionId)
+                if (selection == null) {
+                    val request = checkNotNull(intents.readRequest(selectionId)) { "应用源码请求不可用。" }
+                    check(request.projectId == projectId && recoveryNavigation == navigationSequence.get())
+                    openAppAuthoring(request.appId, request.name, null, recoveryRequest = request)
+                    return@launch
+                }
+                check(selection.projectId == projectId)
+                if (selection.sessionId != null) {
+                    if (project.sessions.none { canonicalSessionId(it.sessionId) == selection.sessionId }) {
+                        projectStore.recoverStagedAuthoringIntents()
+                        project = checkNotNull(currentProject())
+                    }
+                    check(project.sessions.any { canonicalSessionId(it.sessionId) == selection.sessionId &&
+                        it.mode == SessionMode.Code && it.transcriptPath == selection.transcriptPath }) { "应用源码会话不可用。" }
+                }
+                val proof = localApps.prepareAuthoringSource(selection.sourceId, selection.sourceDirectory, selection.sourceRequestId, entryMode)
+                check(currentProject() != null && recoveryNavigation == navigationSequence.get() &&
+                    proof.path == selection.sourceDirectory && proof.sourceId == selection.sourceId &&
+                    proof.requestId == selection.sourceRequestId &&
+                    proof.sourcePath == localApps.hostFile(selection.sourceDirectory).absolutePath) { "应用源码身份已变化。" }
+                openAppAuthoring(selection.appId, project.record.name, proof, recoverySelection = selection)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (failure: Exception) { chatViewModel.reportHostError(if (com.lingxi.code.apps.isAppDevelopmentCodeRequired(failure))
+                resources.getString(R.string.local_app_development_requires_code) else failure.message ?: "无法恢复应用源码。") }
         }
     }
 
@@ -2318,7 +3010,7 @@ fun RootScreen(
                         },
                         onOpenTerminal = {
                             closeDrawer()
-                            onOpenTerminal("interactive", null)
+                            openCurrentOwnerTerminal("interactive", null)
                         },
                         onClose = { closeDrawer() },
                         engineSessions = drawerEngineSessions,
@@ -2339,7 +3031,19 @@ fun RootScreen(
                             queueScopeStateWrite { scopeStore.persistSessionPinned(sessionId, drawerUi.sessionPinnedAt(sessionId)) }
                         },
                         productionData = drawerProductionData,
-                        onSelectProjectSession = ::openProjectSession,
+                        onOpenRecentSession = { row ->
+                            val intent = nextNavigationIntent()
+                            val targetScope = row.scope
+                            val project = projectSnapshotForScope(targetScope)
+                            scope.launch {
+                                if (switchEngineScope(targetScope, project, SessionRef(row.uuid, row.title), false,
+                                        sessionModeOverride = row.mode, navigationIntent = intent,
+                                        selectedTranscriptPath = row.transcriptPath, requireSelectedTranscript = true)) {
+                                    closeDrawer()
+                                    closeProjectPages()
+                                }
+                            }
+                        },
                         onOpenCron = { taskKey ->
                             markCronResultsSeen()
                             closeDrawer()
@@ -2367,10 +3071,12 @@ fun RootScreen(
                         apps = drawerApps,
                         onOpenApps = {
                             closeDrawer()
+                            appPageSequence.incrementAndGet()
                             appsPageOpen = true
                         },
                         onOpenApp = { appId ->
                             closeDrawer()
+                            appPageSequence.incrementAndGet()
                             runtimeAppId = appId
                         },
                         onOpenRemoteControl = {
@@ -2413,32 +3119,21 @@ fun RootScreen(
                     effectivePermissionMode = settingsState.effectivePermissionMode,
                     onOpenPermissionSettings = onOpenPermissionSettings,
                     state = state,
-                    onSend = {
-                        text ->
-                        voiceSpeechPlayer.stop()
-                        runConversationAction {
-                            chatViewModel.send(
-                                text,
-                                origin = ConversationTurnOrigin.Ordinary,
-                            )
-                        }
+                    onRetryAuthoring = if (authoringRetryAvailable) chatViewModel::retryAuthoringBinding else null,
+                    onSend = { text -> submitComposer(text, null) },
+                    onSendPreflight = { text, attachment ->
+                        if (activeProjectSyncing) {
+                            chatViewModel.reportHostError(resources.getString(R.string.project_sync_in_progress_notice))
+                            false
+                        } else chatViewModel.admitComposerSend(text, attachment != null)
                     },
-                    onSendPreflight = { text, attachment -> chatViewModel.admitComposerSend(text, attachment != null) },
-                    onSendWithAttachment = { text, attachment ->
-                        voiceSpeechPlayer.stop()
-                        runConversationAction {
-                            chatViewModel.send(
-                                text,
-                                images = attachment?.toImageRef()?.let(::listOf).orEmpty(),
-                                origin = ConversationTurnOrigin.Ordinary,
-                            )
-                        }
-                    },
+                    onSendWithAttachment = ::submitComposer,
                     // "新对话": reset the local transcript immediately AND tell the
                     // engine to begin a new session (NewSession). For the mock the
                     // engine call is a no-op, so this still behaves like newChat.
                     onNewChat = {
-                        startNewSessionIn(ConversationScope.Global, lastSelectedMode)
+                        val (targetScope, targetMode) = com.lingxi.code.model.defaultNewChatTarget(activeSessionMode)
+                        startNewSessionIn(targetScope, targetMode)
                     },
                     onSelectModel = chatViewModel::selectModel,
                     onSelectReasoning = chatViewModel::selectReasoning,
@@ -2479,6 +3174,10 @@ fun RootScreen(
                         onVoiceHoldRelease()
                     },
                     onFlowModeClick = {
+                        if (!flowActive && !chatViewModel.engineSource.value.turnAdmissionReady) {
+                            chatViewModel.reportHostError(resources.getString(R.string.chat_turn_preparing_retry))
+                            return@ChatScreen
+                        }
                         val realtime = settingsState.voice.conversation.mode == "realtime"
                         if (!flowActive && ((realtime && settingsState.voiceCapability.providerRealtime?.readiness != "ready") ||
                             (!realtime && (settingsState.voiceCapability.recognitionReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE ||
@@ -2489,7 +3188,10 @@ fun RootScreen(
                         }
                         audioGuidance = null
                         flowActive = !flowActive
-                        if (flowActive) voiceSpeechPlayer.stop()
+                        if (flowActive) {
+                            if (viewModel == null) sessionHost.yieldOtherOwnersAutomaticSpeech(chatViewModel)
+                            voiceSpeechPlayer.stop()
+                        }
                     },
                     flowModeActive = flowActive,
                     // Unavailable actions stay reachable to explain how to configure them.
@@ -2506,12 +3208,45 @@ fun RootScreen(
                             assistantText = orbAssistantText,
                             onSend = {
                                 text ->
-                                runConversationAction {
-                                    chatViewModel.send(
-                                        text,
-                                        origin = ConversationTurnOrigin.Flow,
-                                    )
+                                val owner = chatViewModel
+                                val ownerScope = sourceScope
+                                val ownerId = canonicalSessionId(state.session.id)
+                                val ownership = draftOwnership
+                                val controller = flowVoiceController
+                                val voiceGeneration = controller.submissionGeneration()
+                                val rejected = com.lingxi.code.conversation.RejectedComposerDraft(
+                                    text, null, state.visualizationChip, ownerScope, ownerId,
+                                )
+                                val gate = com.lingxi.code.conversation.ComposerRestoreGate(
+                                    revision = { Triple(ownership.revision.longValue, ownership.attachmentRevision.longValue, owner.visualizationDraftRevision()) },
+                                    preserve = { ownership.rejected.add(rejected) },
+                                    restore = {
+                                        if (owner.sourceScope.value == ownerScope && canonicalSessionId(owner.state.value.session.id) == ownerId &&
+                                            ownership.scope.value == ownerScope && canonicalSessionId(ownership.sessionId.value.orEmpty()) == ownerId &&
+                                            draftCell.value.isEmpty() && attachmentCell.value == null && owner.state.value.visualizationChip == null
+                                        ) {
+                                            if (viewModel == null) publishOwnerDraft(owner, ownerScope, ownerId, text)
+                                            else {
+                                                ownership.revision.longValue++
+                                                ownership.loaded.value = true
+                                                draftCell.value = text
+                                                owner.onDraftChanged(text, ownerScope, ownerId)
+                                            }
+                                            owner.restoreVisualizationDraft(rejected.visualization)
+                                        } else ownership.rejected.add(rejected)
+                                    },
+                                )
+                                val fail = {
+                                    gate.rejected()
+                                    controller.rejectSubmission(voiceGeneration)
                                 }
+                                if (activeProjectSyncing) {
+                                    owner.reportHostError(resources.getString(R.string.project_sync_in_progress_notice))
+                                    fail()
+                                } else {
+                                    owner.send(text, origin = ConversationTurnOrigin.Flow, onNotAdmitted = fail)
+                                }
+                                gate.cleared()
                             },
                             onCancel = { chatViewModel.cancel() },
                             controller = flowVoiceController,
@@ -2522,7 +3257,29 @@ fun RootScreen(
                     onDraftChange = ::updateCurrentDraft,
                     onCameraClick = onCameraClick,
                     attachment = attachment,
-                    onRemoveAttachment = { attachment = null },
+                    hasUnsentDraft = draftOwnership.rejected.isNotEmpty(),
+                    canRestoreUnsentDraft = draft.isEmpty() && attachment == null && state.visualizationChip == null &&
+                        draftOwnership.rejected.firstOrNull()?.let { failed ->
+                            failed.scope == sourceScope && canonicalSessionId(failed.sessionId.orEmpty()) == canonicalSessionId(state.session.id)
+                        } == true,
+                    onRestoreUnsentDraft = {
+                        val failed = draftOwnership.rejected.firstOrNull()
+                        if (failed != null && draft.isEmpty() && attachment == null && state.visualizationChip == null &&
+                            failed.scope == sourceScope && canonicalSessionId(failed.sessionId.orEmpty()) == canonicalSessionId(state.session.id)
+                        ) {
+                            updateCurrentDraft(failed.text)
+                            attachment = failed.attachment
+                            draftOwnership.attachmentRevision.longValue++
+                            chatViewModel.restoreVisualizationDraft(failed.visualization)
+                            draftOwnership.rejected.removeAt(0)
+                        }
+                    },
+                    onRemoveAttachment = {
+                        attachment = null
+                        draftOwnership.attachmentRevision.longValue++
+                        pendingComposerRestore?.cleared()
+                        pendingComposerRestore = null
+                    },
                     onShare = onShare,
                     onStop = chatViewModel::cancel,
                     onDiscardRecoveredTurn = chatViewModel::discardRecoveredTurn,
@@ -2549,7 +3306,7 @@ fun RootScreen(
                     onOpenComputerUseSettings = onOpenComputerUseSettings,
                     onDismissComputerUseSetup = { computerUseSetupDismissed = true },
                     onOpenTerminal = { sessionId, command ->
-                        onOpenTerminal(sessionId, command)
+                        openCurrentOwnerTerminal(sessionId, command)
                     },
                     onAnswerQuestion = chatViewModel::answerQuestion,
                     onCancelQuestion = chatViewModel::cancelQuestion,
@@ -2649,9 +3406,9 @@ fun RootScreen(
                         if (mode != null) {
                             rememberModeSelection(mode)
                         }
-                        startProjectSession(shown.id, mode ?: lastSelectedMode)
+                        startProjectSession(shown.id, mode ?: activeSessionMode)
                     },
-                    onOpenSession = { ref -> openProjectSession(shown.id, ref) },
+                    onOpenSession = { selected -> openProjectSession(shown.id, selected) },
                     onOpenCron = { taskKey ->
                         markCronResultsSeen()
                         closeProjectPages()
@@ -2665,23 +3422,42 @@ fun RootScreen(
                             importProjectLauncher.launch(null)
                         }
                     },
+                    onRecoverAuthoring = projectState.projects.firstOrNull { it.record.id == shown.id }
+                        ?.record?.authoringIntentId?.let { selection -> { recoverProjectAuthoring(shown.id, selection) } },
+                    canStartAuthoring = { authoringEntryMode() != null },
                 )
             }
         }
 
+        val authoringRecoveryProjects = projectState.projects.mapNotNull { project ->
+            project.record.authoringIntentId?.let { selection ->
+                com.lingxi.code.apps.PendingAuthoringRecovery(project.record.id, selection, project.record.name)
+            }
+        }
+        var pendingAuthoringRecoveries by remember { mutableStateOf(emptyList<com.lingxi.code.apps.PendingAuthoringRecovery>()) }
+        LaunchedEffect(appsPageOpen, projectState.storageUnavailable, authoringRecoveryProjects) {
+            pendingAuthoringRecoveries = if (!appsPageOpen || projectState.storageUnavailable) emptyList()
+            else com.lingxi.code.apps.pendingAuthoringRecoveries(authoringRecoveryProjects,
+                com.lingxi.code.apps.AuthoringIntentStore(appContext))
+        }
         AnimatedVisibility(
             visible = appsPageOpen,
             enter = slideInHorizontally(initialOffsetX = { it }),
             exit = slideOutHorizontally(targetOffsetX = { it }),
         ) {
-            BackHandler { appsPageOpen = false }
+            BackHandler { appPageSequence.incrementAndGet(); appsPageOpen = false }
             UnifiedAppsPage(
                 apps = localApps,
-                onBack = { appsPageOpen = false },
-                onRemoteApps = { appsPageOpen = false; onOpenRemoteControl() },
-                onOpen = { runtimeAppId = it },
-                onDetails = { localAppDetailsId = it },
-                onAuthoring = ::openAppAuthoring,
+                onBack = { appPageSequence.incrementAndGet(); appsPageOpen = false },
+                onRemoteApps = { appPageSequence.incrementAndGet(); appsPageOpen = false; onOpenRemoteControl() },
+                onOpen = { appPageSequence.incrementAndGet(); runtimeAppId = it },
+                onDetails = { appPageSequence.incrementAndGet(); localAppDetailsId = it },
+                onAuthoring = { appId, name, directory -> openAppAuthoring(appId, name, directory) },
+                pendingAuthoring = pendingAuthoringRecoveries,
+                onRecoverAuthoring = { recoverProjectAuthoring(it.projectId, it.selectionId) },
+                canStartAuthoring = { authoringEntryMode() != null },
+                captureImportTicket = { captureAppAuthoringOperation { appsPageOpen }?.let(sessionHost::retainAuthoringPickerTicket) },
+                takeImportTicket = sessionHost::takeAuthoringPickerTicket,
             )
         }
         marketInstallId?.let { remoteId ->
@@ -2689,7 +3465,7 @@ fun RootScreen(
             com.lingxi.code.apps.UnifiedMarketInstallPage(
                 apps = localApps, marketId = remoteId,
                 onBack = { marketInstallId = null },
-                onInstalled = { localId -> marketInstallId = null; localAppDetailsId = localId },
+                onInstalled = { localId -> appPageSequence.incrementAndGet(); marketInstallId = null; localAppDetailsId = localId },
             )
         }
         // Like the project page, these keep their last app while sliding out.
@@ -2702,13 +3478,18 @@ fun RootScreen(
         ) {
             val shownId = localAppDetailsId ?: lastLocalAppDetailsId
             if (shownId != null) {
-                BackHandler { localAppDetailsId = null }
+                BackHandler { appPageSequence.incrementAndGet(); localAppDetailsId = null }
                 UnifiedAppDetailsPage(
                     apps = localApps,
                     appId = shownId,
-                    onBack = { localAppDetailsId = null },
-                    onOpen = { runtimeAppId = it },
-                    onAuthoring = ::openAppAuthoring,
+                    onBack = { appPageSequence.incrementAndGet(); localAppDetailsId = null },
+                    onOpen = { appPageSequence.incrementAndGet(); runtimeAppId = it },
+                    onAuthoring = { appId, name, directory -> openAppAuthoring(appId, name, directory) },
+                    onRestoreAuthoring = { appId, name, remix, revision ->
+                        openAppAuthoring(appId, name, null, sourceOperation = if (remix) "remix" else "restore", sourceRevision = revision)
+                    },
+                    canStartAuthoring = { authoringEntryMode() != null },
+                    captureOperation = { captureAppAuthoringOperation { localAppDetailsId == shownId } },
                 )
             }
         }
@@ -2725,8 +3506,9 @@ fun RootScreen(
                 UnifiedAppRuntimePage(
                     apps = localApps,
                     appId = shownId,
-                    onClose = { runtimeAppId = null },
+                    onClose = { appPageSequence.incrementAndGet(); runtimeAppId = null },
                     onShowDetails = { appId ->
+                        appPageSequence.incrementAndGet()
                         runtimeAppId = null
                         localAppDetailsId = appId
                     },
@@ -2740,6 +3522,7 @@ fun RootScreen(
                 messageCount = state.messages.size,
                 relativeTime = "",
                 mode = activeSessionMode,
+                transcriptPath = currentEngineSource.recoverySpec?.transcriptPath,
             )
             val otherMode = when (activeSessionMode) {
                 SessionMode.Chat -> SessionMode.Code
@@ -2771,7 +3554,7 @@ fun RootScreen(
                     val reference = handoffReference
                     val targetScope = resolveLinkedScope(reference?.sourceScope)
                     if (reference != null && targetScope != null) {
-                        val intent = navigationSequence.incrementAndGet()
+                        val intent = nextNavigationIntent()
                         scope.launch {
                             if (!switchEngineScope(targetScope, projectSnapshotForScope(targetScope),
                                     SessionRef(reference.sourceSessionId, ""), false,
@@ -2800,15 +3583,22 @@ fun RootScreen(
                 },
                 onOpenTerminal = {
                     sessionPanelOpen = false
-                    onOpenTerminal("interactive", null)
+                    openCurrentOwnerTerminal("interactive", null)
                 },
                 onArchive = {
                     sessionPanelOpen = false
                     val id = state.session.id
                     val projectId = (sourceScope as? ConversationScope.Project)?.projectId
+                    val owner = chatViewModel
+                    val mode = activeSessionMode
+                    val intent = nextNavigationIntent()
                     scope.launch {
                         runCatching { projectStore.setSessionArchived(projectId, id, true) }
-                            .onSuccess { startNewSessionIn(ConversationScope.Global, lastSelectedMode) }
+                            .onSuccess {
+                                if (navigationSequence.get() == intent && (viewModel != null || sessionHost.selected.value === owner) &&
+                                    canonicalSessionId(owner.state.value.session.id) == canonicalSessionId(id)
+                                ) startNewSessionIn(ConversationScope.Global, mode)
+                            }
                             .onFailure {
                                 chatViewModel.reportHostError(
                                     resources.getString(R.string.session_index_save_failed_fmt, it.message.orEmpty()),
@@ -2820,27 +3610,69 @@ fun RootScreen(
         }
         if (filesBrowserOpen) {
             val filePaths = remember { com.lingxi.code.project.MobileUserStorage.directories(context) }
-            val filesRepository = remember { com.lingxi.code.project.WorkspaceDirectoryRepository(java.io.File(filePaths.home),
-                filePaths.guestHome, filePaths.defaultGuestCwd, filePaths.projectsGuestPath, java.io.File(filePaths.configHome)) }
+            val defaultWorkspace = filePaths.globalGuestCwd(activeSessionMode)
+            val verifiedAppSource = currentEngineSource.verifiedAuthoringSource().takeIf { workspaceStorageHealthy }
+            val filesRepository = remember(filePaths, defaultWorkspace, verifiedWorkspaceProjects, workspaceStorageHealthy, verifiedScheduledWorkspace, verifiedAppSource) {
+                filePaths.workspaceDirectoryRepository(defaultWorkspace, verifiedWorkspaceProjects,
+                    verifiedScheduledWorkspace.takeIf { workspaceStorageHealthy }, verifiedAppSource)
+            }
             val browserSource = remember { currentEngineSource }
-            val browserSession = remember { liveWorkspace?.sessionId }
-            WorkspaceFilesDialog(filesRepository, liveWorkspace?.cwd ?: filePaths.defaultGuestCwd,
+            val browserWorkspace = remember { browserSource.workspaceState.value }
+            val browserSession = browserWorkspace?.sessionId
+            if (browserWorkspace == null || browserWorkspace.cwd.isBlank() || browserSession.isNullOrBlank() ||
+                browserSource !== chatViewModel.engineSource.value ||
+                canonicalSessionId(browserSession) != canonicalSessionId(chatViewModel.state.value.session.id)) {
+                LaunchedEffect(browserSource, browserWorkspace) {
+                    filesBrowserOpen = false
+                    chatViewModel.reportHostError(resources.getString(R.string.workspace_session_changed))
+                }
+            } else WorkspaceFilesDialog(filesRepository, browserWorkspace.cwd,
                 protectedPaths = {
                     projectState.projects.flatMap { project -> listOf(project.record.directory, project.record.activeDirectory,
                         project.record.directory.substringBeforeLast('/')) + project.record.additionalDirectories + project.sessions.mapNotNull { it.workspaceDirectory } } +
                         listOfNotNull(currentEngineSource.workspaceState.value?.cwd, currentEngineSource.workspaceState.value?.projectRoot) +
                         currentEngineSource.workspaceState.value?.additionalDirectories.orEmpty() + sessionState.rows.mapNotNull { it.workspaceDirectory }
-                }, canMutate = { !chatViewModel.state.value.requiresBackgroundExecution && !chatViewModel.state.value.sessionTransitioning &&
+                }, canMutate = { workspaceOwnerStoreMatches(scopeStateValid == true, projectStore.state.value, verifiedWorkspaceProjects) &&
+                    !chatViewModel.state.value.requiresBackgroundExecution && !chatViewModel.state.value.sessionTransitioning &&
                     !chatViewModel.state.value.cancellationInFlight && chatViewModel.engineSource.value === browserSource &&
-                    browserSource.workspaceState.value?.sessionId == browserSession },
+                    browserSource.workspaceState.value?.sessionId == browserSession &&
+                    canonicalSessionId(chatViewModel.state.value.session.id) == canonicalSessionId(browserSession) },
                 onDismiss = { filesBrowserOpen = false })
         }
         if (workspacePickerOpen) {
             val pickerSource = remember { currentEngineSource }
-            val pickerSessionId = remember { pickerSource.workspaceState.value?.sessionId.orEmpty() }
+            val pickerSessionId = remember { pickerSource.workspaceState.value?.sessionId?.takeIf(String::isNotBlank) }
+            suspend fun requirePickerGrant(path: String) {
+                check(pickerSource.turnAdmissionReady && chatViewModel.engineSource.value === pickerSource &&
+                    workspaceOwnerStoreMatches(scopeStateValid == true, projectStore.state.value, verifiedWorkspaceProjects)) {
+                    context.getString(R.string.workspace_session_changed)
+                }
+                val ownerProject = (sourceScope as? ConversationScope.Project)?.let { scope ->
+                    projectStore.state.value.projects.singleOrNull { it.record.id == scope.projectId }
+                }
+                val taskWorkspace = if (sourceScope == ConversationScope.Scheduled) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        pickerSessionId?.let { com.lingxi.code.project.MobileUserStorage.verifiedScheduledWorkspace(appContext, it) }
+                    }
+                } else null
+                val roots = com.lingxi.code.project.MobileUserStorage.directories(appContext).projectGrantRoots()
+                check(com.lingxi.code.project.scheduledPickerPathAllowed(sourceScope == ConversationScope.Scheduled, taskWorkspace, path) &&
+                    com.lingxi.code.project.isSafeProjectWorkspace(roots, path, null, ownerProject,
+                    pickerSource.verifiedAuthoringSource(), verifiedScheduled = taskWorkspace)) {
+                    context.getString(R.string.workspace_browser_operation_failed)
+                }
+                check(chatViewModel.engineSource.value === pickerSource &&
+                    workspaceOwnerStoreMatches(scopeStateValid == true, projectStore.state.value, verifiedWorkspaceProjects)) {
+                    context.getString(R.string.workspace_session_changed)
+                }
+            }
             WorkspaceDirectorySheet(
                 projects = drawerProductionData.projects.orEmpty(),
                 currentScope = newChatScope,
+                workspaceGuestPath = com.lingxi.code.project.MobileUserStorage.directories(context).globalGuestCwd(activeSessionMode),
+                verifiedProjects = verifiedWorkspaceProjects,
+                verifiedScheduled = verifiedScheduledWorkspace.takeIf { workspaceStorageHealthy },
+                verifiedAppSource = pickerSource.verifiedAuthoringSource().takeIf { workspaceStorageHealthy },
                 onDismiss = { workspacePickerOpen = false },
                 currentDirectory = liveWorkspace?.cwd,
                 runtimeStatus = stringResource(com.lingxi.code.settings.linuxRuntimeStateLabel(settingsState.linuxRuntime.rootfsState)),
@@ -2854,22 +3686,27 @@ fun RootScreen(
                         pickerSource.workspaceState.value?.additionalDirectories.orEmpty() +
                         sessionState.rows.mapNotNull { it.workspaceDirectory }
                 },
-                canMutate = { !chatViewModel.state.value.requiresBackgroundExecution && !chatViewModel.state.value.sessionTransitioning && !chatViewModel.state.value.cancellationInFlight &&
+                canMutate = { pickerSessionId != null &&
+                    workspaceOwnerStoreMatches(scopeStateValid == true, projectStore.state.value, verifiedWorkspaceProjects) &&
+                    !chatViewModel.state.value.requiresBackgroundExecution && !chatViewModel.state.value.sessionTransitioning && !chatViewModel.state.value.cancellationInFlight &&
                     chatViewModel.engineSource.value === pickerSource &&
-                    pickerSource.workspaceState.value?.sessionId.orEmpty() == pickerSessionId },
+                    pickerSource.workspaceState.value?.sessionId == pickerSessionId &&
+                    canonicalSessionId(chatViewModel.state.value.session.id) == canonicalSessionId(pickerSessionId) },
                 onPickDirectory = { path ->
                     check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
-                    pickerSource.changeWorkspace(path, pickerSessionId)
+                    requirePickerGrant(path)
+                    pickerSource.changeWorkspace(path, checkNotNull(pickerSessionId))
                     check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
                 },
                 onAddDirectory = { path ->
                     check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
-                    pickerSource.addWorkspaceDirectory(path, pickerSessionId)
+                    requirePickerGrant(path)
+                    pickerSource.addWorkspaceDirectory(path, checkNotNull(pickerSessionId))
                     check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
                 },
                 onPick = { target ->
                     workspacePickerOpen = false
-                    if (target != newChatScope) startNewSessionIn(target, lastSelectedMode, carryDraft = true)
+                    if (target != newChatScope) startNewSessionIn(target, activeSessionMode, carryDraft = true)
                 },
             )
         }
@@ -3001,6 +3838,7 @@ private fun cronStatusLabel(status: CronRunStatus, context: Context): String = w
     CronRunStatus.Cancelled -> context.getString(R.string.chat_status_cancelled)
     CronRunStatus.Skipped -> context.getString(R.string.cron_status_skipped)
     CronRunStatus.Interrupted -> "Interrupted"
+    CronRunStatus.OutcomeUnknown -> context.getString(R.string.cron_status_outcome_unknown)
 }
 
 internal fun appendVoiceTranscript(base: String, transcript: String): String = when {
@@ -3030,8 +3868,7 @@ private fun ConversationStorageUnavailable(
     if (filesOpen) {
         val paths = remember(context) { com.lingxi.code.project.MobileUserStorage.directories(context) }
         val repository = remember(paths) {
-            com.lingxi.code.project.WorkspaceDirectoryRepository(java.io.File(paths.home), paths.guestHome,
-                paths.defaultGuestCwd, paths.projectsGuestPath, java.io.File(paths.configHome))
+            paths.workspaceDirectoryRepository(paths.guestHome)
         }
         WorkspaceFilesDialog(repository, paths.guestHome, protectedPaths = { emptyList() },
             canMutate = { false }, onDismiss = { filesOpen = false })

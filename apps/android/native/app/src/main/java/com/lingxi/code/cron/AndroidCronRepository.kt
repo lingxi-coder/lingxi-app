@@ -67,6 +67,39 @@ class AndroidCronRepository private constructor(
     /** Release watchers owned by a repository whose host lifecycle has ended. */
     internal fun dispose() { repositoryScope.cancel() }
 
+    /** Strictly scan all known scheduler stores before admitting a new owner. */
+    internal suspend fun strictOwnerReceipts(projectIds: Set<String>): List<CronRunRecord> {
+        val scopes = scopeScanner.scan()
+        val found = scopes.mapNotNull { it.projectId }.toSet()
+        val missing = (projectIds - found).map { "project.$it" }.sorted()
+        if (scopes.count { it.scopeId == GLOBAL_CRON_SCOPE_ID } != 1 || found != projectIds) {
+            throw com.lingxi.code.project.ProjectCatalogUnavailableException(missing.ifEmpty { listOf("scheduled") },
+                "Scheduled project stores are unavailable: ${((found - projectIds) + (projectIds - found)).sorted()}")
+        }
+        val receipts = scopes.flatMap { scope ->
+            try {
+                val ledger = gateway.listOwnerReservationsStrict(scope).map { reservation ->
+                    val identity = CronOwnerIdentity(reservation.sessionId, reservation.sessionTranscriptPath,
+                        reservation.sessionMode, reservation.sessionScopeKey)
+                    validateCronOwnerIdentity(identity)
+                    val id = com.lingxi.code.model.canonicalSessionId(identity.sessionId)
+                    CronRunRecord("ledger:${scope.scopeId}:$id", "ledger", scope.scopeId,
+                        scope.projectId, scope.projectName, "", 0L, 0L,
+                        sessionId = id, sessionTranscriptPath = identity.transcriptPath,
+                        sessionMode = identity.mode, sessionScopeKey = identity.scopeKey)
+                }
+                ledger + gateway.listStrict(scope).flatMap { sdkCronReceipts(scope, it) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                val owner = scope.projectId?.let { "project.$it" } ?: "scheduled"
+                throw com.lingxi.code.project.ProjectCatalogUnavailableException(listOf(owner),
+                    "Scheduled task store is unavailable for $owner", failure)
+            }
+        }
+        return receipts
+    }
+
     fun refresh() {
         repositoryScope.launch { refreshNow() }
     }
@@ -172,7 +205,9 @@ class AndroidCronRepository private constructor(
     internal fun recoverNativeTerminal(record: CronRunRecord, task: com.lingxi.code.bindings.runtime.CronTaskDto): Boolean {
         val automation = CronAutomation.from(task)
         val terminal = automation.terminalFor(record) ?: return false
-        historyStore.attachExecution(record.runId, terminal.sessionId, terminal.model)
+        historyStore.attachExecution(record.runId, terminal.sessionId, terminal.model,
+            sessionTranscriptPath = terminal.sessionTranscriptPath, sessionMode = terminal.sessionMode,
+            sessionScopeKey = terminal.sessionScopeKey)
         historyStore.markTerminal(record.runId, terminal.status, terminal.summary, terminal.error, terminal.finishedAtMs)
         postPendingNotifications(record.runId)
         return true
@@ -199,15 +234,12 @@ class AndroidCronRepository private constructor(
         }
     }
 
-    private fun defaultAutomation(): CronAutomation =
-        CronAutomation.defaults(com.lingxi.code.settings.ProviderSettingsRepository(appContext).engineLaunchConfig().defaultModel)
-
     suspend fun create(
         scopeId: String,
         cron: String,
         prompt: String,
         recurring: Boolean,
-        automation: CronAutomation = defaultAutomation(),
+        automation: CronAutomation,
     ): com.lingxi.code.bindings.runtime.CronTaskDto = mutateAndReconcile(
         reason = "create",
         scopeId = scopeId,

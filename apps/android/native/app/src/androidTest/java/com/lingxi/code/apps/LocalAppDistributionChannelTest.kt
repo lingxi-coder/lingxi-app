@@ -25,13 +25,13 @@ class LocalAppDistributionChannelTest {
     @Test fun externalBrowserRequiresConsentBoundToPublishedContent() = runBlocking<Unit> {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/browser-consent-${UUID.randomUUID()}")
+        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).codeGuestCwd.trimEnd('/') + "/browser-consent-${UUID.randomUUID()}")
         check(source.mkdirs())
         source.resolve("lingxi-app.json").writeText("""{"schema":2,"name":"Browser consent fixture","entry":{"type":"static","path":"index.html"},"targets":[{"platform":"android","environment":"web"}]}""")
         source.resolve("index.html").writeText("<!doctype html><title>Consent fixture</title>")
         var id: String? = null
         try {
-            val published = apps.request("publish") { put("sourcePath", source.path); put("expectedRevision", 0) } as JSONObject
+            val published = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish") { put("sourcePath", source.path); put("expectedRevision", 0) } as JSONObject
             val record = published.getJSONObject("record").appRecord()
             val release = published.getJSONObject("release").appRelease()
             id = record.id
@@ -43,7 +43,7 @@ class LocalAppDistributionChannelTest {
             apps.setKeepRunning(record.id, release.digest, true)
             assertTrue(apps.keepRunning(record.id, release.digest))
             source.resolve("index.html").appendText("<!-- changed release -->")
-            val changed = apps.request("publish", record.id) { put("sourcePath", source.path); put("expectedRevision", release.revision) } as JSONObject
+            val changed = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish", record.id) { put("sourcePath", source.path); put("expectedRevision", release.revision) } as JSONObject
             val next = changed.getJSONObject("release").appRelease()
             assertNotEquals(release.digest, next.digest)
             assertFalse("New release contents need fresh consent", apps.keepRunning(record.id, next.digest))
@@ -58,13 +58,13 @@ class LocalAppDistributionChannelTest {
         assumeFalse("Requires the actual Play package", BuildConfig.MOBILE_LINUX_FULL)
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/channel-${UUID.randomUUID()}")
+        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).codeGuestCwd.trimEnd('/') + "/channel-${UUID.randomUUID()}")
         check(source.mkdirs())
         source.resolve("lingxi-app.json").writeText("""{"schema":2,"name":"Channel refusal fixture","entry":{"type":"server","process":"api"},"targets":[{"platform":"android","environment":"mobile-linux","channels":["direct"],"capabilities":["process"]}],"capabilities":["process"],"processes":[{"name":"api","command":"python3 server.py","ready":{"path":"/","timeoutMs":1000}}]}""")
         source.resolve("server.py").writeText("raise RuntimeError('restricted channel must never execute this')")
         var id: String? = null
         try {
-            val published = apps.request("publish") { put("sourcePath", source.path); put("expectedRevision", 0) } as JSONObject
+            val published = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish") { put("sourcePath", source.path); put("expectedRevision", 0) } as JSONObject
             val record = published.getJSONObject("record").appRecord()
             id = record.id
             apps.grant(record.id, published.getJSONObject("release").appRelease().digest)

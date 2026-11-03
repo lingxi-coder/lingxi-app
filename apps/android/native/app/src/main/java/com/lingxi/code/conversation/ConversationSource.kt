@@ -25,6 +25,13 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onSubscription
 
+/** Supplies the exact transcript that must be checkpointed before a durable turn. */
+interface DurableTranscriptSource {
+    suspend fun awaitTurnTranscriptPath(): String
+}
+
+enum class ColdAuthoringRecoveryState { NotNeeded, Preparing, Failed, Ready }
+
 /**
  * The seam between the [ChatViewModel] and whatever produces turns. The
  * ViewModel talks ONLY to a [ConversationSource] — it never reaches into mock
@@ -44,6 +51,10 @@ import kotlinx.coroutines.flow.onSubscription
  * fail-closed unavailable state when the engine can't build.
  */
 interface ConversationSource {
+    /** False while a newly created Local App owner is awaiting its durable binding. */
+    val turnAdmissionReady: Boolean get() = true
+    val coldAuthoringRecoveryState: StateFlow<ColdAuthoringRecoveryState>? get() = null
+    suspend fun retryColdAuthoringRecovery() { error("No pending authoring recovery") }
     /** Process-redelivery context for the engine this source owns. */
     val recoverySpec: ConversationRecoverySpec?
         get() = null

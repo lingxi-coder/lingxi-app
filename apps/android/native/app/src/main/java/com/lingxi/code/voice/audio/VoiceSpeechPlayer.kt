@@ -8,6 +8,9 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -27,6 +30,7 @@ internal class VoiceSpeechPlayer(
     internal val audioOwner = AudioOwnerKey.ui("speech-player-${UUID.randomUUID()}")
     private val lifecycleScope = CoroutineScope(SupervisorJob() + dispatcher)
     private var playbackJob: Job? = null
+    private var activeAutomaticPlayback: Job? = null
     private var ownerDrain: Job? = null
     private val speechJobs = java.util.concurrent.ConcurrentHashMap.newKeySet<Job>()
     private val generation = java.util.concurrent.atomic.AtomicLong()
@@ -41,6 +45,10 @@ internal class VoiceSpeechPlayer(
         speed: Float? = null,
         foregroundUserInitiated: Boolean = false,
         flowDuplex: Boolean = false,
+        automatic: Boolean = false,
+        awaitStart: suspend () -> Boolean = { true },
+        mayStart: () -> Boolean = { true },
+        retryBusy: Boolean = false,
         onError: (DeviceAudioError) -> Unit = {},
     ) {
         val preceding = playbackJob
@@ -60,20 +68,57 @@ internal class VoiceSpeechPlayer(
                         flowDuplex = flowDuplex,
                     ),
                 )
-                val result = if (admission == null) play() else admission.withLock {
-                    if (generation.get() == token) play() else null
+                var busyRetryDelayMs = 250L
+                while (generation.get() == token) {
+                    if (!awaitStart()) return@launch
+                    var deferred = false
+                    suspend fun playIfReady(): DeviceAudioResult? = when {
+                        generation.get() != token -> null
+                        !mayStart() -> { deferred = true; null }
+                        else -> {
+                            val current = currentCoroutineContext()[Job]
+                            if (automatic) synchronized(this@VoiceSpeechPlayer) { activeAutomaticPlayback = current }
+                            try {
+                                currentCoroutineContext().ensureActive()
+                                play()
+                            } finally {
+                                if (automatic) synchronized(this@VoiceSpeechPlayer) {
+                                    if (activeAutomaticPlayback === current) activeAutomaticPlayback = null
+                                }
+                            }
+                        }
+                    }
+                    val result = if (admission == null) playIfReady() else admission.withLock { playIfReady() }
+                    currentCoroutineContext().ensureActive()
+                    if (generation.get() != token) return@launch
+                    if (deferred) continue
+                    if (result is DeviceAudioResult.Failed && retryBusy && result.error.kind == DeviceAudioErrorKind.Busy) {
+                        // Busy means audio admission failed before playback; do not lose this reply.
+                        delay(busyRetryDelayMs)
+                        busyRetryDelayMs = (busyRetryDelayMs * 2).coerceAtMost(5_000L)
+                        continue
+                    }
+                    if (result is DeviceAudioResult.Failed) onError(result.error)
+                    break
                 }
-                if (result is DeviceAudioResult.Failed) onError(result.error)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                onError(DeviceAudioError(DeviceAudioErrorKind.Unavailable, error.message.orEmpty()))
+                currentCoroutineContext().ensureActive()
+                if (generation.get() == token) {
+                    onError(DeviceAudioError(DeviceAudioErrorKind.Unavailable, error.message.orEmpty()))
+                }
             }
         }
         speechJobs.add(job)
         job.invokeOnCompletion { speechJobs.remove(job) }
         playbackJob = job
         job.start()
+    }
+
+    /** Explicit microphone input takes priority over another owner's automatic reply. */
+    @Synchronized fun yieldAutomaticPlayback() {
+        activeAutomaticPlayback?.cancel()
     }
 
     @Synchronized fun stop() {

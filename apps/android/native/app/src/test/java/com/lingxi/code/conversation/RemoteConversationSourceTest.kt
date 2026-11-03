@@ -1,6 +1,7 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.bindings.android.RemoteImageRefFfi
+import com.lingxi.code.bindings.android.RemoteFfiException
 import com.lingxi.code.bindings.android.RemoteOutgoingStatusFfi
 import com.lingxi.code.bindings.android.RemoteOutgoingPromptFfi
 import com.lingxi.code.bindings.android.RemotePendingFfi
@@ -35,6 +36,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -442,9 +444,9 @@ class RemoteConversationSourceTest {
             pending = RemotePendingFfi(listOf(toolRequest()), emptyList(), emptyList())))
         try { source.denyPermission(4uL); fail("wrong request") }
         catch (_: IllegalStateException) {}
-        port.permissionFailure = IllegalStateException("temporarily offline")
+        port.permissionFailure = RemoteFfiException.InvalidArgument("rejected before send")
         try { source.approvePermission(3uL, PermissionResponseDto.ALLOW_ONCE); fail("failed response") }
-        catch (_: IllegalStateException) {}
+        catch (_: RemoteFfiException.InvalidArgument) {}
         port.permissionFailure = null
         source.approvePermission(3uL, PermissionResponseDto.ALLOW_ONCE)
         try { source.denyPermission(3uL); fail("already answered") }
@@ -462,6 +464,61 @@ class RemoteConversationSourceTest {
         source.denyPermission(3uL)
         assertEquals(listOf("permission:3:false"), port.calls)
         assertNull(source.pendingPermission.value)
+    }
+
+    @Test fun cancelledTeamApprovalKeepsItsReservationUntilTheSentResponseSettles() = runTest {
+        val port = FakeRemoteSessionPort()
+        val id = "team-approval:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
+        val source = RemoteConversationSource(port, id, "Pixel 9")
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { source.externalFeed.collect {} }
+        port.updates.emit(remoteUpdate(sessionId = id, sessionMode = null,
+            pending = RemotePendingFfi(listOf(toolRequest()), emptyList(), emptyList())))
+        val gate = CompletableDeferred<Unit>()
+        port.permissionGate = gate
+        val first = launch(UnconfinedTestDispatcher(testScheduler)) {
+            source.approvePermission(3uL, PermissionResponseDto.ALLOW_ONCE)
+        }
+        runCurrent()
+        first.cancel()
+        try { source.denyPermission(3uL); fail("opposite response overtook the pending RPC") }
+        catch (_: IllegalStateException) {}
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(listOf("permission:3:true"), port.calls)
+        assertNull(source.pendingPermission.value)
+        try { source.denyPermission(3uL); fail("successful capability was consumed") }
+        catch (_: IllegalStateException) {}
+    }
+
+    @Test fun teamApprovalConsumesUnknownOutcomeButAllowsRetryAfterExplicitHostRejection() = runTest {
+        val id = "team-approval:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
+        for (code in listOf("timeout", "closed", "not_pending", "internal", "unknown_code")) {
+            val port = FakeRemoteSessionPort()
+            val source = RemoteConversationSource(port, id, "Pixel 9")
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { source.externalFeed.collect {} }
+            port.updates.emit(remoteUpdate(sessionId = id, sessionMode = null,
+                pending = RemotePendingFfi(listOf(toolRequest()), emptyList(), emptyList())))
+            port.permissionFailure = RemoteFfiException.Rpc(code, "remote response")
+            try { source.approvePermission(3uL, PermissionResponseDto.ALLOW_ONCE); fail(code) }
+            catch (_: RemoteFfiException.Rpc) {}
+            assertNull(source.pendingPermission.value)
+            port.permissionFailure = null
+            try { source.denyPermission(3uL); fail("unknown outcome must remain consumed") }
+            catch (_: IllegalStateException) {}
+            assertTrue(port.calls.isEmpty())
+        }
+        val port = FakeRemoteSessionPort()
+        val source = RemoteConversationSource(port, id, "Pixel 9")
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { source.externalFeed.collect {} }
+        port.updates.emit(remoteUpdate(sessionId = id, sessionMode = null,
+            pending = RemotePendingFfi(listOf(toolRequest()), emptyList(), emptyList())))
+        port.permissionFailure = RemoteFfiException.Rpc("forbidden", "explicit host rejection")
+        try { source.approvePermission(3uL, PermissionResponseDto.ALLOW_ONCE); fail("host rejection") }
+        catch (_: RemoteFfiException.Rpc) {}
+        assertEquals(3uL, source.pendingPermission.value?.requestId)
+        port.permissionFailure = null
+        source.denyPermission(3uL)
+        assertEquals(listOf("permission:3:false"), port.calls)
     }
 
     @Test fun aMalformedTeamApprovalNameStillWaitsForAnAuthoritativeMode() {

@@ -27,10 +27,10 @@ class UnifiedLocalAppRootfsRepairTest {
         val apps = UnifiedLocalApps.get(context)
         val mode = LinuxRuntimeMode.MobileLinux
         val directories = com.lingxi.code.project.MobileUserStorage.directories(context)
-        val source = apps.hostFile(directories.appsGuestPath.trimEnd('/') + "/repair-acceptance-${UUID.randomUUID()}")
+        val source = apps.hostFile(directories.codeGuestCwd.trimEnd('/') + "/repair-acceptance-${UUID.randomUUID()}")
         check(File(context.filesDir, "local-app-acceptance-fixtures/python").copyRecursively(source))
         val sourceBytes = File(source, "server.py").readBytes()
-        val value = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
+        val value = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
         val record = value.getJSONObject("record").appRecord()
         val release = value.getJSONObject("release").appRelease()
         apps.grant(record.id, release.digest)

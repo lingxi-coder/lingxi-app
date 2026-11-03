@@ -2,18 +2,115 @@ package com.lingxi.code.voice
 
 import com.lingxi.code.voice.audio.RealtimeSpeechCallbacks
 import com.lingxi.code.voice.audio.RealtimeSpeechSession
+import com.lingxi.code.voice.audio.AudioOwnerKey
+import com.lingxi.code.voice.audio.DeviceAudioOperation
+import com.lingxi.code.voice.audio.DeviceAudioResult
+import com.lingxi.code.voice.audio.VoiceSpeechPlayer
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VoiceCaptureLifecycleTest {
+    @Test
+    fun heldCaptureWaitsForPlaybackCleanupAndDrainsBeforeReleasingAdmission() = runTest {
+        val admission = Mutex()
+        val speechCleanup = CompletableDeferred<Unit>()
+        val captureCleanup = CompletableDeferred<Unit>()
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        suspend fun speak(owner: AudioOwnerKey, operation: DeviceAudioOperation): DeviceAudioResult = when (operation) {
+            is DeviceAudioOperation.Speak -> try {
+                awaitCancellation()
+            } finally {
+                withContext(NonCancellable) { speechCleanup.await() }
+            }
+            DeviceAudioOperation.EndOwner -> DeviceAudioResult.OwnerEnded
+            else -> error("unexpected operation")
+        }
+        val playerA = VoiceSpeechPlayer(::speak, admission, dispatcher)
+        playerA.speakAsync("A", automatic = true)
+        runCurrent()
+
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        var opened = 0
+        var delivered: VoiceCaptureResult? = null
+        val capture = VoiceCapture(
+            requestPermission = {}, hasPermission = { true },
+            openRealtimeSession = { _, callbacks ->
+                ServiceRealtimeListenSession(scope, callbacks, admission, drain = { captureCleanup.await() }) { serviceCallbacks ->
+                    opened++
+                    FakeRealtimeSession(serviceCallbacks).also { it.finalOnStop = "B transcript"; it.ready() }
+                }
+            },
+            transcribeOnce = { VoiceCaptureResult.Empty },
+        )
+        capture.start { delivered = it }
+        playerA.yieldAutomaticPlayback()
+        runCurrent()
+        assertEquals(0, opened)
+        speechCleanup.complete(Unit)
+        runCurrent()
+        assertEquals(1, opened)
+        capture.stop()
+        runCurrent()
+        assertEquals(VoiceCaptureResult.Transcript("B transcript"), delivered)
+        var nextOwnerAdmitted = false
+        val nextOwner = launch { admission.withLock { nextOwnerAdmitted = true } }
+        runCurrent()
+        assertTrue(!nextOwnerAdmitted)
+        captureCleanup.complete(Unit)
+        runCurrent()
+        assertTrue(nextOwnerAdmitted)
+        nextOwner.join()
+        capture.dispose()
+        playerA.dispose()
+        scope.coroutineContext[Job]?.cancel()
+    }
+
+    @Test
+    fun releaseOrCancelWhileWaitingForAdmissionNeverOpensTheMicrophone() = runTest {
+        val admission = Mutex(locked = true)
+        val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+        var opened = 0
+        val results = mutableListOf<VoiceCaptureResult>()
+        fun capture() = VoiceCapture(
+            requestPermission = {}, hasPermission = { true },
+            openRealtimeSession = { _, callbacks ->
+                ServiceRealtimeListenSession(scope, callbacks, admission) { serviceCallbacks ->
+                    opened++
+                    FakeRealtimeSession(serviceCallbacks)
+                }
+            },
+            transcribeOnce = { VoiceCaptureResult.Empty },
+        )
+        val released = capture()
+        released.start { results += it }
+        released.stop()
+        val cancelled = capture()
+        cancelled.start { results += it }
+        cancelled.cancel()
+        admission.unlock()
+        runCurrent()
+        assertEquals(0, opened)
+        assertEquals(listOf(VoiceCaptureResult.Empty), results)
+        released.dispose()
+        cancelled.dispose()
+        scope.coroutineContext[Job]?.cancel()
+    }
+
     private class FakeRealtimeSession(
         private val callbacks: RealtimeSpeechCallbacks,
     ) : RealtimeSpeechSession {
@@ -61,6 +158,34 @@ class VoiceCaptureLifecycleTest {
 
         assertTrue(requested)
         assertEquals(VoiceCapturePhase.PermissionRequired, VoiceCaptureStore.state.value.phase)
+    }
+
+    @Test
+    fun completedPermissionRequestClearsItsWaitWithoutResettingActiveCapture() {
+        val waiting = VoiceCapture(
+            requestPermission = {},
+            hasPermission = { false },
+            openRealtimeSession = { _, _ -> error("should not open session") },
+            transcribeOnce = { VoiceCaptureResult.Empty },
+        )
+        waiting.start()
+        VoiceCaptureStore.permissionRequestCompleted()
+        assertEquals(VoiceCapturePhase.Idle, VoiceCaptureStore.state.value.phase)
+
+        lateinit var session: FakeRealtimeSession
+        val active = VoiceCapture(
+            requestPermission = {},
+            hasPermission = { true },
+            openRealtimeSession = { _, callbacks -> FakeRealtimeSession(callbacks).also { session = it } },
+            transcribeOnce = { VoiceCaptureResult.Empty },
+        )
+        active.start()
+        session.ready()
+        session.partial("keep")
+        VoiceCaptureStore.permissionRequestCompleted()
+        assertEquals(VoiceCapturePhase.Listening, VoiceCaptureStore.state.value.phase)
+        assertEquals("keep", VoiceCaptureStore.state.value.partialTranscript)
+        active.dispose()
     }
 
     @Test

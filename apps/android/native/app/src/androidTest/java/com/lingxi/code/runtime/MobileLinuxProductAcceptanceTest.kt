@@ -43,7 +43,7 @@ class MobileLinuxProductAcceptanceTest {
             val config = LinuxRuntimeBridge.configForWorkspace(context, mode, project.workspace)
             val runtime = buildAndroidMobileLinuxRuntimeHandle(config)
             val marker = "product-acceptance-${UUID.randomUUID()}"
-            suspend fun command(script: String, cwd: String? = null): String {
+            suspend fun command(script: String, cwd: String = directories.configGuestPath): String {
                 val result = runtime.runCommand(MobileLinuxCommandRequestFfi(
                     command = "/bin/sh", args = listOf("-lc", "set -e; $script"), cwd = cwd,
                     env = emptyList(), stdin = null, timeoutMs = 30_000uL,
@@ -59,7 +59,7 @@ class MobileLinuxProductAcceptanceTest {
                 val boot = runtime.boot()
                 assertEquals(boot.lastError, MobileLinuxRootfsStateFfi.READY, boot.state)
                 val identity = command("id -un; id -u; id -g; printf '%s\\n' \"\$HOME\" \"\$USER\"; pwd; sudo -n id -u; sudo -ni sh -c 'printf %s \"\$HOME\"'")
-                assertEquals("${directories.linuxUser}\n1000\n1000\n${directories.guestHome}\n${directories.linuxUser}\n${directories.defaultGuestCwd}\n0\n/root", identity)
+                assertEquals("${directories.linuxUser}\n1000\n1000\n${directories.guestHome}\n${directories.linuxUser}\n${directories.configGuestPath}\n0\n/root", identity)
                 command("printf '$marker' > \"\$HOME/$marker\"; printf project-ok > product-proof", project.workspace.guestPath)
                 assertEquals("project-ok", File(project.workspace.hostPath, "product-proof").readText())
                 runtime.spawnBackground(MobileLinuxCommandRequestFfi(
@@ -91,7 +91,7 @@ class MobileLinuxProductAcceptanceTest {
                 runtime.shutdown()
                 runtime.boot()
                 assertEquals(marker, command("cat \"\$HOME/$marker\"; cp \"\$HOME/$marker\" \"\$HOME/.lingxi-product-acceptance-cold-$marker\"; rm \"\$HOME/$marker\""))
-                android.util.Log.i("ProductAcceptance", "PRODUCT_MOBILE_LINUX_ACCEPTANCE PASS android uid=1000 home=${directories.guestHome} workspace=${directories.defaultGuestCwd} project=${project.record.id}")
+                android.util.Log.i("ProductAcceptance", "PRODUCT_MOBILE_LINUX_ACCEPTANCE PASS android uid=1000 home=${directories.guestHome} workspace=${directories.configGuestPath} project=${project.record.id}")
             } finally {
                 runtime.shutdown()
                 fixture.deleteRecursively()
@@ -112,7 +112,8 @@ class MobileLinuxProductColdStartAcceptanceTest {
             runtime.boot()
             val result = runtime.runCommand(MobileLinuxCommandRequestFfi(
                 command = "/bin/sh", args = listOf("-lc", "set -e; found=0; for file in \"\$HOME\"/.lingxi-product-acceptance-cold-*; do [ -f \"\$file\" ] || continue; value=\$(cat \"\$file\"); [ \"\$file\" = \"\$HOME/.lingxi-product-acceptance-cold-\$value\" ]; rm \"\$file\"; found=1; done; [ \"\$found\" = 1 ]; printf 'PRODUCT_COLD_%s\\n' OK"),
-                cwd = null, env = emptyList(), stdin = null, timeoutMs = 30_000uL,
+                cwd = com.lingxi.code.project.MobileUserStorage.directories(context).configGuestPath,
+                env = emptyList(), stdin = null, timeoutMs = 30_000uL,
                 allowNetwork = false, mounts = emptyList(),
             ))
             assertEquals(result.stderr, 0, result.exitCode)

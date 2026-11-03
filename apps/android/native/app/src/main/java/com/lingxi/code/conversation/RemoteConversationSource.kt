@@ -2,6 +2,7 @@ package com.lingxi.code.conversation
 
 import com.lingxi.code.R
 import com.lingxi.code.bindings.android.RemoteImageFfi
+import com.lingxi.code.bindings.android.RemoteFfiException
 import com.lingxi.code.bindings.android.RemoteModelsFfi
 import com.lingxi.code.bindings.android.RemoteOutgoingStatusFfi
 import com.lingxi.code.bindings.android.RemotePermissionModeFfi
@@ -26,6 +27,7 @@ import com.lingxi.code.model.ReasoningControl
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -34,6 +36,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -426,13 +429,33 @@ class RemoteConversationSource(
     private suspend fun respondPermission(requestId: ULong, allow: Boolean) {
         requirePermissionResponse(requestId)
         if (!approvalOnly) return port.respondPermission(requestId, allow)
+        currentCoroutineContext().ensureActive()
         check(approvalConsumed.compareAndSet(false, true)) { "Remote approval has already been answered" }
         try {
-            port.respondPermission(requestId, allow)
-            approvalDelivered = true
-            mutablePermission.value = null
+            // A UI coroutine may disappear after the RPC is sent. Keep this
+            // one-shot reservation until the transport has actually settled.
+            withContext(NonCancellable) {
+                port.respondPermission(requestId, allow)
+                approvalDelivered = true
+                mutablePermission.value = null
+            }
         } catch (failure: Throwable) {
-            approvalConsumed.set(false)
+            if (!approvalDelivered) {
+                val knownNotAccepted = when (failure) {
+                    is RemoteFfiException.InvalidArgument, is RemoteFfiException.NotConnected -> true
+                    is RemoteFfiException.Rpc -> failure.code in setOf(
+                        "capacity", "invalid_params", "forbidden", "not_approved",
+                        "unknown_session", "not_remote_enabled", "upgrade_required",
+                    )
+                    else -> false
+                }
+                if (knownNotAccepted) approvalConsumed.set(false)
+                else {
+                    // An indeterminate transport outcome may already have reached the host.
+                    approvalDelivered = true
+                    mutablePermission.value = null
+                }
+            }
             throw failure
         }
     }

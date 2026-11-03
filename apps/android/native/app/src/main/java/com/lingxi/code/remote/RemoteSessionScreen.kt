@@ -27,7 +27,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.Alignment
@@ -85,7 +84,8 @@ class RemoteChat internal constructor(
     val chat: ChatViewModel,
     private val store: ViewModelStore,
 ) {
-    internal var savedDraft: String = ""
+    internal var savedDraft by mutableStateOf("")
+        private set
     internal var needsReattach: Boolean = false
     internal val attachments = mutableStateListOf<ComposerAttachment>()
 
@@ -186,12 +186,11 @@ internal fun RemoteSessionScreen(
             strings = strings,
         )
     }
-    var draft by rememberSaveable(key) { mutableStateOf(remote.savedDraft) }
+    val draft = remote.savedDraft
     val attachments = remote.attachments
     val activity = context as? Activity
     DisposableEffect(key) {
         onDispose {
-            remote.updateDraft(draft)
             if (activity?.isChangingConfigurations != true) holder.release(key)
         }
     }
@@ -278,25 +277,6 @@ internal fun RemoteSessionScreen(
     }
 
     val failedSends by chat.externalSendFailures.collectAsState()
-    LaunchedEffect(chat, failedSends, draft, attachments.size) {
-        val failed = failedSends.firstOrNull()
-        if (failed != null && draft.isEmpty() && attachments.isEmpty()) {
-            val restored = runCatching {
-                failed.images.map { image ->
-                    val bytes = Base64.getDecoder().decode(image.base64)
-                    val bitmap = checkNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size))
-                    ComposerAttachment(bitmap.asImageBitmap(), bitmap.width, bitmap.height, image.mediaType, image.base64)
-                }
-            }.getOrNull()
-            if (restored != null) {
-                draft = failed.text
-                remote.updateDraft(failed.text)
-                attachments.addAll(restored)
-                chat.acknowledgeExternalSendFailure(failed)
-            }
-        }
-    }
-
     val rejected = stringResource(R.string.remote_image_unusable)
     val pick = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(REMOTE_MAX_PROMPT_IMAGES),
@@ -378,7 +358,7 @@ internal fun RemoteSessionScreen(
                 voiceInputSupported = false,
                 voiceConversationSupported = false,
                 draft = draft,
-                onDraftChange = { remote.updateDraft(it); draft = it },
+                onDraftChange = remote::updateDraft,
                 pendingPermission = pendingPermission != null,
                 effectivePermissionMode = meta.controls?.permission?.effective ?: "default",
                 onOpenPermissionSettings = { modeDialog = true },
@@ -389,6 +369,26 @@ internal fun RemoteSessionScreen(
                 attachments = attachments.toList(),
                 onRemoveAttachmentAt = { if (it in attachments.indices) attachments.removeAt(it) },
                 onRemoveAttachment = { attachments.clear() },
+                hasUnsentDraft = failedSends.isNotEmpty(),
+                canRestoreUnsentDraft = draft.isEmpty() && attachments.isEmpty(),
+                onRestoreUnsentDraft = {
+                    val failed = failedSends.firstOrNull()
+                    if (failed != null && remote.savedDraft.isEmpty() && attachments.isEmpty()) {
+                        val restored = runCatching {
+                            failed.images.map { image ->
+                                val bytes = Base64.getDecoder().decode(image.base64)
+                                val bitmap = checkNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size))
+                                ComposerAttachment(bitmap.asImageBitmap(), bitmap.width, bitmap.height, image.mediaType, image.base64)
+                            }
+                        }.getOrNull()
+                        if (restored == null) chat.reportHostError(rejected)
+                        else {
+                            remote.updateDraft(failed.text)
+                            attachments.addAll(restored)
+                            chat.acknowledgeExternalSendFailure(failed)
+                        }
+                    }
+                },
                 onStop = chat::cancel,
                 onDismissError = chat::dismissError,
                 onDismissCompactRejection = chat::dismissCompactRejection,

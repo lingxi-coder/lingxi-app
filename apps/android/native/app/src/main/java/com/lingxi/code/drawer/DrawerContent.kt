@@ -124,6 +124,7 @@ fun DrawerContent(
     /** Real project/cron/workspace collections. Null collections render unavailable. */
     productionData: DrawerProductionData = DrawerProductionData(),
     onSelectProjectSession: (String, SessionRef) -> Unit = { _, session -> onSelectSession(session) },
+    onOpenRecentSession: ((RecentSession) -> Unit)? = null,
     onOpenCron: (String) -> Unit = {},
     onOpenCronList: () -> Unit = {},
     onOpenProjects: () -> Unit = {},
@@ -206,6 +207,7 @@ fun DrawerContent(
     val recentApps = remember(apps) { recentApps(apps) }
 
     fun open(session: RecentSession) {
+        onOpenRecentSession?.let { it(session); return }
         ui.selectSession(session.uuid)
         when (val scope = session.scope) {
             ConversationScope.Global, ConversationScope.Scheduled -> onResumeSession(session.uuid)
@@ -673,6 +675,7 @@ private fun RecentRow(
                             relativeTime = session.relativeTime,
                             mode = session.mode,
                             modifiedAtEpochSeconds = session.modifiedAtEpochSeconds,
+                            transcriptPath = session.transcriptPath,
                         ),
                         otherMode,
                     )

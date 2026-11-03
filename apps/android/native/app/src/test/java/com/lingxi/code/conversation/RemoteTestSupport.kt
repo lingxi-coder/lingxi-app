@@ -62,6 +62,7 @@ internal class FakeRemoteSessionPort : RemoteSessionPort {
     var fetchGate: CompletableDeferred<Unit>? = null
     var sendGate: CompletableDeferred<Unit>? = null
     var providerAccountGate: CompletableDeferred<Unit>? = null
+    var permissionGate: CompletableDeferred<Unit>? = null
     var permissionFailure: Exception? = null
     var modelListRequests = 0
 
@@ -86,6 +87,7 @@ internal class FakeRemoteSessionPort : RemoteSessionPort {
     override suspend fun dismissPrompt(promptId: String) { calls += "dismiss:$promptId" }
     override suspend fun cancelTurn() { calls += "cancel" }
     override suspend fun respondPermission(requestId: ULong, allow: Boolean) {
+        permissionGate?.await()
         permissionFailure?.let { throw it }
         calls += "permission:$requestId:$allow"
     }

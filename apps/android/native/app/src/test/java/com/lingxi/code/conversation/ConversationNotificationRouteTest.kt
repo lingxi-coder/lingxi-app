@@ -5,6 +5,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ConversationNotificationRouteTest {
+    @Test fun `internal notification requires its exact captured transcript path`() {
+        val generation = "19587a33-0725-48db-abca-8a2aed345f6b"
+        val url = "lingxi://session/session-a?workspace=global&mode=chat&generation=$generation"
+        assertNull(ConversationNotificationRoute.parseNotification(url, null))
+        assertNull(ConversationNotificationRoute.parseNotification(url, "relative.jsonl"))
+        val request = requireNotNull(ConversationNotificationRoute.parseNotification(url, "/a/session.jsonl"))
+        assertEquals("/a/session.jsonl", request.transcriptPath)
+        assertFalse(selectedTranscriptPathMatches(request.transcriptPath, "/b/session.jsonl"))
+    }
     @Test fun `notification produces the shared canonical contract`() {
         val generation = "19587a33-0725-48db-abca-8a2aed345f6b"
         val spec = ConversationRecoverySpec(null, null, SessionMode.Code,

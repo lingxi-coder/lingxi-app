@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.terminal.emulator.TerminalEmulator
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -23,35 +24,40 @@ class TerminalViewModel(
 ) : ViewModel() {
     private val local = MutableStateFlow(TerminalUiState(args, commandDraft = args.initCommand?.takeIf { it.isNotBlank() }))
     private var startJob: Job? = null
+    private var closeJob: Job? = null
+    private var lastLaunchGeneration: Int? = null
+    private val pendingCommands = ArrayDeque<String>()
     val emulator = TerminalEmulator()
 
     private val merged = MutableStateFlow(local.value)
     val uiState: StateFlow<TerminalUiState> = merged.asStateFlow()
 
     init {
+        // Terminal query responses remain active even while its UI is hidden.
+        emulator.onResponse = { bytes -> viewModelScope.launch { gateway.write(bytes) } }
         viewModelScope.launch {
             combine(local, gateway.state, gateway.error) { ui, connection, error ->
                 ui.copy(connectionState = connection, errorMessage = error)
             }.collect(merged)
         }
-        viewModelScope.launch {
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             gateway.output.collect(emulator::feed)
         }
     }
 
     fun dispatch(action: TerminalAction) {
         when (action) {
-            TerminalAction.DismissCommand -> local.value = local.value.copy(commandDraft = null)
+            TerminalAction.DismissCommand -> local.value = local.value.copy(commandDraft = pendingCommands.removeFirstOrNull())
             is TerminalAction.EditCommand -> local.value = local.value.copy(commandDraft = action.text)
             TerminalAction.ConfirmCommand -> {
                 val draft = local.value.commandDraft
                 if (draft != null && merged.value.connectionState == TerminalConnectionState.CONNECTED) {
-                    local.value = local.value.copy(commandDraft = null)
+                    local.value = local.value.copy(commandDraft = pendingCommands.removeFirstOrNull())
                     send((draft + "\n").toByteArray())
                 }
             }
             TerminalAction.Start -> start()
-            TerminalAction.Close -> viewModelScope.launch { gateway.close() }
+            TerminalAction.Close -> close()
             TerminalAction.Clear -> viewModelScope.launch { gateway.clear() }
             TerminalAction.ToggleCtrl -> local.value = local.value.copy(ctrlActive = !local.value.ctrlActive)
             TerminalAction.ToggleKeyboard -> local.value =
@@ -64,17 +70,46 @@ class TerminalViewModel(
         }
     }
 
+    /** Reopening keeps the terminal and any unfinished command review. */
+    fun acceptLaunch(generation: Int, command: String?) {
+        if (lastLaunchGeneration == generation) return
+        val first = lastLaunchGeneration == null
+        lastLaunchGeneration = generation
+        val next = command?.takeIf(String::isNotBlank) ?: return
+        if (first && next == args.initCommand) return
+        if (local.value.commandDraft == null) local.value = local.value.copy(commandDraft = next)
+        else pendingCommands.addLast(next)
+    }
+
+    private fun close() {
+        val opening = startJob
+        val previousClose = closeJob
+        startJob = null
+        closeJob = viewModelScope.launch {
+            previousClose?.join()
+            opening?.join()
+            gateway.close()
+        }
+    }
+
     private fun start() {
         if (startJob != null) return
-        startJob = viewModelScope.launch {
+        val previousClose = closeJob
+        lateinit var opening: Job
+        opening = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
+                previousClose?.join()
                 gateway.start(args.sessionId)
             } catch (cancelled: CancellationException) {
+                if (startJob === opening) startJob = null
                 throw cancelled
             } catch (_: Throwable) {
+                if (startJob === opening) startJob = null
                 // Gateway state/error are authoritative and fail closed.
             }
         }
+        startJob = opening
+        opening.start()
     }
 
     private fun send(original: ByteArray) {

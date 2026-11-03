@@ -63,7 +63,7 @@ class CronRunHistoryStoreInstrumentedTest {
     }
 
     @Test
-    fun checksumFailureRecoversLastGoodBackupAndQuarantinesPrimary() {
+    fun checksumFailurePreservesBothFilesAndRejectsOwnerValidation() {
         val scope = CronScope("global", null, "全局", root.path, "/home/lingxi/lingxi/global")
         val run = store.enqueue(scope, "task", "prompt", 900L)!!
         store.markTerminal(run.runId, CronRunStatus.Succeeded, resultText = "durable")
@@ -72,27 +72,24 @@ class CronRunHistoryStoreInstrumentedTest {
             Charsets.UTF_8,
         )
 
-        val recovered = CronRunHistoryStore(root).record(run.runId)
-
-        assertEquals("durable", recovered?.resultText)
-        assertTrue(
-            root.listFiles().orEmpty().any { it.name.startsWith("index.corrupt.") },
-        )
-        assertEquals(
-            "durable",
-            CronRunHistoryStore(root).record(run.runId)?.resultText,
-        )
+        val original = File(root, "index.json").readText()
+        val backup = File(root, "index.last-good.json").readText()
+        assertTrue(runCatching { CronRunHistoryStore(root).validatedOwnerReceipts() }.isFailure)
+        assertEquals(original, File(root, "index.json").readText())
+        assertEquals(backup, File(root, "index.last-good.json").readText())
+        assertTrue(root.listFiles().orEmpty().none { it.name.startsWith("index.corrupt.") })
     }
     @Test
     fun executionIdentityAndNotificationClaimSurviveReload() {
         val scope = CronScope("global", null, "None", root.path, "/home/lingxi/lingxi/global")
         val run = store.enqueue(scope, "task", "prompt", 900L)!!
-        store.attachExecution(run.runId, "session-1", "provider/model", "failed")
+        store.attachExecution(run.runId, "19587a33-0725-48db-abca-8a2aed345f6b", "provider/model", "failed",
+            sessionTranscriptPath = "/guest/session.jsonl", sessionMode = "chat", sessionScopeKey = "scheduled")
         store.markTerminal(run.runId, CronRunStatus.Failed, errorMessage = "failed")
         assertTrue(store.claimNotification(run.runId))
         val reloaded = CronRunHistoryStore(root)
         org.junit.Assert.assertFalse(reloaded.claimNotification(run.runId))
-        assertEquals("session-1", reloaded.record(run.runId)?.sessionId)
+        assertEquals("19587a33-0725-48db-abca-8a2aed345f6b", reloaded.record(run.runId)?.sessionId)
         assertEquals("provider/model", reloaded.record(run.runId)?.model)
         assertEquals("failed", reloaded.record(run.runId)?.notificationPolicy)
     }

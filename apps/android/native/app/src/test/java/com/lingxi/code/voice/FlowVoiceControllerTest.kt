@@ -9,17 +9,95 @@ import com.lingxi.code.voice.audio.DeviceAudioResult
 import com.lingxi.code.voice.audio.RealtimeSpeechCallbacks
 import com.lingxi.code.voice.audio.RealtimeSpeechSession
 import com.lingxi.code.voice.audio.NavigationDrainingRealtimeSession
+import com.lingxi.code.voice.audio.VoiceSpeechPlayer
+import com.lingxi.code.conversation.AutomaticReplySpeechGate
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FlowVoiceControllerTest {
+    @Test fun rejectedVoiceSubmissionFinishesOnlyItsOwnListenGeneration() = runTest {
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV4(), revision = 1L))
+        val controller = FlowVoiceController(service, { true }, {}, UnconfinedTestDispatcher(testScheduler))
+        var firstGeneration = 0L
+        val recognized = mutableListOf<String>()
+        controller.listen({ text ->
+            recognized += text
+            firstGeneration = controller.submissionGeneration()
+            controller.rejectSubmission(firstGeneration)
+        }) {}
+        runCurrent()
+        assertEquals(listOf("recognized"), recognized)
+        assertEquals(OrbPhase.Idle, controller.state.value.phase)
+
+        controller.listen({ recognized += it }) {}
+        runCurrent()
+        assertEquals(OrbPhase.Thinking, controller.state.value.phase)
+        controller.rejectSubmission(firstGeneration)
+        assertEquals(OrbPhase.Thinking, controller.state.value.phase)
+        controller.rejectSubmission(controller.submissionGeneration())
+        assertEquals(OrbPhase.Idle, controller.state.value.phase)
+        controller.dispose()
+    }
+    @Test
+    fun explicitFlowInputWaitsForHiddenAutomaticSpeechToDrainAndPreservesItsQueuedReply() = runTest {
+        var flowVisible = false
+        val gate = AutomaticReplySpeechGate { flowVisible }
+        gate.configure(enabled = true, foreground = true)
+        val admission = Mutex()
+        val cleanup = CompletableDeferred<Unit>()
+        val spoken = mutableListOf<String>()
+        suspend fun speak(owner: AudioOwnerKey, operation: DeviceAudioOperation): DeviceAudioResult = when (operation) {
+            is DeviceAudioOperation.Speak -> {
+                spoken += operation.text
+                if (operation.text == "first") {
+                    try { awaitCancellation() } finally { withContext(NonCancellable) { cleanup.await() } }
+                }
+                DeviceAudioResult.PlaybackCompleted(1)
+            }
+            DeviceAudioOperation.EndOwner -> DeviceAudioResult.OwnerEnded
+            else -> error("unexpected operation")
+        }
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        val playerA = VoiceSpeechPlayer(::speak, admission, dispatcher)
+        playerA.speakAsync("first", automatic = true, awaitStart = gate::awaitStart, mayStart = gate::mayStart)
+        playerA.speakAsync("queued", automatic = true, awaitStart = gate::awaitStart, mayStart = gate::mayStart)
+        runCurrent()
+        assertEquals(listOf("first"), spoken)
+
+        val serviceB = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV4(), revision = 1L))
+        serviceB.onListenOpened = { it.ready() }
+        val flowB = FlowVoiceController(serviceB, { true }, {}, dispatcher, admission)
+        flowVisible = true
+        gate.signal()
+        playerA.yieldAutomaticPlayback()
+        flowB.ensureListening({}, {})
+        runCurrent()
+        assertTrue(serviceB.sessions.isEmpty()) // cleanup still owns device admission
+        assertTrue(playerA.hasAudioWork())
+
+        cleanup.complete(Unit)
+        runCurrent()
+        assertEquals(1, serviceB.sessions.size)
+        assertEquals(listOf("first"), spoken)
+        flowB.pause()
+        flowVisible = false
+        gate.signal()
+        runCurrent()
+        assertEquals(listOf("first", "queued"), spoken)
+        flowB.dispose()
+        playerA.dispose()
+    }
+
     @Test
     fun permissionGrantResumesThePendingListen() = runTest {
         var permissionGranted = false

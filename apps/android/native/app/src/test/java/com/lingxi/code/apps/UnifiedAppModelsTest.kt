@@ -5,6 +5,11 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class UnifiedAppModelsTest {
+    @Test fun `code required maps by stable reason and never by message text`() {
+        assertTrue(isAppDevelopmentCodeRequired(AppDevelopmentRequiresCodeException()))
+        assertTrue(isAppDevelopmentCodeRequired(AppServiceException(APP_DEVELOPMENT_REQUIRES_CODE, "arbitrary")))
+        assertFalse(isAppDevelopmentCodeRequired(AppServiceException("other", "local_app_development_requires_code")))
+    }
     private val launch = AppLaunch(AppRun("a123", "run123", 2, "digest", "running", null, setOf("api")),
         "http://127.0.0.1:49123/__run/run123/index.html", "http://127.0.0.1:49123")
 
@@ -37,6 +42,32 @@ class UnifiedAppModelsTest {
         assertEquals("executionConsentRequired", error.code)
         assertEquals("Allow this release first", error.message)
         assertNull(decodeAppResponse("""{"ok":true,"value":null}"""))
+    }
+    @Test fun `native authoring grant requires the exact physical source and Code mode`() {
+        val sourceId = "123e4567-e89b-12d3-a456-426614174000"
+        val otherId = "223e4567-e89b-12d3-a456-426614174000"
+        val receipt = JSONObject("""{"sourceId":"$sourceId","sessionMode":"code","sourceDirectory":"/home/user/.brand/.apps/example","workspaceId":"323e4567-e89b-12d3-a456-426614174000","projectRef":{"kind":"mobileProject","projectId":"423e4567-e89b-12d3-a456-426614174000"},"authoringSessionId":"523e4567-e89b-12d3-a456-426614174000","ownerAppId":"app-a"}""")
+        val grant = receipt.appAuthoringGrant(sourceId)
+        assertEquals(sourceId, grant.sourceId)
+        assertEquals("app-a", grant.ownerAppId)
+        assertEquals("/home/user/.brand/.apps/example", grant.authoring.sourceDirectory)
+        val source = "/home/user/.brand/.apps/example"
+        val project = "423e4567-e89b-12d3-a456-426614174000"
+        val workspace = "323e4567-e89b-12d3-a456-426614174000"
+        val session = "523e4567-e89b-12d3-a456-426614174000"
+        assertTrue(grant.matchesOwner(sourceId, source, project, workspace, session))
+        assertFalse(grant.matchesOwner(otherId, source, project, workspace, session))
+        assertFalse(grant.matchesOwner(sourceId, "$source/other", project, workspace, session))
+        assertFalse(grant.matchesOwner(sourceId, source, otherId, workspace, session))
+        assertFalse(grant.matchesOwner(sourceId, source, project, otherId, session))
+        assertFalse(grant.matchesOwner(sourceId, source, project, workspace, otherId))
+        assertThrows(IllegalArgumentException::class.java) { receipt.appAuthoringGrant(otherId) }
+        assertThrows(IllegalArgumentException::class.java) { JSONObject(receipt.toString()).apply { remove("sourceId") }.appAuthoringGrant() }
+        assertThrows(IllegalArgumentException::class.java) { JSONObject(receipt.toString()).put("sourceId", 5).appAuthoringGrant() }
+        assertThrows(IllegalArgumentException::class.java) { JSONObject(receipt.toString()).put("sourceId", sourceId.uppercase()).appAuthoringGrant() }
+        assertThrows(IllegalArgumentException::class.java) { JSONObject(receipt.toString()).put("sessionMode", "chat").appAuthoringGrant() }
+        assertThrows(IllegalArgumentException::class.java) { JSONObject(receipt.toString()).put("ownerAppId", 5).appAuthoringGrant() }
+        assertNull(JSONObject(receipt.toString()).apply { remove("ownerAppId") }.appAuthoringGrant().ownerAppId)
     }
     @Test fun `native task DTO retains observed progress usage and error`() {
         val task = JSONObject("""{"runId":"run-1","requestId":"opaque-Request-1","state":"failed","sequence":4,"phase":"waiting_for_permission","progress":{"completedModelTurns":2,"turnLimit":8},"createdAt":10,"updatedAt":12,"model":{"provider":"fixture","model":"fixture"},"limits":{"maxTurns":8,"timeoutMs":60000},"usage":{"inputTokens":11,"outputTokens":7,"costUsd":0.0123,"costEstimated":true,"turns":2},"error":{"code":"permissionDenied","message":"Tool access was revoked"}}""").appAgentTask()

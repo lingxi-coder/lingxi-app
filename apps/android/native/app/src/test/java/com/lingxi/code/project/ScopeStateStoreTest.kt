@@ -3,6 +3,7 @@ package com.lingxi.code.project
 import com.lingxi.code.shouldPersistActiveSession
 import com.lingxi.code.shouldTransferNewDraft
 import com.lingxi.code.conversation.ConversationDraftWriter
+import com.lingxi.code.conversation.completeHandoffDraft
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.conversationScopeFromKey
@@ -29,6 +30,145 @@ class ScopeStateStoreTest {
     val temp = TemporaryFolder()
 
     private fun store() = ScopeStateStore(File(temp.root, "scope-state.json"))
+
+    @Test
+    fun `an observed owner registry deleted while a write is staged stays missing`() = runTest {
+        val file = File(temp.root, "scope-state.json")
+        assertTrue(store().claimSessionOwner("19587a33-0725-48db-abca-8a2aed345f6b", "global", SessionMode.Chat))
+        val deletingWriter = ProjectAtomicWriter { target, text, validate ->
+            DefaultProjectAtomicWriter().write(target, text) { staged ->
+                validate(staged)
+                assertTrue(target.delete())
+            }
+        }
+        val guarded = ScopeStateStore(file, deletingWriter)
+        val failure = runCatching { guarded.persistConversationDraft("global", "19587a33-0725-48db-abca-8a2aed345f6b", "input") }
+        assertTrue(failure.isFailure)
+        assertFalse(file.exists())
+    }
+
+    @Test
+    fun `a replaced owner registry is preserved when a staged write resumes`() = runTest {
+        val file = File(temp.root, "scope-state.json")
+        assertTrue(store().claimSessionOwner("19587a33-0725-48db-abca-8a2aed345f6b", "global", SessionMode.Chat))
+        val replacement = "external replacement"
+        val replacingWriter = ProjectAtomicWriter { target, text, validate ->
+            DefaultProjectAtomicWriter().write(target, text) { staged ->
+                validate(staged)
+                target.writeText(replacement)
+            }
+        }
+        val guarded = ScopeStateStore(file, replacingWriter)
+        assertTrue(runCatching { guarded.persistConversationDraft("global", "19587a33-0725-48db-abca-8a2aed345f6b", "input") }.isFailure)
+        assertEquals(replacement, file.readText())
+    }
+
+    @Test
+    fun `a different inode with the same bytes is not replaced by a staged write`() = runTest {
+        val file = File(temp.root, "scope-state.json")
+        assertTrue(store().claimSessionOwner("19587a33-0725-48db-abca-8a2aed345f6b", "global", SessionMode.Chat))
+        val original = file.readBytes()
+        val moved = File(temp.root, "preserved-original.json")
+        val replacingWriter = ProjectAtomicWriter { target, text, validate ->
+            DefaultProjectAtomicWriter().write(target, text) { staged ->
+                validate(staged)
+                assertTrue(target.renameTo(moved))
+                target.writeBytes(original)
+            }
+        }
+        val guarded = ScopeStateStore(file, replacingWriter)
+        assertTrue(runCatching { guarded.persistConversationDraft("global", "19587a33-0725-48db-abca-8a2aed345f6b", "input") }.isFailure)
+        assertTrue(original.contentEquals(file.readBytes()))
+        assertTrue(original.contentEquals(moved.readBytes()))
+    }
+
+    @Test
+    fun `a concurrently created target is not overwritten by its first staged write`() {
+        val target = File(temp.root, "new.json")
+        val failure = runCatching {
+            DefaultProjectAtomicWriter().write(target, "{}") {
+                target.writeText("created concurrently")
+            }
+        }
+        assertTrue(failure.isFailure)
+        assertEquals("created concurrently", target.readText())
+    }
+
+    @Test
+    fun `owner observers refresh only after a durable new claim`() = runTest {
+        val first = store()
+        val second = store()
+        val before = second.ownerChanges.value
+        assertTrue(first.claimSessionOwner("19587a33-0725-48db-abca-8a2aed345f6b", "global", SessionMode.Chat))
+        assertEquals(before + 1, second.ownerChanges.value)
+        assertTrue(first.claimSessionOwner("19587a33-0725-48db-abca-8a2aed345f6b", "global", SessionMode.Chat))
+        assertEquals(before + 1, second.ownerChanges.value)
+    }
+
+    @Test
+    fun `scheduled receipt reserves its UUID before the drawer imports it`() = runTest {
+        val historyRoot = File(temp.root, "cron/history")
+        val history = com.lingxi.code.cron.CronRunHistoryStore(historyRoot)
+        val scope = com.lingxi.code.cron.CronScope("global", null, "Global", temp.root.path, "/guest/scheduled")
+        val id = "19587a33-0725-48db-abca-8a2aed345f6b"
+        val run = history.enqueue(scope, "task", "prompt", 1L)!!
+        history.attachExecution(run.runId, sessionId = id, sessionTranscriptPath = "/guest/scheduled.jsonl",
+            sessionMode = "chat", sessionScopeKey = "scheduled")
+        val owners = store()
+        assertFalse(owners.claimSessionOwner(id, "global", SessionMode.Chat))
+        assertTrue(owners.readSessionOwners().isEmpty())
+        assertTrue(owners.claimSessionOwner(id, "scheduled", SessionMode.Chat))
+    }
+
+    @Test
+    fun `short cron reservation fences new owners while existing and confirmed owner continue`() = runTest {
+        val owners = store()
+        val existing = "19587a33-0725-48db-abca-8a2aed345f6b"
+        val scheduled = "29587a33-0725-48db-abca-8a2aed345f6b"
+        assertTrue(owners.claimSessionOwner(existing, "global", SessionMode.Chat))
+        val token = checkNotNull(com.lingxi.code.conversation.SessionAdmissionGate.beginCronReservation(scheduled, "scheduled", SessionMode.Chat, null))
+        try {
+            assertTrue(owners.claimSessionOwner(existing, "global", SessionMode.Chat))
+            assertTrue(owners.claimSessionOwner("other", "global", SessionMode.Chat))
+            assertFalse(owners.claimSessionOwner(scheduled, "global", SessionMode.Chat))
+            val receipt = com.lingxi.code.cron.CronRunRecord("reservation", "task", "global", null, "Global", "", 1, 1,
+                sessionId = scheduled, sessionTranscriptPath = "/guest/scheduled.jsonl", sessionMode = "chat", sessionScopeKey = "scheduled")
+            val deferred = owners.reconcileCronReceipts(listOf(receipt), emptyMap(), emptyMap())
+            assertTrue(deferred.any { it.sessionId == scheduled })
+            assertTrue(com.lingxi.code.cron.CronRunHistoryStore(File(temp.root, "cron/history")).validatedOwnerReceipts().isEmpty())
+            assertTrue(com.lingxi.code.conversation.SessionAdmissionGate.permitsNewOwner("unrelated"))
+            owners.reconcileCronReceipts(listOf(receipt), emptyMap(), emptyMap(), reservationToken = token)
+            assertTrue(owners.claimCronSessionOwner(scheduled, "scheduled", SessionMode.Chat, token))
+            com.lingxi.code.conversation.SessionAdmissionGate.finishCronReservation(token, committed = true)
+            assertTrue(com.lingxi.code.conversation.SessionAdmissionGate.needsOwnerScan())
+            assertTrue(owners.claimSessionOwner(existing, "global", SessionMode.Chat))
+            com.lingxi.code.conversation.SessionAdmissionGate.completeOwnerScan(
+                com.lingxi.code.conversation.SessionAdmissionGate.scanEpoch())
+            assertTrue(owners.claimSessionOwner("other", "global", SessionMode.Chat))
+        } finally {
+            com.lingxi.code.conversation.SessionAdmissionGate.finishCronReservation(token, committed = false)
+            com.lingxi.code.conversation.SessionAdmissionGate.completeOwnerScan(
+                com.lingxi.code.conversation.SessionAdmissionGate.scanEpoch())
+        }
+    }
+
+    @Test
+    fun `damaged scheduled receipt index freezes new claims but leaves existing owner intact`() = runTest {
+        val owners = store()
+        assertTrue(owners.claimSessionOwner("first", "global", SessionMode.Chat))
+        val historyRoot = File(temp.root, "cron/history")
+        val history = com.lingxi.code.cron.CronRunHistoryStore(historyRoot)
+        val scope = com.lingxi.code.cron.CronScope("global", null, "Global", temp.root.path, "/guest/scheduled")
+        val run = history.enqueue(scope, "task", "prompt", 1L)!!
+        history.attachExecution(run.runId, sessionId = "29587a33-0725-48db-abca-8a2aed345f6b", sessionTranscriptPath = "/guest/scheduled.jsonl",
+            sessionMode = "chat", sessionScopeKey = "scheduled")
+        val sidecar = File(historyRoot, "sessions.json")
+        sidecar.writeText("damaged")
+        assertTrue(owners.claimSessionOwner("first", "global", SessionMode.Chat))
+        assertTrue(runCatching { owners.claimSessionOwner("second", "global", SessionMode.Chat) }.isFailure)
+        assertEquals("damaged", sidecar.readText())
+        assertEquals(setOf("first"), owners.readSessionOwners().keys)
+    }
 
     @Test
     fun `scope keys round-trip through their persistence form`() {
@@ -117,6 +257,11 @@ class ScopeStateStoreTest {
         assertFalse(store.persistActiveSelection("project.p", SessionMode.Code) { false })
         assertEquals(original, file.readText())
         assertEquals("global", store.readActiveScopeKey(SessionMode.Chat))
+        assertTrue(store.persistLastActiveSession("global#chat", "first"))
+        val withSession = file.readText()
+        assertFalse(store.persistLastActiveSession("global#chat", "superseded") { false })
+        assertEquals(withSession, file.readText())
+        assertEquals("first", store.read("global#chat")?.lastActiveSessionId)
     }
 
     @Test
@@ -129,6 +274,98 @@ class ScopeStateStoreTest {
         val reopened = store()
         assertEquals(draft.toList(), reopened.readConversationDraft("global", "target")?.toList())
         assertEquals(handoff.copy(sourceSessionId = sourceId), reopened.readConversationHandoff("global", "target"))
+    }
+
+    @Test
+    fun `handoff retains input entered during its durable write`() = runTest {
+        val store = store()
+        val target = "19587a33-0725-48db-abca-8a2aed345f6b"
+        val handoff = ScopeStateStore.ConversationHandoff("global", "29587a33-0725-48db-abca-8a2aed345f6b",
+            SessionMode.Code, SessionMode.Chat, "cutoff", "request")
+        val writer = ConversationDraftWriter(this)
+        val key = ConversationDraftWriter.Key("global", target)
+        val persist: suspend (ConversationDraftWriter.Key, String) -> Unit = { draftKey, value ->
+            store.persistConversationDraft(draftKey.scopeKey, draftKey.sessionId, value)
+        }
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var draft = ""
+        val completion = async {
+            completeHandoffDraft("summary", persistHandoff = { value ->
+                entered.complete(Unit)
+                release.await()
+                store.persistHandoffDraft("global", target, value, handoff)
+            }, currentDraft = { draft }, publishDraft = { value ->
+                draft = value
+                writer.write(key, value, persist) { throw it }
+            })
+        }
+        entered.await()
+        draft = "new user input"
+        writer.write(key, draft, persist) { throw it }.join()
+        release.complete(Unit)
+        completion.await()
+        writer.await()
+        assertEquals("summary\n\nnew user input", draft)
+        assertEquals(draft, store().readConversationDraft("global", target))
+        assertEquals(handoff, store().readConversationHandoff("global", target))
+    }
+
+    @Test
+    fun `handoff storage itself preserves a previously durable user edit`() = runTest {
+        val store = store()
+        val target = "19587a33-0725-48db-abca-8a2aed345f6b"
+        val handoff = ScopeStateStore.ConversationHandoff("global", "29587a33-0725-48db-abca-8a2aed345f6b",
+            SessionMode.Code, SessionMode.Chat, "cutoff", "request")
+        store.persistConversationDraft("global", target, "already saved input")
+        store.persistHandoffDraft("global", target, "summary", handoff)
+        assertEquals("summary\n\nalready saved input", store().readConversationDraft("global", target))
+        assertEquals(handoff, store().readConversationHandoff("global", target))
+    }
+
+    @Test
+    fun `handoff publishes saved input when the owner has not loaded its draft`() = runTest {
+        val store = store()
+        val target = "19587a33-0725-48db-abca-8a2aed345f6b"
+        val handoff = ScopeStateStore.ConversationHandoff("global", "29587a33-0725-48db-abca-8a2aed345f6b",
+            SessionMode.Code, SessionMode.Chat, "cutoff", "request")
+        store.persistConversationDraft("global", target, "saved before loading")
+        var published = ""
+        completeHandoffDraft("summary", { store.persistHandoffDraft("global", target, it, handoff) },
+            currentDraft = { null }, publishDraft = { published = it })
+        assertEquals("summary\n\nsaved before loading", published)
+        assertEquals(published, store().readConversationDraft("global", target))
+    }
+
+    @Test
+    fun `handoff does not publish to a source replaced during its durable write`() = runTest {
+        val store = store()
+        val target = "19587a33-0725-48db-abca-8a2aed345f6b"
+        val handoff = ScopeStateStore.ConversationHandoff("global", "29587a33-0725-48db-abca-8a2aed345f6b",
+            SessionMode.Code, SessionMode.Chat, "cutoff", "request")
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var sourceStillMatches = true
+        var published = false
+        val completion = async {
+            runCatching {
+                completeHandoffDraft("summary", persistHandoff = { value ->
+                    entered.complete(Unit)
+                    release.await()
+                    store.persistHandoffDraft("global", target, value, handoff)
+                }, currentDraft = {
+                    check(sourceStillMatches)
+                    ""
+                }, publishDraft = { published = true })
+            }
+        }
+        entered.await()
+        sourceStillMatches = false
+        release.complete(Unit)
+        assertTrue(completion.await().isFailure)
+        assertFalse(published)
+        assertEquals("summary", store().readConversationDraft("global", target))
+        assertEquals(handoff, store().readConversationHandoff("global", target))
     }
 
     @Test

@@ -51,7 +51,7 @@ class CronPreflightWorkManagerTest {
         history.attachExecution(started.runId, notificationPolicy = "none")
         val other = history.enqueue(scope, "other", "fixture", 1002, manual = true)!!
         val cancelled = history.enqueue(scope, "cancelled", "fixture", 1003, manual = true)!!
-        val tasks = listOf("read-error", "started-error", "other", "cancelled").map(::task)
+        val tasks = listOf("read-error", "started-error", "other", "cancelled", "unknown", "throws-after-start").map(::task)
         val calls = ConcurrentHashMap<String, AtomicInteger>()
         val acknowledgements = AtomicInteger()
         val goodGateway = FixtureGateway(tasks, calls, acknowledgements)
@@ -136,6 +136,18 @@ class CronPreflightWorkManagerTest {
             assertTrue(cancellation is CancellationException)
             assertEquals(CronRunStatus.Queued, history.record(cancelled.runId)?.status)
             assertNull(history.record(cancelled.runId)?.startedAtMs)
+
+            for (taskId in listOf("unknown", "throws-after-start")) {
+                val record = history.enqueue(scope, taskId, "fixture", 1100L + taskId.length, manual = true)!!
+                fun workerForRecord() = TestListenableWorkerBuilder<CronExecutionWorker>(context)
+                    .setInputData(Data.Builder().putString(CronWorkKeys.RUN_ID, record.runId).build())
+                    .setWorkerFactory(factory).build()
+                runBlocking { workerForRecord().doWork() }
+                assertEquals(CronRunStatus.OutcomeUnknown, history.record(record.runId)?.status)
+                runBlocking { workerForRecord().doWork() }
+                assertEquals("An uncertain execution must not be replayed", 1, calls[taskId]?.get())
+                if (taskId == "unknown") assertEquals("/guest/exact.jsonl", history.record(record.runId)?.sessionTranscriptPath)
+            }
         } finally {
             ownedRepository?.dispose()
             manager?.cancelAllWork()?.result?.get(10, TimeUnit.SECONDS)
@@ -146,7 +158,8 @@ class CronPreflightWorkManagerTest {
     }
 
     private fun task(id: String) = CronTaskDto(
-        CronAutomation.defaults("fixture/model").change("notificationPolicy", "none").json,
+        CronAutomation.defaults("fixture/model").change("notificationPolicy", "none")
+            .change("sessionMode", "code").change("sessionScopeKey", "scheduled").json,
         id, "0 9 * * *", "fixture", 1uL, null, true, null, "Daily", true, null,
     )
 
@@ -156,10 +169,19 @@ class CronPreflightWorkManagerTest {
         val acknowledgements: AtomicInteger,
     ) : CronEngineGateway {
         override suspend fun list(scope: CronScope) = tasks
+        override suspend fun listStrict(scope: CronScope) = tasks
+        override suspend fun listOwnerReservationsStrict(scope: CronScope) = emptyList<com.lingxi.code.bindings.runtime.CronOwnerReservationDto>()
         override suspend fun dueOccurrences(scope: CronScope, nowMs: Long) = emptyList<Pair<String, Long>>()
         override suspend fun runTaskNow(scope: CronScope, taskId: String, scheduledAtMs: Long): CronTaskExecutionBatch {
             calls.computeIfAbsent(taskId) { AtomicInteger() }.incrementAndGet()
-            return CronTaskExecutionBatch(listOf(FiredCronJobDto(null, taskId, "fixture", "done", CronFireStatusDto.Ok, false)))
+            if (taskId == "throws-after-start") throw IOException("temporarily unavailable after execution began")
+            if (taskId == "unknown") return CronTaskExecutionBatch(listOf(FiredCronJobDto(
+                sessionId = "19587a33-0725-48db-abca-8a2aed345f6b", id = taskId, prompt = "fixture",
+                resultText = null, status = CronFireStatusDto.OutcomeUnknown("Execution result was not confirmed"), retryable = false,
+                sessionTranscriptPath = "/guest/exact.jsonl", sessionMode = "code", sessionScopeKey = "scheduled")))
+            return CronTaskExecutionBatch(listOf(FiredCronJobDto(sessionId = null, id = taskId, prompt = "fixture",
+                resultText = "done", status = CronFireStatusDto.Ok, retryable = false,
+                sessionTranscriptPath = null, sessionMode = null, sessionScopeKey = null)))
         }
         override suspend fun runTaskIfDue(scope: CronScope, taskId: String, scheduledAtMs: Long) = error("No scheduled execution in fixture")
         override suspend fun acknowledgeOccurrence(scope: CronScope, taskId: String, scheduledAtMs: Long): Boolean { acknowledgements.incrementAndGet(); return true }

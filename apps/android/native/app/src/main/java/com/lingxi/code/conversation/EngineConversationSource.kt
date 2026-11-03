@@ -45,6 +45,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.update
@@ -81,6 +82,39 @@ internal fun ConversationSource.bindAudioOwner(owner: com.lingxi.code.voice.audi
     }
 }
 
+internal fun ConversationSource.verifiedAuthoringSource(): com.lingxi.code.project.AuthoringSourceIdentity? =
+    if (!turnAdmissionReady) null else when (this) {
+        is EngineConversationSource -> authoringSourceIdentity
+        is RecoveringConversationSource -> verifiedAuthoringSource()
+        else -> null
+    }
+
+internal fun ConversationSource.pendingAuthoringSourceIdentity(): com.lingxi.code.project.AuthoringSourceIdentity? = when (this) {
+    is EngineConversationSource -> authoringSourceIdentity
+    is RecoveringConversationSource -> pendingAuthoringSourceIdentity()
+    else -> null
+}
+
+internal fun ConversationSource.reserveAuthoringSelection(): Boolean = when (this) {
+    is EngineConversationSource -> reserveAuthoringSelection()
+    is RecoveringConversationSource -> reserveAuthoringSelection()
+    else -> false
+}
+
+internal suspend fun ConversationSource.authoritativeAuthoringWorkspace(): com.lingxi.code.project.SessionWorkspaceState = when (this) {
+    is EngineConversationSource -> authoritativeAuthoringWorkspace()
+    is RecoveringConversationSource -> authoritativeAuthoringWorkspace()
+    else -> error("Authoring source is unavailable")
+}
+
+internal fun ConversationSource.releaseAuthoringSelection() {
+    when (this) {
+        is EngineConversationSource -> releaseAuthoringSelection()
+        is RecoveringConversationSource -> releaseAuthoringSelection()
+        else -> Unit
+    }
+}
+
 class EngineConversationSource internal constructor(
     private val handle: MobileEngineHandle,
     private val mediaHost: AndroidNativeMediaHost,
@@ -105,20 +139,112 @@ class EngineConversationSource internal constructor(
     private val initialRecoverySpec: ConversationRecoverySpec,
     private val userHomePath: String,
     private val userHomeGuestPath: String,
-) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource {
+    private val pendingAuthoringAdmission: com.lingxi.code.project.PendingAuthoringAdmission? = null,
+    internal val authoringSourceIdentity: com.lingxi.code.project.AuthoringSourceIdentity? = null,
+    private val authoringSessionBoundary: AuthoringSessionBoundary? = null,
+) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource, DurableTranscriptSource {
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val coldAuthoringRecovery = MutableStateFlow(ColdAuthoringRecoveryState.NotNeeded)
+    private val coldAuthoringRecoveryMutex = Mutex()
+    private val authoringSelectionFence = AuthoringSelectionFence()
+    private var coldAuthoringIntent: Pair<Context, com.lingxi.code.apps.AuthoringIntent>? = null
+    override val coldAuthoringRecoveryState: StateFlow<ColdAuthoringRecoveryState> = coldAuthoringRecovery.asStateFlow()
+    override val turnAdmissionReady: Boolean get() = authoringSelectionFence.ready && pendingAuthoringAdmission?.ready != false &&
+        (authoringSessionBoundary?.permits(activeSession.value?.sessionId) != false)
+
+    internal fun reserveAuthoringSelection(): Boolean = !closed.get() && authoringSourceIdentity != null && authoringSelectionFence.reserve()
+    internal fun releaseAuthoringSelection() = authoringSelectionFence.release()
+    internal suspend fun authoritativeAuthoringWorkspace(): com.lingxi.code.project.SessionWorkspaceState =
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            val state = handle.workspaceState()
+            com.lingxi.code.project.SessionWorkspaceState(state.sessionId, state.cwd, state.projectRoot,
+                state.additionalDirectories, state.transcriptPath)
+        }
+
+    internal fun acknowledgeAuthoringBinding(
+        identity: com.lingxi.code.project.AuthoringSourceIdentity,
+        sessionId: String,
+    ): Boolean {
+        val active = activeSession.value?.sessionId?.let(::canonicalSessionId) ?: return false
+        if (initialRecoverySpec.sessionMode != SessionMode.Code || authoringSessionBoundary?.permits(active) != true) return false
+        return pendingAuthoringAdmission?.acknowledge(identity, active, canonicalSessionId(sessionId)) ?: false
+    }
+
+    /** A provisional cold owner is not authorized until its real resumed transcript has been checked. */
+    private fun recoverAuthoringAfterNativeResume(context: Context, intent: com.lingxi.code.apps.AuthoringIntent) {
+        coldAuthoringIntent = context to intent
+        coldAuthoringRecovery.value = ColdAuthoringRecoveryState.Preparing
+        eventScope.launch {
+            try {
+                retryColdAuthoringRecovery()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // The owner-local retry remains available without destroying this source.
+            }
+        }
+    }
+
+    override suspend fun retryColdAuthoringRecovery() = coldAuthoringRecoveryMutex.withLock {
+        val (context, intent) = checkNotNull(coldAuthoringIntent)
+        if (coldAuthoringRecovery.value == ColdAuthoringRecoveryState.Ready) return@withLock
+        coldAuthoringRecovery.value = ColdAuthoringRecoveryState.Preparing
+        try {
+            kotlinx.coroutines.withTimeout(20_000L) {
+                combine(activeSession, workspace) { active, current -> active to current }
+                    .first { (active, current) -> active != null && current != null }
+            }
+            val identity = checkNotNull(authoringSourceIdentity)
+            fun matches(): Boolean {
+                val current = activeSession.value
+                return !closed.get() && com.lingxi.code.apps.coldAuthoringResumeMatches(intent, current?.sessionId,
+                    current?.mode, current?.kind == SessionActivationKind.Resumed, workspace.value)
+            }
+            com.lingxi.code.apps.completeColdAuthoringRecovery(
+                matches = ::matches,
+                register = {
+                    com.lingxi.code.apps.UnifiedLocalApps.get(context).getOrRecoverAuthoringGrant(
+                        intent.sourceDirectory, intent.projectId, checkNotNull(intent.sessionId), SessionMode.Code)
+                },
+                persist = {
+                    val store = com.lingxi.code.apps.AuthoringIntentStore(context)
+                    store.markBindingConfirmed(intent.selectionId, checkNotNull(intent.sessionId))
+                    val request = store.readRequest(intent.selectionId)
+                    if (request != null && request.operation != "bind") store.markRequestCompleted(intent.selectionId)
+                },
+                admit = { acknowledgeAuthoringBinding(identity, checkNotNull(intent.sessionId)) },
+            )
+            coldAuthoringRecovery.value = ColdAuthoringRecoveryState.Ready
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            if (!closed.get()) coldAuthoringRecovery.value = ColdAuthoringRecoveryState.Failed
+            throw cancelled
+        } catch (failure: Exception) {
+            coldAuthoringRecovery.value = ColdAuthoringRecoveryState.Failed
+            android.util.Log.w("EngineConversationSource", "Authoring recovery remains unavailable", failure)
+            throw failure
+        }
+    }
 
     override val recoverySpec: ConversationRecoverySpec
         get() {
-            val directory = workspace.value?.cwd ?: return initialRecoverySpec
+            val current = workspace.value?.takeIf { workspace ->
+                activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(workspace.sessionId)
+            }
+            val spec = initialRecoverySpec.copy(transcriptPath =
+                current?.transcriptPath?.takeIf(String::isNotBlank) ?: initialRecoverySpec.transcriptPath)
+            val directory = current?.cwd ?: return spec
             val home = userHomeGuestPath
-            if (directory != home && !directory.startsWith("$home/")) return initialRecoverySpec
+            if (directory != home && !directory.startsWith("$home/")) return spec
             val relative = directory.removePrefix(home).removePrefix("/")
-            return initialRecoverySpec.copy(hostPath = java.io.File(userHomePath, relative).absolutePath, guestPath = directory, additionalDirectories = workspace.value?.additionalDirectories.orEmpty())
+            return spec.copy(hostPath = java.io.File(userHomePath, relative).absolutePath, guestPath = directory, additionalDirectories = current.additionalDirectories)
         }
 
     override val workspaceState = workspace.asStateFlow()
 
-    internal fun newSideChatSource() = SideChatSource(handle)
+    internal fun newSideChatSource(): SideChatSource {
+        requireSideChatParentAdmission(turnAdmissionReady)
+        return SideChatSource(handle) { turnAdmissionReady }
+    }
 
     private val durableAttachMutex = Mutex()
     private val durableAttachCoordinator = DurableAttachCoordinator()
@@ -198,6 +324,13 @@ class EngineConversationSource internal constructor(
     override val workflowProgress: Flow<WorkflowProgressUpdate> = workflowEvents
 
     override suspend fun submitClientCommand(command: ClientCommand) {
+        check(authoringSessionBoundary == null || (command !is ClientCommand.NewSession && command !is ClientCommand.ResumeSession &&
+            command !is ClientCommand.ForkSession && command !== ClientCommand.ClearSession)) {
+            "An authoring source cannot change its session"
+        }
+        check(turnAdmissionReady || maySubmitWhileAuthoringPending(command)) {
+            "Authoring binding is not ready"
+        }
         handle.submit(command)
     }
 
@@ -228,55 +361,58 @@ class EngineConversationSource internal constructor(
         record: DurableConversationTurnRecord,
         forceAttach: Boolean,
         afterSequence: Long = 0L,
-    ) = durableAttachMutex.withLock {
-        val latest = durableTurns.load()?.takeIf {
-            it.turnId == record.turnId && canonicalSessionId(it.sessionId) == canonicalSessionId(record.sessionId)
-        } ?: record
-        // A second Activity can claim the shared source while AttachTurn is
-        // suspended. Snapshot the first claim's disposition before yielding;
-        // that claim must still consume its required Resume exactly once.
-        val resumeForThisAttach = resumeOnUiAttach
-        val owner = if (forceAttach) DurableAttachOwner.Ui else DurableAttachOwner.Headless
-        val request = DurableAttachRequest(
-            sessionId = canonicalSessionId(latest.sessionId),
-            turnId = latest.turnId,
-            afterSequence = afterSequence.coerceAtLeast(0L),
-        )
-        if (!durableAttachCoordinator.reserve(request, owner)) return@withLock
-        durableReplayGate.noteAttachRequested(
-            turnId = latest.turnId,
-            activation = activeSession.value?.takeIf { canonicalSessionId(it.sessionId) == canonicalSessionId(latest.sessionId) }
-                ?.let(retainedUiTranscript::activation),
-            afterSequence = request.afterSequence,
-        )
-        try {
-            handle.submit(
-                ClientCommand.AttachTurn(
-                    turnId = latest.turnId.toULong(),
-                    afterSequence = request.afterSequence.toULong(),
-                ),
+    ) {
+        pendingAuthoringAdmission?.awaitReady()
+        durableAttachMutex.withLock {
+            val latest = durableTurns.load()?.takeIf {
+                it.turnId == record.turnId && canonicalSessionId(it.sessionId) == canonicalSessionId(record.sessionId)
+            } ?: record
+            // A second Activity can claim the shared source while AttachTurn is
+            // suspended. Snapshot the first claim's disposition before yielding;
+            // that claim must still consume its required Resume exactly once.
+            val resumeForThisAttach = resumeOnUiAttach
+            val owner = if (forceAttach) DurableAttachOwner.Ui else DurableAttachOwner.Headless
+            val request = DurableAttachRequest(
+                sessionId = canonicalSessionId(latest.sessionId),
+                turnId = latest.turnId,
+                afterSequence = afterSequence.coerceAtLeast(0L),
             )
-        } catch (error: Throwable) {
-            durableReplayGate.cancelAttach(latest.turnId)
-            durableAttachCoordinator.rollback(request, owner)
-            ConversationHeadlessRecovery.markDurableAttachFailed(recoverySpec.ownerKey, this)
-            throw DurableAttachFailure(latest.turnId, "attach", error)
-        }
-        // Cold-process recovery needs ResumeTurn. A UI takeover resumes only
-        // when the process coordinator reports that no headless/UI executor is
-        // already attached to this source; retained-live sources only Attach.
-        val needsResume = if (forceAttach) shouldResumeDurableTurn(true, resumeForThisAttach)
-            else !ConversationHeadlessRecovery.hasLiveExecutor(recoverySpec.ownerKey, this)
-        if (needsResume) {
+            if (!durableAttachCoordinator.reserve(request, owner)) return@withLock
+            durableReplayGate.noteAttachRequested(
+                turnId = latest.turnId,
+                activation = activeSession.value?.takeIf { canonicalSessionId(it.sessionId) == canonicalSessionId(latest.sessionId) }
+                    ?.let(retainedUiTranscript::activation),
+                afterSequence = request.afterSequence,
+            )
             try {
-                handle.submit(ClientCommand.ResumeTurn(latest.turnId.toULong()))
+                handle.submit(
+                    ClientCommand.AttachTurn(
+                        turnId = latest.turnId.toULong(),
+                        afterSequence = request.afterSequence.toULong(),
+                    ),
+                )
             } catch (error: Throwable) {
                 durableReplayGate.cancelAttach(latest.turnId)
                 durableAttachCoordinator.rollback(request, owner)
                 ConversationHeadlessRecovery.markDurableAttachFailed(recoverySpec.ownerKey, this)
-                throw DurableAttachFailure(latest.turnId, "resume", error)
+                throw DurableAttachFailure(latest.turnId, "attach", error)
             }
-            ConversationHeadlessRecovery.markDurableExecutorActive(recoverySpec.ownerKey, this)
+            // Cold-process recovery needs ResumeTurn. A UI takeover resumes only
+            // when the process coordinator reports that no headless/UI executor is
+            // already attached to this source; retained-live sources only Attach.
+            val needsResume = if (forceAttach) shouldResumeDurableTurn(true, resumeForThisAttach)
+                else !ConversationHeadlessRecovery.hasLiveExecutor(recoverySpec.ownerKey, this)
+            if (needsResume) {
+                try {
+                    handle.submit(ClientCommand.ResumeTurn(latest.turnId.toULong()))
+                } catch (error: Throwable) {
+                    durableReplayGate.cancelAttach(latest.turnId)
+                    durableAttachCoordinator.rollback(request, owner)
+                    ConversationHeadlessRecovery.markDurableAttachFailed(recoverySpec.ownerKey, this)
+                    throw DurableAttachFailure(latest.turnId, "resume", error)
+                }
+                ConversationHeadlessRecovery.markDurableExecutorActive(recoverySpec.ownerKey, this)
+            }
         }
     }
 
@@ -339,17 +475,26 @@ class EngineConversationSource internal constructor(
     }
 
     override suspend fun changeWorkspace(path: String, expectedSessionId: String) {
-        handle.changeWorkspace(path, expectedSessionId)
+        if (authoringSourceIdentity == null) handle.changeWorkspace(path, expectedSessionId)
+        else {
+            check(turnAdmissionReady) { "The authoring workspace is unavailable" }
+            authoringSelectionFence.mutateWorkspace { handle.changeWorkspace(path, expectedSessionId) }
+        }
         refreshSessions()
     }
 
     override suspend fun addWorkspaceDirectory(path: String, expectedSessionId: String) {
-        handle.addWorkspaceDirectory(path, expectedSessionId)
+        if (authoringSourceIdentity == null) handle.addWorkspaceDirectory(path, expectedSessionId)
+        else {
+            check(turnAdmissionReady) { "The authoring workspace is unavailable" }
+            authoringSelectionFence.mutateWorkspace { handle.addWorkspaceDirectory(path, expectedSessionId) }
+        }
         refreshSessions()
     }
 
     override suspend fun resumeSession(uuid: String) {
         if (uuid.isBlank()) return
+        check(authoringSessionBoundary == null || authoringSessionBoundary.permits(uuid)) { "Authoring source belongs to another session" }
         if (activeSession.value?.sessionId?.let(::canonicalSessionId) != canonicalSessionId(uuid)) {
             retainedUiTranscript.clear()
         }
@@ -360,27 +505,26 @@ class EngineConversationSource internal constructor(
         // Propagate command failures: the ViewModel must keep the composer gated
         // and surface an explicit session error instead of pretending the locally
         // selected transcript was resumed.
-        sessions.value.rows.firstOrNull { canonicalSessionId(it.uuid) == canonicalSessionId(uuid) }
-            ?.transcriptPath?.let { path ->
-                handle.resumeWorkspaceSession(canonicalSessionId(uuid), path)
-                return
-            }
-        handle.submit(
-            ClientCommand.ResumeSession(
-                sessionId = canonicalSessionId(uuid),
-                cwd = null,
-                expectedMode = initialRecoverySpec.sessionMode.toDto(),
-            ),
-        )
+        val activePath = recoverySpec.transcriptPath.takeIf {
+            activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(uuid)
+        }
+        val catalogPath = sessions.value.rows.firstOrNull {
+            canonicalSessionId(it.uuid) == canonicalSessionId(uuid) && it.mode == initialRecoverySpec.sessionMode
+        }?.transcriptPath
+        val path = (activePath ?: catalogPath)?.takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("The selected conversation transcript is unavailable")
+        handle.resumeWorkspaceSession(canonicalSessionId(uuid), path)
     }
 
     override suspend fun newSession() {
+        check(authoringSessionBoundary == null) { "A new authoring session needs its own source" }
         retainedUiTranscript.clear()
         durableTurns.clear()
         handle.submit(ClientCommand.NewSession(cwd = null, model = null, mode = initialRecoverySpec.sessionMode.toDto()))
     }
 
     override suspend fun newSession(cwd: String) {
+        check(authoringSessionBoundary == null) { "A new authoring session needs its own source" }
         retainedUiTranscript.clear()
         durableTurns.clear()
         handle.submit(ClientCommand.NewSession(cwd = cwd, model = null, mode = initialRecoverySpec.sessionMode.toDto()))
@@ -444,6 +588,18 @@ class EngineConversationSource internal constructor(
     override fun submit(text: String, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> =
         submit(text, images, turnId, null, null)
 
+    override suspend fun awaitTurnTranscriptPath(): String {
+        val id = activeSession.value?.sessionId ?: error("Conversation session is not ready")
+        val value = kotlinx.coroutines.withTimeoutOrNull(20_000L) {
+            workspace.first { state -> state != null && canonicalSessionId(state.sessionId) == canonicalSessionId(id) &&
+                state.transcriptPath.isNotBlank() }
+        } ?: error("The conversation transcript is unavailable")
+        check(activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(id)) {
+            "Conversation session changed before submission"
+        }
+        return checkNotNull(value).transcriptPath
+    }
+
     override val visualizationHost: VisualizationHost? by lazy {
         runCatching { handle.visualizationHost(VISUALIZATION_ORIGIN) }.getOrNull()
     }
@@ -454,6 +610,12 @@ class EngineConversationSource internal constructor(
         turnId: Long,
         visualizationContext: VisualizationRef?,
         promptMode: PromptModeDto?,
+    ): Flow<ReplyEvent> = submitForComposer(text, images, turnId, visualizationContext, promptMode, onNotAdmitted = {})
+
+    internal fun submitForComposer(
+        text: String, images: List<ImageRefDto>, turnId: Long,
+        visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, onNotAdmitted: () -> Unit,
+        tryBeginNative: () -> Boolean = { true },
     ): Flow<ReplyEvent> =
         // Subscribe-before-submit: the returned reply stream maps the shared
         // engine flow through `mapReplyStream`, but the `SendPrompt` is fired
@@ -465,23 +627,32 @@ class EngineConversationSource internal constructor(
         // because the collector is already subscribed before the turn is spawned.
         mapReplyStream(
             events.onSubscription {
+                var nativeAttempted = false
                 try {
-                    permissionIngress.beginTurn()
-                    activeSession.value?.sessionId?.let { sessionId ->
-                        durableTurns.begin(sessionId, turnId)
-                    }
-                    handle.submit(
-                        ClientCommand.SendPrompt(
-                            text = text.toClientTextDto(),
-                            promptMode = promptMode,
-                            images = images,
-                            turnId = turnId.toULong(),
-                            visualizationContext = visualizationContext?.toDto(),
-                        ),
+                    submitDurableTurn(
+                        prepare = {
+                            check(turnAdmissionReady) { "Authoring binding is not ready" }
+                            awaitTurnTranscriptPath()
+                            permissionIngress.beginTurn()
+                            activeSession.value?.sessionId?.let { sessionId -> durableTurns.begin(sessionId, turnId) }
+                        },
+                        submit = {
+                            if (!tryBeginNative()) throw kotlinx.coroutines.CancellationException("Turn cancelled before submission")
+                            nativeAttempted = true
+                            handle.submit(ClientCommand.SendPrompt(
+                                text = text.toClientTextDto(), promptMode = promptMode, images = images,
+                                turnId = turnId.toULong(), visualizationContext = visualizationContext?.toDto(),
+                            ))
+                        },
+                        onNotAdmitted = onNotAdmitted,
                     )
                 } catch (t: Throwable) {
+                    if (t is kotlinx.coroutines.CancellationException) {
+                        if (!nativeAttempted) { permissionIngress.endTurn(); runCatching { durableTurns.clear(turnId) } }
+                        throw t
+                    }
                     permissionIngress.endTurn()
-                    durableTurns.clear(turnId)
+                    if (!nativeAttempted) runCatching { durableTurns.clear(turnId) }
                     // Inject the build/submit failure into the same stream the
                     // collector is already reading, so the mapper terminates it.
                     emit(
@@ -505,18 +676,37 @@ class EngineConversationSource internal constructor(
         raw: ClientTextDto,
         images: List<ImageRefDto>,
         turnId: Long,
+    ): Flow<ReplyEvent> = submitSlashForComposer(raw, images, turnId, onNotAdmitted = {})
+
+    internal fun submitSlashForComposer(
+        raw: ClientTextDto, images: List<ImageRefDto>, turnId: Long, onNotAdmitted: () -> Unit,
+        tryBeginNative: () -> Boolean = { true },
     ): Flow<ReplyEvent> =
         mapReplyStream(
             events.onSubscription {
+                var nativeAttempted = false
                 try {
-                    permissionIngress.beginTurn()
-                    activeSession.value?.sessionId?.let { sessionId ->
-                        durableTurns.begin(sessionId, turnId)
-                    }
-                    handle.submit(runSlashCommandClientCommand(raw, images, turnId))
+                    submitDurableTurn(
+                        prepare = {
+                            check(turnAdmissionReady) { "Authoring binding is not ready" }
+                            awaitTurnTranscriptPath()
+                            permissionIngress.beginTurn()
+                            activeSession.value?.sessionId?.let { sessionId -> durableTurns.begin(sessionId, turnId) }
+                        },
+                        submit = {
+                            if (!tryBeginNative()) throw kotlinx.coroutines.CancellationException("Turn cancelled before submission")
+                            nativeAttempted = true
+                            handle.submit(runSlashCommandClientCommand(raw, images, turnId))
+                        },
+                        onNotAdmitted = onNotAdmitted,
+                    )
                 } catch (t: Throwable) {
+                    if (t is kotlinx.coroutines.CancellationException) {
+                        if (!nativeAttempted) { permissionIngress.endTurn(); runCatching { durableTurns.clear(turnId) } }
+                        throw t
+                    }
                     permissionIngress.endTurn()
-                    durableTurns.clear(turnId)
+                    if (!nativeAttempted) runCatching { durableTurns.clear(turnId) }
                     emit(
                         ClientEvent.Error(
                             kind = ErrorKindDto.TRANSPORT,
@@ -560,6 +750,12 @@ class EngineConversationSource internal constructor(
     }
 
     override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        // A native command may retain the engine after destroy() returns. Close
+        // this exact attachment now so a replacement can wait for its drain.
+        runCatching { mediaHost.beginEngineAttachmentDrain(handle) }.onFailure {
+            android.util.Log.w("EngineConversationSource", "Could not start media attachment drain", it)
+        }
         com.lingxi.code.voice.audio.AndroidAudioSessionContext.releaseIfBound(
             com.lingxi.code.voice.audio.AudioOwnerKey.computerUse(initialRecoverySpec.ownerKey), handle,
         )
@@ -599,9 +795,14 @@ class EngineConversationSource internal constructor(
             reuseProcessSource: Boolean = true,
             currentSource: ConversationSource? = null,
             expectedSessionId: String? = null,
+            initialSessionTranscriptPath: String? = null,
             runtimeGeneration: String = java.util.UUID.randomUUID().toString(),
             strictRuntimeGeneration: Boolean = false,
+            pendingAuthoringAdmission: com.lingxi.code.project.PendingAuthoringAdmission? = null,
         ): ConversationSource {
+            if (expectedSessionId != null && initialSessionTranscriptPath.isNullOrBlank()) {
+                return UnavailableConversationSource("The selected conversation transcript is unavailable")
+            }
             if (reuseProcessSource && expectedSessionId != null) {
                 ConversationServiceOwners.initialize(context.applicationContext)
                 ConversationServiceOwners.persisted(context.applicationContext).firstOrNull { snapshot ->
@@ -611,6 +812,7 @@ class EngineConversationSource internal constructor(
                             projectId = if (workspaceKey == "global" || workspaceKey == "scheduled") null else projectWorkspace?.projectId,
                             hostPath = projectWorkspace?.hostPath, sessionMode = sessionMode, linuxRuntimeMode = linuxRuntimeMode,
                             workspaceKey = workspaceKey ?: projectWorkspace?.projectId?.let { "project.$it" } ?: "global",
+                            transcriptPath = initialSessionTranscriptPath,
                         ), expectedSessionId)
                 }?.let { ConversationHeadlessRecovery.recover(context.applicationContext, it) }
             }
@@ -622,6 +824,7 @@ class EngineConversationSource internal constructor(
                 workspaceKey = workspaceKey ?: projectWorkspace?.projectId?.let { "project.$it" } ?: "global",
                 guestPath = projectWorkspace?.guestPath,
                 additionalDirectories = projectWorkspace?.additionalDirectories.orEmpty(),
+                transcriptPath = initialSessionTranscriptPath,
                 runtimeGeneration = runtimeGeneration,
             )
             if (reuseProcessSource) {
@@ -636,7 +839,8 @@ class EngineConversationSource internal constructor(
             return prepareConversationSource {
                 create(context, projectWorkspace, workspaceKey, sessionMode, linuxRuntimeMode,
                     reuseProcessSource = reuseProcessSource, replaceProcessSource = true,
-                    expectedSessionId = expectedSessionId, runtimeGeneration = runtimeGeneration)
+                    expectedSessionId = expectedSessionId, initialSessionTranscriptPath = initialSessionTranscriptPath,
+                    runtimeGeneration = runtimeGeneration, pendingAuthoringAdmission = pendingAuthoringAdmission)
             }
         }
 
@@ -644,7 +848,7 @@ class EngineConversationSource internal constructor(
          * Build the engine + register the event-bridging listener, or return an
          * explicit unavailable source when the engine is not usable.
          */
-        fun create(
+        internal fun create(
             context: Context,
             projectWorkspace: ProjectWorkspace? = null,
             workspaceKey: String? = null,
@@ -658,9 +862,11 @@ class EngineConversationSource internal constructor(
              */
             replaceProcessSource: Boolean = false,
             expectedSessionId: String? = null,
+            initialSessionTranscriptPath: String? = null,
             runtimeGeneration: String = java.util.UUID.randomUUID().toString(),
             autoAttachDurableTurns: Boolean = !reuseProcessSource,
             registerOnCreate: Boolean = true,
+            pendingAuthoringAdmission: com.lingxi.code.project.PendingAuthoringAdmission? = null,
         ): ConversationSource {
             val recoverySpec = ConversationRecoverySpec(
                 projectId = if (workspaceKey == "global" || workspaceKey == "scheduled") null else projectWorkspace?.projectId,
@@ -670,6 +876,7 @@ class EngineConversationSource internal constructor(
                 workspaceKey = workspaceKey ?: projectWorkspace?.projectId?.let { "project.$it" } ?: "global",
                 guestPath = projectWorkspace?.guestPath,
                 additionalDirectories = projectWorkspace?.additionalDirectories.orEmpty(),
+                transcriptPath = initialSessionTranscriptPath,
                 runtimeGeneration = runtimeGeneration,
             )
             if (reuseProcessSource && !replaceProcessSource) {
@@ -686,6 +893,40 @@ class EngineConversationSource internal constructor(
                     ConversationHeadlessRecovery.UiSourceClaim.WrongGeneration -> return UnavailableConversationSource("Conversation owner has changed")
                 }
             }
+            if (expectedSessionId != null && initialSessionTranscriptPath.isNullOrBlank()) {
+                if (reuseProcessSource && !replaceProcessSource) {
+                    ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.ownerKey)
+                }
+                return UnavailableConversationSource("The selected conversation transcript is unavailable")
+            }
+            val projectAdmission = try {
+                val scopeKey = checkNotNull(recoverySpec.workspaceKey)
+                if (scopeKey.startsWith("project.")) {
+                    kotlinx.coroutines.runBlocking {
+                        com.lingxi.code.project.admitProjectSource(context.applicationContext, scopeKey,
+                            checkNotNull(projectWorkspace), sessionMode, expectedSessionId, pendingAuthoringAdmission,
+                            initialSessionTranscriptPath)
+                    }
+                } else {
+                    check(pendingAuthoringAdmission == null) { "Authoring owner is not a Project" }
+                    com.lingxi.code.project.AdmittedProjectSource(null, null)
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                if (reuseProcessSource) ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.ownerKey)
+                throw cancelled
+            } catch (failure: Exception) {
+                if (reuseProcessSource) ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.ownerKey)
+                android.util.Log.w("EngineConversationSource", "Project source admission failed", failure)
+                val message = if (com.lingxi.code.apps.isAppDevelopmentCodeRequired(failure))
+                    context.getString(R.string.local_app_development_requires_code)
+                else context.getString(R.string.chat_engine_build_failed)
+                return UnavailableConversationSource(message)
+            }
+            val authoringIdentity = projectAdmission.identity
+            val effectiveAuthoringAdmission = pendingAuthoringAdmission ?: projectAdmission.recovery?.let {
+                com.lingxi.code.project.PendingAuthoringAdmission(checkNotNull(authoringIdentity))
+            }
+            val authoringBoundary = authoringIdentity?.let { AuthoringSessionBoundary(expectedSessionId) }
             // Callback ingress is non-blocking and lossless. A dedicated pump may
             // suspend behind a slow collector without ever stalling Rust's event
             // callback or dropping assistant text / terminal events.
@@ -720,6 +961,7 @@ class EngineConversationSource internal constructor(
             // by real history out-of-band from the per-turn stream.
             val sessions = MutableStateFlow(EngineSessionState.loading())
             val workspace = MutableStateFlow<com.lingxi.code.project.SessionWorkspaceState?>(null)
+            val workspaceRevision = java.util.concurrent.atomic.AtomicLong()
             // The lifecycle event emitted by the engine confirms both the UUID
             // and immutable mode, together with the restored transcript.
             val activeSession = MutableStateFlow<ActivatedSession?>(null)
@@ -735,7 +977,7 @@ class EngineConversationSource internal constructor(
             val mediaContextBindings = MediaAudioSessionContextBindings<MobileEngineHandle> { _, binding ->
                 mediaHost.removeAudioSessionContext(binding)
             }
-            var mediaContextEngine: MobileEngineHandle? = null
+            val mediaContextEngine = java.util.concurrent.atomic.AtomicReference<MobileEngineHandle?>(null)
             val mediaContextUpdate = Mutex()
             suspend fun refreshMediaContext(engine: MobileEngineHandle) = mediaContextUpdate.withLock {
                 try {
@@ -764,6 +1006,7 @@ class EngineConversationSource internal constructor(
                 projectWorkspace = projectWorkspace,
                 sessionMode = sessionMode,
                 initialSessionId = expectedSessionId?.let(::canonicalSessionId),
+                initialSessionTranscriptPath = initialSessionTranscriptPath,
                 linuxRuntimeMode = linuxRuntimeMode,
                 computerUseOwnerKey = recoverySpec.ownerKey,
                 mediaHost = mediaHost,
@@ -781,23 +1024,54 @@ class EngineConversationSource internal constructor(
                             sessions.value = reduceSessionEvent(sessions.value, event, strings = sessionCatalogStrings(context))
                             val previousActiveSessionId = activeSession.value?.sessionId
                             activeSession.update { current ->
-                                sessionActivationFrom(event, strings) ?: current
+                                val activation = sessionActivationFrom(event, strings)
+                                if (activation != null) authoringBoundary?.observe(activation.sessionId)
+                                activation ?: current
                             }
                             when (event) {
                                 is ClientEvent.SessionStarted,
                                 is ClientEvent.SessionResumed,
-                                is ClientEvent.ModelChanged -> mediaContextEngine?.let { refreshMediaContext(it) }
+                                is ClientEvent.ModelChanged -> mediaContextEngine.get()?.let { refreshMediaContext(it) }
                                 ClientEvent.SessionEnded -> previousActiveSessionId?.let { sessionId ->
-                                    mediaContextEngine?.let { engine -> mediaContextBindings.remove(engine, sessionId) }
+                                    mediaContextEngine.get()?.let { engine -> mediaContextBindings.remove(engine, sessionId) }
                                 }
                                 else -> Unit
                             }
                             if (event is ClientEvent.WorkspaceChanged) {
-                                val value = event.state
-                                workspace.value = com.lingxi.code.project.SessionWorkspaceState(
-                                    value.sessionId, value.cwd, value.projectRoot,
-                                    value.additionalDirectories, value.transcriptPath,
-                                )
+                                // An event can be delivered after a newer /cd.
+                                // Read the same engine's committed writer state
+                                // and publish it only if no newer query won.
+                                val expected = event.state.sessionId
+                                val revision = workspaceRevision.incrementAndGet()
+                                mediaContextEngine.get()?.let { engine ->
+                                    eventScope.launch {
+                                        runCatching { engine.workspaceState() }.getOrNull()?.let { value ->
+                                            if (canonicalSessionId(value.sessionId) == canonicalSessionId(expected) &&
+                                                activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(expected) &&
+                                                workspaceRevision.compareAndSet(revision, revision + 1)) {
+                                                workspace.value = com.lingxi.code.project.SessionWorkspaceState(value.sessionId,
+                                                    value.cwd, value.projectRoot, value.additionalDirectories, value.transcriptPath)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (event is ClientEvent.SessionStarted || event is ClientEvent.SessionResumed) {
+                                val expected = sessionActivationFrom(event, strings)?.sessionId
+                                val engine = mediaContextEngine.get()
+                                if (expected != null && engine != null) {
+                                    val revision = workspaceRevision.get()
+                                    eventScope.launch {
+                                        runCatching { engine.workspaceState() }.getOrNull()?.let { value ->
+                                            if (canonicalSessionId(value.sessionId) == canonicalSessionId(expected) &&
+                                                activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(expected) &&
+                                                workspaceRevision.compareAndSet(revision, revision + 1)) {
+                                                workspace.value = com.lingxi.code.project.SessionWorkspaceState(value.sessionId,
+                                                    value.cwd, value.projectRoot, value.additionalDirectories, value.transcriptPath)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
                             if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }
@@ -862,7 +1136,7 @@ class EngineConversationSource internal constructor(
                     context.getString(R.string.chat_engine_build_failed),
                 )
             }
-            mediaContextEngine = handle
+            mediaContextEngine.set(handle)
             // Account management must remain available before an inference/audio route exists.
             kotlinx.coroutines.runBlocking { refreshMediaContext(handle) }
             val workspaceRestore = runCatching { kotlinx.coroutines.runBlocking {
@@ -877,6 +1151,9 @@ class EngineConversationSource internal constructor(
                 }
             } }
             workspaceRestore.exceptionOrNull()?.let { failure ->
+                runCatching { mediaHost.beginEngineAttachmentDrain(handle) }.onFailure {
+                    android.util.Log.w("EngineConversationSource", "Could not start media attachment drain", it)
+                }
                 mediaContextBindings.close()
                 runCatching { handle.destroy() }
                 if (reuseProcessSource) ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.ownerKey)
@@ -895,8 +1172,12 @@ class EngineConversationSource internal constructor(
                 // Session/model events retry media routing once account setup supplies a route.
                 try {
                     handle.submit(ClientCommand.ListSessionAgents)
+                    val revision = workspaceRevision.get()
                     val value = handle.workspaceState()
-                    workspace.value = com.lingxi.code.project.SessionWorkspaceState(value.sessionId, value.cwd, value.projectRoot, value.additionalDirectories, value.transcriptPath)
+                    if (activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(value.sessionId) &&
+                        workspaceRevision.compareAndSet(revision, revision + 1)) {
+                        workspace.value = com.lingxi.code.project.SessionWorkspaceState(value.sessionId, value.cwd, value.projectRoot, value.additionalDirectories, value.transcriptPath)
+                    }
                 } catch (_: Throwable) {
                     // A later foreground execution refresh retries this query.
                 }
@@ -954,7 +1235,11 @@ class EngineConversationSource internal constructor(
                 initialRecoverySpec = recoverySpec,
                 userHomePath = com.lingxi.code.project.MobileUserStorage.directories(context).home,
                 userHomeGuestPath = com.lingxi.code.project.MobileUserStorage.directories(context).guestHome,
+                pendingAuthoringAdmission = effectiveAuthoringAdmission,
+                authoringSourceIdentity = authoringIdentity,
+                authoringSessionBoundary = authoringBoundary,
             )
+            projectAdmission.recovery?.let { source.recoverAuthoringAfterNativeResume(context.applicationContext, it) }
             if (registerOnCreate) ConversationHeadlessRecovery.register(recoverySpec.ownerKey, source)
             return source
         }

@@ -10,7 +10,11 @@ import java.io.File
 import java.io.FileOutputStream
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.UUID
 
 /**
@@ -45,11 +49,41 @@ internal const val GLOBAL_SESSION_INDEX_FILE = "global-session-index.json"
 
 fun interface ProjectAtomicWriter {
     fun write(target: File, text: String, validate: (String) -> Unit)
+
+    /** Stage before taking a caller's short publication lock, when supported. */
+    fun writeGuarded(target: File, text: String, validate: (String) -> Unit, publish: (() -> Unit) -> Unit) {
+        publish { write(target, text, validate) }
+    }
 }
 
 internal class DefaultProjectAtomicWriter : ProjectAtomicWriter {
-    override fun write(target: File, text: String, validate: (String) -> Unit) {
+    private data class TargetSnapshot(val fileKey: Any, val bytes: ByteArray, val modified: java.nio.file.attribute.FileTime)
+
+    private fun snapshot(target: File): TargetSnapshot? {
+        val path = target.toPath()
+        val before = try {
+            Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        } catch (_: NoSuchFileException) {
+            return null
+        }
+        check(before.isRegularFile && !before.isSymbolicLink) { "Storage target is not a regular file: ${target.name}" }
+        val fileKey = checkNotNull(before.fileKey()) { "Storage target identity is unavailable: ${target.name}" }
+        val bytes = Files.newInputStream(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { it.readBytes() }
+        val after = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        check(after.isRegularFile && !after.isSymbolicLink && fileKey == after.fileKey() &&
+            before.size() == after.size() && after.size() == bytes.size.toLong() &&
+            before.lastModifiedTime() == after.lastModifiedTime()) {
+            "Storage target changed while reading: ${target.name}"
+        }
+        return TargetSnapshot(fileKey, bytes, after.lastModifiedTime())
+    }
+
+    override fun write(target: File, text: String, validate: (String) -> Unit) =
+        writeGuarded(target, text, validate) { it() }
+
+    override fun writeGuarded(target: File, text: String, validate: (String) -> Unit, publish: (() -> Unit) -> Unit) {
         target.parentFile?.mkdirs()
+        val previous = snapshot(target)
         val temp = File(target.parentFile, ".${target.name}.${UUID.randomUUID()}.tmp")
         try {
             FileOutputStream(temp).use { output ->
@@ -58,19 +92,40 @@ internal class DefaultProjectAtomicWriter : ProjectAtomicWriter {
             }
             val staged = temp.readText(Charsets.UTF_8)
             validate(staged)
-            try {
-                Files.move(
-                    temp.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING,
-                )
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(
-                    temp.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING,
-                )
+            val current = snapshot(target)
+            check((previous == null && current == null) || (previous != null && current != null &&
+                previous.fileKey == current.fileKey && previous.bytes.contentEquals(current.bytes))) {
+                "Storage target changed while writing: ${target.name}"
+            }
+            publish {
+                // The byte comparison above happens outside the publication lock.
+                // Recheck identity immediately before rename. As with the other
+                // guarded writes, this is not an inode-CAS against an unrelated
+                // process between the final check and rename.
+                val latest = try {
+                    Files.readAttributes(target.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                } catch (_: NoSuchFileException) {
+                    null
+                }
+                check((current == null && latest == null) || (current != null && latest != null &&
+                    latest.isRegularFile && !latest.isSymbolicLink && current.fileKey == latest.fileKey() &&
+                    current.bytes.size.toLong() == latest.size() && current.modified == latest.lastModifiedTime())) {
+                    "Storage target changed before publication: ${target.name}"
+                }
+                try {
+                    Files.move(
+                        temp.toPath(),
+                        target.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING,
+                    )
+                } catch (_: AtomicMoveNotSupportedException) {
+                    Files.move(
+                        temp.toPath(),
+                        target.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                    )
+                }
             }
         } finally {
             temp.delete()
@@ -89,6 +144,15 @@ internal class ProjectRepository(
     private val userHomeGuestPath: String,
     private val ownerStateFile: File? = null,
 ) {
+    // Repository operations are serialized by ProjectStore's repository mutex.
+    // A caller may supply a short commit guard without holding it while fsync runs.
+    private var writePublication: ((File, () -> Unit) -> Unit)? = null
+
+    internal fun <T> withWritePublication(guard: (File, () -> Unit) -> Unit, operation: () -> T): T {
+        check(writePublication == null)
+        writePublication = guard
+        return try { operation() } finally { writePublication = null }
+    }
     init {
         projectsRoot.mkdirs()
     }
@@ -158,14 +222,32 @@ internal class ProjectRepository(
     fun createInternal(name: String, mode: SessionMode): ProjectSnapshot =
         createProject(name, ProjectStorageKind.Internal, null, null, mode)
 
+    fun createAuthoringPlaceholder(name: String, mode: SessionMode, projectId: String, authoringIntentId: String): ProjectSnapshot {
+        com.lingxi.code.apps.requireCodeAuthoring(mode)
+        validateProjectId(authoringIntentId)
+        return createProject(name, ProjectStorageKind.Internal, null, null, mode, projectId, null, authoringIntentId)
+    }
+
     /** Register an existing owned source directory without copying or relocating it. */
-    fun registerAuthoringWorkspace(name: String, guestDirectory: String, mode: SessionMode): ProjectSnapshot {
-        val workspace = workspaceForDirectory("authoring", guestDirectory)
-        load().projects.firstOrNull { it.record.directory == guestDirectory }?.let {
-            return addVisibleMode(it.record.id, mode)
+    fun registerAuthoringWorkspace(name: String, guestDirectory: String, mode: SessionMode,
+        projectId: String, authoringIntentId: String): ProjectSnapshot {
+        com.lingxi.code.apps.requireCodeAuthoring(mode)
+        validateProjectId(projectId)
+        validateProjectId(authoringIntentId)
+        workspaceForDirectory("authoring", guestDirectory)
+        val projects = load().projects
+        projects.firstOrNull { it.record.directory == guestDirectory && it.record.id != projectId }?.let {
+            error("Authoring source belongs to another project")
         }
-        val created = createInternal(name, mode)
-        return updateProject(created.record.copy(directory = guestDirectory, activeDirectory = guestDirectory))
+        projects.firstOrNull { it.record.id == projectId }?.let {
+            val placeholder = "$projectsGuestRoot/$projectId/workspace"
+            require(it.record.directory == guestDirectory || (it.record.directory == placeholder && it.record.authoringIntentId == authoringIntentId)) {
+                "Authoring project changed"
+            }
+            return updateProject(it.record.copy(directory = guestDirectory, activeDirectory = guestDirectory,
+                authoringIntentId = authoringIntentId, visibleModes = it.record.visibleModes + mode))
+        }
+        return createProject(name, ProjectStorageKind.Internal, null, null, mode, projectId, guestDirectory, authoringIntentId)
     }
 
     fun createSafMirror(
@@ -184,12 +266,17 @@ internal class ProjectRepository(
         sourceTreeUri: String?,
         sourceDisplayName: String?,
         mode: SessionMode,
+        requestedProjectId: String? = null,
+        initialDirectory: String? = null,
+        authoringIntentId: String? = null,
     ): ProjectSnapshot {
-        val id = newId()
+        val id = requestedProjectId ?: newId()
         require(isLowercaseUuid(id)) { "project id must be a lowercase UUID" }
-        val cleanName = name.trim()
+        val cleanName = if (authoringIntentId != null) name else name.trim()
         require(cleanName.isNotEmpty()) { "project name cannot be blank" }
-        require(cleanName.length <= 120) { "project name is too long" }
+        require(if (authoringIntentId != null) cleanName.codePointCount(0, cleanName.length) <= 80 else cleanName.length <= 120) {
+            "project name is too long"
+        }
         val dir = projectDirectory(id)
         require(!dir.exists()) { "project already exists: $id" }
         load()
@@ -206,9 +293,10 @@ internal class ProjectRepository(
             updatedAtEpochMillis = timestamp,
             sourceTreeUri = sourceTreeUri,
             sourceDisplayName = sourceDisplayName,
-            directory = guestWorkspace,
-            activeDirectory = guestWorkspace,
+            directory = initialDirectory ?: guestWorkspace,
+            activeDirectory = initialDirectory ?: guestWorkspace,
             visibleModes = setOf(mode),
+            authoringIntentId = authoringIntentId,
         )
         try {
             writeProject(record)
@@ -266,20 +354,28 @@ internal class ProjectRepository(
     fun updateSessions(
         projectId: String?,
         sessions: List<ProjectSessionSummary>,
+        preserveSessionIds: Set<String> = emptySet(),
     ): ProjectStoreState {
         val state = load()
         val snapshot = projectId?.let { loadProject(it) }
         val existing = snapshot?.sessions ?: state.globalSessions
-        val canonical = sessions.map { it.copy(sessionId = canonicalSessionId(it.sessionId)) }
+        val canonical = sessions.map { it.copy(sessionId = canonicalSessionId(it.sessionId),
+            transcriptPath = it.transcriptPath?.takeIf(String::isNotBlank)) }
         require(canonical.all { it.sessionId.isNotBlank() }) { "Session catalog contains an empty id" }
         require(canonical.groupBy { it.sessionId }.values.all { rows -> rows.map { it.mode }.distinct().size == 1 }) {
             "Session catalog contains conflicting modes"
         }
-        val incoming = canonical
-            .distinctBy { it.sessionId }
+        require(canonical.groupBy { it.sessionId }.values.all { rows -> rows.mapNotNull { it.transcriptPath }.distinct().size <= 1 }) {
+            "Session catalog contains conflicting transcript identities"
+        }
+        val incoming = canonical.groupBy { it.sessionId }.values
+            .map { rows -> rows.first().copy(transcriptPath = rows.firstNotNullOfOrNull { it.transcriptPath }) }
             .map { row ->
                 val cached = existing.firstOrNull { it.sessionId == row.sessionId }
                 require(cached == null || cached.mode == row.mode) { "A session's mode cannot change" }
+                require(cached?.transcriptPath == null || row.transcriptPath == null || cached.transcriptPath == row.transcriptPath) {
+                    "A session's transcript identity cannot change"
+                }
                 if (cached?.pendingCatalogConfirmation == true && row.messageCount < cached.messageCount) {
                     return@map cached
                 }
@@ -292,10 +388,12 @@ internal class ProjectRepository(
                 )
             }
         val incomingIds = incoming.mapTo(mutableSetOf()) { it.sessionId }
-        // Retain only local rows that the file-backed engine has not acknowledged,
-        // plus archived metadata; normal confirmed rows remain authoritative.
+        // A listing is scoped to the engine's current directory. Keep the
+        // selected exact transcript identity even when another directory's
+        // listing omits it; a missing file is reported on restore, never
+        // replaced by another transcript with the same UUID.
         val normalized = (incoming + existing.filter {
-            it.sessionId !in incomingIds && (it.pendingCatalogConfirmation || it.isArchived ||
+            it.sessionId !in incomingIds && (it.sessionId in preserveSessionIds || it.pendingCatalogConfirmation || it.isArchived || it.transcriptPath != null ||
                 (snapshot != null && it.workspaceDirectory != null && it.workspaceDirectory != snapshot.record.activeDirectory))
         }).sortedByDescending { it.updatedAtEpochMillis }
         requireNoOtherSessionOwner(state, projectId, normalized)
@@ -317,10 +415,10 @@ internal class ProjectRepository(
     }
 
     /**
-     * Persist a freshly confirmed Engine session before it has a rollout file.
+     * Persist a freshly confirmed Engine session and its exact transcript source.
      *
      * The engine's SessionList is file-backed, so a SessionStarted event can
-     * precede the new empty session appearing in that listing. Keeping this
+     * precede the new anchored session appearing in that listing. Keeping this
      * small, idempotent row makes the Project or global conversation recoverable
      * immediately. Omitted provisional rows survive stale lists until the
      * engine includes the id, at which point catalog data replaces the row.
@@ -331,6 +429,8 @@ internal class ProjectRepository(
         title: String,
         mode: SessionMode,
         initialMessageCount: Int = 0,
+        transcriptPath: String? = null,
+        markActive: Boolean = true,
     ): ProjectStoreState {
         val canonicalId = canonicalSessionId(sessionId)
         require(canonicalId.isNotBlank()) { "session id cannot be blank" }
@@ -343,6 +443,9 @@ internal class ProjectRepository(
         val timestamp = now()
         val existing = sessions.firstOrNull { it.sessionId == canonicalId }
         require(existing == null || existing.mode == mode) { "A session's mode cannot change" }
+        require(existing?.transcriptPath == null || transcriptPath.isNullOrBlank() || existing.transcriptPath == transcriptPath) {
+            "A session's transcript identity cannot change"
+        }
         val started = ProjectSessionSummary(
             sessionId = canonicalId,
             title = title.ifBlank {
@@ -357,7 +460,7 @@ internal class ProjectRepository(
                 initialMessageCount > (existing?.messageCount ?: 0),
             workspaceDirectory = existing?.workspaceDirectory ?: snapshot?.record?.activeDirectory,
             originalProjectDirectory = existing?.originalProjectDirectory ?: snapshot?.record?.activeDirectory,
-            transcriptPath = existing?.transcriptPath,
+            transcriptPath = transcriptPath?.takeIf(String::isNotBlank) ?: existing?.transcriptPath,
         )
         val updated = listOf(started) + sessions.filterNot { it.sessionId == canonicalId }
         requireNoOtherSessionOwner(state, projectId, updated)
@@ -365,11 +468,12 @@ internal class ProjectRepository(
             writeSessionFile(File(projectsRoot, GLOBAL_SESSION_INDEX_FILE), updated)
         } else {
             writeSessions(projectId, updated)
+            val record = requireNotNull(snapshot).record
             writeProject(
-                requireNotNull(snapshot).record.copy(
+                record.copy(
                     updatedAtEpochMillis = timestamp,
-                    lastActiveSessionId = canonicalId,
-                    visibleModes = snapshot.record.visibleModes + mode,
+                    lastActiveSessionId = if (markActive) canonicalId else record.lastActiveSessionId,
+                    visibleModes = record.visibleModes + mode,
                 ),
             )
         }
@@ -419,21 +523,48 @@ internal class ProjectRepository(
         writeJson(target, encodeBaseline(baseline), ::decodeBaseline)
     }
 
-    fun recordWorkspace(projectId: String, state: SessionWorkspaceState): ProjectStoreState {
-        load()
+    fun recordWorkspace(projectId: String?, state: SessionWorkspaceState, expectedPreviousPath: String? = null,
+        checkPreviousPath: Boolean = false, updateProjectDirectory: Boolean = true): ProjectStoreState {
+        val current = load()
+        if (projectId == null) {
+            if (current.globalSessions.none { canonicalSessionId(it.sessionId) == canonicalSessionId(state.sessionId) }) return current
+            val existing = current.globalSessions.single { canonicalSessionId(it.sessionId) == canonicalSessionId(state.sessionId) }
+            if (checkPreviousPath && existing.transcriptPath != expectedPreviousPath) return current
+            require(existing.transcriptPath == null || state.transcriptPath.isBlank() || existing.transcriptPath == state.transcriptPath ||
+                existing.transcriptPath == expectedPreviousPath) {
+                "A session's transcript identity cannot change"
+            }
+            val sessions = current.globalSessions.map { session ->
+                if (canonicalSessionId(session.sessionId) == canonicalSessionId(state.sessionId)) session.copy(
+                    workspaceDirectory = state.cwd,
+                    originalProjectDirectory = state.projectRoot,
+                    transcriptPath = state.transcriptPath.takeIf(String::isNotBlank) ?: session.transcriptPath,
+                ) else session
+            }
+            writeSessionFile(File(projectsRoot, GLOBAL_SESSION_INDEX_FILE), sessions)
+            return load()
+        }
         val snapshot = loadProject(projectId)
+        val existing = snapshot.sessions.firstOrNull { canonicalSessionId(it.sessionId) == canonicalSessionId(state.sessionId) }
+        if (checkPreviousPath && existing?.transcriptPath != expectedPreviousPath) return current
+        require(existing?.transcriptPath == null || state.transcriptPath.isBlank() || existing.transcriptPath == state.transcriptPath ||
+            existing.transcriptPath == expectedPreviousPath) {
+            "A session's transcript identity cannot change"
+        }
         workspaceForDirectory(projectId, state.cwd)
         state.additionalDirectories.forEach { workspaceForDirectory(projectId, it, requireExisting = false) }
-        writeProject(snapshot.record.copy(
-            activeDirectory = state.cwd,
-            additionalDirectories = (snapshot.record.additionalDirectories + state.additionalDirectories + state.cwd)
-                .filter { it != snapshot.record.directory }.distinct(),
-        ))
+        if (updateProjectDirectory) {
+            writeProject(snapshot.record.copy(
+                activeDirectory = state.cwd,
+                additionalDirectories = (snapshot.record.additionalDirectories + state.additionalDirectories + state.cwd)
+                    .filter { it != snapshot.record.directory }.distinct(),
+            ))
+        }
         writeSessions(projectId, snapshot.sessions.map { session ->
             if (canonicalSessionId(session.sessionId) == canonicalSessionId(state.sessionId)) session.copy(
                 workspaceDirectory = state.cwd,
                 originalProjectDirectory = state.projectRoot,
-                transcriptPath = state.transcriptPath,
+                transcriptPath = state.transcriptPath.takeIf(String::isNotBlank) ?: session.transcriptPath,
             ) else session
         })
         return load()
@@ -455,6 +586,12 @@ internal class ProjectRepository(
     }
 
     fun workspace(projectId: String): ProjectWorkspace = loadProjectLayout(projectId).workspace
+
+    fun knownProjectIds(): Set<String> = readIndex().projectIds.toSet()
+
+    fun bothSessionIndexesMissing(): Boolean = listOf(
+        File(projectsRoot, PROJECTS_INDEX_FILE), File(projectsRoot, GLOBAL_SESSION_INDEX_FILE),
+    ).all { !it.exists() && !Files.isSymbolicLink(it.toPath()) }
 
     fun project(projectId: String): ProjectSnapshot = loadProject(projectId)
 
@@ -597,7 +734,9 @@ internal class ProjectRepository(
     }
 
     private fun <T> writeJson(target: File, value: String, decoder: (String) -> T) {
-        writer.write(target, value) { decoder(it) }
+        val guard = writePublication
+        if (guard == null) writer.write(target, value) { decoder(it) }
+        else writer.writeGuarded(target, value, { decoder(it) }) { commit -> guard(target, commit) }
     }
 
     private fun projectDirectory(projectId: String): File = File(projectsRoot, projectId)
@@ -643,6 +782,7 @@ internal class ProjectRepository(
         .put("lastSyncAtEpochMillis", value.lastSyncAtEpochMillis)
         .put("lastActiveSessionId", value.lastActiveSessionId)
         .put("syncState", value.syncState.name)
+        .put("authoringIntentId", value.authoringIntentId)
         .toString(2)
 
     private fun decodeProject(text: String): ProjectRecord {
@@ -650,9 +790,10 @@ internal class ProjectRepository(
         require(json.getInt("version") == 1)
         val id = json.getString("id")
         validateProjectId(id)
+        val authoringIntentId = json.optNullableString("authoringIntentId")?.also(::validateProjectId)
         return ProjectRecord(
             id = id,
-            name = json.getString("name").also { require(it.isNotBlank()) },
+            name = json.getString("name").also { require(if (authoringIntentId != null) it.isNotEmpty() else it.isNotBlank()) },
             directory = json.getString("directory"),
             activeDirectory = json.getString("activeDirectory"),
             additionalDirectories = json.getJSONArray("additionalDirectories").stringList(),
@@ -667,6 +808,7 @@ internal class ProjectRepository(
             lastActiveSessionId = json.optNullableString("lastActiveSessionId")
                 ?.let(::canonicalSessionId),
             syncState = ProjectSyncState.valueOf(json.getString("syncState")),
+            authoringIntentId = authoringIntentId,
         )
     }
 

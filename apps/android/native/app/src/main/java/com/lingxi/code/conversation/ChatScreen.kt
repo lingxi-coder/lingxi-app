@@ -44,6 +44,7 @@ import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -167,6 +168,10 @@ fun ChatScreen(
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
+    hasUnsentDraft: Boolean = false,
+    canRestoreUnsentDraft: Boolean = false,
+    onRestoreUnsentDraft: () -> Unit = {},
+    onRetryAuthoring: (() -> Unit)? = null,
     attachments: List<ComposerAttachment> = emptyList(),
     onRemoveAttachmentAt: (Int) -> Unit = {},
     onShare: (String) -> Unit = {},
@@ -484,6 +489,14 @@ fun ChatScreen(
                     onPickWorkspace = onPickWorkspace,
                     modeSelectionEnabled = modeSelectionEnabled,
                 )
+            }
+            if (hasUnsentDraft) {
+                TextButton(onClick = onRestoreUnsentDraft, enabled = canRestoreUnsentDraft) {
+                    Text(stringResource(R.string.chat_restore_unsent_message))
+                }
+            }
+            onRetryAuthoring?.let { retry ->
+                TextButton(onClick = retry) { Text(stringResource(R.string.common_retry)) }
             }
             Composer(
                 text = draft,

@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 
@@ -58,6 +59,8 @@ data class ConversationRecoverySpec(
     val workspaceKey: String? = null,
     val guestPath: String? = null,
     val additionalDirectories: List<String> = emptyList(),
+    /** Exact SDK catalog path, which may be a guest path; never rewrite it. */
+    val transcriptPath: String? = null,
     /** A new engine generation never inherits another owner's pending actions. */
     val runtimeGeneration: String = java.util.UUID.randomUUID().toString(),
 ) {
@@ -369,16 +372,41 @@ internal class DurableAttachCoordinator {
 internal class RecoveringConversationSource(
     private val pendingSource: Deferred<ConversationSource?>,
     private val strings: ConversationStrings,
-    override val recoverySpec: ConversationRecoverySpec,
+    recoverySpec: ConversationRecoverySpec,
     private val releaseClaim: () -> Boolean = { ConversationHeadlessRecovery.releaseUiClaim(recoverySpec.ownerKey) },
-) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource {
+) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource, DurableTranscriptSource {
     private val delegateScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val models = MutableStateFlow(EngineModelState())
     private val sessions = MutableStateFlow(EngineSessionState.loading())
+    private val workspace = MutableStateFlow<com.lingxi.code.project.SessionWorkspaceState?>(null)
     private val activeSession = MutableStateFlow<ActivatedSession?>(null)
     private val permissions = MutableStateFlow<PermissionPromptState?>(null)
     private val mcp = MutableStateFlow(emptyList<MCPServer>())
+    private val coldAuthoringRecovery = MutableStateFlow(ColdAuthoringRecoveryState.NotNeeded)
+    override val coldAuthoringRecoveryState: StateFlow<ColdAuthoringRecoveryState> = coldAuthoringRecovery.asStateFlow()
+    override suspend fun retryColdAuthoringRecovery() {
+        val delegate = pendingSource.await() ?: error("engine is not connected")
+        delegate.retryColdAuthoringRecovery()
+    }
     @Volatile private var retainedSource: ConversationSource? = null
+    override val turnAdmissionReady: Boolean get() = retainedSource?.turnAdmissionReady == true
+    internal fun acknowledgeAuthoringBinding(identity: com.lingxi.code.project.AuthoringSourceIdentity, sessionId: String): Boolean =
+        (retainedSource as? EngineConversationSource)?.acknowledgeAuthoringBinding(identity, sessionId) == true
+    internal fun verifiedAuthoringSource(): com.lingxi.code.project.AuthoringSourceIdentity? =
+        (retainedSource as? EngineConversationSource)?.takeIf { it.turnAdmissionReady }?.authoringSourceIdentity
+    internal fun pendingAuthoringSourceIdentity(): com.lingxi.code.project.AuthoringSourceIdentity? =
+        (retainedSource as? EngineConversationSource)?.authoringSourceIdentity
+    internal fun reserveAuthoringSelection(): Boolean =
+        (retainedSource as? EngineConversationSource)?.reserveAuthoringSelection() == true
+    internal fun releaseAuthoringSelection() {
+        (retainedSource as? EngineConversationSource)?.releaseAuthoringSelection()
+    }
+    internal suspend fun authoritativeAuthoringWorkspace(): com.lingxi.code.project.SessionWorkspaceState =
+        (retainedSource as? EngineConversationSource)?.authoritativeAuthoringWorkspace()
+            ?: error("Authoring source is unavailable")
+    private val initialRecoverySpec = recoverySpec
+    override val recoverySpec: ConversationRecoverySpec
+        get() = retainedSource?.recoverySpec ?: initialRecoverySpec
     private val ownershipLock = Any()
     private var closed = false
     private var releasedToRecovery = false
@@ -402,9 +430,13 @@ internal class RecoveringConversationSource(
             }
             launch { delegate.modelState.collect { models.value = it } }
             launch { delegate.sessionState.collect { sessions.value = it } }
+            launch { delegate.workspaceState.collect { workspace.value = it } }
             launch { delegate.activeSessionState.collect { activeSession.value = it } }
             launch { delegate.pendingPermission.collect { permissions.value = it } }
             launch { delegate.mcpServers.collect { mcp.value = it } }
+            delegate.coldAuthoringRecoveryState?.let { state ->
+                launch { state.collect { coldAuthoringRecovery.value = it } }
+            }
         }
     }
 
@@ -428,8 +460,26 @@ internal class RecoveringConversationSource(
     override val pendingPermission: StateFlow<PermissionPromptState?> = permissions.asStateFlow()
     override val modelState: StateFlow<EngineModelState> = models.asStateFlow()
     override val sessionState: StateFlow<EngineSessionState> = sessions.asStateFlow()
+    override val workspaceState: StateFlow<com.lingxi.code.project.SessionWorkspaceState?> = workspace.asStateFlow()
     override val activeSessionState: StateFlow<ActivatedSession?> = activeSession.asStateFlow()
     override val mcpServers: StateFlow<List<MCPServer>> = mcp.asStateFlow()
+
+    override suspend fun awaitTurnTranscriptPath(): String {
+        val expected = initialRecoverySpec.transcriptPath?.takeIf(String::isNotBlank)
+            ?: error("Conversation transcript is unavailable")
+        val delegate = pendingSource.await() ?: error("engine is not connected")
+        val actual = if (delegate is EngineConversationSource) delegate.awaitTurnTranscriptPath() else {
+            val id = delegate.activeSessionState.value?.sessionId ?: error("Conversation session is not ready")
+            kotlinx.coroutines.withTimeoutOrNull(20_000L) {
+                delegate.workspaceState.first { state -> state != null &&
+                    canonicalSessionId(state.sessionId) == canonicalSessionId(id) && state.transcriptPath.isNotBlank() }
+            }?.transcriptPath ?: error("Conversation transcript is unavailable")
+        }
+        check(delegate.recoverySpec?.ownerKey == initialRecoverySpec.ownerKey && actual == expected) {
+            "Conversation recovery source changed"
+        }
+        return actual
+    }
 
     override suspend fun submitClientCommand(command: ClientCommand) {
         pendingSource.await()?.submitClientCommand(command)
@@ -508,28 +558,51 @@ internal class RecoveringConversationSource(
         turnId: Long,
         visualizationContext: VisualizationRef?,
         promptMode: PromptModeDto?,
+    ): Flow<ReplyEvent> = submitForComposer(text, images, turnId, visualizationContext, promptMode, onNotAdmitted = {})
+
+    internal fun submitForComposer(
+        text: String, images: List<ImageRefDto>, turnId: Long,
+        visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, onNotAdmitted: () -> Unit,
+        tryBeginNative: () -> Boolean = { true },
     ): Flow<ReplyEvent> = flow {
         val delegate = pendingSource.await()
         if (delegate == null) {
+            onNotAdmitted()
             emit(ReplyEvent.Error(strings.resolve(R.string.chat_engine_build_failed, "引擎创建失败")))
             emit(ReplyEvent.End)
             return@flow
         }
-        emitAll(delegate.submit(text, images, turnId, visualizationContext, promptMode))
+        emitAll(if (delegate is EngineConversationSource)
+            delegate.submitForComposer(text, images, turnId, visualizationContext, promptMode, onNotAdmitted, tryBeginNative)
+        else {
+            if (!tryBeginNative()) throw kotlinx.coroutines.CancellationException("Turn cancelled before submission")
+            delegate.submit(text, images, turnId, visualizationContext, promptMode)
+        })
     }
 
     override fun submitSlashCommand(
         raw: ClientTextDto,
         images: List<ImageRefDto>,
         turnId: Long,
+    ): Flow<ReplyEvent> = submitSlashForComposer(raw, images, turnId, onNotAdmitted = {})
+
+    internal fun submitSlashForComposer(
+        raw: ClientTextDto, images: List<ImageRefDto>, turnId: Long, onNotAdmitted: () -> Unit,
+        tryBeginNative: () -> Boolean = { true },
     ): Flow<ReplyEvent> = flow {
         val delegate = pendingSource.await() as? SlashCommandConversationSource
         if (delegate == null) {
+            onNotAdmitted()
             emit(ReplyEvent.Error(strings.resolve(R.string.chat_engine_build_failed, "引擎创建失败")))
             emit(ReplyEvent.End)
             return@flow
         }
-        emitAll(delegate.submitSlashCommand(raw, images, turnId))
+        emitAll(if (delegate is EngineConversationSource)
+            delegate.submitSlashForComposer(raw, images, turnId, onNotAdmitted, tryBeginNative)
+        else {
+            if (!tryBeginNative()) throw kotlinx.coroutines.CancellationException("Turn cancelled before submission")
+            delegate.submitSlashCommand(raw, images, turnId)
+        })
     }
 
     override suspend fun cancel(turnId: Long?) {

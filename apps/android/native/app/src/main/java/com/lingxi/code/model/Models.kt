@@ -44,6 +44,7 @@ data class ProjectSession(
     val msgs: Int,
     val mode: SessionMode,
     val updatedAtEpochMillis: Long = 0L,
+    val transcriptPath: String? = null,
 )
 
 data class Project(

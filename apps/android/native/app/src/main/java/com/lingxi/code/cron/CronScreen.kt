@@ -94,8 +94,11 @@ fun CronScreen(
 ) {
     val state by vm.state.collectAsState()
     val modelState = engineSource?.modelState?.collectAsState()?.value
+    val activeMode = engineSource?.activeSessionState?.collectAsState()?.value?.mode
     val projects = projectStore?.state?.collectAsState()?.value
     val context = LocalContext.current
+    val scopeStore = remember(context) { com.lingxi.code.project.ScopeStateStore(context.applicationContext) }
+    val ownerRevision by scopeStore.ownerChanges.collectAsState()
     val lifecycleOwner = LocalLifecycleOwner.current
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("all") }
@@ -106,6 +109,8 @@ fun CronScreen(
     var selectedScopeId by rememberSaveable { mutableStateOf(GLOBAL_CRON_SCOPE_ID) }
     var editingTaskId by rememberSaveable { mutableStateOf<String?>(null) }
     var metadata by rememberSaveable { mutableStateOf(CronAutomation.defaults("").json) }
+    var formMode by rememberSaveable { mutableStateOf<String?>(null) }
+    var owners by remember { mutableStateOf<Map<String, com.lingxi.code.project.ScopeStateStore.SessionOwner>>(emptyMap()) }
     val automation = CronAutomation(metadata)
     var dirty by rememberSaveable { mutableStateOf(false) }
     var discardAction by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -122,13 +127,17 @@ fun CronScreen(
         prompt = task.task.prompt
         cronExpr = task.task.cron
         recurring = task.task.recurring
-        metadata = CronAutomation.from(task.task).json
+        val existing = CronAutomation.from(task.task)
+        metadata = existing.json
+        formMode = if (existing.runMode == "selected_session") existing.targetSessionMode else existing.sessionMode
         detail = true; dirty = false; formError = null
     }
     fun create() {
         editingTaskId = null; selectedScopeId = GLOBAL_CRON_SCOPE_ID
         prompt = ""; cronExpr = "0 9 * * *"; recurring = true
-        metadata = CronAutomation.defaults(modelState?.active.orEmpty()).json
+        formMode = activeMode?.wireValue
+        metadata = CronAutomation.defaults(modelState?.active.orEmpty())
+            .change("sessionMode", formMode).change("sessionScopeKey", cronCreatedSessionScope(selectedScopeId)).json
         detail = true; dirty = false; formError = null
     }
     DisposableEffect(lifecycleOwner, vm) {
@@ -143,6 +152,23 @@ fun CronScreen(
             create()
             prompt = initialPrompt
             appliedInitialPrompt = true
+        }
+    }
+    LaunchedEffect(projects, state.generatedSessions, scopeStore, ownerRevision) {
+        owners = try {
+            scopeStore.validate()
+            scopeStore.readSessionOwners()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+    LaunchedEffect(activeMode, detail, editingTaskId, formMode) {
+        if (detail && editingTaskId == null && formMode == null && activeMode != null) {
+            formMode = activeMode.wireValue
+            metadata = automation.change("sessionMode", activeMode.wireValue)
+                .change("sessionScopeKey", cronCreatedSessionScope(selectedScopeId)).json
         }
     }
     // A new task needs a model; fill it in once the engine reports the active one.
@@ -216,24 +242,33 @@ fun CronScreen(
                         colors = CardDefaults.outlinedCardColors(containerColor = MaterialTheme.colorScheme.surface),
                     ) {
                     CronChoice(stringResource(R.string.cron_runs_in), automation.runMode, listOf("new_session" to stringResource(R.string.cron_run_mode_new_chat), "selected_session" to stringResource(R.string.cron_run_mode_selected_chat), "task_session" to stringResource(R.string.cron_run_mode_task_chat))) {
-                        change(automation.change("runMode", it).change("targetSessionId", null).change("ownedSessionId", null))
+                        if (it != automation.runMode) {
+                            change(automation.change("runMode", it).clearTarget().clearOwnedSession()
+                                .change("sessionMode", formMode).change("sessionScopeKey", cronCreatedSessionScope(selectedScopeId)))
+                        }
                     }
                     CronChoice(stringResource(R.string.cron_run_project_label), selectedScopeId, state.scopes.map { it.scopeId to if (it.projectId == null) stringResource(R.string.common_none) else it.projectName }, enabled = editingTaskId == null && automation.runMode != "selected_session") {
-                        selectedScopeId = it; dirty = true
+                        selectedScopeId = it
+                        change(automation.change("sessionScopeKey", cronCreatedSessionScope(it)))
                     }
                     if (automation.runMode == "selected_session") {
-                        val sessions = buildList {
-                            state.generatedSessions.filter { it.projectId == null && it.sessionId != null }.distinctBy { it.sessionId }
-                                .forEach { add(Triple(GLOBAL_CRON_SCOPE_ID, it.sessionId!!, it.prompt.take(120))) }
-                            projects?.projects?.forEach { project -> project.sessions.filterNot { it.isArchived }.forEach { add(Triple(project.record.id, it.sessionId, "${project.record.name} / ${it.title}")) } }
-                        }.filter { editingTaskId == null || it.first == selectedScopeId }
-                        CronChoice(stringResource(R.string.drawer_tab_chat), automation.targetSessionId, sessions.map { it.second to it.third }) { id ->
-                            sessions.firstOrNull { it.second == id }?.let { selectedScopeId = it.first }
-                            change(automation.change("targetSessionId", id))
+                        val mode = com.lingxi.code.model.SessionMode.entries.firstOrNull { it.wireValue == formMode }
+                        val sessions = if (projects != null && mode != null)
+                            cronSessionTargets(projects!!, state.generatedSessions, owners, mode)
+                                .filter { editingTaskId == null || it.schedulerScopeId == selectedScopeId }
+                        else emptyList()
+                        CronChoice(stringResource(R.string.drawer_tab_chat), automation.targetSessionId, sessions.map { it.sessionId to it.label }) { id ->
+                            sessions.singleOrNull { it.sessionId == id }?.let { target ->
+                                selectedScopeId = target.schedulerScopeId
+                                change(automation.withTarget(target))
+                            }
                         }
                     }
                     if (editingTaskId != null) OutlinedButton(onClick = {
-                        editingTaskId = null; metadata = automation.copied().json; dirty = true
+                        editingTaskId = null
+                        metadata = automation.copied().change("sessionMode", formMode)
+                            .change("sessionScopeKey", cronCreatedSessionScope(selectedScopeId)).json
+                        dirty = true
                     }) { Text(stringResource(R.string.cron_copy_project)) }
                     CronChoice(stringResource(R.string.session_details_model), automation.model, modelState?.available.orEmpty().map { it to (modelState?.details?.get(it)?.displayName ?: it) }) { model ->
                         change(automation.change("model", model).withReasoning(com.lingxi.code.bindings.client.ReasoningSelectionDto.Automatic))
@@ -256,16 +291,35 @@ fun CronScreen(
                     Text("${stringResource(R.string.cron_time_zone)}: ${ZoneId.systemDefault().id}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     val validation = stringResource(R.string.cron_form_validation_error)
                     Button(enabled = !submitting, onClick = {
-                        if (prompt.isBlank() || cronExpr.isBlank() || automation.model.isBlank() || (automation.runMode == "selected_session" && automation.targetSessionId.isBlank())) {
+                        val selectedMode = com.lingxi.code.model.SessionMode.entries.firstOrNull { it.wireValue == formMode }
+                        if (prompt.isBlank() || cronExpr.isBlank() || automation.model.isBlank() || selectedMode == null ||
+                            (automation.runMode == "selected_session" && (automation.targetSessionId.isBlank() ||
+                                automation.targetSessionTranscriptPath.isBlank() || automation.targetSessionMode != selectedMode.wireValue ||
+                                automation.targetSessionScopeKey.isBlank())) ||
+                            (automation.runMode != "selected_session" && (automation.sessionMode != selectedMode.wireValue ||
+                                automation.sessionScopeKey != cronCreatedSessionScope(selectedScopeId)))) {
                             formError = validation; return@Button
                         }
                         submitting = true
+                        val saveScope = selectedScopeId
+                        val saveAutomation = automation
+                        val validate: suspend () -> Unit = {
+                            val store = requireNotNull(projectStore) { validation }
+                            scopeStore.validate()
+                            store.validateOwnerIndexes()
+                            scopeStore.validate()
+                            val currentOwners = scopeStore.readSessionOwners()
+                            if (saveAutomation.runMode == "selected_session") {
+                                val targets = cronSessionTargets(store.state.value, vm.state.value.generatedSessions, currentOwners, selectedMode)
+                                require(targets.count { saveAutomation.matchesTarget(it, saveScope, selectedMode) } == 1) { validation }
+                            }
+                        }
                         val result: (String?) -> Unit = { error ->
                             submitting = false; formError = error
                             if (error == null) { dirty = false; detail = false }
                         }
-                        editingTaskId?.let { vm.update(selectedScopeId, it, cronExpr, prompt, recurring, automation, result) }
-                            ?: vm.create(selectedScopeId, cronExpr, prompt, recurring, automation, result)
+                        editingTaskId?.let { vm.update(saveScope, it, cronExpr, prompt, recurring, saveAutomation, validate, result) }
+                            ?: vm.create(saveScope, cronExpr, prompt, recurring, saveAutomation, validate, result)
                     }) { Text(stringResource(if (submitting) R.string.audio_settings_saving else R.string.settings_save)) }
                 }
             }
@@ -592,6 +646,7 @@ private fun runStatusLabel(status: CronRunStatus): String = when (status) {
     CronRunStatus.Cancelled -> stringResource(R.string.chat_status_cancelled)
     CronRunStatus.Skipped -> stringResource(R.string.cron_status_skipped)
     CronRunStatus.Interrupted -> stringResource(R.string.chat_result_interrupted)
+    CronRunStatus.OutcomeUnknown -> stringResource(R.string.cron_status_outcome_unknown)
 }
 
 @Composable

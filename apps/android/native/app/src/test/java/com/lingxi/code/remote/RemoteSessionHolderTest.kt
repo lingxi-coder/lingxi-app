@@ -61,12 +61,12 @@ class RemoteSessionHolderTest {
         val holder = RemoteSessionHolder()
         val port = FakeRemoteSessionPort()
         val owner = open(holder, port)
-        owner.savedDraft = "unsent"
+        owner.updateDraft("unsent")
         holder.release("account/host/s1")
         val reopened = open(holder, port)
         assertSame(owner, reopened)
         assertTrue(reopened.needsReattach)
-        owner.savedDraft = ""
+        owner.updateDraft("")
         holder.release("account/host/s1")
         runCurrent()
         assertNotSame(owner, open(holder, port))

@@ -28,6 +28,82 @@ class ProjectRepositorySessionModeTest {
     )
 
     @Test
+    fun `an observed global session index deleted during staging stays missing`() {
+        val original = repository()
+        original.recordStartedSession(null, "first", "First", SessionMode.Chat, transcriptPath = "/guest/first.jsonl")
+        val index = File(temp.root, "projects/global-session-index.json")
+        val deletingWriter = ProjectAtomicWriter { target, text, validate ->
+            DefaultProjectAtomicWriter().write(target, text) { staged ->
+                validate(staged)
+                if (target == index) assertTrue(target.delete())
+            }
+        }
+        val guarded = ProjectRepository(projectsRoot = File(temp.root, "projects"), userHome = File(temp.root, "user-home"),
+            projectsGuestRoot = projectsGuestRoot, userHomeGuestPath = guestHome, writer = deletingWriter)
+        assertTrue(runCatching {
+            guarded.recordStartedSession(null, "second", "Second", SessionMode.Chat, transcriptPath = "/guest/second.jsonl")
+        }.isFailure)
+        assertFalse(index.exists())
+    }
+
+    @Test
+    fun `global workspace persists the exact guest transcript path for cold restore`() {
+        val repository = repository()
+        val path = "/home/test_user/.config/lingxi/sessions/original.jsonl"
+        repository.recordStartedSession(null, "global-session", "Global", SessionMode.Chat)
+        repository.recordWorkspace(null, SessionWorkspaceState("global-session", guestHome, guestHome, emptyList(), path))
+        assertEquals(path, repository().load().globalSessions.single().transcriptPath)
+        repository.recordWorkspace(null, SessionWorkspaceState("global-session", guestHome, guestHome, emptyList(), ""))
+        assertEquals(path, repository().load().globalSessions.single().transcriptPath)
+    }
+
+    @Test
+    fun `a second transcript path cannot replace an existing session identity`() {
+        val repository = repository()
+        val original = "/guest/original.jsonl"
+        repository.recordStartedSession(null, "session", "Global", SessionMode.Chat, transcriptPath = original)
+        val before = File(temp.root, "projects/global-session-index.json").readText()
+        assertTrue(runCatching {
+            repository.updateSessions(null, listOf(ProjectSessionSummary("session", "Copy", 1, "", 1,
+                SessionMode.Chat, transcriptPath = "/guest/other.jsonl")))
+        }.isFailure)
+        assertEquals(before, File(temp.root, "projects/global-session-index.json").readText())
+        assertEquals(original, repository().load().globalSessions.single().transcriptPath)
+    }
+
+    @Test
+    fun `trusted workspace relocation uses exact old path CAS in global and project indexes`() {
+        val repository = repository()
+        val project = repository.createInternal("Project", SessionMode.Chat)
+        for (projectId in listOf<String?>(null, project.record.id)) {
+            val id = if (projectId == null) "global-id" else "project-id"
+            val cwd = if (projectId == null) guestHome else project.record.directory
+            val original = "/guest/$id-original.jsonl"
+            val relocated = "/guest/$id-relocated.jsonl"
+            repository.recordStartedSession(projectId, id, "Owner", SessionMode.Chat, transcriptPath = original)
+            val latest = SessionWorkspaceState(id, cwd, cwd, emptyList(), relocated)
+            repository.recordWorkspace(projectId, latest, expectedPreviousPath = original, checkPreviousPath = true)
+            val stale = SessionWorkspaceState(id, cwd, cwd, emptyList(), original)
+            repository.recordWorkspace(projectId, stale, expectedPreviousPath = original, checkPreviousPath = true)
+            val reloaded = repository().load()
+            val row = if (projectId == null) reloaded.globalSessions.single() else reloaded.projects.single().sessions.single()
+            assertEquals(relocated, row.transcriptPath)
+            assertTrue(runCatching { repository.updateSessions(projectId, listOf(
+                ProjectSessionSummary(id, "Foreign copy", 1, "", 1, SessionMode.Chat, transcriptPath = original))) }.isFailure)
+        }
+    }
+
+    @Test
+    fun `global listing from another directory retains the original exact transcript`() {
+        val repository = repository()
+        val original = ProjectSessionSummary("session", "Global", 1, "", 1, SessionMode.Chat,
+            workspaceDirectory = "/guest/original", transcriptPath = "/guest/original.jsonl")
+        repository.updateSessions(null, listOf(original))
+        repository.updateSessions(null, emptyList())
+        assertEquals(original.transcriptPath, repository().load().globalSessions.single().transcriptPath)
+    }
+
+    @Test
     fun `empty projects persist only their creation mode and can join another space`() {
         val repository = repository()
         val project = repository.createInternal("Chat workspace", SessionMode.Chat)
@@ -500,9 +576,10 @@ class ProjectRepositorySessionModeTest {
         assertEquals(setOf("a", "b"), restored.sessions.map { it.sessionId }.toSet())
         assertEquals(project.record.directory, restored.sessions.first { it.sessionId == "a" }.workspaceDirectory)
         assertEquals(linked, restored.sessions.first { it.sessionId == "b" }.workspaceDirectory)
-        // Deletion remains authoritative for the directory actually being listed.
+        // Omission is not proof of deletion: retain both exact identities and
+        // let the SDK validate the selected file on the next open.
         repository.updateSessions(project.record.id, emptyList())
-        assertEquals(listOf("a"), repository.project(project.record.id).sessions.map { it.sessionId })
+        assertEquals(setOf("a", "b"), repository.project(project.record.id).sessions.map { it.sessionId }.toSet())
     }
 
     @Test
@@ -524,10 +601,13 @@ class ProjectRepositorySessionModeTest {
         val guestSource = "$guestHome/$testConfigDirectory/.apps/counter"
         File(source, "index.html").writeText("unchanged")
         val repo = ProjectRepository(projects, userHome = home, projectsGuestRoot = "$guestHome/lingxi/projects", userHomeGuestPath = guestHome)
-        val first = repo.registerAuthoringWorkspace("Counter", guestSource, SessionMode.Code)
-        val second = repo.registerAuthoringWorkspace("Counter", guestSource, SessionMode.Code)
+        val projectId = java.util.UUID.randomUUID().toString()
+        val selectionId = java.util.UUID.randomUUID().toString()
+        val first = repo.registerAuthoringWorkspace("Counter", guestSource, SessionMode.Code, projectId, selectionId)
+        val second = repo.registerAuthoringWorkspace("Counter", guestSource, SessionMode.Code, projectId, selectionId)
         assertEquals(first.record.id, second.record.id)
         assertEquals(source.canonicalPath, first.workspace.hostPath)
+        assertEquals(selectionId, second.record.authoringIntentId)
         assertEquals("unchanged", File(source, "index.html").readText())
         assertTrue(first.sessions.isEmpty())
     }
@@ -539,9 +619,56 @@ class ProjectRepositorySessionModeTest {
         java.nio.file.Files.createSymbolicLink(File(home, "escape").toPath(), outside.toPath())
         val repo = ProjectRepository(File(home, "lingxi/projects"), userHome = home, projectsGuestRoot = "$guestHome/lingxi/projects", userHomeGuestPath = guestHome)
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            repo.registerAuthoringWorkspace("Escape", "$guestHome/escape", SessionMode.Code)
+            repo.registerAuthoringWorkspace("Escape", "$guestHome/escape", SessionMode.Code,
+                java.util.UUID.randomUUID().toString(), java.util.UUID.randomUUID().toString())
         }
         assertTrue(repo.load().projects.isEmpty())
+    }
+
+    @Test
+    fun `authoring placeholder publishes its exact recoverable selection before a source exists`() {
+        val home = temp.newFolder("authoring-placeholder-home")
+        val repo = ProjectRepository(File(home, "lingxi/projects"), userHome = home,
+            projectsGuestRoot = "$guestHome/lingxi/projects", userHomeGuestPath = guestHome)
+        val projectId = java.util.UUID.randomUUID().toString()
+        val selectionId = java.util.UUID.randomUUID().toString()
+        val placeholder = repo.createAuthoringPlaceholder("Counter", SessionMode.Code, projectId, selectionId)
+        assertEquals(selectionId, repo.load().projects.single().record.authoringIntentId)
+        assertTrue(placeholder.workspace.hostDirectory.isDirectory)
+        val source = File(home, "$testConfigDirectory/.apps/counter").apply { mkdirs() }
+        val updated = repo.registerAuthoringWorkspace("Counter", "$guestHome/$testConfigDirectory/.apps/counter",
+            SessionMode.Code, projectId, selectionId)
+        assertEquals(selectionId, updated.record.authoringIntentId)
+        assertEquals(source.canonicalPath, updated.workspace.hostPath)
+        assertEquals(projectId, repo.load().projects.single().record.id)
+    }
+
+    @Test
+    fun `authoring placeholder accepts the maximum sdk name in supplementary Unicode`() {
+        val home = temp.newFolder("authoring-unicode-home")
+        val repo = ProjectRepository(File(home, "lingxi/projects"), userHome = home,
+            projectsGuestRoot = "$guestHome/lingxi/projects", userHomeGuestPath = guestHome)
+        val name = "\uD83D\uDE00".repeat(80)
+        val project = repo.createAuthoringPlaceholder(name, SessionMode.Code,
+            java.util.UUID.randomUUID().toString(), java.util.UUID.randomUUID().toString())
+        assertEquals(name, repo.load().projects.single().record.name)
+        assertEquals(name, project.record.name)
+    }
+
+    @Test
+    fun `chat cannot create or register an authoring project`() {
+        val home = temp.newFolder("authoring-chat-home")
+        val root = File(home, "lingxi/projects")
+        val repo = ProjectRepository(root, userHome = home, projectsGuestRoot = "$guestHome/lingxi/projects", userHomeGuestPath = guestHome)
+        val projectId = java.util.UUID.randomUUID().toString()
+        val selectionId = java.util.UUID.randomUUID().toString()
+        val createFailure = runCatching { repo.createAuthoringPlaceholder("App", SessionMode.Chat, projectId, selectionId) }.exceptionOrNull()
+        val registerFailure = runCatching { repo.registerAuthoringWorkspace("App", "$guestHome/.config/.apps/app",
+            SessionMode.Chat, projectId, selectionId) }.exceptionOrNull()
+        assertEquals("local_app_development_requires_code", createFailure?.message)
+        assertEquals("local_app_development_requires_code", registerFailure?.message)
+        assertFalse(File(root, projectId).exists())
+        assertFalse(File(root, "index.json").exists())
     }
 
 }

@@ -12,6 +12,17 @@ import org.junit.Test
 
 class RecentSessionsTest {
 
+    @Test fun selectedRowRetainsItsOwnScopeModeAndTranscriptPath() {
+        val live = row("same-id", mode = SessionMode.Chat).copy(transcriptPath = "/b/same-id.jsonl")
+        val selected = build(globalSessions = listOf(live)).single().sessions.single()
+        assertEquals(ConversationScope.Global, selected.scope)
+        assertEquals(SessionMode.Chat, selected.mode)
+        assertEquals("/b/same-id.jsonl", selected.transcriptPath)
+        val changedCatalog = live.copy(transcriptPath = "/a/same-id.jsonl")
+        assertEquals("/b/same-id.jsonl", selected.transcriptPath)
+        assertEquals("/a/same-id.jsonl", build(globalSessions = listOf(changedCatalog)).single().sessions.single().transcriptPath)
+    }
+
     // 2026-10-12 18:00:00 in UTC+8 (the user's zone) = 10:00:00 UTC.
     private val zone = 8 * 3600
     private val now = 1_791_799_200L

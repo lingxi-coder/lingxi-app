@@ -80,38 +80,32 @@ internal fun SideChatSheet(
                     val permission by entry.viewModel.pendingPermission.collectAsState()
                     val draft by entry.draft.collectAsState()
                     val attachment by entry.attachment.collectAsState()
+                    val rejected by entry.rejected.collectAsState()
                     val onCameraClick = rememberCameraCapture { image ->
                         // Capture belongs to the entry that opened the camera, never the current selector.
                         if (entry in manager.chats.value && !entry.closing.value) {
                             BitmapFactory.decodeByteArray(image.jpegBytes, 0, image.jpegBytes.size)?.let { bitmap ->
-                                entry.attachment.value = ComposerAttachment(
+                                entry.updateAttachment(ComposerAttachment(
                                     thumb = bitmap.asImageBitmap(), width = image.width, height = image.height,
                                     mediaType = "image/jpeg", base64 = Base64.encodeToString(image.jpegBytes, Base64.NO_WRAP),
-                                )
+                                ))
                             }
                         }
                     }
-                    var submittedDraft by remember { mutableStateOf(entry.lastSubmission) }
-                    LaunchedEffect(state.error, state.compaction?.status, submittedDraft) {
-                        if (state.error != null || state.compaction?.status == CompactionProgressStatus.Failed) {
-                            val restored = restoreSideComposerAfterFailure(
-                                entry.draft.value, entry.attachment.value, submittedDraft, entry.lastSubmittedAttachment,
-                            )
-                            entry.draft.value = restored.first
-                            entry.attachment.value = restored.second
-                        }
-                    }
                     ChatScreen(
-                        state = if (closing) state.copy(sessionReady = false) else state, onSend = { submittedDraft = it; entry.lastSubmission = it; entry.viewModel.send(it) },
-                        onSendWithAttachment = { text, image ->
-                            submittedDraft = text
-                            entry.lastSubmission = text
-                            entry.lastSubmittedAttachment = image
-                            entry.viewModel.send(text, images = image?.toImageRef()?.let(::listOf).orEmpty())
-                        },
+                        state = if (closing) state.copy(sessionReady = false) else state,
+                        onSend = { entry.submit(it, null) },
+                        onSendWithAttachment = { text, image -> entry.submit(text, image) },
                         attachment = attachment,
                         onCameraClick = onCameraClick,
-                        onRemoveAttachment = { entry.attachment.value = null },
+                        onRemoveAttachment = {
+                            entry.updateAttachment(null)
+                            entry.pendingRestore?.cleared()
+                            entry.pendingRestore = null
+                        },
+                        hasUnsentDraft = rejected.isNotEmpty(),
+                        canRestoreUnsentDraft = draft.isEmpty() && attachment == null && state.visualizationChip == null,
+                        onRestoreUnsentDraft = entry::restoreRejected,
                         onSendPreflight = { text, attachment -> entry.viewModel.admitComposerSend(text, attachment != null) },
                         onNewChat = { manager.visible.value = false },
                         onSelectModel = entry.viewModel::selectModel,
@@ -120,7 +114,7 @@ internal fun SideChatSheet(
                         isDark = isDark, modifier = Modifier.weight(1f), showTopBar = false, showNewChatControls = false,
                         effectivePermissionMode = controls?.permission?.effective ?: "auto",
                         onOpenPermissionSettings = { controlsOpen = true },
-                        draft = draft, onDraftChange = { entry.draft.value = it },
+                        draft = draft, onDraftChange = entry::updateDraft,
                         pendingPermission = permission != null,
                         voiceInputSupported = false, voiceConversationSupported = false,
                         onStop = entry.viewModel::cancel,
@@ -181,7 +175,3 @@ private fun reasoningLabel(selection: ReasoningSelectionDto): String = when (sel
     is ReasoningSelectionDto.Level -> selection.id
     is ReasoningSelectionDto.TokenBudget -> "${selection.tokens} tokens"
 }
-
-internal fun <T> restoreSideComposerAfterFailure(
-    draft: String, attachment: T?, submittedDraft: String?, submittedAttachment: T?,
-): Pair<String, T?> = (draft.ifEmpty { submittedDraft.orEmpty() }) to (attachment ?: submittedAttachment)

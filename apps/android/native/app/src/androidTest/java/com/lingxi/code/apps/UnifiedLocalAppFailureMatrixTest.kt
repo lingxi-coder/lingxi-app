@@ -22,11 +22,11 @@ class UnifiedLocalAppFailureMatrixTest {
     @Test fun preparationWriteAndDownloadFailuresKeepServingReleaseAndData() = runBlocking<Unit> {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/failure-matrix-${UUID.randomUUID()}")
+        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).codeGuestCwd.trimEnd('/') + "/failure-matrix-${UUID.randomUUID()}")
         check(File(context.filesDir, "local-app-acceptance-fixtures/python").copyRecursively(source))
         val manifestFile = File(source, "lingxi-app.json")
         val original = manifestFile.readText()
-        val published = apps.request("publish") { put("sourcePath", source.path); put("expectedRevision", 0) } as JSONObject
+        val published = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish") { put("sourcePath", source.path); put("expectedRevision", 0) } as JSONObject
         val record = published.getJSONObject("record").appRecord()
         val release = published.getJSONObject("release").appRelease()
         NativeAppActivityHost(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
@@ -49,7 +49,7 @@ class UnifiedLocalAppFailureMatrixTest {
                 var latest = record.latestRevision
                 for ((command, expectedLog) in failures) {
                     manifestFile.writeText(JSONObject(original).put("build", JSONArray().put(JSONObject().put("command", command))).toString())
-                    val candidate = apps.request("publish", record.id) { put("sourcePath", source.path); put("expectedRevision", latest) } as JSONObject
+                    val candidate = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish", record.id) { put("sourcePath", source.path); put("expectedRevision", latest) } as JSONObject
                     val next = candidate.getJSONObject("release").appRelease(); latest = next.revision
                     apps.grant(record.id, next.digest)
                     val startFailure = runCatching { apps.start(record.id, revision = next.revision) }.exceptionOrNull()
@@ -66,7 +66,7 @@ class UnifiedLocalAppFailureMatrixTest {
                 // never replace the still-serving code or rewrite user data.
                 for ((compatibleFrom, expectedCode) in listOf(2 to "dataIncompatible", 1 to "dataMigrationRequired")) {
                     manifestFile.writeText(JSONObject(original).put("dataSchema", JSONObject().put("version", 2).put("compatibleFrom", compatibleFrom)).toString())
-                    val schema = apps.request("publish", record.id) { put("sourcePath", source.path); put("expectedRevision", latest) } as JSONObject
+                    val schema = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish", record.id) { put("sourcePath", source.path); put("expectedRevision", latest) } as JSONObject
                     val next = schema.getJSONObject("release").appRelease()
                     latest = next.revision
                     apps.grant(record.id, next.digest)
@@ -84,14 +84,14 @@ class UnifiedLocalAppFailureMatrixTest {
     @Test fun publicationCompareAndSwapAndOriginPortConflictHaveExplicitOutcomes() = runBlocking<Unit> {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/conflict-matrix-${UUID.randomUUID()}")
+        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).codeGuestCwd.trimEnd('/') + "/conflict-matrix-${UUID.randomUUID()}")
         check(File(context.filesDir, "local-app-acceptance-fixtures/static").copyRecursively(source))
-        val published = apps.request("publish") { put("sourcePath", source.path); put("expectedRevision", 0) } as JSONObject
+        val published = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish") { put("sourcePath", source.path); put("expectedRevision", 0) } as JSONObject
         val record = published.getJSONObject("record").appRecord()
         try {
             File(source, "dist/index.html").appendText("\n<!-- concurrent release -->")
             val outcomes = (1..2).map { async(Dispatchers.IO) {
-                runCatching { apps.request("publish", record.id) { put("sourcePath", source.path); put("expectedRevision", record.latestRevision) } }
+                runCatching { apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish", record.id) { put("sourcePath", source.path); put("expectedRevision", record.latestRevision) } }
             } }.awaitAll()
             assertEquals(1, outcomes.count { it.isSuccess })
             assertEquals(1, outcomes.count { it.isFailure })

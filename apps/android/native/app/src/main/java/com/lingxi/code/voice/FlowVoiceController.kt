@@ -332,6 +332,12 @@ internal class FlowVoiceController(
         listenImpl(pending.onSend, pending.onCancel, pending.cancelCurrentTurn)
     }
 
+    /** Correlate a rejected send to the listen operation that produced it. */
+    internal fun submissionGeneration(): Long = generation.get()
+    internal fun rejectSubmission(token: Long) {
+        if (isCurrent(token)) updateReply("", false)
+    }
+
     fun updateReply(text: String, streaming: Boolean) {
         if (pinnedConfiguration?.configuration?.conversation?.mode == "realtime") return
         val current = mutableState.value

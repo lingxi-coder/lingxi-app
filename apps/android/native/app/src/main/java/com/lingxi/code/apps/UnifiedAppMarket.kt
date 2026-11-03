@@ -59,10 +59,8 @@ class UnifiedAppMarket(private val context: Context, private val apps: UnifiedLo
                 require(manifest.toString() == distribution.getJSONObject("manifest").toString() ||
                     canonicalJson(manifest) == canonicalJson(distribution.getJSONObject("manifest"))) { "Package manifest differs from its release" }
                 val origin = JSONObject().put("appId", remoteId).put("releaseId", distribution.getString("versionId")).put("digest", distribution.getString("releaseDigest"))
-                if (installation == null) apps.importSource(source.absolutePath, origin) else {
-                    val result = apps.request("publish", installation.id) {
-                        put("sourcePath", source.absolutePath); put("expectedRevision", installation.latestRevision); put("marketOrigin", origin)
-                    } as JSONObject
+                if (installation == null) apps.installMarketSource(source.absolutePath, origin) else {
+                    val result = apps.publishMarketUpdate(installation.id, source.absolutePath, installation.latestRevision, origin)
                     apps.refresh()
                     val updated = result.getJSONObject("record").appRecord()
                     val release = result.getJSONObject("release").appRelease()

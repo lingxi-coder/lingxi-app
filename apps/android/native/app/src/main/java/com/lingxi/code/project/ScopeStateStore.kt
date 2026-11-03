@@ -53,6 +53,9 @@ class ScopeStateStore internal constructor(
 
     data class SessionOwner(val scopeKey: String, val mode: SessionMode)
 
+    /** Shared across store instances; emitted only after a durable owner claim. */
+    val ownerChanges: kotlinx.coroutines.flow.StateFlow<Long> get() = ownerRevision
+
     suspend fun validate() = withContext(Dispatchers.IO) {
         mutex.withLock { load() }
         Unit
@@ -74,15 +77,10 @@ class ScopeStateStore internal constructor(
         allowCommit: () -> Boolean = { true },
     ): Boolean = withContext(Dispatchers.IO) {
         mutex.withLock {
-            synchronized(com.lingxi.code.conversation.SessionAdmissionGate.lock) {
-                if (!allowCommit()) false else {
-                    val snapshot = load()
-                    val next = snapshot.copy(activeMode = mode,
-                        activeScopes = snapshot.activeScopes + (mode.wireValue to scopeKey))
-                    write(next)
-                    true
-                }
-            }
+            val snapshot = load()
+            val next = snapshot.copy(activeMode = mode,
+                activeScopes = snapshot.activeScopes + (mode.wireValue to scopeKey))
+            writeGuarded(next, allowCommit)
         }
     }
 
@@ -92,6 +90,17 @@ class ScopeStateStore internal constructor(
         scopeKey: String,
         mode: SessionMode,
         allowNew: () -> Boolean = { true },
+    ): Boolean = claimSessionOwner(sessionId, scopeKey, mode, allowNew, null)
+
+    internal suspend fun claimCronSessionOwner(sessionId: String, scopeKey: String, mode: SessionMode, token: Long): Boolean =
+        claimSessionOwner(sessionId, scopeKey, mode, { true }, token)
+
+    private suspend fun claimSessionOwner(
+        sessionId: String,
+        scopeKey: String,
+        mode: SessionMode,
+        allowNew: () -> Boolean,
+        reservationToken: Long?,
     ): Boolean =
         withContext(Dispatchers.IO) {
             mutex.withLock {
@@ -102,17 +111,125 @@ class ScopeStateStore internal constructor(
                 val owner = SessionOwner(scopeKey, mode)
                 val previous = snapshot.sessionOwners[id]
                 if (previous != null) return@withLock previous == owner
-                synchronized(com.lingxi.code.conversation.SessionAdmissionGate.lock) {
-                    if (!allowNew()) false else {
-                        write(snapshot.copy(sessionOwners = snapshot.sessionOwners + (id to owner)))
-                        true
+                val gate = com.lingxi.code.conversation.SessionAdmissionGate
+                val token = synchronized(gate.lock) {
+                    if (!allowNew()) null else gate.beginOwnerWrite(id, scopeKey, mode, reservationToken)
+                } ?: return@withLock false
+                try {
+                    // The UUID remains reserved while disk reads and fsync run.
+                    // Other owners and navigation do not need the global gate.
+                    while (true) {
+                        val receiptVersion = gate.receiptVersion()
+                        val read = runCatching {
+                            com.lingxi.code.cron.CronRunHistoryStore(File(file.parentFile, "cron/history")).validatedOwnerReceipts()
+                        }
+                        if (receiptVersion != gate.receiptVersion()) continue
+                        val receipts = read.getOrThrow()
+                        snapshot.sessionOwners.filterValues { it.scopeKey == "scheduled" }.forEach { (savedId, savedOwner) ->
+                            check(receipts.any { canonicalSessionId(checkNotNull(it.sessionId)) == savedId &&
+                                it.sessionScopeKey == savedOwner.scopeKey && it.sessionMode == savedOwner.mode.wireValue }) {
+                                "scheduled session $savedId is missing its owner receipt"
+                            }
+                        }
+                        if (owner.scopeKey == "scheduled" && receipts.none {
+                                canonicalSessionId(checkNotNull(it.sessionId)) == id &&
+                                    it.sessionScopeKey == owner.scopeKey && it.sessionMode == owner.mode.wireValue
+                            }) return@withLock false
+                        for (receipt in receipts) {
+                            val receiptId = canonicalSessionId(checkNotNull(receipt.sessionId))
+                            val receiptOwner = SessionOwner(checkNotNull(receipt.sessionScopeKey),
+                                com.lingxi.code.model.sessionModeFromWireValue(checkNotNull(receipt.sessionMode)))
+                            val recorded = snapshot.sessionOwners[receiptId]
+                            check(recorded == null || recorded == receiptOwner) { "scheduled session $receiptId has conflicting recorded owners" }
+                            if (receiptId == id && receiptOwner != owner) return@withLock false
+                        }
+                        val published = writeGuarded(snapshot.copy(sessionOwners = snapshot.sessionOwners + (id to owner))) {
+                            val runtime = gate.runtimeIdentity(id)
+                            allowNew() && gate.permitsOwnerWrite(token, id, reservationToken) &&
+                                gate.receiptVersion() == receiptVersion &&
+                                (runtime == null || (runtime.workspace == scopeKey && runtime.mode == mode))
+                        }
+                        if (published) {
+                            ownerRevision.value += 1L
+                            return@withLock true
+                        }
+                        val retry = synchronized(gate.lock) {
+                            allowNew() && gate.permitsOwnerWrite(token, id, reservationToken) &&
+                                gate.receiptVersion() != receiptVersion
+                        }
+                        if (!retry) return@withLock false
                     }
+                    @Suppress("UNREACHABLE_CODE") false
+                } finally {
+                    gate.finishOwnerWrite(token)
                 }
             }
         }
 
     suspend fun readSessionOwners(): Map<String, SessionOwner> = withContext(Dispatchers.IO) {
         mutex.withLock { load().sessionOwners }
+    }
+
+    /** Read claims while serializing with durable owner changes. */
+    internal suspend fun <T> withSessionOwnersLocked(block: (Map<String, SessionOwner>) -> T): T = withContext(Dispatchers.IO) {
+        mutex.withLock { block(load().sessionOwners) }
+    }
+
+    /** Validate all known owners before committing newly discovered SDK receipts. */
+    internal suspend fun reconcileCronReceipts(
+        discovered: List<com.lingxi.code.cron.CronRunRecord>,
+        indexed: Map<String, SessionOwner>,
+        indexedPaths: Map<String, String>,
+        knownProjectIds: Set<String> = emptySet(),
+        reservationToken: Long? = null,
+    ): List<com.lingxi.code.cron.CronRunRecord> = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val snapshot = load()
+            val history = com.lingxi.code.cron.CronRunHistoryStore(File(file.parentFile, "cron/history"))
+            val deferred = discovered.filter { run ->
+                val identity = com.lingxi.code.cron.CronOwnerIdentity(checkNotNull(run.sessionId),
+                    checkNotNull(run.sessionTranscriptPath), checkNotNull(run.sessionMode), checkNotNull(run.sessionScopeKey))
+                com.lingxi.code.conversation.SessionAdmissionGate.deferReceiptForOtherCron(
+                    com.lingxi.code.conversation.SessionAdmissionGate.ReceiptIdentity(
+                        canonicalSessionId(identity.sessionId), identity.scopeKey,
+                        com.lingxi.code.cron.validateCronOwnerIdentity(identity), identity.transcriptPath), reservationToken)
+            }
+            val ready = discovered - deferred.toSet()
+            history.withReceiptReservations(ready, reservationToken) {
+                val combined = history.validatedOwnerReceipts() + discovered
+                if (combined.isNotEmpty() && !file.exists() && !Files.isSymbolicLink(file.toPath())) {
+                    throw ProjectCatalogUnavailableException(listOf("owner-registry"),
+                        "Conversation owner registry is missing while scheduled owners exist")
+                }
+                combined.groupBy { canonicalSessionId(checkNotNull(it.sessionId)) }.forEach { (id, group) ->
+                    val identities = group.map { Triple(it.sessionScopeKey, it.sessionMode, it.sessionTranscriptPath) }.distinct()
+                    check(identities.size == 1) { "scheduled session $id has conflicting transcript identities" }
+                    val run = group.first()
+                    val owner = SessionOwner(checkNotNull(run.sessionScopeKey),
+                        com.lingxi.code.model.sessionModeFromWireValue(checkNotNull(run.sessionMode)))
+                    val project = com.lingxi.code.model.conversationScopeFromKey(owner.scopeKey) as? com.lingxi.code.model.ConversationScope.Project
+                    if (project != null && project.projectId !in knownProjectIds) {
+                        throw ProjectCatalogUnavailableException(listOf(owner.scopeKey), "Scheduled project owner is unavailable")
+                    }
+                    val other = listOfNotNull(indexed[id], snapshot.sessionOwners[id]).firstOrNull { it != owner }
+                    if (other != null) throw ProjectCatalogUnavailableException(
+                        listOf("scheduled", owner.scopeKey, other.scopeKey).distinct().sorted(),
+                        "Session $id has conflicting scheduled and recorded owners")
+                    if (indexedPaths[id] != null && indexedPaths[id] != run.sessionTranscriptPath) {
+                        throw ProjectCatalogUnavailableException(listOf("scheduled", owner.scopeKey).distinct().sorted(),
+                            "Session $id has conflicting transcript identities")
+                    }
+                }
+                snapshot.sessionOwners.filterValues { it.scopeKey == "scheduled" }.forEach { (id, owner) ->
+                    check(combined.any { canonicalSessionId(checkNotNull(it.sessionId)) == id &&
+                        it.sessionScopeKey == owner.scopeKey && it.sessionMode == owner.mode.wireValue }) {
+                        "scheduled session $id is missing its owner receipt"
+                    }
+                }
+                history.mergeSdkOwnerReceipts(ready)
+                history.validatedOwnerReceipts() + deferred
+            }
+        }
     }
 
     suspend fun matchesSessionOwner(sessionId: String, scopeKey: String, mode: SessionMode): Boolean =
@@ -126,12 +243,20 @@ class ScopeStateStore internal constructor(
     /** Persist the draft and its origin together so neither can outlive the other. */
     suspend fun persistHandoffDraft(
         scopeKey: String, sessionId: String, draft: String, handoff: ConversationHandoff,
-    ) {
+    ): String {
         val id = canonicalSessionId(sessionId)
         require(id.isNotBlank() && id != "new" && handoff.sourceSessionId.isNotBlank())
         val key = conversationDraftKey(scopeKey, id)
-        mutate { it.copy(conversationDrafts = it.conversationDrafts + (key to draft),
-            handoffs = it.handoffs + (key to handoff.copy(sourceSessionId = canonicalSessionId(handoff.sourceSessionId)))) }
+        var merged = draft
+        mutate { snapshot ->
+            // Another visible owner may have saved edits while the handoff was
+            // being prepared. Preserve those bytes in this same durable write,
+            // before the in-memory owner queues its latest value.
+            merged = com.lingxi.code.conversation.mergeHandoffDraft(draft, snapshot.conversationDrafts[key].orEmpty())
+            snapshot.copy(conversationDrafts = snapshot.conversationDrafts + (key to merged),
+                handoffs = snapshot.handoffs + (key to handoff.copy(sourceSessionId = canonicalSessionId(handoff.sourceSessionId))))
+        }
+        return merged
     }
 
     suspend fun readActiveMode(): SessionMode? = withContext(Dispatchers.IO) {
@@ -179,14 +304,14 @@ class ScopeStateStore internal constructor(
         mutate { it.copy(selectedMode = mode) }
     }
 
-    suspend fun persistLastActiveSession(scopeKey: String, sessionId: String?) {
-        mutate { snapshot ->
-            val current = snapshot.scopes[scopeKey] ?: ScopeState()
-            snapshot.copy(
-                scopes = snapshot.scopes + (scopeKey to current.copy(lastActiveSessionId = sessionId)),
-            )
+    suspend fun persistLastActiveSession(scopeKey: String, sessionId: String?, allowCommit: () -> Boolean = { true }): Boolean =
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                val snapshot = load()
+                val current = snapshot.scopes[scopeKey] ?: ScopeState()
+                writeGuarded(snapshot.copy(scopes = snapshot.scopes + (scopeKey to current.copy(lastActiveSessionId = sessionId))), allowCommit)
+            }
         }
-    }
 
     suspend fun persistWorkspacePinned(workspaceKey: String, pinnedAtEpochMillis: Long?) {
         mutate { snapshot ->
@@ -266,6 +391,21 @@ class ScopeStateStore internal constructor(
     private fun write(snapshot: Snapshot) {
         writer.write(file, encode(snapshot)) { decode(it) }
         observedStateFiles.add(observationKey)
+    }
+
+    /** Encode and fsync without blocking navigation; validate immediately at publication. */
+    private fun writeGuarded(snapshot: Snapshot, allowCommit: () -> Boolean): Boolean {
+        var published = false
+        writer.writeGuarded(file, encode(snapshot), { decode(it) }) { commit ->
+            synchronized(com.lingxi.code.conversation.SessionAdmissionGate.lock) {
+                if (allowCommit()) {
+                    commit()
+                    published = true
+                }
+            }
+        }
+        if (published) observedStateFiles.add(observationKey)
+        return published
     }
 
     private fun encode(snapshot: Snapshot): String = JSONObject()
@@ -410,6 +550,7 @@ class ScopeStateStore internal constructor(
     companion object {
         internal const val SCOPE_STATE_FILE = "scope-state.json"
         private val stateMutex = Mutex()
+        private val ownerRevision = kotlinx.coroutines.flow.MutableStateFlow(0L)
         // All access is serialized by stateMutex, including across store instances.
         private val observedStateFiles = mutableSetOf<String>()
         private fun conversationDraftKey(scopeKey: String, sessionId: String) = "$scopeKey#session:$sessionId"

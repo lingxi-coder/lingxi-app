@@ -27,6 +27,14 @@ data class AppAuthoring(
             projectRef?.let { it.kind == "mobileProject" && it.projectId == projectId } == true &&
             isCanonicalUuidValue(workspaceId) && isCanonicalUuidValue(projectId) && isCanonicalUuidValue(authoringSessionId)
 }
+
+/** A native owner receipt, including the physical source identity verified by the host. */
+internal data class AppAuthoringGrant(val authoring: AppAuthoring, val sourceId: String, val ownerAppId: String?)
+internal fun AppAuthoringGrant.matchesOwner(sourceId: String, source: String, projectId: String,
+    workspaceId: String, sessionId: String): Boolean =
+    this.sourceId == sourceId && authoring.sourceDirectory == source && authoring.workspaceId == workspaceId &&
+        authoring.projectRef == AppProjectRef("mobileProject", projectId = projectId) && authoring.authoringSessionId == sessionId
+
 internal fun isCanonicalUuidValue(value: String?): Boolean = value?.let {
     runCatching { java.util.UUID.fromString(it).toString() == it }.getOrDefault(false)
 } == true
@@ -37,6 +45,11 @@ data class AppRecord(
     val marketOrigin: AppMarketOrigin?, val originPort: Int, val executionGrants: Set<String>,
     val updatedAtMs: Long,
 )
+
+/** Remix creates a new app; subsequent owner binding must use the returned record. */
+internal fun authoringResultAppId(result: AppRecord?, requestedAppId: String?): String? =
+    result?.id ?: requestedAppId
+
 data class AppRelease(val appId: String, val revision: Long, val digest: String, val manifest: JSONObject, val marketOrigin: AppMarketOrigin? = null) {
     val capabilities: Set<String> get() = manifest.optJSONArray("capabilities").strings().toSet()
     val executesCode: Boolean get() = "process" in capabilities || listOf("install", "build", "processes").any { (manifest.optJSONArray(it)?.length() ?: 0) > 0 }
@@ -62,10 +75,16 @@ data class AppAuthoringSessionContext(
     fun toJson(): JSONObject = JSONObject().put("workspaceId", workspaceId)
         .put("sourceDirectory", sourceDirectory).put("projectRef", projectRef.toJson()).put("mode", mode)
 }
-data class AppAuthoringResolution(val action: String, val sourceDirectory: String, val authoring: AppAuthoring?)
+data class AppAuthoringResolution(
+    val action: String, val sourceDirectory: String, val authoring: AppAuthoring?,
+    val sourceId: String?, val sourcePath: String?,
+)
 data class BrowserReviewRequest(val appId: String, val runId: String?)
 data class AppLibraryState(val apps: List<AppRecord> = emptyList(), val loading: Boolean = true, val error: String? = null, val openedRevision: Long = 0)
 class AppServiceException(val code: String, message: String) : Exception(message)
+
+internal fun isAppDevelopmentCodeRequired(error: Throwable): Boolean =
+    error is AppDevelopmentRequiresCodeException || (error is AppServiceException && error.code == APP_DEVELOPMENT_REQUIRES_CODE)
 
 internal fun JSONObject.optionalString(key: String): String? = if (!has(key) || isNull(key)) null else getString(key)
 internal fun JSONArray?.strings(): List<String> = if (this == null) emptyList() else (0 until length()).map(::getString)
@@ -82,6 +101,16 @@ internal fun JSONObject.appAuthoring(): AppAuthoring = AppAuthoring(
     authoringSessionId = optionalString("authoringSessionId"),
     appId = optionalString("appId"),
 )
+internal fun JSONObject.appAuthoringGrant(expectedSourceId: String? = null): AppAuthoringGrant {
+    require(opt("sessionMode") == "code") { "Authoring receipt is not for a Code session" }
+    val sourceId = opt("sourceId") as? String
+    require(isCanonicalUuidValue(sourceId) && (expectedSourceId == null || sourceId == expectedSourceId)) {
+        "Authoring receipt does not match the selected source"
+    }
+    val ownerAppId = if (!has("ownerAppId") || isNull("ownerAppId")) null else
+        requireNotNull(opt("ownerAppId") as? String) { "Invalid authoring owner metadata" }
+    return AppAuthoringGrant(appAuthoring(), checkNotNull(sourceId), ownerAppId)
+}
 internal fun JSONObject.appRecord(): AppRecord = AppRecord(
     getString("appId"), getString("name"), getString("summary"), getLong("currentRevision"), getLong("latestRevision"),
     optJSONObject("authoring")?.appAuthoring(),

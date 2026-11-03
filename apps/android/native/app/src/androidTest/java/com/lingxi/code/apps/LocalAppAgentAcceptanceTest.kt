@@ -1635,17 +1635,13 @@ class LocalAppAgentAcceptanceTest {
         unlistedSkillId: String? = null,
         unlistedSkillBody: String? = null,
     ): AppRecord {
-        val sourceDirectory = apps.createAuthoring("Agent acceptance ${UUID.randomUUID()}")
-        val source = apps.hostFile(sourceDirectory)
-        source.deleteRecursively()
-        check(File(context.filesDir, "local-app-acceptance-fixtures/calorie-agent").copyRecursively(source))
+        // These Agent fixtures exercise ordinary Project publishing, not the
+        // managed authoring tool's engine-owned publication path.
+        val source = File(com.lingxi.code.project.MobileUserStorage.directories(context).home,
+            "local-app-acceptance-projects/${UUID.randomUUID()}")
+        check(source.mkdirs())
+        check(File(context.filesDir, "local-app-acceptance-fixtures/calorie-agent").copyRecursively(source, overwrite = true))
         sources.add(source)
-        val projectRef = AppProjectRef("mobileProject", projectId = UUID.randomUUID().toString())
-        apps.registerAuthoring(JSONObject()
-            .put("workspaceId", UUID.randomUUID().toString())
-            .put("sourceDirectory", sourceDirectory)
-            .put("projectRef", projectRef.toJson())
-            .put("authoringSessionId", canonicalSessionId(UUID.randomUUID().toString())))
         if (pageHtml != null) File(source, "index.html").writeText(pageHtml)
         if (tools.isNotEmpty()) {
             val manifest = File(source, "lingxi-app.json")
@@ -1688,7 +1684,7 @@ class LocalAppAgentAcceptanceTest {
             }
             manifest.writeText(value.toString())
         }
-        val value = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
+        val value = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
         return value.getJSONObject("record").appRecord()
     }
 

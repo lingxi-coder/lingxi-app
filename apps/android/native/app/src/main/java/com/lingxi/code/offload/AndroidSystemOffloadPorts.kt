@@ -13,7 +13,10 @@ import android.provider.CalendarContract
 import android.provider.ContactsContract
 import android.provider.MediaStore
 import androidx.core.content.ContextCompat
+import com.lingxi.code.bindings.runtime.CronTaskDto
 import com.lingxi.code.cron.AndroidCronRepository
+import com.lingxi.code.cron.CronAutomation
+import com.lingxi.code.cron.cronCreatedSessionScope
 import com.lingxi.code.voice.audio.AudioOwnerKey
 import com.lingxi.code.voice.audio.DeviceAudioResult
 import com.lingxi.code.voice.audio.OffloadMediaCommand
@@ -482,7 +485,7 @@ private class ScheduledPort(private val context: Context) : NativeCommandPort {
                 NativeOffloadResult.success("runId=${record.runId}\nstatus=${record.status}\n")
             }
             else -> NativeOffloadResult.usage(
-                "Usage: scheduled list | scheduled create --cron <expr> --prompt <text> [--scope global] | scheduled delete|run <id> [scope]",
+                "Usage: scheduled list | scheduled create --cron <expr> --prompt <text> --mode <chat|code> --model <model> [--scope global] | scheduled delete|run <id> [scope]",
             )
         }
 
@@ -501,21 +504,35 @@ private class ScheduledPort(private val context: Context) : NativeCommandPort {
         return NativeOffloadResult.success(output)
     }
 
-    private suspend fun create(raw: List<String>): NativeOffloadResult {
-        val args = CommandArguments.parse(raw)
-            ?: return NativeOffloadResult.usage("scheduled create --cron <expr> --prompt <text>")
-        val cron = args.option("cron")
-            ?: return NativeOffloadResult.usage("scheduled: --cron is required")
-        val prompt = args.option("prompt")
-            ?: return NativeOffloadResult.usage("scheduled: --prompt is required")
-        val task = repository.create(
-            scopeId = args.option("scope") ?: "global",
-            cron = cron,
-            prompt = prompt,
-            recurring = args.option("recurring")?.toBooleanStrictOrNull() ?: true,
-        )
-        return NativeOffloadResult.success("id=${task.id}\nnextFireMs=${task.nextFireMs ?: ""}\n")
-    }
+    private suspend fun create(raw: List<String>): NativeOffloadResult =
+        executeScheduledCreate(raw) { scope, cron, prompt, recurring, automation ->
+            repository.create(scope, cron, prompt, recurring, automation)
+        }
+}
+
+internal suspend fun executeScheduledCreate(
+    raw: List<String>,
+    create: suspend (String, String, String, Boolean, CronAutomation) -> CronTaskDto,
+): NativeOffloadResult {
+    val args = CommandArguments.parse(raw)
+        ?: return NativeOffloadResult.usage("scheduled create --cron <expr> --prompt <text> --mode <chat|code> --model <model>")
+    val cron = args.option("cron")
+        ?: return NativeOffloadResult.usage("scheduled: --cron is required")
+    val prompt = args.option("prompt")
+        ?: return NativeOffloadResult.usage("scheduled: --prompt is required")
+    val scope = args.option("scope") ?: "global"
+    val automation = scheduledCommandAutomation(args.option("mode"), args.option("model"), scope)
+        ?: return NativeOffloadResult.usage("scheduled: --mode must be chat or code and --model is required")
+    val task = create(scope, cron, prompt, args.option("recurring")?.toBooleanStrictOrNull() ?: true, automation)
+    return NativeOffloadResult.success("id=${task.id}\nnextFireMs=${task.nextFireMs ?: ""}\n")
+}
+
+internal fun scheduledCommandAutomation(mode: String?, model: String?, scopeId: String): CronAutomation? {
+    if (mode != "chat" && mode != "code") return null
+    val modelName = model?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    return CronAutomation.defaults(modelName)
+        .change("sessionMode", mode)
+        .change("sessionScopeKey", cronCreatedSessionScope(scopeId))
 }
 
 private data class CommandArguments(

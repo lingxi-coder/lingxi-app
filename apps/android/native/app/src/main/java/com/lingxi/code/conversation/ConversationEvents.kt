@@ -662,18 +662,9 @@ private fun optUInt(value: Any?): UInt? {
 private fun JSONObject.booleanOrDefault(key: String): Boolean? =
     if (!has(key)) false else opt(key) as? Boolean
 
-/**
- * The `type` tag of a retained `turn_ended` envelope's `outcome`.
- *
- * The object form is the only shape the engine emits today; a bare string is
- * still accepted so a journal retained by an older build stays readable.
- */
-private fun retainedTurnOutcome(event: JSONObject): String? {
-    event.optJSONObject("outcome")?.let { outcome ->
-        return outcome.optString("type").takeUnless(String::isEmpty)
-    }
-    return (event.opt("outcome") as? String)?.takeUnless(String::isEmpty)
-}
+/** The `type` tag of a retained `turn_ended` envelope's tagged outcome. */
+private fun retainedTurnOutcome(event: JSONObject): String? =
+    event.optJSONObject("outcome")?.optString("type")?.takeUnless(String::isEmpty)
 
 /**
  * Convert transport diagnostics into concise, actionable mobile copy.

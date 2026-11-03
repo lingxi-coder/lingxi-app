@@ -27,20 +27,36 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String) -> Unit, onDetails: (String) -> Unit,
-    onAuthoring: (String?, String, String) -> Unit, onRemoteApps: () -> Unit) {
+    onAuthoring: (String?, String, AuthoringDirectory?) -> Unit, onRemoteApps: () -> Unit,
+    pendingAuthoring: List<PendingAuthoringRecovery> = emptyList(),
+    onRecoverAuthoring: (PendingAuthoringRecovery) -> Unit = {}, canStartAuthoring: () -> Boolean = { false },
+    captureImportTicket: () -> String? = { null },
+    takeImportTicket: (String) -> AppAuthoringOperationHost? = { null }) {
     val context = LocalContext.current
-    val appsGuestPath = remember(context) { com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath }
     val state by apps.state.collectAsState()
     val scope = rememberCoroutineScope()
     var query by rememberSaveable { mutableStateOf("") }
     var name by rememberSaveable { mutableStateOf("") }
-    var sourceDirectory by rememberSaveable { mutableStateOf("") }
     var creating by rememberSaveable { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var nameError by remember { mutableStateOf(false) }
+    var requiresCode by remember { mutableStateOf(false) }
+    var importTicket by rememberSaveable { mutableStateOf<String?>(null) }
+    fun authoringAction(block: () -> Unit) { if (canStartAuthoring()) block() else requiresCode = true }
     fun action(block: suspend () -> Unit) { scope.launch { busy = true; error = null; try { block() } catch (e: Exception) { error = e.message } finally { busy = false } } }
     val importSource = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) action { val imported = apps.importArchive(uri); onDetails(imported.id) }
+        val ticket = importTicket
+        importTicket = null
+        dispatchAuthoringPickerResult(ticket, uri, takeImportTicket, start = { operation, selected ->
+            busy = true
+            operation.launch(work = { apps.importArchive(selected, com.lingxi.code.model.SessionMode.Code) }) { result, current ->
+                busy = false
+                if (current) result.onSuccess { onDetails(it.id) }.onFailure {
+                    error = if (isAppDevelopmentCodeRequired(it)) context.getString(R.string.local_app_development_requires_code) else it.message
+                }
+            }
+        }, missing = { requiresCode = true })
     }
     LaunchedEffect(Unit) { apps.refresh() }
     Column(Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg).blockTouchesBehind().windowInsetsPadding(WindowInsets.systemBars).testTag(UiTags.APPS_PAGE)) {
@@ -51,14 +67,35 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
         })
         TextButton(onClick = onRemoteApps, modifier = Modifier.padding(horizontal = 16.dp)) { Text(stringResource(R.string.remote_apps_browse)) }
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            TextButton(onClick = { creating = true }) { Text(stringResource(R.string.local_app_v2_create)) }
-            TextButton(enabled = !busy, onClick = { importSource.launch(arrayOf("application/zip", "application/x-zip-compressed")) }) { Text(stringResource(R.string.local_app_v2_import_source)) }
+            TextButton(onClick = { authoringAction { creating = true } }) { Text(stringResource(R.string.local_app_v2_create)) }
+            TextButton(enabled = !busy, onClick = { authoringAction {
+                val ticket = captureImportTicket()
+                if (ticket == null) requiresCode = true else {
+                    importTicket = ticket
+                    try { importSource.launch(arrayOf("application/zip", "application/x-zip-compressed")) }
+                    catch (failure: Exception) {
+                        takeImportTicket(ticket)
+                        importTicket = null
+                        error = failure.message
+                    }
+                }
+            } }) { Text(stringResource(R.string.local_app_v2_import_source)) }
             TextButton(onClick = { action { apps.refresh() } }) { Text(stringResource(R.string.local_app_v2_refresh)) }
         }
         if (busy || state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         (error ?: state.error)?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         OutlinedTextField(query, { query = it }, label = { Text(stringResource(R.string.local_app_v2_search)) }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp))
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(pendingAuthoring, key = { "pending-authoring:${it.selectionId}" }) { pending ->
+                ElevatedCard(Modifier.fillMaxWidth().testTag("pending-authoring:${pending.selectionId}")) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(pending.name, style = MaterialTheme.typography.titleMedium)
+                        TextButton(onClick = { authoringAction { onRecoverAuthoring(pending) } }) {
+                            Text(stringResource(R.string.local_app_authoring_recover))
+                        }
+                    }
+                }
+            }
             if (state.apps.isEmpty() && !state.loading) item { Text(stringResource(R.string.local_app_v2_empty)) }
             items(state.apps.filter { query.isBlank() || it.name.contains(query, true) }, key = { it.id }) { app ->
                 ElevatedCard(Modifier.fillMaxWidth().testTag(UiTags.appTile(app.id))) {
@@ -69,7 +106,7 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
                         Row {
                             TextButton(onClick = { onOpen(app.id) }) { Text(stringResource(R.string.local_app_v2_open)) }
                             TextButton(onClick = { onDetails(app.id) }) { Text(stringResource(R.string.local_app_v2_manage)) }
-                            TextButton(onClick = { onAuthoring(app.id, app.name, "") }) { Text(stringResource(R.string.local_app_v2_develop)) }
+                            TextButton(onClick = { authoringAction { onAuthoring(app.id, app.name, null) } }) { Text(stringResource(R.string.local_app_v2_develop)) }
                         }
                     }
                 }
@@ -77,21 +114,24 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
         }
     }
     if (creating) AlertDialog(onDismissRequest = { if (!busy) creating = false }, title = { Text(stringResource(R.string.local_app_v2_create)) }, text = {
-        Column { Text(stringResource(R.string.local_app_v2_create_note)); OutlinedTextField(name, { name = it }, label = { Text(stringResource(R.string.local_app_v2_name)) }, singleLine = true)
-            OutlinedTextField(sourceDirectory, { sourceDirectory = it }, label = { Text(stringResource(R.string.local_app_v2_source_directory)) }, placeholder = { Text("$appsGuestPath/…") }, singleLine = true)
-            Text(stringResource(R.string.local_app_v2_source_directory_note), style = MaterialTheme.typography.bodySmall)
+        Column {
+            Text(stringResource(R.string.local_app_v2_create_note))
+            OutlinedTextField(name, { name = it; nameError = false }, label = { Text(stringResource(R.string.local_app_v2_name)) },
+                singleLine = true, isError = nameError)
+            if (nameError) Text(stringResource(R.string.local_app_authoring_name_invalid), color = MaterialTheme.colorScheme.error)
         }
-    }, confirmButton = { TextButton(enabled = name.isNotBlank() && !busy, onClick = { action {
-        val directory = sourceDirectory.trim().takeIf { it.isNotEmpty() }?.also { guest ->
-            require(withContext(Dispatchers.IO) { apps.hostFile(guest).isDirectory }) { "请选择已存在的 Linux 用户目录。" }
-        } ?: apps.createAuthoring(name.trim())
-        creating = false; onAuthoring(null, name.trim(), directory)
+    }, confirmButton = { TextButton(enabled = name.isNotBlank() && !busy, onClick = { authoringAction {
+        val requestedName = name.trim()
+        if (!validAuthoringName(requestedName)) nameError = true
+        else { creating = false; onAuthoring(null, requestedName, null) }
     } }) { Text(stringResource(R.string.local_app_v2_create_confirm)) } }, dismissButton = { TextButton(onClick = { creating = false }) { Text(stringResource(R.string.local_app_v2_cancel)) } })
+    RequiresCodeDialog(requiresCode) { requiresCode = false }
 }
 
 @Composable
 fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> Unit, onOpen: (String) -> Unit,
-    onAuthoring: (String?, String, String) -> Unit) {
+    onAuthoring: (String?, String, AuthoringDirectory?) -> Unit, onRestoreAuthoring: (String, String, Boolean, Long) -> Unit,
+    canStartAuthoring: () -> Boolean = { false }, captureOperation: () -> AppAuthoringOperationHost? = { null }) {
     val scope = rememberCoroutineScope()
     var record by remember(appId) { mutableStateOf<AppRecord?>(null) }
     var releases by remember(appId) { mutableStateOf<List<AppRelease>>(emptyList()) }
@@ -99,6 +139,8 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
     var logs by remember(appId) { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var requiresCode by remember { mutableStateOf(false) }
+    fun authoringAction(block: () -> Unit) { if (canStartAuthoring()) block() else requiresCode = true }
     var deleting by remember { mutableStateOf(false) }
     var pendingRelease by remember { mutableStateOf<AppRelease?>(null) }
     var publication by remember { mutableStateOf<AppMarketPublication?>(null) }
@@ -135,6 +177,18 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
         reloadAgentTasks(releases.firstOrNull { it.revision == record?.currentRevision })
     }
     fun action(block: suspend () -> Unit) { scope.launch { busy = true; error = null; try { block(); reload() } catch (e: Exception) { error = e.message } finally { busy = false } } }
+    fun <T> authoringWork(work: suspend () -> T, onSuccess: (T) -> Unit) {
+        val operation = captureOperation()
+        if (operation == null) { requiresCode = true; return }
+        busy = true
+        error = null
+        operation.launch(work) { result, current ->
+            busy = false
+            if (current) result.onSuccess(onSuccess).onFailure {
+                error = if (isAppDevelopmentCodeRequired(it)) context.getString(R.string.local_app_development_requires_code) else it.message
+            }
+        }
+    }
     val exportSource = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         val prepared = sourceExport; sourceExport = null
         if (prepared == null) { if (uri != null) error = context.getString(R.string.local_app_v2_export_interrupted) }
@@ -154,7 +208,7 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
             val app = record
             if (app != null) {
                 item { Text(app.summary); Text(serving?.phase ?: runs.lastOrNull()?.phase ?: "stopped", style = MaterialTheme.typography.labelMedium) }
-                item { Row { TextButton(onClick = { onOpen(appId) }) { Text(stringResource(R.string.local_app_v2_open)) }; TextButton(onClick = { onAuthoring(appId, app.name, "") }) { Text(stringResource(R.string.local_app_v2_develop)) }; TextButton(enabled = !busy, onClick = { action { apps.stop(appId) } }) { Text(stringResource(R.string.local_app_v2_stop)) } } }
+                item { Row { TextButton(onClick = { onOpen(appId) }) { Text(stringResource(R.string.local_app_v2_open)) }; TextButton(onClick = { authoringAction { onAuthoring(appId, app.name, null) } }) { Text(stringResource(R.string.local_app_v2_develop)) }; TextButton(enabled = !busy, onClick = { action { apps.stop(appId) } }) { Text(stringResource(R.string.local_app_v2_stop)) } } }
                 item { Row { TextButton(enabled = !busy, onClick = { action { apps.start(appId, "restart") } }) { Text(stringResource(R.string.local_app_v2_restart)) }; TextButton(enabled = !busy, onClick = { action { apps.repair(appId) } }) { Text(stringResource(R.string.local_app_v2_repair)) }; TextButton(enabled = !busy, onClick = { action { apps.revoke(appId); permissionRevision++ } }) { Text(stringResource(R.string.local_app_v2_revoke)) } } }
                 item { Text(stringResource(R.string.local_app_v2_repair_note), style = MaterialTheme.typography.bodySmall) }
                 item {
@@ -168,7 +222,11 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
                     } }) { Text(stringResource(R.string.local_app_v2_export_source)) }
                 }
                 item {
-                    TextButton(enabled = !busy, onClick = { action { publication = apps.market.publisher.prepare(appId) } }) { Text(stringResource(R.string.local_app_v2_publish_market)) }
+                    TextButton(enabled = !busy, onClick = { authoringAction {
+                        authoringWork(work = { apps.market.publisher.prepare(appId, com.lingxi.code.model.SessionMode.Code) }) {
+                            publication = it
+                        }
+                    } }) { Text(stringResource(R.string.local_app_v2_publish_market)) }
                     publicationStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     TextButton(onClick = {
                         val root = java.net.URI(com.lingxi.code.BuildConfig.LOCAL_APP_MARKET_API_ROOT)
@@ -192,9 +250,8 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
                 val release = releases.firstOrNull { it.revision == app.currentRevision }
                 if (release != null) {
                     item { Text("浏览器使用期间通过运行通知保留本地服务。停止应用会停止服务与 Agent 任务。", style = MaterialTheme.typography.bodySmall) }
-                    item { TextButton(onClick = { action {
-                        val restored = apps.restoreSource(appId, app.marketOrigin?.remixedFrom == null && app.marketOrigin != null)
-                        onAuthoring(restored.id, restored.name, restored.authoring?.sourceDirectory.orEmpty())
+                    item { TextButton(onClick = { authoringAction {
+                        onRestoreAuthoring(appId, app.name, app.marketOrigin?.remixedFrom == null && app.marketOrigin != null, release.revision)
                     } }) { Text(stringResource(if (app.marketOrigin != null && app.marketOrigin.remixedFrom == null) R.string.local_app_v2_remix else R.string.local_app_v2_restore)) } }
                     if ("agent" in release.capabilities) {
                         item {
@@ -229,13 +286,22 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
             item { Text(stringResource(R.string.local_app_v2_publish_note, prepared.revision)); Text(prepared.name, style = MaterialTheme.typography.titleMedium); Text(prepared.summary) }
             items(prepared.files, key = { it }) { Text(it, style = MaterialTheme.typography.bodySmall) }
         }
-    }, confirmButton = { TextButton(enabled = !busy, onClick = { action {
-        val status = apps.market.publisher.publish(prepared)
-        publicationStatus = context.getString(R.string.local_app_v2_publish_status, status)
-        publication = null
+    }, confirmButton = { TextButton(enabled = !busy, onClick = { authoringAction {
+        authoringWork(work = { apps.market.publisher.publish(prepared, com.lingxi.code.model.SessionMode.Code) }) { status ->
+            publicationStatus = context.getString(R.string.local_app_v2_publish_status, status)
+            publication = null
+        }
     } }) { Text(stringResource(R.string.local_app_v2_publish_confirm)) } }, dismissButton = { TextButton(enabled = !busy, onClick = { publication = null }) { Text(stringResource(R.string.local_app_v2_cancel)) } }) }
     agentRelease?.let { release -> LocalAppAgentSettingsDialog(apps, release) { agentRelease = null } }
     if (deleting) AlertDialog(onDismissRequest = { deleting = false }, title = { Text(stringResource(R.string.local_app_v2_remove_title)) }, text = { Text(stringResource(R.string.local_app_v2_remove_note)) }, confirmButton = { TextButton(onClick = { deleting = false; scope.launch { try { apps.remove(appId); onBack() } catch (e: Exception) { error = e.message } } }) { Text(stringResource(R.string.local_app_v2_remove_confirm)) } }, dismissButton = { TextButton(onClick = { deleting = false }) { Text(stringResource(R.string.local_app_v2_cancel)) } })
+    RequiresCodeDialog(requiresCode) { requiresCode = false }
+}
+
+@Composable
+internal fun RequiresCodeDialog(visible: Boolean, onDismiss: () -> Unit) {
+    if (visible) AlertDialog(onDismissRequest = onDismiss,
+        text = { Text(stringResource(R.string.local_app_development_requires_code)) },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.local_app_v2_cancel)) } })
 }
 
 @Composable

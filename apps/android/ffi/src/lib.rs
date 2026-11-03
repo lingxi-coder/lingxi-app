@@ -188,6 +188,8 @@ pub use host::build_mobile_engine;
 #[cfg(feature = "uniffi")]
 pub use host::create_android_side_chat;
 #[cfg(feature = "uniffi")]
+pub use host::AndroidMediaDrainStatus;
+#[cfg(feature = "uniffi")]
 pub use host::AndroidNativeMediaHost;
 #[cfg(feature = "uniffi")]
 pub use host::MediaAudioSessionBindingFfi;

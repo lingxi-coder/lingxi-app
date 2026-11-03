@@ -311,6 +311,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
               "runtime": "android-proot",
               "platform": "android",
               "abi": "arm64",
+              "brand_profile": {"brand_id":"lingxi", "linux_user":"lingxi", "config_dir_name":".lingxi"},
               "rootfs_version": "3.21.3",
               "content_sha256": "${canonicalInventorySha256(immutableFiles)}",
               "sbom_filename": "$sbomFileName",
@@ -323,7 +324,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
               "packages": $packagesJson,
               "executable_allowlist": $allowlistJson,
               "immutable_files": $immutableJson,
-              "writable_paths": ["/home/lingxi", "/root", "/tmp", "/var/tmp", "/home/lingxi/lingxi"]
+              "writable_paths": ["/home/lingxi", "/root", "/tmp", "/var/tmp", "/home/lingxi/.lingxi"]
             }
         """.trimIndent()
     }

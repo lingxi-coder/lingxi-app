@@ -56,6 +56,7 @@ fun ProjectSnapshot.toDrawerProject(strings: ConversationStrings = DefaultConver
                 msgs = session.messageCount,
                 mode = session.mode,
                 updatedAtEpochMillis = session.updatedAtEpochMillis,
+                transcriptPath = session.transcriptPath,
             )
         },
     )

@@ -110,6 +110,7 @@ internal object NativeEngineFactory {
         projectWorkspace: ProjectWorkspace? = null,
         sessionMode: SessionMode,
         initialSessionId: String? = null,
+        initialSessionTranscriptPath: String? = null,
         linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
         computerUseOwnerKey: String? = null,
     ): MobileEngineHandle? {
@@ -127,10 +128,12 @@ internal object NativeEngineFactory {
                 config = AndroidEngineLaunchConfigFfi(
                     appVersion = BuildConfig.VERSION_NAME,
                     appAgentHost = policy.appAgentHost,
+                    schedulerController = scenario == NativeEngineScenario.ScheduledHeadless,
                     apiBase = apiBase,
                     model = model,
                     sessionMode = sessionMode.toDto(),
                     initialSessionId = initialSessionId,
+                    initialSessionTranscriptPath = initialSessionTranscriptPath,
                     visionDelegationEnabled = visionDelegationEnabled,
                     appFilesRoot = appContext.filesDir.canonicalPath,
                     projectCwd = projectWorkspace?.hostPath,

@@ -15,6 +15,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runCurrent
 import org.junit.Assert.assertEquals
@@ -24,6 +25,94 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class ConversationSourceRecoveryTest {
+    @Test fun onlyFailuresBeforeNativeSubmissionRestoreInput() = kotlinx.coroutines.test.runTest {
+        var restored = 0
+        var submitted = 0
+        val failedPrepare = runCatching {
+            submitDurableTurn(
+                prepare = { error("checkpoint failed") },
+                submit = { submitted++ },
+                onNotAdmitted = { restored++ },
+            )
+        }
+        assertTrue(failedPrepare.isFailure)
+        assertEquals(1, restored)
+        assertEquals(0, submitted)
+        val unknownNativeResult = runCatching {
+            submitDurableTurn(
+                prepare = {},
+                submit = { submitted++; error("native result unavailable") },
+                onNotAdmitted = { restored++ },
+            )
+        }
+        assertTrue(unknownNativeResult.isFailure)
+        assertEquals(1, restored)
+        assertEquals(1, submitted)
+    }
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun pendingTakeoverForwardsWorkspaceAndRejectsChangedWriterPath() = kotlinx.coroutines.test.runTest {
+        val spec = ConversationRecoverySpec(null, null, SessionMode.Chat, LinuxRuntimeMode.MobileLinux,
+            workspaceKey = "global", transcriptPath = "/guest/original.jsonl")
+        val pending = CompletableDeferred<ConversationSource?>()
+        val delegate = object : ConversationSource {
+            override val recoverySpec = spec.copy(transcriptPath = "/guest/other.jsonl")
+            override val activeSessionState = MutableStateFlow<ActivatedSession?>(
+                ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed, SessionMode.Chat))
+            override val workspaceState = MutableStateFlow<com.lingxi.code.project.SessionWorkspaceState?>(
+                com.lingxi.code.project.SessionWorkspaceState("session-a", "/guest", "/guest", emptyList(), "/guest/other.jsonl"))
+        }
+        val wrapper = RecoveringConversationSource(pending, DefaultConversationStrings, spec, releaseClaim = { true })
+        try {
+            pending.complete(delegate)
+            // The wrapper forwards from Dispatchers.Default, independently of
+            // runTest's virtual clock. Bound that cross-dispatcher wait in real time.
+            val forwarded = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                kotlinx.coroutines.withTimeout(3_000) { wrapper.workspaceState.first { it != null } }
+            }
+            assertEquals("/guest/other.jsonl", forwarded?.transcriptPath)
+            assertTrue(runCatching { wrapper.awaitTurnTranscriptPath() }.isFailure)
+        } finally { wrapper.close() }
+    }
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun turnWaitsForExactSourceAndDurableSnapshotBeforeSubmission() = kotlinx.coroutines.test.runTest {
+        val pathReady = CompletableDeferred<String>()
+        val persistEntered = CompletableDeferred<Unit>()
+        val persistFinished = CompletableDeferred<Unit>()
+        val spec = ConversationRecoverySpec(null, null, SessionMode.Chat, LinuxRuntimeMode.MobileLinux,
+            workspaceKey = "global", transcriptPath = "/guest/exact.jsonl")
+        var snapshot: ConversationBackgroundSnapshot? = null
+        var submitted = false
+        val work = async {
+            prepareTurnRecovery("session-a", 42L, { pathReady.await() }, { true }, { snapshot }) {
+                assertEquals("/guest/exact.jsonl", it.recoverySpec?.transcriptPath)
+                persistEntered.complete(Unit)
+                persistFinished.await()
+            }
+            submitted = true
+        }
+        runCurrent()
+        assertFalse(submitted)
+        snapshot = ConversationBackgroundSnapshot("session-a", 42L, "Working", spec)
+        pathReady.complete("/guest/exact.jsonl")
+        runCurrent()
+        assertTrue(persistEntered.isCompleted)
+        assertFalse("Native submission must wait for durable storage", submitted)
+        persistFinished.complete(Unit)
+        work.await()
+        assertTrue(submitted)
+    }
+
+    @Test fun turnRejectsAnUnmatchedRecoverySourceBeforeSubmission() = kotlinx.coroutines.test.runTest {
+        val spec = ConversationRecoverySpec(null, null, SessionMode.Chat, LinuxRuntimeMode.MobileLinux,
+            workspaceKey = "global", transcriptPath = "/guest/other.jsonl")
+        var persisted = false
+        val result = runCatching {
+            prepareTurnRecovery("session-a", 42L, { "/guest/exact.jsonl" }, { true },
+                { ConversationBackgroundSnapshot("session-a", 42L, "Working", spec) }) { persisted = true }
+        }
+        assertTrue(result.isFailure)
+        assertFalse(persisted)
+    }
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
@@ -166,6 +255,8 @@ class ConversationSourceRecoveryTest {
         assertTrue(matchesRetainedConversationOwner(code, "sess:$sessionId", code.copy(hostPath = "/other/path"), sessionId))
         assertFalse(matchesRetainedConversationOwner(code, sessionId, code, "another"))
         assertFalse(matchesRetainedConversationOwner(code, sessionId, code.copy(workspaceKey = "project.other"), sessionId))
+        assertFalse(matchesRetainedConversationOwner(code.copy(transcriptPath = "/guest/one"), sessionId,
+            code.copy(transcriptPath = "/guest/two"), sessionId))
     }
 
     @Test

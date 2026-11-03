@@ -127,6 +127,16 @@ class SafProjectSynchronizerInstrumentedTest {
     }
 
     @Test
+    fun onlyTheLocalSchedulerLedgerAndItsTransactionLockAreExcluded() {
+        assertTrue(isLocalSchedulerOwnerState(".lingxi/scheduled_owner_reservations.jsonl"))
+        assertTrue(isLocalSchedulerOwnerState(".lingxi/scheduled_tasks.lock"))
+        assertFalse(isLocalSchedulerOwnerState(".lingxi/scheduled_tasks.json"))
+        assertFalse(isLocalSchedulerOwnerState(".lingxi/session-cron/scheduled_tasks.lock"))
+        assertFalse(isLocalSchedulerOwnerState("project/.lingxi/scheduled_owner_reservations.jsonl"))
+        assertFalse(isLocalSchedulerOwnerState(".lingxi/notes.md"))
+    }
+
+    @Test
     fun exportRequiresPersistedWritePermission() {
         assertTrue(
             persistedPermissionAllows(

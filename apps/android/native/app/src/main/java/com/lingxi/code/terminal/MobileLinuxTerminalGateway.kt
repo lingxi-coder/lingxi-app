@@ -11,8 +11,11 @@ import com.lingxi.code.settings.LinuxRuntimeBridge
 import com.lingxi.code.settings.LinuxRuntimeMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -26,6 +29,11 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+
+internal fun <K, V : Any> MutableMap<K, V>.removeIfSame(key: K, expected: V) {
+    if (this[key] === expected) remove(key)
+}
 
 /**
  * PTY adapter over the one native MobileLinux runtime owned by UniFFI.
@@ -37,16 +45,27 @@ import kotlinx.coroutines.sync.withLock
 class MobileLinuxTerminalGateway internal constructor(
     private val runtime: TerminalRuntime,
     private val mode: LinuxRuntimeMode,
+    private val cwd: String,
+    private val ownerKey: String,
+    private val bridgeDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val pollDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : TerminalSessionGateway {
-    constructor(context: Context, mode: LinuxRuntimeMode) : this(
+    constructor(context: Context, mode: LinuxRuntimeMode, cwd: String, ownerKey: String) : this(
         runtime = BridgeTerminalRuntime(context.applicationContext, mode),
         mode = mode,
+        cwd = cwd,
+        ownerKey = ownerKey,
     )
+
+    init {
+        require(cwd.isNotBlank() && cwd.startsWith('/') && '\u0000' !in cwd)
+        require(ownerKey.isNotBlank())
+    }
 
     private val mutableOutput = MutableSharedFlow<ByteArray>(extraBufferCapacity = 128)
     private val mutableState = MutableStateFlow(TerminalConnectionState.IDLE)
     private val mutableError = MutableStateFlow<String?>(null)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + bridgeDispatcher)
     private var attachedSession: SharedSession? = null
     private var attachedKey: SessionKey? = null
     private var bridgeJobs: List<Job> = emptyList()
@@ -57,18 +76,23 @@ class MobileLinuxTerminalGateway internal constructor(
 
     override suspend fun start(sessionId: String): TerminalStartResult {
         val normalizedSessionId = sessionId.ifBlank { DEFAULT_SESSION_ID }
-        val key = SessionKey(mode = mode, sessionId = normalizedSessionId)
+        val key = SessionKey(mode = mode, sessionId = normalizedSessionId, cwd = cwd, ownerKey = ownerKey)
         attachedSession?.takeIf { attachedKey == key }?.let {
+            check(!it.outcomeUncertain) { "Terminal process outcome is unconfirmed" }
             return TerminalStartResult(created = false)
         }
 
         val (session, created) = registryMutex.withLock {
             sessionRegistry[key]?.let { return@withLock it to false }
-            SharedSession(
+            lateinit var createdSession: SharedSession
+            createdSession = SharedSession(
                 key = key,
                 runtime = runtime,
-                removeSelf = { removeSession(key) },
-            ).also { sessionRegistry[key] = it } to true
+                pollDispatcher = pollDispatcher,
+                removeSelf = { removeSession(key, createdSession) },
+            )
+            sessionRegistry[key] = createdSession
+            createdSession to true
         }
 
         attach(session, key)
@@ -76,9 +100,26 @@ class MobileLinuxTerminalGateway internal constructor(
             val fresh = session.startIfNeeded()
             TerminalStartResult(created = fresh)
         } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) {
+                if (created && !session.outcomeUncertain) removeSession(key, session)
+                if (attachedSession === session && attachedKey == key) {
+                    bridgeJobs.forEach(Job::cancel)
+                    bridgeJobs = emptyList()
+                    attachedSession = null
+                    attachedKey = null
+                }
+            }
             throw cancelled
         } catch (failure: Throwable) {
-            if (created) removeSession(key)
+            if (created && !session.outcomeUncertain) removeSession(key, session)
+            if (attachedSession === session && attachedKey == key) {
+                bridgeJobs.forEach(Job::cancel)
+                bridgeJobs = emptyList()
+                attachedSession = null
+                attachedKey = null
+                mutableState.value = session.state.value
+                mutableError.value = session.error.value
+            }
             throw failure
         }
     }
@@ -101,9 +142,10 @@ class MobileLinuxTerminalGateway internal constructor(
         val session = attachedSession
         attachedKey = null
         attachedSession = null
-        session?.close()
-        if (key != null) removeSession(key)
-        mutableState.value = TerminalConnectionState.CLOSED
+        val confirmed = session?.close() ?: true
+        if (confirmed && key != null && session != null) removeSession(key, session)
+        mutableState.value = if (confirmed) TerminalConnectionState.CLOSED else TerminalConnectionState.FAILED
+        if (!confirmed) mutableError.value = session?.error?.value
     }
 
     private fun attach(session: SharedSession, key: SessionKey) {
@@ -113,7 +155,7 @@ class MobileLinuxTerminalGateway internal constructor(
         mutableState.value = session.state.value
         mutableError.value = session.error.value
         bridgeJobs = listOf(
-            scope.launch {
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 session.output.collect { mutableOutput.emit(it) }
             },
             scope.launch {
@@ -125,9 +167,9 @@ class MobileLinuxTerminalGateway internal constructor(
         )
     }
 
-    private suspend fun removeSession(key: SessionKey) {
+    private suspend fun removeSession(key: SessionKey, expected: SharedSession) {
         registryMutex.withLock {
-            sessionRegistry.remove(key)
+            sessionRegistry.removeIfSame(key, expected)
         }
     }
 
@@ -171,38 +213,44 @@ class MobileLinuxTerminalGateway internal constructor(
     private class SharedSession(
         private val key: SessionKey,
         private val runtime: TerminalRuntime,
+        pollDispatcher: CoroutineDispatcher,
         private val removeSelf: suspend () -> Unit,
     ) {
-        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val scope = CoroutineScope(SupervisorJob() + pollDispatcher)
         private val startMutex = Mutex()
         private val mutableOutput = MutableSharedFlow<ByteArray>(extraBufferCapacity = 128)
         private val mutableState = MutableStateFlow(TerminalConnectionState.IDLE)
         private val mutableError = MutableStateFlow<String?>(null)
-        private var handle: MobileLinuxPtySessionHandleFfi? = null
+        @Volatile private var handle: MobileLinuxPtySessionHandleFfi? = null
         private var pollJob: Job? = null
         private var eventCursor: ULong? = null
         private var size = MobileLinuxPtySizeFfi(cols = 80u, rows = 24u)
-        private var closed = false
+        @Volatile private var closed = false
+        @Volatile var outcomeUncertain = false
+            private set
 
         val output: Flow<ByteArray> = mutableOutput.asSharedFlow()
         val state: StateFlow<TerminalConnectionState> = mutableState.asStateFlow()
         val error: StateFlow<String?> = mutableError.asStateFlow()
 
         suspend fun startIfNeeded(): Boolean = startMutex.withLock {
+            check(!outcomeUncertain) { "Terminal process outcome is unconfirmed" }
             if (closed) error("Terminal session ${key.sessionId} is closed")
             if (handle != null || mutableState.value == TerminalConnectionState.CONNECTING) {
                 return@withLock false
             }
             mutableState.value = TerminalConnectionState.CONNECTING
             mutableError.value = null
+            var submittedOpen = false
             try {
                 val priorEvents = runtime.readEvents(limit = 256u)
                 eventCursor = priorEvents.maxOfOrNull { it.sequence }
+                submittedOpen = true
                 val opened = runtime.openPty(
                     MobileLinuxPtyOpenRequestFfi(
                         command = "/bin/sh",
                         args = listOf("-l"),
-                        cwd = null,
+                        cwd = key.cwd,
                         env = emptyList(),
                         size = size,
                         mounts = emptyList<MobileLinuxMountSpecFfi>(),
@@ -213,12 +261,23 @@ class MobileLinuxTerminalGateway internal constructor(
                 pollJob = scope.launch { pollEvents(opened) }
                 true
             } catch (cancelled: CancellationException) {
+                if (submittedOpen) {
+                    outcomeUncertain = true
+                    mutableError.value = "Terminal process outcome is unconfirmed"
+                    mutableState.value = TerminalConnectionState.FAILED
+                } else {
+                    closed = true
+                    mutableState.value = TerminalConnectionState.FAILED
+                    withContext(NonCancellable) { removeSelf() }
+                }
                 throw cancelled
             } catch (failure: Throwable) {
                 mutableError.value = failure.message ?: "MobileLinux terminal unavailable"
                 mutableState.value = TerminalConnectionState.FAILED
-                closed = true
-                removeSelf()
+                if (submittedOpen) outcomeUncertain = true else {
+                    closed = true
+                    removeSelf()
+                }
                 throw failure
             }
         }
@@ -235,53 +294,75 @@ class MobileLinuxTerminalGateway internal constructor(
             handle?.let { runtime.resizePty(it, size) }
         }
 
-        suspend fun close() = startMutex.withLock {
-            if (closed) return@withLock
+        suspend fun close(): Boolean = startMutex.withLock {
+            if (closed) return@withLock true
+            val active = handle
+            if (outcomeUncertain && active == null) return@withLock false
+            if (active != null) {
+                try {
+                    runtime.closePty(active)
+                } catch (cancelled: CancellationException) {
+                    outcomeUncertain = true
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    outcomeUncertain = true
+                    mutableError.value = failure.message ?: "Terminal close could not be confirmed"
+                    mutableState.value = TerminalConnectionState.FAILED
+                    return@withLock false
+                }
+            }
             closed = true
+            outcomeUncertain = false
+            handle = null
             pollJob?.cancel()
             pollJob = null
-            val active = handle
-            handle = null
-            if (active != null) {
-                runCatching { runtime.closePty(active) }
-            }
             mutableState.value = TerminalConnectionState.CLOSED
             scope.cancel()
+            true
         }
 
         private suspend fun pollEvents(opened: MobileLinuxPtySessionHandleFfi) {
-            while (scope.isActive && handle?.id == opened.id) {
-                val events = runtime.readEvents(
-                    afterSequence = eventCursor,
-                    limit = 256u,
-                ).sortedBy { it.sequence }
-                if (events.isEmpty()) {
-                    delay(EVENT_POLL_INTERVAL_MS)
-                    continue
-                }
-                for (event in events) {
-                    eventCursor = maxOf(eventCursor ?: 0u, event.sequence)
-                    if (event.sessionId != opened.id) continue
-                    when (event.kind) {
-                        MobileLinuxEventKindFfi.PTY_OUTPUT ->
-                            event.data?.takeIf(ByteArray::isNotEmpty)?.let { mutableOutput.emit(it) }
-                        MobileLinuxEventKindFfi.PTY_CLOSED -> {
-                            mutableState.value = TerminalConnectionState.CLOSED
-                            closed = true
-                            removeSelf()
-                            return
-                        }
-                        MobileLinuxEventKindFfi.RUNTIME_ERROR -> {
-                            mutableError.value = event.detail
-                                ?: event.text
-                                ?: "MobileLinux PTY failed"
-                            mutableState.value = TerminalConnectionState.FAILED
-                            closed = true
-                            removeSelf()
-                            return
-                        }
-                        else -> Unit
+            try {
+                while (scope.isActive && handle?.id == opened.id) {
+                    val events = runtime.readEvents(
+                        afterSequence = eventCursor,
+                        limit = 256u,
+                    ).sortedBy { it.sequence }
+                    if (events.isEmpty()) {
+                        delay(EVENT_POLL_INTERVAL_MS)
+                        continue
                     }
+                    for (event in events) {
+                        eventCursor = maxOf(eventCursor ?: 0u, event.sequence)
+                        if (event.sessionId != opened.id) continue
+                        when (event.kind) {
+                            MobileLinuxEventKindFfi.PTY_OUTPUT ->
+                                event.data?.takeIf(ByteArray::isNotEmpty)?.let { mutableOutput.emit(it) }
+                            MobileLinuxEventKindFfi.PTY_CLOSED -> {
+                                mutableState.value = TerminalConnectionState.CLOSED
+                                closed = true
+                                outcomeUncertain = false
+                                removeSelf()
+                                return
+                            }
+                            MobileLinuxEventKindFfi.RUNTIME_ERROR -> {
+                                mutableError.value = event.detail
+                                    ?: event.text
+                                    ?: "MobileLinux PTY failed"
+                                mutableState.value = TerminalConnectionState.FAILED
+                                outcomeUncertain = true
+                            }
+                            else -> Unit
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                if (!closed) {
+                    outcomeUncertain = true
+                    mutableError.value = failure.message ?: "Terminal event stream failed"
+                    mutableState.value = TerminalConnectionState.FAILED
                 }
             }
         }
@@ -293,6 +374,8 @@ class MobileLinuxTerminalGateway internal constructor(
     private data class SessionKey(
         val mode: LinuxRuntimeMode,
         val sessionId: String,
+        val cwd: String,
+        val ownerKey: String,
     )
 
     internal companion object {

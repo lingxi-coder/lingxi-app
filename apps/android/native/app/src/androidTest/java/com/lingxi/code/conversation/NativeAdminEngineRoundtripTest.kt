@@ -33,8 +33,9 @@ class NativeAdminEngineRoundtripTest {
         val engine = buildAndroidEngine(
             config = AndroidEngineLaunchConfigFfi(
                 appVersion = null,
-                appAgentHost = false,
+                appAgentHost = false, schedulerController = false,
                 apiBase = "https://invalid.example", model = "", sessionMode = SessionModeDto.CODE,
+                initialSessionId = null, initialSessionTranscriptPath = null,
                 visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,
                 providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":[]}"""),
                 mobileLinux = runtime,

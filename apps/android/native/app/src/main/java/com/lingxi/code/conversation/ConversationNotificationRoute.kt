@@ -13,6 +13,7 @@ data class ConversationLaunchRequest(
     val workspaceKey: String? = null,
     val sessionMode: SessionMode,
     val runtimeGeneration: String? = null,
+    val transcriptPath: String? = null,
 )
 
 internal data class ConversationCancelRouteSpec(
@@ -24,8 +25,15 @@ internal data class ConversationCancelRouteSpec(
 
 object ConversationNotificationRoute {
     const val EXTRA_NOTIFICATION_OWNER = "conversation_notification_owner"
+    private const val EXTRA_NOTIFICATION_TRANSCRIPT_PATH = "conversation_notification_transcript_path"
     fun parse(intent: Intent?): ConversationLaunchRequest? {
-        return parse(intent?.dataString)
+        if (intent?.getBooleanExtra(EXTRA_NOTIFICATION_OWNER, false) != true) return null
+        return parseNotification(intent.dataString, intent.getStringExtra(EXTRA_NOTIFICATION_TRANSCRIPT_PATH))
+    }
+
+    internal fun parseNotification(route: String?, transcriptPath: String?): ConversationLaunchRequest? {
+        if (transcriptPath?.startsWith('/') != true) return null
+        return parse(route)?.copy(transcriptPath = transcriptPath)
     }
 
     internal fun parse(route: String?): ConversationLaunchRequest? {
@@ -72,12 +80,14 @@ object ConversationNotificationRoute {
             .addCategory(Intent.CATEGORY_BROWSABLE)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             .putExtra(EXTRA_NOTIFICATION_OWNER, true)
+            .putExtra(EXTRA_NOTIFICATION_TRANSCRIPT_PATH, recoverySpec.transcriptPath)
 
     fun cancelIntent(
         context: Context,
         sessionId: String,
         turnId: Long? = null,
         recoverySpec: ConversationRecoverySpec? = null,
+        activeTaskIds: Set<String> = emptySet(),
     ): Intent {
         val route = cancelRouteSpec(sessionId, turnId)
         return Intent(context, ConversationTurnService::class.java)
@@ -99,7 +109,9 @@ object ConversationNotificationRoute {
                     putExtra(ConversationTurnService.EXTRA_RUNTIME_GENERATION, spec.runtimeGeneration)
                     putExtra(ConversationTurnService.EXTRA_LINUX_RUNTIME_MODE, spec.linuxRuntimeMode.name)
                     putExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY, spec.workspaceKey)
+                    putExtra(ConversationTurnService.EXTRA_TRANSCRIPT_PATH, spec.transcriptPath)
                 }
+                putExtra(ConversationTurnService.EXTRA_ACTIVE_TASK_IDS, activeTaskIds.toTypedArray())
             }
     }
 

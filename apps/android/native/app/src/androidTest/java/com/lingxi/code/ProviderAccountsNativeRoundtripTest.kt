@@ -46,8 +46,9 @@ class ProviderAccountsNativeRoundtripTest {
                     // None maps to MobileConfig.startup_catalog=None: no catalog
                     // prefetch/load/subscription or upstream discovery. The Host
                     // still projects its compiled-in canonical model definitions.
-                    appVersion = null, appAgentHost = false,
+                    appVersion = null, appAgentHost = false, schedulerController = false,
                     apiBase = "https://invalid.example", model = "", sessionMode = SessionModeDto.CODE,
+                    initialSessionId = null, initialSessionTranscriptPath = null,
                     visionDelegationEnabled = false, appFilesRoot = root.path, projectCwd = workspace.path,
                     providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":["openai"]}"""),
                     mobileLinux = runtime, physicalMemoryBytes = 0u, hostEnvironment = null,

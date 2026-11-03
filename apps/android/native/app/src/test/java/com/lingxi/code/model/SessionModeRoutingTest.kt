@@ -37,10 +37,11 @@ class SessionModeRoutingTest {
             uuid = sessionId, title = "Chat", messageCount = 1,
             relativeTime = "", mode = SessionMode.Chat,
         )
-        // Restoration uses the exact session identity and its workspace.
-        assertTrue(isRestorableSession("sess:$sessionId", row.uuid, "/work/project", "/work/project"))
-        assertFalse(isRestorableSession(sessionId, row.uuid, "/work/other", "/work/project"))
-        assertFalse(isRestorableSession("session-b", row.uuid, "/work/project", "/work/project"))
+        // The owning project stays fixed even if a different session changes its cwd.
+        assertTrue(isRestorableSession("sess:$sessionId", row.uuid))
+        assertTrue(sessionLinkModeMatchesOwner(SessionMode.Chat, row.mode, null, false))
+        assertFalse(sessionLinkModeMatchesOwner(SessionMode.Code, row.mode, null, false))
+        assertFalse(isRestorableSession("session-b", row.uuid))
     }
 
     @Test

@@ -69,6 +69,7 @@ data class RecentSession(
     val modifiedAtEpochSeconds: Long?,
     val pinnedAtEpochMillis: Long?,
     val status: RecentStatus = RecentStatus.Idle,
+    val transcriptPath: String? = null,
 )
 
 @Immutable
@@ -122,6 +123,7 @@ internal fun buildRecentGroups(
                         modifiedAtEpochSeconds = session.updatedAtEpochMillis.takeIf { it > 0L }?.div(1000L),
                         pinnedAtEpochMillis = pinnedSessions[session.id],
                         status = statusFor(session.id),
+                        transcriptPath = session.transcriptPath,
                     ),
                 )
             }
@@ -161,6 +163,7 @@ private fun SessionRow.toRecent(
     modifiedAtEpochSeconds = modifiedAtEpochSeconds,
     pinnedAtEpochMillis = pinnedSessions[uuid],
     status = statusFor(uuid),
+    transcriptPath = transcriptPath,
 )
 
 private fun RecentSession.matches(normalizedQuery: String): Boolean =

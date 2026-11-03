@@ -51,7 +51,7 @@ class SideChatNativeUiTest {
                 onPermission = { error("No permission expected") },
             )),
         ))
-        val source = SideChatSource(engine)
+        val source = SideChatSource(engine) { true }
         val store = ViewModelStore()
         val visible = mutableStateOf(true)
         try {

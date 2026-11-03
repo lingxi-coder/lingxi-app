@@ -45,6 +45,8 @@ data class ProjectRecord(
     val additionalDirectories: List<String> = emptyList(),
     /** A project can appear in either space without copying its files. */
     val visibleModes: Set<SessionMode>,
+    /** Exact app-private source selection to offer for explicit authoring recovery. */
+    val authoringIntentId: String? = null,
 )
 
 data class SessionWorkspaceState(

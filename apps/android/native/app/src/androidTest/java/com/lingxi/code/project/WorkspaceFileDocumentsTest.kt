@@ -29,7 +29,7 @@ class WorkspaceFileDocumentsTest {
             val file = requireNotNull(source.createFile("text/plain", "note.txt"))
             context.contentResolver.openOutputStream(file.uri)!!.use { it.write("system document".toByteArray()) }
             val incoming = DocumentsContract.buildTreeDocumentUri("com.lingxi.code.debug.test.filesfixtures", DocumentsContract.getDocumentId(source.uri))
-            val repo = WorkspaceDirectoryRepository(native, "/home/test", "/home/test/work", "/home/test/work/projects", File(native, ".config"))
+            val repo = WorkspaceDirectoryRepository(native, "/home/test", "/home/test/work", "/home/test/work/projects", File(native, ".config"), listOf("/home/test/work", "/home/test/work/projects"))
             val imported = repo.importDocuments(context, listOf(incoming), "/home/test", true, FileConflict.KeepBoth) {}
             assertTrue(imported.toString(), imported.isEmpty())
             assertEquals("system document", File(native, "source/note.txt").readText())

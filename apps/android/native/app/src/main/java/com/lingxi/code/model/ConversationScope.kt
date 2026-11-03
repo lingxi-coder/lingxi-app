@@ -26,6 +26,10 @@ enum class SessionMode(val wireValue: String) {
     Code("code"),
 }
 
+/** A generic new chat has no project and uses the visible conversation mode. */
+internal fun defaultNewChatTarget(activeMode: SessionMode): Pair<ConversationScope, SessionMode> =
+    ConversationScope.Global to activeMode
+
 /**
  * The durable key a scope's state (last-active session, composer draft) is
  * stored under — `global` / `scheduled` / `project.<id>`.

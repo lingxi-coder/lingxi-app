@@ -2746,5 +2746,7 @@
   "local_app_development_requires_code": "Chat 모드에서는 Local App을 개발할 수 없습니다. 계속하려면 Code 모드로 전환하세요.",
   "local_app_publication_pending": "완료되지 않은 앱 게시",
   "local_app_publication_recover": "게시 재개",
-  "local_app_publication_review_prepared": "게시할 내용 검토"
+  "local_app_publication_review_prepared": "게시할 내용 검토",
+  "local_app_market_remix": "편집 가능한 사본 만들기",
+  "local_app_market_remix_confirm": "이 버전에서 편집 가능한 소스 사본을 만들까요?"
 }

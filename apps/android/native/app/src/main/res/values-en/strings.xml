@@ -2578,4 +2578,6 @@
     <string name="local_app_publication_pending">Unfinished app publications</string>
     <string name="local_app_publication_recover">Resume publishing</string>
     <string name="local_app_publication_review_prepared">Review prepared publication</string>
+    <string name="local_app_market_remix">Create editable copy</string>
+    <string name="local_app_market_remix_confirm">Create an editable source copy from this release?</string>
 </resources>

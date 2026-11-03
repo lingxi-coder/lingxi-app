@@ -2746,5 +2746,7 @@
   "local_app_development_requires_code": "Chat 模式不支援 Local App 開發，請切換至 Code 模式後繼續。",
   "local_app_publication_pending": "未完成的應用程式發佈",
   "local_app_publication_recover": "恢復發佈",
-  "local_app_publication_review_prepared": "檢視待發佈內容"
+  "local_app_publication_review_prepared": "檢視待發佈內容",
+  "local_app_market_remix": "建立可編輯副本",
+  "local_app_market_remix_confirm": "從此版本建立可編輯的原始碼副本？"
 }

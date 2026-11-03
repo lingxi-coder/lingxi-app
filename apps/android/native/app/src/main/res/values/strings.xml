@@ -2578,4 +2578,6 @@
     <string name="local_app_publication_pending">未完成的应用发布</string>
     <string name="local_app_publication_recover">恢复发布</string>
     <string name="local_app_publication_review_prepared">审阅待发布内容</string>
+    <string name="local_app_market_remix">创建可编辑副本</string>
+    <string name="local_app_market_remix_confirm">从此版本创建可编辑源码副本？</string>
 </resources>

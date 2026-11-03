@@ -2572,4 +2572,5 @@
     <string name="chat_agent_report_pending">終了・レポート送信待ち</string>
     <string name="chat_agent_report_delivered">レポート送信済み</string>
     <string name="chat_agent_execution_ended">実行終了</string>
+    <string name="local_app_authoring_recover">アプリ開発を再開</string>
 </resources>

@@ -2740,5 +2740,6 @@
   "chat_agent_report_flagged": "报告已送达，附有警告",
   "chat_agent_report_pending": "已结束，报告待送达",
   "chat_agent_report_delivered": "报告已送达",
-  "chat_agent_execution_ended": "执行已结束"
+  "chat_agent_execution_ended": "执行已结束",
+  "local_app_authoring_recover": "恢复应用开发"
 }

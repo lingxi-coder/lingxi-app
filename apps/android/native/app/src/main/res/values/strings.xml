@@ -2572,4 +2572,5 @@
     <string name="chat_agent_report_pending">已结束，报告待送达</string>
     <string name="chat_agent_report_delivered">报告已送达</string>
     <string name="chat_agent_execution_ended">执行已结束</string>
+    <string name="local_app_authoring_recover">恢复应用开发</string>
 </resources>

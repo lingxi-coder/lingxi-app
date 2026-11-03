@@ -2745,5 +2745,6 @@
   "chat_agent_report_flagged": "Report delivered with warning",
   "chat_agent_report_pending": "Ended, report pending",
   "chat_agent_report_delivered": "Report delivered",
-  "chat_agent_execution_ended": "Execution ended"
+  "chat_agent_execution_ended": "Execution ended",
+  "local_app_authoring_recover": "Resume app development"
 }

@@ -2740,5 +2740,6 @@
   "chat_agent_report_flagged": "警告付きレポート送信済み",
   "chat_agent_report_pending": "終了・レポート送信待ち",
   "chat_agent_report_delivered": "レポート送信済み",
-  "chat_agent_execution_ended": "実行終了"
+  "chat_agent_execution_ended": "実行終了",
+  "local_app_authoring_recover": "アプリ開発を再開"
 }

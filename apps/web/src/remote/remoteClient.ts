@@ -28,7 +28,7 @@ import {
 import { emptyTranscript, TranscriptBuilder, type Transcript } from './sessionModel';
 import { displayText } from './text';
 import type { ViewerConnection } from './viewerConnection';
-import { isPermissionModeId, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS } from './reuse';
+import { isPermissionModeId, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS, slashCommandEchoesRequest } from './reuse';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Session state
@@ -89,6 +89,12 @@ export const isTeamApproval = (sessionId: string): boolean => sessionId.length =
   && /^team-approval:[A-Za-z0-9_-]{32}$/u.test(sessionId);
 const validMode = (mode: unknown): mode is SessionModeDto => mode === 'chat' || mode === 'code';
 const approvalPendingOnly = (pending: RemotePending): boolean => pending.questions.length === 0 && pending.computer_access.length === 0;
+
+/** Configuration slash commands have no prompt record to reconcile with. */
+function promptExpectsEcho(text: string): boolean {
+  const trimmed = text.trim();
+  return !/^\/[^\s/]+(?:\s|$)/u.test(trimmed) || slashCommandEchoesRequest(trimmed);
+}
 
 type SnapshotAssembly = { epoch: string; mode?: SessionModeDto; first: number; messages: MessageDto[]; records: RemoteSeqRecord[] };
 type SnapshotEnd = Extract<SessionSnapshotParams, { phase: 'end' }>;
@@ -185,6 +191,7 @@ export class SessionController {
   private modeWaitUpdates = 0;
   private modeWaitBytes = 0;
   private modeRejected = false;
+  private approvalResponse: 'available' | 'inFlight' | 'consumed' = 'available';
   private snapshotFinishedDuringAttach = false;
   private droppedThroughSeq: number | undefined;
   private awaitingAttach = false;
@@ -209,6 +216,9 @@ export class SessionController {
 
   private commit(change: Partial<SessionState>): void {
     this.current = { ...this.current, ...change };
+    if (this.approvalResponse === 'consumed') {
+      this.current = { ...this.current, pending: { ...this.current.pending, permissions: [] } };
+    }
     if (this.notifyScheduled) return;
     this.notifyScheduled = true;
     // Records arrive in bursts; one render per burst is enough.
@@ -582,7 +592,10 @@ export class SessionController {
     if (running && (images.length > 0 || files.length > 0)) {
       throw new RemoteRpcError('forbidden', 'Attachments cannot be sent while a turn is running.');
     }
-    const attachments = images.filter((image) => isSupportedImageMediaType(image.media_type)).slice(0, MAX_IMAGE_ATTACHMENTS);
+    if (images.length > MAX_IMAGE_ATTACHMENTS || images.some((image) => !isSupportedImageMediaType(image.media_type)) || files.length > 4) {
+      throw new RemoteRpcError('invalid_params', 'The prompt contains unsupported or too many attachments.');
+    }
+    const attachments = [...images];
     if (text.trim().length === 0 && attachments.length === 0 && files.length === 0) return Promise.resolve();
     const prompt: OutgoingPrompt = { id: randomId(), text, images: attachments, files, status: 'sending' };
     this.commit({ outgoing: [...this.current.outgoing, prompt] });
@@ -594,6 +607,10 @@ export class SessionController {
     this.requireConversation();
     const prompt = this.current.outgoing.find((entry) => entry.id === id);
     if (prompt === undefined || prompt.status !== 'failed') return;
+    const running = this.current.turn.running || this.current.transcript.conversation.running;
+    if (running && (prompt.images.length > 0 || (prompt.files?.length ?? 0) > 0)) {
+      throw new RemoteRpcError('forbidden', 'Attachments cannot be sent while a turn is running.');
+    }
     this.updateOutgoing(id, { status: 'sending', error: undefined });
     await this.dispatchPrompt(prompt);
   }
@@ -611,7 +628,7 @@ export class SessionController {
         ...((prompt.files?.length ?? 0) > 0 ? { file_refs: [...prompt.files!] } : {}),
         client_request_id: prompt.id,
       });
-      if (this.seenTurns.has(result.turn_id)) this.dismissPrompt(prompt.id);
+      if (!promptExpectsEcho(prompt.text) || this.seenTurns.has(result.turn_id)) this.dismissPrompt(prompt.id);
       else this.updateOutgoing(prompt.id, { turnId: result.turn_id });
     } catch (error) {
       this.updateOutgoing(prompt.id, { status: 'failed', error: errorMessage(error).code });
@@ -631,12 +648,30 @@ export class SessionController {
   async respondPermission(requestId: number, decision: Extract<PermissionResponseDto, { type: 'allow_once' | 'deny' }>): Promise<void> {
     if (isTeamApproval(this.sessionId)) {
       if (this.modeRejected || this.current.status !== 'live' || !this.connected()
+        || this.approvalResponse !== 'available'
         || this.current.sessionMode !== undefined || !this.current.pending.permissions.some((request) => request.request_id === requestId)
         || (decision.type !== 'allow_once' && decision.type !== 'deny')) {
         throw new RemoteRpcError('closed', 'The remote approval is unavailable.');
       }
-    } else this.requireConversation();
-    await this.answer(() => this.io.request('permission.respond', { session_id: this.sessionId, request_id: requestId, decision }));
+      this.approvalResponse = 'inFlight';
+      try {
+        await this.answer(() => this.io.request('permission.respond', { session_id: this.sessionId, request_id: requestId, decision }));
+        this.approvalResponse = 'consumed';
+        this.commit({});
+      } catch (error) {
+        if (!(error instanceof RemoteRpcError) || error.code === 'timeout' || error.code === 'closed' || error.code === 'internal') {
+          // The host may have received the answer even when its reply was lost.
+          this.approvalResponse = 'consumed';
+          this.commit({});
+        } else {
+          this.approvalResponse = 'available';
+        }
+        throw error;
+      }
+    } else {
+      this.requireConversation();
+      await this.answer(() => this.io.request('permission.respond', { session_id: this.sessionId, request_id: requestId, decision }));
+    }
   }
 
   async answerQuestion(requestId: number, answers: Record<string, string>): Promise<void> {

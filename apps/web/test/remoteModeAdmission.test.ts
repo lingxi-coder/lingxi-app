@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ManualClock, type RemotePending, type RemoteSeqRecord } from '@lingxi/bridge-client/remote';
+import { ManualClock, RemoteRpcError, type RemotePending, type RemoteSeqRecord } from '@lingxi/bridge-client/remote';
 import { RemoteClient, SessionController, isTeamApproval, type SessionIo } from '../src/remote/remoteClient';
 import type { ViewerConnection } from '../src/remote/viewerConnection';
 
@@ -32,6 +32,59 @@ function snapshot(controller: SessionController, mode?: 'chat' | 'code', epoch =
 function started(seq: number, id: string, mode: 'chat' | 'code'): RemoteSeqRecord {
   return { seq, record: { type: 'event', event: { type: 'session_started', session_id: id, mode } } };
 }
+
+test('invalid attachment batches are rejected before any prompt is queued', () => {
+  const { controller, calls } = rig();
+  snapshot(controller, 'code');
+  const image = { media_type: 'image/png', base64: 'AAAA' };
+  assert.throws(() => controller.sendPrompt('keep', [image, { ...image, media_type: 'image/bmp' }]));
+  assert.throws(() => controller.sendPrompt('keep', Array(5).fill(image)));
+  assert.throws(() => controller.sendPrompt('keep', [], Array(5).fill('receipt')));
+  assert.deepEqual(controller.getState().outgoing, []);
+  assert.deepEqual(calls, []);
+});
+
+test('successful configuration commands finish without waiting for a prompt echo', async () => {
+  const { controller } = rig();
+  snapshot(controller, 'code');
+  for (const text of ['/model', '/model chosen', '/effort high', '/plan', '/plan open', '/plan share']) {
+    await controller.sendPrompt(text);
+    assert.deepEqual(controller.getState().outgoing, [], text);
+  }
+  await controller.sendPrompt('/plan implement this');
+  assert.equal(controller.getState().outgoing.length, 1);
+  controller.handleEvent({ seq: 1, record: { type: 'prompt', turn_id: 1, text: '/plan implement this', origin: 'desktop' } });
+  assert.deepEqual(controller.getState().outgoing, []);
+});
+
+test('retry retains a failed image or file until the running turn finishes', async () => {
+  for (const withImage of [true, false]) {
+    const calls: Array<{ method: string; params: any }> = [];
+    const io: SessionIo = {
+      request: (async (method: string, params: unknown) => {
+        calls.push({ method, params });
+        if (calls.length === 1) throw new Error('not accepted');
+        return { turn_id: 22 };
+      }) as SessionIo['request'],
+      notify() {}, clock: new ManualClock(),
+    };
+    const controller = new SessionController('s', io, () => true);
+    snapshot(controller, 'code');
+    await controller.sendPrompt('preserve', withImage ? [{ media_type: 'image/png', base64: 'AAAA' }] : [], withImage ? [] : ['receipt']);
+    const failed = controller.getState().outgoing[0]!;
+    assert.equal(failed.status, 'failed');
+    controller.handleEvent({ seq: 1, record: { type: 'event', event: { type: 'turn_started', turn_id: 9 } } });
+    await assert.rejects(controller.retryPrompt(failed.id));
+    assert.deepEqual(controller.getState().outgoing[0], failed);
+    assert.equal(calls.length, 1);
+    snapshot(controller, 'code', 'e2');
+    await controller.retryPrompt(failed.id);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]!.params.client_request_id, calls[0]!.params.client_request_id);
+    assert.deepEqual(calls[1]!.params.images, calls[0]!.params.images);
+    assert.deepEqual(calls[1]!.params.file_refs, calls[0]!.params.file_refs);
+  }
+});
 
 test('an unknown mode holds the snapshot and records until its own lifecycle confirms it', async () => {
   const { controller, calls } = rig();
@@ -153,17 +206,88 @@ test('Team capability admits only a pending allow-once or deny and has no conver
   assert.equal(controller.getState().status, 'live');
   assert.equal(controller.getState().sessionMode, undefined);
   await controller.respondPermission(1, { type: 'allow_once' });
-  await controller.respondPermission(1, { type: 'deny' });
+  await assert.rejects(controller.respondPermission(1, { type: 'deny' }));
+  controller.handleSnapshot({ session_id: approvalId, phase: 'begin', epoch: 'e2', first_message_index: 0 });
+  controller.handleSnapshot({ session_id: approvalId, phase: 'end', cursor: { epoch: 'e2', seq: 0 }, pending, turn: { running: false } });
+  assert.deepEqual(controller.getState().pending.permissions, []);
+  await assert.rejects(controller.respondPermission(1, { type: 'deny' }));
   await assert.rejects(controller.respondPermission(2, { type: 'allow_once' }));
   assert.throws(() => controller.sendPrompt('forbidden'));
   await assert.rejects(controller.cancelTurn());
   await assert.rejects(controller.answerQuestion(1, {}));
   await assert.rejects(controller.setModel('x'));
   await assert.rejects(controller.fetchImage('x'));
-  assert.deepEqual(calls.map((call) => call.method), ['permission.respond', 'permission.respond']);
+  assert.deepEqual(calls.map((call) => call.method), ['permission.respond']);
   controller.handleEvent(started(1, approvalId, 'code'));
   assert.equal(controller.getState().status, 'error');
   await assert.rejects(controller.respondPermission(1, { type: 'deny' }));
+});
+
+test('a Team approval reserves one in-flight response and permits a retry after failure', async () => {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  let calls = 0;
+  const io: SessionIo = {
+    request: (() => {
+      calls += 1;
+      return new Promise<void>((ok, fail) => { resolve = ok; reject = fail; });
+    }) as SessionIo['request'],
+    notify() {}, clock: new ManualClock(),
+  };
+  const controller = new SessionController(approvalId, io, () => true);
+  const pending: RemotePending = { permissions: [{ request_id: 1, kind: { type: 'tool_use_confirm', tool_name: 'Bash', tool_input_json: '{}', default_allow: false } }], questions: [], computer_access: [] };
+  controller.handleSnapshot({ session_id: approvalId, phase: 'begin', epoch: 'e1', first_message_index: 0 });
+  controller.handleSnapshot({ session_id: approvalId, phase: 'end', cursor: { epoch: 'e1', seq: 0 }, pending, turn: { running: false } });
+  const first = controller.respondPermission(1, { type: 'allow_once' });
+  await assert.rejects(controller.respondPermission(1, { type: 'deny' }));
+  assert.equal(calls, 1);
+  reject(new RemoteRpcError('capacity', 'host refused the request'));
+  await assert.rejects(first);
+  const retry = controller.respondPermission(1, { type: 'deny' });
+  assert.equal(calls, 2);
+  resolve();
+  await retry;
+  assert.deepEqual(controller.getState().pending.permissions, []);
+  controller.handlePending(pending);
+  assert.deepEqual(controller.getState().pending.permissions, []);
+  await assert.rejects(controller.respondPermission(1, { type: 'allow_once' }));
+});
+
+test('an uncertain Team approval result cannot be answered with the opposite decision', async () => {
+  for (const error of [new RemoteRpcError('timeout', 'reply lost'), new RemoteRpcError('closed', 'link lost'), new RemoteRpcError('internal', 'unknown result'), new Error('unexpected transport failure')]) {
+    let calls = 0;
+    const io: SessionIo = {
+      request: (async () => { calls += 1; throw error; }) as SessionIo['request'],
+      notify() {}, clock: new ManualClock(),
+    };
+    const controller = new SessionController(approvalId, io, () => true);
+    const pending: RemotePending = { permissions: [{ request_id: 1, kind: { type: 'tool_use_confirm', tool_name: 'Bash', tool_input_json: '{}', default_allow: false } }], questions: [], computer_access: [] };
+    controller.handleSnapshot({ session_id: approvalId, phase: 'begin', epoch: 'e1', first_message_index: 0 });
+    controller.handleSnapshot({ session_id: approvalId, phase: 'end', cursor: { epoch: 'e1', seq: 0 }, pending, turn: { running: false } });
+    await assert.rejects(controller.respondPermission(1, { type: 'allow_once' }));
+    controller.handlePending(pending);
+    assert.deepEqual(controller.getState().pending.permissions, []);
+    await assert.rejects(controller.respondPermission(1, { type: 'deny' }));
+    assert.equal(calls, 1);
+  }
+});
+
+test('a Team approval answered elsewhere cannot be resurrected by a stale pending update', async () => {
+  let calls = 0;
+  const io: SessionIo = {
+    request: (async () => { calls += 1; throw new RemoteRpcError('not_pending', 'already answered'); }) as SessionIo['request'],
+    notify() {}, clock: new ManualClock(),
+  };
+  const controller = new SessionController(approvalId, io, () => true);
+  const pending: RemotePending = { permissions: [{ request_id: 1, kind: { type: 'tool_use_confirm', tool_name: 'Bash', tool_input_json: '{}', default_allow: false } }], questions: [], computer_access: [] };
+  controller.handleSnapshot({ session_id: approvalId, phase: 'begin', epoch: 'e1', first_message_index: 0 });
+  controller.handleSnapshot({ session_id: approvalId, phase: 'end', cursor: { epoch: 'e1', seq: 0 }, pending, turn: { running: false } });
+  await controller.respondPermission(1, { type: 'deny' });
+  assert.equal(controller.getState().answeredElsewhere, true);
+  controller.handlePending(pending);
+  assert.deepEqual(controller.getState().pending.permissions, []);
+  await assert.rejects(controller.respondPermission(1, { type: 'allow_once' }));
+  assert.equal(calls, 1);
 });
 
 test('Team capability rejects a history pagination marker', async () => {

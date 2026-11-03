@@ -4,8 +4,8 @@ import type { Locale } from '../utils/locale';
 import type { RemoteClient } from './remoteClient';
 
 /** Original bytes, independent of the compressed image picker. */
-export function Files({ client, session, locale, disabled, onAttach }: {
-  client: RemoteClient; session: string; locale: Locale; disabled: boolean; onAttach(file: FileReceipt): void;
+export function Files({ client, session, locale, disabled, attachmentLimitReached = false, onAttach }: {
+  client: RemoteClient; session: string; locale: Locale; disabled: boolean; attachmentLimitReached?: boolean; onAttach(file: FileReceipt): void;
 }) {
   const zh = locale === 'zh';
   const [files, setFiles] = useState<FileReceipt[]>([]);
@@ -63,19 +63,20 @@ export function Files({ client, session, locale, disabled, onAttach }: {
   };
   return <details className="rc-files">
     <summary>{zh ? '文件' : 'Files'} ({files.length})</summary>
-    <button type="button" disabled={disabled || busy} onClick={() => input.current?.click()}>{zh ? '上传原文件' : 'Upload file'}</button>
+    <button type="button" disabled={disabled || busy || attachmentLimitReached} onClick={() => input.current?.click()}>{zh ? '上传原文件' : 'Upload file'}</button>
     <input type="file" ref={input} hidden onChange={event => {
       const file = event.target.files?.[0]; event.target.value = ''; if (file) void upload(file);
     }} />
     {busy && abort.current ? <button type="button" onClick={() => abort.current?.abort()}>{zh ? '取消传输' : 'Cancel transfer'}</button> : null}
-    {!busy && selected ? <button type="button" disabled={disabled} onClick={() => void upload(selected)}>{zh ? '重试 / 续传' : 'Retry / resume'}</button> : null}
+    {!busy && selected ? <button type="button" disabled={disabled || attachmentLimitReached} onClick={() => void upload(selected)}>{zh ? '重试 / 续传' : 'Retry / resume'}</button> : null}
     {progress ? <p role="status">{progress}</p> : null}
     {problem ? <p role="alert">{problem}</p> : null}
     <ul>{files.map(file => <li key={file.ref}>
       {file.name} · {file.size.toLocaleString()} B{' '}
-      <button type="button" disabled={disabled || busy} onClick={() => onAttach(file)}>{zh ? '附到消息' : 'Attach'}</button>{' '}
+      <button type="button" disabled={disabled || busy || attachmentLimitReached} onClick={() => onAttach(file)}>{zh ? '附到消息' : 'Attach'}</button>{' '}
       <button type="button" disabled={disabled || busy} onClick={() => void download(file)}>{zh ? '下载' : 'Download'}</button>
     </li>)}</ul>
+    {attachmentLimitReached ? <p className="rc-note">{zh ? '一条消息最多附加 4 个文件。' : 'A message can include at most 4 files.'}</p> : null}
     {disabled ? <p className="rc-note">{zh ? '文件传输需要 WebRTC 连接。' : 'File transfer requires a WebRTC connection.'}</p> : null}
   </details>;
 }

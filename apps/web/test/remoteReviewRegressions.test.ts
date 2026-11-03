@@ -173,6 +173,44 @@ test('a mode conflict between render and send retains the session file attachmen
   }
 });
 
+test('adding a fifth file keeps the four existing draft attachments', async () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} } as unknown as Document;
+  const { controller, snapshot } = historyController();
+  snapshot('e1', 'base', 0);
+  controller.activate = () => {};
+  controller.deactivate = () => {};
+  const receipts = Array.from({ length: 5 }, (_, index) => ({
+    transfer_id: String(index).repeat(32), ref: String(index).repeat(32), session_id: 's',
+    name: `file-${index}.txt`, size: 0, sha256: '0'.repeat(64),
+  }));
+  const state = { sessions: [], bots: [] };
+  const client = {
+    session: () => controller, getState: () => state, subscribe: () => () => {}, botOfThread: () => undefined,
+    models: async () => ({ models: [], current: '' }), listFiles: async () => receipts,
+  } as unknown as RemoteClient;
+  let renderer: any;
+  try {
+    await act(async () => { renderer = create(createElement(SessionView, {
+      locale: 'en', client, sessionId: 's', connection: { phase: 'ready', hostId: 'h', transport: 'webrtc', attempt: 0, everReady: true },
+      deviceName: 'browser', onBack() {},
+    })); });
+    const attachButtons = () => renderer.root.findAllByType('button').filter((button: any) => button.children.includes('Attach'));
+    assert.equal(attachButtons().length, 5);
+    for (let index = 0; index < 4; index += 1) {
+      await act(async () => { attachButtons()[index].props.onClick(); });
+    }
+    assert.equal(attachButtons()[4].props.disabled, true);
+    // Even a late callback cannot evict an existing attachment.
+    await act(async () => { attachButtons()[4].props.onClick(); });
+    const removed = renderer.root.findAllByProps({ 'aria-label': 'Remove file' });
+    assert.deepEqual(removed.map((button: any) => button.parent.children[0]), receipts.slice(0, 4).map(file => file.name));
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.document = originalDocument;
+  }
+});
+
 test('a turn starting between render and send retains files for the next idle turn', async () => {
   const originalDocument = globalThis.document;
   globalThis.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} } as unknown as Document;

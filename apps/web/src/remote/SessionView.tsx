@@ -108,12 +108,13 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
             <div className={`rc-bubble rc-outgoing${prompt.status === 'failed' ? ' rc-failed' : ''}`}>
               {prompt.text ? <p className="rc-plain">{prompt.text}</p> : null}
               {prompt.images.length > 0 ? <p className="rc-note">{prompt.images.length} × {t(locale, 'imageAlt')}</p> : null}
+              {(prompt.files?.length ?? 0) > 0 ? <p className="rc-note">{prompt.files!.length} × {locale === 'zh' ? '文件' : 'file'}</p> : null}
               <p className="rc-note">
                 {prompt.status === 'sending' ? t(locale, 'sending') : t(locale, 'sendFailed')}
                 {prompt.status === 'failed' ? (
                   <>
                     {' '}
-                    <button type="button" className="rc-link" disabled={!live} onClick={() => void controller.retryPrompt(prompt.id).catch(() => undefined)}>{t(locale, 'sendRetry')}</button>
+                    <button type="button" className="rc-link" disabled={!live || (running && (prompt.images.length > 0 || (prompt.files?.length ?? 0) > 0))} onClick={() => void controller.retryPrompt(prompt.id).catch(() => undefined)}>{t(locale, 'sendRetry')}</button>
                     {' '}
                     <button type="button" className="rc-link" onClick={() => controller.dismissPrompt(prompt.id)}>{t(locale, 'dismiss')}</button>
                   </>
@@ -126,7 +127,10 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
 
       <PendingPrompts locale={locale} controller={controller} pending={state.pending} answeredElsewhere={state.answeredElsewhere} disabled={!live} />
       {!approval ? <><Files key={sessionId} client={client} session={sessionId} locale={locale} disabled={!live || connection.transport !== 'webrtc'}
-        onAttach={file => setAttachments(current => [...current.filter(f => f.ref !== file.ref), file].slice(-4))} />
+        attachmentLimitReached={attachments.length >= 4}
+        onAttach={file => setAttachments(current => current.some(f => f.ref === file.ref)
+          ? current.map(f => f.ref === file.ref ? file : f)
+          : current.length < 4 ? [...current, file] : current)} />
       {attachments.length ? <ul>{attachments.map(file => <li key={file.ref}>{file.name}{' '}
         <button type="button" aria-label={locale === 'zh' ? '移除文件' : 'Remove file'} onClick={() => setAttachments(current => current.filter(f => f.ref !== file.ref))}>×</button>
       </li>)}</ul> : null}

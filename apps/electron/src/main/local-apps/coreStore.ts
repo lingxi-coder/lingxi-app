@@ -116,6 +116,10 @@ export class CoreLocalAppStore implements LocalAppStore {
       const native = input.nativeAuthoring;
       let committed: unknown | null = null;
       if (previous) committed = await this.core.request<unknown | null>({ op: 'getPublication', requestId: previous.requestId });
+      // A completed Host intent proves this ID previously returned a durable
+      // SDK result. If that receipt is missing, recreating the same staged
+      // bytes must never turn a historical replay into a fresh mutation.
+      if (previous?.state === 'completed' && !committed) throw new Error('The committed Local App publication receipt is no longer available');
       if (input.publicationReplayOnly && !committed) throw new Error('The committed Local App publication receipt is no longer available');
       let fingerprintPath = stagingInputPath;
       if (!fingerprintPath && previous) {

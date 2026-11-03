@@ -391,7 +391,7 @@ test('tool source read verifies the originating owner; installed app listing and
   assert.equal(status.authoring, undefined);
   assert.equal(status.sourceSnapshotPath, undefined);
   const read = await host.request({ action: 'read', id: row.id,
-    source_session: { projectPath: path, sessionId: codeSession } }, undefined, tool);
+    source_session: { projectPath: path, sessionId: codeSession, mode: 'code' } }, undefined, tool);
   assert.ok(read.sourceSnapshotPath);
   host.options.currentConversationMode = () => 'chat';
   const chatList = await host.request({ action: 'list' });
@@ -525,18 +525,64 @@ test('a committed publication replays its historical Code receipt after its sour
   host.options.currentConversationMode = () => 'chat';
   host.store.publicationIntent = async () => ({ requestId, sourceDirectory: path, authoringSessionId: sessionId,
     native: { sourceId, setCurrent: true }, state: 'completed' });
+  let lookups = 0;
   host.store.core.request = async (input: any) => {
+    lookups++;
     assert.equal(input.op, 'getPublication'); assert.equal(input.requestId, requestId);
     return { sourceId, publisher, record: { appId: row.id } };
   };
   let observed: any;
   host.store.publish = async (input: any) => { observed = input; return row; };
   const result = await host.request({ action: 'publish', name: 'App', html: '<p>original</p>',
-    source_session: { projectPath: path, sessionId, requestId } }, undefined, { kind: 'tool' });
+    source_session: { projectPath: path, sessionId, mode: 'code', requestId } }, undefined, { kind: 'tool' });
   assert.equal(result.id, row.id);
   assert.equal(observed.nativeAuthoring.sourceId, sourceId);
   assert.equal(observed.nativeAuthoring.authoring.authoringSessionId, sessionId);
   assert.equal(observed.publication.requestId, requestId);
+  await assert.rejects(host.request({ action: 'publish', name: 'App', html: '<p>original</p>',
+    source_session: { projectPath: path, sessionId, mode: 'chat', requestId } }, undefined, { kind: 'tool' }), /local_app_development_requires_code|Code/);
+  assert.equal(lookups, 1, 'Chat cannot even look up a historical Code publication');
+});
+
+test('a durable Code tool publication retains source A after its session changes cwd to B', async t => {
+  const { root, host, row } = await fixture(t);
+  const path = join(root, 'original-source'); await fs.mkdir(path);
+  const source = await fs.realpath(path), sessionId = randomUUID(), requestId = randomUUID();
+  const native = mockNativeAuthoring(host);
+  host.options.resolveAuthoringBinding = async (_id: unknown, ref: { projectPath: string; sessionId: string }) => ({
+    sourceDirectory: ref.projectPath, projectRef: { kind: 'desktopPath', path: ref.projectPath }, authoringSessionId: ref.sessionId,
+  });
+  await host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath: source, sessionId }, setCurrent: true });
+  const sourceId = native.sources.get(source)!;
+  host.options.resolveAuthoringBinding = async () => { throw new Error('The session cwd is now B'); };
+  let state = 'pending';
+  host.store.publicationIntent = async (id: string) => id === requestId ? ({ requestId, state, sourceDirectory: source,
+    authoringSessionId: sessionId, appId: row.id, native: { sourceId, setCurrent: false } }) : undefined;
+  host.store.core.request = async (input: any) => { assert.equal(input.op, 'getPublication'); return null; };
+  const writes: any[] = [];
+  host.store.publish = async (input: any) => { writes.push(input); return row; };
+  const input = { action: 'publish', id: row.id, expectedRevision: 1, html: '<p>captured A</p>', source_path: source,
+    source_session: { projectPath: source, sessionId, mode: 'code', requestId } };
+  await host.request(input, undefined, { kind: 'tool' });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].publication.sourceDirectory, source);
+  assert.equal(writes[0].publication.authoringSessionId, sessionId);
+  assert.equal(writes[0].publication.requestId, requestId);
+  assert.equal(writes[0].nativeAuthoring.sourceId, sourceId);
+  for (const bad of [
+    { ...input, source_session: { ...input.source_session, mode: 'chat' } },
+    { ...input, source_session: { ...input.source_session, sessionId: randomUUID() } },
+    { ...input, source_session: { ...input.source_session, projectPath: join(root, 'other') } },
+    { ...input, id: `a${'f'.repeat(32)}` },
+  ]) await assert.rejects(host.request(bad, undefined, { kind: 'tool' }));
+  state = 'preparing';
+  await assert.rejects(host.request(input, undefined, { kind: 'tool' }), /cwd is now B/);
+  state = 'pending';
+  await assert.rejects(host.request(input, undefined, { kind: 'native', mode: 'code' }), /cwd is now B/);
+  await assert.rejects(host.request(input, undefined, { kind: 'native', mode: 'chat' }), /local_app_development_requires_code|Code/);
+  native.sources.set(source, randomUUID());
+  await assert.rejects(host.request(input, undefined, { kind: 'tool' }), /receipt/);
+  assert.equal(writes.length, 1, 'only the original captured owner reaches the publisher');
 });
 
 test('a registered source cannot publish through an unrelated or mismatched session receipt', async t => {

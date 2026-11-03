@@ -1301,9 +1301,12 @@ export class LocalAppHost {
     if (action === 'publish' || (origin.kind === 'tool' && action === 'read')) {
       const session = sourceSessionRef(input.source_session);
       if (!session) throw new Error(nativeTr('local_app_development_requires_code'));
+      if (origin.kind === 'tool' && (input.source_session as Record<string, unknown>).mode !== 'code') {
+        throw new Error(nativeTr('local_app_development_requires_code'));
+      }
       // Start the trusted owner lookup immediately, while the original
-      // session may still be the displayed live draft. It is safe to ignore a
-      // later failure only for a verified, already committed SDK receipt.
+      // session may still be the displayed live draft. A durable pending
+      // tool request may also use its captured Code owner after a later /cd.
       const resolution = this.resolveNativeAuthoring(session).then(value => ({ value }), error => ({ error }));
       if (action === 'publish') {
         const requestId = (input.source_session as Record<string, unknown>).requestId;
@@ -1334,7 +1337,9 @@ export class LocalAppHost {
           }
         }
       }
-      if (committedAuthoring !== undefined && priorPublication) {
+      const admittedToolReplay = origin.kind === 'tool' && priorPublication?.state === 'pending'
+        && (input.source_session as Record<string, unknown>).mode === 'code';
+      if (priorPublication && (committedAuthoring !== undefined || admittedToolReplay)) {
         originatingAuthoring = { sourceDirectory: priorPublication.sourceDirectory,
           projectRef: { kind: 'desktopPath', path: priorPublication.sourceDirectory }, authoringSessionId: priorPublication.authoringSessionId };
       } else {

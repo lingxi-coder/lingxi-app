@@ -104,6 +104,57 @@ test('unknown native publish retains its host-owned staging for recovery', async
     (await store.pendingPublications()).map(entry => entry.requestId).sort());
 });
 
+test('a completed publication whose SDK receipt disappeared cannot become a new mutation', async t => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'local-app-lost-receipt-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const requestId = randomUUID(), sessionId = randomUUID(); let writes = 0;
+  const result = { record: { appId: id, currentRevision: 1, latestRevision: 1, name: 'App', summary: '', executionGrants: [], createdAtMs: 1, updatedAtMs: 2 },
+    release: { appId: id, revision: 1, digest: 'd'.repeat(64), manifest } };
+  const transport: LocalAppCoreTransport = { dispose: async () => undefined, request: async <T>(request: Record<string, any>) => {
+    if (request.op === 'fingerprintAuthoringPublication') return { stagedDigest: 'd'.repeat(64) } as T;
+    if (request.op === 'getPublication') return null as T;
+    if (request.op === 'publishOnce') { writes++; return result as T; }
+    if (request.op === 'layout') return { sourcePath: '/release/source', dataPath: '/data' } as T;
+    throw new Error(`Unexpected request ${request.op}`);
+  } };
+  const store = new CoreLocalAppStore(join(root, 'config', 'local-apps', 'v2'), transport);
+  const input = { name: 'App', html: '<p>Original</p>', publication: { requestId, sourceDirectory: '/ordinary/project', authoringSessionId: sessionId } };
+  await store.publish(input);
+  await assert.rejects(store.publish(input), /committed Local App publication receipt is no longer available/);
+  assert.equal(writes, 1, 'missing receipt never causes a second publish');
+});
+
+test('a pending publication rejects changed bytes or revision before any SDK mutation', async t => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'local-app-pending-conflict-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const requestId = randomUUID(), sessionId = randomUUID(), config = join(root, 'config', 'local-apps', 'v2');
+  let writes = 0;
+  const transport: LocalAppCoreTransport = { dispose: async () => undefined, request: async <T>(request: Record<string, any>) => {
+    if (request.op === 'getPublication') return null as T;
+    if (request.op === 'fingerprintAuthoringPublication') {
+      const bytes = await fs.readFile(join(request.sourcePath, 'index.html'));
+      return { stagedDigest: createHash('sha256').update(bytes).digest('hex') } as T;
+    }
+    if (request.op === 'publishOnce') writes++;
+    throw new Error(`Unexpected request ${request.op}`);
+  } };
+  const store = new CoreLocalAppStore(config, transport); await fs.mkdir(store.importsRoot, { recursive: true });
+  const imports = await fs.realpath(store.importsRoot), original = join(imports, 'old-input'), fixed = join(imports, `host-publish-${requestId}`);
+  await fs.mkdir(original); await fs.writeFile(join(original, 'index.html'), 'original');
+  const stagedDigest = createHash('sha256').update('original').digest('hex');
+  const intents = new PublicationIntents(config, imports);
+  await intents.capture({ requestId, sourceDirectory: '/ordinary/project', authoringSessionId: sessionId,
+    appId: id, expectedRevision: 1, stagedDigest, sourcePath: fixed, stagingInputPath: original });
+  await fs.rename(original, fixed); await intents.ready(requestId);
+  const retry = join(imports, 'retry'); await fs.mkdir(retry); await fs.writeFile(join(retry, 'index.html'), 'changed');
+  const publication = { requestId, sourceDirectory: '/ordinary/project', authoringSessionId: sessionId };
+  await assert.rejects(store.publish({ id, expectedRevision: 1, staged_path: retry, publication }), /conflicts/);
+  await fs.writeFile(join(retry, 'index.html'), 'original');
+  await assert.rejects(store.publish({ id, expectedRevision: 2, staged_path: retry, publication }), /conflicts/);
+  assert.equal(writes, 0);
+  assert.equal(await fs.readFile(join(fixed, 'index.html'), 'utf8'), 'original');
+});
+
 test('a committed publication recovers by its saved request and digest even after staging disappears', async t => {
   const root = await fs.mkdtemp(join(tmpdir(), 'local-app-publish-recover-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

@@ -68,7 +68,8 @@ async function main() {
   const toolResult = async (input: Record<string, any>) => {
     const payload = { ...input };
     if (input.action === 'publish' || input.action === 'read') {
-      payload.source_session = { ...(input.source_session ?? defaultSession),
+      const source = input.source_session ?? defaultSession;
+      payload.source_session = { ...source, mode: trustedSessions.get(source.sessionId)?.mode,
         ...(input.action === 'publish' ? { requestId: input.source_session?.requestId ?? randomUUID() } : {}) };
     }
     let toolStage: string | undefined;

@@ -80254,6 +80254,40 @@
         }
       }
     },
+    "side_chat_delivery_unconfirmed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提交状态未确认"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提交狀態未確認"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delivery status unconfirmed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "送信状況は未確認です"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "전송 상태가 확인되지 않았습니다"
+          }
+        }
+      }
+    },
     "side_chat_empty": {
       "localizations": {
         "zh-Hans": {
@@ -80420,6 +80454,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "워크스페이스를 전환하기 전에 사이드 채팅을 종료하세요."
+          }
+        }
+      }
+    },
+    "side_chat_expired_read_only": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此旁聊已过期。以下未发送内容仅供查看和复制。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此旁聊已過期。以下未傳送內容僅供檢視與複製。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This side chat has expired. Unsent content is available to view and copy."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このサイドチャットは期限切れです。未送信の内容は表示とコピーのみ可能です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 사이드 채팅은 만료되었습니다. 보내지 않은 내용은 확인하고 복사할 수 있습니다."
           }
         }
       }

@@ -2580,4 +2580,6 @@
     <string name="local_app_publication_review_prepared">檢視待發佈內容</string>
     <string name="local_app_market_remix">建立可編輯副本</string>
     <string name="local_app_market_remix_confirm">從此版本建立可編輯的原始碼副本？</string>
+    <string name="side_chat_expired_read_only">此旁聊已過期。以下未傳送內容僅供檢視與複製。</string>
+    <string name="side_chat_delivery_unconfirmed">提交狀態未確認</string>
 </resources>

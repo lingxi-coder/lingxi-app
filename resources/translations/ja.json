@@ -2748,5 +2748,7 @@
   "local_app_publication_recover": "公開を再開",
   "local_app_publication_review_prepared": "公開予定の内容を確認",
   "local_app_market_remix": "編集可能なコピーを作成",
-  "local_app_market_remix_confirm": "このバージョンから編集可能なソースのコピーを作成しますか？"
+  "local_app_market_remix_confirm": "このバージョンから編集可能なソースのコピーを作成しますか？",
+  "side_chat_expired_read_only": "このサイドチャットは期限切れです。未送信の内容は表示とコピーのみ可能です。",
+  "side_chat_delivery_unconfirmed": "送信状況は未確認です"
 }

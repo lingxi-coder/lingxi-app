@@ -2753,5 +2753,7 @@
   "local_app_publication_recover": "Resume publishing",
   "local_app_publication_review_prepared": "Review prepared publication",
   "local_app_market_remix": "Create editable copy",
-  "local_app_market_remix_confirm": "Create an editable source copy from this release?"
+  "local_app_market_remix_confirm": "Create an editable source copy from this release?",
+  "side_chat_expired_read_only": "This side chat has expired. Unsent content is available to view and copy.",
+  "side_chat_delivery_unconfirmed": "Delivery status unconfirmed"
 }

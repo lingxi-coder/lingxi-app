@@ -71,3 +71,10 @@ Desktop 音频源码检查点为 `7305467d6` 与 `4df650e07`：runtime reservati
 iOS 最终 host staticlib 和 Swift metadata 生成已成功，7 个生成文件推广完毕。Android metadata、目标架构库与移动端整体验收尚未完成。独立审查正在覆盖 async admission 前的持久化、失败输入保留、草稿 ABA、导航/音频 owner 固定，以及列表显示来源到 native resume 的 exact path 校验。
 
 Desktop 最新完整运行 3880 pass / 4 fail / 16 skip；两项 fixture 已由 `c8c8a3b8e` 修复并完成 29 项定向复测，真实 Bridge binary 与 Cron producer 相关两项仍待最终产物。完整运行的 provisional pin 边界继续保留。
+
+
+## 最终 deferred replay SDK 检查点
+
+独立审查发现 CLI/headless/mobile 的通用 deferred replay 需要在每次分派前核验当前 writer authority。修复提交为 Harness `bc68dcfa5ebcd78ab23f877a433ca83c81bb4663`，仅四个文件且提交后工作区干净；没有 C ABI、FFI、协议或存储格式变化。deferred 6/6、private Chat 1/1、compaction 1/1 通过。runtime cold replay 由本次冻结源码生成、签名与 binary/dep-info/hash 验证的二进制直接运行 1/1；原 Cargo 链接命令被磁盘保护中断，不计 Cargo 命令通过。App pin、生成物与后续平台验证以该新提交为准。
+
+本轮移动端与 Desktop 限定范围独立复审已收口；冻结 hash 与实际执行层级见 validation index。iOS native 检查点 `ca3113890`/`cff83c61b`、Desktop metadata/drain 与 pending mode 检查点 `1aa18f362`、五语生成资源对齐 `577797ef2` 均在任务分支，未向 main 发布。CLI/Bridge 与真实单 flavor 原生门禁尚在推进。

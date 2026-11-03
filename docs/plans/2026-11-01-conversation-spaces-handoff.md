@@ -1,6 +1,14 @@
 # Chat / Code 上下文与跨端集成交接
 
-## 2026-11-02 最终 SDK 与原生绑定续作（优先于下方旧记录）
+## 2026-11-02 独立复审后收口（优先于下方 d4a6 检查点）
+
+iOS native 源码已按清单提交 `ca3113890`，仅 EOF 空行修正为 `cff83c61b`，没有提交 Generated 或证据目录。独立复审冻结的 342 项 Sources/Tests/project 输入聚合 SHA-256 为 `7e57b509cf6d7b525494c5562d195ad7d802258e6e804bf62715ac082d32df06`。真实 actor/存储/SessionHost 宿主套件 206/206；Full 产品、unit 与 UI 源码类型检查通过的检查点，以及最后测试夹具/EOF 差异均在 iOS evidence 中分别记录。它们仍不代表 simulator ABI/link/runtime 已验收。
+
+独立复审继续修复：Android admission/Stop 的精确未提交恢复、Side/Remote 完整失败稿和 ABA、当前空间 Global New Chat、抽屉 exact path；Desktop pending open 的固定 mode 校验、metadata token 显式释放、已接纳写跨 timeout/disconnect/quit 的 drain。CLI 非 fork 恢复需从目标 workspace 加载项目配置，后台 add-dir/config home 按调用来源固定，TUI deferred replay 不能在审批界面启动前等待。上述晚修尚待最终整合验证。
+
+SDK 通用 deferred replay 的来源检查修复已提交为 `bc68dcfa5ebcd78ab23f877a433ca83c81bb4663`（parent d4a6），仅四文件，工作树干净、未推送。每次派发前检查当前 writer 的 authority；新门禁为 deferred 6/6、private Chat 1/1、compaction 1/1。runtime cold replay 1/1 使用本次冻结源码编译、Mach-O/签名与 binary/dep-info/source hashes 验证的二进制直跑；其 Cargo 链接命令曾被 2 GiB 保护中断，不能算 Cargo 命令通过。**d4a6 及其双端主机绑定是中间检查点，App 正重新固定 bc68dcfa、生成并验证协议和绑定，三端真实验证仍须完成。** SDK 未修改 C ABI、协议/FFI schema 或存储格式；不得仅据此跳过 source identity 和实际生成验证。
+
+## 2026-11-02 d4a6 SDK 与原生绑定检查点（历史）
 
 Harness 最终提交为 `d4a6af84d0523102590622472e4d4a1149ba933d`，工作区干净；App 的 47 个 manifest pin 与 locked resolver 的 84 个 SDK crate 均对齐该提交。LLM 固定为 `0c2f041e856265e093e404d9b202c4238f73ef3c`。最终 source identity 校验、官方 TS 生成与 `--check` 均通过，协议为 32。此前 9c8f/186ecf40 均仅为历史基线。
 

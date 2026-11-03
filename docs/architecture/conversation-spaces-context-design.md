@@ -396,6 +396,11 @@ Provider response 的结束不等于 Agent 输入的结束。Agent 可能仍在�
 
 唯一例外是持有认证 handoff 身份的内部恢复路径：它精确恢复已接纳的后台 Chat owner 与上下文，不能成为用户用 CLI 任意打开 Chat 历史的旁路。
 
+非 fork 恢复按捕获 transcript 的 workspace 重新解析项目 MCP、provider/routing、plan 与权限策略；显式相对 `--add-dir` 仍按启动目录解析。后台 PTY 的配置根在发布 job 前固定为绝对路径，不能因 worker cwd 改变而重解释。fork 在调用方 workspace 创建独立会话，因此继续使用调用方项目配置。
+
+会话选择保留显示行的 exact path，并在用户确认时捕获物理 authority 与 bytes，在旧 owner 关闭和新 mount 之间复验；不能用后来的 UUID 查询代替该收据。`/resume` 目录随 live SessionCwd 刷新，旧 cwd 的迟到结果不能替换当前列表。通用 deferred replay 每次派发前检查当前 writer 的 session/incarnation/authority，释放短事务后才进入审批和工具。TUI 必须先能消费审批事件再执行恢复；恢复未结束时保留初始输入并阻止新的提交与会话切换。
+
+
 调度器借用已挂载 idle owner 属于私有路径。借用、取消、关闭时必须排除普通/排队/realtime 输入，并等待 child、detached transitions 与后台生产者 drain 后再发布终态。
 
 mobile-cron 使用与常规 runtime 一致的 8 MiB worker stack，并对大型 assembly future 做装箱。该实现针对此前 stack overflow；仍须用真实隔离进程回归确认，不能仅凭源码认为问题关闭。

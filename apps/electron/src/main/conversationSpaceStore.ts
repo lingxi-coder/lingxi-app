@@ -1,4 +1,5 @@
 import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import type { ConversationSpace, ConversationSpacesSnapshot, OwnedConversation, SpaceNavigation } from '../shared/conversationSpaces.js';
 import { isSessionId } from './sessionIdentity.js';
@@ -88,9 +89,10 @@ export class ConversationSpaceStore {
   private readonly file: string;
   private value: StoredSpaces;
 
-  constructor(userData: string) {
+  constructor(userData: string, brandHome = process.env.LINGXI_CONFIG_DIR || join(homedir(), '.lingxi')) {
     this.file = join(userData, 'conversation-spaces.v2.json');
-    const workspace = join(userData, 'general-chat-workspace');
+    const workspace = brandHome;
+    if (!isAbsolute(workspace)) throw new Error('The brand workspace must be an absolute path.');
     mkdirSync(workspace, { recursive: true, mode: 0o700 });
     const stat = lstatSync(workspace);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('The general chat workspace must be a real directory.');

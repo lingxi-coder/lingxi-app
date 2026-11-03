@@ -11,7 +11,7 @@ const id = '11111111-2222-4333-8444-555555555555';
 test('project membership and independent navigation survive restart without assigning an unprojected chat', (t) => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'conversation-spaces-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const store = new ConversationSpaceStore(root);
+  const store = new ConversationSpaceStore(root, join(root, '.lingxi'));
   const project = join(root, 'existing-project');
   store.addProject(project, 'code');
   store.addProject(project, 'chat');
@@ -22,13 +22,14 @@ test('project membership and independent navigation survive restart without assi
   store.setNavigation('chat', null, chat);
   store.setNavigation('code', project);
   store.setMode('code');
-  const reopenedStore = new ConversationSpaceStore(root);
+  const reopenedStore = new ConversationSpaceStore(root, join(root, '.lingxi'));
   const reopened = reopenedStore.snapshot();
   assert.equal(reopened.activeMode, 'code');
   assert.deepEqual(reopened.projects[project], ['code', 'chat']);
   assert.deepEqual(reopened.projects[newProject], ['chat']);
   assert.deepEqual(reopened.navigation.chat, { projectId: null, session: chat });
   assert.deepEqual(reopened.navigation.code, { projectId: project });
+  assert.equal(store.globalWorkspace, join(root, '.lingxi'));
   assert.notEqual(store.globalWorkspace, join(root, 'scheduled-workspace'));
 });
 
@@ -39,12 +40,12 @@ test('older space configuration is ignored and current data requires an explicit
   writeFileSync(join(root, 'conversation-spaces.v1.json'), JSON.stringify({
     version: 1, activeMode: 'code', projects: { [project]: ['code'] }, migrationPending: [project],
   }));
-  const store = new ConversationSpaceStore(root);
+  const store = new ConversationSpaceStore(root, join(root, '.lingxi'));
   assert.equal(store.snapshot().activeMode, 'chat');
   assert.deepEqual(store.snapshot().projects, {});
   assert.throws(() => store.register({ projectPath: project, projectId: project, sessionId: id } as any), /Invalid conversation owner/);
   writeFileSync(join(root, 'conversation-spaces.v2.json'), JSON.stringify({ version: 1 }));
-  assert.throws(() => new ConversationSpaceStore(root), /Invalid conversation spaces/);
+  assert.throws(() => new ConversationSpaceStore(root, join(root, '.lingxi')), /Invalid conversation spaces/);
 });
 
 test('old active, pinned and archived references without current owners do not reappear', (t) => {
@@ -75,7 +76,7 @@ test('old active, pinned and archived references without current owners do not r
 test('owner cannot switch mode or project and workspace relocation keeps both', (t) => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'conversation-spaces-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const store = new ConversationSpaceStore(root);
+  const store = new ConversationSpaceStore(root, join(root, '.lingxi'));
   const chat = { projectPath: store.globalWorkspace, projectId: null, sessionId: id, mode: 'chat' as const };
   store.register(chat);
   store.setNavigation('chat', null, chat);
@@ -85,18 +86,34 @@ test('owner cannot switch mode or project and workspace relocation keeps both', 
   assert.equal(store.findBySessionId(id)?.mode, 'chat');
   const moved = store.relocate(chat, join(root, 'other-workspace'));
   assert.deepEqual(moved, { ...chat, projectPath: join(root, 'other-workspace') });
-  assert.deepEqual(new ConversationSpaceStore(root).snapshot().navigation.chat.session, moved);
+  assert.deepEqual(new ConversationSpaceStore(root, join(root, '.lingxi')).snapshot().navigation.chat.session, moved);
 });
 
 test('a persisted UUID cannot name two owners in different workspaces', (t) => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'conversation-spaces-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const store = new ConversationSpaceStore(root);
+  const store = new ConversationSpaceStore(root, join(root, '.lingxi'));
   store.register({ projectPath: store.globalWorkspace, projectId: null, sessionId: id, mode: 'chat' });
   const file = join(root, 'conversation-spaces.v2.json');
   const contents = JSON.parse(readFileSync(file, 'utf8'));
   contents.sessions.push({ projectPath: join(root, 'other'), projectId: null, sessionId: id, mode: 'code' });
   writeFileSync(file, JSON.stringify(contents));
-  assert.throws(() => new ConversationSpaceStore(root), /Duplicate conversation owner/);
+  assert.throws(() => new ConversationSpaceStore(root, join(root, '.lingxi')), /Duplicate conversation owner/);
   assert.equal(readFileSync(file, 'utf8'), JSON.stringify(contents));
+});
+
+test('Global workspace honors the explicit brand home instead of Electron userData', (t) => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'conversation-brand-root-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const previous = process.env.LINGXI_CONFIG_DIR;
+  try {
+    process.env.LINGXI_CONFIG_DIR = join(root, '.atlas');
+    const store = new ConversationSpaceStore(root);
+    assert.equal(store.globalWorkspace, join(root, '.atlas'));
+    process.env.LINGXI_CONFIG_DIR = 'relative-brand-home';
+    assert.throws(() => new ConversationSpaceStore(root), /absolute path/);
+  } finally {
+    if (previous === undefined) delete process.env.LINGXI_CONFIG_DIR;
+    else process.env.LINGXI_CONFIG_DIR = previous;
+  }
 });

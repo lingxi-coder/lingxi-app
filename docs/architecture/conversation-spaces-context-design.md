@@ -48,7 +48,7 @@ LogicalScope = Global | Project(projectId)
 Workspace = { cwd, exact transcript path, filesystem/trust context }
 ```
 
-Global 会话仍然需要真实目录供工具运行。Desktop 使用应用私有的 `general-chat-workspace`；移动端使用平台已有的 Global workspace。
+Global 会话仍然需要真实目录供工具运行。各端统一使用 `~/.<品牌>`（灵犀为 `~/.lingxi`）作为品牌根与 Global 默认工作目录；移动端的 `~` 指 Linux 用户主目录，Desktop 指系统用户主目录。Desktop 显式 `LINGXI_CONFIG_DIR` 覆盖同时用于品牌根和 Global workspace。
 
 `cwd` 可以变化。Global 会话执行 `/cd` 进入某个项目目录后仍然是 Global；Project 会话离开项目目录后也不会自动变成另一个 Project。目录规则与文件系统信任仍按实际执行环境处理，不能据此反推逻辑 Project。
 
@@ -254,7 +254,7 @@ SDK Rust DTO、snapshot/ordinal 合约、TS 生成类型、客户端 validator�
 
 | 平台 | 当前实现 |
 | --- | --- |
-| Desktop | `userData/conversation-spaces.v2.json`：activeMode、项目成员关系、导航、已登记 owner；Global workspace 为同级 `general-chat-workspace`。 |
+| Desktop | `userData/conversation-spaces.v2.json`：activeMode、项目成员关系、导航、已登记 owner；Global workspace 为 `~/.lingxi`（或显式 `LINGXI_CONFIG_DIR`）。 |
 | Android | `filesDir/scope-state.json` 使用 version 2；Project/session 索引要求显式 mode 与 membership，项目和 Global 索引分别保存。 |
 | iOS | `ProjectScopedPreferences` 按空间、scope、UUID 保存导航与草稿；项目内 `session-spaces.json` 和 `global-session-spaces.json` 使用当前 session index 格式。 |
 

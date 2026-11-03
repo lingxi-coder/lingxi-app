@@ -32416,6 +32416,40 @@
         }
       }
     },
+    "local_app_authoring_name_invalid": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请输入名称，最多 80 个字符。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請輸入名稱，最多 80 個字元。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a name of up to 80 characters."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "名前を80文字以内で入力してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이름을 80자 이내로 입력하세요."
+          }
+        }
+      }
+    },
     "local_app_authoring_recover": {
       "localizations": {
         "zh-Hans": {
@@ -32518,6 +32552,40 @@
         }
       }
     },
+    "local_app_development_requires_code": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chat 模式不支持 Local App 开发，请切换到 Code 模式后继续。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chat 模式不支援 Local App 開發，請切換至 Code 模式後繼續。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chat mode does not support Local App development. Switch to Code mode to continue."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatモードではLocal Appを開発できません。Codeモードに切り替えてください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chat 모드에서는 Local App을 개발할 수 없습니다. 계속하려면 Code 모드로 전환하세요."
+          }
+        }
+      }
+    },
     "local_app_host_recommendation": {
       "localizations": {
         "zh-Hans": {
@@ -32548,6 +32616,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "오래 실행되는 앱은 컴퓨터에서 실행하는 것이 좋습니다. 이 휴대전화에서도 실행할 수 있습니다."
+          }
+        }
+      }
+    },
+    "local_app_publication_pending": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未完成的应用发布"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未完成的應用程式發佈"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unfinished app publications"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未完了のアプリ公開"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "완료되지 않은 앱 게시"
+          }
+        }
+      }
+    },
+    "local_app_publication_recover": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复发布"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢復發佈"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resume publishing"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "公開を再開"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게시 재개"
           }
         }
       }

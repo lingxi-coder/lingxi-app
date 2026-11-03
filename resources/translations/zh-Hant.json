@@ -2741,5 +2741,9 @@
   "chat_agent_report_pending": "已結束，報告待送達",
   "chat_agent_report_delivered": "報告已送達",
   "chat_agent_execution_ended": "執行已結束",
-  "local_app_authoring_recover": "恢復應用程式開發"
+  "local_app_authoring_recover": "恢復應用程式開發",
+  "local_app_authoring_name_invalid": "請輸入名稱，最多 80 個字元。",
+  "local_app_development_requires_code": "Chat 模式不支援 Local App 開發，請切換至 Code 模式後繼續。",
+  "local_app_publication_pending": "未完成的應用程式發佈",
+  "local_app_publication_recover": "恢復發佈"
 }

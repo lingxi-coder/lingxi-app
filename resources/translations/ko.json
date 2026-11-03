@@ -2741,5 +2741,9 @@
   "chat_agent_report_pending": "종료됨, 보고서 전달 대기 중",
   "chat_agent_report_delivered": "보고서 전달됨",
   "chat_agent_execution_ended": "실행 종료",
-  "local_app_authoring_recover": "앱 개발 재개"
+  "local_app_authoring_recover": "앱 개발 재개",
+  "local_app_authoring_name_invalid": "이름을 80자 이내로 입력하세요.",
+  "local_app_development_requires_code": "Chat 모드에서는 Local App을 개발할 수 없습니다. 계속하려면 Code 모드로 전환하세요.",
+  "local_app_publication_pending": "완료되지 않은 앱 게시",
+  "local_app_publication_recover": "게시 재개"
 }

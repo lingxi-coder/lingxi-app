@@ -2573,4 +2573,8 @@
     <string name="chat_agent_report_delivered">Report delivered</string>
     <string name="chat_agent_execution_ended">Execution ended</string>
     <string name="local_app_authoring_recover">Resume app development</string>
+    <string name="local_app_authoring_name_invalid">Enter a name of up to 80 characters.</string>
+    <string name="local_app_development_requires_code">Chat mode does not support Local App development. Switch to Code mode to continue.</string>
+    <string name="local_app_publication_pending">Unfinished app publications</string>
+    <string name="local_app_publication_recover">Resume publishing</string>
 </resources>

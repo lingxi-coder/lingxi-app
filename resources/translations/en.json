@@ -2746,5 +2746,9 @@
   "chat_agent_report_pending": "Ended, report pending",
   "chat_agent_report_delivered": "Report delivered",
   "chat_agent_execution_ended": "Execution ended",
-  "local_app_authoring_recover": "Resume app development"
+  "local_app_authoring_recover": "Resume app development",
+  "local_app_authoring_name_invalid": "Enter a name of up to 80 characters.",
+  "local_app_development_requires_code": "Chat mode does not support Local App development. Switch to Code mode to continue.",
+  "local_app_publication_pending": "Unfinished app publications",
+  "local_app_publication_recover": "Resume publishing"
 }

@@ -355,6 +355,7 @@ class ChatViewModel(
     /** Collector for the active reply stream. */
     private var turnJob: Job? = null
     private var pendingSubmission: NativeSubmissionGate? = null
+    private var pendingNativePrompt: NativePromptSubmission? = null
     private val pendingFollowUps = mutableMapOf<Long, NativeSubmissionGate>()
     private val nativeTurnAdmission = NativeTurnAdmission()
     private var visualizationDraftRevision = 0L
@@ -2719,10 +2720,32 @@ class ChatViewModel(
      * unsubscribing first could hide the terminal event while the engine keeps
      * running.
      */
-    private suspend fun cancelEngineTurn(job: Job?, turnId: Long? = null) {
+    private suspend fun cancelEngineTurn(
+        job: Job?,
+        turnId: Long? = null,
+        owner: ConversationSource = source,
+        submission: NativePromptSubmission? = null,
+    ) {
         if (job == null && turnId == null) return
         try {
-            source.cancel(turnId)
+            val identity = if (submission != null) (owner as? NativePromptReceiptSource)?.currentNativePromptIdentity() else null
+            val settled = stopWithSubmissionReceipt(
+                stop = { owner.cancel(turnId) },
+                submission = submission,
+                owner = owner,
+                identity = identity,
+                turnId = turnId,
+                timeoutMs = 5_000L,
+                clearCheckpoint = { confirmed ->
+                    (owner as? NativePromptReceiptSource)?.clearNotAdmitted(confirmed, checkNotNull(turnId)) == true
+                },
+            )
+            if (settled && source === owner &&
+                (identity?.sideId != null || identity?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(_state.value.session.id)) &&
+                durableTurnId == turnId) {
+                durableTurnId = null
+                reportBackgroundTurnState()
+            }
         } finally {
             job?.cancelAndJoin()
         }
@@ -3102,6 +3125,13 @@ class ChatViewModel(
             onNotAdmitted?.invoke()
         }
         pendingSubmission = admission
+        val turnSource = source
+        val slashCommandSource = turnSource as? SlashCommandConversationSource
+        val isSlash = !isBashInput && isSlashCommandLine(text) && slashCommandSource != null
+        val nativePrompt = if (!isSlash && turnSource is NativePromptReceiptSource) {
+            NativePromptSubmission(turnSource, submittedTurnId, admission)
+        } else null
+        pendingNativePrompt = nativePrompt
         durableTurnId = submittedTurnId
         recoveredTurnToken = null
         recoveryReplayTurnId = null
@@ -3134,8 +3164,6 @@ class ChatViewModel(
         // process has already crossed into the background.
         setBackgroundTurnActive(true)
 
-        val turnSource = source
-        val slashCommandSource = turnSource as? SlashCommandConversationSource
         turnJob = viewModelScope.launch {
             try {
                 val awaitPath: (suspend () -> String)? = when (turnSource) {
@@ -3162,7 +3190,6 @@ class ChatViewModel(
             }
             val rejected = { admission.reject(); Unit }
             val knownRejected = { admission.rejectKnown(); Unit }
-            val isSlash = !isBashInput && isSlashCommandLine(text) && slashCommandSource != null
             val replyStream = when {
                 isSlash && turnSource is EngineConversationSource ->
                     turnSource.submitSlashForComposer(text.toClientTextDto(), images, submittedTurnId, rejected, admission::enter)
@@ -3172,10 +3199,17 @@ class ChatViewModel(
                     if (!admission.enter()) throw CancellationException("Turn cancelled before submission")
                     slashCommandSource!!.submitSlashCommand(text.toClientTextDto(), images, submittedTurnId)
                 }
-                turnSource is EngineConversationSource ->
-                    turnSource.submitForComposer(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode, rejected, admission::enter)
-                turnSource is RecoveringConversationSource ->
-                    turnSource.submitForComposer(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode, rejected, admission::enter)
+                turnSource is NativePromptReceiptSource ->
+                    turnSource.submitForComposer(
+                        submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode,
+                        if (turnSource is SideChatSource) knownRejected else rejected, admission::enter,
+                        bindNativeIdentity = { identity ->
+                            source === turnSource && turnToken == token && durableTurnId == submittedTurnId &&
+                                (identity.sideId != null || canonicalSessionId(_state.value.session.id) == canonicalSessionId(identity.sessionId)) &&
+                                nativePrompt?.bindIdentity(turnSource, identity, submittedTurnId) == true
+                        },
+                        onNativeResult = { nativePrompt?.record(it) },
+                    )
                 turnSource is SideChatSource ->
                     turnSource.submitForComposer(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode, knownRejected, admission::enter)
                 else -> {
@@ -3219,6 +3253,9 @@ class ChatViewModel(
         if (!_state.value.streaming && !_state.value.liveTurnWaitingForUser) return
         pendingSubmission?.reject()
         pendingFollowUps.values.toList().forEach { it.reject() }
+        val stoppedOwner = source
+        val stoppedTurnId = durableTurnId
+        val stoppedSubmission = pendingNativePrompt
         val cancelledToken = turnToken
         val cancelledText = _state.value.streamingMessage?.text.orEmpty()
         // Supersede the turn: a late event arriving after the engine's Cancel
@@ -3242,7 +3279,7 @@ class ChatViewModel(
         }
         emitTurnCompletion(cancelledToken, ConversationTurnOutcome.Cancelled, cancelledText)
         val cancellation = viewModelScope.async {
-            runCatching { cancelEngineTurn(job, durableTurnId) }
+            runCatching { cancelEngineTurn(job, stoppedTurnId, stoppedOwner, stoppedSubmission) }
         }
         explicitCancellation = cancellation
         viewModelScope.launch {

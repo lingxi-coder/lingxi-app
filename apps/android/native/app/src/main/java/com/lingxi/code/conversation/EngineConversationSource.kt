@@ -142,7 +142,7 @@ class EngineConversationSource internal constructor(
     private val pendingAuthoringAdmission: com.lingxi.code.project.PendingAuthoringAdmission? = null,
     internal val authoringSourceIdentity: com.lingxi.code.project.AuthoringSourceIdentity? = null,
     private val authoringSessionBoundary: AuthoringSessionBoundary? = null,
-) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource, DurableTranscriptSource {
+) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource, DurableTranscriptSource, NativePromptReceiptSource {
     private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
     private val coldAuthoringRecovery = MutableStateFlow(ColdAuthoringRecoveryState.NotNeeded)
     private val coldAuthoringRecoveryMutex = Mutex()
@@ -243,7 +243,8 @@ class EngineConversationSource internal constructor(
 
     internal fun newSideChatSource(): SideChatSource {
         requireSideChatParentAdmission(turnAdmissionReady)
-        return SideChatSource(handle) { turnAdmissionReady }
+        val parentSessionId = checkNotNull(activeSession.value?.sessionId) { "Conversation session is not ready" }
+        return SideChatSource(handle, parentSessionId, { activeSession.value?.sessionId }) { turnAdmissionReady }
     }
 
     private val durableAttachMutex = Mutex()
@@ -612,10 +613,12 @@ class EngineConversationSource internal constructor(
         promptMode: PromptModeDto?,
     ): Flow<ReplyEvent> = submitForComposer(text, images, turnId, visualizationContext, promptMode, onNotAdmitted = {})
 
-    internal fun submitForComposer(
+    override fun submitForComposer(
         text: String, images: List<ImageRefDto>, turnId: Long,
         visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, onNotAdmitted: () -> Unit,
-        tryBeginNative: () -> Boolean = { true },
+        tryBeginNative: () -> Boolean,
+        bindNativeIdentity: (NativePromptIdentity) -> Boolean,
+        onNativeResult: (Result<Unit>) -> Unit,
     ): Flow<ReplyEvent> =
         // Subscribe-before-submit: the returned reply stream maps the shared
         // engine flow through `mapReplyStream`, but the `SendPrompt` is fired
@@ -628,21 +631,33 @@ class EngineConversationSource internal constructor(
         mapReplyStream(
             events.onSubscription {
                 var nativeAttempted = false
+                var preparedSessionId: String? = null
                 try {
                     submitDurableTurn(
                         prepare = {
                             check(turnAdmissionReady) { "Authoring binding is not ready" }
                             awaitTurnTranscriptPath()
                             permissionIngress.beginTurn()
-                            activeSession.value?.sessionId?.let { sessionId -> durableTurns.begin(sessionId, turnId) }
+                            val sessionId = checkNotNull(activeSession.value?.sessionId) { "Conversation session is not ready" }
+                            durableTurns.begin(sessionId, turnId)
+                            preparedSessionId = sessionId
                         },
                         submit = {
+                            val sessionId = checkNotNull(preparedSessionId)
+                            if (activeSession.value?.sessionId?.let(::canonicalSessionId) != canonicalSessionId(sessionId) ||
+                                !bindNativeIdentity(NativePromptIdentity(sessionId))) {
+                                onNotAdmitted()
+                                error("Conversation session changed before submission")
+                            }
                             if (!tryBeginNative()) throw kotlinx.coroutines.CancellationException("Turn cancelled before submission")
                             nativeAttempted = true
-                            handle.submit(ClientCommand.SendPrompt(
-                                text = text.toClientTextDto(), promptMode = promptMode, images = images,
-                                turnId = turnId.toULong(), visualizationContext = visualizationContext?.toDto(),
-                            ))
+                            submitWithReceipt(
+                                submit = { handle.submit(ClientCommand.SendPrompt(
+                                    text = text.toClientTextDto(), promptMode = promptMode, images = images,
+                                    turnId = turnId.toULong(), visualizationContext = visualizationContext?.toDto(),
+                                )) },
+                                record = onNativeResult,
+                            )
                         },
                         onNotAdmitted = onNotAdmitted,
                     )
@@ -671,6 +686,13 @@ class EngineConversationSource internal constructor(
             expectedTurnId = turnId,
             expectedSessionId = activeSession.value?.sessionId,
         )
+
+    override suspend fun currentNativePromptIdentity(): NativePromptIdentity? =
+        activeSession.value?.sessionId?.let { NativePromptIdentity(it).canonical() }
+
+    override suspend fun clearNotAdmitted(identity: NativePromptIdentity, turnId: Long): Boolean =
+        identity.sideId == null && currentNativePromptIdentity() == identity.canonical() &&
+            durableTurns.clearNotAdmitted(identity.sessionId, turnId)
 
     override fun submitSlashCommand(
         raw: ClientTextDto,

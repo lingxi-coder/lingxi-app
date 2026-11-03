@@ -30,6 +30,20 @@ interface DurableTranscriptSource {
     suspend fun awaitTurnTranscriptPath(): String
 }
 
+/** Supplies the exact source session and direct native result of a prompt submission. */
+interface NativePromptReceiptSource {
+    fun submitForComposer(
+        text: String, images: List<ImageRefDto>, turnId: Long,
+        visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, onNotAdmitted: () -> Unit,
+        tryBeginNative: () -> Boolean = { true },
+        bindNativeIdentity: (NativePromptIdentity) -> Boolean = { true },
+        onNativeResult: (Result<Unit>) -> Unit = {},
+    ): Flow<ReplyEvent>
+
+    suspend fun currentNativePromptIdentity(): NativePromptIdentity?
+    suspend fun clearNotAdmitted(identity: NativePromptIdentity, turnId: Long): Boolean
+}
+
 enum class ColdAuthoringRecoveryState { NotNeeded, Preparing, Failed, Ready }
 
 /**

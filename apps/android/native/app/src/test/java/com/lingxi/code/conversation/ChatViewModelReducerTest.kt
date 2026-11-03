@@ -66,6 +66,113 @@ import org.junit.Test
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModelReducerTest {
+    private open class ControlledNativePromptSource(
+        initialIdentity: NativePromptIdentity?,
+        private val store: DurableConversationTurnClientStore? = null,
+    ) : ConversationSource, NativePromptReceiptSource {
+        var identity = initialIdentity
+        val active = MutableStateFlow<ActivatedSession?>(null)
+        override val activeSessionState: StateFlow<ActivatedSession?> = active.asStateFlow()
+        override val recoverySpec = if (store != null) ConversationRecoverySpec(
+            null, null, com.lingxi.code.model.SessionMode.Chat,
+            com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux, workspaceKey = "global",
+            transcriptPath = "/guest/session.jsonl",
+        ) else null
+        val entered = CompletableDeferred<Long>()
+        val releaseSend = CompletableDeferred<Unit>()
+        val cancelled = mutableListOf<Long?>()
+        var cleared = 0
+
+        override fun submitForComposer(
+            text: String, images: List<ImageRefDto>, turnId: Long,
+            visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, onNotAdmitted: () -> Unit,
+            tryBeginNative: () -> Boolean, bindNativeIdentity: (NativePromptIdentity) -> Boolean,
+            onNativeResult: (Result<Unit>) -> Unit,
+        ): Flow<ReplyEvent> = kotlinx.coroutines.flow.flow {
+            val confirmed = checkNotNull(currentNativePromptIdentity())
+            store?.begin(confirmed.sessionId, turnId)
+            check(bindNativeIdentity(confirmed))
+            check(tryBeginNative())
+            entered.complete(turnId)
+            try {
+                submitWithReceipt(
+                    submit = { releaseSend.await(); throw com.lingxi.code.bindings.client.ClientException.Rejected("turn_cancelled_before_admission") },
+                    record = onNativeResult,
+                )
+            } catch (failure: com.lingxi.code.bindings.client.ClientException.Rejected) {
+                emit(ReplyEvent.Error(failure.message))
+            }
+        }
+
+        override suspend fun currentNativePromptIdentity(): NativePromptIdentity? = identity?.canonical()
+        override suspend fun clearNotAdmitted(identity: NativePromptIdentity, turnId: Long): Boolean {
+            if (identity.canonical() != currentNativePromptIdentity()) return false
+            cleared++
+            return store?.clearNotAdmitted(identity.sessionId, turnId) ?: true
+        }
+        override suspend fun cancel(turnId: Long?) { cancelled += turnId }
+    }
+
+    private class ControlledMainPromptSource(store: DurableConversationTurnClientStore) :
+        ControlledNativePromptSource(null, store), DurableTranscriptSource {
+        override suspend fun awaitTurnTranscriptPath(): String = "/guest/session.jsonl"
+    }
+
+    @Test fun firstPromptBindsStartedSessionBeforeNativeStopReceipt() = runTest(dispatcher) {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val sessionId = java.util.UUID.randomUUID().toString()
+        val store = DurableConversationTurnClientStore(FakeSharedPreferences(), "global#chat", initialSessionId = sessionId)
+        val source = ControlledMainPromptSource(store)
+        val vm = ChatViewModel(source)
+        var restored = 0
+        assertEquals("new", vm.state.value.session.id)
+        vm.send("original", images = listOf(ImageRefDto("image/png", "AQID")), onNotAdmitted = { restored++ })
+        assertFalse(source.entered.isCompleted)
+
+        val activated = ActivatedSession(sessionId, emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Chat)
+        source.identity = NativePromptIdentity(sessionId)
+        source.active.value = activated
+        assertTrue(vm.applyActivatedSession(activated))
+        runCurrent()
+        val turnId = source.entered.await()
+        assertEquals(turnId, store.load()?.turnId)
+        assertEquals(1, vm.state.value.messages.count { it.role == Role.User })
+
+        vm.cancel()
+        runCurrent()
+        assertEquals(listOf(turnId), source.cancelled)
+        assertEquals(0, restored)
+        source.releaseSend.complete(Unit)
+        runCurrent()
+        assertEquals(1, restored)
+        assertNull(store.load())
+        assertEquals(1, source.cleared)
+        assertTrue(vm.state.value.messages.none { it.role == Role.User })
+        assertNull(vm.state.value.error)
+    }
+
+    @Test fun sideStopReceiptRestoresOnlyItsOwnSideOwner() = runTest(dispatcher) {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val source = ControlledNativePromptSource(NativePromptIdentity("parent-a", "side-a"))
+        val other = ControlledNativePromptSource(NativePromptIdentity("parent-a", "side-b"))
+        val vm = ChatViewModel(source)
+        val otherVm = ChatViewModel(other)
+        var restored = 0
+        vm.send("side original", images = listOf(ImageRefDto("image/png", "AQID")), onNotAdmitted = { restored++ })
+        runCurrent()
+        val turnId = source.entered.await()
+        vm.cancel()
+        runCurrent()
+        assertEquals(listOf(turnId), source.cancelled)
+        source.releaseSend.complete(Unit)
+        runCurrent()
+        assertEquals(1, restored)
+        assertEquals(1, source.cleared)
+        assertTrue(vm.state.value.messages.none { it.role == Role.User })
+        assertEquals(0, other.cleared)
+        assertTrue(otherVm.state.value.messages.isEmpty())
+    }
+
     @Test fun pendingAuthoringBlocksOnlyItsOwnerAndPreservesRejectedInput() = runTest(dispatcher) {
         var readyA = false
         val submittedA = mutableListOf<String>()

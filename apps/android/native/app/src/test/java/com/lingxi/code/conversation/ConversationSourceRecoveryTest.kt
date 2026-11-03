@@ -25,6 +25,16 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class ConversationSourceRecoveryTest {
+    @Test fun stoppedBeforeAdmissionClearsOnlyTheExactSessionAndTurn() {
+        val store = DurableConversationTurnClientStore(FakeSharedPreferences(), "global#chat", initialSessionId = "session-a")
+        store.begin("session-a", 42L)
+        assertFalse(store.clearNotAdmitted("session-b", 42L))
+        assertTrue(store.clearNotAdmitted("session-a", 41L))
+        assertEquals(42L, store.load()?.turnId)
+        assertTrue(store.clearNotAdmitted("session-a", 42L))
+        assertEquals(null, store.load())
+    }
+
     @Test fun onlyFailuresBeforeNativeSubmissionRestoreInput() = kotlinx.coroutines.test.runTest {
         var restored = 0
         var submitted = 0

@@ -167,6 +167,13 @@ internal class DurableConversationTurnClientStore(
         if (ownerSessionId != canonicalSessionId(sessionId)) return@synchronized
         preferences.edit().remove(key(scope, sessionId, turnId)).commit()
     }
+
+    /** Clear only the checkpoint proven not admitted by this session's Send. */
+    fun clearNotAdmitted(sessionId: String, turnId: Long): Boolean = synchronized(lock) {
+        if (ownerSessionId != canonicalSessionId(sessionId)) return@synchronized false
+        val recordKey = key(scope, sessionId, turnId)
+        !preferences.contains(recordKey) || preferences.edit().remove(recordKey).commit()
+    }
 }
 
 /** UI-owned history kept only in the live source while its current turn runs. */
@@ -374,7 +381,7 @@ internal class RecoveringConversationSource(
     private val strings: ConversationStrings,
     recoverySpec: ConversationRecoverySpec,
     private val releaseClaim: () -> Boolean = { ConversationHeadlessRecovery.releaseUiClaim(recoverySpec.ownerKey) },
-) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource, DurableTranscriptSource {
+) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource, DurableTranscriptSource, NativePromptReceiptSource {
     private val delegateScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val models = MutableStateFlow(EngineModelState())
     private val sessions = MutableStateFlow(EngineSessionState.loading())
@@ -560,10 +567,12 @@ internal class RecoveringConversationSource(
         promptMode: PromptModeDto?,
     ): Flow<ReplyEvent> = submitForComposer(text, images, turnId, visualizationContext, promptMode, onNotAdmitted = {})
 
-    internal fun submitForComposer(
+    override fun submitForComposer(
         text: String, images: List<ImageRefDto>, turnId: Long,
         visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, onNotAdmitted: () -> Unit,
-        tryBeginNative: () -> Boolean = { true },
+        tryBeginNative: () -> Boolean,
+        bindNativeIdentity: (NativePromptIdentity) -> Boolean,
+        onNativeResult: (Result<Unit>) -> Unit,
     ): Flow<ReplyEvent> = flow {
         val delegate = pendingSource.await()
         if (delegate == null) {
@@ -572,13 +581,19 @@ internal class RecoveringConversationSource(
             emit(ReplyEvent.End)
             return@flow
         }
-        emitAll(if (delegate is EngineConversationSource)
-            delegate.submitForComposer(text, images, turnId, visualizationContext, promptMode, onNotAdmitted, tryBeginNative)
+        emitAll(if (delegate is NativePromptReceiptSource)
+            delegate.submitForComposer(text, images, turnId, visualizationContext, promptMode, onNotAdmitted, tryBeginNative, bindNativeIdentity, onNativeResult)
         else {
             if (!tryBeginNative()) throw kotlinx.coroutines.CancellationException("Turn cancelled before submission")
             delegate.submit(text, images, turnId, visualizationContext, promptMode)
         })
     }
+
+    override suspend fun currentNativePromptIdentity(): NativePromptIdentity? =
+        (pendingSource.await() as? NativePromptReceiptSource)?.currentNativePromptIdentity()
+
+    override suspend fun clearNotAdmitted(identity: NativePromptIdentity, turnId: Long): Boolean =
+        (pendingSource.await() as? NativePromptReceiptSource)?.clearNotAdmitted(identity, turnId) == true
 
     override fun submitSlashCommand(
         raw: ClientTextDto,

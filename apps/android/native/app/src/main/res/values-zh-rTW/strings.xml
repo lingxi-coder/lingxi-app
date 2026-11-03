@@ -2577,4 +2577,5 @@
     <string name="local_app_development_requires_code">Chat 模式不支援 Local App 開發，請切換至 Code 模式後繼續。</string>
     <string name="local_app_publication_pending">未完成的應用程式發佈</string>
     <string name="local_app_publication_recover">恢復發佈</string>
+    <string name="local_app_publication_review_prepared">檢視待發佈內容</string>
 </resources>

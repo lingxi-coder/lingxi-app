@@ -2745,5 +2745,6 @@
   "local_app_authoring_name_invalid": "名前を80文字以内で入力してください。",
   "local_app_development_requires_code": "ChatモードではLocal Appを開発できません。Codeモードに切り替えてください。",
   "local_app_publication_pending": "未完了のアプリ公開",
-  "local_app_publication_recover": "公開を再開"
+  "local_app_publication_recover": "公開を再開",
+  "local_app_publication_review_prepared": "公開予定の内容を確認"
 }

@@ -2577,4 +2577,5 @@
     <string name="local_app_development_requires_code">Chat mode does not support Local App development. Switch to Code mode to continue.</string>
     <string name="local_app_publication_pending">Unfinished app publications</string>
     <string name="local_app_publication_recover">Resume publishing</string>
+    <string name="local_app_publication_review_prepared">Review prepared publication</string>
 </resources>

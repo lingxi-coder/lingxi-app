@@ -2577,4 +2577,5 @@
     <string name="local_app_development_requires_code">Chat 모드에서는 Local App을 개발할 수 없습니다. 계속하려면 Code 모드로 전환하세요.</string>
     <string name="local_app_publication_pending">완료되지 않은 앱 게시</string>
     <string name="local_app_publication_recover">게시 재개</string>
+    <string name="local_app_publication_review_prepared">게시할 내용 검토</string>
 </resources>

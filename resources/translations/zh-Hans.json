@@ -2745,5 +2745,6 @@
   "local_app_authoring_name_invalid": "请输入名称，最多 80 个字符。",
   "local_app_development_requires_code": "Chat 模式不支持 Local App 开发，请切换到 Code 模式后继续。",
   "local_app_publication_pending": "未完成的应用发布",
-  "local_app_publication_recover": "恢复发布"
+  "local_app_publication_recover": "恢复发布",
+  "local_app_publication_review_prepared": "审阅待发布内容"
 }

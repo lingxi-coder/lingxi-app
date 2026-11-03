@@ -2577,4 +2577,5 @@
     <string name="local_app_development_requires_code">ChatモードではLocal Appを開発できません。Codeモードに切り替えてください。</string>
     <string name="local_app_publication_pending">未完了のアプリ公開</string>
     <string name="local_app_publication_recover">公開を再開</string>
+    <string name="local_app_publication_review_prepared">公開予定の内容を確認</string>
 </resources>

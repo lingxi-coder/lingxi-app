@@ -32688,6 +32688,40 @@
         }
       }
     },
+    "local_app_publication_review_prepared": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "审阅待发布内容"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "檢視待發佈內容"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review prepared publication"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "公開予定の内容を確認"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게시할 내용 검토"
+          }
+        }
+      }
+    },
     "mcp_add_server": {
       "localizations": {
         "zh-Hans": {

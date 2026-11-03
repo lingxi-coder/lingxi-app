@@ -26,12 +26,11 @@ test('Desktop authoring resolves only the real Code session cwd matching its sel
   assert.deepEqual(result, { sourceDirectory: canonicalPath, projectRef: { kind: 'desktopPath', path: canonicalPath }, authoringSessionId: sessionId });
 });
 
-test('Desktop authoring accepts either mode while enforcing the source Project cwd', async t => {
+test('Desktop authoring rejects Chat and enforces the source Project cwd', async t => {
   const projectPath = await directory(t, 'project');
   const otherPath = await directory(t, 'other');
-  const chat = await resolveDesktopAuthoringBinding({ find: async () => ({ uuid: sessionId, mode: 'chat', workspace_path: projectPath } as never) },
-    { projectPath, sessionId });
-  assert.equal(chat.sourceDirectory, await fs.realpath(projectPath));
+  await assert.rejects(resolveDesktopAuthoringBinding({ find: async () => ({ uuid: sessionId, mode: 'chat', workspace_path: projectPath } as never) },
+    { projectPath, sessionId }), /local_app_development_requires_code|Code/);
   await assert.rejects(resolveDesktopAuthoringBinding({ find: async () => ({ uuid: sessionId, mode: 'code', workspace_path: otherPath } as never) },
     { projectPath, sessionId }), /dedicated Project cwd/);
   await assert.rejects(resolveDesktopAuthoringBinding({ find: async () => undefined }, { projectPath, sessionId }), /session/);
@@ -46,14 +45,13 @@ test('a host-created Code draft binds before its first prompt persists a catalog
   assert.deepEqual(result, { sourceDirectory: canonicalPath, projectRef: { kind: 'desktopPath', path: canonicalPath }, authoringSessionId: sessionId });
 });
 
-test('unpersisted drafts in either mode bind only the matching locator and cwd', async t => {
+test('unpersisted authoring drafts require Code and the matching locator and cwd', async t => {
   const projectPath = await directory(t, 'project');
   const otherPath = await directory(t, 'other');
   const noCatalogRow = { find: async () => undefined };
   const locator = { projectPath, sessionId };
   const codeDraft = { projectPath, sessionId, mode: 'code' as const, engineCwd: projectPath };
-  const chat = await resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, mode: 'chat' });
-  assert.equal(chat.authoringSessionId, sessionId);
+  await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, mode: 'chat' }), /local_app_development_requires_code|Code/);
   await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }), /session/);
   await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, projectPath: otherPath }), /dedicated Project cwd/);
   await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, engineCwd: otherPath }), /dedicated Project cwd/);
@@ -71,6 +69,23 @@ test('a persisted invalid or mismatched row cannot fall back to a live draft', a
   await assert.rejects(resolveDesktopAuthoringBinding({ find: async () => ({
     uuid: sessionId, mode: 'code', workspace_path: otherPath,
   } as never) }, locator, liveDraft), /dedicated Project cwd/);
+});
+
+test('a pending Local App receipt verifies its exact recorded transcript before registration', async t => {
+  const projectPath = await directory(t, 'exact-source');
+  const selected = { scope: 'repository' as const, transcriptPath: join(projectPath, 'a', `${sessionId}.jsonl`) };
+  const other = join(projectPath, 'b', `${sessionId}.jsonl`);
+  const live = { projectPath, sessionId, mode: 'code' as const, engineCwd: projectPath };
+  let path = selected.transcriptPath;
+  const catalog = { find: async () => { throw new Error('must not find by UUID'); },
+    select: async (_project: string, _id: string, selection: typeof selected) => {
+      assert.deepEqual(selection, selected); return { uuid: sessionId, mode: 'code', workspace_path: projectPath, path } as never;
+    } };
+  assert.equal((await resolveDesktopAuthoringBinding(catalog, { projectPath, sessionId }, live, selected)).authoringSessionId, sessionId);
+  path = other;
+  await assert.rejects(resolveDesktopAuthoringBinding(catalog, { projectPath, sessionId }, live, selected), /source changed/);
+  await assert.rejects(resolveDesktopAuthoringBinding({ find: async () => undefined, select: async () => undefined },
+    { projectPath, sessionId }, live, selected), /source changed/);
 });
 
 test('only the exact active connected draft runtime can supply a missing catalog row', () => {

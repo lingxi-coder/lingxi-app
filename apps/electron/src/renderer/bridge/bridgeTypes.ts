@@ -221,7 +221,7 @@ export interface UseBridge {
   touchSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<void>;
   renameSession(projectPath: string, sessionId: string, title: string, selection: SessionMetadataSelection): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
-  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace): Promise<SessionRef | false>;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<SessionRef | false>;
   /** Show a chat of a Bot in the chat view; a new one when `sessionId` is absent. Rejects with the reason it could not start. */
   openBotSession(botId: string, sessionId?: string, transcriptPath?: string): Promise<import('../../shared/bots').BotSessionRefUi>;
   /** Follow the host, which made a chat of a Bot the displayed one on its own (the owner clicked a notification). */
@@ -336,7 +336,7 @@ export interface UseBridge {
   audioRetainFlow(sessionId: string, leaseId: string, retain: boolean): Promise<void>;
   audioFinishListen(flow?: NativeAudioFlowLease): Promise<void>;
   refresh(): Promise<void>;
-  newSession(projectPath?: string): Promise<import("../../shared/settings").SessionRef | undefined>;
+  newSession(projectPath?: string, purpose?: import('../../shared/localApps').LocalAppSessionPurpose): Promise<import("../../shared/settings").SessionRef | undefined>;
   resumeSession(sessionId: string): Promise<void>;
   switchConversationSpace(mode: 'chat' | 'code'): Promise<void>;
   readonly handoffPending: boolean;

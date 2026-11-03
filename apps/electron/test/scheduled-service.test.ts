@@ -57,7 +57,7 @@ async function harness(t: TestContext) {
   const archived = new Set<string>();
   const catalogRows = new Map<string, { uuid: string; title: string; mode?: 'chat' | 'code'; path?: string; empty_session?: boolean }[]>([[project, [{ uuid: targetId, title: 'Chosen chat', mode: 'code' }]], [global, []]]);
   const ensured: { ref: SessionRef; empty: boolean; model?: string }[] = [];
-  const background: { ref: SessionRef; empty: boolean; model?: string; transcriptPath?: string; durableAnchor?: boolean }[] = [];
+  const background: { ref: SessionRef; empty: boolean; model?: string; transcriptPath?: string; durableAnchor?: string }[] = [];
   const mounted = new Set<string>();
   const mountedRuntimes = new Map<string, SessionRuntime>();
   const turns: { runId: string; task: CronJobDto; ref: SessionRef }[] = [];
@@ -67,7 +67,7 @@ async function harness(t: TestContext) {
   const notifications: { title: string; body: string; ref?: SessionRef }[] = [];
   const errors: unknown[] = [];
   let execute = async (_runId: string, _task: CronJobDto) => 'A completed summary';
-  let prepareTarget = async (_ref: SessionRef, _durableAnchor: boolean) => {};
+  let prepareTarget = async (_ref: SessionRef, _durableAnchor?: string) => {};
   let resolveSource = async (ref: SessionRef) => {
     const row = await (service as any).catalogFor(ref.projectPath).find(ref.projectPath, ref.sessionId);
     if (!row) throw new Error('The target chat is unavailable.');
@@ -127,7 +127,7 @@ async function harness(t: TestContext) {
     setSessionDirectoryGrants: (id: string, directories: readonly string[]) => { grants.set(id, directories); },
     retainBackgroundSession: (ref: SessionRef) => { const lease = { ref, released: false }; leases.push(lease); return () => { lease.released = true; }; },
     ensure: async (ref: SessionRef, empty: boolean, model?: string) => { ensured.push({ ref, empty, model }); if (ensureFailure) throw ensureFailure; return runtime(ref); },
-    withBackgroundSession: async <T>(ref: SessionRef, empty: boolean, model: string | undefined, operation: (runtime: SessionRuntime) => Promise<T>, transcriptPath?: string, durableAnchor = false) => {
+    withBackgroundSession: async <T>(ref: SessionRef, empty: boolean, model: string | undefined, operation: (runtime: SessionRuntime) => Promise<T>, transcriptPath?: string, durableAnchor?: string) => {
       background.push({ ref, empty, model, transcriptPath, durableAnchor });
       await prepareTarget(ref, durableAnchor);
       return operation(runtime(ref, transcriptPath));
@@ -233,7 +233,7 @@ test('a bound TaskSession cancelled before send remains resumable on the next oc
   h.setAfterBinding(async () => { throw new Error('cancelled: before scheduled send'); });
   const first = task({ runMode: 'task_session', notificationPolicy: 'none' });
   await assert.rejects(runClaim(h.service, h.source, 'first-occurrence', first), /cancelled: before scheduled send/);
-  assert.equal(h.background[0].durableAnchor, true);
+  assert.equal(h.background[0].durableAnchor, 'Morning brief');
   assert.equal(h.bindings.length, 1, 'the source has durably bound the prepared target');
   const boundId = h.bindings[0].sessionId;
   assert.equal(h.catalogRows.get(h.project)?.[0].uuid, boundId, 'the anchor is ready before binding');
@@ -244,7 +244,7 @@ test('a bound TaskSession cancelled before send remains resumable on the next oc
   assert.equal(h.background[1].ref.mode, 'code');
   assert.equal(h.background[1].empty, false, 'the existing anchor is resumed from its exact saved source');
   assert.equal(h.background[1].transcriptPath, `/sessions/${boundId}.jsonl`);
-  assert.equal(h.background[1].durableAnchor, false, 'a restored target is not re-anchored');
+  assert.equal(h.background[1].durableAnchor, undefined, 'a restored target is not re-anchored');
 });
 
 test('listing a scope with no persisted catalog answers without starting an engine', async (t) => {
@@ -1029,7 +1029,7 @@ for (const runMode of ['new_session', 'task_session', 'selected_session'] as con
 test('a new-session run bound before cancellation leaves an openable durable source', async t => {
   const h = await harness(t);
   h.setPrepareTarget(async (ref, durableAnchor) => {
-    assert.equal(durableAnchor, true);
+    assert.equal(durableAnchor, 'Morning brief');
     h.catalogRows.set(ref.projectPath, [{ uuid: ref.sessionId, title: 'Cancelled run', mode: ref.mode,
       path: `/sessions/${ref.sessionId}.jsonl`, empty_session: true }]);
   });

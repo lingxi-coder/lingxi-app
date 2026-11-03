@@ -56,6 +56,8 @@ import type {
   SessionRuntimeSummary,
 } from './bridgeTypes.js';
 import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
+import { validateNewAuthoringIntent, type AuthoringSessionIntent, type AuthoringSessionSource } from './local-apps/authoringSessionIntents.js';
+import type { LocalAppNewSessionIntent } from '../shared/localApps.js';
 import type { SessionRuntime } from './bridge.js';
 import { isSessionId } from './sessionIdentity.js';
 import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectFolderSelection } from '../shared/projectCreation.js';
@@ -515,6 +517,7 @@ async function resolveSavedConversationTranscriptRow(
 
 type ResolvedMetadataSource = { ref: SessionRef; row?: ProjectSessionCatalogRow; transcriptPath?: string };
 type MetadataAction = 'rename' | 'touch' | 'verify';
+type CapturedLocalAppAuthoring = { sourceDirectory: string; commit<T>(operation: () => T): Promise<T> };
 type CapturedMetadataSource = {
   requested: SessionRef;
   source: ResolvedMetadataSource;
@@ -589,6 +592,13 @@ export class HostController {
   private scheduled?: ScheduledTaskService;
   private notifier?: HostNotifier;
   private keepAwake?: KeepAwake;
+  private captureLocalAppAuthoring?: (appId: string, ref: SessionRef, version: number) => Promise<CapturedLocalAppAuthoring>;
+  private localAppSession?: {
+    begin(input: LocalAppNewSessionIntent): { allocate(ref: SessionRef): Promise<void>; recordSource(source: AuthoringSessionSource): Promise<void>; finish(ref: SessionRef): Promise<void> };
+    get(requestId: string): Promise<AuthoringSessionIntent>;
+    recordSource(requestId: string, source: AuthoringSessionSource): Promise<AuthoringSessionIntent>;
+    finish(saved: AuthoringSessionIntent): Promise<void>;
+  };
 
   constructor(
     private readonly settings: SettingsStore,
@@ -612,6 +622,10 @@ export class HostController {
 
   private providerAccounts?: DesktopProviderAccounts;
   attachProviderAccounts(service: DesktopProviderAccounts): void { this.providerAccounts = service; }
+  attachLocalAppAuthoring(capture: (appId: string, ref: SessionRef, version: number) => Promise<CapturedLocalAppAuthoring>): void {
+    this.captureLocalAppAuthoring = capture;
+  }
+  attachLocalAppSessions(value: NonNullable<HostController['localAppSession']>): void { this.localAppSession = value; }
 
   private account?: AccountService;
   private offAccount?: () => void;
@@ -1008,6 +1022,7 @@ export class HostController {
     });
     this.ipc.handle(CH_PROJECT_APPS_DEFAULT, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
+      if (this.currentConversationMode() !== 'code') throw new Error(nativeTr('local_app_development_requires_code'));
       const request = {};
       this.projectFolderPickRequests.set(event.sender, request);
       // Directory discovery does not load project or managed settings.
@@ -1020,8 +1035,11 @@ export class HostController {
     });
     this.ipc.handle(CH_PROJECT_FOLDER_PICK, async (event: IpcMainInvokeEvent, purpose: unknown = 'project') => {
       this.assertSender(event);
-      ++this.navigationGeneration;
       if (purpose !== 'project' && purpose !== 'local-app') throw new Error('Invalid project purpose.');
+      if (purpose === 'local-app' && this.currentConversationMode() !== 'code') {
+        throw new Error(nativeTr('local_app_development_requires_code'));
+      }
+      ++this.navigationGeneration;
       const request = {};
       this.projectFolderPickRequests.set(event.sender, request);
       const defaultPath = purpose === 'local-app' ? this.projectFolderSelections.get(event.sender)?.path : undefined;
@@ -1034,9 +1052,12 @@ export class HostController {
     });
     this.ipc.handle(CH_PROJECT_CREATE, async (event: IpcMainInvokeEvent, selectionId: unknown, directoryName?: unknown) => {
       this.assertSender(event);
-      ++this.navigationGeneration;
       const selection = this.projectFolderSelections.get(event.sender);
       if (!selection || !selection.path || selection.id !== selectionId) throw new Error('Choose a source folder before creating the project.');
+      if (selection.localApp && this.currentConversationMode() !== 'code') {
+        throw new Error(nativeTr('local_app_development_requires_code'));
+      }
+      ++this.navigationGeneration;
       return this.enqueueNavigation(async () => {
         this.assertSender(event);
         if (this.projectFolderSelections.get(event.sender) !== selection) throw new Error('The source folder selection has changed.');
@@ -1059,7 +1080,7 @@ export class HostController {
           }
         } else if (directoryName !== undefined) throw new Error('An existing folder uses its directory name.');
         try {
-          const workspace = await this.selectWorkspaceInternal(path, true, !selection.localApp);
+          const workspace = await this.selectWorkspaceInternal(path, true, !selection.localApp, selection.localApp ? 'code' : undefined);
           if (this.projectFolderSelections.get(event.sender) === selection) this.projectFolderSelections.delete(event.sender);
           return workspace;
         } catch (error) {
@@ -1123,14 +1144,31 @@ export class HostController {
       this.handoffs.get(requestId)?.abort();
       this.discardHandoff(requestId);
     });
-    this.ipc.handle(CH_SESSION_NEW, async (event: IpcMainInvokeEvent, projectPath: unknown, model: unknown) => {
+    this.ipc.handle(CH_SESSION_NEW, async (event: IpcMainInvokeEvent, projectPath: unknown, model: unknown, purpose?: unknown) => {
       this.assertSender(event);
+      let authoring: LocalAppNewSessionIntent | undefined;
+      let recoveryId: string | undefined;
+      if (purpose !== undefined) {
+        if (!purpose || typeof purpose !== 'object' || Array.isArray(purpose)) throw new Error('invalid new session purpose');
+        const input = purpose as Record<string, unknown>;
+        if (input.kind === 'local-app' && Object.keys(input).every(key => key === 'kind' || key === 'intent')) {
+          authoring = validateNewAuthoringIntent(input.intent);
+        } else if (input.kind === 'recover-local-app' && Object.keys(input).every(key => key === 'kind' || key === 'requestId') && isSessionId(input.requestId)) {
+          recoveryId = input.requestId;
+        } else throw new Error('invalid new session purpose');
+      }
+      const space = this.settings.conversationSpaces.snapshot().activeMode;
+      if (purpose !== undefined && this.currentConversationMode() !== 'code') throw new Error(nativeTr('local_app_development_requires_code'));
+      if (purpose !== undefined && !this.localAppSession) throw new Error('The Local App authoring host is unavailable');
+      // Reserve the per-App ordering at admission, not after a slow runtime boot.
+      const localApp = authoring ? this.localAppSession!.begin(authoring) : undefined;
       const requestedAt = Date.now();
       const generation = ++this.navigationGeneration;
-      const space = this.settings.conversationSpaces.snapshot().activeMode;
       this.draftAdmissionGenerations.set(space, generation);
       return this.enqueueNavigation(async () => {
+        if (recoveryId) return this.recoverLocalAppSession(recoveryId, generation);
         const projectId = projectPath === null ? null : this.requireProject(projectPath);
+        if (localApp && (projectId === null || space !== 'code')) throw new Error('Local App authoring requires a Code Project');
         if (projectId !== null && (!this.settings.hasProject(projectId)
           || !this.settings.conversationSpaces.snapshot().projects[projectId]?.includes(space))) {
           throw new Error('project is not in this conversation space');
@@ -1143,13 +1181,28 @@ export class HostController {
           projectPath: project,
           queueWaitMs: navigationStartedAt - requestedAt,
         }));
+        let release: (() => void) | undefined;
         try {
           const runtimeStartedAt = Date.now();
           const current = () => generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === space;
-          const ref = await this.bridge.newSession(project, model as string | undefined, { mode: space, projectId, activate: current });
+          const ref = await this.bridge.newSession(project, model as string | undefined, { mode: space, projectId, activate: localApp ? () => false : current,
+            ...(localApp ? { forceNew: true, durableDraftTitle: authoring!.name.trim() || 'Local App',
+              onAllocated: async (allocated: SessionRef) => {
+                release = this.bridge.retainBackgroundSession(allocated);
+                await localApp.allocate(allocated);
+              } } : {}) });
           const owned: OwnedConversation = { ...ref, mode: space, projectId };
           this.settings.conversationSpaces.register(owned);
-          if (this.draftAdmissionGenerations.get(space) === generation) this.draftSelections.set(space, owned);
+          if (localApp) {
+            const runtime = this.bridge.get(ref.sessionId);
+            if (!runtime) throw new Error('The Local App Code session is unavailable');
+            const path = await this.rememberCreatedSessionSource(owned, runtime, false, source => localApp.recordSource(source));
+            const selected = this.settings.getSessionTranscriptSelection(owned);
+            if (!selected || selected.catalogProjectPath !== project || selected.transcriptPath !== path) throw new Error('The Local App session source changed');
+            await localApp.finish(owned);
+            await this.assertLocalAppSessionRuntime(owned, runtime, path);
+          }
+          if ((!localApp || current()) && this.draftAdmissionGenerations.get(space) === generation) this.draftSelections.set(space, owned);
           const runtimeDurationMs = Date.now() - runtimeStartedAt;
           this.diagnostics.add('info', 'host', diagnosticEvent('session_new_runtime_ready', {
             durationMs: runtimeDurationMs,
@@ -1179,19 +1232,31 @@ export class HostController {
             projectPath: project,
           }));
           throw error;
-        }
+        } finally { release?.(); }
       });
     });
-    this.ipc.handle(CH_SESSION_OPEN, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, selection?: unknown, linkedMode?: unknown) => {
+    this.ipc.handle(CH_SESSION_OPEN, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, selection?: unknown, linkedMode?: unknown, authoringAppId?: unknown, authoringVersion?: unknown) => {
       this.assertSender(event);
-      const generation = ++this.navigationGeneration;
       if (linkedMode !== undefined && linkedMode !== 'chat' && linkedMode !== 'code') throw new Error('invalid linked session mode');
+      if ((authoringAppId === undefined) !== (authoringVersion === undefined)
+        || (authoringAppId !== undefined && (typeof authoringAppId !== 'string' || !/^a[a-f0-9]{32}$/.test(authoringAppId)
+          || linkedMode !== 'code' || selection !== undefined || typeof authoringVersion !== 'number'
+          || !Number.isSafeInteger(authoringVersion) || authoringVersion < 0))) {
+        throw new Error('invalid Local App authoring session');
+      }
+      if (authoringAppId !== undefined && this.currentConversationMode() !== 'code') {
+        throw new Error(nativeTr('local_app_development_requires_code'));
+      }
+      const generation = ++this.navigationGeneration;
       const expectedMode = linkedMode ?? this.settings.conversationSpaces.snapshot().activeMode;
       this.draftAdmissionGenerations.delete(expectedMode);
       return this.enqueueNavigation(async () => {
         const project = this.requireProject(projectPath);
         if (!isSessionId(sessionId)) throw new Error('invalid session id');
         const ref = { projectPath: project, sessionId } satisfies SessionRef;
+        const authoring = authoringAppId === undefined ? undefined : await this.captureLocalAppAuthoring?.(authoringAppId as string, ref, authoringVersion as number);
+        if (authoringAppId !== undefined && !authoring) throw new Error('The Local App authoring host is unavailable');
+        if (authoring && authoring.sourceDirectory !== project) throw new Error('The Local App authoring workspace changed');
         let selected: SessionOpenSelection | undefined;
         if (selection !== undefined) {
           if (!selection || typeof selection !== 'object' || Array.isArray(selection)) throw new Error('invalid session selection');
@@ -1209,7 +1274,7 @@ export class HostController {
         if (generation !== this.navigationGeneration) return this.bootstrap();
         const previousMode = this.settings.conversationSpaces.snapshot().activeMode;
         this.settings.conversationSpaces.setMode(linkedMode);
-        try { return await this.openSessionAndActivateInternal(ref, selected, generation, linkedMode); }
+        try { return await this.openSessionAndActivateInternal(ref, selected, generation, linkedMode, authoring); }
         catch (error) {
           if (generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === linkedMode) {
             this.settings.conversationSpaces.setMode(previousMode);
@@ -2121,7 +2186,84 @@ export class HostController {
   }
 
   /** Persist only the transcript confirmed by the live writer and its catalog. */
-  async rememberCreatedSessionSource(ref: SessionRef, runtime: SessionRuntime, scheduled: boolean): Promise<string> {
+  private async recoverLocalAppSession(requestId: string, generation: number): Promise<BootstrapState> {
+    if (!this.localAppSession) throw new Error('The Local App authoring host is unavailable');
+    let saved = await this.localAppSession.get(requestId);
+    const project = this.requireProject(saved.projectPath);
+    if (!this.settings.hasProject(project) || !this.settings.conversationSpaces.snapshot().projects[project]?.includes('code')) {
+      throw new Error('Add the saved Local App Project before recovering its Code session');
+    }
+    const owned: OwnedConversation = { projectPath: project, projectId: project, sessionId: saved.sessionId, mode: 'code' };
+    const existing = this.settings.conversationSpaces.findBySessionId(owned.sessionId);
+    if (existing && (existing.projectPath !== project || existing.projectId !== project || existing.mode !== 'code')) {
+      throw new Error('The Local App session owner changed');
+    }
+    const release = this.bridge.retainBackgroundSession(owned);
+    try {
+      this.sessionCatalog.invalidate(project);
+      const remembered = this.settings.getSessionTranscriptSelection(owned);
+      if (remembered && remembered.catalogProjectPath !== project) throw new Error('The Local App session source changed');
+      if (!saved.source && (remembered || this.bridge.get(owned.sessionId))) {
+        throw new Error('The Local App draft source was not confirmed; choose its exact session before continuing');
+      }
+      if (saved.source && remembered && (saved.source.transcriptPath !== remembered.transcriptPath || saved.source.scope !== remembered.scope)) {
+        throw new Error('The Local App session source changed');
+      }
+      const selected = saved.source;
+      const row = selected ? await this.sessionCatalog.select(project, owned.sessionId, selected) : undefined;
+      if (selected && (!row || row.path !== selected.transcriptPath)) throw new Error('The Local App session source is unavailable');
+      if (row && (row.uuid.toLowerCase() !== owned.sessionId.toLowerCase() || row.mode !== 'code' || !row.path || !isAbsolute(row.path)
+        || (row.workspace_path && canonicalWorkspace(row.workspace_path) !== project))) {
+        throw new Error('The Local App session source changed');
+      }
+      const live = this.bridge.get(owned.sessionId);
+      let runtime: SessionRuntime;
+      if (live) {
+        if (!selected || live.projectPath !== project || live.sessionMode !== 'code' || live.connectionState.status !== 'connected'
+          || live.isStarting || live.needsSessionResume) throw new Error('The Local App session source cannot be confirmed');
+        const state = await live.getWorkspaceState();
+        if (this.bridge.get(owned.sessionId) !== live || live.connectionState.status !== 'connected'
+          || live.sessionMode !== 'code' || state.transcript_path !== selected.transcriptPath || canonicalWorkspace(state.cwd) !== project) {
+          throw new Error('The Local App session source changed');
+        }
+        runtime = live;
+      } else {
+        runtime = row
+          ? await this.bridge.openSession(owned, row.empty_session === true, row.resume_model, false, row.path)
+          : await this.bridge.restoreDurableDraft(owned, saved.name.trim() || 'Local App');
+      }
+      this.settings.conversationSpaces.register(owned);
+      const path = await this.rememberCreatedSessionSource(owned, runtime, false, async source => {
+        saved = await this.localAppSession!.recordSource(saved.requestId, source);
+      }, selected);
+      const confirmed = this.settings.getSessionTranscriptSelection(owned);
+      if (!confirmed || confirmed.catalogProjectPath !== project || confirmed.transcriptPath !== path
+        || (selected && (selected.transcriptPath !== path || selected.scope !== confirmed.scope))) throw new Error('The Local App session source changed');
+      // Recovery never changes an App's current owner; a newer explicit rebind wins.
+      await this.localAppSession.finish(saved);
+      await this.assertLocalAppSessionRuntime(owned, runtime, path);
+      if (generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === 'code') {
+        this.bridge.activateSession(owned);
+        this.settings.activateProject(project);
+        this.settings.setActiveSessionDraft(owned);
+      }
+      return this.bootstrap();
+    } finally { release(); }
+  }
+
+  private async assertLocalAppSessionRuntime(owner: OwnedConversation, runtime: SessionRuntime, path: string): Promise<void> {
+    const state = await runtime.getWorkspaceState();
+    const current = this.settings.conversationSpaces.findBySessionId(owner.sessionId);
+    if (this.bridge.get(owner.sessionId) !== runtime || runtime.projectPath !== owner.projectPath || runtime.sessionMode !== 'code'
+      || !current || current.mode !== 'code' || current.projectId !== owner.projectId || current.projectPath !== owner.projectPath
+      || (owner.projectId !== null && (!this.settings.hasProject(owner.projectId) || this.isProjectClosing(owner.projectId)))
+      || state.transcript_path !== path || canonicalWorkspace(state.cwd) !== owner.projectPath) {
+      throw new Error('The Local App session source changed');
+    }
+  }
+
+  async rememberCreatedSessionSource(ref: SessionRef, runtime: SessionRuntime, scheduled: boolean,
+    beforeRemember?: (source: AuthoringSessionSource) => Promise<void>, preferredSource?: AuthoringSessionSource): Promise<string> {
     const known = this.settings.conversationSpaces.findBySessionId(ref.sessionId);
     const managed = this.settings.scheduledSessionWorkspace(ref.sessionId);
     const projectId = managed?.projectPath === ref.projectPath ? null
@@ -2139,9 +2281,10 @@ export class HostController {
       || canonicalWorkspace(state.cwd) !== owner.projectPath || !lstatSync(path).isFile()) {
       throw new Error('The live session has no verified transcript source.');
     }
+    if (preferredSource && preferredSource.transcriptPath !== path) throw new Error('The Local App session source changed');
     this.sessionCatalog.invalidate(owner.projectPath);
     let selected: { catalogProjectPath: string; scope: SessionCatalogScope; transcriptPath: string } | undefined;
-    for (const scope of ['current', 'repository', 'all'] as const) {
+    for (const scope of preferredSource ? [preferredSource.scope] : ['current', 'repository', 'all'] as const) {
       const row = await this.sessionCatalog.select(owner.projectPath, owner.sessionId, { scope, transcriptPath: path });
       if (!row || row.path !== path) continue;
       if (row.uuid.toLowerCase() !== owner.sessionId.toLowerCase() || row.mode !== owner.mode
@@ -2156,10 +2299,29 @@ export class HostController {
     if (this.bridge.get(owner.sessionId) !== runtime || runtime.projectPath !== owner.projectPath || runtime.sessionMode !== owner.mode
       || (current && (current.projectPath !== owner.projectPath || current.projectId !== owner.projectId || current.mode !== owner.mode))
       || (!current && known)) throw new Error('The session owner changed before its source was recorded.');
+    await beforeRemember?.({ scope: selected.scope, transcriptPath: selected.transcriptPath });
+    if (beforeRemember) {
+      const confirmed = await runtime.getWorkspaceState();
+      const after = this.settings.conversationSpaces.findBySessionId(owner.sessionId);
+      if (this.bridge.get(owner.sessionId) !== runtime || runtime.sessionMode !== owner.mode || !after
+        || (after && (after.projectPath !== owner.projectPath || after.projectId !== owner.projectId || after.mode !== owner.mode))
+        || (owner.projectId !== null && (!this.settings.hasProject(owner.projectId) || this.isProjectClosing(owner.projectId)))
+        || confirmed.transcript_path !== path || canonicalWorkspace(confirmed.cwd) !== owner.projectPath) {
+        throw new Error('The session owner changed before its source was recorded.');
+      }
+    }
     if (!current) this.settings.conversationSpaces.register(owner);
     this.settings.rememberSessionTranscriptSelection(owner, selected);
     runtime.rememberTranscriptSelection(path);
     return path;
+  }
+
+  /** Return a mode only when the displayed owner agrees with the committed space. */
+  currentConversationMode(): ConversationSpace | undefined {
+    const mode = this.settings.conversationSpaces.snapshot().activeMode;
+    const active = this.settings.getPublic().activeSession;
+    if (!active) return mode;
+    return this.settings.conversationSpaces.find(active)?.mode === mode ? mode : undefined;
   }
 
   private async switchConversationSpace(space: ConversationSpace, generation: number): Promise<BootstrapState> {
@@ -2188,7 +2350,8 @@ export class HostController {
     return this.enqueueNavigation(() => this.selectWorkspaceInternal(input, addProject));
   }
 
-  private async selectWorkspaceInternal(input: string, addProject: boolean, createInitialSession = true): Promise<WorkspaceMetadata> {
+  private async selectWorkspaceInternal(input: string, addProject: boolean, createInitialSession = true,
+    admittedMode?: ConversationSpace): Promise<WorkspaceMetadata> {
     const workspace = canonicalWorkspace(input);
     if (this.closingProjects.has(workspace)) throw new Error('project is closing');
     this.workspaceFiles.invalidate();
@@ -2196,7 +2359,7 @@ export class HostController {
       this.assertNotAppData(workspace);
       const wasEmpty = this.settings.getPublic().projects.length === 0;
       this.settings.addProject(workspace);
-      this.settings.conversationSpaces.addProject(workspace, this.settings.conversationSpaces.snapshot().activeMode);
+      this.settings.conversationSpaces.addProject(workspace, admittedMode ?? this.settings.conversationSpaces.snapshot().activeMode);
       // General project creation supplies the first draft. App creation only
       // adds metadata; the renderer explicitly admits its one authoring chat.
       if (wasEmpty && createInitialSession) {
@@ -2664,7 +2827,8 @@ export class HostController {
     });
   }
 
-  private async openSessionAndActivateInternal(ref: SessionRef, selection?: SessionOpenSelection, generation?: number, expectedMode?: ConversationSpace): Promise<BootstrapState> {
+  private async openSessionAndActivateInternal(ref: SessionRef, selection?: SessionOpenSelection, generation?: number, expectedMode?: ConversationSpace,
+    authoring?: CapturedLocalAppAuthoring): Promise<BootstrapState> {
     if (!isSessionId(ref.sessionId)) throw new Error('invalid session id');
     const project = this.requireProject(ref.projectPath);
     ref = { projectPath: project, sessionId: ref.sessionId.toLowerCase() };
@@ -2674,12 +2838,21 @@ export class HostController {
       if (expectedMode && draft.mode !== expectedMode) throw new Error('The session belongs to a different conversation space.');
       const current = () => generation === undefined || (generation === this.navigationGeneration
         && this.settings.conversationSpaces.snapshot().activeMode === expectedMode);
-      await this.bridge.reopenOwnedDraft(draft, current);
-      if (current()) {
+      if (authoring && draft.projectPath !== authoring.sourceDirectory) throw new Error('The Local App authoring workspace changed');
+      await this.bridge.reopenOwnedDraft(draft, () => !authoring && current());
+      const activate = () => {
+        if (!current()) return;
         this.bridge.activateSession(draft);
         this.draftSelections.set(draft.mode, draft);
         this.settings.setActiveSessionDraft(draft);
-      }
+      };
+      if (authoring && current()) {
+        const runtime = this.bridge.get(draft.sessionId);
+        if (!runtime || runtime.sessionMode !== 'code' || canonicalWorkspace((await runtime.getWorkspaceState()).cwd) !== authoring.sourceDirectory) {
+          throw new Error('The Local App authoring workspace changed');
+        }
+        await authoring.commit(activate);
+      } else if (!authoring) activate();
       return this.bootstrap();
     }
     const existing = this.bridge.get(ref.sessionId);
@@ -2707,6 +2880,13 @@ export class HostController {
         source = project;
       }
     }
+    if (authoring) {
+      if (source !== authoring.sourceDirectory) throw new Error('The Local App authoring workspace changed');
+      if (existing?.connectionState.status === 'connected'
+        && (existing.sessionMode !== 'code' || canonicalWorkspace((await existing.getWorkspaceState()).cwd) !== authoring.sourceDirectory)) {
+        throw new Error('The Local App authoring workspace changed');
+      }
+    }
     const known = this.settings.conversationSpaces.find({ projectPath: source, sessionId: ref.sessionId })
       ?? this.settings.conversationSpaces.find(ref) ?? this.settings.conversationSpaces.findBySessionId(ref.sessionId);
     if (!known) throw new Error('The session has no authenticated conversation scope.');
@@ -2730,25 +2910,37 @@ export class HostController {
       }
       const canonical: OwnedConversation = { projectPath: source, sessionId: ref.sessionId, mode: ownerMode, projectId };
       await this.bridge.openSession(canonical, session?.empty_session === true, session?.resume_model,
-        generation === undefined, selection ? session?.path : undefined);
+        generation === undefined && !authoring, selection ? session?.path : undefined);
       if (generation !== undefined && (generation !== this.navigationGeneration
         || this.settings.conversationSpaces.snapshot().activeMode !== expectedMode)) return this.bootstrap();
-      // The engine must acknowledge the exact copy before persistent ownership moves.
-      if (known.projectPath !== source) this.settings.conversationSpaces.relocate(known, source);
-      if (generation !== undefined) this.bridge.activateSession(canonical);
-      // Persist navigation after a matching engine acknowledgement.
-      const wasArchived = this.settings.isSessionArchived(canonical) || this.settings.isSessionArchived(ref);
-      this.settings.relocateSession(known ?? { projectPath: project, sessionId: ref.sessionId }, source, selection ? {
-        catalogProjectPath: catalogProject, scope: selection.scope, transcriptPath: session!.path,
-      } : undefined);
-      const recorded = this.settings.conversationSpaces.find(canonical);
-      if (recorded) {
-        this.settings.conversationSpaces.setMode(recorded.mode);
-        this.settings.conversationSpaces.setNavigation(recorded.mode, recorded.projectId, recorded);
-        this.draftSelections.delete(recorded.mode);
+      if (authoring) {
+        const runtime = this.bridge.get(ref.sessionId);
+        if (!runtime || runtime.sessionMode !== 'code' || canonicalWorkspace((await runtime.getWorkspaceState()).cwd) !== authoring.sourceDirectory) {
+          throw new Error('The Local App authoring workspace changed');
+        }
       }
-      if (wasArchived) { this.settings.setSessionArchived(canonical, false); this.remoteControlUi?.sessionsChanged(); }
-      if (wasArchived) await this.loadProjectSessions(source);
+      const commit = () => {
+        if (generation !== undefined && (generation !== this.navigationGeneration
+          || this.settings.conversationSpaces.snapshot().activeMode !== expectedMode)) return { current: false, wasArchived: false };
+        // The engine must acknowledge the exact copy before persistent ownership moves.
+        if (known.projectPath !== source) this.settings.conversationSpaces.relocate(known, source);
+        if (generation !== undefined || authoring) this.bridge.activateSession(canonical);
+        const wasArchived = this.settings.isSessionArchived(canonical) || this.settings.isSessionArchived(ref);
+        this.settings.relocateSession(known ?? { projectPath: project, sessionId: ref.sessionId }, source, selection ? {
+          catalogProjectPath: catalogProject, scope: selection.scope, transcriptPath: session!.path,
+        } : undefined);
+        const recorded = this.settings.conversationSpaces.find(canonical);
+        if (recorded) {
+          this.settings.conversationSpaces.setMode(recorded.mode);
+          this.settings.conversationSpaces.setNavigation(recorded.mode, recorded.projectId, recorded);
+          this.draftSelections.delete(recorded.mode);
+        }
+        if (wasArchived) { this.settings.setSessionArchived(canonical, false); this.remoteControlUi?.sessionsChanged(); }
+        return { current: true, wasArchived };
+      };
+      const result = authoring ? await authoring.commit(commit) : commit();
+      if (!result.current) return this.bootstrap();
+      if (result.wasArchived) await this.loadProjectSessions(source);
       return this.bootstrap();
     } finally { releaseCopy?.(); }
   }

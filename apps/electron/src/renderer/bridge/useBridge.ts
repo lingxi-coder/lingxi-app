@@ -1909,22 +1909,27 @@ export function useBridge(): UseBridge {
   }, [capture, host, mutateSessionCatalog]);
 
   const openSession = useCallback(async (projectPath: string, sessionId: string, selection?: SessionOpenSelection,
-    linkedMode?: import('../../shared/conversationSpaces').ConversationSpace) => {
+    linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number) => {
     if (!host) throw new Error('Desktop host unavailable.');
     const operationId = beginNavigationOperation();
-    const target = { projectPath, sessionId } satisfies SessionRef;
+    // Keep the displayed owner while the host verifies an app's source/cwd.
+    const target = authoringAppId === undefined ? { projectPath, sessionId } satisfies SessionRef
+      : bootstrapRef.current?.activeSession ?? bootstrapRef.current?.settings.activeSession ?? { projectPath, sessionId };
     pendingSessionRef.current = target;
     setSessionReady(false);
     sessionLoadingRef.current = true;
     setPendingSession(target);
-    removedRuntimeIds.current.delete(sessionId);
+    if (authoringAppId === undefined) removedRuntimeIds.current.delete(sessionId);
     try {
-      const snapshot = linkedMode !== undefined
+      const snapshot = authoringAppId !== undefined
+        ? await host.openSession(projectPath, sessionId, selection, linkedMode, authoringAppId, authoringVersion)
+        : linkedMode !== undefined
         ? await host.openSession(projectPath, sessionId, selection, linkedMode)
         : selection === undefined
         ? await host.openSession(projectPath, sessionId)
         : await host.openSession(projectPath, sessionId, selection);
       if (isCurrentNavigationOperation(operationId)) {
+        removedRuntimeIds.current.delete(sessionId);
         pendingSessionRef.current = null;
         setSessionReady(false);
         sessionLoadingRef.current = false;
@@ -2246,7 +2251,7 @@ export function useBridge(): UseBridge {
     ]);
   }, [command, refreshDiagnostics, requestTaskList]);
 
-  const newSession = useCallback(async (requestedProjectPath?: string) => {
+  const newSession = useCallback(async (requestedProjectPath?: string, purpose?: import('../../shared/localApps').LocalAppSessionPurpose) => {
     if (sessionLoadingRef.current) return;
     if (!host || !bootstrap) return;
     const projectId = requestedProjectPath ?? null;
@@ -2261,7 +2266,8 @@ export function useBridge(): UseBridge {
     setPendingSession(target);
     setError(null);
     try {
-      const snapshot = await host.newSession(projectId, desktop.currentModelSource ?? desktop.currentModel ?? undefined);
+      const model = desktop.currentModelSource ?? desktop.currentModel ?? undefined;
+      const snapshot = purpose === undefined ? await host.newSession(projectId, model) : await host.newSession(projectId, model, purpose);
       if (isCurrentNavigationOperation(operationId)) {
         pendingSessionRef.current = null;
         setSessionReady(false);

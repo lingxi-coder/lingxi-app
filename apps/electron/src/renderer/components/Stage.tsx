@@ -1,6 +1,7 @@
 import { tr } from '../i18n/locale';
 import { crossSessionMessage } from './messageOrigin';
 import { ActivityToolGroup } from './ActivityToolGroup';
+import { localAppToolRequiresCode } from '../bridge/localAppErrors';
 import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
 import { PlanPreview, PlanDocument } from './PlanDocument';
@@ -735,7 +736,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           // break the sibling spacing when that status appears or disappears.
           if (item === tailThinking) return null;
           const content = (() => {
-          if (activityView && item.type === 'tool-group' && !item.tools.some(tool => localAppReference(tool) || submittedPlans.some(plan => plan.id === tool.id))) {
+          if (activityView && item.type === 'tool-group' && !item.tools.some(tool => localAppReference(tool) || localAppToolRequiresCode(tool.tool, tool.status, tool.result?.headline, tool.result?.body) || submittedPlans.some(plan => plan.id === tool.id))) {
             return <div className="transcript-run-item" data-run-type="tool" key={item.id}><ActivityToolGroup group={item}><ToolGroup group={item} modUiSessionId={modUiSessionId} open={true} ungrouped toolOpen={id => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} /></ActivityToolGroup></div>;
           }
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} files={item.files} onReview={onReviewFiles ? path => onReviewFiles(item.id, item.files!, path) : undefined} />;

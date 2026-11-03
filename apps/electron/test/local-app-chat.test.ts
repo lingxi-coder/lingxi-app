@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { localAppAuthoringPrompt, localAppChatTarget, localAppDraftDisposition, type LocalAppChatNavigation, type LocalAppDraft } from '../src/renderer/bridge/localAppChat';
 import type { DesktopAuthoringRef } from '../src/shared/localApps';
+import { localAppErrorMessage, localAppToolRequiresCode } from '../src/renderer/bridge/localAppErrors';
 
 const source = { projectPath: '/project/app', sessionId: 'session-app' };
 const active = { projectPath: '/project/other', sessionId: 'session-other' };
@@ -14,15 +15,40 @@ const app = { id: binding.appId!, name: 'Reading garden', authoring: binding, au
 
 function navigation(overrides: Partial<LocalAppChatNavigation> = {}): LocalAppChatNavigation {
   return {
+    mode: 'code', requiresCodeMessage: 'Switch to Code',
     hasProject: () => true,
     openSession: async () => source,
     addProject: async () => { throw new Error('Unexpected project picker'); },
     newSession: async () => { throw new Error('Unexpected new chat'); },
-    bindAuthoring: async () => binding,
-    prepareAuthoring: async () => binding,
+    recoverSession: async () => { throw new Error('Unexpected recovery'); },
     ...overrides,
   };
 }
+
+test('Chat rejects Local App creation without switching mode or touching the project', async () => {
+  const calls: string[] = [];
+  await assert.rejects(localAppChatTarget(undefined, navigation({
+    mode: 'chat',
+    addProject: async () => { calls.push('project'); return { path: source.projectPath }; },
+    newSession: async () => { calls.push('session'); return source; },
+  }), () => true), /Switch to Code/);
+  assert.deepEqual(calls, []);
+});
+
+test('the stable SDK development refusal is localized only for a failed LocalApp tool', () => {
+  const reason = 'local_app_development_requires_code: Code required';
+  assert.match(localAppErrorMessage(new Error(reason)), /Switch to Code/);
+  assert.equal(localAppErrorMessage(new Error('another failure')), 'another failure');
+  assert.equal(localAppToolRequiresCode('LocalApp', 'error', reason), true);
+  assert.equal(localAppToolRequiresCode('LocalApp', 'error', `Error: ${reason}`), true);
+  assert.equal(localAppToolRequiresCode('Read', 'error', reason), false);
+  assert.equal(localAppToolRequiresCode('LocalApp', 'done', reason), false);
+  for (const other of ['PathBlocked /tmp/local_app_development_requires_code/file',
+    'The source says "local_app_development_requires_code"', 'local_app_development_requires_code_extra']) {
+    assert.equal(localAppErrorMessage(other), other);
+    assert.equal(localAppToolRequiresCode('LocalApp', 'error', other), false);
+  }
+});
 
 test('Modify resumes the exact saved Code session in the dedicated app source project', async () => {
   let created = false, bound = false;
@@ -32,7 +58,6 @@ test('Modify resumes the exact saved Code session in the dedicated app source pr
       return source;
     },
     newSession: async () => { created = true; return active; },
-    bindAuthoring: async () => { bound = true; return binding; },
   }), () => true);
   assert.deepEqual(target, source);
   assert.equal(created, false);
@@ -44,7 +69,6 @@ test('Modify never silently replaces a verified authoring session', async () => 
   await assert.rejects(localAppChatTarget(app, navigation({
     openSession: async () => false,
     newSession: async projectPath => { created = true; return { projectPath, sessionId: 'session-replacement' }; },
-    bindAuthoring: async () => { bound = true; return binding; },
   }), () => true), /Could not resume the saved app authoring session/);
   assert.equal(created, false);
   assert.equal(bound, false);
@@ -54,23 +78,34 @@ test('Create without a saved workspace asks for one and makes a real Code sessio
   const calls: string[] = [];
   const target = await localAppChatTarget(undefined, navigation({
     addProject: async purpose => { assert.equal(purpose, 'local-app'); calls.push('pick'); return { path: '/selected/app' }; },
-    newSession: async path => { calls.push(`new:${path}`); return { projectPath: path, sessionId: 'new-session' }; },
-    prepareAuthoring: async session => { calls.push(`prepare:${session.projectPath}:${session.sessionId}`); return { ...binding,
-      sourceDirectory: session.projectPath, projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId, appId: undefined }; },
+    newSession: async (path, intent) => { calls.push(`new:${path}`); assert.deepEqual(intent, { name: 'app', setCurrent: false }); return { projectPath: path, sessionId: 'new-session' }; },
   }), () => true);
-  assert.deepEqual(calls, ['pick', 'new:/selected/app', 'prepare:/selected/app:new-session']);
+  assert.deepEqual(calls, ['pick', 'new:/selected/app']);
   assert.deepEqual(target, { projectPath: '/selected/app', sessionId: 'new-session' });
 });
 
-test('a legacy source-only binding is rebound in its saved source directory', async () => {
-  const legacy = { id: app.id, name: app.name, authoring: { sourceDirectory: source.projectPath }, authoringAction: 'rebindRequired' as const };
+test('an unconfirmed source-only binding is registered without changing the current owner', async () => {
+  const unconfirmed = { id: app.id, name: app.name, authoring: { sourceDirectory: source.projectPath }, authoringAction: 'rebindRequired' as const };
   let bound = false;
-  const target = await localAppChatTarget(legacy, navigation({
-    newSession: async path => ({ projectPath: path, sessionId: 'session-rebound' }),
-    bindAuthoring: async (_appId, session) => { bound = true; return { ...binding, authoringSessionId: session.sessionId }; },
+  const target = await localAppChatTarget(unconfirmed, navigation({
+    newSession: async (path, intent) => { assert.equal(intent.setCurrent, false); assert.equal(intent.appId, app.id); bound = true; return { projectPath: path, sessionId: 'session-rebound' }; },
   }), () => true);
   assert.deepEqual(target, { projectPath: source.projectPath, sessionId: 'session-rebound' });
   assert.equal(bound, true);
+});
+
+test('an explicitly restored source becomes current after its new session is registered', async () => {
+  const restored = { id: app.id, name: app.name, authoring: { sourceDirectory: source.projectPath },
+    authoringAction: 'rebindRequired' as const, authoringSetCurrent: true, authoringRequestId: 'copy-operation' };
+  let registered = false;
+  const target = await localAppChatTarget(restored, navigation({
+    newSession: async (projectPath, intent) => {
+      assert.equal(intent.setCurrent, true); assert.equal(intent.sourceRequestId, 'copy-operation'); registered = true;
+      return { projectPath, sessionId: 'restored-session' };
+    },
+  }), () => true);
+  assert.equal(target?.sessionId, 'restored-session');
+  assert.equal(registered, true);
 });
 
 test('a removed saved workspace must be re-added exactly instead of using the active project', async () => {
@@ -79,7 +114,6 @@ test('a removed saved workspace must be re-added exactly instead of using the ac
     hasProject: () => false,
     addProject: async purpose => { calls.push(`pick:${purpose}`); return { path: source.projectPath }; },
     newSession: async path => { calls.push(`new:${path}`); return { projectPath: path, sessionId: 'recovered-session' }; },
-    bindAuthoring: async (_appId, session) => ({ ...binding, authoringSessionId: session.sessionId }),
   }), () => true);
   assert.deepEqual(calls, ['pick:local-app', `new:${source.projectPath}`]);
   assert.deepEqual(target, { projectPath: source.projectPath, sessionId: 'recovered-session' });
@@ -94,12 +128,10 @@ test('a missing source can be explicitly located and rebound before creating an 
   const target = await localAppChatTarget(missing, navigation({
     hasProject: path => path === '/restored/app-source',
     addProject: async purpose => { calls.push(`locate:${purpose}`); return { path: '/restored/app-source' }; },
-    newSession: async projectPath => { calls.push(`new:${projectPath}`); return { projectPath, sessionId: 'restored-session' }; },
-    bindAuthoring: async (appId, session) => { calls.push(`bind:${appId}:${session.sessionId}`); return { ...binding, sourceDirectory: session.projectPath,
-      projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId }; },
+    newSession: async (projectPath, intent) => { assert.equal(intent.setCurrent, true); assert.equal(intent.appId, app.id); calls.push(`new:${projectPath}`); return { projectPath, sessionId: 'restored-session' }; },
   }), () => true);
   assert.deepEqual(target, { projectPath: '/restored/app-source', sessionId: 'restored-session' });
-  assert.deepEqual(calls, [`locate:local-app`, 'new:/restored/app-source', `bind:${app.id}:restored-session`]);
+  assert.deepEqual(calls, [`locate:local-app`, 'new:/restored/app-source']);
 });
 
 test('canceling source recovery never creates a chat or draft', async () => {

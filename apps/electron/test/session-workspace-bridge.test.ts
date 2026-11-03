@@ -388,6 +388,26 @@ test('useBridge transports a picker selection while retaining the standard openS
   assert.equal(await context.open('/current', 'unrelated'), false, 'a different acknowledged UUID cannot become an authoring target');
 });
 
+test('Local App open retains the displayed owner until the host confirms its source', async () => {
+  const gate = deferred<any>(), calls: unknown[] = [], pending: unknown[] = [], snapshots: unknown[] = [];
+  const current = { projectPath: '/original', sessionId: 'A' };
+  const appId = `a${'1'.repeat(32)}`;
+  const context: any = {
+    useCallback: (fn: unknown) => fn, bootstrapRef: { current: { activeSession: current, settings: {} } },
+    host: { openSession: (...args: unknown[]) => { calls.push(args); return gate.promise; } },
+    beginNavigationOperation: () => 1, pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
+    removedRuntimeIds: { current: new Set() }, setSessionReady() {}, setPendingSession: (value: unknown) => pending.push(value), setError() {},
+    isCurrentNavigationOperation: () => true, applyBootstrap: (value: unknown) => snapshots.push(value), capture(error: unknown) { throw error; },
+  };
+  evaluate('globalThis.open = ' + initializer(bridgeSource, 'openSession'), context);
+  const opening = context.open('/app/source', 'B', undefined, 'code', appId, 7);
+  assert.deepEqual(pending[0], current, 'the unverified target is not displayed');
+  assert.deepEqual(calls, [['/app/source', 'B', undefined, 'code', appId, 7]]);
+  gate.resolve({ revision: 2, activeSession: { projectPath: '/app/source', sessionId: 'B' } });
+  assert.equal((await opening).sessionId, 'B');
+  assert.equal(snapshots.length, 1);
+});
+
 test('the ordinary sidebar opens the exact transcript from its displayed Current catalog', async () => {
   const response = deferred<boolean>(), calls: unknown[] = [], opening: unknown[] = [];
   let openedChat = 0, openingKey: string | null = null;

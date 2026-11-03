@@ -818,7 +818,7 @@ export class SessionRuntime {
   private draftSessionMode?: RuntimeSessionMode;
   private draftModeRestorationRequired: boolean;
   constructor(private readonly opts: BridgeManagerOptions, sessionMode?: RuntimeSessionMode,
-    private readonly scheduledDurableAnchor = false) {
+    private readonly durableDraftTitle?: string) {
     this.sessionMode = sessionMode ?? opts.expectedSessionMode;
     this.draftSessionMode = sessionMode;
     this.draftModeRestorationRequired = sessionMode !== undefined;
@@ -1904,8 +1904,8 @@ export class SessionRuntime {
         reused: Boolean(reusable),
       });
       if (reusable) {
-        if (this.scheduledDurableAnchor && this.draftSessionMode !== undefined) {
-          throw new Error('The new scheduled chat UUID is already owned.');
+        if (this.durableDraftTitle && this.draftSessionMode !== undefined) {
+          throw new Error('The new durable draft UUID is already owned.');
         }
         this.launchDir = reusable.launchDir;
         this.adoptedPid = reusable.pid;
@@ -2162,7 +2162,7 @@ export class SessionRuntime {
       bridgeDir,
       sessionTranscriptPath: this.ownedTranscriptPath,
       restoreDraft: this.draftSessionMode !== undefined,
-      scheduledDurableAnchor: this.draftSessionMode !== undefined && this.scheduledDurableAnchor,
+      durableDraftTitle: this.draftSessionMode !== undefined ? this.durableDraftTitle : undefined,
       initialConversationMode: this.draftSessionMode,
       expectedConversationMode: this.draftSessionMode === undefined ? this.sessionMode : undefined,
       additionalDirectories: launch.additionalDirectories,
@@ -3089,6 +3089,10 @@ export class SessionRuntime {
         ...(visualizationContext !== undefined ? { visualizationContext } : {}),
       });
     } catch (error) { this.telemetry?.endTurn('error', traceContext); throw error; }
+    if (!source || source.origin === 'desktop' || source.origin === 'device') {
+      try { this.opts.onPromptAdmitted?.(); }
+      catch (error) { this.diagnostics.add('warn', 'host', `prompt admission callback: ${sanitizeDiagnostic(error)}`); }
+    }
     this.journalPrompt(prompt, validatedImages, turnId ?? 0, source);
     this.sessionHasHistory = true;
     if (needsIdentityCommit && this.opts.onFirstPromptSent?.() !== false) {

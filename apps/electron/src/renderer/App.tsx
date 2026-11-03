@@ -7,6 +7,7 @@ import './components/Bots.css';
 import { useBots } from './bridge/useBots';
 import { botScopesKey } from './bridge/botRoutines';
 import { localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
+import { localAppErrorMessage } from './bridge/localAppErrors';
 import type { LocalAppEditRequest } from '../shared/localApps';
 import type { TerminalScope } from '../shared/terminal';
 import { settingsLinkRequest, runtimeLinkItem, type SettingsLinkRequest, type ScheduledLinkRequest } from './deepLinkRoutes';
@@ -109,27 +110,25 @@ export function App() {
   const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading || localAppBridge.current.projectCreationOpen, []);
   const openLocalAppChat = useCallback((app?: LocalAppEditRequest) => {
     if (sessionNavigationBlocked()) return;
+    const mode = localAppBridge.current.bootstrap?.conversationSpaces.activeMode;
+    if (mode !== 'code') {
+      setLocalAppNavigationError(tr('local_app_development_requires_code'));
+      return;
+    }
     const nonce = ++localAppNavigation.current;
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
     const navigate = async () => {
       const current = localAppBridge.current;
       const target = await localAppChatTarget(app, {
+        mode,
+        requiresCodeMessage: tr('local_app_development_requires_code'),
         hasProject: path => Boolean(current.bootstrap?.settings.projects.includes(path)
           || current.bootstrap?.scheduledWorkspace === path),
-        openSession: current.openSession,
+        openSession: (projectPath, sessionId) => localAppBridge.current.openSession(projectPath, sessionId, undefined, 'code', app?.id, app?.authoringVersion),
         addProject: current.addProject,
-        newSession: current.newSession,
-        bindAuthoring: (appId, session) => {
-          const api = window.lingxi?.localApps;
-          if (!api) throw new Error('Desktop application host is unavailable');
-          return api.bindAuthoring(appId, session);
-        },
-        prepareAuthoring: session => {
-          const api = window.lingxi?.localApps;
-          if (!api) throw new Error('Desktop application host is unavailable');
-          return api.prepareAuthoring(session);
-        },
+        newSession: (projectPath, intent) => localAppBridge.current.newSession(projectPath, { kind: 'local-app', intent }),
+        recoverSession: requestId => localAppBridge.current.newSession(undefined, { kind: 'recover-local-app', requestId }),
       }, () => localAppNavigation.current === nonce);
       if (!target || localAppNavigation.current !== nonce) return;
       setPage('chat');
@@ -137,7 +136,7 @@ export function App() {
       setLocalAppDraft({ id: app?.id ?? '', name: app?.name ?? '', nonce, target });
     };
     localAppNavigationQueue.current = localAppNavigationQueue.current.then(navigate, navigate).catch(error => {
-      if (localAppNavigation.current === nonce) setLocalAppNavigationError(error instanceof Error ? error.message : String(error));
+      if (localAppNavigation.current === nonce) setLocalAppNavigationError(localAppErrorMessage(error));
     });
   }, [sessionNavigationBlocked]);
   const consumeLocalAppDraft = useCallback((nonce: number) => {
@@ -492,7 +491,7 @@ export function App() {
           {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
           {localAppNavigationError && <div role="alert" className="local-app-error">{localAppNavigationError}</div>}
           {page === 'teams' && <Suspense fallback={<p role="status">{locale.startsWith('zh') ? '正在加载团队…' : 'Loading Teams…'}</p>}><Teams zh={locale.startsWith('zh')} initialInvite={teamInvite} onInviteHandled={handledTeamInvite} /></Suspense>}
-          <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
+          <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}
               onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }}

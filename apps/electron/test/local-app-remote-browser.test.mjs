@@ -275,7 +275,7 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
       manifest: { schema: 2, targets: [], name: 'Remote Agent contract', entry: { type: 'static', path: 'index.html' }, capabilities: ['agent'], agent: { tools: [], skills: [] } },
       agent: { enabled: true, model, tools: [], skills: [], background: false, maxTurns: 5, timeoutMs: 60_000 },
     };
-    host = new LocalAppHost({ core: { onDisconnected() {}, async dispose() {} }, configHome: directory, preload: '/unused', mainWindow: () => undefined, edit: async () => {}, agentCatalog: async () => ({ models: [model], tools: [], skills: [] }) });
+    host = new LocalAppHost({ core: { onDisconnected() {}, async dispose() {} }, configHome: directory, appProjectsRoot: join(directory, '.apps'), currentConversationMode: () => 'code', preload: '/unused', mainWindow: () => undefined, edit: async () => {}, agentCatalog: async () => ({ models: [model], tools: [], skills: [] }) });
     host.store = {
       root, get: async () => structuredClone(row), getRevision: async () => structuredClone(row), list: async () => [structuredClone(row)],
       save: async value => Object.assign(row, structuredClone(value)), assertTarget: async () => {}, revisionPath: () => source,

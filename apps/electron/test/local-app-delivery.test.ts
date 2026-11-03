@@ -48,6 +48,34 @@ test('non-publish and failed LocalApp results stay ordinary grouped tools', () =
   }
 });
 
+test('a Code-required LocalApp failure remains visible while tool details and surrounding groups are collapsed', () => {
+  const reason = 'local_app_development_requires_code: Code required';
+  const item: ToolRunItem = { ...published, nativeOutput: undefined, status: 'error', result: { headline: reason, body: reason } };
+  const before = structuredClone(item);
+  const rows = transcriptRows([shell, item, { ...shell, id: 'next' }], false);
+  assert.deepEqual(rows.filter(row => row.type === 'tool-group').map(row => row.tools.map(tool => tool.id)), [['install'], ['publish'], ['next']]);
+  for (const open of [false, true]) {
+    const html = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) },
+      React.createElement(ToolCall, { item, open, onSetOpen: () => {} })));
+    assert.match(html, /Chat mode does not support Local App development\. Switch to Code mode to continue\./);
+    assert.match(html, /flex:1 0 100%;white-space:normal;overflow-wrap:anywhere/);
+    assert.match(html, new RegExp(`aria-expanded="${open}"`));
+    assert.doesNotMatch(html, /local_app_development_requires_code/);
+  }
+  const html = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, React.createElement(Stage, {
+    activityView: true, liveItems: [shell, item, { ...shell, id: 'next' }], running: false,
+  })));
+  assert.match(html, /Chat mode does not support Local App development\. Switch to Code mode to continue\./);
+  for (const [details] of html.matchAll(/<details class="activity-tool-group"[\s\S]*?<\/details>/g)) {
+    assert.doesNotMatch(details, /Switch to Code mode/);
+  }
+  assert.deepEqual(item, before, 'presentation does not mutate raw diagnostics');
+  const ordinary = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) },
+    React.createElement(ToolCall, { item: { ...item, result: { headline: 'Other failure', body: 'Other failure' } }, open: false, onSetOpen: () => {} })));
+  assert.match(ordinary, />Failed<\/span>/);
+  assert.doesNotMatch(ordinary, /Switch to Code mode/);
+});
+
 test('activity view preserves the app card outside collapsed tool details', () => {
   const html = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, React.createElement(Stage, {
     activityView: true,

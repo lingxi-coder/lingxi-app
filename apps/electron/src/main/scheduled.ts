@@ -573,7 +573,7 @@ export class ScheduledTaskService {
           await source.markCronRunStarted(runId, ref.sessionId, { transcriptPath: state.transcript_path, mode, scopeKey });
         });
         return { sessionId: ref.sessionId, summary };
-      }, transcriptPath, !existing);
+      }, transcriptPath, !existing ? (config.name?.trim() || task.prompt.split('\n')[0].replace(/^# /, '').trim() || 'Scheduled task') : undefined);
     });
     this.sessionQueues.set(ref.sessionId, operation);
     try {

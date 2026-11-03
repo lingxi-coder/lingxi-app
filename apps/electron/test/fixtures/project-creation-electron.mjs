@@ -40,6 +40,44 @@ async function main() {
         writeFileSync(join(evidence, 'create-project-preview.png'), (await window.webContents.capturePage(rectangle, { stayHidden: true, stayAwake: true })).toPNG());
       }
     };
+    await window.loadURL(`${url}?mode=chat`);
+    await wait(`!!document.querySelector('button[aria-label="Apps"]')`);
+    await run(`window.unmountCodeRequiredTool = window.mountCodeRequiredTool(); true`);
+    await wait(`!!document.querySelector('#code-required-tool-fixture .tool-row-status')`);
+    await check(`(() => {
+      const host = document.querySelector('#code-required-tool-fixture');
+      const hint = host.querySelector('.tool-row-status'), trigger = host.querySelector('button');
+      const range = document.createRange(), text = hint.firstChild;
+      range.setStart(text, text.length - 'continue.'.length); range.setEnd(text, text.length);
+      const tail = range.getBoundingClientRect(), box = hint.getBoundingClientRect(), summary = hint.parentElement.getBoundingClientRect();
+      const style = getComputedStyle(hint);
+      return trigger.getAttribute('aria-expanded') === 'false' && hint.textContent.includes('Switch to Code mode to continue.')
+        && style.whiteSpace === 'normal' && style.overflowWrap === 'anywhere' && hint.scrollWidth <= hint.clientWidth
+        && box.height > parseFloat(style.lineHeight) * 1.5 && tail.width > 0 && tail.left >= box.left - 1 && tail.right <= box.right + 1
+        && tail.bottom <= box.bottom + 1 && tail.bottom <= summary.bottom + 1 && tail.right <= summary.right + 1;
+    })()`, 'Collapsed Code-required tool must show the entire wrapping instruction in a narrow container');
+    await run(`document.querySelector('#code-required-tool-fixture button').click()`);
+    await wait(`document.querySelector('#code-required-tool-fixture button').getAttribute('aria-expanded') === 'true' && document.querySelector('#code-required-tool-fixture .tool-result-error')?.textContent.includes('Switch to Code mode')`);
+    await run(`window.unmountCodeRequiredTool()`);
+    await run(`document.querySelector('button[aria-label="Apps"]').click()`);
+    await wait(`!!document.querySelector('aside[aria-label="Unfinished app publications"]')`);
+    await run(`document.querySelector('aside[aria-label="Unfinished app publications"] button').click()`);
+    await wait(`document.querySelector('.local-app-error')?.textContent.includes('Switch to Code mode')`);
+    await check(`window.projectCreationFixture.publicationRecoveries.length === 0`, 'Chat may view pending publications but cannot resume one');
+    await wait(`!!document.querySelector('aside[aria-label="Resume app development"]')`);
+    await run(`document.querySelector('aside[aria-label="Resume app development"] button').click()`);
+    await wait(`document.querySelector('.local-app-error')?.textContent.includes('Switch to Code mode')`);
+    await check(`window.projectCreationFixture.sessionRecoveries.length === 0`, 'Chat may view pending sessions but cannot resume one');
+    await run(`document.querySelector('.local-app-library-header button').click()`);
+    await wait(`document.querySelector('.desktop-main > .local-app-error')?.textContent.includes('Switch to Code mode')`);
+    await check(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.defaults === 0 && window.projectCreationFixture.newSessions.length === 0 && window.projectCreationFixture.switches.length === 0`, 'Chat must explain the Code requirement without switching or creating a project');
+    await window.loadURL(`${url}?recover=1`);
+    await wait(`!!document.querySelector('button[aria-label="Apps"]')`);
+    await run(`document.querySelector('button[aria-label="Apps"]').click()`);
+    await wait(`!!document.querySelector('aside[aria-label="Resume app development"] button')`);
+    await run(`document.querySelector('aside[aria-label="Resume app development"] button').click()`);
+    await wait(`window.projectCreationFixture.newSessionPurposes[0]?.kind === 'recover-local-app' && document.querySelector('[contenteditable=true]')?.textContent.includes('创建一个本地应用')`);
+    await check(`window.projectCreationFixture.sessionRecoveries[0] === 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' && window.projectCreationFixture.newSessionPurposes[0].requestId === window.projectCreationFixture.sessionRecoveries[0] && window.projectCreationFixture.switches.length === 0`, 'Code recovery must use the exact saved intent and never switch spaces');
     await window.loadURL(url);
     await wait(`!!document.querySelector('[aria-label="Add project"]') && !document.querySelector('[aria-label="Add project"]').closest('[inert]')`);
     await open();
@@ -153,6 +191,7 @@ async function main() {
     await confirmTrust();
     await wait(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.newSessions.length === 1 && document.querySelector('[contenteditable=true]')?.textContent.includes('创建一个本地应用')`);
     await check(`window.projectCreationFixture.newSessions[0] === '/fixture/.current-product/.apps/Reading garden' && window.projectCreationFixture.projects.length === 2`, 'Confirmed app creation must create exactly one chat in its own project');
+    await check(`window.projectCreationFixture.newSessionPurposes[0]?.intent?.name === 'Reading garden'`, 'The durable draft title must come from the selected Local App project');
     await openAppProject();
     await run(`window.projectCreationFixture.nextFolder={id:'explicit-app-folder',path:'/Users/tester/Projects/Explicit app'}; document.querySelector('.create-project-add-folder').click()`);
     await wait(`document.querySelector('[aria-label="Project name"]').value === 'Explicit app'`);
@@ -237,7 +276,7 @@ async function main() {
     await run(`document.querySelector('.create-project-submit').click()`);
     await wait(`!!document.querySelector('.trust-folder-dialog')`);
     await screenshot('trust-folder-dark');
-    console.log(JSON.stringify({ opening: true, stagedSelection: true, cancel: true, retry: true, busy: true, sidebarRefresh: true, refreshFailure: true, settingsEntry: true, appProject: true, canceledLookup: true, sourceRecovery: true, startupRecovery: true, nativePaths: true, focusAndEscape: true, narrow: true }));
+    console.log(JSON.stringify({ toolCodeRequired: true, chatRequiresCode: true, chatPendingVisible: true, codeSessionRecovery: true, opening: true, stagedSelection: true, cancel: true, retry: true, busy: true, sidebarRefresh: true, refreshFailure: true, settingsEntry: true, appProject: true, canceledLookup: true, sourceRecovery: true, startupRecovery: true, nativePaths: true, focusAndEscape: true, narrow: true }));
   } catch (error) { console.error(error); process.exitCode = 1; }
   finally { window.destroy(); app.exit(process.exitCode ?? 0); }
 }

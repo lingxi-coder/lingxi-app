@@ -1,6 +1,8 @@
 import { promises as fs } from 'node:fs';
 import type { ProjectSessionCatalog } from '../session-catalog.js';
 import type { LiveDraftSession } from '../sessionRuntimeManager.js';
+import type { AuthoringSessionSource } from './authoringSessionIntents.js';
+import { nativeTr } from '../../shared/nativeLocale.js';
 
 export interface DesktopAuthoringSessionRef { projectPath: string; sessionId: string }
 export interface ResolvedDesktopAuthoring {
@@ -11,16 +13,21 @@ export interface ResolvedDesktopAuthoring {
 
 /** Resolve a session locator through the trusted Desktop catalog, then prove its cwd is the selected Project. */
 export async function resolveDesktopAuthoringBinding(
-  catalog: Pick<ProjectSessionCatalog, 'find'>,
+  catalog: Pick<ProjectSessionCatalog, 'find'> & Partial<Pick<ProjectSessionCatalog, 'select'>>,
   session: DesktopAuthoringSessionRef,
   liveDraft?: LiveDraftSession,
+  selected?: AuthoringSessionSource,
 ): Promise<ResolvedDesktopAuthoring> {
-  const source = await catalog.find(session.projectPath, session.sessionId);
+  if (selected && !catalog.select) throw new Error('The Local App session source cannot be verified');
+  const source = selected ? await catalog.select!(session.projectPath, session.sessionId, selected)
+    : await catalog.find(session.projectPath, session.sessionId);
+  if (selected && (!source || source.path !== selected.transcriptPath)) throw new Error('The Local App session source changed');
   const projectPath = await fs.realpath(session.projectPath);
   if (source) {
     if (source.uuid !== session.sessionId || !source.workspace_path) {
       throw new Error('Choose a session with a saved workspace');
     }
+    if (source.mode !== 'code') throw new Error(nativeTr('local_app_development_requires_code'));
     const actualPath = await fs.realpath(source.workspace_path);
     if (actualPath !== projectPath) throw new Error('The Local App source must be the dedicated Project cwd');
     if (!(await fs.stat(actualPath)).isDirectory()) throw new Error('The selected session workspace is not a directory');
@@ -33,6 +40,7 @@ export async function resolveDesktopAuthoringBinding(
   if (!liveDraft || liveDraft.sessionId !== session.sessionId) {
     throw new Error('Choose a session with a saved workspace');
   }
+  if (liveDraft.mode !== 'code') throw new Error(nativeTr('local_app_development_requires_code'));
   const [runtimeProjectPath, actualPath] = await Promise.all([
     fs.realpath(liveDraft.projectPath), fs.realpath(liveDraft.engineCwd),
   ]);

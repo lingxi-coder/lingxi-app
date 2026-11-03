@@ -616,6 +616,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       // `remoteControlAtStartup`: a new chat starts shared with the user's other devices.
       try { remotePolicy?.sessionCreated(ref); } catch (error) { diagnostics.add('warn', 'host', `remote control: ${sanitizeDiagnostic(error)}`); }
     },
+    onPromptAdmitted: ref => {
+      void localApps?.completeAuthoringSession(ref).catch(error => diagnostics.add('warn', 'host', `Local App session recovery: ${sanitizeDiagnostic(error)}`));
+    },
     confirmBypassPermissions: async () => {
       // Shown ONCE per install (persisted), mirroring the oracle's
       // `bypassPermissionsModeAccepted`. Body text is the oracle's Bypass
@@ -726,6 +729,16 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     nativeAudio ?? undefined,
   );
   if (providerAccounts) host.attachProviderAccounts(providerAccounts);
+  host.attachLocalAppAuthoring((appId, ref, version) => {
+    if (!localApps) throw new Error('The Local App authoring host is unavailable');
+    return localApps.captureAuthoringSession(appId, ref, version);
+  });
+  host.attachLocalAppSessions({
+    begin: intent => { if (!localApps) throw new Error('The Local App authoring host is unavailable'); return localApps.beginAuthoringSession(intent); },
+    get: requestId => { if (!localApps) throw new Error('The Local App authoring host is unavailable'); return localApps.getAuthoringSession(requestId); },
+    recordSource: (requestId, source) => { if (!localApps) throw new Error('The Local App authoring host is unavailable'); return localApps.recordAuthoringSessionSource(requestId, source); },
+    finish: saved => { if (!localApps) throw new Error('The Local App authoring host is unavailable'); return localApps.finishAuthoringSession(saved); },
+  });
   host.attachComputerSettings(computerSettings);
   // Whether the Mac may sleep while Bots work is the owner's to say; the switch is in the Bots page.
   const keepAwake = new KeepAwake({
@@ -993,14 +1006,22 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     }
     localApps = new LocalAppHost({
       configHome: productPaths.brandHome,
+      appProjectsRoot: productPaths.appProjectsRoot,
       onRemoteAccessEnded: quitIfNothingNeedsTheApp,
       accountToken: () => account.getIdToken(),
       accountId: () => account.snapshot().user?.uid ?? undefined,
+      currentConversationMode: () => host?.currentConversationMode(),
       core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.brandHome, message => diagnostics.add('warn', 'host', message)),
-      resolveAuthoringBinding: async (_appId, session) => {
+      resolveAuthoringBinding: async (_appId, session, source) => {
         const activeSession = settings.getPublic().activeSession ?? undefined;
         const liveDraft = bridge?.getActiveDraftSession(session, activeSession);
-        return resolveDesktopAuthoringBinding(sessionCatalog, session, liveDraft);
+        const remembered = settings.getSessionTranscriptSelection(session);
+        if (remembered && (remembered.catalogProjectPath !== session.projectPath
+          || (source && (source.scope !== remembered.scope || source.transcriptPath !== remembered.transcriptPath)))) {
+          throw new Error('The Local App session source changed');
+        }
+        const exact = source ?? (remembered && { scope: remembered.scope, transcriptPath: remembered.transcriptPath });
+        return resolveDesktopAuthoringBinding(sessionCatalog, session, liveDraft, exact);
       },
       preload: join(moduleDirectory, '../preload/localApp.cjs'),
       nodeExecutable: process.execPath,

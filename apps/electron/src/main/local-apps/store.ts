@@ -107,6 +107,9 @@ export async function copySource(source: string, destination: string): Promise<v
 export interface LocalAppPublishInput {
   id?: string; name?: string; summary?: string; html?: string; staged_path?: string;
   authoring?: DesktopAuthoringRef; expectedRevision?: number;
+  publication?: { requestId: string; sourceDirectory: string; authoringSessionId: string };
+  /** Only return a previously committed SDK result; never admit a new write. */
+  publicationReplayOnly?: boolean;
 }
 /** Platform execution adapter contract. The Rust library is the production store. */
 export interface LocalAppStore {
@@ -118,7 +121,6 @@ export interface LocalAppStore {
   list(): Promise<DesktopLocalApp[]>;
   save(row: DesktopLocalApp): Promise<void>;
   publish(input: LocalAppPublishInput): Promise<DesktopLocalApp>;
-  bindAuthoring(id: string, authoring: DesktopAuthoringRef): Promise<DesktopAuthoringRef>;
   prepareWorkspace(row: DesktopLocalApp): Promise<string>;
   remove(id: string): Promise<void>;
 }

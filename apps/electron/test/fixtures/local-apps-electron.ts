@@ -4,7 +4,7 @@ import { app, BrowserWindow, protocol, dialog, session, type Session } from 'ele
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { LocalAppHost } from '../../src/main/local-apps/host';
 import { desktopTargets } from '../../src/main/local-apps/marketClient';
@@ -39,7 +39,7 @@ async function main() {
     const canonical = await fs.realpath(source.projectPath);
     return { sourceDirectory: canonical, projectRef: { kind: 'desktopPath' as const, path: canonical }, authoringSessionId: ref.sessionId };
   };
-  const createHost = () => new LocalAppHost({ configHome, core: new LocalAppCoreClient(resolveServerBin(), configHome), preload: join(root, 'localApp.cjs'),
+  const createHost = () => new LocalAppHost({ configHome, appProjectsRoot: join(configHome, '.apps'), core: new LocalAppCoreClient(resolveServerBin(), configHome), currentConversationMode: () => 'code', preload: join(root, 'localApp.cjs'),
     nodeExecutable: process.execPath, mainWindow: () => library, edit: async () => undefined, resolveAuthoringBinding });
   let discovery: { port: number; token: string };
   let url: string;
@@ -56,11 +56,6 @@ async function main() {
   await library.webContents.executeJavaScript(`(()=>{window.__localAppChangeCount=0;window.lingxi.localApps.onChanged(()=>window.__localAppChangeCount++);return true})()`);
   trace('await library.loadURL(process.env.LINGXI_TEST_LIBRARY_URL!);');
   assert.equal((await fetch(url, { method: 'POST', body: '{}' })).status, 403);
-  const toolResult = async (input: object) => {
-    const response = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${discovery.token}` }, body: JSON.stringify(input) });
-    return { status: response.status, value: await response.json() };
-  };
-  const tool = async (input: object) => { const result = await toolResult(input); assert.equal(result.status, 200, JSON.stringify(result.value)); return result.value; };
   const nativeSource = async (name: string, mode: 'code' | 'chat' = 'code') => {
     const requestedPath = join(root, 'source-projects', name);
     await fs.mkdir(requestedPath, { recursive: true, mode: 0o700 });
@@ -69,6 +64,32 @@ async function main() {
     trustedSessions.set(sessionId, { projectPath, mode });
     return { projectPath, sessionId };
   };
+  const defaultSession = await nativeSource('ordinary-code-project');
+  const toolResult = async (input: Record<string, any>) => {
+    const payload = { ...input };
+    if (input.action === 'publish' || input.action === 'read') {
+      payload.source_session = { ...(input.source_session ?? defaultSession),
+        ...(input.action === 'publish' ? { requestId: input.source_session?.requestId ?? randomUUID() } : {}) };
+    }
+    let toolStage: string | undefined;
+    if (input.action === 'publish' && typeof input.staged_path === 'string') {
+      const imports = await fs.realpath(host.store.importsRoot);
+      const source = await fs.realpath(input.staged_path).catch(() => undefined);
+      const child = source && relative(imports, source);
+      if (source && child && child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child)) {
+        // The production SDK stages a fresh copy per tool invocation. Retain
+        // this fixture's source so subsequent revisions can be prepared.
+        toolStage = join(imports, `fixture-tool-${randomUUID()}`);
+        await fs.cp(source, toolStage, { recursive: true });
+        payload.staged_path = toolStage;
+      }
+    }
+    try {
+      const response = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${discovery.token}` }, body: JSON.stringify(payload) });
+      return { status: response.status, value: await response.json() };
+    } finally { if (toolStage) await fs.rm(toolStage, { recursive: true, force: true }); }
+  };
+  const tool = async (input: Record<string, unknown>) => { const result = await toolResult(input); assert.equal(result.status, 200, JSON.stringify(result.value)); return result.value; };
   const publishUpdate = async (id: string, input: Record<string, unknown>) => {
     const current = await tool({ action: 'read', id });
     assert.equal(current.id, id, 'read must return the app being updated');
@@ -98,17 +119,26 @@ async function main() {
     source_path: firstSource.projectPath, source_session: sourceSession });
   assert.equal(invalidPrecommit.status, 400, 'pre-commit staging failure is returned to the tool');
   assert.match(invalidPrecommit.value.error, /staging directory/);
-  const pendingBeforeRestart = JSON.parse(await fs.readFile(join(host.store.root, 'authoring-pending.v1.json'), 'utf8'));
-  assert.equal(pendingBeforeRestart.entries.find((entry: any) => entry.authoring.authoringSessionId === firstSource.sessionId)?.state, 'pending');
+  const proofBeforeRestart = await host.store.findAuthoringSource(firstSource.projectPath);
+  assert.ok(proofBeforeRestart);
+  const grantBeforeRestart = await host.store.getAuthoringGrant(firstSource.projectPath,
+    { kind: 'desktopPath', path: firstSource.projectPath }, firstSource.sessionId);
+  assert.equal(grantBeforeRestart.sourceId, proofBeforeRestart.sourceId);
+  assert.equal(grantBeforeRestart.authoring.authoringSessionId, firstSource.sessionId);
+  assert.equal(grantBeforeRestart.ownerAppId, undefined);
   await host.dispose();
   await startHost();
+  const grantAfterRestart = await host.store.getAuthoringGrant(firstSource.projectPath,
+    { kind: 'desktopPath', path: firstSource.projectPath }, firstSource.sessionId);
+  assert.equal(grantAfterRestart.sourceId, proofBeforeRestart.sourceId, 'the original native source receipt survives a host restart');
   const first = await tool({ action: 'publish', name: '识字花园', summary: '每天学习汉字，记录进步。',
     staged_path: appProject, source_path: firstSource.projectPath, source_session: sourceSession });
   const firstRow = await host.store.get(first.id);
   assert.equal(firstRow.authoring?.authoringSessionId, firstSource.sessionId, 'the first release and trusted Code binding commit together');
   assert.equal(firstRow.authoring?.appId, first.id, 'Core assigns authoring ownership to the new app');
-  assert.equal(JSON.parse(await fs.readFile(join(host.store.root, 'authoring-pending.v1.json'), 'utf8')).entries
-    .find((entry: any) => entry.authoring.authoringSessionId === firstSource.sessionId)?.state, 'consumed');
+  const publishedGrant = await host.store.getAuthoringGrant(firstSource.projectPath,
+    { kind: 'desktopPath', path: firstSource.projectPath }, firstSource.sessionId);
+  assert.equal(publishedGrant.ownerAppId, first.id, 'the source receipt is bound to the published App');
   await until(() => library.webContents.executeJavaScript(`Boolean(document.querySelector('.local-app-tile-open'))`));
 
   const racingSource = await nativeSource('concurrent-publish');
@@ -127,7 +157,7 @@ async function main() {
   const racingRejected = racingResults.find(result => result.status === 400);
   assert.ok(racingSuccess, 'one serialized first publication should commit');
   assert.ok(racingRejected, 'the parallel duplicate first publication should be rejected');
-  assert.match(racingRejected.value.error, new RegExp(racingSuccess.value.id));
+  assert.match(racingRejected.value.error, /belongs to another application/);
   assert.equal((await host.list()).filter(row => row.authoring?.sourceDirectory === racingSource.projectPath).length, 1,
     'parallel model publishes cannot create duplicate apps for one native source');
   await host.store.core.request({ op: 'remove', appId: racingSuccess.value.id });
@@ -489,9 +519,7 @@ async function main() {
   assert.deepEqual((await host.store.get(backend.id)).grants, []);
   dialog.showMessageBox = originalDialog;
 
-  // Simulate a response failure after the Rust record/release committed. The
-  // host must recover the owner from Core and refuse a duplicate first publish
-  // after restart, while retaining the explicit app id in the error.
+  // A lost reply after commit is replayed using the same durable tool ID.
   const uncertainSource = await nativeSource('post-commit-retry');
   await fs.writeFile(join(uncertainSource.projectPath, 'lingxi-app.json'), JSON.stringify({ schema: 2,
     targets: nativeTargets, name: 'Committed before response',
@@ -508,7 +536,7 @@ async function main() {
     return published;
   };
   const uncertainRequest = { action: 'publish', staged_path: uncertainStage, source_path: uncertainSource.projectPath,
-    source_session: uncertainSource };
+    source_session: { ...uncertainSource, requestId: randomUUID() } };
   const lostResponse = await toolResult(uncertainRequest);
   assert.equal(lostResponse.status, 400);
   assert.match(lostResponse.value.error, /simulated response loss/);
@@ -518,8 +546,8 @@ async function main() {
   await host.dispose();
   await startHost();
   const retryAfterRestart = await toolResult(uncertainRequest);
-  assert.equal(retryAfterRestart.status, 400, 'the uncertain retry must not create a second app');
-  assert.match(retryAfterRestart.value.error, new RegExp(committed[0]!.id));
+  assert.equal(retryAfterRestart.status, 200, 'the original publication ID replays its committed result');
+  assert.equal(retryAfterRestart.value.id, committed[0]!.id);
   assert.equal((await host.list()).filter(row => row.authoring?.sourceDirectory === uncertainSource.projectPath).length, 1);
   await host.store.core.request({ op: 'remove', appId: committed[0]!.id });
 

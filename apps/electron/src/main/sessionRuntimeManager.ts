@@ -204,6 +204,19 @@ export class SessionRuntimeManager {
     return resolveActiveDraftSession(ref, activeRef, this.findDraft(ref), this.runtimes.get(ref.sessionId), this.activeSessionId);
   }
 
+  /** Reopen the exact UUID captured by a previously admitted durable creation. */
+  async restoreDurableDraft(ref: SessionRef, title: string): Promise<SessionRuntime> {
+    assertSessionRef(ref);
+    if (ref.mode !== 'code' || !ref.projectId || !title.trim()) throw new Error('Invalid Local App draft owner');
+    const existing = this.runtimes.get(ref.sessionId);
+    if (existing) throw new Error('The Local App draft has an unverified runtime owner');
+    const key = `${draftScope('code', ref.projectId)}:${ref.sessionId}`;
+    const draft = { ...ref, mode: 'code' as const, projectId: ref.projectId };
+    this.draftSessions.set(key, draft);
+    try { return await this.ensure(draft, true, undefined, undefined, 'code', title); }
+    catch (error) { this.draftSessions.delete(key); throw error; }
+  }
+
   private draftKey(ref: SessionRef): string | undefined {
     return [...this.draftSessions].find(([, draft]) => draft.projectPath === ref.projectPath && draft.sessionId === ref.sessionId)?.[0];
   }
@@ -363,17 +376,17 @@ export class SessionRuntimeManager {
   }
 
   /** Create, validate, and optionally start one session-owned runtime. */
-  async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string, sessionMode?: RuntimeSessionMode, scheduledDurableAnchor = false): Promise<SessionRuntime> {
+  async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string, sessionMode?: RuntimeSessionMode, durableDraftTitle?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const eviction = this.evictingSessions.get(ref.sessionId);
     if (eviction) {
       await eviction;
-      return this.ensure(ref, start, resumeModel, remountControls, sessionMode, scheduledDurableAnchor);
+      return this.ensure(ref, start, resumeModel, remountControls, sessionMode, durableDraftTitle);
     }
     const existing = this.runtimes.get(ref.sessionId);
     if (existing) {
-      if (scheduledDurableAnchor) throw new Error('The new scheduled chat already has a runtime owner.');
+      if (durableDraftTitle) throw new Error('The new durable draft already has a runtime owner.');
       if (existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
       if (ref.mode && existing.sessionMode && ref.mode !== existing.sessionMode) throw new Error('session mode does not match its owner');
       if (start) await existing.start();
@@ -385,7 +398,7 @@ export class SessionRuntimeManager {
     const runtimeOptions = this.runtimeOptions(ref);
     const draft = this.findDraft(ref);
     const draftMode = draft?.sessionId === ref.sessionId ? draft.mode : sessionMode;
-    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls }, draftMode, scheduledDurableAnchor);
+    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls }, draftMode, durableDraftTitle);
     this.runtimes.set(ref.sessionId, runtime);
     this.touch(ref.sessionId);
     for (const listener of [...this.runtimeCreatedListeners]) this.announceRuntime(listener, runtime);
@@ -410,11 +423,11 @@ export class SessionRuntimeManager {
     }
   }
 
-  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true, transcriptPath?: string, remountControls?: string, scheduledDurableAnchor = false): Promise<SessionRuntime> {
+  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true, transcriptPath?: string, remountControls?: string, durableDraftTitle?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
-    if (scheduledDurableAnchor && existing) throw new Error('The new scheduled chat already has a runtime owner.');
+    if (durableDraftTitle && existing) throw new Error('The new durable draft already has a runtime owner.');
     if (existing && existing.projectPath !== ref.projectPath) {
       throw new Error('session id is owned by a different project');
     }
@@ -423,7 +436,7 @@ export class SessionRuntimeManager {
     }
     const pending = this.openingSessions.get(ref.sessionId);
     if (pending) {
-      if (scheduledDurableAnchor) throw new Error('The new scheduled chat is already being opened.');
+      if (durableDraftTitle) throw new Error('The new durable draft is already being opened.');
       if (pending.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
       if (transcriptPath && pending.transcriptPath !== transcriptPath) throw new Error('another transcript selection is being opened');
       if (ref.mode && pending.mode && ref.mode !== pending.mode) throw new Error('session mode does not match its owner');
@@ -443,7 +456,7 @@ export class SessionRuntimeManager {
       const release = this.retainBackgroundSession(ref);
       return Promise.all([...restarting].map(operation => operation.catch(() => undefined))).then(() => {
         if (this.runtimes.get(ref.sessionId) !== existing) throw new Error('session runtime was replaced while opening');
-        return this.openSession(ref, empty, resumeModel, activate, transcriptPath, remountControls, scheduledDurableAnchor);
+        return this.openSession(ref, empty, resumeModel, activate, transcriptPath, remountControls, durableDraftTitle);
       }).finally(release);
     }
     if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
@@ -456,7 +469,7 @@ export class SessionRuntimeManager {
       return Promise.resolve(existing);
     }
 
-    const promise = this.openSessionInternal(ref, existing, empty, transcriptPath, remountControls, scheduledDurableAnchor).then((runtime) => {
+    const promise = this.openSessionInternal(ref, existing, empty, transcriptPath, remountControls, durableDraftTitle).then((runtime) => {
       runtime.completeWorkspaceRemount();
       if (transcriptPath) this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
       const requested = this.openingSessions.get(ref.sessionId)?.activationModes;
@@ -471,7 +484,7 @@ export class SessionRuntimeManager {
     return trackedPromise;
   }
 
-  private async openSessionInternal(ref: SessionRef, existing: SessionRuntime | undefined, empty: boolean, transcriptPath?: string, remountControls?: string, scheduledDurableAnchor = false): Promise<SessionRuntime> {
+  private async openSessionInternal(ref: SessionRef, existing: SessionRuntime | undefined, empty: boolean, transcriptPath?: string, remountControls?: string, durableDraftTitle?: string): Promise<SessionRuntime> {
     let runtime: SessionRuntime | undefined;
     const previousTranscriptPath = this.sessionTranscriptPaths.get(ref.sessionId);
     try {
@@ -521,10 +534,10 @@ export class SessionRuntimeManager {
         }
         const selectedPath = transcriptPath ?? this.sessionTranscriptPaths.get(ref.sessionId);
         if (!empty && !selectedPath) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
-        if (scheduledDurableAnchor && (!empty || selectedPath)) throw new Error('A durable scheduled anchor requires a new chat.');
+        if (durableDraftTitle && (!empty || selectedPath)) throw new Error('A durable draft anchor requires a new chat.');
         runtime = await this.ensure({ ...ref, ...(expectedMode ? { mode: expectedMode } : {}) }, true, undefined, remountControls,
-          empty && !selectedPath ? expectedMode : undefined, scheduledDurableAnchor);
-        if (scheduledDurableAnchor && this.opts.captureSessionSource) {
+          empty && !selectedPath ? expectedMode : undefined, durableDraftTitle);
+        if (durableDraftTitle && this.opts.captureSessionSource) {
           const path = await this.opts.captureSessionSource(ref, runtime, true);
           if (path) this.sessionTranscriptPaths.set(ref.sessionId, path);
         }
@@ -610,12 +623,12 @@ export class SessionRuntimeManager {
     resumeModel: string | undefined,
     operation: (runtime: SessionRuntime) => Promise<T>,
     transcriptPath?: string,
-    scheduledDurableAnchor = false,
+    durableDraftTitle?: string,
   ): Promise<T> {
     assertSessionRef(ref);
     this.backgroundSessionLeases.set(ref.sessionId, (this.backgroundSessionLeases.get(ref.sessionId) ?? 0) + 1);
     try {
-      return await operation(await this.openSession(ref, empty, resumeModel, false, transcriptPath, undefined, scheduledDurableAnchor));
+      return await operation(await this.openSession(ref, empty, resumeModel, false, transcriptPath, undefined, durableDraftTitle));
     } finally {
       const count = (this.backgroundSessionLeases.get(ref.sessionId) ?? 1) - 1;
       if (count) this.backgroundSessionLeases.set(ref.sessionId, count);
@@ -624,7 +637,7 @@ export class SessionRuntimeManager {
     }
   }
 
-  async newSession(projectPath: string, model: string | undefined, ownership: { mode: RuntimeSessionMode; projectId: string | null; activate?: () => boolean; forceNew?: boolean }): Promise<SessionRef> {
+  async newSession(projectPath: string, model: string | undefined, ownership: { mode: RuntimeSessionMode; projectId: string | null; activate?: () => boolean; forceNew?: boolean; durableDraftTitle?: string; onAllocated?: (ref: SessionRef) => Promise<void> }): Promise<SessionRef> {
     if (typeof projectPath !== 'string' || projectPath.length === 0) throw new Error('invalid project path');
     this.assertProjectNotClosing(projectPath);
     if (!ownership || (ownership.mode !== 'chat' && ownership.mode !== 'code')) throw new Error('The session creation mode is unavailable.');
@@ -635,7 +648,7 @@ export class SessionRuntimeManager {
     if (pendingDraft) return pendingDraft;
     const draft = this.draftSessions.get(key);
     const promise = draft ? this.reopenDraftSession(draft, model, ownership.activate)
-      : this.allocateDraftSession(projectPath, projectId, mode, key, model, ownership.activate);
+      : this.allocateDraftSession(projectPath, projectId, mode, key, model, ownership.activate, ownership.durableDraftTitle, ownership.onAllocated);
     const trackedPromise = promise.finally(() => {
       if (this.openingDraftSessions.get(key) === trackedPromise) this.openingDraftSessions.delete(key);
       this.scheduleCacheTrim();
@@ -650,7 +663,7 @@ export class SessionRuntimeManager {
     return { projectPath: draft.projectPath, sessionId: draft.sessionId, projectId: draft.projectId, mode: draft.mode };
   }
 
-  private async allocateDraftSession(projectPath: string, projectId: string | null, mode: RuntimeSessionMode, key: string, model?: string, shouldActivate?: () => boolean): Promise<SessionRef> {
+  private async allocateDraftSession(projectPath: string, projectId: string | null, mode: RuntimeSessionMode, key: string, model?: string, shouldActivate?: () => boolean, durableDraftTitle?: string, onAllocated?: (ref: SessionRef) => Promise<void>): Promise<SessionRef> {
     let ref: SessionRef | undefined;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const candidate = { projectPath, projectId, mode, sessionId: randomUUID() } satisfies SessionRef;
@@ -668,7 +681,8 @@ export class SessionRuntimeManager {
     if (!ref) throw new Error('could not allocate a new session id');
     this.draftSessions.set(key, { ...ref, projectId, mode });
     try {
-      const runtime = await this.ensure(ref, true, model, undefined, mode);
+      await onAllocated?.(ref);
+      const runtime = await this.ensure(ref, true, model, undefined, mode, durableDraftTitle);
       if (!shouldActivate || shouldActivate()) this.activate(runtime);
     } catch (error) {
       this.clearDraftSession(ref);
@@ -922,6 +936,7 @@ export class SessionRuntimeManager {
       getSavedFastMode,
       onFastModeSelected,
       onFirstPromptSent,
+      onPromptAdmitted,
       maxCachedRuntimes: _maxCachedRuntimes,
       workspaceSettings,
       ...base
@@ -967,6 +982,7 @@ export class SessionRuntimeManager {
         if (this.sourceCaptureWanted.has(ref.sessionId)) this.captureSessionSource(ref);
       },
       onDurableSessionActivity: () => this.wantSessionSource(ref, true),
+      onPromptAdmitted: () => onPromptAdmitted?.(ref),
       onFirstPromptSent: () => {
         this.wantSessionSource(ref, false);
         if (!onFirstPromptSent) {

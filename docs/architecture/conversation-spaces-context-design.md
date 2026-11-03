@@ -158,6 +158,8 @@ Desktop 对 slash command 在发送前同步建立 pending lease；收到相关�
 | Skills / MCP / Plugins | 使用同一套按需发现与授权机制。 | 使用同一套按需发现与授权机制。 |
 | 模型、账户、信任与权限 | 独立配置与检查。 | 独立配置与检查。 |
 
+Local App 开发是明确的 Code 操作。Chat 可浏览已安装应用的元数据、版本和运行结果，也可按既有权限运行应用；创建、编辑源码、开发预览、发布、remix 和恢复开发或未完成发布均须由 Code 入口准入。Chat 触发这些操作时提示用户切换到 Code，不自动切换、不自动新建 Code 会话，也不重试原操作。已由 Code 会话接纳的操作继续由原 owner 完成或停放，不因用户转到 Chat 而取消或改绑。
+
 模式本身不能成为越权调用、隐式安装插件或在页面切换时执行 setup/hook 的理由。
 
 ### 5.3 五个装载阶段
@@ -248,7 +250,7 @@ SDK Rust DTO、snapshot/ordinal 合约、TS 生成类型、客户端 validator�
 
 新建草稿可以还没有用户消息。调度器若要把一个新 TaskSession 的 UUID 绑定到持久任务，必须先在 owner 的 writer 权限下落盘空会话锚点，并完成文件与父目录同步；然后才向任务绑定方确认。
 
-私有 `--scheduled-durable-anchor` 仅用于这种新目标；不能成为公共恢复绕过入口。相同 UUID/mode/cwd 的空锚点重试幂等，其他 owner、错误工作目录或真实已有对话不能被新调度草稿接管。重定位元数据也需要验证。
+私有 `--durable-draft-title <title>` 为调度目标和 Local App 的新 Code 草稿提供同一持久锚点；调用方显式传入任务或草稿标题，它不赋予调度 scope，也不能成为公共恢复绕过入口。相同 UUID/mode/cwd 的空锚点重试幂等，其他 owner、错误工作目录或真实已有对话不能被新草稿接管。Local App 同时持久保存创建意图和确认后的精确 transcript 路径；切换空间后原操作继续完成并停放，用户须主动回到 Code 才能恢复。重定位元数据也需要验证。
 
 ### 9.3 各端本地状态
 

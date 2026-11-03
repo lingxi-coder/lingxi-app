@@ -53,9 +53,9 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, launchTimeou
   const load = new Function('module','exports','require','setTimeout','clearTimeout',(await bundledHost).outputFiles[0]!.text);
   load(module,module.exports,(name:string)=>name === 'electron' ? electron : require(name),hostSetTimeout,clearTimeout);
   const LocalAppHost = (module.exports as any).LocalAppHost;
-  const host = new LocalAppHost({core:{onDisconnected(){}},configHome:root,onRemoteAccessEnded:()=>{ended++;},preload:'/unused',mainWindow:()=>undefined,edit:async()=>{},agentCatalog:async()=>({models:[model],tools:[],skills:[]})});
+  const host = new LocalAppHost({core:{onDisconnected(){}},configHome:root,appProjectsRoot:join(root,'.apps'),currentConversationMode:()=> 'code',onRemoteAccessEnded:()=>{ended++;},preload:'/unused',mainWindow:()=>undefined,edit:async()=>{},agentCatalog:async()=>({models:[model],tools:[],skills:[]})});
   const row:any = {id,name:'Remote app',summary:'',revision:1,currentRevision:1,releaseDigest:'d'.repeat(64),background:false,grants:['agent'],phase:'stopped',manifest:{schema:2,targets:[],name:'Remote app',entry:{type:'static',path:'index.html'},capabilities:['agent'],agent:{tools:[],skills:[]}},agent:{enabled:true,model,tools:[],skills:[],background:false,maxTurns:5,timeoutMs:10000}};
-  const store:any = {root, get:async()=>structuredClone(row), getRevision:async()=>structuredClone(row), list:async()=>[structuredClone(row)], save:async(value:any)=>{Object.assign(row,structuredClone(value));}, assertTarget:async()=>{}, revisionPath:()=>root, core:{request:async()=>({digest:row.releaseDigest,files:[]})}, publish:async()=>{row.revision++;row.currentRevision=row.revision;return structuredClone(row);} };
+  const store:any = {root, get:async()=>structuredClone(row), getRevision:async()=>structuredClone(row), list:async()=>[structuredClone(row)], save:async(value:any)=>{Object.assign(row,structuredClone(value));}, assertTarget:async()=>{}, revisionPath:()=>root, publicationIntent:async()=>undefined, core:{request:async()=>({digest:row.releaseDigest,files:[]})}, publish:async()=>{row.revision++;row.currentRevision=row.revision;return structuredClone(row);} };
   host.store = store;
   const runtime:any = {status:(value:any)=>({...value,phase:running?'running':'stopped',runningRevision:running?revision:undefined,runId:running?runId:undefined}),
     suspendStarts:(appId:string)=>{heldStarts.set(appId,(heldStarts.get(appId)??0)+1);return()=>{const count=(heldStarts.get(appId)??1)-1;if(count)heldStarts.set(appId,count);else heldStarts.delete(appId);};},
@@ -316,7 +316,10 @@ test('owner revoke, stop, release publication and disable invalidate a remote op
     const opening=f.host.remoteOpen(id,owner);const rejected=assert.rejects(opening,/changed|not enabled/);await entered;
     if(action==='owner')f.host.remoteRevokeOwner(owner);
     if(action==='stop')await f.host.request({action:'stop',id});
-    if(action==='publish'){f.host.publishAuthoring=async()=>({});await f.host.request({action:'publish',id,html:'next'});}
+    if(action==='publish'){
+      f.host.resolveNativeAuthoring=async()=>({}); f.host.publishAuthoring=async()=>undefined;
+      await f.host.request({action:'publish',id,html:'next',source_session:{projectPath:'/test',sessionId:'11111111-2222-4333-8444-555555555555',requestId:'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff'}});
+    }
     if(action==='disable')await f.host.request({action:'remote-access',id,enabled:false});
     release(); await rejected;assert.equal(f.liveSession,false);
   }

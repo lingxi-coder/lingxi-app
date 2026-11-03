@@ -1,5 +1,6 @@
 import type { RunItem, ToolRunItem } from '../model/runItem';
 import { localAppReference } from '../model/localAppReference';
+import { localAppToolRequiresCode } from '../bridge/localAppErrors';
 
 export interface TranscriptToolGroup {
   readonly type: 'tool-group';
@@ -29,7 +30,7 @@ export function transcriptRows(items: readonly RunItem[], running: boolean, hasP
     if (item.type === 'tool') {
       // A published application is a deliverable. Keep its open action visible
       // when surrounding tools collapse or a following start is still running.
-      if (localAppReference(item)) {
+      if (localAppReference(item) || localAppToolRequiresCode(item.tool, item.status, item.result?.headline, item.result?.body)) {
         rows.push({ type: 'tool-group', id: `tool-group:${item.id}`, tools: [item] });
         group = undefined;
         continue;

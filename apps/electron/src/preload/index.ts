@@ -317,12 +317,12 @@ export interface LingxiApi {
   exportDiagnostics(): Promise<string | null>;
   listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string; conversationSpaces: ConversationSpacesSnapshot }>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
-  newSession(projectPath: string | null, model?: string): Promise<BootstrapState>;
+  newSession(projectPath: string | null, model?: string, purpose?: 'local-app'): Promise<BootstrapState>;
   switchConversationSpace(mode: ConversationSpace): Promise<BootstrapState>;
   prepareSessionHandoff(sourceId: string, target: ConversationSpace, requestId: string, retry?: boolean): Promise<{ snapshot: BootstrapState; summary: string; requestId: string } | null>;
   cancelSessionHandoff(requestId: string): Promise<void>;
   onConversationShown(callback: (snapshot: BootstrapState) => void): Unsubscribe;
-  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: ConversationSpace): Promise<BootstrapState>;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<BootstrapState>;
   prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
   releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
   preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;
@@ -426,8 +426,14 @@ const api: LingxiApi = {
     setBackground: (id, enabled) => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'background', id, enabled }),
     revoke: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'revoke', id }),
     edit: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'edit', id }),
-    bindAuthoring: (id, session) => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'bindAuthoring', id, session }),
+    bindAuthoring: (id, session, setCurrent, sourceRequestId) => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'bindAuthoring', id, session, setCurrent, sourceRequestId }),
     prepareAuthoring: session => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'prepareAuthoring', session }),
+    pendingPublications: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'pendingPublications' }),
+    resumePublication: requestId => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'resumePublication', requestId }),
+    pendingSourceCopies: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'pendingSourceCopies' }),
+    resumeSourceCopy: requestId => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'resumeSourceCopy', requestId }),
+    pendingAuthoringSessions: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'pendingAuthoringSessions' }),
+    resumeAuthoringSession: requestId => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'resumeAuthoringSession', requestId }),
     marketBrowse: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'marketBrowse' }),
     marketInstallLink: remoteId => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'marketInstallLink', remoteId }),
     marketInstall: (remoteId, id, expectedRevision) => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'marketInstall', remoteId, id, expectedRevision }),
@@ -575,12 +581,16 @@ const api: LingxiApi = {
   exportDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_EXPORT) as Promise<string | null>,
   listProjectSessions: (projectPath, scope) => ipcRenderer.invoke(CH_PROJECT_SESSIONS_LIST, projectPath, scope) as Promise<ProjectSessionCatalogState & { projectPath: string; conversationSpaces: ConversationSpacesSnapshot }>,
   updateSessionWorkspace: (sessionId, operation) => ipcRenderer.invoke(CH_SESSION_WORKSPACE, sessionId, operation) as Promise<BootstrapState | null>,
-  newSession: (projectPath, model) => ipcRenderer.invoke(CH_SESSION_NEW, projectPath, model) as Promise<BootstrapState>,
+  newSession: (projectPath, model, purpose) => (purpose === undefined
+    ? ipcRenderer.invoke(CH_SESSION_NEW, projectPath, model)
+    : ipcRenderer.invoke(CH_SESSION_NEW, projectPath, model, purpose)) as Promise<BootstrapState>,
   switchConversationSpace: (mode) => ipcRenderer.invoke(CH_CONVERSATION_SPACE, mode) as Promise<BootstrapState>,
   prepareSessionHandoff: (sourceId, target, requestId, retry) => ipcRenderer.invoke(CH_SESSION_HANDOFF, sourceId, target, requestId, retry) as Promise<{ snapshot: BootstrapState; summary: string; requestId: string } | null>,
   cancelSessionHandoff: (requestId) => ipcRenderer.invoke(CH_SESSION_HANDOFF_CANCEL, requestId) as Promise<void>,
   onConversationShown: (callback) => subscribe(CH_CONVERSATION_SHOWN, callback),
-  openSession: (projectPath, sessionId, selection, linkedMode) => (linkedMode !== undefined
+  openSession: (projectPath, sessionId, selection, linkedMode, authoringAppId, authoringVersion) => (authoringAppId !== undefined
+    ? ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId, selection, linkedMode, authoringAppId, authoringVersion)
+    : linkedMode !== undefined
     ? ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId, selection, linkedMode)
     : selection === undefined
     ? ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId)

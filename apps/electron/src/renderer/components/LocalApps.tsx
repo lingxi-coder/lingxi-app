@@ -1,9 +1,10 @@
 import { LocalAppPublish } from './LocalAppPublish';
 import { desktopHost } from '../bridge/bridgeConnection';
+import { localAppErrorMessage } from '../bridge/localAppErrors';
 import { useI18n } from '../i18n/useI18n';
 import { tr } from '../i18n/locale';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { DesktopLocalApp, LocalAppLog, LocalAppPhase, LocalAppVersion } from '../../shared/localApps';
+import type { DesktopLocalApp, LocalAppLog, LocalAppPhase, LocalAppVersion, PendingLocalAppPublication, PendingLocalAppSourceCopy, PendingLocalAppSession } from '../../shared/localApps';
 import type { ToolRunItem } from '../model/runItem';
 import { localAppReference } from '../model/localAppReference';
 import { useT } from '../theme/ThemeContext';
@@ -30,10 +31,13 @@ export function LocalAppsTopBar({ onOpenMarket }: { onOpenMarket: () => void }) 
     </button>
   </header>;
 }
-export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: () => void }) {
+export function LocalApps({ visible, onCreate, canDevelop }: { visible: boolean; onCreate: () => void; canDevelop: boolean }) {
   const t = useT();
   const { locale } = useI18n();
   const [publication, setPublication] = useState<DesktopLocalApp>();
+  const [pendingPublications, setPendingPublications] = useState<PendingLocalAppPublication[]>([]);
+  const [pendingSources, setPendingSources] = useState<PendingLocalAppSourceCopy[]>([]);
+  const [pendingSessions, setPendingSessions] = useState<PendingLocalAppSession[]>([]);
   const [apps, setApps] = useState<DesktopLocalApp[]>([]);
   const [remoteSettings, setRemoteSettings] = useState<Record<string, boolean>>({});
   const [remoteConfigured, setRemoteConfigured] = useState(false);
@@ -48,10 +52,10 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
   const refresh = useCallback(async () => {
     const token = ++request.current;
     try {
-      const [rows, output, releases, sharing, configuration] = await Promise.all([appsApi().list(), selected ? appsApi().logs(selected) : Promise.resolve([]), selected ? appsApi().versions(selected) : Promise.resolve([]), appsApi().remoteSettings(), appsApi().remoteConfiguration()]);
-      if (request.current === token) { setApps(rows); setLogs(output); setVersions(releases); setRemoteSettings(sharing); setRemoteConfigured(configuration.configured); }
+      const [rows, output, releases, sharing, configuration, pending, sources, sessions] = await Promise.all([appsApi().list(), selected ? appsApi().logs(selected) : Promise.resolve([]), selected ? appsApi().versions(selected) : Promise.resolve([]), appsApi().remoteSettings(), appsApi().remoteConfiguration(), appsApi().pendingPublications(), appsApi().pendingSourceCopies(), appsApi().pendingAuthoringSessions()]);
+      if (request.current === token) { setApps(rows); setLogs(output); setVersions(releases); setRemoteSettings(sharing); setRemoteConfigured(configuration.configured); setPendingPublications(pending); setPendingSources(sources); setPendingSessions(sessions); }
     } catch (error) { if (request.current === token) setError(error instanceof Error ? error.message : String(error)); }
-  }, [selected]);
+  }, [selected, canDevelop]);
   useEffect(() => {
     if (!visible || !desktopHost()?.localApps) return;
     void refresh(); const unsubscribe = appsApi().onChanged(() => { void refresh(); });
@@ -59,8 +63,13 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
   }, [visible, refresh]);
   const act = async (id: string, operation: () => Promise<unknown>) => {
     setBusy(id); setError('');
-    try { await operation(); await refresh(); } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+    try { await operation(); await refresh(); } catch (error) { setError(localAppErrorMessage(error)); }
     finally { setBusy(null); }
+  };
+  const requireDevelopment = (): boolean => {
+    if (canDevelop) return true;
+    setError(tr('local_app_development_requires_code'));
+    return false;
   };
   const filtered = apps.filter(app => `${app.name} ${app.summary}`.toLocaleLowerCase(locale).includes(query.toLocaleLowerCase(locale)));
   return <section className="local-app-library" aria-label={tr('apps_title')} style={{ '--apps-background': t.stageBg, '--apps-text': t.text, '--apps-muted': t.text3, '--apps-surface': t.surface, '--apps-border': t.border, '--apps-accent': t.accent, '--apps-error': t.danger } as CSSProperties}>
@@ -68,6 +77,27 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
     <p className="local-app-update">{tr('desktop_apps_deployment_hint')}</p>
     {!remoteConfigured && <p className="local-app-update">{tr('desktop_apps_remote_unconfigured')}</p>}
     {error && <div className="local-app-error" role="alert">{error}<button onClick={() => { setError(''); void refresh(); }}>{tr('common_retry')}</button></div>}
+    {pendingPublications.length > 0 && <aside className="local-app-update" aria-label={tr('local_app_publication_pending')}>
+      <strong>{tr('local_app_publication_pending')}</strong>
+      {pendingPublications.map(pending => <div className="local-app-actions" key={pending.requestId}>
+        <span>{apps.find(app => app.id === pending.appId)?.name ?? pending.sourceDirectory ?? tr('desktop_app')}{pending.expectedRevision > 0 && ` · v${pending.expectedRevision}`}</span>
+        <button disabled={busy === pending.requestId} onClick={() => { if (requireDevelopment()) void act(pending.requestId, () => appsApi().resumePublication(pending.requestId)); }}>{tr('local_app_publication_recover')}</button>
+      </div>)}
+    </aside>}
+    {pendingSources.length > 0 && <aside className="local-app-update" aria-label={tr('local_app_authoring_recover')}>
+      <strong>{tr('local_app_authoring_recover')}</strong>
+      {pendingSources.map(pending => <div className="local-app-actions" key={pending.requestId}>
+        <span>{apps.find(app => app.id === pending.appId)?.name ?? tr('desktop_app')} · v{pending.revision}</span>
+        <button disabled={busy === pending.requestId} onClick={() => { if (requireDevelopment()) void act(pending.requestId, () => appsApi().resumeSourceCopy(pending.requestId)); }}>{tr('local_app_authoring_recover')}</button>
+      </div>)}
+    </aside>}
+    {pendingSessions.length > 0 && <aside className="local-app-update" aria-label={tr('local_app_authoring_recover')}>
+      <strong>{tr('local_app_authoring_recover')}</strong>
+      {pendingSessions.map(pending => <div className="local-app-actions" key={pending.requestId}>
+        <span>{pending.name || apps.find(app => app.id === pending.appId)?.name || tr('desktop_app')}</span>
+        <button disabled={busy === pending.requestId} onClick={() => { if (requireDevelopment()) void act(pending.requestId, () => appsApi().resumeAuthoringSession(pending.requestId)); }}>{tr('local_app_authoring_recover')}</button>
+      </div>)}
+    </aside>}
     <label className="local-app-search"><span className="sr-only">{tr('apps_search_hint')}</span><input type="search" placeholder={tr('desktop_apps_search')} value={query} onChange={event => setQuery(event.target.value)} /></label>
     {!apps.length && !error ? <div className="local-app-empty"><AppsGlyph size={38}/><h2>{tr('desktop_apps_empty_title')}</h2><p>{tr('desktop_apps_empty_body')}</p><button onClick={onCreate}>{tr('desktop_apps_start_creating')}</button></div> : <div className="local-app-grid">
       {filtered.map(app => <article className="local-app-tile" key={app.id}>
@@ -78,7 +108,7 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
         {remoteSettings[app.id] && <p className="local-app-update">{tr('desktop_apps_remote_shared')}</p>}
         {app.runningRevision && app.runningRevision !== app.revision && <p className="local-app-update">{tr('desktop_apps_update', app.revision)}</p>}
         {app.error && <p className="local-app-error">{app.error}</p>}
-        <div className="local-app-actions"><button onClick={() => { setSelected(selected === app.id ? null : app.id); }}>{tr('desktop_logs')}</button><button disabled={Boolean(app.marketOrigin && !app.authoring?.sourceDirectory && !app.manifest.remix?.allowed)} onClick={() => void act(app.id, () => app.marketOrigin && !app.authoring?.sourceDirectory ? appsApi().remix(app.id) : appsApi().edit(app.id))}>{app.marketOrigin && !app.authoring?.sourceDirectory ? 'Customize' : tr('desktop_modify')}</button>
+        <div className="local-app-actions"><button onClick={() => { setSelected(selected === app.id ? null : app.id); }}>{tr('desktop_logs')}</button><button disabled={Boolean(canDevelop && app.marketOrigin && !app.authoring?.sourceDirectory && !app.manifest.remix?.allowed)} onClick={() => { if (requireDevelopment()) void act(app.id, () => app.marketOrigin && !app.authoring?.sourceDirectory ? appsApi().remix(app.id) : appsApi().edit(app.id)); }}>{app.marketOrigin && !app.authoring?.sourceDirectory && canDevelop ? 'Customize' : tr('desktop_modify')}</button>
           {app.manifest.capabilities?.includes('agent') && <button onClick={() => setAgentSettings(app.id)}>Agent</button>}
           <details><summary aria-label={`Manage ${app.name}`}>•••</summary><div className="local-app-menu">
             <button onClick={() => void act(app.id, () => appsApi().restart(app.id))}>{tr('desktop_restart')}</button>
@@ -87,10 +117,10 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
             <button onClick={() => void act(app.id, () => appsApi().openData(app.id))}>Open data folder</button>
             <label><input type="checkbox" checked={app.background} onChange={event => void act(app.id, () => appsApi().setBackground(app.id, event.target.checked))}/> {tr('desktop_apps_background')}</label>
             <label><input type="checkbox" checked={remoteSettings[app.id] === true} disabled={busy === app.id || (!remoteConfigured && !remoteSettings[app.id])} onChange={event => void act(app.id, () => appsApi().setRemoteAccess(app.id, event.target.checked))}/> {tr('desktop_apps_remote_access')}</label>
-            <button onClick={() => setPublication(app)}>Publish to market…</button>
+            <button onClick={() => { if (requireDevelopment()) setPublication(app); }}>Publish to market…</button>
             {app.marketOrigin && !app.marketOrigin.remixedFrom && <button onClick={() => void act(app.id, () => appsApi().marketInstall(app.marketOrigin!.appId, app.id, app.revision))}>Check for update</button>}
-            {(!app.marketOrigin || app.authoring?.sourceDirectory) && <button onClick={() => void act(app.id, () => appsApi().restoreSource(app.id))}>Restore source copy</button>}
-            {app.manifest.remix?.allowed && <button onClick={() => void act(app.id, () => appsApi().remix(app.id))}>Create a custom copy</button>}
+            {(!app.marketOrigin || app.authoring?.sourceDirectory) && <button onClick={() => { if (requireDevelopment()) void act(app.id, () => appsApi().restoreSource(app.id)); }}>Restore source copy</button>}
+            {app.manifest.remix?.allowed && <button onClick={() => { if (requireDevelopment()) void act(app.id, () => appsApi().remix(app.id)); }}>Create a custom copy</button>}
             <button onClick={() => void act(app.id, () => appsApi().revoke(app.id))}>{tr('desktop_apps_revoke')}</button>
             <button className="local-app-delete" onClick={() => void act(app.id, () => appsApi().remove(app.id))}>{tr('desktop_apps_delete')}</button>
           </div></details>
@@ -103,7 +133,7 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
       {versions.map(version => { const app = apps.find(a => a.id === selected); return <div key={version.revision} className="local-app-actions"><span>v{version.revision} · {new Date(version.createdAtMs).toLocaleString(locale)}{app?.currentRevision === version.revision ? ' · Current' : ''}</span><button disabled={busy === selected || !app || app.currentRevision === undefined || app.currentRevision === version.revision} onClick={() => app?.currentRevision !== undefined && void act(selected, () => appsApi().useVersion(selected, version.revision, app.currentRevision!))}>Use version</button></div>; })}
       <h3>Permissions</h3><p>{apps.find(a => a.id === selected)?.grants.join(', ') || 'No capabilities granted for the latest release.'}</p>
       <h3>{tr('desktop_logs')}</h3><pre>{logs.length ? logs.map(l => `[${new Date(l.time).toLocaleTimeString(locale)}] ${l.process}: ${l.text}`).join('\n') : tr('desktop_apps_log_empty')}</pre></aside>}
-    {publication && <LocalAppPublish key={publication.id} app={publication} onClose={() => setPublication(undefined)}/>}
+    {publication && <LocalAppPublish key={publication.id} app={publication} canDevelop={canDevelop} onClose={() => setPublication(undefined)}/>}
     {agentSettings && apps.find(app => app.id === agentSettings) && <LocalAppAgentSettingsDialog key={agentSettings} app={apps.find(app => app.id === agentSettings)!} onClose={() => setAgentSettings(null)} onSaved={() => void refresh()}/>}
     <LocalAppAgentQuestions/>
   </section>;

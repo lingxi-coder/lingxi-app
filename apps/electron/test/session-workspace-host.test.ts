@@ -915,7 +915,7 @@ test('a new scheduled anchor records its confirmed source before the binding ope
     captureSessionSource: async (_ref, _runtime, scheduled) => { assert.equal(scheduled, true); entered(); return waiting; },
   });
   t.after(async () => { SessionRuntime.prototype.start = originalStart; await manager.dispose(); });
-  const run = manager.withBackgroundSession(owner, true, undefined, async () => { executed = true; }, undefined, true);
+  const run = manager.withBackgroundSession(owner, true, undefined, async () => { executed = true; }, undefined, 'Scheduled task');
   await captureEntered; assert.equal(executed, false);
   finish(join(f.source, `${sessionId}.jsonl`)); await run;
   assert.equal(executed, true);
@@ -1012,7 +1012,7 @@ test('background cold opens use the saved source while new anchors do not consul
   });
   await manager.withBackgroundSession(owner, false, undefined, async () => undefined);
   await manager.withBackgroundSession({ ...owner, sessionId: otherId }, true, undefined, async () => undefined,
-    undefined, true);
+    undefined, 'Scheduled task');
   assert.equal(checks, 1);
   assert.deepEqual(starts, [selected.path, undefined]);
   assert.deepEqual(resumes, [selected.path]);

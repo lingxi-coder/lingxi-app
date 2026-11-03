@@ -229,12 +229,12 @@ export interface LingxiApi {
   exportDiagnostics(): Promise<string | null>;
   listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string; conversationSpaces: ConversationSpacesSnapshot }>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
-  newSession(projectPath: string | null, model?: string): Promise<BootstrapState>;
+  newSession(projectPath: string | null, model?: string, purpose?: import('../../shared/localApps').LocalAppSessionPurpose): Promise<BootstrapState>;
   switchConversationSpace(mode: ConversationSpace): Promise<BootstrapState>;
   prepareSessionHandoff(sourceId: string, target: ConversationSpace, requestId: string, retry?: boolean): Promise<{ snapshot: BootstrapState; summary: string; requestId: string } | null>;
   cancelSessionHandoff(requestId: string): Promise<void>;
   onConversationShown?(callback: (snapshot: BootstrapState) => void): Unsubscribe;
-  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace): Promise<BootstrapState>;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<BootstrapState>;
   prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
   releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
   preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;

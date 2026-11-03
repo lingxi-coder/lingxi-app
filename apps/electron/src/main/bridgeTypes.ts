@@ -157,6 +157,8 @@ export interface BridgeManagerOptions {
   onActivityChanged?: () => void;
   /** Invalidate Electron-main launch material after a credential/config mutation. */
   onFirstPromptSent?: () => boolean | void;
+  /** A user prompt crossed the authenticated bridge boundary. */
+  onPromptAdmitted?: () => void;
   /** A new scheduled turn has crossed the bridge boundary. */
   onDurableSessionActivity?: () => void;
   /** SECURITY: consulted before a `set_permission_mode: bypassPermissions`
@@ -197,7 +199,7 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onDurableSessionActivity' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onPromptAdmitted' | 'onDurableSessionActivity' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
   /** What a session of a working directory is launched with; it is told which session, for settings that belong to the one. */
   workspaceSettings?: (projectPath: string, ref: SessionRef) => Promise<WorkspaceLaunchSettings>;
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
@@ -215,6 +217,7 @@ export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions,
   resolveSavedTranscript?: (ref: SessionRef) => Promise<{ path: string; mode: RuntimeSessionMode } | undefined>;
   captureSessionSource?: (ref: SessionRef, runtime: SessionRuntime, scheduled: boolean) => Promise<string | undefined>;
   onFirstPromptSent?: (ref: SessionRef, isActive: boolean) => boolean | void;
+  onPromptAdmitted?: (ref: SessionRef) => void;
   /** Maximum retained runtimes when enough idle sessions are evictable. */
   maxCachedRuntimes?: number;
 }

@@ -719,7 +719,7 @@ export function buildBridgeArguments(config: {
   listSessionsJson?: boolean;
   sessionTranscriptPath?: string;
   restoreDraft?: boolean;
-  scheduledDurableAnchor?: boolean;
+  durableDraftTitle?: string;
   /** Device default for a newly allocated draft, applied before startup hooks. */
   initialConversationMode?: 'chat' | 'code';
   expectedConversationMode?: 'chat' | 'code';
@@ -753,7 +753,7 @@ export function buildBridgeArguments(config: {
   if (config.sessionId) args.push('--session-id', config.sessionId);
   if (config.sessionTranscriptPath) args.push('--session-transcript-path', config.sessionTranscriptPath);
   if (config.restoreDraft) args.push('--restore-draft');
-  if (config.scheduledDurableAnchor) args.push('--scheduled-durable-anchor');
+  if (config.durableDraftTitle) args.push('--durable-draft-title', config.durableDraftTitle);
   if (config.initialConversationMode) args.push('--initial-conversation-mode', config.initialConversationMode);
   if (config.expectedConversationMode) args.push('--expected-conversation-mode', config.expectedConversationMode);
   if (config.initialProjectRoot) args.push('--session-project-root', config.initialProjectRoot);

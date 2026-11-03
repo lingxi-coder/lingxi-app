@@ -40,13 +40,14 @@ const rows: Record<string, readonly [string, string, string, string, string]> = 
   remote_detail: ['请确认这台设备上显示的配对码与此处一致。允许后，该设备可以查看并操作你已开启远程的对话，包括批准权限请求。如果这不是你的设备，请选择“拒绝”。', '請確認這台裝置上顯示的配對碼與此處一致。允許後，該裝置可以檢視並操作你已開啟遠端的對話，包括核准權限請求。如果這不是你的裝置，請選擇「拒絕」。', 'Confirm the pairing code matches the one on this device. Once allowed, the device can view and control remotely enabled chats, including approving permission requests. Choose Deny if this is not your device.', 'このデバイスのペアリングコードと一致することを確認してください。許可すると、権限リクエストの承認を含め、リモート操作を有効にした会話をこのデバイスから表示・操作できます。自分のデバイスでなければ「拒否」を選んでください。', '이 기기의 페어링 코드와 일치하는지 확인하세요. 허용하면 이 기기에서 원격 기능을 켠 대화를 보고 제어할 수 있으며 권한 요청도 승인할 수 있습니다. 본인 기기가 아니면 거부를 선택하세요.'],
 };
 const locales = ['zh-Hans', 'zh-Hant', 'en', 'ja', 'ko'];
-// Only these four canonical labels are needed by native dialogs. Their values
+// These canonical labels are needed by native dialogs and host errors. Their values
 // are checked against resources/translations so the main bundle stays small.
 const commonRows: Record<string, readonly string[]> = {
   common_cancel: ['取消', '取消', 'Cancel', 'キャンセル', '취소'],
   common_delete: ['删除', '刪除', 'Delete', '削除', '삭제'],
   permission_allow: ['允许', '允許', 'Allow', '許可', '허용'],
   permission_deny: ['拒绝', '拒絕', 'Deny', '拒否', '거부'],
+  local_app_development_requires_code: ['Chat 模式不支持 Local App 开发，请切换到 Code 模式后继续。', 'Chat 模式不支援 Local App 開發，請切換至 Code 模式後繼續。', 'Chat mode does not support Local App development. Switch to Code mode to continue.', 'ChatモードではLocal Appを開発できません。Codeモードに切り替えてください。', 'Chat 모드에서는 Local App을 개발할 수 없습니다. 계속하려면 Code 모드로 전환하세요.'],
 };
 export const nativeCatalog: Record<string, Record<string, string>> = Object.fromEntries(
   [...Object.entries(rows).map(([key, values]) => [`native_${key}`, values] as const), ...Object.entries(commonRows)]

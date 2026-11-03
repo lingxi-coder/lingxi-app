@@ -21,7 +21,7 @@ async function main() {
     model: { providerId: 'test', modelId: 'test', label: 'Test', canSelect: true, supportsAttachments: true, supportsVision: true, supportsStructuredOutput: true } };
   const broker = new LocalAppAgentBroker({ root: join(root, 'storage'), authorize: async () => authorization, revalidate: async () => true,
     execute: async () => { throw new Error('not used'); } });
-  const host = new LocalAppHost({ configHome: root, core: {} as any, preload: join(root, 'preload.cjs'), mainWindow: () => undefined, edit: async () => undefined });
+  const host = new LocalAppHost({ configHome: root, appProjectsRoot: join(root, '.apps'), core: {} as any, currentConversationMode: () => 'code', preload: join(root, 'preload.cjs'), mainWindow: () => undefined, edit: async () => undefined });
   const partition = session.fromPartition(`persist:local-app-${appId}`);
   partition.protocol.handle('lingxi-app', request => {
     const path = new URL(request.url).pathname;

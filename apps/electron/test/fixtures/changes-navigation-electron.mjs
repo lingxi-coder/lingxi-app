@@ -31,7 +31,8 @@ try {
   await run(`(() => { const editor = document.querySelector('.beta-rich-prompt'); editor.textContent = 'Keep my draft'; editor.dispatchEvent(new InputEvent('input', { bubbles: true })); })()`);
   await click(review);
   await wait(`document.querySelector('.desktop-changes-page .git-hunk')`);
-  assert.equal(await run(`document.querySelector('${review}').getAttribute('aria-current') === 'page' && !document.querySelector('.desktop-nav-rail [aria-label="Home"]').hasAttribute('data-active') && !document.querySelector('.side-chat-panel')`), true);
+  // The changes are a page, not a sidebar mode: Home stays marked as the mode while the page marks itself.
+  assert.equal(await run(`document.querySelector('${review}').getAttribute('aria-current') === 'page' && document.querySelector('.desktop-nav-rail [aria-label="Home"]').hasAttribute('data-active') && !document.querySelector('.side-chat-panel')`), true);
   result.sideChatDoesNotHideReview = true;
   await click('.desktop-nav-rail [aria-label="Home"]');
   await wait(`document.querySelector('.side-chat-panel')`);

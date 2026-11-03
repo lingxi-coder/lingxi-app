@@ -37,6 +37,8 @@ export { isPermissionModeId } from '../shared/permission.js';
 
 export const MAX_PROJECTS = 50;
 export const MAX_PINNED_SESSIONS = 100;
+/** How many Bots the sidebar remembers as open; far above any list a person keeps. */
+const MAX_EXPANDED_BOTS = 200;
 export const MAX_REMOTE_SESSIONS = 256;
 export const MAX_DIAGNOSTICS = 200;
 export const MAX_DIAGNOSTIC_LENGTH = 2_000;
@@ -395,7 +397,29 @@ export function parseSidebarPreferences(value: unknown, projects: readonly strin
       if (seen.size > 0) manualSessionOrder[projectPath] = [...seen];
     }
   }
-  return { organization, chatSort, manualSessionOrder };
+  const preferences: SidebarPreferences = { organization, chatSort, manualSessionOrder };
+  // The two Bots-sidebar fields are optional: a file written before they existed, or a value that is not one of ours, yields neither.
+  const mode = input['mode'];
+  if (mode === 'home' || mode === 'bots' || mode === 'teams') preferences.mode = mode;
+  if (Array.isArray(input['expandedBots'])) {
+    const expanded = new Set<string>();
+    for (const botId of input['expandedBots']) {
+      const bounded = boundedString(botId, 128);
+      if (bounded) expanded.add(bounded);
+      if (expanded.size >= MAX_EXPANDED_BOTS) break;
+    }
+    preferences.expandedBots = [...expanded];
+  }
+  return preferences;
+}
+
+/**
+ * Apply a sidebar update over what is saved. The keys the update leaves out keep their saved value, so the part of the
+ * app that saves the sidebar mode or the open Bots need not know the organization and sort, and the reverse. Anything
+ * that is not an object resets the preferences, as it always has.
+ */
+export function patchSidebarPreferences(saved: SidebarPreferences | undefined, update: unknown, projects: readonly string[]): SidebarPreferences {
+  return parseSidebarPreferences(isPlainObject(update) ? { ...saved, ...update } : update, projects);
 }
 
 function cloneSidebarPreferences(value: SidebarPreferences): SidebarPreferences {
@@ -405,6 +429,8 @@ function cloneSidebarPreferences(value: SidebarPreferences): SidebarPreferences 
     manualSessionOrder: Object.fromEntries(
       Object.entries(value.manualSessionOrder).map(([projectPath, sessionIds]) => [projectPath, [...sessionIds]]),
     ),
+    ...(value.mode ? { mode: value.mode } : {}),
+    ...(value.expandedBots ? { expandedBots: [...value.expandedBots] } : {}),
   };
 }
 

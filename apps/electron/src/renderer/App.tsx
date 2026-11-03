@@ -5,6 +5,12 @@ import './components/LocalApps.css';
 import { Bots } from './components/Bots';
 import './components/Bots.css';
 import { useBots } from './bridge/useBots';
+import { useBotSessions } from './bridge/useBotSessions';
+import { useSidebarMode } from './bridge/useSidebarMode';
+import { modeForSettledChat, pageForMode, type AppPage } from './bridge/sidebarMode';
+import type { SidebarMode } from '../shared/settings';
+import { BotsSidebar } from './components/BotsSidebar';
+import { TeamsSidebar } from './components/TeamsSidebar';
 import { botScopesKey } from './bridge/botRoutines';
 import { localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
 import type { LocalAppEditRequest } from '../shared/localApps';
@@ -83,7 +89,7 @@ export function App() {
   const [localAppNavigationError, setLocalAppNavigationError] = useState('');
   const localAppNavigation = useRef(0);
   const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
-  const [page, setPage] = useState<'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams'>('chat');
+  const [page, setPage] = useState<AppPage>('chat');
   const [teamInvite, setTeamInvite] = useState<string>();
   const handledTeamInvite = useCallback(() => setTeamInvite(undefined), []);
   const [theme, setTheme] = useState<ThemeMode>('dark');
@@ -148,7 +154,7 @@ export function App() {
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
   }, []);
-  const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams') => {
+  const openPage = useCallback((next: AppPage) => {
     if (sessionNavigationBlocked()) return;
     cancelLocalAppNavigation();
     setPage(next);
@@ -205,6 +211,48 @@ export function App() {
   const activeBotId = bridge.activeBotId;
   const botChat = activeBotId !== undefined;
   const activeBot = botChat ? bots.state.bots.find((bot) => bot.botId === activeBotId) : undefined;
+  const botSessions = useBotSessions(botsApi);
+  const { setMode: setSidebarMode, mode: sidebarMode } = useSidebarMode({
+    page, setPage, botsAvailable: bots.available, botsKnown: bots.state.availability !== undefined,
+    settings: bridge.bootstrap?.settings, save: bridge.updateSidebarPreferences,
+  });
+  // The sidebar follows the chat on screen when that changes from a Bot's chat to a project's or back (a link, the picker, a notification),
+  // so the chat is always listed beside it. Only settled changes count: a chat that is still opening says nothing yet.
+  const settledBotChat = useRef(botChat);
+  useEffect(() => {
+    if (bridge.sessionLoading || settledBotChat.current === botChat) return;
+    settledBotChat.current = botChat;
+    const next = modeForSettledChat(sidebarMode, page, botChat);
+    if (next !== sidebarMode) setSidebarMode(next);
+  }, [botChat, bridge.sessionLoading, page, sidebarMode, setSidebarMode]);
+  // Whether the sidebar is hidden. The View menu toggles it here, and the sidebar's own button reports its change here too.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  /** The rail's Home, Bots and Teams: the sidebar lists what the mode is for, and the main area goes to the page that goes with it. */
+  const selectSidebarMode = useCallback((mode: SidebarMode) => {
+    if (sessionNavigationBlocked() || (mode === 'bots' && !bots.available)) return;
+    setSidebarMode(mode);
+    openPage(pageForMode(mode, { page, botChat }));
+  }, [bots.available, botChat, openPage, page, sessionNavigationBlocked, setSidebarMode]);
+  const showChat = useCallback(() => {
+    cancelLocalAppNavigation();
+    setPage('chat');
+    setActivityView(false);
+  }, [cancelLocalAppNavigation]);
+  const botDeleteRequests = useRef(0);
+  const { available: botsAvailable, setView: setBotsView } = bots;
+  /** Show a Bot's page, from the sidebar or from the title of its chat; with `delete`, the page asks whether to delete the Bot. */
+  const openBot = useCallback((botId: string, intent?: 'delete') => {
+    if (sessionNavigationBlocked() || !botsAvailable) return;
+    setBotsView({ kind: 'detail', botId, ...(intent === 'delete' ? { deleteRequest: ++botDeleteRequests.current } : {}) });
+    setSidebarMode('bots');
+    openPage('bots');
+  }, [botsAvailable, openPage, sessionNavigationBlocked, setBotsView, setSidebarMode]);
+  const createBot = useCallback(() => {
+    if (sessionNavigationBlocked() || !botsAvailable) return;
+    setBotsView({ kind: 'create' });
+    setSidebarMode('bots');
+    openPage('bots');
+  }, [botsAvailable, openPage, sessionNavigationBlocked, setBotsView, setSidebarMode]);
   const sessionPickerProject = (botChat ? undefined : bridge.activeSession?.projectPath) ?? bridge.bootstrap?.settings.activeProject ?? (botChat ? undefined : workspace?.path) ?? bridge.bootstrap?.settings.projects[0];
   const closeSessionPicker = useCallback(() => {
     const request = sessionPickerRequest.current;
@@ -297,8 +345,13 @@ export function App() {
       setPage('chat');
       setActivityView(!activityView);
       bridge.setRuntimeCenterOverviewOpen(!activityView);
+    } else if ((action === 'home' || action === 'bots' || action === 'teams') && !settingsRoute) {
+      // Bots is ignored where Bots cannot run: the menu shows that item dimmed.
+      selectSidebarMode(action);
+    } else if (action === 'toggle-sidebar' && !settingsRoute) {
+      setSidebarCollapsed((collapsed) => !collapsed);
     }
-  }), [openSettings, settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked]);
+  }), [openSettings, settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked, selectSidebarMode]);
 
   const linkBusy = useRef(false);
   const linkSurfacePending = useRef(false);
@@ -445,11 +498,15 @@ export function App() {
             apps={page === 'apps'}
             changes={page === 'changes'}
             onOpenApps={() => openPage('apps')}
-            teams={page === 'teams'}
-            onOpenTeams={() => openPage('teams')}
-            bots={page === 'bots'}
             botsAvailable={bots.available}
-            onOpenBots={() => openPage('bots')}
+            sidebarMode={sidebarMode}
+            onSelectSidebarMode={selectSidebarMode}
+            modePanel={(mode, search) => mode === 'bots'
+              ? <BotsSidebar bots={bots} sessions={botSessions} bridge={bridge} query={search} chatVisible={page === 'chat'}
+                  onOpenChat={showChat} onOpenBot={openBot} onCreateBot={createBot} />
+              : <TeamsSidebar />}
+            sidebarCollapsed={sidebarCollapsed}
+            onSidebarCollapsedChange={setSidebarCollapsed}
             scheduled={page === 'scheduled'}
             onOpenScheduled={() => openPage('scheduled')}
             onOpenChat={() => openPage('chat')}
@@ -459,7 +516,7 @@ export function App() {
               <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
-                  bot={activeBotId !== undefined ? { name: activeBot?.name ?? '', onOpen: () => { bots.setView({ kind: 'detail', botId: activeBotId }); openPage('bots'); } } : undefined}
+                  bot={activeBotId !== undefined ? { name: activeBot?.name ?? '', onOpen: () => openBot(activeBotId) } : undefined}
                   sideChatOpen={sideChats.open && Boolean(sideChats.selected)}
                   sideChatAvailable={sideChats.sides.length > 0}
                   onToggleSideChat={() => sideChats.setOpen(!sideChats.open)}
@@ -482,7 +539,7 @@ export function App() {
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}
-              onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }}
+              onOpenChat={showChat}
               onNewRoutine={(scope) => openRoutine({ kind: 'new', scope })}
               onOpenRoutine={(scope, id) => openRoutine({ kind: 'job', id, scope })} />
           </div>}

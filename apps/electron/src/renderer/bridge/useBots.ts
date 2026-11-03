@@ -6,7 +6,8 @@ import { BotsController, type BotsState } from './botsStore';
 export type BotsView =
   | { kind: 'list' }
   | { kind: 'create' }
-  | { kind: 'detail'; botId: string };
+  /** `deleteRequest` counts the times the sidebar has asked for the Bot to be deleted: the page asks whether to, each time. */
+  | { kind: 'detail'; botId: string; deleteRequest?: number };
 
 export interface UseBots {
   controller: BotsController;

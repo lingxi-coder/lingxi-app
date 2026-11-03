@@ -40,6 +40,7 @@ export type BotActivity = 'working' | 'waiting' | 'idle';
 
 /** What one running chat of a Bot is doing. */
 export interface BotRuntimeActivity {
+  sessionId: string;
   botId: string;
   turnActive: boolean;
   pendingInteractions: number;
@@ -58,6 +59,7 @@ export function botRuntimes(
     if (runtime.botId === undefined) return [];
     const status = live(runtime.sessionId);
     return [{
+      sessionId: runtime.sessionId,
       botId: runtime.botId,
       turnActive: status?.turnActive ?? runtime.turnActive,
       pendingInteractions: status?.pendingInteractions ?? runtime.pendingInteractions,

@@ -130,6 +130,53 @@ test('sidebar preferences persist only valid manual session orders', () => {
   assert.deepEqual(settings.sidebar!.manualSessionOrder[project], [sessionId]);
 });
 
+test('the sidebar mode and the open Bots are kept when valid, absent from a file that never had them, and dropped when they are not ours', () => {
+  const sidebar = (value: Record<string, unknown>) => parseSettings({ version: 1, projects: [], sidebar: value }).sidebar;
+  const order = { organization: 'list', chatSort: 'manual', manualSessionOrder: {} };
+
+  // A file from before the Bots sidebar has neither key at all, not even as `undefined`.
+  assert.deepEqual(sidebar(order), order);
+  assert.ok(!('mode' in sidebar(order)!) && !('expandedBots' in sidebar(order)!));
+  assert.equal(parseSettings({ version: 1, projects: [] }).sidebar, undefined, 'and one with no sidebar still has none');
+
+  assert.deepEqual(sidebar({ ...order, mode: 'bots', expandedBots: ['a', 'b'] }), { ...order, mode: 'bots', expandedBots: ['a', 'b'] });
+  for (const mode of ['home', 'bots', 'teams']) assert.equal(sidebar({ ...order, mode })!.mode, mode);
+
+  for (const mode of ['settings', 'Bots', '', 1, null, {}, []]) assert.ok(!('mode' in sidebar({ ...order, mode })!), `mode ${JSON.stringify(mode)}`);
+  for (const expanded of ['a', 1, null, {}]) assert.ok(!('expandedBots' in sidebar({ ...order, expandedBots: expanded })!), `expandedBots ${JSON.stringify(expanded)}`);
+
+  assert.deepEqual(sidebar({ ...order, expandedBots: ['a', 'a', '', 7, null, 'x'.repeat(129), 'b', 'y'.repeat(128)] })!.expandedBots, ['a', 'b', 'y'.repeat(128)]);
+  assert.deepEqual(sidebar({ ...order, expandedBots: [] })!.expandedBots, [], 'all Bots closed is an answer');
+  const many = Array.from({ length: 500 }, (_, index) => `bot-${index}`);
+  assert.equal(sidebar({ ...order, expandedBots: many })!.expandedBots!.length, 200);
+});
+
+test('a sidebar update leaves the keys it does not mention as saved, and an update that is not an object resets them', () => {
+  const userData = temporaryDirectory();
+  const store = new SettingsStore(userData);
+  const order = { organization: 'list', chatSort: 'manual', manualSessionOrder: {} };
+  store.update({ sidebar: order });
+  store.update({ sidebar: { mode: 'bots' } });
+  assert.deepEqual(store.getPublic().sidebar, { ...order, mode: 'bots' }, 'saving the mode does not forget the order');
+  store.update({ sidebar: { expandedBots: ['a'] } });
+  assert.deepEqual(store.getPublic().sidebar, { ...order, mode: 'bots', expandedBots: ['a'] }, 'nor the mode');
+  store.update({ sidebar: { organization: 'project', chatSort: 'manual', manualSessionOrder: {} } });
+  assert.deepEqual(store.getPublic().sidebar, { organization: 'project', chatSort: 'manual', manualSessionOrder: {}, mode: 'bots', expandedBots: ['a'] }, 'and saving the order does not forget the Bots');
+  store.update({ sidebar: { mode: 'nonsense' } });
+  assert.equal(store.getPublic().sidebar!.mode, undefined, 'a value that is not a mode removes the saved one');
+
+  assert.deepEqual(new SettingsStore(userData).getPublic().sidebar, store.getPublic().sidebar, 'what was saved is what is read back');
+  store.update({ sidebar: 'reset' });
+  assert.deepEqual(store.getPublic().sidebar, { organization: 'project', chatSort: 'updated', manualSessionOrder: {} }, 'anything else starts over, as it always has');
+
+  const copy = store.getPublic();
+  store.update({ sidebar: { expandedBots: ['x'] } });
+  const next = store.getPublic();
+  next.sidebar!.expandedBots!.push('y');
+  assert.deepEqual(store.getPublic().sidebar!.expandedBots, ['x'], 'a copy handed out is not the stored one');
+  assert.equal(copy.sidebar!.expandedBots, undefined);
+});
+
 test('thought collapse preference remains optional and rejects invalid stored values', () => {
   assert.equal(new SettingsStore(temporaryDirectory()).getPublic().collapseThoughtsByDefault, undefined);
   for (const value of [undefined, null, 'false', 'true', 0, 1, {}, []]) {

@@ -1,3 +1,4 @@
+import type { SessionRowDto } from '@lingxi/bridge-client';
 import { currentLocale, tr, type DesktopLocale } from '../i18n/locale';
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -44,4 +45,10 @@ export function formatClockTime(epochMs: number | undefined): string {
 export function formatSessionMetadata(modifiedRfc3339: string, messageCount: number, now = Date.now()): string {
   const count = Number.isSafeInteger(messageCount) && messageCount >= 0 ? messageCount : 0;
   return `${formatRelativeSessionTime(modifiedRfc3339, now)} · ${tr(count === 1 ? 'desktop_session_message_one' : 'desktop_session_message_count', count)}`;
+}
+
+/** When a sidebar row was last active, in epoch milliseconds; a time that does not parse sorts as the oldest. */
+export function sidebarSessionTimestamp(session: Pick<SessionRowDto, 'modified_rfc3339'>): number {
+  const value = Date.parse(session.modified_rfc3339);
+  return Number.isNaN(value) ? 0 : value;
 }

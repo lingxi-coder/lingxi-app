@@ -299,6 +299,11 @@ final class LocalAppAgentHostLifecycleTests: XCTestCase {
         }
         XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"configure","settings":null}"#), .available)
         XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"registerAuthoring"}"#), .none)
+        XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"getAuthoringGrant"}"#), .none)
+        XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"prepareAuthoringSource"}"#), .none)
+        XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"restoreAuthoringSource"}"#), .none)
+        XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"remixAuthoringSource"}"#), .none)
+        XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"importRemixSource"}"#), .none)
         XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: "invalid JSON"), .currentConfiguration)
     }
 

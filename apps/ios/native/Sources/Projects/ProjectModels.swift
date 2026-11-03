@@ -34,6 +34,126 @@ struct ProjectExternalBookmark: Codable, Equatable, Sendable {
     var isStale: Bool = false
 }
 
+enum LocalAppSourceRequestOperation: String, Codable, Sendable {
+    case create
+    case restore
+    case bind
+    case marketRemix
+}
+
+/// The exact source operation is saved before invoking the native service.
+/// A retry uses the same request ID and payload, not a guessed source path.
+struct LocalAppSourceCreateIntent: Codable, Equatable, Sendable, Identifiable {
+    let version: Int
+    let requestId: String
+    let projectId: String
+    let mode: SessionMode
+    let name: String
+    let prompt: String
+    let operation: LocalAppSourceRequestOperation
+    let appId: String?
+    let revision: Int?
+    let sourceId: String?
+    let sourceDirectory: String?
+    /// Digest of the immutable, privately staged Market release description.
+    let remixInputDigest: String?
+    var completed: Bool
+    var id: String { requestId }
+
+    init(requestId: String, projectId: String, mode: SessionMode, name: String, prompt: String,
+         operation: LocalAppSourceRequestOperation = .create, appId: String? = nil, revision: Int? = nil,
+         sourceId: String? = nil, sourceDirectory: String? = nil, remixInputDigest: String? = nil) {
+        self.version = 1
+        self.requestId = requestId
+        self.projectId = projectId
+        self.mode = mode
+        self.name = name
+        self.prompt = prompt
+        self.operation = operation
+        self.appId = appId
+        self.revision = revision
+        self.sourceId = sourceId
+        self.sourceDirectory = sourceDirectory
+        self.remixInputDigest = remixInputDigest
+        self.completed = false
+    }
+}
+
+/// Durable handoff from a service-created source to its eventual Code owner.
+/// The native source receipt must still be verified before this can grant a
+/// mount or register a session.
+struct LocalAppAuthoringIntent: Codable, Equatable, Sendable {
+    let version: Int
+    let intentId: String
+    let sourceId: String
+    let sourceRequestId: String
+    let sourceDirectory: String
+    let projectId: String
+    let mode: SessionMode
+    var authoringSessionId: String?
+    var transcriptPath: String?
+    let appId: String?
+
+    init(intentId: String, sourceId: String, sourceRequestId: String, sourceDirectory: String, projectId: String,
+         authoringSessionId: String? = nil, transcriptPath: String? = nil, appId: String? = nil) {
+        self.version = 1
+        self.intentId = intentId
+        self.sourceId = sourceId
+        self.sourceRequestId = sourceRequestId
+        self.sourceDirectory = sourceDirectory
+        self.projectId = projectId
+        self.mode = .code
+        self.authoringSessionId = authoringSessionId
+        self.transcriptPath = transcriptPath
+        self.appId = appId
+    }
+
+    /// An existing native receipt can stand alone. When this exact owner has a
+    /// durable intent, it must agree before its source ID is used to check the receipt.
+    static func recoveryCandidate(in intents: [Self], projectID: String, sessionID: String,
+                                  sourceDirectories: [String]) throws -> Self? {
+        let matches = intents.filter {
+            $0.projectId == projectID && $0.authoringSessionId == canonicalSessionID(sessionID)
+        }
+        guard matches.count <= 1,
+              matches.first.map({ $0.transcriptPath != nil && sourceDirectories == [$0.sourceDirectory] }) ?? true else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app authoring intent is ambiguous or incomplete.")
+        }
+        return matches.first
+    }
+
+    func matchesRetainedOwner(scope: ConversationScope, mode: SessionMode, sessionID: String,
+                              workspace: SessionWorkspaceState) -> Bool {
+        mode == .code && self.mode == .code && scope == .project(projectId)
+            && authoringSessionId == canonicalSessionID(sessionID)
+            && canonicalSessionID(workspace.sessionId) == canonicalSessionID(sessionID)
+            && workspace.cwd == sourceDirectory && workspace.transcriptPath == transcriptPath
+    }
+
+    /// The durable update can commit before its awaiting task resumes on the
+    /// main actor. Match only the same immutable request across that window.
+    func matchesInFlightAttempt(_ other: LocalAppAuthoringIntent) -> Bool {
+        guard intentId == other.intentId, sourceId == other.sourceId, sourceRequestId == other.sourceRequestId,
+              sourceDirectory == other.sourceDirectory, projectId == other.projectId,
+              mode == other.mode, appId == other.appId else { return false }
+        if let session = authoringSessionId, let otherSession = other.authoringSessionId, session != otherSession { return false }
+        if let path = transcriptPath, let otherPath = other.transcriptPath, path != otherPath { return false }
+        return true
+    }
+}
+
+struct LocalAppAuthoringSelection: Codable, Equatable, Sendable {
+    let version: Int
+    let projectId: String
+    let intentId: String
+
+    init(projectId: String, intentId: String) {
+        self.version = 1
+        self.projectId = projectId
+        self.intentId = intentId
+    }
+}
+
 struct ProjectRecord: Identifiable, Codable, Equatable, Sendable {
     var id: String
     var name: String
@@ -217,6 +337,10 @@ struct ProjectSnapshot: Identifiable, Equatable, Sendable {
     }
 
     var id: String { record.id }
+
+    static func visible(_ projects: [ProjectSnapshot], in mode: SessionMode) -> [ProjectSnapshot] {
+        projects.filter { $0.record.visibleModes.contains(mode) }
+    }
 }
 
 enum ProjectOperationKind: String, Equatable, Sendable {

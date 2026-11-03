@@ -144,9 +144,11 @@ struct ProjectPage: View {
     /// `(scopeID, taskID)`; `(nil, nil)` opens the full task list.
     let onOpenCron: (String?, String?) -> Void
     let onOpenTerminal: () -> Void
+    let onRecoverAuthoring: () -> Void
 
     @ObservedObject private var convo: ConversationModel
     @State private var showFolderPicker = false
+    @State private var selectedAuthoringIntent: LocalAppAuthoringIntent?
 
     init(
         projectStore: ProjectStore,
@@ -161,7 +163,8 @@ struct ProjectPage: View {
         onNewSession: @escaping (SessionMode?) -> Void,
         onOpenSession: @escaping (SessionMode, String, String?) -> Void,
         onOpenCron: @escaping (String?, String?) -> Void,
-        onOpenTerminal: @escaping () -> Void
+        onOpenTerminal: @escaping () -> Void,
+        onRecoverAuthoring: @escaping () -> Void = {}
     ) {
         self.projectStore = projectStore
         self.projectID = projectID
@@ -175,6 +178,7 @@ struct ProjectPage: View {
         self.onOpenSession = onOpenSession
         self.onOpenCron = onOpenCron
         self.onOpenTerminal = onOpenTerminal
+        self.onRecoverAuthoring = onRecoverAuthoring
         convo = source.model
     }
 
@@ -191,6 +195,17 @@ struct ProjectPage: View {
             }
         }
         .background(t.windowBg.ignoresSafeArea())
+        .task(id: "\(projectID):\(projectStore.localAppIntentRevision)") {
+            do {
+                let intent = try await projectStore.selectedLocalAppAuthoringIntent(projectID: projectID)
+                guard !Task.isCancelled else { return }
+                selectedAuthoringIntent = intent
+            } catch {
+                guard !Task.isCancelled else { return }
+                selectedAuthoringIntent = nil
+                projectStore.errorMessage = error.localizedDescription
+            }
+        }
         .navigationTitle(project?.record.name ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -262,6 +277,12 @@ struct ProjectPage: View {
             }
 
             Section {
+                if LocalAppAuthoringRecoveryVisibility.shouldOffer(intent: selectedAuthoringIntent, project: project) {
+                    Button(action: onRecoverAuthoring) {
+                        Label("local_app_authoring_recover", systemImage: "arrow.clockwise")
+                    }
+                    .accessibilityIdentifier("project.resume-authoring")
+                }
                 if rows.isEmpty {
                     Text("drawer_no_sessions")
                         .font(.footnote)
@@ -334,5 +355,13 @@ struct ProjectPage: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+    }
+}
+
+enum LocalAppAuthoringRecoveryVisibility {
+    static func shouldOffer(intent: LocalAppAuthoringIntent?, project: ProjectSnapshot) -> Bool {
+        guard let intent, intent.projectId == project.record.id else { return false }
+        guard let sessionID = intent.authoringSessionId else { return true }
+        return !project.sessions.contains { canonicalSessionID($0.sessionId) == canonicalSessionID(sessionID) }
     }
 }

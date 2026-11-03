@@ -30,7 +30,9 @@ final class WorkspaceFilesTests: XCTestCase {
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("files-test-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        paths = .init(home: root, guestHome: "/home/brand", workspace: "/home/brand/work", projects: "/home/brand/work/projects", settings: ".config")
+        paths = .init(home: root, guestHome: "/home/brand", workspace: "/home/brand/.config/code",
+            chatWorkspace: "/home/brand/.config/chat", codeWorkspace: "/home/brand/.config/code",
+            projects: "/home/brand/.config/projects", scheduled: "/home/brand/.config/scheduled", settings: ".config")
         repo = .init(paths: paths)
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }

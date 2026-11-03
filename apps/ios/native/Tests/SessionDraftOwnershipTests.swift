@@ -61,4 +61,20 @@ final class SessionDraftOwnershipTests: XCTestCase {
         XCTAssertEqual(preferences.draft(scope: scope, mode: .code, ownerSessionID: ""), "code draft")
         XCTAssertEqual(preferences.draft(scope: .project("another"), mode: .chat, ownerSessionID: ""), "")
     }
+
+    func testSavedEmptyDraftIsNotMistakenForMissingDraft() {
+        let suite = "SessionDraftOwnershipTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        let scope = ConversationScope.project("authoring")
+        XCTAssertFalse(preferences.hasDraft(scope: scope, mode: .code, ownerSessionID: ""))
+        XCTAssertFalse(preferences.hasDraft(scope: scope, mode: .code, ownerSessionID: "A"))
+        preferences.setDraft("", scope: scope, mode: .code, ownerSessionID: "A")
+        XCTAssertTrue(preferences.hasDraft(scope: scope, mode: .code, ownerSessionID: "A"))
+        XCTAssertFalse(preferences.hasDraft(scope: scope, mode: .code, ownerSessionID: "B"))
+        preferences.setDraft("", scope: scope, mode: .code, ownerSessionID: "")
+        XCTAssertTrue(preferences.hasDraft(scope: scope, mode: .code, ownerSessionID: ""))
+        XCTAssertFalse(preferences.hasDraft(scope: scope, mode: .chat, ownerSessionID: ""))
+    }
 }

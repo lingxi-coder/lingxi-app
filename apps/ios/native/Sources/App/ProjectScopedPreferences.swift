@@ -96,6 +96,14 @@ struct ProjectScopedPreferences {
         return (defaults.dictionary(forKey: key("session-drafts", scope: scope)) as? [String: String])?[owner] ?? ""
     }
 
+    /// Distinguish a deliberately cleared draft from a draft that has never
+    /// been saved for this owner.
+    func hasDraft(scope: ConversationScope, mode: SessionMode, ownerSessionID: String) -> Bool {
+        let owner = canonicalSessionID(ownerSessionID)
+        if owner.isEmpty { return defaults.object(forKey: key("draft", scope: scope, mode: mode)) != nil }
+        return (defaults.dictionary(forKey: key("session-drafts", scope: scope)) as? [String: String])?[owner] != nil
+    }
+
     func setDraft(_ value: String, scope: ConversationScope, mode: SessionMode, ownerSessionID: String) {
         let owner = canonicalSessionID(ownerSessionID)
         guard !owner.isEmpty else {

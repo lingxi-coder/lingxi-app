@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 import XCTest
@@ -5,6 +6,7 @@ import XCTest
 
 #if canImport(harness_runtimeFFI)
 import harness_runtimeFFI
+import UIKit
 
 /// The lock makes the injected failure switch safe when the ledger actor writes off-main.
 final class RecoveryWriterFailure: @unchecked Sendable {
@@ -39,8 +41,14 @@ final class RecoveryWriteGate: @unchecked Sendable {
     private let condition = NSCondition()
     private var entered = false
     private var released = false
+    private var enabled = true
+    func setEnabled(_ next: Bool) {
+        condition.lock(); defer { condition.unlock() }
+        enabled = next
+    }
     func block() {
         condition.lock(); defer { condition.unlock() }
+        guard enabled else { return }
         entered = true
         condition.broadcast()
         while !released { condition.wait() }
@@ -300,6 +308,611 @@ final class ConversationRecoveryTests: XCTestCase {
             XCTAssertEqual(host.selectedEntryID, second.id)
         }
     }
+
+    #if DEBUG
+    func testStopDuringFollowupCheckpointLoadKeepsOriginalOwnerDraftAndChip() async throws {
+        let directory = try root(), gate = RecoveryWriteGate()
+        gate.setEnabled(false)
+        let ledger = DurableConversationTurnLedger(writer: RecoveryGateWriter(gate: gate))
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: directory.path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let source = EngineConversationSource(config: config, recoveryLedger: ledger)
+        source.beginTurnForTesting(turnId: 11, sessionId: a)
+        try await source.beginDurableTurnForTesting(turnId: 11, sessionId: a)
+        let host = SessionHost()
+        let entry = try host.retain(source: source, scope: .global, mode: .code,
+                                    sessionID: a, workspace: "/a", draft: "follow up")
+        let other = MockConversationSource(sessionMode: .chat)
+        other.model.activeSessionId = b
+        let otherEntry = try host.retain(source: other, scope: .global, mode: .chat,
+                                         sessionID: b, workspace: "/b", draft: "other")
+        let attachment = ComposerAttachment(image: UIImage(), width: 1, height: 1, base64: "cA==")
+        entry.attachment = attachment
+        entry.draftSourceCodeUnits = Array("follow up".utf16)
+        let chip = VisualizationContextChip(id: "widget", revision: 3, title: "Chart")
+        source.model.visualizationChip = chip
+        let loadStarted = expectation(description: "follow-up reached the ledger load")
+        source.setDurableLoadWillStartForTesting { loadStarted.fulfill() }
+        let cancelStarted = expectation(description: "old turn cancel entered the test transport")
+        var resumeCancel: CheckedContinuation<Void, Never>?
+        var promptCount = 0
+        source.setCommandSubmitterForTesting { command in
+            switch command {
+            case .cancel:
+                await withCheckedContinuation { resumeCancel = $0; cancelStarted.fulfill() }
+                throw POSIXError(.ECANCELED)
+            case .sendPrompt: promptCount += 1
+            default: break
+            }
+        }
+        gate.setEnabled(true)
+        let blockingWrite = Task { try await ledger.begin(url: ledgerURL(directory), sessionID: b, turnID: 22, scope: "/b") }
+        guard await gate.waitForEntry() else {
+            gate.release()
+            _ = try? await blockingWrite.value
+            return XCTFail("the controlled ledger writer did not start")
+        }
+        let pending = Task { await source.send("follow up", sourceCodeUnits: Array("follow up".utf16),
+                                               images: [ImageRefDto(mediaType: attachment.mediaType, base64: attachment.base64)],
+                                               selectedSlashCommand: nil) }
+        await fulfillment(of: [loadStarted], timeout: 2)
+        host.select(otherEntry)
+        let stop = Task { try? await source.cancelAndWait() }
+        await fulfillment(of: [cancelStarted], timeout: 2)
+        gate.release()
+        let token = await pending.value
+        XCTAssertNil(token)
+        XCTAssertTrue(source.model.messages.isEmpty)
+        XCTAssertEqual(promptCount, 0)
+        XCTAssertEqual(entry.draft, "follow up")
+        XCTAssertEqual(entry.draftSourceCodeUnits, Array("follow up".utf16))
+        XCTAssertEqual(entry.attachment, attachment)
+        XCTAssertEqual(source.model.visualizationChip, chip)
+        XCTAssertEqual(otherEntry.draft, "other")
+        resumeCancel?.resume()
+        _ = await stop.value
+        try await blockingWrite.value
+    }
+
+    func testStopBeforeFirstPromptDispatchDoesNotConsumeDraftOrCheckpoint() async throws {
+        let directory = try root(), ledger = DurableConversationTurnLedger()
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: directory.path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let source = EngineConversationSource(config: config, recoveryLedger: ledger)
+        source.model.activeSessionId = a
+        let chip = VisualizationContextChip(id: "widget", revision: 1, title: "Chart")
+        source.model.visualizationChip = chip
+        let started = expectation(description: "prompt reached the last pre-dispatch barrier")
+        var resumeDispatch: CheckedContinuation<Void, Never>?
+        source.setPromptDispatchBarrierForTesting {
+            await withCheckedContinuation { resumeDispatch = $0; started.fulfill() }
+        }
+        var promptCount = 0
+        source.setCommandSubmitterForTesting { command in
+            if case .sendPrompt = command { promptCount += 1 }
+        }
+        let pending = Task { await source.send("keep me") }
+        await fulfillment(of: [started], timeout: 2)
+        source.cancel()
+        resumeDispatch?.resume()
+        let token = await pending.value
+        XCTAssertNil(token)
+        XCTAssertTrue(source.model.messages.isEmpty)
+        XCTAssertFalse(source.model.streaming)
+        XCTAssertEqual(source.model.visualizationChip, chip)
+        XCTAssertEqual(promptCount, 0)
+        await source.waitForDurableCleanupForTesting()
+        let checkpoint = try await ledger.load(url: ledgerURL(directory), sessionID: a)
+        XCTAssertNil(checkpoint)
+    }
+
+    func testPromptDispatchDoesNotConsumeChipEditedDuringAdmission() async throws {
+        let directory = try root()
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "", appSandboxRoot: directory.path,
+            sessionMode: .code, visionDelegationEnabled: false), recoveryLedger: DurableConversationTurnLedger())
+        source.model.activeSessionId = a
+        let chip = VisualizationContextChip(id: "widget", revision: 1, title: "Chart")
+        source.model.visualizationChip = chip
+        let started = expectation(description: "prompt reached the pre-dispatch barrier")
+        var resumeDispatch: CheckedContinuation<Void, Never>?
+        source.setPromptDispatchBarrierForTesting {
+            await withCheckedContinuation { resumeDispatch = $0; started.fulfill() }
+        }
+        source.setCommandSubmitterForTesting { _ in }
+        let pending = Task { await source.send("ask about this") }
+        await fulfillment(of: [started], timeout: 2)
+        source.model.visualizationChip = nil
+        source.model.visualizationChip = chip
+        resumeDispatch?.resume()
+        let token = await pending.value
+        XCTAssertNotNil(token)
+        XCTAssertEqual(source.model.visualizationChip, chip, "an intervening edit returning to the same chip must survive")
+        XCTAssertEqual(source.model.messages.last?.visualizationContext, chip)
+    }
+
+    func testRemovedChipBeforeAdmissionIsNotAutomaticallyRestoredAfterRejectedStop() async throws {
+        let directory = try root()
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "", appSandboxRoot: directory.path,
+            sessionMode: .code, visionDelegationEnabled: false), recoveryLedger: DurableConversationTurnLedger())
+        source.model.activeSessionId = a
+        let host = SessionHost()
+        let entry = try host.retain(source: source, scope: .global, mode: .code,
+                                    sessionID: a, workspace: "/a", draft: "input")
+        let captured = CapturedComposerDraft(
+            draft: Binding(get: { entry.draft }, set: { entry.draft = $0 }),
+            units: Binding(get: { entry.draftSourceCodeUnits }, set: { entry.draftSourceCodeUnits = $0 }),
+            attachment: Binding(get: { entry.attachment }, set: { entry.attachment = $0 }),
+            submittedUnits: nil, revision: { entry.draftRevision })
+        let chip = VisualizationContextChip(id: "chart", revision: 1, title: "Chart")
+        source.model.visualizationChip = chip
+        let chipRevision = source.model.visualizationChipRevision
+        let barrier = expectation(description: "waiting before prompt admission")
+        let dispatched = expectation(description: "original prompt dispatched")
+        let cancelAck = expectation(description: "cancel acknowledged")
+        var resumeDispatch: CheckedContinuation<Void, Never>?
+        var resumeSend: CheckedContinuation<Void, Never>?
+        source.setPromptDispatchBarrierForTesting {
+            await withCheckedContinuation { resumeDispatch = $0; barrier.fulfill() }
+        }
+        source.setCancelSubmissionObserverForTesting { _ in cancelAck.fulfill() }
+        source.setCommandSubmitterForTesting { command in
+            if case .sendPrompt = command {
+                await withCheckedContinuation { resumeSend = $0; dispatched.fulfill() }
+                throw ClientError.Rejected(message: "turn_cancelled_before_admission")
+            }
+        }
+        let send = Task { await source.send("input") }
+        await fulfillment(of: [barrier], timeout: 2)
+        source.model.visualizationChip = nil
+        resumeDispatch?.resume()
+        await fulfillment(of: [dispatched], timeout: 2)
+        let submitted = await send.value
+        let token = try XCTUnwrap(submitted)
+        XCTAssertTrue(captured.clearIfUnchanged())
+        let clearRevision = entry.draftRevision
+        source.registerRejectedPromptRestorer(for: token) { submitted in
+            captured.restoreIfUnchanged(afterClearRevision: clearRevision, model: source.model,
+                                        chip: chip, chipRevision: chipRevision, submitted: submitted)
+        }
+        let stop = Task { try await source.cancelAndWait() }
+        await fulfillment(of: [cancelAck], timeout: 2)
+        resumeSend?.resume()
+        try await stop.value
+        XCTAssertNil(source.model.visualizationChip)
+        XCTAssertEqual(entry.draft, "")
+        let unsent = try XCTUnwrap(source.model.unsentPrompts.first)
+        XCTAssertFalse(unsent.mayRestoreCapturedDraft)
+        XCTAssertEqual(unsent.text, "input")
+        XCTAssertEqual(unsent.visualizationContext, chip)
+    }
+
+    func testRemovedChipBeforeSendTaskStartsIsNotAutomaticallyRestored() async throws {
+        let directory = try root()
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "", appSandboxRoot: directory.path,
+            sessionMode: .code, visionDelegationEnabled: false), recoveryLedger: DurableConversationTurnLedger())
+        source.model.activeSessionId = a
+        let host = SessionHost()
+        let entry = try host.retain(source: source, scope: .global, mode: .code,
+                                    sessionID: a, workspace: "/a", draft: "input")
+        let captured = CapturedComposerDraft(
+            draft: Binding(get: { entry.draft }, set: { entry.draft = $0 }),
+            units: Binding(get: { entry.draftSourceCodeUnits }, set: { entry.draftSourceCodeUnits = $0 }),
+            attachment: Binding(get: { entry.attachment }, set: { entry.attachment = $0 }),
+            submittedUnits: nil, revision: { entry.draftRevision })
+        let chip = VisualizationContextChip(id: "chart", revision: 1, title: "Chart")
+        source.model.visualizationChip = chip
+        let capturedChipRevision = source.model.visualizationChipRevision
+        let dispatched = expectation(description: "queued send reached the controlled transport")
+        let cancelAck = expectation(description: "cancel acknowledged")
+        var resumeSend: CheckedContinuation<Void, Never>?
+        source.setCancelSubmissionObserverForTesting { _ in cancelAck.fulfill() }
+        source.setCommandSubmitterForTesting { command in
+            if case .sendPrompt = command {
+                await withCheckedContinuation { resumeSend = $0; dispatched.fulfill() }
+                throw ClientError.Rejected(message: "turn_cancelled_before_admission")
+            }
+        }
+        let send = Task { await source.send("input") }
+        // This runs before the MainActor task can call source.send.
+        source.model.visualizationChip = nil
+        await fulfillment(of: [dispatched], timeout: 2)
+        let submitted = await send.value
+        let token = try XCTUnwrap(submitted)
+        XCTAssertTrue(captured.clearIfUnchanged())
+        let clearRevision = entry.draftRevision
+        source.registerRejectedPromptRestorer(for: token) { actual in
+            captured.restoreIfUnchanged(afterClearRevision: clearRevision, model: source.model,
+                chip: chip, chipRevision: capturedChipRevision, submitted: actual)
+        }
+        let stop = Task { try await source.cancelAndWait() }
+        await fulfillment(of: [cancelAck], timeout: 2)
+        resumeSend?.resume()
+        try await stop.value
+        XCTAssertNil(source.model.visualizationChip)
+        XCTAssertEqual(entry.draft, "")
+        let unsent = try XCTUnwrap(source.model.unsentPrompts.first)
+        XCTAssertNil(unsent.visualizationContext)
+        XCTAssertEqual(unsent.text, "input")
+    }
+
+    func testStopAfterPromptHandoffDoesNotRestoreOrResubmitUnknownInput() async throws {
+        let directory = try root()
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "", appSandboxRoot: directory.path,
+            sessionMode: .code, visionDelegationEnabled: false), recoveryLedger: DurableConversationTurnLedger())
+        source.model.activeSessionId = a
+        let dispatched = expectation(description: "prompt entered the test transport")
+        var resumePrompt: CheckedContinuation<Void, Never>?
+        var promptCount = 0
+        source.setCommandSubmitterForTesting { command in
+            switch command {
+            case .sendPrompt:
+                promptCount += 1
+                await withCheckedContinuation { resumePrompt = $0; dispatched.fulfill() }
+            case .cancel: throw POSIXError(.ECANCELED)
+            default: break
+            }
+        }
+        let pending = Task { await source.send("already handed off") }
+        await fulfillment(of: [dispatched], timeout: 2)
+        let token = await pending.value
+        XCTAssertNotNil(token)
+        do { try await source.cancelAndWait(); XCTFail("the controlled cancel should fail") }
+        catch { }
+        resumePrompt?.resume()
+        XCTAssertEqual(promptCount, 1)
+        XCTAssertEqual(source.model.messages.filter { $0.role == .user }.map(\.text), ["already handed off"])
+    }
+
+    func testCancelledBeforeAdmissionNeedsBothReceiptsInEitherOrder() async throws {
+        for side in [false, true] {
+            for rejectionFirst in [false, true] {
+                for interveningEdit in [false, true] {
+                    try await exerciseCancelledBeforeAdmission(side: side,
+                        rejectionFirst: rejectionFirst, interveningEdit: interveningEdit)
+                }
+            }
+        }
+    }
+
+    func testRejectedSendDoesNotSettleUntilItsExactCancelSucceeds() async throws {
+        for side in [false, true] {
+            let directory = try root(), ledger = DurableConversationTurnLedger()
+            let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
+                appSandboxRoot: directory.path, sessionMode: .code, visionDelegationEnabled: false),
+                recoveryLedger: ledger, memoryOnly: side)
+            if side { source.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a") }
+            else { source.model.activeSessionId = a }
+            let dispatched = expectation(description: "original send entered")
+            let proof = expectation(description: "original send was rejected")
+            var releaseSend: CheckedContinuation<Void, Never>?
+            var cancels = 0
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case .sendPrompt:
+                    await withCheckedContinuation { releaseSend = $0; dispatched.fulfill() }
+                    throw ClientError.Rejected(message: "turn_cancelled_before_admission")
+                case .cancel:
+                    cancels += 1
+                    if cancels == 1 { throw POSIXError(.EIO) }
+                default: break
+                }
+            }
+            source.setNoAdmissionProofObserverForTesting { _ in proof.fulfill() }
+            let send = Task { await source.send("retain") }
+            await fulfillment(of: [dispatched], timeout: 2)
+            let submitted = await send.value
+            XCTAssertNotNil(submitted)
+            do { try await source.cancelAndWait(); XCTFail("the first cancel must fail") }
+            catch { }
+            releaseSend?.resume()
+            await fulfillment(of: [proof], timeout: 2)
+            XCTAssertTrue(source.model.unsentPrompts.isEmpty)
+            XCTAssertEqual(source.model.messages.filter { $0.role == .user }.map(\.text), ["retain"])
+            if !side {
+                let checkpoint = try await ledger.load(url: ledgerURL(directory), sessionID: a)
+                XCTAssertNotNil(checkpoint)
+            }
+            try await source.cancelAndWait()
+            XCTAssertEqual(source.model.unsentPrompts.map(\.text), ["retain"])
+            XCTAssertTrue(source.model.messages.filter { $0.role == .user }.isEmpty)
+            XCTAssertEqual(cancels, 2)
+        }
+    }
+
+    func testDifferentRejectedErrorDoesNotCreateUnsentPrompt() async throws {
+        for side in [false, true] {
+            let directory = try root()
+            let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
+                appSandboxRoot: directory.path, sessionMode: .code, visionDelegationEnabled: false),
+                recoveryLedger: DurableConversationTurnLedger(), memoryOnly: side)
+            if side { source.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a") }
+            else { source.model.activeSessionId = a }
+            let dispatched = expectation(description: "original send entered")
+            let failureShown = expectation(description: "unknown failure is shown")
+            var releaseSend: CheckedContinuation<Void, Never>?
+            let observation = source.model.$error.dropFirst().sink { value in
+                if value != nil { failureShown.fulfill() }
+            }
+            source.setCommandSubmitterForTesting { command in
+                if case .sendPrompt = command {
+                    await withCheckedContinuation { releaseSend = $0; dispatched.fulfill() }
+                    throw ClientError.Rejected(message: "turn_cancelled_before_admission_extra")
+                }
+            }
+            let send = Task { await source.send("unknown") }
+            await fulfillment(of: [dispatched], timeout: 2)
+            _ = await send.value
+            releaseSend?.resume()
+            await fulfillment(of: [failureShown], timeout: 2)
+            XCTAssertTrue(source.model.unsentPrompts.isEmpty)
+            XCTAssertEqual(source.model.messages.filter { $0.role == .user }.map(\.text), ["unknown"])
+            withExtendedLifetime(observation) {}
+        }
+    }
+
+    func testLateRejectionCannotSettleAnotherOwnerOrTurn() async throws {
+        // Main/turn, Side/side ID, Side/parent and Side/turn are independent
+        // identity changes; none may inherit the old Send's proof.
+        for scenario in 0..<4 {
+            let side = scenario != 0
+            let directory = try root()
+            let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
+                appSandboxRoot: directory.path, sessionMode: .code, visionDelegationEnabled: false),
+                recoveryLedger: DurableConversationTurnLedger(), memoryOnly: side)
+            if side { source.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a") }
+            else { source.model.activeSessionId = a }
+            let dispatched = expectation(description: "old owner's send entered")
+            let cancelStarted = expectation(description: "old owner's cancel entered")
+            let cancelAck = expectation(description: "old owner's cancel returned")
+            var releaseSend: CheckedContinuation<Void, Never>?
+            var releaseCancel: CheckedContinuation<Void, Never>?
+            source.setNoAdmissionProofObserverForTesting { _ in XCTFail("stale send must not create proof") }
+            source.setCancelSubmissionObserverForTesting { _ in cancelAck.fulfill() }
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case .sendPrompt:
+                    await withCheckedContinuation { releaseSend = $0; dispatched.fulfill() }
+                    throw ClientError.Rejected(message: "turn_cancelled_before_admission")
+                case .cancel:
+                    await withCheckedContinuation { releaseCancel = $0; cancelStarted.fulfill() }
+                default: break
+                }
+            }
+            let send = Task { await source.send("old") }
+            await fulfillment(of: [dispatched], timeout: 2)
+            let submitted = await send.value
+            let oldToken = try XCTUnwrap(submitted)
+            let stop = Task { try await source.cancelAndWait() }
+            await fulfillment(of: [cancelStarted], timeout: 2)
+            if scenario == 1 { source.setSideOwnerForTesting(parentSessionID: a, sideID: "side-b") }
+            if scenario == 2 { source.setSideOwnerForTesting(parentSessionID: b, sideID: "side-a") }
+            let nextID = scenario == 1 || scenario == 2 ? oldToken.clientTurnId :
+                (oldToken.clientTurnId == UInt64.max ? 1 : oldToken.clientTurnId + 1)
+            let nextSessionID = scenario == 1 || scenario == 3 ? a : b
+            source.beginTurnForTesting(turnId: nextID, sessionId: nextSessionID)
+            source.model.isCancelling = true
+            releaseSend?.resume()
+            releaseCancel?.resume()
+            await fulfillment(of: [cancelAck], timeout: 2)
+            stop.cancel()
+            _ = try? await stop.value
+            XCTAssertEqual(source.model.activeTurnToken?.clientTurnId, nextID)
+            XCTAssertEqual(source.model.activeSessionId, nextSessionID)
+            XCTAssertTrue(source.model.isCancelling, "the old completion must not unlock the new owner")
+            XCTAssertTrue(source.model.unsentPrompts.isEmpty)
+            XCTAssertNil(source.model.error)
+        }
+    }
+
+    func testUnsentInputSurvivesOnlySameOwnerReplacement() async throws {
+        let host = SessionHost()
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: try root().path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let old = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        old.model.activeSessionId = a
+        let state = SessionWorkspaceState(sessionId: a, cwd: "/a", projectRoot: "/a",
+                                          additionalDirectories: [], transcriptPath: "/a/session.jsonl")
+        old.model.workspaceState = state
+        let entry = try host.retain(source: old, scope: .global, mode: .code,
+                                    sessionID: a, workspace: "/a", draft: "new draft")
+        let token = ConversationTurnToken(clientTurnId: 3, sessionEpoch: 1)
+        let item = ConversationUnsentPrompt(token: token, sessionID: a, sideID: nil,
+            text: "not admitted", sourceCodeUnits: [65, 0xd800],
+            images: [ImageRefDto(mediaType: "image/png", base64: "cA==")],
+            visualizationContext: VisualizationContextChip(id: "chart", revision: 1, title: "Chart"),
+            mayRestoreCapturedDraft: true, chipRevisionAtCapture: 1, chipRevisionAfterAdmission: 2)
+        old.model.unsentPrompts = [item]
+        host.releaseIdleSource(old)
+        XCTAssertTrue(host.entry(for: old) === entry)
+
+        let replacement = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        replacement.model.activeSessionId = a
+        replacement.model.workspaceState = state
+        var catalogPath = state.transcriptPath
+        let preparationStarted = expectation(description: "replacement prepare is suspended")
+        var resumePreparation: CheckedContinuation<Void, Never>?
+        let staleReplacement = Task { @MainActor in
+            await withCheckedContinuation { resumePreparation = $0; preparationStarted.fulfill() }
+            return try host.replaceIdleSource(old, with: replacement, scope: .global, mode: .code,
+                sessionID: a, workspace: "/a", draft: "new draft", validateUnsentOwner: {
+                    guard catalogPath == state.transcriptPath else { throw SessionHost.OwnershipError.sourceIdentityMismatch }
+                })
+        }
+        await fulfillment(of: [preparationStarted], timeout: 2)
+        catalogPath = "/a/other.jsonl"
+        resumePreparation?.resume()
+        do { _ = try await staleReplacement.value; XCTFail("the changed catalog must reject the swap") }
+        catch { }
+        XCTAssertTrue(host.entry(for: old) === entry)
+        XCTAssertEqual(old.model.unsentPrompts.first?.id, item.id)
+        catalogPath = state.transcriptPath
+        let next = try host.replaceIdleSource(old, with: replacement, scope: .global,
+            mode: .code, sessionID: a, workspace: "/a", draft: "new draft", validateUnsentOwner: {
+                guard catalogPath == state.transcriptPath else { throw SessionHost.OwnershipError.sourceIdentityMismatch }
+            })
+        XCTAssertTrue(host.entry(for: replacement) === next)
+        XCTAssertTrue(old.model.unsentPrompts.isEmpty)
+        XCTAssertEqual(replacement.model.unsentPrompts.first?.id, item.id)
+        XCTAssertEqual(replacement.model.unsentPrompts.first?.sourceCodeUnits, [65, 0xd800])
+        XCTAssertEqual(replacement.model.unsentPrompts.first?.images, item.images)
+        XCTAssertEqual(replacement.model.unsentPrompts.first?.visualizationContext, item.visualizationContext)
+
+        let wrong = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        wrong.model.activeSessionId = a
+        wrong.model.workspaceState = SessionWorkspaceState(sessionId: a, cwd: "/a", projectRoot: "/a",
+            additionalDirectories: [], transcriptPath: "/a/other.jsonl")
+        replacement.model.unsentPrompts = [item]
+        XCTAssertThrowsError(try host.replaceIdleSource(replacement, with: wrong, scope: .global,
+            mode: .code, sessionID: a, workspace: "/a", draft: "new draft"))
+        XCTAssertTrue(host.entry(for: replacement) === next)
+        wrong.model.workspaceState = state
+        replacement.model.unsentPrompts = [ConversationUnsentPrompt(token: token, sessionID: b,
+            sideID: nil, text: "wrong owner", sourceCodeUnits: nil, images: [], visualizationContext: nil,
+            mayRestoreCapturedDraft: true, chipRevisionAtCapture: 0, chipRevisionAfterAdmission: 0)]
+        XCTAssertThrowsError(try host.replaceIdleSource(replacement, with: wrong, scope: .global,
+            mode: .code, sessionID: a, workspace: "/a", draft: "new draft"))
+        XCTAssertTrue(host.entry(for: replacement) === next)
+        XCTAssertEqual(replacement.model.unsentPrompts.first?.text, "wrong owner")
+    }
+
+    private func exerciseCancelledBeforeAdmission(side: Bool, rejectionFirst: Bool,
+                                                   interveningEdit: Bool) async throws {
+        let directory = try root(), ledger = DurableConversationTurnLedger()
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: directory.path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let source = EngineConversationSource(config: config, recoveryLedger: ledger, memoryOnly: side)
+        if side { source.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a") }
+        else { source.model.activeSessionId = a }
+        let host = SessionHost()
+        let firstSource: any ConversationSource = side ? MockConversationSource(sessionMode: .code) : source
+        firstSource.model.activeSessionId = a
+        let first = try host.retain(source: firstSource, scope: .global, mode: .code,
+                                    sessionID: a, workspace: "/a", draft: "input")
+        let otherSource = MockConversationSource(sessionMode: .chat)
+        otherSource.model.activeSessionId = b
+        let other = try host.retain(source: otherSource, scope: .global, mode: .chat,
+                                    sessionID: b, workspace: "/b", draft: "other")
+        host.select(first)
+        let sideEntry = side ? SideChatEntry(source: source, id: "side-a") : nil
+        let draft = Binding<String>(get: { sideEntry?.draft ?? first.draft }, set: {
+            if let sideEntry { sideEntry.draft = $0 } else { first.draft = $0 }
+        })
+        let draftUnits = Binding<[UInt16]?>(get: {
+            if let sideEntry { return sideEntry.draftSourceCodeUnits }
+            return first.draftSourceCodeUnits
+        }, set: {
+            if let sideEntry { sideEntry.draftSourceCodeUnits = $0 } else { first.draftSourceCodeUnits = $0 }
+        })
+        let draftAttachment = Binding<ComposerAttachment?>(get: {
+            if let sideEntry { return sideEntry.attachment }
+            return first.attachment
+        }, set: {
+            if let sideEntry { sideEntry.attachment = $0 } else { first.attachment = $0 }
+        })
+        let revision: () -> UInt64? = { sideEntry?.draftRevision ?? first.draftRevision }
+        draft.wrappedValue = "input"
+        let units: [UInt16] = [0x0069, 0x006e, 0x0070, 0x0075, 0x0074, 0xd800]
+        draftUnits.wrappedValue = units
+        let photo = ComposerAttachment(image: UIImage(), width: 1, height: 1, base64: "cA==")
+        draftAttachment.wrappedValue = photo
+        let image = ImageRefDto(mediaType: photo.mediaType, base64: photo.base64)
+        let chip = VisualizationContextChip(id: "chart", revision: 1, title: "Chart")
+        source.model.visualizationChip = chip
+        let chipRevision = source.model.visualizationChipRevision
+        let captured = CapturedComposerDraft(
+            draft: draft, units: draftUnits, attachment: draftAttachment,
+            submittedUnits: units, revision: revision)
+        let dispatched = expectation(description: "original send entered the controlled transport")
+        let cancelStarted = expectation(description: "exact cancel entered the controlled transport")
+        let proofArrived = expectation(description: "original send returned its exact rejection")
+        let cancelAcknowledged = expectation(description: "exact cancel returned successfully")
+        var releaseSend: CheckedContinuation<Void, Never>?
+        var releaseCancel: CheckedContinuation<Void, Never>?
+        var promptCount = 0
+        source.setCommandSubmitterForTesting { command in
+            switch command {
+            case .sendPrompt:
+                promptCount += 1
+                await withCheckedContinuation { releaseSend = $0; dispatched.fulfill() }
+                throw ClientError.Rejected(message: "turn_cancelled_before_admission")
+            case .cancel:
+                await withCheckedContinuation { releaseCancel = $0; cancelStarted.fulfill() }
+            default: break
+            }
+        }
+        source.setNoAdmissionProofObserverForTesting { _ in proofArrived.fulfill() }
+        source.setCancelSubmissionObserverForTesting { _ in cancelAcknowledged.fulfill() }
+        let pending = Task { await source.send("input", sourceCodeUnits: units, images: [image], selectedSlashCommand: nil) }
+        await fulfillment(of: [dispatched], timeout: 2)
+        let submitted = await pending.value
+        let token = try XCTUnwrap(submitted)
+        XCTAssertTrue(captured.clearIfUnchanged())
+        let clearRevision = revision()
+        source.registerRejectedPromptRestorer(for: token) { submitted in
+            captured.restoreIfUnchanged(afterClearRevision: clearRevision, model: source.model,
+                                        chip: chip, chipRevision: chipRevision, submitted: submitted)
+        }
+        host.select(other)
+        if interveningEdit {
+            draft.wrappedValue = "another"
+            draft.wrappedValue = ""
+            source.model.visualizationChip = chip
+            source.model.visualizationChip = nil
+        }
+        var stopCompleted = false
+        let stop = Task { try await source.cancelAndWait(); stopCompleted = true }
+        await fulfillment(of: [cancelStarted], timeout: 2)
+        if rejectionFirst {
+            releaseSend?.resume()
+            await fulfillment(of: [proofArrived], timeout: 2)
+            XCTAssertFalse(stopCompleted)
+            XCTAssertTrue(source.model.unsentPrompts.isEmpty)
+            XCTAssertEqual(source.model.messages.filter { $0.role == .user }.count, 1)
+            releaseCancel?.resume()
+            await fulfillment(of: [cancelAcknowledged], timeout: 2)
+        } else {
+            releaseCancel?.resume()
+            await fulfillment(of: [cancelAcknowledged], timeout: 2)
+            XCTAssertFalse(stopCompleted)
+            XCTAssertTrue(source.model.unsentPrompts.isEmpty)
+            XCTAssertEqual(source.model.messages.filter { $0.role == .user }.count, 1)
+            releaseSend?.resume()
+            await fulfillment(of: [proofArrived], timeout: 2)
+        }
+        try await stop.value
+        XCTAssertTrue(stopCompleted)
+        XCTAssertEqual(promptCount, 1)
+        XCTAssertTrue(source.model.messages.filter { $0.role == .user }.isEmpty)
+        XCTAssertFalse(source.model.streaming)
+        XCTAssertEqual(host.selectedEntryID, other.id)
+        XCTAssertEqual(other.draft, "other")
+        if interveningEdit {
+            XCTAssertEqual(draft.wrappedValue, "")
+            XCTAssertNil(draftAttachment.wrappedValue)
+            XCTAssertNil(source.model.visualizationChip)
+            let unsent = try XCTUnwrap(source.model.unsentPrompts.first)
+            XCTAssertEqual(source.model.unsentPrompts.count, 1)
+            XCTAssertEqual(unsent.token, token)
+            XCTAssertEqual(unsent.sessionID, a.lowercased())
+            XCTAssertEqual(unsent.sideID, side ? "side-a" : nil)
+            XCTAssertEqual(unsent.text, "input")
+            XCTAssertEqual(unsent.sourceCodeUnits, units)
+            XCTAssertEqual(unsent.images, [image])
+            XCTAssertEqual(unsent.visualizationContext, chip)
+        } else {
+            XCTAssertEqual(draft.wrappedValue, "input")
+            XCTAssertEqual(draftUnits.wrappedValue, units)
+            XCTAssertEqual(draftAttachment.wrappedValue, photo)
+            XCTAssertEqual(source.model.visualizationChip, chip)
+            XCTAssertTrue(source.model.unsentPrompts.isEmpty)
+        }
+        if !side {
+            await source.waitForDurableCleanupForTesting()
+            let checkpoint = try await ledger.load(url: ledgerURL(directory), sessionID: a)
+            XCTAssertNil(checkpoint)
+        }
+    }
+    #endif
 
     func testRemoteAndSideDraftRevisionsDetectRestoredValues() {
         let remote = RemoteDraftOwner()

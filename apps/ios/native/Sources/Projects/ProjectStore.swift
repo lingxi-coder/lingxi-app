@@ -22,6 +22,9 @@ final class ProjectStore {
     var loading = true
     var operation: ProjectOperation?
     var errorMessage: String?
+    var pendingLocalAppCreations: [LocalAppSourceCreateIntent] = []
+    var pendingLocalAppError: String?
+    private(set) var localAppIntentRevision: UInt64 = 0
     var onWillArchiveSession: ((String?, String) async throws -> Void)?
     var sessionScopeClaims: (() -> [String: ConversationScope]?)?
     var additionalSessionEvidence: (() throws -> [String: SessionOwnerEvidence])?
@@ -391,6 +394,13 @@ final class ProjectStore {
         return scope
     }
 
+    /// Only snapshots from a currently valid owner catalog can grant the file
+    /// browser access to a project's source workspace.
+    func fileWorkspaceProjects() -> [ProjectSnapshot] {
+        guard !loading, (try? validatedSessionOwnership()) != nil else { return [] }
+        return projects
+    }
+
     func reload() {
         Task { await reloadAsync() }
     }
@@ -425,25 +435,114 @@ final class ProjectStore {
         }
     }
 
-    /// Creates a dedicated Mobile Project whose active Code cwd is the
-    /// immutable app source copy. The project ID remains the native workspace
-    /// identity; the source folder is an authorized home directory.
-    @discardableResult
-    func createLocalAppAuthoringProject(name: String, sourceDirectory: String) async throws -> ProjectSnapshot {
-        let project = try await createInternal(name: name)
-        var record = project.record
-        record.activeDirectory = sourceDirectory
-        var seenDirectories = Set<String>()
-        record.additionalDirectories = (record.additionalDirectories + [sourceDirectory]).filter {
-            seenDirectories.insert($0).inserted
+    func refreshPendingLocalAppCreations() async {
+        do {
+            let repository = repository
+            pendingLocalAppCreations = try await executionDomain.async { try repository.pendingLocalAppSourceCreations() }
+            pendingLocalAppError = nil
+        } catch {
+            pendingLocalAppCreations = []
+            pendingLocalAppError = error.localizedDescription
         }
+    }
+
+    func storeLocalAppSourceCreateIntent(_ intent: LocalAppSourceCreateIntent) async throws {
+        _ = try requireConsistentOwners(projectId: nil)
         let repository = repository
-        let executionDomain = executionDomain
-        let updatedRecord = record
-        let updated = try await executionDomain.async { try repository.updateProject(updatedRecord) }
-        let state = try await executionDomain.async { repository.load() }
-        publish(state, preservingConflicts: true)
-        return updated
+        pendingLocalAppCreations = try await executionDomain.async {
+            try repository.storeLocalAppSourceCreateIntent(intent)
+            return try repository.pendingLocalAppSourceCreations()
+        }
+        pendingLocalAppError = nil
+    }
+
+    func localAppSourceCreateIntent(requestID: String) async throws -> LocalAppSourceCreateIntent? {
+        let repository = repository
+        return try await executionDomain.async { try repository.localAppSourceCreateIntent(requestID: requestID) }
+    }
+
+    func storeLocalAppRemixRequest(_ intent: LocalAppSourceCreateIntent, input: LocalAppMarketRemixInput,
+                                   configHome: URL) async throws {
+        _ = try requireConsistentOwners(projectId: nil)
+        let repository = repository
+        pendingLocalAppCreations = try await executionDomain.async {
+            try repository.storeLocalAppRemixRequest(intent, input: input, configHome: configHome)
+            return try repository.pendingLocalAppSourceCreations()
+        }
+        pendingLocalAppError = nil
+    }
+
+    func localAppRemixInput(_ intent: LocalAppSourceCreateIntent, configHome: URL)
+        async throws -> (LocalAppMarketRemixInput, URL) {
+        let repository = repository
+        return try await executionDomain.async { try repository.localAppRemixInput(intent, configHome: configHome) }
+    }
+
+    func storeLocalAppRemixArchive(_ bytes: Data, intent: LocalAppSourceCreateIntent, configHome: URL) async throws -> URL {
+        let repository = repository
+        return try await executionDomain.async {
+            try repository.storeLocalAppRemixArchive(bytes, intent: intent, configHome: configHome)
+        }
+    }
+
+    func completeLocalAppSourceCreateIntent(requestID: String, owner: LocalAppAuthoringIntent) async throws {
+        let repository = repository
+        try await executionDomain.async { try repository.completeLocalAppSourceCreateIntent(requestID: requestID, owner: owner) }
+        await refreshPendingLocalAppCreations()
+    }
+
+    /// Publish a project together with its source intent and selection before
+    /// it can appear in the project list or be used to prepare an engine.
+    @discardableResult
+    func createLocalAppAuthoringProject(name: String, sourceDirectory: String, sourceID: String, sourceRequestID: String,
+                                        appID: String?, projectID: String, intentID: String)
+        async throws -> (ProjectSnapshot, LocalAppAuthoringIntent) {
+        let result = try await withOwnerScopeMutation {
+            try await self.runThrowingOperation(.create, message: String(localized: "project_creating_message")) {
+                _ = try self.requireConsistentOwners(projectId: nil)
+                let repository = self.repository
+                return try await self.executionDomain.async {
+                    let (project, intent) = try repository.createLocalAppAuthoringProject(name: name,
+                        sourceDirectory: sourceDirectory, sourceID: sourceID, sourceRequestID: sourceRequestID, appID: appID,
+                        projectID: projectID, intentID: intentID)
+                    return StoreAuthoringCreateResult(project: project, intent: intent, state: repository.load())
+                }
+            } onSuccess: { result in
+                self.publish(result.state, preservingConflicts: true)
+                return (result.project, result.intent)
+            }
+        }
+        await refreshPendingLocalAppCreations()
+        localAppIntentRevision &+= 1
+        return result
+    }
+
+    func localAppAuthoringIntents(projectID: String) async throws -> [LocalAppAuthoringIntent] {
+        let repository = repository
+        return try await executionDomain.async { try repository.localAppAuthoringIntents(projectId: projectID) }
+    }
+
+    func storeLocalAppAuthoringIntent(_ intent: LocalAppAuthoringIntent,
+                                      replacing previous: LocalAppAuthoringIntent? = nil) async throws {
+        let repository = repository
+        try await executionDomain.async { try repository.storeLocalAppAuthoringIntent(intent, replacing: previous) }
+        localAppIntentRevision &+= 1
+    }
+
+    func selectedLocalAppAuthoringIntent(projectID: String) async throws -> LocalAppAuthoringIntent? {
+        let repository = repository
+        return try await executionDomain.async { try repository.selectedLocalAppAuthoringIntent(projectId: projectID) }
+    }
+
+    func selectLocalAppAuthoringIntent(projectID: String, intentID: String,
+                                       authority: WorkspaceWriteAuthority, revision: UInt64,
+                                       projectAuthority: WorkspaceWriteAuthority, projectRevision: UInt64) async throws {
+        let repository = repository
+        try await executionDomain.async {
+            try repository.selectLocalAppAuthoringIntent(projectId: projectID, intentId: intentID,
+                authority: authority, revision: revision, projectAuthority: projectAuthority, projectRevision: projectRevision)
+        }
+        localAppIntentRevision &+= 1
     }
 
     @discardableResult
@@ -789,6 +888,12 @@ final class ProjectStore {
 
 private struct StoreCreateResult: Sendable {
     let project: ProjectSnapshot
+    let state: ProjectRepositoryState
+}
+
+private struct StoreAuthoringCreateResult: Sendable {
+    let project: ProjectSnapshot
+    let intent: LocalAppAuthoringIntent
     let state: ProjectRepositoryState
 }
 

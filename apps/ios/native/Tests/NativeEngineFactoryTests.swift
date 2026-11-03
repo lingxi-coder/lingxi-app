@@ -100,7 +100,7 @@ final class NativeEngineFactoryTests: XCTestCase {
         let noTask = try NativeEngineFactory.prepare(.scheduled(
             appSandboxRoot: "/sandbox", scope: global, task: nil, snapshot: snapshot, runtime: nil
         )).configuration
-        XCTAssertNil(noTask.projectCwd)
+        XCTAssertEqual(noTask.projectCwd, MobileUserStorage.directories().scheduledCwd)
         XCTAssertEqual(noTask.model, "default-model")
     }
 
@@ -137,15 +137,27 @@ final class NativeEngineFactoryTests: XCTestCase {
         let owner = await first!.workspaceState()
         XCTAssertNotNil(UUID(uuidString: owner.sessionId))
         XCTAssertTrue((owner.transcriptPath as NSString).isAbsolutePath)
+        XCTAssertEqual(owner.cwd, dirs.chatGuestCwd)
         first = nil
         let firstReleased = await waitForMobileSessionRelease(lingxiHome: dirs.configHome, sessionId: owner.sessionId, timeoutMs: 8_000)
         XCTAssertTrue(firstReleased)
         guard firstReleased else { return }
 
+        var code: MobileEngineHandle? = try build(mode: .code)
+        let codeOwner = await code!.workspaceState()
+        XCTAssertEqual(codeOwner.cwd, dirs.codeGuestCwd)
+        XCTAssertNotEqual(codeOwner.sessionId, owner.sessionId)
+        XCTAssertNotEqual(codeOwner.cwd, owner.cwd)
+        code = nil
+        let codeReleased = await waitForMobileSessionRelease(lingxiHome: dirs.configHome, sessionId: codeOwner.sessionId, timeoutMs: 8_000)
+        XCTAssertTrue(codeReleased)
+        guard codeReleased else { return }
+
         var restored: MobileEngineHandle? = try build(sessionID: owner.sessionId, path: owner.transcriptPath)
         let restoredOwner = await restored!.workspaceState()
         XCTAssertEqual(restoredOwner.sessionId, owner.sessionId)
         XCTAssertEqual(restoredOwner.transcriptPath, owner.transcriptPath)
+        XCTAssertEqual(restoredOwner.cwd, dirs.chatGuestCwd)
         restored = nil
         let restoredReleased = await waitForMobileSessionRelease(lingxiHome: dirs.configHome, sessionId: owner.sessionId, timeoutMs: 8_000)
         XCTAssertTrue(restoredReleased)
@@ -264,7 +276,8 @@ final class NativeEngineFactoryTests: XCTestCase {
         let result = await handle.runCronTaskNow(taskId: task.id, ownerAdmission: admission)
         await admission.cancelAndWait()
         XCTAssertEqual(beginCount, 1)
-        XCTAssertTrue(try XCTUnwrap(result).retryable)
+        let outcome = try XCTUnwrap(result)
+        XCTAssertTrue(outcome.retryable, "Rejected owner result: \(outcome.status)")
         let reservations = try await store.listOwnerReservationsStrict()
         XCTAssertTrue(reservations.isEmpty)
         let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?.allObjects.compactMap { $0 as? URL } ?? []
@@ -285,8 +298,8 @@ final class NativeEngineFactoryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let managedRoot = root.appendingPathComponent("runtime").path
         let dirs = MobileUserStorage.directories(managedRoot: managedRoot)
-        let repository = ProjectRepository(projectsRoot: URL(fileURLWithPath: dirs.projects),
-                                           userHome: URL(fileURLWithPath: dirs.home))
+        let repository = ProjectRepository(projectsRoot: URL(fileURLWithPath: dirs.projects, isDirectory: true),
+                                           userHome: URL(fileURLWithPath: dirs.home, isDirectory: true))
         var project = try repository.createInternal(name: "Project")
         let before = CronScope.project(project)
         let moved = URL(fileURLWithPath: dirs.home).appendingPathComponent("elsewhere", isDirectory: true)

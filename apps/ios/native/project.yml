@@ -207,8 +207,6 @@ targets:
           fi
           if [ -f "${RUNTIME_STAGE_ROOT}/manifest.json" ]; then
             cp "${RUNTIME_STAGE_ROOT}/manifest.json" "${DESTINATION}/linux-runtime-manifest.json"
-          elif [ -f "${RUNTIME_RESOURCES}/runtime-manifest.json" ]; then
-            cp "${RUNTIME_RESOURCES}/runtime-manifest.json" "${DESTINATION}/linux-runtime-manifest.json"
           else
             echo "error: Linux runtime manifest is missing; rebuild the Alpine runtime."
             exit 1

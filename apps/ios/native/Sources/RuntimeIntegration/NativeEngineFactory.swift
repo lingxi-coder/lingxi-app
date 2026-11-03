@@ -127,7 +127,7 @@ enum NativeEngineFactory {
                 sessionMode: mode.dto,
                 visionDelegationEnabled: snapshot.visionDelegationEnabled,
                 appSandboxRoot: appSandboxRoot,
-                projectCwd: scope.projectCwd ?? (task == nil ? nil : directories.scheduledCwd),
+                projectCwd: scope.projectCwd ?? directories.scheduledCwd,
                 projectAdditionalDirectories: [],
                 projectMountGrants: [],
                 providerConfig: IosProviderConfigFfi(
@@ -142,7 +142,7 @@ enum NativeEngineFactory {
         case let .appAgent(appSandboxRoot, snapshot):
             let mobileLinux: IosMobileLinuxConfigFfi?
             #if LINGXI_FULL
-            let metadata = LXISHRuntimeBundleMetadata.current()
+            let metadata = try LXISHRuntimeBundleMetadata.current()
             let workspace = try MobileUserStorage.prepareProjectsDirectory()
             mobileLinux = IosMobileLinuxConfigFfi(
                 mode: .mobileLinux,
@@ -216,7 +216,8 @@ enum NativeEngineFactory {
     static func build(
         _ prepared: Prepared,
         mediaHost: IosNativeMediaHost?,
-        interactiveBuilder: HandleBuilder? = nil
+        interactiveBuilder: HandleBuilder? = nil,
+        onNativeDispatch: @escaping @Sendable () -> Void = {}
     ) async throws -> MobileEngineHandle {
         let listener: IosEventListener
         let permissions: IosPermissionSink
@@ -252,10 +253,12 @@ enum NativeEngineFactory {
                 autoreleasepool {
                     continuation.resume(with: Result {
                         if let interactiveBuilder, case .interactive = prepared.policy {
+                            onNativeDispatch()
                             return try interactiveBuilder(prepared.configuration, listener, mediaHost, permissions)
                         }
                         try prepared.validateMediaHost(mediaHost)
                         let location: IosLocation? = provideLocation ? LocationImpl() : nil
+                        onNativeDispatch()
                         return try buildIosEngineWithConfig(
                             config: prepared.configuration,
                             listener: listener,

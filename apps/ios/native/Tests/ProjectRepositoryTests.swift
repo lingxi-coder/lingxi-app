@@ -18,6 +18,23 @@ final class ProjectRepositoryTests: XCTestCase {
         }
     }
 
+    func testWorkspacePickerShowsOnlyProjectsInTheCapturedMode() {
+        func project(_ name: String, modes: Set<SessionMode>) -> ProjectSnapshot {
+            let id = UUID().uuidString.lowercased()
+            let record = ProjectRecord(id: id, name: name, storageKind: .internal,
+                createdAt: .distantPast, updatedAt: .distantPast, modeMembership: modes)
+            let workspace = ProjectWorkspace(projectId: id, hostURL: root.appendingPathComponent(id),
+                                             guestPath: "/home/lingxi/\(id)")
+            return ProjectSnapshot(record: record, workspace: workspace, sessions: [])
+        }
+        let chat = project("chat", modes: [.chat])
+        let code = project("code", modes: [.code])
+        let shared = project("shared", modes: [.chat, .code])
+        let all = [chat, code, shared]
+        XCTAssertEqual(Set(ProjectSnapshot.visible(all, in: .chat).map(\.id)), Set([chat.id, shared.id]))
+        XCTAssertEqual(Set(ProjectSnapshot.visible(all, in: .code).map(\.id)), Set([code.id, shared.id]))
+    }
+
     func testGuardedPublicationRejectsChangedTargetAndChangedStagingFile() throws {
         let target = root.appendingPathComponent("guarded.json")
         let original = Data("original".utf8)
@@ -54,6 +71,256 @@ final class ProjectRepositoryTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root, writer: writer)
         XCTAssertThrowsError(try repository.updateSessions(projectId: nil, sessions: [session("second", at: Date())]))
         XCTAssertEqual(try Data(contentsOf: file), replacement)
+    }
+
+    func testCreateIntentSurvivesBeforeProjectAndStagedFailure() throws {
+        let projects = root.appendingPathComponent("projects", isDirectory: true)
+        let repository = ProjectRepository(projectsRoot: projects, userHome: root)
+        let request = LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
+            projectId: UUID().uuidString.lowercased(), mode: .code, name: "Notes", prompt: "keep this request")
+        try repository.storeLocalAppSourceCreateIntent(request)
+        XCTAssertEqual(try ProjectRepository(projectsRoot: projects, userHome: root).pendingLocalAppSourceCreations(), [request])
+        let source = MobileUserStorage.directories().appsGuestPath + "/notes"
+        let sourceID = UUID().uuidString.lowercased()
+        let failing = ProjectRepository(projectsRoot: projects,
+            writer: FailingWriter(failingFileName: ".local-app-selection.json"), userHome: root)
+        XCTAssertThrowsError(try failing.createLocalAppAuthoringProject(name: request.name, sourceDirectory: source,
+            sourceID: sourceID, sourceRequestID: request.requestId, appID: nil,
+            projectID: request.projectId, intentID: request.requestId))
+        let reopened = ProjectRepository(projectsRoot: projects, userHome: root)
+        XCTAssertNil(reopened.load().errorMessage)
+        XCTAssertTrue(reopened.load().projects.isEmpty)
+        XCTAssertEqual(try reopened.pendingLocalAppSourceCreations(), [request])
+
+        let (project, intent) = try reopened.createLocalAppAuthoringProject(name: request.name, sourceDirectory: source,
+            sourceID: sourceID, sourceRequestID: request.requestId, appID: nil,
+            projectID: request.projectId, intentID: request.requestId)
+        XCTAssertEqual(project.id, request.projectId)
+        XCTAssertEqual(try reopened.selectedLocalAppAuthoringIntent(projectId: project.id), intent)
+        XCTAssertEqual(try reopened.pendingLocalAppSourceCreations(), [request],
+                       "The recovery offer remains visible until an owner receipt is confirmed")
+        let retry = try reopened.createLocalAppAuthoringProject(name: request.name, sourceDirectory: source,
+            sourceID: sourceID, sourceRequestID: request.requestId, appID: nil,
+            projectID: request.projectId, intentID: request.requestId)
+        XCTAssertEqual(retry.0.id, project.id)
+        XCTAssertEqual(retry.1, intent)
+        XCTAssertThrowsError(try reopened.createLocalAppAuthoringProject(name: request.name, sourceDirectory: source,
+            sourceID: UUID().uuidString.lowercased(), sourceRequestID: request.requestId, appID: nil,
+            projectID: request.projectId, intentID: request.requestId))
+        var owner = intent
+        owner.authoringSessionId = UUID().uuidString.lowercased()
+        owner.transcriptPath = "/transcripts/owner.jsonl"
+        try reopened.storeLocalAppAuthoringIntent(owner, replacing: intent)
+        try reopened.completeLocalAppSourceCreateIntent(requestID: request.requestId, owner: owner)
+        XCTAssertTrue(try reopened.pendingLocalAppSourceCreations().isEmpty)
+    }
+
+    func testMarketRemixPersistsExactPrivateInputAndRejectsChangedArchive() throws {
+        let projects = root.appendingPathComponent("projects", isDirectory: true)
+        let privateRoot = root.appendingPathComponent("private", isDirectory: true)
+        try FileManager.default.createDirectory(at: privateRoot, withIntermediateDirectories: true)
+        let repository = ProjectRepository(projectsRoot: projects, userHome: root)
+        let requestID = UUID().uuidString.lowercased()
+        let manifestData = Data(#"{"schema":1,"name":"Notes","summary":null,"entry":{"type":"web","path":"index.html"},"targets":[],"remix":{"allowed":true}}"#.utf8)
+        let manifest = try JSONDecoder().decode(UnifiedAppManifest.self, from: manifestData)
+        let signedManifest = try JSONDecoder().decode(LocalAppJSON.self, from: manifestData)
+        let file = LocalAppMarketRemixInput.File(path: "lingxi-app.json", sizeBytes: 1,
+            sha256: String(repeating: "a", count: 64), executable: false)
+        let input = LocalAppMarketRemixInput(requestId: requestID,
+            archivePath: privateRoot.appendingPathComponent("local-app-imports").appendingPathComponent("market-" + requestID).appendingPathComponent("source.zip").path,
+            archiveSha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            archiveBytes: 3, manifest: manifest, files: [file], dependencies: [],
+            signedManifest: signedManifest, signedFiles: try .encode([file]), signedDependencies: .array([]),
+            marketOrigin: .init(appId: "market-app", releaseId: "release-1", digest: "release-digest", remixedFrom: "market-app"))
+        let digest = try ProjectRepository.localAppRemixInputDigest(input)
+        let intent = LocalAppSourceCreateIntent(requestId: requestID, projectId: UUID().uuidString.lowercased(),
+            mode: .code, name: "Notes", prompt: "", operation: .marketRemix, remixInputDigest: digest)
+        let chatIntent = LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
+            projectId: UUID().uuidString.lowercased(), mode: .chat, name: "Notes", prompt: "",
+            operation: .marketRemix, remixInputDigest: digest)
+        XCTAssertThrowsError(try repository.storeLocalAppRemixRequest(chatIntent, input: input, configHome: privateRoot))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: privateRoot.appendingPathComponent("local-app-imports").path))
+        try repository.storeLocalAppRemixRequest(intent, input: input, configHome: privateRoot)
+        let reopened = ProjectRepository(projectsRoot: projects, userHome: root)
+        XCTAssertEqual(try reopened.pendingLocalAppSourceCreations(), [intent])
+        let (saved, archive) = try reopened.localAppRemixInput(intent, configHome: privateRoot)
+        XCTAssertEqual(saved, input)
+        guard case let .object(savedManifest) = saved.signedManifest else { return XCTFail("Expected the signed manifest") }
+        XCTAssertEqual(savedManifest["summary"], .null, "Recovery must preserve explicit null in the signed input")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: archive.path),
+                       "A committed native request can be replayed without its old ZIP")
+        XCTAssertThrowsError(try reopened.storeLocalAppRemixArchive(Data("wrong".utf8), intent: intent, configHome: privateRoot))
+        XCTAssertEqual(try reopened.storeLocalAppRemixArchive(Data("abc".utf8), intent: intent, configHome: privateRoot), archive)
+        XCTAssertEqual(try Data(contentsOf: archive), Data("abc".utf8))
+        XCTAssertEqual(try reopened.storeLocalAppRemixArchive(Data("abc".utf8), intent: intent, configHome: privateRoot), archive)
+        // Model the native producer's immutable result; registration is a
+        // separate step and cannot hide this recovery offer before readback.
+        let appID = "new-market-remix", sourceID = UUID().uuidString.lowercased()
+        let source = MobileUserStorage.directories().appsGuestPath + "/remix"
+        let (project, owner) = try reopened.createLocalAppAuthoringProject(name: intent.name, sourceDirectory: source,
+            sourceID: sourceID, sourceRequestID: requestID, appID: appID,
+            projectID: intent.projectId, intentID: requestID)
+        XCTAssertEqual(owner.appId, appID)
+        XCTAssertEqual(try reopened.pendingLocalAppSourceCreations(), [intent])
+        var authenticated = owner
+        authenticated.authoringSessionId = UUID().uuidString.lowercased()
+        authenticated.transcriptPath = "/catalog/owner.jsonl"
+        try reopened.storeLocalAppAuthoringIntent(authenticated, replacing: owner)
+        XCTAssertEqual(try reopened.pendingLocalAppSourceCreations(), [intent], "A pending or failed native register must remain retryable")
+        let restoredOwner = try XCTUnwrap(reopened.selectedLocalAppAuthoringIntent(projectId: project.id))
+        XCTAssertEqual(restoredOwner.appId, appID)
+        XCTAssertEqual(restoredOwner.sourceId, sourceID)
+        let session = try XCTUnwrap(restoredOwner.authoringSessionId)
+        let response = "{\"sourceDirectory\":\"\(source)\",\"workspaceId\":\"\(project.id)\",\"projectRef\":{\"kind\":\"mobileProject\",\"projectId\":\"\(project.id)\"},\"authoringSessionId\":\"\(session)\",\"sourceId\":\"\(sourceID)\",\"sessionMode\":\"code\"}"
+        let receipt = try JSONDecoder().decode(LocalAppAuthoringReceipt.self, from: Data(response.utf8))
+        let expectedOwner = LocalAppAuthoringOwner(sourceDirectory: source, projectID: project.id, sessionID: session, appID: appID)
+        XCTAssertTrue(expectedOwner.matches(receipt.authoring))
+        XCTAssertTrue(receipt.matchesSourceID(restoredOwner.sourceId))
+        XCTAssertFalse(receipt.matchesSourceID(UUID().uuidString.lowercased()))
+        try reopened.completeLocalAppSourceCreateIntent(requestID: requestID, owner: restoredOwner)
+        XCTAssertTrue(try reopened.pendingLocalAppSourceCreations().isEmpty)
+        let moved = root.appendingPathComponent("moved-config", isDirectory: true)
+        try FileManager.default.moveItem(at: privateRoot, to: moved)
+        var completed = intent
+        completed.completed = true
+        let (movedInput, originalPath) = try reopened.localAppRemixInput(completed, configHome: moved)
+        XCTAssertEqual(movedInput, input)
+        XCTAssertEqual(originalPath.path, input.archivePath, "Replay must preserve the original request payload")
+        XCTAssertThrowsError(try reopened.storeLocalAppRemixArchive(Data("abc".utf8), intent: completed, configHome: moved),
+                             "A moved sandbox must not write into an old path")
+    }
+
+    func testMarketRemixStagesRealZipAndSignedHiddenFileInventoryWithoutExtraction() throws {
+        // ZIP entries: lingxi-app.json, index.html, .gitignore and
+        // .well-known/security.txt. Native import validates the ZIP and paths.
+        let encoded = "UEsDBBQAAAAAAAAAIViFsZTibAAAAGwAAAAPAAAAbGluZ3hpLWFwcC5qc29ueyJzY2hlbWEiOjEsIm5hbWUiOiJOb3RlcyIsImVudHJ5Ijp7InR5cGUiOiJ3ZWIiLCJwYXRoIjoiaW5kZXguaHRtbCJ9LCJ0YXJnZXRzIjpbXSwicmVtaXgiOnsiYWxsb3dlZCI6dHJ1ZX19UEsDBBQAAAAAAAAAIVibWLMIIwAAACMAAAAKAAAAaW5kZXguaHRtbDwhZG9jdHlwZSBodG1sPjx0aXRsZT5Ob3RlczwvdGl0bGU+UEsDBBQAAAAAAAAAIViqpgOJDgAAAA4AAAAKAAAALmdpdGlnbm9yZW5vZGVfbW9kdWxlcy8KUEsDBBQAAAAAAAAAIVi7UZbFHwAAAB8AAAAYAAAALndlbGwta25vd24vc2VjdXJpdHkudHh0Q29udGFjdDogc2VjdXJpdHlAZXhhbXBsZS50ZXN0ClBLAQIUAxQAAAAAAAAAIViFsZTibAAAAGwAAAAPAAAAAAAAAAAAAACkgQAAAABsaW5neGktYXBwLmpzb25QSwECFAMUAAAAAAAAACFYm1izCCMAAAAjAAAACgAAAAAAAAAAAAAApIGZAAAAaW5kZXguaHRtbFBLAQIUAxQAAAAAAAAAIViqpgOJDgAAAA4AAAAKAAAAAAAAAAAAAACkgeQAAAAuZ2l0aWdub3JlUEsBAhQDFAAAAAAAAAAhWLtRlsUfAAAAHwAAABgAAAAAAAAAAAAAAKSBGgEAAC53ZWxsLWtub3duL3NlY3VyaXR5LnR4dFBLBQYAAAAABAAEAPMAAABvAQAAAAA="
+        let bytes = try XCTUnwrap(Data(base64Encoded: encoded))
+        let config = root.appendingPathComponent("config", isDirectory: true)
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
+        let repository = ProjectRepository(projectsRoot: root.appendingPathComponent("projects"), userHome: root)
+        let requestID = UUID().uuidString.lowercased()
+        let manifestData = Data(#"{"schema":1,"name":"Notes","entry":{"type":"web","path":"index.html"},"targets":[],"remix":{"allowed":true}}"#.utf8)
+        let manifest = try JSONDecoder().decode(UnifiedAppManifest.self, from: manifestData)
+        let files: [LocalAppMarketRemixInput.File] = [
+            .init(path: "lingxi-app.json", sizeBytes: 108, sha256: "fc2c0ec1a63c84b6def425a46b2e95429fea41db8c9635eaff291a2b0d4af5cf", executable: false),
+            .init(path: "index.html", sizeBytes: 35, sha256: "190656c049cf9a75ef41619dd0ea48ca4d644ae7725b4b10856a7bd0896d9bff", executable: false),
+            .init(path: ".gitignore", sizeBytes: 14, sha256: "4d56952b0fb13bf8f9b6c13a6d4c34a075bac3af447636a1df4335d7576e2f97", executable: false),
+            .init(path: ".well-known/security.txt", sizeBytes: 31, sha256: "1b49129282fc3f4ecc302c73c5cad0762dd0596532e9e411e14678b693286d7f", executable: false),
+        ]
+        let archivePath = config.appendingPathComponent("local-app-imports/market-\(requestID)/source.zip").path
+        let input = LocalAppMarketRemixInput(requestId: requestID, archivePath: archivePath,
+            archiveSha256: "2b33ccadd0cf52a1fb0d2dacbf9d472c9340cb78d50ea49292c080333fa3cd8f",
+            archiveBytes: 632, manifest: manifest, files: files, dependencies: [],
+            signedManifest: try JSONDecoder().decode(LocalAppJSON.self, from: manifestData),
+            signedFiles: try .encode(files), signedDependencies: .array([]),
+            marketOrigin: .init(appId: "market-app", releaseId: "release-1", digest: "digest", remixedFrom: "market-app"))
+        let intent = LocalAppSourceCreateIntent(requestId: requestID, projectId: UUID().uuidString.lowercased(),
+            mode: .code, name: "Notes", prompt: "", operation: .marketRemix,
+            remixInputDigest: try ProjectRepository.localAppRemixInputDigest(input))
+        try repository.storeLocalAppRemixRequest(intent, input: input, configHome: config)
+        let staged = try repository.storeLocalAppRemixArchive(bytes, intent: intent, configHome: config)
+        XCTAssertEqual(try Data(contentsOf: staged), bytes)
+        XCTAssertEqual(try repository.localAppRemixInput(intent, configHome: config).0.files, files)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged.deletingLastPathComponent().appendingPathComponent(".gitignore").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged.deletingLastPathComponent().appendingPathComponent(".well-known").path))
+    }
+
+    func testMarketRemixFailureBeforeIntentAndSymlinkRemainUntrusted() throws {
+        let projects = root.appendingPathComponent("projects", isDirectory: true)
+        let privateRoot = root.appendingPathComponent("private", isDirectory: true)
+        try FileManager.default.createDirectory(at: privateRoot, withIntermediateDirectories: true)
+        let requestID = UUID().uuidString.lowercased()
+        let manifest = try JSONDecoder().decode(UnifiedAppManifest.self, from: Data(
+            #"{"schema":1,"name":"Notes","entry":{"type":"web","path":"index.html"},"targets":[],"remix":{"allowed":true}}"#.utf8))
+        let file = LocalAppMarketRemixInput.File(path: "lingxi-app.json", sizeBytes: 1,
+            sha256: String(repeating: "a", count: 64), executable: false)
+        let input = LocalAppMarketRemixInput(requestId: requestID,
+            archivePath: privateRoot.appendingPathComponent("local-app-imports").appendingPathComponent("market-" + requestID).appendingPathComponent("source.zip").path,
+            archiveSha256: String(repeating: "b", count: 64),
+            archiveBytes: 3, manifest: manifest, files: [file], dependencies: [],
+            signedManifest: try .encode(manifest), signedFiles: try .encode([file]), signedDependencies: .array([]),
+            marketOrigin: .init(appId: "market-app", releaseId: "release-1", digest: "digest", remixedFrom: "market-app"))
+        let intent = LocalAppSourceCreateIntent(requestId: requestID, projectId: UUID().uuidString.lowercased(),
+            mode: .code, name: "Notes", prompt: "", operation: .marketRemix,
+            remixInputDigest: try ProjectRepository.localAppRemixInputDigest(input))
+        let failing = ProjectRepository(projectsRoot: projects,
+            writer: FailingWriter(failingFileName: ".local-app-create-\(requestID).json"), userHome: root)
+        XCTAssertThrowsError(try failing.storeLocalAppRemixRequest(intent, input: input, configHome: privateRoot))
+        let reopened = ProjectRepository(projectsRoot: projects, userHome: root)
+        XCTAssertTrue(try reopened.pendingLocalAppSourceCreations().isEmpty)
+        XCTAssertThrowsError(try reopened.localAppRemixInput(intent, configHome: privateRoot))
+        try reopened.storeLocalAppRemixRequest(intent, input: input, configHome: privateRoot)
+        let metadata = privateRoot.appendingPathComponent("local-app-imports").appendingPathComponent("market-" + requestID).appendingPathComponent("input.json")
+        let original = try Data(contentsOf: metadata)
+        try Data("{}".utf8).write(to: metadata)
+        XCTAssertThrowsError(try reopened.localAppRemixInput(intent, configHome: privateRoot))
+        try original.write(to: metadata)
+        let staging = privateRoot.appendingPathComponent("local-app-imports", isDirectory: true)
+        let target = privateRoot.appendingPathComponent("moved", isDirectory: true)
+        try FileManager.default.moveItem(at: staging, to: target)
+        try FileManager.default.createSymbolicLink(at: staging, withDestinationURL: target)
+        XCTAssertThrowsError(try reopened.localAppRemixInput(intent, configHome: privateRoot))
+    }
+
+    func testPublishedAuthoringProjectRemainsRecoverableWhenIndexCommitFails() throws {
+        let projects = root.appendingPathComponent("projects", isDirectory: true)
+        let initial = ProjectRepository(projectsRoot: projects, userHome: root)
+        _ = try initial.createInternal(name: "Existing")
+        let request = LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
+            projectId: UUID().uuidString.lowercased(), mode: .code, name: "Notes", prompt: "keep")
+        try initial.storeLocalAppSourceCreateIntent(request)
+        let failing = ProjectRepository(projectsRoot: projects,
+            writer: FailingWriter(failingFileName: projectIndexFileName), userHome: root)
+        XCTAssertThrowsError(try failing.createLocalAppAuthoringProject(name: request.name,
+            sourceDirectory: MobileUserStorage.directories().appsGuestPath + "/notes",
+            sourceID: UUID().uuidString.lowercased(), sourceRequestID: request.requestId, appID: nil,
+            projectID: request.projectId, intentID: request.requestId))
+        let reopened = ProjectRepository(projectsRoot: projects, userHome: root)
+        let state = reopened.load()
+        XCTAssertNil(state.errorMessage)
+        XCTAssertTrue(state.projects.contains { $0.id == request.projectId })
+        let selected = try XCTUnwrap(reopened.selectedLocalAppAuthoringIntent(projectId: request.projectId))
+        XCTAssertEqual(selected.intentId, request.requestId)
+        XCTAssertEqual(try reopened.pendingLocalAppSourceCreations(), [request])
+    }
+
+    func testCreateIntentRejectsChangedPayloadAndSymlink() throws {
+        let repository = ProjectRepository(projectsRoot: root, userHome: root)
+        let request = LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
+            projectId: UUID().uuidString.lowercased(), mode: .code, name: "Notes", prompt: "first")
+        try repository.storeLocalAppSourceCreateIntent(request)
+        let changed = LocalAppSourceCreateIntent(requestId: request.requestId,
+            projectId: request.projectId, mode: .code, name: request.name, prompt: "different")
+        XCTAssertThrowsError(try repository.storeLocalAppSourceCreateIntent(changed))
+        XCTAssertEqual(try repository.localAppSourceCreateIntent(requestID: request.requestId), request)
+        let path = root.appendingPathComponent(".local-app-create-\(request.requestId).json")
+        let target = root.appendingPathComponent("other.json")
+        try FileManager.default.moveItem(at: path, to: target)
+        try FileManager.default.createSymbolicLink(at: path, withDestinationURL: target)
+        XCTAssertThrowsError(try repository.localAppSourceCreateIntent(requestID: request.requestId))
+        XCTAssertThrowsError(try repository.pendingLocalAppSourceCreations())
+    }
+
+    func testCreateIntentNameUsesTheServiceUnicodeScalarLimit() throws {
+        let repository = ProjectRepository(projectsRoot: root, userHome: root)
+        func request(_ name: String) -> LocalAppSourceCreateIntent {
+            LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
+                projectId: UUID().uuidString.lowercased(), mode: .code, name: name, prompt: "")
+        }
+        XCTAssertNoThrow(try repository.storeLocalAppSourceCreateIntent(request(String(repeating: "a", count: 80))))
+        XCTAssertThrowsError(try repository.storeLocalAppSourceCreateIntent(request(String(repeating: "a", count: 81))))
+        XCTAssertNoThrow(try repository.storeLocalAppSourceCreateIntent(request(String(repeating: "e\u{301}", count: 40))))
+        XCTAssertThrowsError(try repository.storeLocalAppSourceCreateIntent(request(String(repeating: "e\u{301}", count: 41))))
+    }
+
+    func testChatCreateIntentIsRejectedBeforeAnyFileIsPublished() throws {
+        let repository = ProjectRepository(projectsRoot: root, userHome: root)
+        let request = LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
+            projectId: UUID().uuidString.lowercased(), mode: .chat, name: "Notes", prompt: "draft")
+        XCTAssertThrowsError(try repository.storeLocalAppSourceCreateIntent(request))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            root.appendingPathComponent(".local-app-create-\(request.requestId).json").path))
+        XCTAssertTrue(try repository.pendingLocalAppSourceCreations().isEmpty)
     }
 
     func testModeMembershipSurvivesAnEmptyCatalog() throws {
@@ -292,7 +559,7 @@ final class ProjectRepositoryTests: XCTestCase {
     func testCatalogPreservesConfirmedSessionsFromOtherWorkspaces() throws {
         let repository = ProjectRepository(projectsRoot: root)
         let project = try repository.createInternal(name: "Linked directories")
-        let linked = "/home/lingxi/lingxi/projects/linked"
+        let linked = LXISHGuestPaths.workspace("projects") + "/linked"
         try FileManager.default.createDirectory(at: root.appendingPathComponent("linked"), withIntermediateDirectories: true)
         let original = ProjectSessionSummary(sessionId: "a", title: "A", messageCount: 2,
             relativeTime: "Now", updatedAt: Date(), workspaceDirectory: project.record.directory, transcriptPath: "/catalog/a.jsonl")
@@ -314,7 +581,7 @@ final class ProjectRepositoryTests: XCTestCase {
     func testMissingLinkedDirectoryDoesNotBlockLiveWorkspacePersistence() throws {
         let repository = ProjectRepository(projectsRoot: root)
         let project = try repository.createInternal(name: "Missing linked folder")
-        let missing = "/home/lingxi/lingxi/projects/deleted"
+        let missing = LXISHGuestPaths.workspace("projects") + "/deleted"
         _ = try recordWorkspace(repository, projectId: project.id, state: SessionWorkspaceState(sessionId: "draft",
             cwd: project.record.directory, projectRoot: project.record.directory, additionalDirectories: [missing], transcriptPath: "/catalog/draft.jsonl"),
             mode: .code, updateProjectDirectory: true)
@@ -349,7 +616,7 @@ final class ProjectRepositoryTests: XCTestCase {
             projectDirectory.appendingPathComponent(projectWorkspaceDirectoryName, isDirectory: true).resolvingSymlinksInPath(),
             created.workspace.hostURL
         )
-        XCTAssertEqual("/home/lingxi/lingxi/projects/\(created.record.id)/workspace", created.workspace.guestPath)
+        XCTAssertEqual(LXISHGuestPaths.workspace("projects") + "/\(created.record.id)/workspace", created.workspace.guestPath)
         XCTAssertTrue(FileManager.default.fileExists(atPath: projectDirectory.appendingPathComponent(projectManifestFileName).path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: projectDirectory.appendingPathComponent(projectSessionIndexFileName).path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: projectDirectory.appendingPathComponent(projectSyncBaselineFileName).path))
@@ -503,10 +770,11 @@ final class ProjectRepositoryTests: XCTestCase {
         let project = try repository.createInternal(name: "Workspace project")
         let linked = root.appendingPathComponent("linked", isDirectory: true)
         try FileManager.default.createDirectory(at: linked, withIntermediateDirectories: true)
-        let guest = "/home/lingxi/lingxi/projects/linked"
-        _ = try repository.recordStartedSession(projectId: project.id, sessionId: "session-one", title: "Shared", mode: .code, authoritativeTranscriptPath: "/home/lingxi/.lingxi/projects/b/session-one.jsonl")
+        let guest = LXISHGuestPaths.workspace("projects") + "/linked"
+        let transcript = LXISHGuestPaths.workspace("projects") + "/b/session-one.jsonl"
+        _ = try repository.recordStartedSession(projectId: project.id, sessionId: "session-one", title: "Shared", mode: .code, authoritativeTranscriptPath: transcript)
         _ = try recordWorkspace(repository, projectId: project.id, state: SessionWorkspaceState(sessionId: "session-one", cwd: guest,
-            projectRoot: project.record.directory, additionalDirectories: [guest], transcriptPath: "/home/lingxi/.lingxi/projects/b/session-one.jsonl"),
+            projectRoot: project.record.directory, additionalDirectories: [guest], transcriptPath: transcript),
             mode: .code, updateProjectDirectory: true)
         let restored = try ProjectRepository(projectsRoot: root).project(projectId: project.id)
         XCTAssertEqual(restored.workspace.hostURL, linked.resolvingSymlinksInPath())

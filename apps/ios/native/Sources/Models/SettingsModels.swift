@@ -291,11 +291,12 @@ struct LinuxRuntimeState: Equatable {
         switch rootfsState {
         case .blockedByLicense: return String(localized: "settings_linux_badge_blocked")
         case .unsupported: return String(localized: "settings_linux_badge_not_linked")
-        default: return available ? String(localized: "settings_status_available") : String(localized: "settings_linux_task_unavailable")
+        default: return availableForExecution ? String(localized: "settings_status_available") : String(localized: "settings_linux_task_unavailable")
         }
     }
 
-    var canOpenTerminal: Bool { terminalSupported && available }
+    var availableForExecution: Bool { available && rootfsState == .ready }
+    var canOpenTerminal: Bool { terminalSupported && availableForExecution }
 
     /// Fold a bridge PROBE result into this state. The ONLY sanctioned way to
     /// apply a whole probe: `LinuxRuntimeBridge` builds a full

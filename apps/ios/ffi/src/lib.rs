@@ -176,6 +176,8 @@ pub use host::build_mobile_engine;
 #[cfg(feature = "uniffi")]
 pub use host::create_ios_side_chat;
 #[cfg(feature = "uniffi")]
+pub use host::IosMediaDrainStatus;
+#[cfg(feature = "uniffi")]
 pub use host::IosNativeMediaHost;
 #[cfg(feature = "uniffi")]
 pub use host::MediaAudioSessionBindingFfi;

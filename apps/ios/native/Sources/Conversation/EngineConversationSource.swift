@@ -10,6 +10,13 @@ import harness_runtimeFFI
 #endif
 
 #if canImport(harness_runtimeFFI)
+private final class EngineNativeDispatchEvidence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var dispatched = false
+    func markDispatched() { lock.withLock { dispatched = true } }
+    var didDispatch: Bool { lock.withLock { dispatched } }
+}
+
 /// The real conversation source: an in-process engine reached over UniFFI.
 ///
 /// Lifecycle: lazily build the `MobileEngineHandle` on first `send`; register
@@ -19,6 +26,11 @@ import harness_runtimeFFI
 /// `ToolUse*` / `TurnEnded` back through the listener.
 @MainActor
 final class EngineConversationSource: ConversationSource {
+    private struct HandleBootstrapFailure: Error {
+        let underlying: Error
+        let sessionID: String
+        let handle: MobileEngineHandle
+    }
     private static let turnLog = Logger(
         subsystem: "com.lingxi.code",
         category: "conversation-turn"
@@ -36,14 +48,27 @@ final class EngineConversationSource: ConversationSource {
     private var config: EngineConfig
     private let handleBuilder: HandleBuilder?
     private let mediaHostComposition: IOSNativeMediaHostComposition?
+    #if DEBUG
+    private var mediaDrainForTesting: (begin: (MobileEngineHandle) throws -> Void, wait: (UInt32) async -> Bool)?
+
+    func setMediaDrainForTesting(begin: @escaping (MobileEngineHandle) throws -> Void,
+                                 wait: @escaping (UInt32) async -> Bool) {
+        precondition(!nativeConstructionStarted)
+        mediaDrainForTesting = (begin, wait)
+    }
+    #endif
     private let permissionModeRepository: PermissionModeConfigurationRepository
     private var handle: MobileEngineHandle?
-    private var isRetiredForReconnect = false
+    private(set) var isRetiredForReconnect = false
     private var sessionOwnerAdmission: ((String) -> Bool)?
     private var sessionStartupAdmission: (() -> Bool)?
     private var sessionStartupLease: (() -> Bool)?
     private var sessionStartupFinished: (() -> Void)?
     private var sessionOwnerRejected = false
+    private var authoringOwner: LocalAppAuthoringOwner?
+    private var provisionalAuthoringOwner: LocalAppProvisionalAuthoringOwner?
+    private(set) var recoveredAuthoringIntent: LocalAppAuthoringIntent?
+    private var authoringMountAuthorizationPending = false
     private let audioContextOwnerID = UUID().uuidString
     private var audioContextGeneration: UInt64 = 0
     private var audioContextTask: Task<Void, Never>?
@@ -56,7 +81,12 @@ final class EngineConversationSource: ConversationSource {
     /// the task itself runs off-main because engine construction may install
     /// and boot the bundled Linux runtime.
     private var handleBuildTask: Task<MobileEngineHandle, Error>?
+    private var retirementTask: Task<Void, Error>?
     private var handleBuildAttemptID: UInt64 = 0
+    private var nativeDispatchEvidence = EngineNativeDispatchEvidence()
+    var nativeConstructionStarted: Bool { nativeDispatchEvidence.didDispatch }
+    private var failedNativeSessionID: String?
+    private var failedNativeHandle: MobileEngineHandle?
     private var listener: EngineListener?
     /// The permission sink registered with the engine (SHIP-BLOCKER #3). Held so
     /// it outlives `ensureHandle`; Rust calls `onRequest` on it when a tool needs
@@ -81,6 +111,15 @@ final class EngineConversationSource: ConversationSource {
     private var currentResponseReasoningIDs: Set<String> = []
     private var pendingAssistantIdentity: String?
     private var pendingUserRowsByToken: [String: UUID] = [:]
+    private struct OriginalPrompt {
+        let item: ConversationUnsentPrompt
+        let engineIdentity: ObjectIdentifier?
+        let sideID: String?
+    }
+    private var originalPrompts: [ConversationTurnToken: OriginalPrompt] = [:]
+    private var cancelledBeforeAdmission: Set<ConversationTurnToken> = []
+    private var acceptedSidePrompts: Set<ConversationTurnToken> = []
+    private var rejectedPromptRestorers: [ConversationTurnToken: (ConversationUnsentPrompt) -> Bool] = [:]
     private var currentAssistantBlockKey: UInt64?
     private var assistantRowsByBlock: [UInt64: Set<UUID>] = [:]
     private var assistantOrderedRowsByIdentity: [String: [UUID]] = [:]
@@ -114,13 +153,24 @@ final class EngineConversationSource: ConversationSource {
     private var nextSessionTransitionOperationID: UInt64 = 1
     private let durableTurns: DurableConversationTurnClientStore?
     private var promptAdmissionPending = false
+    private var promptAdmissionGeneration = UUID()
+    #if DEBUG
+    private var promptDispatchBarrierForTesting: (() async -> Void)?
+    private var durableLoadWillStartForTesting: (() -> Void)?
+    private var noAdmissionProofObserverForTesting: ((ConversationTurnToken) -> Void)?
+    private var cancelSubmissionObserverForTesting: ((UInt64) -> Void)?
+    #endif
     private var durableLookupPending = false
+    private var authoringWorkspaceValidation: UUID?
+    private var workspaceMutationsInFlight = 0
+    private var ownerCommandsInFlight = 0
     private var durableCheckpointOwners: [UInt64: String] = [:]
     private var durableCleanupPending: [String: Set<UInt64>] = [:]
     private var durableCleanupTasks: [UInt64: Task<Void, Never>] = [:]
     private var durableCleanupFailures: [String: String] = [:]
     private var durableUnconfirmedOwners = Set<String>()
     private(set) var sideID: String?
+    private var sideParentSessionID: String?
     private var sideEnded = false
     private var sideClosing = false
     private var pendingSideInput: (String, [UInt16]?, [ImageRefDto])?
@@ -140,7 +190,182 @@ final class EngineConversationSource: ConversationSource {
                 attachmentGeneration: binding.attachmentGeneration) else { return nil }
         return .attached(attachment: attachment, logicalOwner: .session(sessionID: model.activeSessionId))
     }
-    var isAvailableForPrompts: Bool { !isRetiredForReconnect && !sessionOwnerRejected }
+    var isAvailableForPrompts: Bool {
+        !isRetiredForReconnect && !sessionOwnerRejected && !authoringMountAuthorizationPending
+            && !model.authoringBindingPending && authoringWorkspaceValidation == nil
+            && (authoringOwner.map { canonicalSessionID(model.activeSessionId) == canonicalSessionID($0.sessionID) } ?? true)
+    }
+
+    /// Installed synchronously before a source is published. A provisional
+    /// source may prepare to learn its UUID, but no turn may start yet.
+    func requireAuthoringBindingBeforeTurns(_ owner: LocalAppProvisionalAuthoringOwner) throws {
+        guard handle == nil, handleBuildTask == nil, config.initialSessionId == nil,
+              config.sessionMode == .code, UUID(uuidString: owner.projectID) != nil,
+              config.projectCwd == owner.sourceDirectory,
+              config.projectMountGrants.contains(owner.sourceDirectory) else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The provisional app source does not match this engine.")
+        }
+        provisionalAuthoringOwner = owner
+        model.authoringBindingPending = true
+    }
+
+    func requireAuthoringMountAuthorization() {
+        authoringMountAuthorizationPending = true
+        model.authoringBindingPending = true
+    }
+
+    var needsAuthoringMountAuthorization: Bool { authoringMountAuthorizationPending }
+
+    /// Hold admission while verifying an existing owner's live workspace.
+    /// Previously admitted turns and workspace changes are never cancelled.
+    func beginAuthoringWorkspaceValidation() throws -> UUID {
+        guard isAvailableForPrompts, workspaceMutationsInFlight == 0, ownerCommandsInFlight == 0,
+              !promptAdmissionPending, !durableLookupPending,
+              ConversationSourceReplacementPolicy.allowsReplacement(of: model, hasActiveRealtimeAudio: hasActiveRealtimeAudio)
+        else { throw LocalAppServiceFailure("AUTHORING_BUSY", "Wait for this conversation to finish before opening app development.") }
+        let token = UUID()
+        authoringWorkspaceValidation = token
+        return token
+    }
+
+    func endAuthoringWorkspaceValidation(_ token: UUID) {
+        if authoringWorkspaceValidation == token { authoringWorkspaceValidation = nil }
+    }
+
+    func expectRecoveredAuthoringSession(sessionID: String, transcriptPath: String) throws {
+        guard authoringMountAuthorizationPending, handle == nil, handleBuildTask == nil,
+              config.initialSessionId == nil, UUID(uuidString: sessionID) != nil,
+              !transcriptPath.isEmpty, (transcriptPath as NSString).isAbsolutePath else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app session cannot be restored.")
+        }
+        config.initialSessionId = canonicalSessionID(sessionID)
+        config.initialSessionTranscriptPath = transcriptPath
+        pendingSessionTransition = .resume(canonicalSessionID(sessionID))
+        model.sessionTransitionPending = true
+    }
+
+    var pendingRecoveredAuthoringOwner: LocalAppAuthoringOwner? {
+        guard model.authoringBindingPending, !authoringMountAuthorizationPending else { return nil }
+        return authoringOwner
+    }
+
+    func setVerifiedAuthoringOwner(_ owner: LocalAppAuthoringOwner, intent: LocalAppAuthoringIntent? = nil) throws {
+        guard handle == nil, handleBuildTask == nil, config.sessionMode == .code,
+              config.projectMountGrants.contains(owner.sourceDirectory),
+              canonicalSessionID(config.initialSessionId ?? "") == canonicalSessionID(owner.sessionID) else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring session changed before authorization.")
+        }
+        authoringOwner = owner
+        recoveredAuthoringIntent = intent
+        model.authoringBindingPending = true
+    }
+
+    func authorizeAuthoringMount(grants: [String], owner: LocalAppAuthoringOwner,
+                                 intent: LocalAppAuthoringIntent? = nil) throws {
+        guard authoringMountAuthorizationPending, handle == nil, handleBuildTask == nil,
+              grants.contains(owner.sourceDirectory),
+              config.sessionMode == .code,
+              canonicalSessionID(config.initialSessionId ?? "") == canonicalSessionID(owner.sessionID) else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring session changed before authorization.")
+        }
+        config.projectMountGrants = grants
+        authoringOwner = owner
+        recoveredAuthoringIntent = intent
+        authoringMountAuthorizationPending = false
+        // Preparing the exact transcript is permitted, but no turn is
+        // admitted until its native owner and receipt are both confirmed.
+        model.authoringBindingPending = true
+    }
+
+    func confirmRecoveredAuthoringOwner(_ owner: LocalAppAuthoringOwner, binding: LocalAppAuthoring) throws {
+        guard model.authoringBindingPending, !authoringMountAuthorizationPending,
+              authoringOwner == owner, owner.matches(binding), config.sessionMode == .code,
+              model.sessionModeKnown, model.sessionMode == .code, !model.sessionTransitionPending,
+              canonicalSessionID(model.activeSessionId) == canonicalSessionID(owner.sessionID) else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The recovered app owner does not match its native session.")
+        }
+        recoveredAuthoringIntent = nil
+        model.authoringBindingPending = false
+    }
+
+    func authorizeProvisionalAuthoringMount(grants: [String], owner: LocalAppProvisionalAuthoringOwner) throws {
+        guard authoringMountAuthorizationPending, handle == nil, handleBuildTask == nil,
+              config.initialSessionId == nil, config.sessionMode == .code,
+              UUID(uuidString: owner.projectID) != nil, config.projectCwd == owner.sourceDirectory,
+              grants.contains(owner.sourceDirectory) else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The app source changed before recovery.")
+        }
+        config.projectMountGrants = grants
+        provisionalAuthoringOwner = owner
+        authoringMountAuthorizationPending = false
+        // Turn admission remains closed until this newly minted UUID has a receipt.
+        model.authoringBindingPending = true
+    }
+
+    func preparedProvisionalAuthoringWorkspace(_ owner: LocalAppProvisionalAuthoringOwner) async throws -> SessionWorkspaceState {
+        guard model.authoringBindingPending, provisionalAuthoringOwner == owner, let currentHandle = handle else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The prepared app owner is unavailable.")
+        }
+        let state = await currentHandle.workspaceState()
+        guard handle === currentHandle, model.authoringBindingPending, provisionalAuthoringOwner == owner,
+              UUID(uuidString: state.sessionId) != nil, state.cwd == owner.sourceDirectory,
+              !state.transcriptPath.isEmpty, (state.transcriptPath as NSString).isAbsolutePath else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The prepared app workspace does not match its source.")
+        }
+        return SessionWorkspaceState(sessionId: canonicalSessionID(state.sessionId), cwd: state.cwd,
+            projectRoot: state.projectRoot, additionalDirectories: state.additionalDirectories,
+            transcriptPath: state.transcriptPath)
+    }
+
+    /// A failed preparation may not be publishable as an owner, but its
+    /// native handle still supplies the UUID needed to wait for exact release.
+    func preparedSessionIDForRelease() async -> String? {
+        if let failedNativeSessionID { return failedNativeSessionID }
+        guard let currentHandle = handle ?? failedNativeHandle else { return nil }
+        let state = await currentHandle.workspaceState()
+        let identity = canonicalSessionID(state.sessionId)
+        guard (handle === currentHandle || failedNativeHandle === currentHandle), UUID(uuidString: identity) != nil,
+              config.initialSessionId.map({ canonicalSessionID($0) == identity }) ?? true else { return nil }
+        return identity
+    }
+
+    var hasUnconfirmedAuthoringOwner: Bool {
+        model.authoringBindingPending && !authoringMountAuthorizationPending
+            && (authoringOwner != nil || provisionalAuthoringOwner != nil)
+    }
+
+    /// This source never admitted a turn and failed before it published a
+    /// handle. Its native claim may nevertheless be draining asynchronously.
+    func retireFailedPreparationForRelease() async throws {
+        try await retireForReconnect(allowUnconfirmedAuthoring: hasUnconfirmedAuthoringOwner,
+                                     allowIncompleteBootstrap: true)
+    }
+
+    /// The composition is the one captured when this source constructed its
+    /// engine. Unknown or timed-out attachment drain never permits remount.
+    func waitForMediaAttachmentDrain(timeoutMs: UInt32) async -> Bool {
+        guard nativeConstructionStarted else { return true }
+        #if DEBUG
+        if let mediaDrainForTesting { return await mediaDrainForTesting.wait(timeoutMs) }
+        #endif
+        guard let mediaHost = mediaHostComposition?.nativeHost else { return false }
+        return await mediaHost.waitForAttachmentDrain(timeoutMs: timeoutMs) == .ready
+    }
+
+    func confirmAuthoringBinding(_ owner: LocalAppAuthoringOwner, binding: LocalAppAuthoring) throws {
+        guard model.authoringBindingPending, !authoringMountAuthorizationPending,
+              provisionalAuthoringOwner?.matches(owner) == true, owner.matches(binding),
+              sessionMode == .code,
+              canonicalSessionID(model.activeSessionId) == canonicalSessionID(owner.sessionID),
+              let workspace = model.workspaceState,
+              canonicalSessionID(workspace.sessionId) == canonicalSessionID(owner.sessionID),
+              workspace.cwd == owner.sourceDirectory else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring session changed before its binding was confirmed.")
+        }
+        authoringOwner = owner
+        provisionalAuthoringOwner = nil
+        model.authoringBindingPending = false
+    }
 
     func setSessionOwnerAdmission(_ admission: @escaping (String) -> Bool) {
         sessionOwnerAdmission = admission
@@ -179,6 +404,10 @@ final class EngineConversationSource: ConversationSource {
 
     private func admitSessionOwner(_ sessionID: String) -> Bool {
         guard !sessionOwnerRejected else { return false }
+        guard authoringOwner.map({ canonicalSessionID($0.sessionID) == canonicalSessionID(sessionID) }) ?? true else {
+            rejectSessionOwner("The app authoring session owner changed.")
+            return false
+        }
         guard sessionOwnerAdmission?(sessionID) ?? true else {
             rejectSessionOwner(SessionHost.OwnershipError.conflictingOwner.localizedDescription)
             return false
@@ -261,7 +490,14 @@ final class EngineConversationSource: ConversationSource {
         let id: UInt64
         let turnId: UInt64
         let epoch: UInt64
+        let sessionID: String
+        let engineIdentity: ObjectIdentifier?
         let task: Task<Void, Error>
+    }
+
+    private enum CancellationAcknowledgement: Equatable {
+        case terminal
+        case notAdmitted
     }
 
     init(
@@ -432,7 +668,7 @@ final class EngineConversationSource: ConversationSource {
     // MARK: ConversationSource
 
     func startNewConversation() {
-        guard !isSideChat else { return }
+        guard !isSideChat, authoringOwner == nil, !model.authoringBindingPending else { return }
         // A paused/waiting durable turn is still owned by the engine even
         // though `model.streaming` is false. Do not clear its checkpoint or
         // replace the session until recovery reaches Running or a terminal
@@ -449,35 +685,11 @@ final class EngineConversationSource: ConversationSource {
         // out-of-band via `SessionStarted`.
         submitSessionTransition(
             cancelling: turnIdToCancel,
-            submission: .command(.newSession(cwd: config.projectCwd ?? LXISHGuestPaths.workspaceRoot, model: nil, mode: config.sessionMode.dto)),
+            submission: .command(.newSession(cwd: config.projectCwd ?? LXISHGuestPaths.conversationWorkspace(for: config.sessionMode), model: nil, mode: config.sessionMode.dto)),
             failurePrefix: String(localized: "chat_new_session_failed"),
             transitionOperationID: transitionOperationID,
             isNew: true
         )
-    }
-
-    /// Creates an ordinary authoring session with an explicit guest cwd. The
-    /// local app service owns the application; this session only owns its work.
-    func startLocalAppAuthoringSession(cwd: String) async throws -> String {
-        guard !isSideChat, unresolvedRecoveryTurnID == nil, pauseAcknowledgements.isEmpty,
-              !model.streaming, !model.sessionTransitionPending else {
-            throw LocalAppServiceFailure("CONVERSATION_BUSY", "Finish the active conversation before opening app development.")
-        }
-        _ = try await ensureHandle()
-        let prior = model.activeSessionId
-        model.sessionTransitionFailure = nil
-        let operation = beginSessionTransition(.new)
-        prepareSessionTransition(cancelling: nil, isNew: true)
-        submitSessionTransition(cancelling: nil, submission: .command(.newSession(cwd: cwd, model: nil, mode: config.sessionMode.dto)),
-            failurePrefix: String(localized: "chat_new_session_failed"), transitionOperationID: operation, isNew: true)
-        for _ in 0..<400 {
-            try Task.checkCancellation()
-            if let failure = model.sessionTransitionFailure { throw LocalAppServiceFailure("SESSION_CREATION_FAILED", String(describing: failure)) }
-            if !model.sessionTransitionPending, !model.activeSessionId.isEmpty, model.activeSessionId != prior,
-               model.workspaceState?.sessionId == model.activeSessionId, model.workspaceState?.cwd == cwd { return model.activeSessionId }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        throw LocalAppServiceFailure("SESSION_CREATION_TIMEOUT", "The authoring session did not confirm its workspace. No draft was inserted.")
     }
 
     /// Capture the old turn before a session transition. Its correlator stays
@@ -701,6 +913,12 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func clearTurnPointers(keepEpoch: Bool = true) {
+        if let token = activeConversationTurnToken {
+            originalPrompts.removeValue(forKey: token)
+            cancelledBeforeAdmission.remove(token)
+            acceptedSidePrompts.remove(token)
+            rejectedPromptRestorers.removeValue(forKey: token)
+        }
         streamingIndex = nil
         streamingItemIndex = nil
         currentResponseMessageIDs = []
@@ -788,10 +1006,10 @@ final class EngineConversationSource: ConversationSource {
         model.messageDetails.removeValue(forKey: id)
     }
 
-    /// The chip attached in the composer, consumed by exactly one send.
-    private func takeVisualizationChip() -> VisualizationContextChip? {
-        defer { model.visualizationChip = nil }
-        return model.visualizationChip
+    /// Clear only the chip captured by this send, without erasing a later edit.
+    private func consumeVisualizationChip(_ chip: VisualizationContextChip?, revision: UInt64) {
+        guard model.visualizationChipRevision == revision, model.visualizationChip == chip else { return }
+        model.visualizationChip = nil
     }
 
     /// Order a live visualization slot. A reference line ends the narration
@@ -1154,7 +1372,14 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func makeSideChat(requestID: String) async throws -> EngineConversationSource {
+        guard isAvailableForPrompts else { throw LocalAppServiceFailure("AUTHORING_PENDING", "The app authoring binding is not ready.") }
         let sharedHandle = try await ensureHandle()
+        let parentState = await sharedHandle.workspaceState()
+        let parentID = canonicalSessionID(parentState.sessionId)
+        guard !parentID.isEmpty, self.handle === sharedHandle,
+              model.activeSessionId.isEmpty || canonicalSessionID(model.activeSessionId) == parentID else {
+            throw SessionHost.OwnershipError.conflictingOwner
+        }
         let child = EngineConversationSource(
             config: config,
             mediaHostComposition: mediaHostComposition,
@@ -1162,6 +1387,7 @@ final class EngineConversationSource: ConversationSource {
         )
         child.model.providerConfigured = model.providerConfigured
         child.handle = sharedHandle
+        child.sideParentSessionID = parentID
         let listener = EngineListener(source: child)
         let sink = EnginePermissionSink(listener: listener)
         child.listener = listener
@@ -1210,19 +1436,43 @@ final class EngineConversationSource: ConversationSource {
         onSideSubmissionFailure = nil
     }
 
-    private func submitCommand(_ command: ClientCommand, expectedSessionEpoch: UInt64? = nil) async throws {
+    private func submitCommand(_ command: ClientCommand, expectedSessionEpoch: UInt64? = nil,
+                               beforePromptDispatch: (() -> Bool)? = nil) async throws {
         try Task.checkCancellation()
+        let ownsTurnAdmission: Bool
+        switch command {
+        case .sendPrompt, .runSlashCommand, .startRealtimeAudio, .realtimeAudioInput, .resumeWorkflow, .forceCompact:
+            guard isAvailableForPrompts else { throw LocalAppServiceFailure("AUTHORING_PENDING", "The app authoring binding is not ready.") }
+            ownsTurnAdmission = true
+        case .newSession, .resumeSession, .clearSession:
+            guard authoringOwner == nil, !model.authoringBindingPending, !authoringMountAuthorizationPending,
+                  authoringWorkspaceValidation == nil else {
+                throw LocalAppServiceFailure("AUTHORING_CHANGED", "Open another conversation to change the authoring owner.")
+            }
+            ownsTurnAdmission = false
+        default: ownsTurnAdmission = false
+        }
+        if ownsTurnAdmission { ownerCommandsInFlight += 1 }
+        defer { if ownsTurnAdmission { ownerCommandsInFlight -= 1 } }
         if let expectedSessionEpoch, sessionEpoch != expectedSessionEpoch { throw CancellationError() }
         if let testCommandSubmitter {
+            #if DEBUG
+            if beforePromptDispatch != nil { await promptDispatchBarrierForTesting?() }
+            #endif
+            guard beforePromptDispatch?() ?? true else { throw CancellationError() }
             try await testCommandSubmitter(command)
             return
         }
         let handle = try await ensureHandle()
         try Task.checkCancellation()
         if let expectedSessionEpoch, sessionEpoch != expectedSessionEpoch { throw CancellationError() }
+        if sideID != nil, sideEnded { throw CancellationError() }
+        #if DEBUG
+        if beforePromptDispatch != nil { await promptDispatchBarrierForTesting?() }
+        #endif
+        guard beforePromptDispatch?() ?? true else { throw CancellationError() }
         do {
             if let sideID {
-                guard !sideEnded else { throw CancellationError() }
                 try await handle.submitSideChat(sideId: sideID, command: command)
             } else {
                 try await handle.submit(command: command)
@@ -1256,6 +1506,7 @@ final class EngineConversationSource: ConversationSource {
         if let operation = cancellationOperation, operation.turnId == turnId {
             return operation
         }
+        promptAdmissionGeneration = UUID()
         let operationID = nextCancellationOperationID
         nextCancellationOperationID &+= 1
         let epoch = activeTurnEpoch ?? sessionEpoch
@@ -1267,6 +1518,8 @@ final class EngineConversationSource: ConversationSource {
             id: operationID,
             turnId: turnId,
             epoch: epoch,
+            sessionID: durableCheckpointOwners[turnId] ?? canonicalSessionID(model.activeSessionId),
+            engineIdentity: handle.map(ObjectIdentifier.init),
             task: task
         )
         cancellationOperation = operation
@@ -1275,7 +1528,8 @@ final class EngineConversationSource: ConversationSource {
 
     private func finishCancellation(
         _ operation: CancellationOperation,
-        error: Error?
+        error: Error?,
+        acknowledgement: CancellationAcknowledgement? = nil
     ) {
         guard cancellationOperation?.id == operation.id else { return }
         cancellationOperation = nil
@@ -1284,7 +1538,11 @@ final class EngineConversationSource: ConversationSource {
         let stillOwnsVisibleTurn = currentTurnId == operation.turnId
             && activeTurnEpoch == operation.epoch
             && operation.epoch == sessionEpoch
-        model.isCancelling = false
+            && (model.activeSessionId.isEmpty || operation.sessionID.isEmpty ||
+                canonicalSessionID(model.activeSessionId) == operation.sessionID)
+        if stillOwnsVisibleTurn || (currentTurnId == nil && operation.epoch == sessionEpoch) {
+            model.isCancelling = false
+        }
 
         if let error {
             if stillOwnsVisibleTurn {
@@ -1295,7 +1553,8 @@ final class EngineConversationSource: ConversationSource {
                 }
                 model.statusLine = nil
                 model.error = ConversationError(kind: .host, message: String(localized: "chat_cancel_failed \(error)"))
-            } else if model.statusLine == String(localized: "chat_stopping") {
+            } else if currentTurnId == nil, operation.epoch == sessionEpoch,
+                      model.statusLine == String(localized: "chat_stopping") {
                 model.statusLine = nil
             }
             Self.turnLog.error(
@@ -1305,6 +1564,10 @@ final class EngineConversationSource: ConversationSource {
         }
 
         if stillOwnsVisibleTurn {
+            if acknowledgement == .notAdmitted {
+                settlePromptRejectedBeforeAdmission(ConversationTurnToken(
+                    clientTurnId: operation.turnId, sessionEpoch: operation.epoch))
+            }
             clearDurableCheckpoint(operation.turnId)
             if unresolvedRecoveryTurnID == operation.turnId {
                 unresolvedRecoveryTurnID = nil
@@ -1321,7 +1584,8 @@ final class EngineConversationSource: ConversationSource {
             finishActiveRun(.cancelled)
             publishActiveTurnCompletion(.cancelled)
             clearTurnPointers(keepEpoch: false)
-        } else if model.statusLine == String(localized: "chat_stopping") {
+        } else if currentTurnId == nil, operation.epoch == sessionEpoch,
+                  model.statusLine == String(localized: "chat_stopping") {
             model.statusLine = nil
         }
         requestSessionCatalogRefreshAfterSettledTurn()
@@ -1338,8 +1602,8 @@ final class EngineConversationSource: ConversationSource {
             // the listener FIFO, then wait for the correlated terminal
             // TurnRecoveryState before releasing any visible ownership.
             await listener?.waitUntilIdle()
-            try await waitForCancellationAcknowledgement(turnID: operation.turnId)
-            finishCancellation(operation, error: nil)
+            let acknowledgement = try await waitForCancellationAcknowledgement(operation)
+            finishCancellation(operation, error: nil, acknowledgement: acknowledgement)
         } catch {
             finishCancellation(operation, error: error)
             throw error
@@ -1414,22 +1678,97 @@ final class EngineConversationSource: ConversationSource {
             "prompt submit turn=\(prompt.turnId, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
         )
 
-        Task { [self] in
-            do {
-                try await self.submitCommand(.sendPrompt(
-                    text: ClientTextDto(codeUnits: prompt.sourceCodeUnits),
-                    promptMode: prompt.promptMode,
-                    images: prompt.images,
-                    turnId: prompt.turnId,
-                    visualizationContext: prompt.visualizationContext.map {
-                        VisualizationRefDto(id: $0.id, revision: $0.revision)
-                    }), expectedSessionEpoch: token.sessionEpoch)
-            } catch {
-                guard self.activeConversationTurnToken == token else { return }
-                self.fail(.host, "\(error)", clearDurable: false)
+        return token
+    }
+
+    /// The view registers against the original owner's captured bindings.
+    /// The rejection can settle before the view resumes from send(), so also
+    /// try a queued item without replacing any intervening edit.
+    func registerRejectedPromptRestorer(
+        for token: ConversationTurnToken, restore: @escaping (ConversationUnsentPrompt) -> Bool
+    ) {
+        if let index = model.unsentPrompts.firstIndex(where: { $0.token == token }) {
+            let item = model.unsentPrompts[index]
+            if item.mayRestoreCapturedDraft, ownsUnsentPrompt(item), restore(item) {
+                model.unsentPrompts.removeAll { $0.id == item.id }
+            }
+        } else if originalPrompts[token] != nil {
+            rejectedPromptRestorers[token] = restore
+        }
+    }
+
+    func removeUnsentPrompt(_ id: UUID) {
+        model.unsentPrompts.removeAll { $0.id == id }
+    }
+
+    func ownsUnsentPrompt(_ prompt: ConversationUnsentPrompt) -> Bool {
+        guard prompt.ownerEpoch == sessionEpoch else { return false }
+        if let ownerSide = prompt.sideID {
+            return sideID == ownerSide && sideParentSessionID == prompt.sessionID
+        }
+        return !isSideChat && !prompt.sessionID.isEmpty &&
+            canonicalSessionID(model.activeSessionId) == prompt.sessionID
+    }
+
+    /// Called only by SessionHost after it verifies the same session, scope,
+    /// transcript and workspace on both sides of a drained replacement.
+    func adoptUnsentPromptsFromVerifiedOwner(_ prompts: [ConversationUnsentPrompt]) {
+        model.unsentPrompts = prompts.map { $0.rebound(toOwnerEpoch: sessionEpoch) }
+    }
+
+    private func settlePromptRejectedBeforeAdmission(_ token: ConversationTurnToken) {
+        guard let original = originalPrompts.removeValue(forKey: token) else { return }
+        cancelledBeforeAdmission.remove(token)
+        acceptedSidePrompts.remove(token)
+        if original.sideID != nil { pendingSideInput = nil }
+        if let row = pendingUserRowsByToken.removeValue(forKey: "client-turn:\(token.clientTurnId)") {
+            removeMessage(id: row)
+        }
+        let restore = rejectedPromptRestorers.removeValue(forKey: token)
+        let restored = original.item.mayRestoreCapturedDraft && ownsUnsentPrompt(original.item) && (restore?(original.item) ?? false)
+        if !restored { model.unsentPrompts.append(original.item) }
+    }
+
+    /// Do not report an admitted send to the composer until this owner has
+    /// passed its last main-actor gate immediately before the FFI handoff.
+    /// A Stop that wins while handle or checkpoint work is suspended leaves
+    /// the captured draft untouched. Once handed off, failure is ambiguous
+    /// and follows the existing native recovery path rather than being resent.
+    private func dispatchPrompt(
+        _ command: ClientCommand,
+        epoch: UInt64,
+        generation: UUID,
+        admit: @escaping () -> ConversationTurnToken?,
+        onSuccess: @escaping (ConversationTurnToken) -> Void = { _ in },
+        onFailure: @escaping (ConversationTurnToken, Error) -> Void
+    ) async -> ConversationTurnToken? {
+        await withCheckedContinuation { continuation in
+            Task { @MainActor [self] in
+                var admittedToken: ConversationTurnToken?
+                do {
+                    try await submitCommand(command, expectedSessionEpoch: epoch) {
+                        guard !Task.isCancelled, generation == promptAdmissionGeneration,
+                              epoch == sessionEpoch, !model.isCancelling,
+                              !isRetiredForReconnect, !sessionOwnerRejected, isAvailableForPrompts,
+                              !model.sessionTransitionPending, !sideEnded, !sideClosing,
+                              let token = admit() else { return false }
+                        admittedToken = token
+                        continuation.resume(returning: token)
+                        return true
+                    }
+                    if let token = admittedToken { onSuccess(token) }
+                } catch {
+                    if let token = admittedToken {
+                        onFailure(token, error)
+                    } else {
+                        if !(error is CancellationError) {
+                            model.error = ConversationError(kind: .host, message: "\(error)")
+                        }
+                        continuation.resume(returning: nil)
+                    }
+                }
             }
         }
-        return token
     }
 
     private static func isCompactSlash(_ raw: String) -> Bool {
@@ -1511,6 +1850,7 @@ final class EngineConversationSource: ConversationSource {
             !Task.isCancelled,
             !isRetiredForReconnect,
             !sessionOwnerRejected,
+            isAvailableForPrompts,
             !promptAdmissionPending,
             !durableLookupPending,
             !sideEnded,
@@ -1522,6 +1862,12 @@ final class EngineConversationSource: ConversationSource {
             unresolvedRecoveryTurnID == nil,
             !model.isSelectedAgentReadOnly
         else { return nil }
+        promptAdmissionPending = true
+        defer { promptAdmissionPending = false }
+        let admissionGeneration = promptAdmissionGeneration
+        let admissionEpoch = sessionEpoch
+        let chip = model.visualizationChip
+        let chipRevision = model.visualizationChipRevision
         // Keep the composer's draft when the catalog cannot authorize any
         // new owner, even before an engine has produced its initial UUID.
         guard admitSessionStartup() else { return nil }
@@ -1555,56 +1901,53 @@ final class EngineConversationSource: ConversationSource {
         guard !isSideChat || !model.streaming else { return nil }
         let currentOwner = canonicalSessionID(model.activeSessionId)
         if durableOwnerIsBlocked(currentOwner) { return nil }
-        if isSideChat { pendingSideInput = (text, sourceCodeUnits, images) }
         if model.streaming {
             guard exactSlashCommand == nil, let token = activeConversationTurnToken else { return nil }
             if let durableTurns {
-                promptAdmissionPending = true
-                defer { promptAdmissionPending = false }
                 do {
+                    #if DEBUG
+                    durableLoadWillStartForTesting?()
+                    #endif
                     guard let record = try await durableTurns.load(), record.turnID == token.clientTurnId else {
                         throw DurableConversationRecoveryError.invalidStore
                     }
                     try Task.checkCancellation()
-                    guard model.streaming, activeConversationTurnToken == token else { return nil }
+                    guard admissionGeneration == promptAdmissionGeneration, !model.isCancelling,
+                          model.streaming, activeConversationTurnToken == token else { return nil }
                 } catch {
                     if !(error is CancellationError) { model.error = ConversationError(kind: .host, message: "\(error)") }
                     return nil
                 }
             }
-            model.isNew = false
-            model.notice = nil
-            let chip = takeVisualizationChip()
-            var queued = Message(role: .user, text: text, images: uiImages(from: images))
-            queued.sentAtMs = Int64(Date().timeIntervalSince1970 * 1_000)
-            queued.visualizationContext = chip
-            appendMessage(queued)
             let queuedTurnID = nextTurnId
             nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
-            pendingUserRowsByToken["client-turn:\(queuedTurnID)"] = queued.id
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    try await self.submitCommand(.sendPrompt(
-                        text: ClientTextDto(codeUnits: promptSourceCodeUnits),
-                        promptMode: promptMode,
-                        images: images,
-                        turnId: queuedTurnID,
-                        visualizationContext: chip.map { VisualizationRefDto(id: $0.id, revision: $0.revision) }))
-                } catch {
-                    guard self.activeConversationTurnToken == token else { return }
-                    self.model.error = ConversationError(kind: .host, message: "\(error)")
-                }
-            }
-            return token
+            return await dispatchPrompt(.sendPrompt(
+                text: ClientTextDto(codeUnits: promptSourceCodeUnits), promptMode: promptMode,
+                images: images, turnId: queuedTurnID,
+                visualizationContext: chip.map { VisualizationRefDto(id: $0.id, revision: $0.revision) }),
+                epoch: admissionEpoch, generation: admissionGeneration, admit: { [self] in
+                    guard model.streaming, activeConversationTurnToken == token,
+                          pauseAcknowledgements.isEmpty, unresolvedRecoveryTurnID == nil,
+                          !model.isSelectedAgentReadOnly else { return nil }
+                    model.isNew = false
+                    model.notice = nil
+                    consumeVisualizationChip(chip, revision: chipRevision)
+                    var queued = Message(role: .user, text: text, images: uiImages(from: images))
+                    queued.sentAtMs = Int64(Date().timeIntervalSince1970 * 1_000)
+                    queued.visualizationContext = chip
+                    appendMessage(queued)
+                    pendingUserRowsByToken["client-turn:\(queuedTurnID)"] = queued.id
+                    return token
+                }, onFailure: { [self] token, error in
+                    guard activeConversationTurnToken == token else { return }
+                    model.error = ConversationError(kind: .host, message: "\(error)")
+                })
         }
 
         let turnId = nextTurnId
         nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
+        var expectedOwner = currentOwner
         if exactSlashCommand == nil, let durableTurns {
-            promptAdmissionPending = true
-            defer { promptAdmissionPending = false }
-            let epoch = sessionEpoch
             var owner = currentOwner
             var workspace = model.workspaceState?.cwd
             do {
@@ -1620,11 +1963,15 @@ final class EngineConversationSource: ConversationSource {
                     workspace = state.cwd
                 }
                 guard !durableOwnerIsBlocked(owner) else { return nil }
-                guard epoch == sessionEpoch, !isRetiredForReconnect, !sessionOwnerRejected, admitSessionOwner(owner) else { throw CancellationError() }
+                guard admissionGeneration == promptAdmissionGeneration, !model.isCancelling,
+                      admissionEpoch == sessionEpoch, !isRetiredForReconnect, !sessionOwnerRejected,
+                      admitSessionOwner(owner) else { throw CancellationError() }
                 try Task.checkCancellation()
                 try await durableTurns.begin(sessionID: owner, turnID: turnId, workspace: workspace)
                 durableCheckpointOwners[turnId] = owner
-                guard !Task.isCancelled, epoch == sessionEpoch, !isRetiredForReconnect, admitSessionOwner(owner),
+                expectedOwner = owner
+                guard !Task.isCancelled, admissionGeneration == promptAdmissionGeneration, !model.isCancelling,
+                      admissionEpoch == sessionEpoch, !isRetiredForReconnect, admitSessionOwner(owner),
                       model.activeSessionId.isEmpty || canonicalSessionID(model.activeSessionId) == owner else {
                     clearDurableCheckpoint(turnId)
                     return nil
@@ -1635,15 +1982,6 @@ final class EngineConversationSource: ConversationSource {
             }
         }
 
-        model.isNew = false
-        model.notice = nil
-        let chip = exactSlashCommand == nil ? takeVisualizationChip() : nil
-        var prompt = Message(role: .user, text: text, images: uiImages(from: images))
-        prompt.sentAtMs = Int64(Date().timeIntervalSince1970 * 1_000)
-        prompt.visualizationContext = chip
-        appendMessage(prompt)
-
-        if exactSlashCommand == nil { pendingUserRowsByToken["client-turn:\(turnId)"] = prompt.id }
         if let exactSlashCommand {
             let token = SlashCommandMatcher.commandToken(in: trimmed) ?? ""
             let tokenUnits = exactSlashCommand.sourceCodeUnits(for: token) ?? Array(token.utf16)
@@ -1657,6 +1995,12 @@ final class EngineConversationSource: ConversationSource {
             var rawUnits: [UInt16] = [0x002f]
             rawUnits.append(contentsOf: tokenUnits)
             rawUnits.append(contentsOf: inputUnits.dropFirst(suffixStart))
+            if isSideChat { pendingSideInput = (text, sourceCodeUnits, images) }
+            model.isNew = false
+            model.notice = nil
+            var prompt = Message(role: .user, text: text, images: uiImages(from: images))
+            prompt.sentAtMs = Int64(Date().timeIntervalSince1970 * 1_000)
+            appendMessage(prompt)
             return startSlashCommand(
                 raw: ClientTextDto(codeUnits: rawUnits),
                 displayRaw: trimmed,
@@ -1664,24 +2008,108 @@ final class EngineConversationSource: ConversationSource {
                 turnId: turnId
             )
         }
-        return startPrompt(TurnPrompt(
+        let prompt = TurnPrompt(
             sourceCodeUnits: promptSourceCodeUnits,
             promptMode: promptMode,
             images: images,
             turnId: turnId,
             visualizationContext: chip
-        ))
+        )
+        let submittedOwner = expectedOwner
+        let submittedSideID = sideID
+        let submittedSideParent = sideParentSessionID
+        let token = await dispatchPrompt(.sendPrompt(
+            text: ClientTextDto(codeUnits: prompt.sourceCodeUnits), promptMode: prompt.promptMode,
+            images: prompt.images, turnId: prompt.turnId,
+            visualizationContext: chip.map { VisualizationRefDto(id: $0.id, revision: $0.revision) }),
+            epoch: admissionEpoch, generation: admissionGeneration, admit: { [self] in
+                guard !model.streaming, !model.slashCommandPending, pauseAcknowledgements.isEmpty,
+                      unresolvedRecoveryTurnID == nil, !model.isSelectedAgentReadOnly,
+                      submittedOwner.isEmpty || model.activeSessionId.isEmpty ||
+                        canonicalSessionID(model.activeSessionId) == submittedOwner else { return nil }
+                if isSideChat { pendingSideInput = (text, sourceCodeUnits, images) }
+                model.isNew = false
+                model.notice = nil
+                let chipUnchanged = model.visualizationChip == chip && model.visualizationChipRevision == chipRevision
+                consumeVisualizationChip(chip, revision: chipRevision)
+                var row = Message(role: .user, text: text, images: uiImages(from: images))
+                row.sentAtMs = Int64(Date().timeIntervalSince1970 * 1_000)
+                row.visualizationContext = chip
+                appendMessage(row)
+                pendingUserRowsByToken["client-turn:\(turnId)"] = row.id
+                let token = startPrompt(prompt)
+                let ownerID = isSideChat ? (sideParentSessionID ?? "") : submittedOwner
+                if !ownerID.isEmpty, !isSideChat || sideID != nil {
+                    originalPrompts[token] = OriginalPrompt(
+                        item: ConversationUnsentPrompt(token: token, sessionID: ownerID, sideID: sideID,
+                            text: text, sourceCodeUnits: sourceCodeUnits, images: images,
+                            visualizationContext: chip, mayRestoreCapturedDraft: chipUnchanged,
+                            chipRevisionAtCapture: chipRevision,
+                            chipRevisionAfterAdmission: model.visualizationChipRevision),
+                        engineIdentity: handle.map(ObjectIdentifier.init), sideID: sideID)
+                }
+                return token
+            }, onSuccess: { [self] token in
+                if isSideChat, activeConversationTurnToken == token,
+                   sideID == submittedSideID, sideParentSessionID == submittedSideParent,
+                   originalPrompts[token]?.engineIdentity == handle.map(ObjectIdentifier.init) {
+                    acceptedSidePrompts.insert(token)
+                }
+            }, onFailure: { [self] token, error in
+                guard activeConversationTurnToken == token, sideID == submittedSideID,
+                      sideParentSessionID == submittedSideParent,
+                      submittedOwner.isEmpty || model.activeSessionId.isEmpty ||
+                        canonicalSessionID(model.activeSessionId) == submittedOwner else { return }
+                if let original = originalPrompts[token],
+                   original.engineIdentity != handle.map(ObjectIdentifier.init) { return }
+                if let clientError = error as? ClientError,
+                   case let .Rejected(message) = clientError,
+                   message == "turn_cancelled_before_admission",
+                   let original = originalPrompts[token],
+                   original.engineIdentity == handle.map(ObjectIdentifier.init),
+                   (isSideChat
+                    ? (original.sideID == sideID && original.item.sessionID == sideParentSessionID)
+                    : original.item.sessionID == durableCheckpointOwners[token.clientTurnId]) {
+                    cancelledBeforeAdmission.insert(token)
+                    #if DEBUG
+                    noAdmissionProofObserverForTesting?(token)
+                    #endif
+                    return
+                }
+                fail(.host, "\(error)", clearDurable: false)
+            })
+        if token == nil { clearDurableCheckpoint(turnId) }
+        return token
     }
 
     func cancelAndWait() async throws {
+        // Invalidate submissions before any suspension, including when the
+        // first prompt has not yet created a visible/native turn.
+        promptAdmissionGeneration = UUID()
         if isSideChat {
             // Atomic creation may return before its first TurnStarted reaches
             // Swift. A side-scoped Cancel(nil) still stops that admitted work.
             guard currentTurnId != nil || sideID != nil else { return }
+            let token = activeConversationTurnToken
+            let expectedSideID = sideID
+            let expectedParent = sideParentSessionID
+            let expectedEngine = handle.map(ObjectIdentifier.init)
             model.isCancelling = true
-            defer { model.isCancelling = false }
+            defer {
+                if sideID == expectedSideID, sideParentSessionID == expectedParent,
+                   activeConversationTurnToken == nil || activeConversationTurnToken == token {
+                    model.isCancelling = false
+                }
+            }
             try await submitCommand(.cancel(turnId: currentTurnId))
+            #if DEBUG
+            if let token { cancelSubmissionObserverForTesting?(token.clientTurnId) }
+            #endif
             await listener?.waitUntilIdle()
+            if let token, let expectedSideID, let expectedParent {
+                try await settleSideCancellationIfKnown(token: token, sideID: expectedSideID,
+                    parentID: expectedParent, engineIdentity: expectedEngine)
+            }
             return
         }
         let operation: CancellationOperation
@@ -1705,13 +2133,16 @@ final class EngineConversationSource: ConversationSource {
         model.statusLine = String(localized: "chat_stopping")
         do {
             try await operation.task.value
+            #if DEBUG
+            cancelSubmissionObserverForTesting?(operation.turnId)
+            #endif
             // Do not treat a successful Cancel command as terminal. The
             // host may return Ok for a stale/missing turn; only the
             // listener's matching terminal recovery snapshot proves that
             // this source may clear its durable checkpoint and gates.
             await listener?.waitUntilIdle()
-            try await waitForCancellationAcknowledgement(turnID: operation.turnId)
-            finishCancellation(operation, error: nil)
+            let acknowledgement = try await waitForCancellationAcknowledgement(operation)
+            finishCancellation(operation, error: nil, acknowledgement: acknowledgement)
         } catch {
             finishCancellation(operation, error: error)
             throw error
@@ -1719,9 +2150,63 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func cancel() {
+        // ChatView calls this synchronously. Close admission before enqueuing
+        // the async Cancel so a resumed Send cannot overtake the tap.
+        promptAdmissionGeneration = UUID()
+        let expectedToken = activeConversationTurnToken
+        let expectedSideID = isSideChat ? sideID : nil
+        let expectedSideParent = isSideChat ? sideParentSessionID : nil
+        let expectedEpoch = sessionEpoch
+        guard expectedToken != nil || expectedSideID != nil else { return }
+        model.isCancelling = true
         Task { [weak self] in
             guard let self else { return }
+            guard self.sessionEpoch == expectedEpoch,
+                  !self.isSideChat || (self.sideID == expectedSideID && self.sideParentSessionID == expectedSideParent),
+                  expectedToken.map({ self.activeConversationTurnToken == $0 }) ??
+                    (self.sideID == expectedSideID && self.currentTurnId == nil) else {
+                if self.sessionEpoch == expectedEpoch, self.cancellationOperation == nil,
+                   !self.isSideChat || (self.sideID == expectedSideID && self.sideParentSessionID == expectedSideParent),
+                   self.activeConversationTurnToken == nil {
+                    self.model.isCancelling = false
+                    self.model.statusLine = nil
+                }
+                return
+            }
             try? await self.cancelAndWait()
+        }
+    }
+
+    private func settleSideCancellationIfKnown(
+        token: ConversationTurnToken, sideID expectedSideID: String,
+        parentID: String, engineIdentity: ObjectIdentifier?
+    ) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while true {
+            guard sideID == expectedSideID, sideParentSessionID == parentID,
+                  handle.map(ObjectIdentifier.init) == engineIdentity else {
+                throw CancellationAcknowledgementError.timedOut(turnID: token.clientTurnId)
+            }
+            // A normal accepted side turn keeps its existing event-driven
+            // completion behavior. Only the original Send's exact rejection
+            // can instead establish that nothing was admitted.
+            if activeConversationTurnToken != token || acceptedSidePrompts.contains(token) { return }
+            if let original = originalPrompts[token], original.sideID == expectedSideID,
+               original.item.sessionID == parentID, original.engineIdentity == engineIdentity,
+               cancelledBeforeAdmission.contains(token) {
+                settlePromptRejectedBeforeAdmission(token)
+                model.streaming = false
+                model.statusLine = nil
+                model.notice = .cancelled
+                finishActiveRun(.cancelled)
+                publishActiveTurnCompletion(.cancelled)
+                clearTurnPointers(keepEpoch: false)
+                return
+            }
+            guard Date() < deadline else {
+                throw CancellationAcknowledgementError.timedOut(turnID: token.clientTurnId)
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
         }
     }
 
@@ -1890,8 +2375,8 @@ final class EngineConversationSource: ConversationSource {
             invalidateAudioSessionContext()
         }
         if active {
-            guard Self.settingsOwner !== self else { return }
-            Self.settingsOwner?.settingsGeneration &+= 1
+            if Self.settingsOwner === self, DesktopSettingsRepository.shared.connected { return }
+            if Self.settingsOwner !== self { Self.settingsOwner?.settingsGeneration &+= 1 }
             Self.settingsOwner = self
             settingsGeneration &+= 1
             let generation = settingsGeneration
@@ -2004,6 +2489,9 @@ final class EngineConversationSource: ConversationSource {
     /// adapter can stream events the moment the first turn runs.
     private func ensureHandle() async throws -> MobileEngineHandle {
         guard !isRetiredForReconnect else { throw CancellationError() }
+        guard !authoringMountAuthorizationPending else {
+            throw LocalAppServiceFailure("AUTHORING_PENDING", "The app authoring binding is not ready.")
+        }
         guard !isRemoteProjection else { throw RemoteFfiError.NotConnected }
         if let handle { return handle }
         if let handleBuildTask {
@@ -2031,43 +2519,52 @@ final class EngineConversationSource: ConversationSource {
         let handleBuilder = self.handleBuilder
         handleBuildAttemptID &+= 1
         let attemptID = handleBuildAttemptID
+        let dispatchEvidence = EngineNativeDispatchEvidence()
+        nativeDispatchEvidence = dispatchEvidence
+        failedNativeSessionID = nil
+        failedNativeHandle = nil
         // The task owns the entire session bootstrap and is shared by all
         // callers; the factory runs the blocking constructor on its own thread.
         let mediaHost = mediaHostComposition?.nativeHost
         let buildTask = Task.detached(priority: .userInitiated) {
-            [handleBuilder, prepared, mediaHost] in
+            [handleBuilder, prepared, mediaHost, dispatchEvidence] in
             let handle = try await NativeEngineFactory.build(
-                prepared, mediaHost: mediaHost, interactiveBuilder: handleBuilder
+                prepared, mediaHost: mediaHost, interactiveBuilder: handleBuilder,
+                onNativeDispatch: { dispatchEvidence.markDispatched() }
             )
             let owner = await handle.workspaceState().sessionId
-            for directory in additionalDirectories where directory == LXISHGuestPaths.home || directory.hasPrefix(LXISHGuestPaths.home + "/") {
-                let native = URL(fileURLWithPath: userHome).appendingPathComponent(String(directory.dropFirst(LXISHGuestPaths.home.count + 1)))
-                var isDirectory: ObjCBool = false
-                if FileManager.default.fileExists(atPath: native.path, isDirectory: &isDirectory), isDirectory.boolValue {
-                    try await handle.addWorkspaceDirectory(path: directory, expectedSessionId: owner)
+            do {
+                for directory in additionalDirectories where directory == LXISHGuestPaths.home || directory.hasPrefix(LXISHGuestPaths.home + "/") {
+                    let native = URL(fileURLWithPath: userHome).appendingPathComponent(String(directory.dropFirst(LXISHGuestPaths.home.count + 1)))
+                    var isDirectory: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: native.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                        try await handle.addWorkspaceDirectory(path: directory, expectedSessionId: owner)
+                    }
                 }
+                // Bootstrap listings are part of construction: never publish a
+                // handle that failed halfway through initialization.
+                try await handle.submit(command: .listModels)
+                try await handle.submit(command: .getConversationControls)
+                try await handle.submit(
+                    command: .listSessions(limit: EngineConversationSource.completeSessionListLimit, mode: nil)
+                )
+                // The composer has no static fallback: populate its command
+                // palette from the same dynamic registry used for execution.
+                try await handle.submit(command: .refreshListings(which: [.slashCommands]))
+                // Agent roster is session-scoped and follows the same
+                // out-of-band bootstrap path as models/sessions so the picker
+                // is populated before the first turn.
+                try? await handle.submit(command: .listSessionAgents)
+                // Seed the pinned tasks panel: a re-opened scope may already
+                // have a Workflow build running; its rows arrive as `TaskRow`
+                // events (zero rows ⇒ zero events). Best-effort — unlike the
+                // model/session listings above, the panel is not worth
+                // failing the whole handle over (it self-heals on pushes).
+                try? await handle.submit(command: .taskList(statusFilter: nil, requestId: nil))
+                return handle
+            } catch {
+                throw HandleBootstrapFailure(underlying: error, sessionID: owner, handle: handle)
             }
-            // Bootstrap listings are part of construction: never publish a
-            // handle that failed halfway through initialization.
-            try await handle.submit(command: .listModels)
-            try await handle.submit(command: .getConversationControls)
-            try await handle.submit(
-                command: .listSessions(limit: EngineConversationSource.completeSessionListLimit, mode: nil)
-            )
-            // The composer has no static fallback: populate its command
-            // palette from the same dynamic registry used for execution.
-            try await handle.submit(command: .refreshListings(which: [.slashCommands]))
-            // Agent roster is session-scoped and follows the same
-            // out-of-band bootstrap path as models/sessions so the picker
-            // is populated before the first turn.
-            try? await handle.submit(command: .listSessionAgents)
-            // Seed the pinned tasks panel: a re-opened scope may already
-            // have a Workflow build running; its rows arrive as `TaskRow`
-            // events (zero rows ⇒ zero events). Best-effort — unlike the
-            // model/session listings above, the panel is not worth
-            // failing the whole handle over (it self-heals on pushes).
-            try? await handle.submit(command: .taskList(statusFilter: nil, requestId: nil))
-            return handle
         }
         // Share the entire build, identity admission, and publication rather
         // than exposing the raw native handle to concurrent callers.
@@ -2075,11 +2572,14 @@ final class EngineConversationSource: ConversationSource {
             defer { sessionStartupFinished?() }
             do {
                 let builtHandle = try await buildTask.value
-                guard !isRetiredForReconnect, handleBuildAttemptID == attemptID else { throw CancellationError() }
+                failedNativeHandle = builtHandle
                 let workspace = await builtHandle.workspaceState()
+                let builtIdentity = canonicalSessionID(workspace.sessionId)
+                if UUID(uuidString: builtIdentity) != nil { failedNativeSessionID = builtIdentity }
                 guard !isRetiredForReconnect, handleBuildAttemptID == attemptID else { throw CancellationError() }
                 guard admitSessionOwner(workspace.sessionId) else { throw SessionHost.OwnershipError.conflictingOwner }
                 handle = builtHandle
+                failedNativeHandle = nil
                 model.workspaceState = SessionWorkspaceState(sessionId: workspace.sessionId, cwd: workspace.cwd,
                     projectRoot: workspace.projectRoot, additionalDirectories: workspace.additionalDirectories, transcriptPath: workspace.transcriptPath)
                 refreshAudioSessionContext()
@@ -2091,6 +2591,12 @@ final class EngineConversationSource: ConversationSource {
             } catch {
                 if handleBuildAttemptID == attemptID {
                     handleBuildTask = nil
+                }
+                if let failure = error as? HandleBootstrapFailure {
+                    let identity = canonicalSessionID(failure.sessionID)
+                    if UUID(uuidString: identity) != nil { failedNativeSessionID = identity }
+                    failedNativeHandle = failure.handle
+                    throw failure.underlying
                 }
                 throw error
             }
@@ -2121,13 +2627,35 @@ final class EngineConversationSource: ConversationSource {
 
     /// Retire only an idle owner. The native engine's UUID claim is released
     /// asynchronously after all strong handles and native work have drained.
-    func retireForReconnect() async throws {
-        if isRetiredForReconnect { return }
+    func retireForReconnect(allowUnconfirmedAuthoring: Bool = false, allowIncompleteBootstrap: Bool = false) async throws {
+        if let retirementTask { return try await retirementTask.value }
+        let task = Task { @MainActor [self] in
+            try await performRetirement(allowUnconfirmedAuthoring: allowUnconfirmedAuthoring,
+                                        allowIncompleteBootstrap: allowIncompleteBootstrap)
+        }
+        retirementTask = task
+        do {
+            try await task.value
+            retirementTask = nil
+        } catch {
+            retirementTask = nil
+            throw error
+        }
+    }
+
+    private func performRetirement(allowUnconfirmedAuthoring: Bool, allowIncompleteBootstrap: Bool) async throws {
+        if isRetiredForReconnect {
+            try finishRetiringNativeHandle()
+            return
+        }
         await listener?.waitUntilIdle()
-        guard !hasLiveSideChats,
+        guard (!allowUnconfirmedAuthoring || hasUnconfirmedAuthoringOwner), !hasLiveSideChats,
+              workspaceMutationsInFlight == 0, ownerCommandsInFlight == 0,
               !promptAdmissionPending, !durableLookupPending, durableCleanupPending.isEmpty,
               ConversationSourceReplacementPolicy.allowsReplacement(
-                of: model, hasActiveRealtimeAudio: hasActiveRealtimeAudio) else {
+                of: model, hasActiveRealtimeAudio: hasActiveRealtimeAudio,
+                allowUnconfirmedAuthoring: allowUnconfirmedAuthoring,
+                allowPendingSessionTransition: allowIncompleteBootstrap) else {
             throw NSError(domain: "ConversationSourceReplacement", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: String(localized: "chat_error_finish_background_turn_first")])
         }
@@ -2141,19 +2669,39 @@ final class EngineConversationSource: ConversationSource {
         audioContextTask?.cancel()
         audioContextTask = nil
         setSettingsActive(false)
+        listener?.detachSource()
+        listener = nil
+        permissionSink = nil
+        externalEventHandler = nil
+        await audioTask?.value
+        if let buildTask { _ = try? await buildTask.value }
+        // A detached builder can finish after retirement began. Drain its
+        // actual attachment before releasing the last Swift handle reference.
+        try finishRetiringNativeHandle()
+    }
+
+    private func finishRetiringNativeHandle() throws {
+        if let engine = handle ?? failedNativeHandle ?? mediaHostSessionEngine {
+            #if DEBUG
+            if let mediaDrainForTesting {
+                try mediaDrainForTesting.begin(engine)
+            } else if let mediaHost = mediaHostComposition?.nativeHost {
+                try mediaHost.beginEngineAttachmentDrain(engine: engine)
+            }
+            #else
+            if let mediaHost = mediaHostComposition?.nativeHost {
+                try mediaHost.beginEngineAttachmentDrain(engine: engine)
+            }
+            #endif
+        }
         if let mediaHostSessionBinding, let mediaHostSessionEngine {
             mediaHostComposition?.removeAudioSessionContext(
                 for: mediaHostSessionEngine, binding: mediaHostSessionBinding)
         }
         mediaHostSessionBinding = nil
         mediaHostSessionEngine = nil
-        listener?.detachSource()
-        listener = nil
-        permissionSink = nil
-        externalEventHandler = nil
         handle = nil
-        await audioTask?.value
-        if let buildTask { _ = try? await buildTask.value }
+        failedNativeHandle = nil
     }
 
     /// Refresh the real session catalog (drawer-open). Builds the handle if
@@ -3117,16 +3665,31 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
-    private func waitForCancellationAcknowledgement(turnID: UInt64) async throws {
-        if terminalRecoveryStates[turnID].map(Self.isTerminalRecoveryState) == true {
-            return
+    private func waitForCancellationAcknowledgement(
+        _ operation: CancellationOperation
+    ) async throws -> CancellationAcknowledgement {
+        let turnID = operation.turnId
+        let token = ConversationTurnToken(clientTurnId: turnID, sessionEpoch: operation.epoch)
+        func acknowledgement() -> CancellationAcknowledgement? {
+            if terminalRecoveryStates[turnID].map(Self.isTerminalRecoveryState) == true {
+                return .terminal
+            }
+            guard cancellationOperation?.id == operation.id,
+                  activeConversationTurnToken == token,
+                  let original = originalPrompts[token], cancelledBeforeAdmission.contains(token),
+                  original.item.sessionID == operation.sessionID,
+                  durableCheckpointOwners[turnID] == operation.sessionID,
+                  original.engineIdentity == operation.engineIdentity,
+                  handle.map(ObjectIdentifier.init) == operation.engineIdentity,
+                  model.activeSessionId.isEmpty ||
+                    canonicalSessionID(model.activeSessionId) == operation.sessionID else { return nil }
+            return .notAdmitted
         }
+        if let result = acknowledgement() { return result }
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             try await Task.sleep(nanoseconds: 10_000_000)
-            if terminalRecoveryStates[turnID].map(Self.isTerminalRecoveryState) == true {
-                return
-            }
+            if let result = acknowledgement() { return result }
         }
         throw CancellationAcknowledgementError.timedOut(turnID: turnID)
     }
@@ -4609,6 +5172,7 @@ final class EngineConversationSource: ConversationSource {
 
     func cancelForTesting() {
         guard model.streaming, currentTurnId != nil else { return }
+        promptAdmissionGeneration = UUID()
         model.isCancelling = true
         model.statusLine = String(localized: "chat_stopping")
     }
@@ -4616,6 +5180,29 @@ final class EngineConversationSource: ConversationSource {
     func setCommandSubmitterForTesting(_ submitter: ((ClientCommand) async throws -> Void)?) {
         testCommandSubmitter = submitter
     }
+
+    #if DEBUG
+    func setPromptDispatchBarrierForTesting(_ barrier: (() async -> Void)?) {
+        promptDispatchBarrierForTesting = barrier
+    }
+
+    func setDurableLoadWillStartForTesting(_ observer: (() -> Void)?) {
+        durableLoadWillStartForTesting = observer
+    }
+
+    func setNoAdmissionProofObserverForTesting(_ observer: ((ConversationTurnToken) -> Void)?) {
+        noAdmissionProofObserverForTesting = observer
+    }
+
+    func setCancelSubmissionObserverForTesting(_ observer: ((UInt64) -> Void)?) {
+        cancelSubmissionObserverForTesting = observer
+    }
+
+    func setSideOwnerForTesting(parentSessionID: String, sideID: String) {
+        sideParentSessionID = canonicalSessionID(parentSessionID)
+        self.sideID = sideID
+    }
+    #endif
 
     func setResumeSubmitterForTesting(_ submitter: ((String, String) async throws -> Void)?) {
         testResumeSubmitter = submitter
@@ -5568,7 +6155,6 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func fail(_ kind: ConversationError.Kind, _ message: String, clearDurable: Bool = true) {
-        restoreFailedSideSubmission()
         if let cancellationOperation,
            cancellationOperation.turnId == currentTurnId {
             // An engine error racing Cancel is not terminal ownership
@@ -5751,7 +6337,7 @@ final class EngineConversationSource: ConversationSource {
     /// retaining the old transcript and correlator until the host confirms
     /// release. Only then is the transcript reset for the selected session.
     func openSession(_ session: SessionRef) {
-        guard !isSideChat else { return }
+        guard !isSideChat, authoringOwner == nil, !model.authoringBindingPending else { return }
         guard unresolvedRecoveryTurnID == nil,
               pauseAcknowledgements.isEmpty
         else { return }
@@ -5761,16 +6347,33 @@ final class EngineConversationSource: ConversationSource {
 
 
     func changeWorkspace(_ path: String, expectedSessionID: String) {
+        do { try beginWorkspaceMutation() }
+        catch { fail(.host, error.localizedDescription); return }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.workspaceMutationsInFlight -= 1 }
             do {
-                try await setWorkspaceDirectory(path, expectedSessionID: expectedSessionID)
+                try await performWorkspaceChange(path, expectedSessionID: expectedSessionID)
             } catch { fail(.host, error.localizedDescription) }
         }
     }
 
     func setWorkspaceDirectory(_ path: String, expectedSessionID: String) async throws {
+        try beginWorkspaceMutation()
+        defer { workspaceMutationsInFlight -= 1 }
+        try await performWorkspaceChange(path, expectedSessionID: expectedSessionID)
+    }
+
+    private func beginWorkspaceMutation() throws {
+        guard isAvailableForPrompts else { throw LocalAppServiceFailure("AUTHORING_PENDING", "Wait for the app authoring binding to finish.") }
+        workspaceMutationsInFlight += 1
+    }
+
+    private func performWorkspaceChange(_ path: String, expectedSessionID: String) async throws {
         let handle = try await ensureHandle()
+        guard isAvailableForPrompts else {
+            throw LocalAppServiceFailure("AUTHORING_PENDING", "Wait for the app authoring binding to finish.")
+        }
         try await handle.changeWorkspace(path: path, expectedSessionId: expectedSessionID)
         listSessions()
     }
@@ -5803,10 +6406,16 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func addWorkspaceDirectory(_ path: String, expectedSessionID: String) {
+        do { try beginWorkspaceMutation() }
+        catch { fail(.host, error.localizedDescription); return }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.workspaceMutationsInFlight -= 1 }
             do {
                 let handle = try await ensureHandle()
+                guard isAvailableForPrompts else {
+                    throw LocalAppServiceFailure("AUTHORING_PENDING", "Wait for the app authoring binding to finish.")
+                }
                 try await handle.addWorkspaceDirectory(path: path, expectedSessionId: expectedSessionID)
                 listSessions()
             } catch { fail(.host, error.localizedDescription) }
@@ -5814,7 +6423,7 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func resumeSession(_ uuid: String) {
-        guard !isSideChat else { return }
+        guard !isSideChat, authoringOwner == nil, !model.authoringBindingPending else { return }
         guard !uuid.isEmpty,
               unresolvedRecoveryTurnID == nil,
               pauseAcknowledgements.isEmpty

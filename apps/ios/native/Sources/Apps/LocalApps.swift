@@ -6,7 +6,9 @@ actor LocalAppServiceClient {
     private struct TargetCompatibility: Decodable, Sendable { let compatible: Bool }
     private var handle: MobileLocalAppServiceHandle?
     private var linuxAttached = false
-    func request<T: Decodable & Sendable>(_ fields: [String: LocalAppJSON], as type: T.Type = T.self) async throws -> T {
+    func request<T: Decodable & Sendable>(_ fields: [String: LocalAppJSON], as type: T.Type = T.self,
+                                          purpose: LocalAppRequestPurpose = .ordinary) async throws -> T {
+        try LocalAppDevelopmentAdmission.requireServiceRequest(fields, purpose: purpose)
         if handle == nil {
             let service = try buildIosLocalAppService(configHome: MobileUserStorage.directories().configHome, runtime: nil)
             let target = await MainActor.run { UnifiedAppMarket.targets.last! }
@@ -28,7 +30,7 @@ actor LocalAppServiceClient {
                 let compatibility: TargetCompatibility = try await send(service, ["op": .string("checkTarget"), "appId": .string(id), "revision": revision, "target": try .encode(target)])
                 guard compatibility.compatible else { throw LocalAppServiceFailure("UNSUPPORTED_TARGET", "此版本不支持当前设备或发行渠道。") }
                 LXISHRuntimeResourceBootstrap.prepare()
-                let metadata = LXISHRuntimeBundleMetadata.current()
+                let metadata = try LXISHRuntimeBundleMetadata.current()
                 let workspace = try MobileUserStorage.prepareProjectsDirectory()
                 let directories = MobileUserStorage.directories()
                 let config = IosMobileLinuxConfigFfi(mode: .mobileLinux,
@@ -46,7 +48,8 @@ actor LocalAppServiceClient {
         return try await send(service, fields)
     }
     // Trusted native UI only; page calls use the authenticated external-browser gateway.
-    func agentHost(_ request: String) async throws -> LocalAppJSON {
+    func agentHost(_ request: String, authoringMode: SessionMode? = nil) async throws -> LocalAppJSON {
+        try LocalAppDevelopmentAdmission.requireAgentHostRequest(request, mode: authoringMode)
         switch LocalAppAgentHostPolicy.requirement(for: request) {
         case .none:
             break
@@ -60,8 +63,9 @@ actor LocalAppServiceClient {
         let response = try await handle.agentHostJson(request: request)
         return try JSONDecoder().decode(LocalAppServiceEnvelope<LocalAppJSON>.self, from: Data(response.utf8)).result()
     }
-    func agentHost<T: Decodable & Sendable>(_ fields: [String: LocalAppJSON], as type: T.Type) async throws -> T {
-        let value = try await agentHost(String(decoding: JSONEncoder().encode(fields), as: UTF8.self))
+    func agentHost<T: Decodable & Sendable>(_ fields: [String: LocalAppJSON], as type: T.Type,
+                                            authoringMode: SessionMode? = nil) async throws -> T {
+        let value = try await agentHost(String(decoding: JSONEncoder().encode(fields), as: UTF8.self), authoringMode: authoringMode)
         return try JSONDecoder().decode(T.self, from: JSONEncoder().encode(value))
     }
     private func send<T: Decodable & Sendable>(_ service: MobileLocalAppServiceHandle, _ fields: [String: LocalAppJSON]) async throws -> T {
@@ -89,12 +93,17 @@ enum LocalAppAgentHostPolicy {
         case currentConfiguration
     }
 
+    static func requiresCode(for request: String) -> Bool {
+        LocalAppDevelopmentAdmission.requiresCode(forAgentHostRequest: request)
+    }
+
     static func requirement(for request: String) -> Requirement {
         guard let data = request.data(using: .utf8),
               let fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let op = fields["op"] as? String else { return .currentConfiguration }
         switch op {
-        case "registerAuthoring":
+        case "registerAuthoring", "getAuthoringGrant", "prepareAuthoringSource", "bindAuthoringSource",
+             "createAuthoring", "restoreAuthoringSource", "remixAuthoringSource", "importRemixSource":
             return .none
         case "configure" where fields["settings"] is NSNull:
             return .available
@@ -476,7 +485,9 @@ final class UnifiedLocalApps {
     func layout(_ id: String) async throws -> LocalAppLayout {
         try await client.request(["op": .string("layout"), "appId": .string(id)])
     }
-    func prepareAuthoring(_ id: String, sessions: [String: LocalAppAuthoringSessionBinding]) async throws -> LocalAppAuthoringResolution {
+    func prepareAuthoring(_ id: String, sessions: [String: LocalAppAuthoringSessionBinding],
+                          mode: SessionMode) async throws -> LocalAppAuthoringResolution {
+        try LocalAppDevelopmentAdmission.requireCode(mode)
         guard let app = record(id), let authoring = app.authoring else {
             throw LocalAppServiceFailure("SOURCE_MISSING", "Choose or import an editable source copy before continuing development.")
         }
@@ -488,10 +499,80 @@ final class UnifiedLocalApps {
             "appId": .string(id),
             "sourceExists": .bool(exists),
             "sessionBindings": .object(try sessions.mapValues { try LocalAppJSON.encode($0) })
-        ])
+        ], purpose: .development(mode))
     }
-    func bindAuthoring(_ id: String, authoring: LocalAppAuthoring) async throws {
-        try await action("bindAuthoring", id: id, extra: ["authoring": try .encode(authoring)])
+    func createAuthoring(name: String, requestID: String, mode: SessionMode) async throws -> LocalAppCreatedAuthoringSource {
+        try LocalAppDevelopmentAdmission.requireCode(mode)
+        guard UUID(uuidString: requestID) != nil else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The app creation request is incomplete.")
+        }
+        let result = try await client.agentHost([
+            "op": .string("createAuthoring"), "name": .string(name),
+            "requestId": .string(canonicalSessionID(requestID))
+        ], as: LocalAppCreatedAuthoringSource.self, authoringMode: mode)
+        guard canonicalSessionID(result.requestId) == canonicalSessionID(requestID) else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The app service returned a different creation request.")
+        }
+        try Self.validateAuthoringSource(result)
+        return result
+    }
+
+    func prepareAuthoringSource(sourceID: String, sourceDirectory: String,
+                                mode: SessionMode) async throws -> LocalAppVerifiedAuthoringSource {
+        try LocalAppDevelopmentAdmission.requireCode(mode)
+        guard UUID(uuidString: sourceID) != nil else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The app source receipt is incomplete.")
+        }
+        let result = try await client.agentHost([
+            "op": .string("prepareAuthoringSource"), "sourceId": .string(canonicalSessionID(sourceID)),
+            "sourceDirectory": .string(sourceDirectory)
+        ], as: LocalAppVerifiedAuthoringSource.self, authoringMode: mode)
+        guard canonicalSessionID(result.sourceId) == canonicalSessionID(sourceID),
+              result.sourceDirectory == sourceDirectory else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The app source receipt does not match this project.")
+        }
+        try Self.validateAuthoringSource(sourceID: result.sourceId, sourceDirectory: result.sourceDirectory, sourcePath: result.sourcePath)
+        return result
+    }
+
+    func importMarketRemix(_ input: LocalAppMarketRemixInput, archivePath: String,
+                           mode: SessionMode) async throws -> LocalAppMarketRemixResult {
+        let request = try LocalAppAuthoringHostRequest.importRemix(input, archivePath: archivePath, mode: mode)
+        let result = try await client.agentHost(request, as: LocalAppMarketRemixResult.self, authoringMode: mode)
+        guard result.requestId == input.requestId, result.release.appId == result.record.appId,
+              !result.record.appId.isEmpty else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The market source receipt does not match this request.")
+        }
+        try Self.validateAuthoringSource(sourceID: result.sourceId, sourceDirectory: result.sourceDirectory,
+                                         sourcePath: result.sourcePath)
+        return result
+    }
+
+    static func validateAuthoringSource(_ result: LocalAppCreatedAuthoringSource) throws {
+        guard UUID(uuidString: result.requestId) != nil else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The app service returned an invalid source request.")
+        }
+        try validateAuthoringSource(sourceID: result.sourceId, sourceDirectory: result.sourceDirectory, sourcePath: result.sourcePath)
+    }
+
+    static func validateAuthoringSource(sourceID: String, sourceDirectory: String, sourcePath: String) throws {
+        let expected = try Self.hostSourceDirectory(sourceDirectory).standardizedFileURL.path
+        guard UUID(uuidString: sourceID) != nil,
+              expected == URL(fileURLWithPath: sourcePath, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path,
+              sourceDirectory.hasPrefix(MobileUserStorage.directories().appsGuestPath + "/") else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The app service returned an invalid source directory.")
+        }
+    }
+
+    func exactAuthoringBinding(sourceDirectory: String, projectID: String, sessionID: String,
+                               mode: SessionMode, expectedSourceID: String? = nil) async throws -> LocalAppAuthoring {
+        let request = try LocalAppAuthoringHostRequest.getGrant(sourceDirectory: sourceDirectory, projectID: projectID,
+                                                                sessionID: sessionID, mode: mode)
+        let receipt = try await client.agentHost(request, as: LocalAppAuthoringReceipt.self, authoringMode: mode)
+        guard receipt.sessionMode == mode, receipt.matchesSourceID(expectedSourceID) else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app binding has a different mode or source.")
+        }
+        return receipt.authoring
     }
     private func cancelAgentApp(
         _ appID: String,
@@ -506,11 +587,20 @@ final class UnifiedLocalApps {
         await agentBackground.cancel(appID: appID, client: client, reason: reason)
         if let wake, let token, wake.appID == appID { handoffPreparations.finish(wake, token: token) }
     }
-    /// Native-only pending binding for a newly-created app. This uses the
-    /// trusted App Agent host channel; it is not part of the browser API.
-    func registerPendingAuthoring(_ authoring: LocalAppAuthoring) async throws {
-        let request = try LocalAppAuthoringHostRequest.registerPending(authoring)
-        let _: LocalAppJSON = try await client.agentHost(request, as: LocalAppJSON.self)
+    /// Native-only immutable owner receipt for a new or published app. This
+    /// trusted channel is never exposed to the external-browser gateway.
+    func registerAuthoring(_ authoring: LocalAppAuthoring, sourceID: String, requestID: String,
+                           mode: SessionMode, setCurrent: Bool) async throws {
+        let request = try LocalAppAuthoringHostRequest.register(authoring, sourceID: sourceID,
+                                                                 requestID: requestID, mode: mode, setCurrent: setCurrent)
+        let receipt = try await client.agentHost(request, as: LocalAppAuthoringReceipt.self, authoringMode: mode)
+        guard receipt.sessionMode == mode, receipt.matchesSourceID(sourceID),
+              case .mobileProject(let projectID)? = authoring.projectRef,
+              let sessionID = authoring.authoringSessionId,
+              LocalAppAuthoringOwner(sourceDirectory: authoring.sourceDirectory, projectID: projectID,
+                                     sessionID: sessionID, appID: authoring.appId).matches(receipt.authoring) else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The registered app binding has a different owner.")
+        }
     }
     static func hostSourceDirectory(_ source: String) throws -> URL {
         let paths = MobileUserStorage.directories()
@@ -524,18 +614,43 @@ final class UnifiedLocalApps {
         guard url.path == base.path || url.path.hasPrefix(base.path + "/") else { throw LocalAppServiceFailure("INVALID_SOURCE", "Source path escaped the local user home.") }
         return url
     }
-    static func newAuthoringDirectory(name: String, create: Bool = true) throws -> String {
-        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty, clean.count <= 100 else { throw LocalAppServiceFailure("INVALID_NAME", "Enter an app name of 1–100 characters.") }
-        let slug = clean.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? String($0) : "-" }.joined()
-        let guest = MobileUserStorage.directories().appsGuestPath + "/" + slug + "-" + UUID().uuidString.prefix(8).lowercased()
-        if create { try FileManager.default.createDirectory(at: hostSourceDirectory(guest), withIntermediateDirectories: true) }
-        return guest
+    func bindAuthoringSource(requestID: String, sourceID: String, sourceDirectory: String,
+                             appID: String, mode: SessionMode) async throws -> LocalAppCreatedAuthoringSource {
+        try LocalAppDevelopmentAdmission.requireCode(mode)
+        guard UUID(uuidString: requestID) != nil, UUID(uuidString: sourceID) != nil, !appID.isEmpty else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The app source binding request is incomplete.")
+        }
+        let bound = try await client.agentHost(["op": .string("bindAuthoringSource"),
+            "requestId": .string(canonicalSessionID(requestID)), "sourceId": .string(canonicalSessionID(sourceID)),
+            "sourceDirectory": .string(sourceDirectory), "targetAppId": .string(appID)], as: LocalAppBoundAuthoringSource.self,
+            authoringMode: mode)
+        guard canonicalSessionID(bound.requestId) == canonicalSessionID(requestID),
+              canonicalSessionID(bound.sourceId) == canonicalSessionID(sourceID),
+              bound.sourceDirectory == sourceDirectory, bound.targetAppId == appID else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The app source binding changed.")
+        }
+        let result = LocalAppCreatedAuthoringSource(sourceId: bound.sourceId, requestId: bound.requestId,
+            sourceDirectory: bound.sourceDirectory, sourcePath: bound.sourcePath)
+        try Self.validateAuthoringSource(result)
+        return result
     }
-    func restoreAuthoring(_ app: UnifiedAppRecord) async throws -> UnifiedAppRecord {
-        let guest = try Self.newAuthoringDirectory(name: app.name, create: false)
-        let result: UnifiedAppRecord = try await client.request(["op": .string("restoreAuthoring"), "appId": .string(app.appId), "sourcePath": .string(try Self.hostSourceDirectory(guest).path), "authoring": try .encode(LocalAppAuthoring(sourceDirectory: guest))])
-        await refresh(); return result
+
+    func restoreAuthoringSource(appID: String, revision: Int, requestID: String,
+                                mode: SessionMode) async throws -> LocalAppCreatedAuthoringSource {
+        try LocalAppDevelopmentAdmission.requireCode(mode)
+        guard UUID(uuidString: requestID) != nil, !appID.isEmpty, revision > 0 else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The app source restore request is incomplete.")
+        }
+        let request: [String: LocalAppJSON] = ["op": .string("restoreAuthoringSource"),
+            "appId": .string(appID), "requestId": .string(canonicalSessionID(requestID)), "revision": .number(Double(revision))]
+        let result = try await client.agentHost(request, as: LocalAppRestoredAuthoringSource.self, authoringMode: mode)
+        try Self.validateAuthoringSource(LocalAppCreatedAuthoringSource(sourceId: result.sourceId, requestId: result.requestId,
+            sourceDirectory: result.sourceDirectory, sourcePath: result.sourcePath))
+        guard result.record.appId == appID, canonicalSessionID(result.requestId) == canonicalSessionID(requestID) else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The restored source does not match this app.")
+        }
+        return LocalAppCreatedAuthoringSource(sourceId: result.sourceId, requestId: result.requestId,
+            sourceDirectory: result.sourceDirectory, sourcePath: result.sourcePath)
     }
 
 }

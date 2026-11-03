@@ -27,6 +27,8 @@ struct LocalAppDevelopmentRequest: Sendable {
     let appId: String?
     let name: String
     let sourceDirectory: String
+    let sourceID: String
+    let sourceRequestID: String?
     let authoring: LocalAppAuthoring?
     let prompt: String
 }
@@ -36,17 +38,34 @@ struct AppsPage: View {
     @Environment(\.openURL) private var openURL
     let library: UnifiedLocalApps
     let market: UnifiedAppMarket
+    let projectStore: ProjectStore
     let onOpenApp: (String) -> Void
     let onShowDetails: (String) -> Void
-    let onDevelop: (LocalAppDevelopmentRequest) -> Void
+    let currentMode: () -> SessionMode
+    let captureImportPresentation: () -> LocalAppActionPresentation
+    let onCreate: (String, String) async throws -> Void
+    let onRecoverCreation: (LocalAppSourceCreateIntent) -> Void
     @State private var query = ""
     @State private var creating = false
     @State private var importing = false
+    @State private var importingMode: SessionMode?
+    @State private var importPresentation: LocalAppActionPresentation?
+    @State private var requiresCode = false
     @State private var error: String?
     private var filtered: [UnifiedAppRecord] { library.records.filter { query.isEmpty || $0.name.localizedStandardContains(query) } }
     var body: some View {
         List {
             if let message = error ?? library.error { Text(message).foregroundStyle(.red).textSelection(.enabled) }
+            if let message = projectStore.pendingLocalAppError { Text(message).foregroundStyle(.red).textSelection(.enabled) }
+            if !projectStore.pendingLocalAppCreations.isEmpty {
+                Section("local_app_authoring_recover") {
+                    ForEach(projectStore.pendingLocalAppCreations) { intent in
+                        Button { if developmentMode() != nil { onRecoverCreation(intent) } } label: {
+                            Label(intent.name, systemImage: "arrow.clockwise")
+                        }.accessibilityIdentifier("apps.recover-creation.\(intent.requestId)")
+                    }
+                }
+            }
             ForEach(filtered) { app in
                 Button { onShowDetails(app.appId) } label: {
                     HStack(spacing: 12) {
@@ -73,22 +92,49 @@ struct AppsPage: View {
                     .accessibilityIdentifier("apps.market.open")
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Menu { Button("创建应用") { creating = true }; Button("导入源码文件夹") { importing = true } }
+                Menu {
+                    Button("创建应用") { if developmentMode() != nil { creating = true } }
+                    Button("导入源码文件夹") {
+                        if let mode = developmentMode() {
+                            importingMode = mode
+                            importPresentation = captureImportPresentation()
+                            importing = true
+                        }
+                    }
+                }
                     label: { Image(systemName: "plus") }.accessibilityLabel("创建或导入应用")
             }
         }
-        .task { await library.refresh() }
-        .sheet(isPresented: $creating) { LocalAppCreateSheet(onCreate: onDevelop) }
+        .task { await library.refresh(); await projectStore.refreshPendingLocalAppCreations() }
+        .sheet(isPresented: $creating) { LocalAppCreateSheet(onCreate: onCreate) }
         .fileImporter(isPresented:$importing,allowedContentTypes:[.folder, .zip]) { result in
-            Task {
+            let admittedMode = importingMode
+            let presentation = importPresentation
+            importingMode = nil
+            importPresentation = nil
+            Task { @MainActor in
                 do {
+                    guard let mode = admittedMode else { throw LocalAppServiceFailure("requiresCode", String(localized: "local_app_development_requires_code")) }
                     let url = try result.get(); let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                    let imported = try await library.importSource(url)
-                    await library.refresh(); onShowDetails(imported.record.appId)
-                } catch { self.error = error.localizedDescription }
+                    let imported = try await library.importSource(url, mode: mode)
+                    await library.refresh()
+                    if presentation?.mayPresent() == true { onShowDetails(imported.record.appId) }
+                } catch {
+                    if let presentation {
+                        presentation.deliverFailure(error.localizedDescription) { self.error = $0 }
+                    } else { self.error = error.localizedDescription }
+                }
             }
         }
         .accessibilityIdentifier("apps.page")
+        .alert(String(localized: "local_app_development_requires_code"), isPresented: $requiresCode) {
+            Button("common_ok", role: .cancel) { }
+        }
+    }
+    private func developmentMode() -> SessionMode? {
+        let mode = currentMode()
+        guard mode == .code else { requiresCode = true; return nil }
+        return mode
     }
     private func openMarket() {
         guard let url = market.browseURL else { error = "应用市场地址不可用。"; return }
@@ -98,40 +144,36 @@ struct AppsPage: View {
 
 private struct LocalAppCreateSheet: View {
     @Environment(\.dismiss) private var dismiss
-    let onCreate: (LocalAppDevelopmentRequest) -> Void
+    let onCreate: (String, String) async throws -> Void
     @State private var name = ""
     @State private var prompt = ""
-    @State private var sourceDirectory = ""
     @State private var error: String?
+    @State private var creating = false
     var body: some View {
         NavigationStack {
             Form {
                 TextField("应用名称",text:$name)
-                TextField("已有源码目录（可选）", text: $sourceDirectory).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Text("留空会在 \(MobileUserStorage.directories().appsGuestPath) 创建目录；已有源码请填写 Linux 用户目录。").font(.footnote).foregroundStyle(.secondary)
+                Text("应用源码将创建在 \(MobileUserStorage.directories().appsGuestPath)。").font(.footnote).foregroundStyle(.secondary)
                 TextField("希望应用完成什么？",text:$prompt,axis:.vertical).lineLimit(3...8)
                 Text("源码保存在本机 Linux 用户空间。创建后进入普通开发会话；本地发布与发布到市场是不同操作。").font(.footnote).foregroundStyle(.secondary)
                 if let error { Text(error).foregroundStyle(.red) }
             }
             .navigationTitle("创建应用")
             .toolbar {
-                ToolbarItem(placement:.cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement:.cancellationAction) { Button("取消") { dismiss() }.disabled(creating) }
                 ToolbarItem(placement:.confirmationAction) { Button("开始开发") {
-                    do {
-                        let directory: String
-                        let selected = sourceDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if selected.isEmpty { directory = try UnifiedLocalApps.newAuthoringDirectory(name:name) }
-                        else {
-                            let url = try UnifiedLocalApps.hostSourceDirectory(selected)
-                            var isDirectory: ObjCBool = false
-                            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { throw LocalAppServiceFailure("SOURCE_MISSING", "请选择已存在的 Linux 用户目录。") }
-                            directory = selected
-                        }
-                        onCreate(.init(appId:nil,name:name,sourceDirectory:directory,authoring:nil,prompt:prompt)); dismiss()
-                    } catch { self.error = error.localizedDescription }
-                }.disabled(name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty) }
+                    creating = true
+                    Task { @MainActor in
+                        defer { creating = false }
+                        do {
+                            try await onCreate(name, prompt)
+                            dismiss()
+                        } catch { self.error = error.localizedDescription }
+                    }
+                }.disabled(creating || name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty) }
             }
         }
+        .interactiveDismissDisabled(creating)
     }
 }
 
@@ -172,6 +214,10 @@ struct LocalAppDetailPage: View {
     let appId: String
     let onOpenApp: (String) -> Void
     let onDevelop: (UnifiedAppRecord) -> Void
+    let onRestore: (UnifiedAppRecord) -> Void
+    let onRemix: (UnifiedAppRecord) -> Void
+    let currentMode: () -> SessionMode
+    let captureActionPresentation: () -> LocalAppActionPresentation
     @State private var releases: [UnifiedAppRelease] = []
     @State private var logs = ""
     @State private var dataPath = ""
@@ -184,6 +230,10 @@ struct LocalAppDetailPage: View {
     @State private var exportingSource = false
     @State private var sourceDocument: LocalAppSourceDocument?
     @State private var restoring = false
+    @State private var remixing = false
+    @State private var pendingRemix = LocalAppRemixSelection<UnifiedAppRecord>()
+    @State private var requiresCode = false
+    @State private var sheetRequiresCode = false
     var body: some View {
         List {
             if let app = library.record(appId) {
@@ -193,8 +243,13 @@ struct LocalAppDetailPage: View {
                     LabeledContent("状态", value: run?.phase ?? "stopped")
                     Button(run?.phase == "running" ? "打开运行中的应用" : "运行") { requestRun(app) }
                     Button("停止") { operation("stop") }.disabled(run?.isLive != true)
-                    Button("继续开发") { onDevelop(app) }
-                    if app.marketOrigin == nil { Button("从当前版本恢复源码副本") { restoring = true } }
+                    Button("继续开发") { if developmentMode() != nil { onDevelop(app) } }
+                    if app.marketOrigin == nil { Button("从当前版本恢复源码副本") { if developmentMode() != nil { restoring = true } } }
+                    if app.marketOrigin?.remixedFrom == nil, app.marketOrigin != nil {
+                        Button("local_app_market_remix") {
+                            if developmentMode() != nil { pendingRemix.capture(app); remixing = true }
+                        }
+                    }
                     Button("修复依赖并重试") { operation("repair") }
                 }
                 Section("版本") {
@@ -228,10 +283,28 @@ struct LocalAppDetailPage: View {
                 }
                 Section("日志") { Text(logs.isEmpty ? "当前没有日志" : logs).font(.caption.monospaced()).textSelection(.enabled); Button("刷新日志") { Task { await load() } } }
                 Section("发布") {
-                    Button("发布到市场") { Task {
-                        preparingPublication = true; defer { preparingPublication = false }
-                        do { publication = try await market.preparePublication(app) } catch { self.error = error.localizedDescription }
-                    } }.disabled(preparingPublication || market.publishing)
+                    Button("发布到市场") {
+                        if let mode = developmentMode() {
+                            let presentation = captureActionPresentation()
+                            Task {
+                                preparingPublication = true; defer { preparingPublication = false }
+                                do {
+                                    let prepared = try await market.preparePublication(app, mode: mode)
+                                    market.parkPreparedPublication(prepared)
+                                    if presentation.mayPresent() {
+                                        publication = market.takePreparedPublication(appID: app.appId)
+                                    }
+                                } catch {
+                                    presentation.deliverFailure(error.localizedDescription) { self.error = $0 }
+                                }
+                            }
+                        }
+                    }.disabled(preparingPublication || market.publishing)
+                    if market.hasPreparedPublication(appID: app.appId) {
+                        Button("local_app_publication_review_prepared") {
+                            if developmentMode() != nil { publication = market.takePreparedPublication(appID: app.appId) }
+                        }.disabled(market.publishing)
+                    }
                     if preparingPublication { ProgressView("准备源码清单…") }
                     if let url = market.managementURL { Link("管理市场发行与审核", destination: url) }
                     if let status = market.publishStatus { Text(status).font(.footnote) }
@@ -260,7 +333,22 @@ struct LocalAppDetailPage: View {
                 .interactiveDismissDisabled(market.publishing)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("取消") { publication = nil }.disabled(market.publishing) }
-                    ToolbarItem(placement: .confirmationAction) { Button("发布") { Task { do { try await market.publish(prepared); publication = nil } catch { self.error = error.localizedDescription; publication = nil } } }.disabled(market.publishing) }
+                    ToolbarItem(placement: .confirmationAction) { Button("发布") {
+                        if let mode = developmentMode(inSheet: true) {
+                            let presentation = captureActionPresentation()
+                            Task {
+                                do { try await market.publish(prepared, mode: mode); publication = nil }
+                                catch {
+                                    market.parkPreparedPublication(prepared)
+                                    presentation.deliverFailure(error.localizedDescription) { self.error = $0 }
+                                    publication = nil
+                                }
+                            }
+                        }
+                    }.disabled(market.publishing) }
+                }
+                .alert(String(localized: "local_app_development_requires_code"), isPresented: $sheetRequiresCode) {
+                    Button("common_ok", role: .cancel) { }
                 }
             }
         }
@@ -279,10 +367,28 @@ struct LocalAppDetailPage: View {
         }
         .sheet(item:$consent) { release in LocalAppConsentSheet(manifest:release.manifest,digest:release.digest,title:"授权此版本运行") { Task { do { try await library.grant(appId,digest:release.digest); consent = nil; await runRelease(release) } catch { self.error = error.localizedDescription; consent = nil } } } }
         .confirmationDialog("恢复可编辑源码副本？", isPresented: $restoring, titleVisibility: .visible) {
-            Button("恢复副本并继续开发") { Task { do { guard let app = library.record(appId) else { return }; onDevelop(try await library.restoreAuthoring(app)) } catch { self.error = error.localizedDescription } } }
+            Button("恢复副本并继续开发") { if developmentMode() != nil, let app = library.record(appId) { onRestore(app) } }
             Button("取消", role: .cancel) { }
         } message: { Text("从当前不可变发布生成新的源码目录，原目录和发布版本保留。") }
+        .confirmationDialog(String(localized: "local_app_market_remix_confirm"), isPresented: $remixing, titleVisibility: .visible) {
+            Button("local_app_market_remix") {
+                let selected = pendingRemix.take()
+                if developmentMode() != nil, let selected { onRemix(selected) }
+            }
+            Button("common_cancel", role: .cancel) { pendingRemix.clear() }
+        }
         .confirmationDialog("移除应用？",isPresented:$deleting,titleVisibility:.visible) { Button("移除",role:.destructive) { operation("remove") }; Button("取消",role:.cancel) {} } message: { Text("应用将从列表移除。源码和旧归档不受影响。") }
+        .alert(String(localized: "local_app_development_requires_code"), isPresented: $requiresCode) {
+            Button("common_ok", role: .cancel) { }
+        }
+    }
+    private func developmentMode(inSheet: Bool = false) -> SessionMode? {
+        let mode = currentMode()
+        guard mode == .code else {
+            if inSheet { sheetRequiresCode = true } else { requiresCode = true }
+            return nil
+        }
+        return mode
     }
     private func requestRun(_ app: UnifiedAppRecord) {
         guard let release = releases.first(where: { $0.revision == app.currentRevision }) else { error = "当前版本尚未加载，请刷新后重试。"; return }
@@ -476,10 +582,15 @@ struct MarketInstallPage: View {
     let market: UnifiedAppMarket
     let appId: String
     let onOpenApp: (String) -> Void
+    let currentMode: () -> SessionMode
+    let onRemix: (MarketDistribution) -> Void
     @State private var app: MarketApp?
     @State private var distribution: MarketDistribution?
     @State private var error: String?
     @State private var consenting = false
+    @State private var remixing = false
+    @State private var pendingRemix = LocalAppRemixSelection<MarketDistribution>()
+    @State private var requiresCode = false
     @State private var loading = false
     var body: some View {
         List {
@@ -494,6 +605,12 @@ struct MarketInstallPage: View {
                     Text("能力：" + (release.manifest.capabilities ?? []).joined(separator: ", "))
                     Text(release.releaseDigest).font(.caption.monospaced()).textSelection(.enabled)
                     Button("安装到此设备") { consenting = true }.disabled(market.progress != nil || market.installCommitting)
+                    if release.manifest.remix?.allowed == true {
+                        Button("local_app_market_remix") {
+                            if currentMode() == .code { pendingRemix.capture(release); remixing = true }
+                            else { requiresCode = true }
+                        }.disabled(market.progress != nil || market.installCommitting)
+                    }
                 }
             }
             if let progress = market.progress { ProgressView(value: progress) }
@@ -515,6 +632,17 @@ struct MarketInstallPage: View {
                     }
                 }
             }
+        }
+        .confirmationDialog(String(localized: "local_app_market_remix_confirm"), isPresented: $remixing, titleVisibility: .visible) {
+            Button("local_app_market_remix") {
+                let selected = pendingRemix.take()
+                guard currentMode() == .code else { requiresCode = true; return }
+                if let selected { onRemix(selected) }
+            }
+            Button("common_cancel", role: .cancel) { pendingRemix.clear() }
+        }
+        .alert(String(localized: "local_app_development_requires_code"), isPresented: $requiresCode) {
+            Button("common_ok", role: .cancel) { }
         }
     }
     private func load() async {

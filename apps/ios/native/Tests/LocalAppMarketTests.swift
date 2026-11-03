@@ -95,8 +95,14 @@ final class LocalAppMarketTests: XCTestCase {
             authoringSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         )
 
-        let request = try LocalAppAuthoringHostRequest.registerPending(authoring)
+        let sourceID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        let requestID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        let request = try LocalAppAuthoringHostRequest.register(authoring, sourceID: sourceID, requestID: requestID, mode: .code, setCurrent: true)
         XCTAssertEqual(request["op"], .string("registerAuthoring"))
+        XCTAssertEqual(request["sourceId"], .string(sourceID))
+        XCTAssertEqual(request["requestId"], .string(requestID))
+        XCTAssertEqual(request["sessionMode"], .string("code"))
+        XCTAssertEqual(request["setCurrent"], .bool(true))
         let requestBytes = try JSONEncoder().encode(request)
         XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: String(decoding: requestBytes, as: UTF8.self)), .none)
         XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"startNative"}"#), .currentConfiguration)
@@ -114,19 +120,134 @@ final class LocalAppMarketTests: XCTestCase {
         XCTAssertEqual(project["kind"], .string("mobileProject"))
         XCTAssertEqual(project["projectId"], .string("12345678-1234-4abc-8def-1234567890ab"))
 
-        XCTAssertThrowsError(try LocalAppAuthoringHostRequest.registerPending(LocalAppAuthoring(
+        XCTAssertNoThrow(try LocalAppAuthoringHostRequest.register(LocalAppAuthoring(
             sourceDirectory: authoring.sourceDirectory,
             workspaceId: authoring.workspaceId,
             projectRef: authoring.projectRef,
             authoringSessionId: authoring.authoringSessionId,
             appId: "a12345678901234567890123456789012"
-        )))
-        XCTAssertThrowsError(try LocalAppAuthoringHostRequest.registerPending(LocalAppAuthoring(
+        ), sourceID: sourceID, requestID: requestID, mode: .code, setCurrent: false))
+        XCTAssertThrowsError(try LocalAppAuthoringHostRequest.register(LocalAppAuthoring(
             sourceDirectory: authoring.sourceDirectory,
             workspaceId: authoring.workspaceId,
             projectRef: .mobileProject("different-project"),
             authoringSessionId: authoring.authoringSessionId
-        )))
+        ), sourceID: sourceID, requestID: requestID, mode: .code, setCurrent: false))
+        XCTAssertThrowsError(try LocalAppAuthoringHostRequest.register(authoring, sourceID: "invalid", requestID: requestID, mode: .code, setCurrent: false))
+        XCTAssertThrowsError(try LocalAppAuthoringHostRequest.register(authoring, sourceID: sourceID, requestID: "invalid", mode: .code, setCurrent: false))
+        XCTAssertThrowsError(try LocalAppAuthoringHostRequest.register(authoring, sourceID: sourceID, requestID: requestID, mode: .chat, setCurrent: false))
+    }
+
+    func testExactAuthoringLookupBindsProjectSessionSourceAndApp() throws {
+        let project = UUID().uuidString.lowercased()
+        let session = UUID().uuidString.lowercased()
+        let source = MobileUserStorage.directories().appsGuestPath + "/owner-test"
+        let owner = LocalAppAuthoringOwner(sourceDirectory: source, projectID: project, sessionID: session, appID: nil)
+        let binding = LocalAppAuthoring(sourceDirectory: source, workspaceId: project,
+                                        projectRef: .mobileProject(project), authoringSessionId: session)
+        XCTAssertTrue(owner.matches(binding))
+        var wrong = binding
+        wrong.workspaceId = UUID().uuidString
+        XCTAssertFalse(owner.matches(wrong))
+        wrong = binding; wrong.projectRef = .mobileProject(UUID().uuidString)
+        XCTAssertFalse(owner.matches(wrong))
+        wrong = binding; wrong.authoringSessionId = UUID().uuidString
+        XCTAssertFalse(owner.matches(wrong))
+        wrong = binding; wrong.sourceDirectory += "-other"
+        XCTAssertFalse(owner.matches(wrong))
+        wrong = binding; wrong.appId = "different-app"
+        XCTAssertTrue(owner.matches(wrong), "Published metadata does not replace the immutable owner receipt")
+        let request = try LocalAppAuthoringHostRequest.getGrant(sourceDirectory: source, projectID: project, sessionID: session, mode: .code)
+        XCTAssertEqual(request["op"], .string("getAuthoringGrant"))
+        XCTAssertEqual(request["sourceDirectory"], .string(source))
+        XCTAssertEqual(request["projectId"], .string(project))
+        XCTAssertEqual(request["authoringSessionId"], .string(session))
+        XCTAssertEqual(request["sessionMode"], .string("code"))
+        XCTAssertThrowsError(try LocalAppAuthoringHostRequest.getGrant(sourceDirectory: source, projectID: project, sessionID: "not-a-uuid", mode: .code))
+        XCTAssertThrowsError(try LocalAppAuthoringHostRequest.getGrant(sourceDirectory: source, projectID: project, sessionID: session, mode: .chat))
+    }
+
+    func testMissingAuthoringSourceDoesNotRequireAReceipt() throws {
+        let missing = try JSONDecoder().decode(LocalAppAuthoringResolution.self,
+            from: Data(#"{"action":"sourceMissing","sourceDirectory":"","authoring":null,"authoringSessionId":null}"#.utf8))
+        XCTAssertEqual(missing.action, "sourceMissing")
+        XCTAssertNil(missing.sourceId)
+        XCTAssertNil(missing.sourcePath)
+    }
+
+    func testAuthoringReceiptRequiresCodeModeFromNativeResponse() throws {
+        let json = #"{"sourceDirectory":"/home/test/.apps/source","workspaceId":"11111111-1111-4111-8111-111111111111","projectRef":{"kind":"mobileProject","projectId":"11111111-1111-4111-8111-111111111111"},"authoringSessionId":"22222222-2222-4222-8222-222222222222","sessionMode":"code","sourceId":"33333333-3333-4333-8333-333333333333","ownerAppId":"app-id"}"#
+        let receipt = try JSONDecoder().decode(LocalAppAuthoringReceipt.self, from: Data(json.utf8))
+        XCTAssertEqual(receipt.sessionMode, .code)
+        XCTAssertEqual(receipt.authoring.authoringSessionId, "22222222-2222-4222-8222-222222222222")
+        XCTAssertTrue(receipt.matchesSourceID("33333333-3333-4333-8333-333333333333"))
+        XCTAssertFalse(receipt.matchesSourceID("44444444-4444-4444-8444-444444444444"))
+        XCTAssertEqual(receipt.ownerAppId, "app-id")
+        XCTAssertThrowsError(try JSONDecoder().decode(LocalAppAuthoringReceipt.self,
+            from: Data(json.replacingOccurrences(of: ",\"sessionMode\":\"code\"", with: "").utf8)))
+        XCTAssertThrowsError(try JSONDecoder().decode(LocalAppAuthoringReceipt.self,
+            from: Data(json.replacingOccurrences(of: ",\"sourceId\":\"33333333-3333-4333-8333-333333333333\"", with: "").utf8)))
+    }
+
+    @MainActor
+    func testChatCannotEnterNativeAuthoringOrLocalPublication() async throws {
+        let client = LocalAppServiceClient()
+        let library = UnifiedLocalApps(client: client)
+        do {
+            _ = try await library.createAuthoring(name: "Notes", requestID: UUID().uuidString.lowercased(), mode: .chat)
+            XCTFail("Chat must be rejected before the native create request")
+        } catch let failure as LocalAppServiceFailure { XCTAssertEqual(failure.code, "requiresCode") }
+        do {
+            let _: LocalAppPublishResult = try await client.request(["op": .string("publish"), "sourcePath": .string("/missing")],
+                                                                     purpose: .development(.chat))
+            XCTFail("Chat must be rejected before publishing")
+        } catch let failure as LocalAppServiceFailure { XCTAssertEqual(failure.code, "requiresCode") }
+        do {
+            _ = try await client.agentHost(#"{"op":"createAuthoring","name":"Notes"}"#, authoringMode: .chat)
+            XCTFail("The raw native host ingress must reject Chat")
+        } catch let failure as LocalAppServiceFailure { XCTAssertEqual(failure.code, "requiresCode") }
+        XCTAssertNoThrow(try LocalAppDevelopmentAdmission.requireCode(.code))
+    }
+
+    @MainActor
+    func testAuthoringRegistrationSerializesOneAppAndKeepsLatestSelection() async {
+        let order = LocalAppAuthoringRegistrationOrder()
+        let first = order.issue(key: "app:a")
+        let firstLease = await order.acquire(key: first.key)
+        let second = order.issue(key: "app:a")
+        let other = order.issue(key: "app:b")
+        let otherLease = await order.acquire(key: other.key)
+        XCTAssertTrue(order.isCurrent(other), "Another app is not blocked by A's registration")
+        order.release(otherLease)
+
+        let started = expectation(description: "second registration waiting")
+        var secondAcquired = false
+        let waiting = Task { @MainActor in
+            started.fulfill()
+            let lease = await order.acquire(key: second.key)
+            secondAcquired = true
+            XCTAssertTrue(order.isCurrent(second))
+            order.release(lease)
+        }
+        await fulfillment(of: [started], timeout: 1)
+        XCTAssertFalse(secondAcquired)
+        XCTAssertFalse(order.isCurrent(first), "A delayed first owner may add only its immutable receipt")
+        order.release(firstLease)
+        await waiting.value
+        XCTAssertTrue(secondAcquired)
+    }
+
+    @MainActor
+    func testDelayedAuthoringCannotReplaceNewerProjectSelection() throws {
+        let order = LocalAppAuthoringRegistrationOrder()
+        let older = order.issueNavigation()
+        let newer = order.issueNavigation()
+        let (authority, revision) = try XCTUnwrap(order.reserveProjectSelection(projectID: "project", sequence: newer))
+        XCTAssertNil(order.reserveProjectSelection(projectID: "project", sequence: older))
+        XCTAssertNoThrow(try authority.commit(revision: revision) { _ in })
+        order.invalidateProjectSelection(projectID: "project")
+        XCTAssertThrowsError(try authority.commit(revision: revision) { _ in })
+        XCTAssertNotNil(order.reserveProjectSelection(projectID: "different-project", sequence: older))
     }
     @MainActor
     func testAuthoringDirectoryUsesLinuxHomeNotDefaultWorkspaceRoot() throws {

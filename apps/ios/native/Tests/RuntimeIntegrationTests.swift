@@ -7,7 +7,7 @@ final class RuntimeIntegrationTests: XCTestCase {
     func testWorkspaceMountIdentityIsIndependentOfProjectsAndPreferences() {
         XCTAssertEqual(LXISHDefaultWorkspace.stableID(), "projects")
         XCTAssertEqual(LXISHDefaultWorkspace.stableID(), LXISHDefaultWorkspace.stableID())
-        XCTAssertEqual(LXISHDefaultWorkspace.guestHome, LXISHGuestPaths.workspaceRoot)
+        XCTAssertEqual(LXISHDefaultWorkspace.guestWorkspace, LXISHGuestPaths.workspace("projects"))
     }
 
     func testUserStorageNormalizesContainerAliasesBeforeDerivingProjects() throws {
@@ -34,10 +34,16 @@ final class RuntimeIntegrationTests: XCTestCase {
             .appendingPathComponent("calorie-a1b2c3d4", isDirectory: true)
         try FileManager.default.createDirectory(at: sourceHost, withIntermediateDirectories: true)
 
+        XCTAssertThrowsError(try MobileUserStorage.projectMountGrantPaths(
+            activeDirectory: sourceGuest, additionalDirectories: [sourceGuest], managedRoot: managedRoot))
+        XCTAssertThrowsError(try MobileUserStorage.projectMountGrantPaths(
+            activeDirectory: sourceGuest, additionalDirectories: [sourceGuest],
+            authorizedLocalAppSource: paths.appsGuestPath + "/other", managedRoot: managedRoot))
         XCTAssertEqual(
             try MobileUserStorage.projectMountGrantPaths(
                 activeDirectory: sourceGuest,
                 additionalDirectories: [sourceGuest],
+                authorizedLocalAppSource: sourceGuest,
                 managedRoot: managedRoot
             ),
             [sourceGuest]
@@ -67,6 +73,7 @@ final class RuntimeIntegrationTests: XCTestCase {
             try MobileUserStorage.projectMountGrantPaths(
                 activeDirectory: aliasGuest,
                 additionalDirectories: [],
+                authorizedLocalAppSource: aliasGuest,
                 managedRoot: managedRoot
             ),
             "symlink source must not become a bind mount"
@@ -95,6 +102,34 @@ final class RuntimeIntegrationTests: XCTestCase {
         )
     }
 
+    func testProjectMountGrantsRequireExplicitManagedContentWithoutConfigAccess() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let managedRoot = root.appendingPathComponent("runtime", isDirectory: true).path
+        let paths = MobileUserStorage.directories(managedRoot: managedRoot)
+        for (guest, host) in [(paths.chatGuestCwd, paths.chatCwd), (paths.codeGuestCwd, paths.codeCwd),
+                              (paths.scheduledGuestCwd, paths.scheduledCwd)] {
+            try FileManager.default.createDirectory(at: URL(fileURLWithPath: host).appendingPathComponent("chosen"), withIntermediateDirectories: true)
+            let selected = guest + "/chosen"
+            XCTAssertEqual(try MobileUserStorage.projectMountGrantPaths(activeDirectory: selected,
+                additionalDirectories: [], managedRoot: managedRoot), [selected])
+        }
+        XCTAssertThrowsError(try MobileUserStorage.projectMountGrantPaths(activeDirectory: paths.scheduledGuestCwd,
+            additionalDirectories: [], managedRoot: managedRoot))
+        let nestedSettings = URL(fileURLWithPath: paths.scheduledCwd).appendingPathComponent(paths.configDirName)
+        try FileManager.default.createDirectory(at: nestedSettings, withIntermediateDirectories: true)
+        XCTAssertThrowsError(try MobileUserStorage.projectMountGrantPaths(activeDirectory: paths.scheduledGuestCwd + "/" + paths.configDirName,
+            additionalDirectories: [], managedRoot: managedRoot))
+        let settings = URL(fileURLWithPath: paths.configHome).appendingPathComponent("providers")
+        try FileManager.default.createDirectory(at: settings, withIntermediateDirectories: true)
+        XCTAssertThrowsError(try MobileUserStorage.projectMountGrantPaths(activeDirectory: paths.configGuestPath + "/providers",
+            additionalDirectories: [], managedRoot: managedRoot))
+        let alias = URL(fileURLWithPath: paths.chatCwd).appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: settings)
+        XCTAssertThrowsError(try MobileUserStorage.projectMountGrantPaths(activeDirectory: paths.chatGuestCwd + "/alias",
+            additionalDirectories: [], managedRoot: managedRoot))
+    }
+
     func testExplicitResourceOverridesWinOverManagedResources() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -113,7 +148,7 @@ final class RuntimeIntegrationTests: XCTestCase {
         XCTAssertEqual(LXISHRuntimeResourceBootstrap.defaultMountURL(managedRoot: managed.path, environment: environment), mount)
     }
 
-    func testInvalidAndEmptyResourceOverridesRetainManagedFallback() throws {
+    func testInvalidAndEmptyArchiveOverridesDoNotFallBack() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let bundle = try emptyBundle(in: root)
@@ -121,7 +156,7 @@ final class RuntimeIntegrationTests: XCTestCase {
         try FileManager.default.createDirectory(at: resources.appendingPathComponent("default_mount"), withIntermediateDirectories: true)
         try Data().write(to: resources.appendingPathComponent("alpine-rootfs.zip"))
         for override in ["", root.appendingPathComponent("missing").path] {
-            let resolved = LXISHRuntimeResourceBootstrap.resolvedLegacyResourceOverrides(
+            let resolved = LXISHRuntimeResourceBootstrap.resolvedResourceOverrides(
                 managedRoot: root.appendingPathComponent("managed").path,
                 bundle: bundle,
                 environment: [
@@ -129,12 +164,12 @@ final class RuntimeIntegrationTests: XCTestCase {
                     LXISHRuntimeResourceBootstrap.defaultMountEnvironmentKey: override,
                 ]
             )
-            XCTAssertEqual(resolved[LXISHRuntimeResourceBootstrap.archiveEnvironmentKey], resources.appendingPathComponent("alpine-rootfs.zip").path)
+            XCTAssertNil(resolved[LXISHRuntimeResourceBootstrap.archiveEnvironmentKey])
             XCTAssertEqual(resolved[LXISHRuntimeResourceBootstrap.defaultMountEnvironmentKey], resources.appendingPathComponent("default_mount").path)
         }
     }
 
-    func testInvalidResourceOverridesUseBundleBeforeManagedResources() throws {
+    func testInvalidArchiveOverrideDoesNotSelectAnotherBundle() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let bundle = try emptyBundle(in: root)
@@ -144,7 +179,7 @@ final class RuntimeIntegrationTests: XCTestCase {
         let managed = root.appendingPathComponent("managed/resources")
         try FileManager.default.createDirectory(at: managed.appendingPathComponent("default_mount"), withIntermediateDirectories: true)
         try Data().write(to: managed.appendingPathComponent("alpine-rootfs.zip"))
-        let resolved = LXISHRuntimeResourceBootstrap.resolvedLegacyResourceOverrides(
+        let resolved = LXISHRuntimeResourceBootstrap.resolvedResourceOverrides(
             managedRoot: root.appendingPathComponent("managed").path,
             bundle: bundle,
             environment: [
@@ -152,7 +187,7 @@ final class RuntimeIntegrationTests: XCTestCase {
                 LXISHRuntimeResourceBootstrap.defaultMountEnvironmentKey: "",
             ]
         )
-        XCTAssertEqual(resolved[LXISHRuntimeResourceBootstrap.archiveEnvironmentKey], resources.appendingPathComponent("alpine-rootfs.zip").path)
+        XCTAssertNil(resolved[LXISHRuntimeResourceBootstrap.archiveEnvironmentKey])
         XCTAssertEqual(resolved[LXISHRuntimeResourceBootstrap.defaultMountEnvironmentKey], resources.appendingPathComponent("default_mount").path)
     }
 
@@ -161,7 +196,7 @@ final class RuntimeIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let bundle = try emptyBundle(in: root)
         for override in ["", root.appendingPathComponent("missing").path] {
-            let resolved = LXISHRuntimeResourceBootstrap.resolvedLegacyResourceOverrides(
+            let resolved = LXISHRuntimeResourceBootstrap.resolvedResourceOverrides(
                 managedRoot: "",
                 bundle: bundle,
                 environment: [

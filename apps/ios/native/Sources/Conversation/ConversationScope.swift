@@ -76,6 +76,11 @@ struct ConversationNavigationIntents<Destination> {
     private(set) var generation: UInt64 = 0
     private var pending: Destination?
 
+    mutating func invalidate() {
+        generation &+= 1
+        pending = nil
+    }
+
     mutating func submit(_ destination: Destination, whileBusy: Bool) -> Bool {
         generation &+= 1
         pending = whileBusy ? destination : nil

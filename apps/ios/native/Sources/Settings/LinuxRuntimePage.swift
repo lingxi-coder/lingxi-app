@@ -56,9 +56,9 @@ private enum LinuxRuntimeBridge {
 
     private static let cache = HandleCache()
 
-    private static func config(for mode: LinuxRuntimeMode) -> IosMobileLinuxConfigFfi {
+    private static func config(for mode: LinuxRuntimeMode) throws -> IosMobileLinuxConfigFfi {
         LXISHRuntimeResourceBootstrap.prepare()
-        let manifest = LXISHRuntimeBundleMetadata.current()
+        let manifest = try LXISHRuntimeBundleMetadata.current()
         // The shared helpers, not local re-derivations: this page and the
         // terminal must resolve the SAME workspace id and directory, and the
         // managedRoot split this diff fixed came from exactly this kind of
@@ -95,7 +95,9 @@ private enum LinuxRuntimeBridge {
         #if targetEnvironment(simulator)
             return simulatorState(mode: mode, action: .refresh)
         #else
-        let cfg = config(for: mode)
+        let cfg: IosMobileLinuxConfigFfi
+        do { cfg = try config(for: mode) }
+        catch { return unavailableBundleState(mode: mode, action: .refresh, error: error) }
         let handle = try? await cache.handle(for: cfg)
         let capability: MobileLinuxCapabilityFfi
         let status: MobileLinuxStatusFfi
@@ -117,7 +119,9 @@ private enum LinuxRuntimeBridge {
         #if targetEnvironment(simulator)
             return simulatorState(mode: mode, action: .verify)
         #else
-        let cfg = config(for: mode)
+        let cfg: IosMobileLinuxConfigFfi
+        do { cfg = try config(for: mode) }
+        catch { return unavailableBundleState(mode: mode, action: .verify, error: error) }
         let handle = try? await cache.handle(for: cfg)
         let capability: MobileLinuxCapabilityFfi
         let status: MobileLinuxStatusFfi
@@ -147,7 +151,7 @@ private enum LinuxRuntimeBridge {
         #if targetEnvironment(simulator)
         throw LinuxRuntimeCommandFailure(message: String(localized: "settings_linux_simulator_unavailable"))
         #else
-        let cfg = config(for: mode)
+        let cfg = try config(for: mode)
         let handle = try await cache.handle(for: cfg)
         let capability = await handle.capability()
         let tasks = try await handle.listTasks()
@@ -175,8 +179,8 @@ private enum LinuxRuntimeBridge {
                 LinuxRuntimeCommandFailure(message: String(localized: "settings_linux_simulator_unavailable"))
             )
         #else
-        let cfg = config(for: mode)
         do {
+            let cfg = try config(for: mode)
             let handle = try await cache.handle(for: cfg)
             let result = try await handle.runCommand(
                 request: MobileLinuxCommandRequestFfi(
@@ -211,8 +215,8 @@ private enum LinuxRuntimeBridge {
         #if targetEnvironment(simulator)
             return .failure(LinuxRuntimeTaskOperationFailure(message: String(localized: "settings_linux_simulator_unavailable")))
         #else
-        let cfg = config(for: mode)
         do {
+            let cfg = try config(for: mode)
             let handle = try await cache.handle(for: cfg)
             let tasks = try await handle.listTasks().map(mapTask)
             let message = tasks.isEmpty ? String(localized: "settings_linux_no_guest_tasks") : String(localized: "settings_linux_refresh_tasks")
@@ -230,8 +234,8 @@ private enum LinuxRuntimeBridge {
         #if targetEnvironment(simulator)
             return .failure(LinuxRuntimeTaskOperationFailure(message: String(localized: "settings_linux_simulator_unavailable")))
         #else
-        let cfg = config(for: mode)
         do {
+            let cfg = try config(for: mode)
             let handle = try await cache.handle(for: cfg)
             let stopped = try await handle.killTask(taskId: taskID)
             let tasks = try await handle.listTasks().map(mapTask)
@@ -251,12 +255,13 @@ private enum LinuxRuntimeBridge {
         tasks: [MobileLinuxTaskFfi]
     ) -> LinuxRuntimeState {
         let detail = status.lastError ?? capability.reason ?? String(localized: "settings_linux_no_diagnostics")
+        let available = capability.available && status.state == .ready
         let summary: String
         if status.state == .blockedByLicense {
             summary = String(localized: "settings_linux_summary_blocked_license")
         } else if status.state == .unsupported {
             summary = String(localized: "settings_linux_summary_ish_not_linked")
-        } else if capability.available {
+        } else if available {
             summary = String(localized: "settings_linux_summary_available")
         } else {
             summary = String(localized: "settings_linux_summary_unavailable")
@@ -268,13 +273,13 @@ private enum LinuxRuntimeBridge {
             version: status.version,
             managedRoot: status.managedRoot,
             installedSizeBytes: status.installedSizeBytes,
-            available: capability.available,
-            terminalSupported: capability.pty,
-            backgroundTasksSupported: capability.backgroundProcesses,
+            available: available,
+            terminalSupported: available && capability.pty,
+            backgroundTasksSupported: available && capability.backgroundProcesses,
             verifyAllowed: capability.rootfsIntegrity,
             repairAllowed: capability.rootfsIntegrity,
             resetAllowed: capability.rootfsIntegrity,
-            writableGuestPaths: status.writableGuestPaths,
+            writableGuestPaths: available ? status.writableGuestPaths : [],
             summary: summary,
             detail: detail,
             lastAction: action,
@@ -328,6 +333,18 @@ private enum LinuxRuntimeBridge {
         state.rootfsState = .unsupported
         state.summary = String(localized: "settings_linux_simulator_unavailable")
         state.detail = String(localized: "settings_linux_summary_simulator_detail")
+        state.lastAction = action
+        state.lastActionMessage = state.detail
+        return state
+    }
+
+    private static func unavailableBundleState(mode: LinuxRuntimeMode, action: LinuxRuntimeAction, error: Error) -> LinuxRuntimeState {
+        var state = LinuxRuntimeState(selectedMode: mode)
+        state.backend = "ios-ish"
+        let missing = (error as? LXISHRuntimeBundleManifestError) == .missing
+        state.rootfsState = missing ? .missing : .corrupt
+        state.summary = String(localized: "settings_linux_summary_unavailable")
+        state.detail = missing ? String(localized: "settings_linux_not_installed") : String(localized: "settings_linux_state_corrupt")
         state.lastAction = action
         state.lastActionMessage = state.detail
         return state

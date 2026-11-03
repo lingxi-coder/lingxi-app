@@ -10,6 +10,7 @@ struct CapturedComposerDraft {
     private let units: Binding<[UInt16]?>
     private let attachment: Binding<ComposerAttachment?>
     private let revision: () -> UInt64?
+    private let originalText: String
     private let originalDraft: [UInt16]
     private let originalUnits: [UInt16]?
     private let originalAttachment: ComposerAttachment?
@@ -22,6 +23,7 @@ struct CapturedComposerDraft {
         self.units = units
         self.attachment = attachment
         self.revision = revision
+        originalText = draft.wrappedValue
         originalDraft = Array(draft.wrappedValue.utf16)
         originalUnits = submittedUnits
         originalAttachment = attachment.wrappedValue
@@ -37,6 +39,25 @@ struct CapturedComposerDraft {
         draft.wrappedValue = ""
         units.wrappedValue = nil
         attachment.wrappedValue = nil
+        return true
+    }
+
+    /// Restore only into the same untouched, empty owner draft that this
+    /// submission cleared. Revision also detects edit-then-erase ABA.
+    @discardableResult
+    func restoreIfUnchanged(afterClearRevision: UInt64?, model: ConversationModel,
+                            chip: VisualizationContextChip?, chipRevision: UInt64,
+                            submitted: ConversationUnsentPrompt) -> Bool {
+        guard let afterClearRevision, revision() == afterClearRevision,
+              draft.wrappedValue.isEmpty, units.wrappedValue == nil,
+              attachment.wrappedValue == nil, model.visualizationChip == nil,
+              submitted.mayRestoreCapturedDraft, submitted.visualizationContext == chip,
+              submitted.chipRevisionAtCapture == chipRevision,
+              model.visualizationChipRevision == submitted.chipRevisionAfterAdmission else { return false }
+        draft.wrappedValue = originalText
+        units.wrappedValue = originalUnits
+        attachment.wrappedValue = originalAttachment
+        model.visualizationChip = chip
         return true
     }
 }
@@ -85,6 +106,7 @@ struct ChatView: View {
     let source: any ConversationSource
     var onOpenSessionDetails: () -> Void = {}
     var onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil
+    var onRetryAuthoringBinding: () -> Void = {}
     @ObservedObject private var convo: ConversationModel
     private var displayedSessionMode: SessionMode { source.isTemporaryConversation ? convo.sessionMode : sessionMode }
     private var usesLocalAccountCatalog: Bool {
@@ -183,7 +205,8 @@ struct ChatView: View {
          onNewChat: (() -> Void)? = nil,
          onOpenVoiceSettings: @escaping () -> Void = {},
          onOpenSessionDetails: @escaping () -> Void = {},
-         onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil) {
+         onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil,
+         onRetryAuthoringBinding: @escaping () -> Void = {}) {
         self.session = session
         self.projectName = projectName
         self.sessionMode = sessionMode
@@ -212,6 +235,7 @@ struct ChatView: View {
         self.onOpenVoiceSettings = onOpenVoiceSettings
         self.onOpenSessionDetails = onOpenSessionDetails
         self.onOpenShellTask = onOpenShellTask
+        self.onRetryAuthoringBinding = onRetryAuthoringBinding
         self.convo = source.model
     }
 
@@ -244,6 +268,11 @@ struct ChatView: View {
                 }
                 messageList(showsSelectedAgent: false)
                 runtimeFooter
+                if convo.authoringBindingPending && convo.authoringBindingRetryAvailable {
+                    Button("common_retry", action: onRetryAuthoringBinding)
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .accessibilityIdentifier("conversation.retry-authoring-binding")
+                }
                 if let guidance = AudioSetupGuidance.forPhase(voiceInteraction.phase, message: voiceInteraction.statusDetail) {
                     AudioSetupBanner(guidance: guidance, onConfigure: onOpenVoiceSettings, onDismiss: voiceInteraction.close)
                 } else if voiceInteraction.isPresented {
@@ -262,9 +291,23 @@ struct ChatView: View {
                     .padding(.vertical, 8)
                     .accessibilityIdentifier("voice.retained-turn")
                 }
+                if let engine = source as? EngineConversationSource {
+                    ForEach(convo.unsentPrompts.filter { engine.ownsUnsentPrompt($0) }) { prompt in
+                        HStack {
+                            if !prompt.images.isEmpty { Image(systemName: "photo") }
+                            Text(prompt.text).lineLimit(2)
+                            Spacer()
+                            Button("remote_restore_unsent") { restoreUnsent(prompt, using: engine) }
+                                .disabled(!draft.isEmpty || draftSourceCodeUnitsBinding.wrappedValue != nil ||
+                                          attachment != nil || convo.visualizationChip != nil)
+                        }
+                        .font(.caption).padding(.horizontal, 14).padding(.vertical, 6)
+                    }
+                }
                 if showsNewChatBar {
                     NewChatBar(
                         mode: displayedSessionMode,
+                        workspaceKey: workspaceKey,
                         workspaceName: workspaceName,
                         modeSelectionDisabled: convo.sessionTransitionPending,
                         onSelectMode: onSelectNewChatMode,
@@ -1077,6 +1120,9 @@ struct ChatView: View {
         let owner = source
         let ownerID = ObjectIdentifier(owner)
         guard pendingSubmissionOwners.insert(ownerID).inserted else { return false }
+        let previousTurn = owner.model.activeTurnToken
+        let capturedChip = owner.model.visualizationChip
+        let capturedChipRevision = owner.model.visualizationChipRevision
         let submittedAttachment = attachment
         let capturedDraft = CapturedComposerDraft(draft: $draft, units: draftSourceCodeUnitsBinding,
             attachment: attachmentBinding ?? $localAttachment, submittedUnits: sourceCodeUnits,
@@ -1087,13 +1133,39 @@ struct ChatView: View {
                                          selectedSlashCommand: selectedSlashCommand)
             pendingSubmissionOwners.remove(ownerID)
             guard let token else { return }
-            capturedDraft.clearIfUnchanged()
+            let cleared = capturedDraft.clearIfUnchanged()
+            let afterClearRevision = draftRevision()
+            if previousTurn == nil, let engine = owner as? EngineConversationSource {
+                let ownerModel = owner.model
+                engine.registerRejectedPromptRestorer(for: token) { submitted in
+                    cleared && capturedDraft.restoreIfUnchanged(afterClearRevision: afterClearRevision,
+                        model: ownerModel, chip: capturedChip, chipRevision: capturedChipRevision,
+                        submitted: submitted)
+                }
+            }
             voiceInteraction.registerAutomaticPlaybackCandidate(token, audioOwner: owner.voiceAudioOwner)
             latestMessageRequestRevision &+= 1
         }
         // The asynchronous admission owns the captured bindings; Composer
         // must not clear them before its checkpoint has been committed.
         return false
+    }
+
+    private func restoreUnsent(_ prompt: ConversationUnsentPrompt, using engine: EngineConversationSource) {
+        guard engine.ownsUnsentPrompt(prompt), draft.isEmpty, draftSourceCodeUnitsBinding.wrappedValue == nil,
+              attachment == nil, convo.visualizationChip == nil,
+              prompt.images.count <= 1 else { return }
+        var restoredAttachment: ComposerAttachment?
+        if let imageRef = prompt.images.first {
+            guard let bytes = Data(base64Encoded: imageRef.base64), let image = UIImage(data: bytes) else { return }
+            restoredAttachment = ComposerAttachment(image: image, width: Int(image.size.width),
+                height: Int(image.size.height), mediaType: imageRef.mediaType, base64: imageRef.base64)
+        }
+        draft = prompt.text
+        draftSourceCodeUnitsBinding.wrappedValue = prompt.sourceCodeUnits
+        (attachmentBinding ?? $localAttachment).wrappedValue = restoredAttachment
+        convo.visualizationChip = prompt.visualizationContext
+        engine.removeUnsentPrompt(prompt.id)
     }
 
     // PR-4 item 2: interrupt the in-flight turn.

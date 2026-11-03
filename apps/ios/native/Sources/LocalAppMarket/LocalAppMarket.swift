@@ -19,6 +19,8 @@ final class UnifiedAppMarket {
     private(set) var publishStatus: String?
     private(set) var publishing = false
     private(set) var installCommitting = false
+    private var remixDownloading = false
+    private var preparedPublications: [String: LocalAppMarketPublication] = [:]
     @ObservationIgnored private var installTask: Task<UnifiedAppRecord, Error>?
     private let library: UnifiedLocalApps
     private let api: MarketAPI?
@@ -57,30 +59,80 @@ final class UnifiedAppMarket {
         #endif
     }
     func detail(_ id: String) async throws -> MarketApp { try await requireAPI().detail(id) }
-    func distribution(_ id: String) async throws -> MarketDistribution {
+    func distribution(_ id: String, versionID: String? = nil) async throws -> MarketDistribution {
         let api = try requireAPI()
         var compatible: [MarketDistribution] = []
         for target in Self.targets {
-            do { compatible.append(try await api.distribution(id,target:target)) }
+            do { compatible.append(try await api.distribution(id,target:target, versionID: versionID)) }
             catch let error as MarketFailure where error.code == "NO_COMPATIBLE_RELEASE" { continue }
         }
         guard let result = compatible.max(by: { $0.sequence < $1.sequence }) else { throw MarketFailure("NO_COMPATIBLE_RELEASE", "No release supports this device and distribution channel.") }
         return result
     }
     func cancelInstall() { if !installCommitting { installTask?.cancel() } }
-    func install(_ distribution: MarketDistribution, approved: Bool, remix: Bool = false) async throws -> UnifiedAppRecord {
-        guard installTask == nil else { throw MarketFailure("INSTALL_IN_PROGRESS", "Wait for the current app installation to finish.") }
-        let task = Task { try await performInstall(distribution, approved: approved, remix: remix) }
+
+    /// Capture the exact public release without persisting its signed URL.
+    func remixInput(_ distribution: MarketDistribution, requestID: String, archivePath: String,
+                    mode: SessionMode) throws -> LocalAppMarketRemixInput {
+        try LocalAppDevelopmentAdmission.requireCode(mode)
+        guard distribution.schema == 2, distribution.manifest.remix?.allowed == true, distribution.artifact.format == "zip",
+              distribution.artifact.sizeBytes > 0, distribution.artifact.sizeBytes <= 25 * 1024 * 1024,
+              distribution.artifact.sha256 == distribution.artifact.sha256.lowercased(),
+              distribution.files.allSatisfy({ $0.sha256 == $0.sha256.lowercased() }),
+              distribution.dependencies.allSatisfy({ $0.sha256 == $0.sha256.lowercased() }),
+              UUID(uuidString: requestID) != nil else { throw MarketFailure("REMIX_NOT_ALLOWED") }
+        func file(_ value: MarketDistribution.File) -> LocalAppMarketRemixInput.File {
+            .init(path: value.path, sizeBytes: value.sizeBytes, sha256: value.sha256, executable: value.executable)
+        }
+        return .init(requestId: canonicalSessionID(requestID), archivePath: archivePath,
+            archiveSha256: distribution.artifact.sha256,
+            archiveBytes: distribution.artifact.sizeBytes, manifest: distribution.manifest,
+            files: distribution.files.map(file), dependencies: distribution.dependencies.map(file),
+            signedManifest: distribution.signedManifest, signedFiles: distribution.signedFiles,
+            signedDependencies: distribution.signedDependencies,
+            marketOrigin: .init(appId: distribution.appId, releaseId: distribution.versionId,
+                                digest: distribution.releaseDigest, remixedFrom: distribution.appId))
+    }
+
+    /// Re-fetch only the captured release and verify all of its bytes before
+    /// placing the ZIP in the request's durable staging area.
+    func downloadRemixArchive(_ input: LocalAppMarketRemixInput, intent: LocalAppSourceCreateIntent,
+                              store: ProjectStore, configHome: URL) async throws {
+        try LocalAppDevelopmentAdmission.requireCode(intent.mode)
+        let (saved, _) = try await store.localAppRemixInput(intent, configHome: configHome)
+        guard saved == input else { throw MarketFailure("RELEASE_CHANGED") }
+        guard !remixDownloading, installTask == nil else { throw MarketFailure("INSTALL_IN_PROGRESS") }
+        remixDownloading = true
+        defer { remixDownloading = false; progress = nil }
+        let release = try await distribution(input.marketOrigin.appId, versionID: input.marketOrigin.releaseId)
+        guard try remixInput(release, requestID: input.requestId, archivePath: input.archivePath, mode: .code) == input else {
+            throw MarketFailure("RELEASE_CHANGED", "The selected market release no longer matches the saved request.")
+        }
+        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("local-app-remix-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: staging) }
+        let archive = staging.appendingPathComponent("source.zip")
+        try await requireAPI().download(release.artifact, to: archive) { [weak self] value in await self?.setProgress(value) }
+        let bytes = try await Task.detached(priority: .userInitiated) {
+            // The native importer validates and extracts the pinned ZIP and
+            // complete signed inventory. The installation extractor applies a
+            // different path policy, so it must not pre-filter remix sources.
+            return try MarketRemixArchive.readVerified(archive, size: input.archiveBytes, sha256: input.archiveSha256)
+        }.value
+        _ = try await store.storeLocalAppRemixArchive(bytes, intent: intent, configHome: configHome)
+    }
+    func install(_ distribution: MarketDistribution, approved: Bool) async throws -> UnifiedAppRecord {
+        guard installTask == nil, !remixDownloading else { throw MarketFailure("INSTALL_IN_PROGRESS", "Wait for the current app installation to finish.") }
+        let task = Task { try await performInstall(distribution, approved: approved) }
         installTask = task
         defer { installTask = nil; installCommitting = false }
         return try await task.value
     }
-    private func performInstall(_ distribution: MarketDistribution, approved: Bool, remix: Bool) async throws -> UnifiedAppRecord {
+    private func performInstall(_ distribution: MarketDistribution, approved: Bool) async throws -> UnifiedAppRecord {
         guard !distribution.executionConsentRequired || approved else { throw MarketFailure("EXECUTION_CONSENT_REQUIRED", "Review the exact release before installing executable code.") }
-        guard !remix || distribution.manifest.remix?.allowed == true else { throw MarketFailure("REMIX_NOT_ALLOWED", "The publisher has not granted modification permission.") }
         await library.refresh()
         let previous = library.records.first { $0.marketOrigin?.appId == distribution.appId && $0.marketOrigin?.remixedFrom == nil }
-        if !remix, let previous {
+        if let previous {
             if previous.marketOrigin?.releaseId == distribution.versionId { return previous }
             let candidate = try await library.release(previous.appId, revision: previous.latestRevision)
             if candidate.marketOrigin?.releaseId == distribution.versionId {
@@ -107,24 +159,15 @@ final class UnifiedAppMarket {
             try Self.verify(content,distribution:distribution)
         }.value
         try Task.checkCancellation()
-        var source = content
-        var authoring: LocalAppAuthoring?
-        if remix {
-            let guest = try UnifiedLocalApps.newAuthoringDirectory(name:distribution.manifest.name)
-            source = try UnifiedLocalApps.hostSourceDirectory(guest)
-            for child in try FileManager.default.contentsOfDirectory(at:content,includingPropertiesForKeys:nil) { try FileManager.default.copyItem(at:child,to:source.appendingPathComponent(child.lastPathComponent)) }
-            authoring = .init(sourceDirectory:guest)
-        }
-        let origin = LocalAppMarketOrigin(appId:distribution.appId,releaseId:distribution.versionId,digest:distribution.releaseDigest,remixedFrom:remix ? distribution.appId : nil)
-        var fields: [String: LocalAppJSON] = ["op": .string(previous != nil && !remix ? "publish" : "import"), "sourcePath": .string(source.path), "marketOrigin": try .encode(origin)]
-        if let authoring { fields["authoring"] = try .encode(authoring) }
-        if let previous, !remix { fields["appId"] = .string(previous.appId); fields["expectedRevision"] = .number(Double(previous.latestRevision)) }
+        let origin = LocalAppMarketOrigin(appId:distribution.appId,releaseId:distribution.versionId,digest:distribution.releaseDigest,remixedFrom:nil)
+        var fields: [String: LocalAppJSON] = ["op": .string(previous != nil ? "publish" : "import"), "sourcePath": .string(content.path), "marketOrigin": try .encode(origin)]
+        if let previous { fields["appId"] = .string(previous.appId); fields["expectedRevision"] = .number(Double(previous.latestRevision)) }
         try Task.checkCancellation()
         installCommitting = true
-        let result: LocalAppPublishResult = try await library.client.request(fields)
+        let result: LocalAppPublishResult = try await library.client.request(fields, purpose: .marketInstallation)
         // Consent binds the locally verified release, before any install/build/start.
         if approved { try await library.grant(result.record.appId,digest:result.release.digest) }
-        if previous != nil, !remix {
+        if previous != nil {
             do { try await library.action("start", id: result.record.appId, extra: ["revision": .number(Double(result.release.revision))]) }
             catch { await library.refresh(); throw error }
         }
@@ -159,7 +202,20 @@ final class UnifiedAppMarket {
         try LocalAppPublicationReceipts(directory: URL(fileURLWithPath: MobileUserStorage.directories().configHome, isDirectory: true)
             .appendingPathComponent("local-app-market-publishing", isDirectory: true))
     }
-    func preparePublication(_ app: UnifiedAppRecord) async throws -> LocalAppMarketPublication {
+    func parkPreparedPublication(_ publication: LocalAppMarketPublication) {
+        let appID = publication.source.appID
+        if let current = preparedPublications[appID], current.source.revision > publication.source.revision { return }
+        preparedPublications[appID] = publication
+    }
+
+    func hasPreparedPublication(appID: String) -> Bool { preparedPublications[appID] != nil }
+
+    func takePreparedPublication(appID: String) -> LocalAppMarketPublication? {
+        preparedPublications.removeValue(forKey: appID)
+    }
+
+    func preparePublication(_ app: UnifiedAppRecord, mode: SessionMode) async throws -> LocalAppMarketPublication {
+        try LocalAppDevelopmentAdmission.requireCode(mode)
         guard let user = Auth.auth().currentUser else { throw MarketFailure("SIGN_IN_REQUIRED", "Sign in to publish to the market.") }
         let currentRelease = try await library.release(app.appId, revision: app.currentRevision)
         let releaseName = currentRelease.manifest.name
@@ -177,7 +233,8 @@ final class UnifiedAppMarket {
         let source = LocalAppSourceArchive(appID: exported.appID, revision: exported.revision, digest: exported.digest, files: exported.files, bytes: bytes)
         return .init(source: source, name: releaseName, summary: releaseSummary, uid: user.uid)
     }
-    func publish(_ prepared: LocalAppMarketPublication) async throws {
+    func publish(_ prepared: LocalAppMarketPublication, mode: SessionMode) async throws {
+        try LocalAppDevelopmentAdmission.requireCode(mode)
         guard !publishing else { throw MarketFailure("PUBLISH_IN_PROGRESS", "A publication is already in progress.") }
         publishing = true; defer { publishing = false }
         guard let user = Auth.auth().currentUser, user.uid == prepared.uid else { throw MarketFailure("ACCOUNT_CHANGED", "Review the source again with the current author account.") }

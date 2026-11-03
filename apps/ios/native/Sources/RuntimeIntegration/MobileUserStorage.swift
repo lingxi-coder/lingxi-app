@@ -29,19 +29,44 @@ enum MobileUserStorage {
         let id = sessionID.hasPrefix("sess:") ? String(sessionID.dropFirst(5)) : sessionID
         guard UUID(uuidString: id)?.uuidString.lowercased() == id else { throw ProjectRepositoryError.escapedWorkspace }
         let brandHome = URL(fileURLWithPath: paths.configHome, isDirectory: true)
-        let manifest = brandHome.appendingPathComponent("automations/sessions/\(id).json")
-        guard FileManager.default.fileExists(atPath: manifest.path) else { return paths.scheduledCwd }
-        guard try manifest.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { throw ProjectRepositoryError.escapedWorkspace }
-        struct Record: Decodable { let version: Int; let workspace: String }
-        let record = try JSONDecoder().decode(Record.self, from: Data(contentsOf: manifest))
+        var descriptors: [Int32] = []
+        defer { for descriptor in descriptors.reversed() { _ = Darwin.close(descriptor) } }
+        let home = open(paths.home, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard home >= 0 else { throw ProjectRepositoryError.escapedWorkspace }
+        descriptors.append(home)
+        func openDirectory(_ parent: Int32, _ name: String) throws -> Int32 {
+            let descriptor = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+            guard descriptor >= 0 else { throw ProjectRepositoryError.escapedWorkspace }
+            descriptors.append(descriptor)
+            return descriptor
+        }
+        let config = try openDirectory(home, paths.configDirName)
+        let automations = try openDirectory(config, "automations")
+        let sessions = try openDirectory(automations, "sessions")
+        let manifest = openat(sessions, id + ".json", O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard manifest >= 0 else { throw ProjectRepositoryError.escapedWorkspace }
+        descriptors.append(manifest)
+        var metadata = stat()
+        guard fstat(manifest, &metadata) == 0, (metadata.st_mode & S_IFMT) == S_IFREG else {
+            throw ProjectRepositoryError.escapedWorkspace
+        }
+        let data = try FileHandle(fileDescriptor: manifest, closeOnDealloc: false).readToEnd() ?? Data()
+        struct Record: Decodable {
+            let version: Int
+            let workspace: String
+            let taskID: String
+
+            enum CodingKeys: String, CodingKey { case version, workspace; case taskID = "task_id" }
+        }
+        let record = try JSONDecoder().decode(Record.self, from: data)
         let parts = record.workspace.split(separator: "/", omittingEmptySubsequences: false)
         guard record.version == 1, parts.count == 3, parts[0] == "workspaces",
-              parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") }) else { throw ProjectRepositoryError.escapedWorkspace }
+              parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") && !$0.contains("\0") }) else { throw ProjectRepositoryError.escapedWorkspace }
         var workspace = brandHome
+        var workspaceDescriptor = config
         for part in parts {
+            workspaceDescriptor = try openDirectory(workspaceDescriptor, String(part))
             workspace.appendPathComponent(String(part), isDirectory: true)
-            let metadata = try workspace.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-            guard metadata.isDirectory == true, metadata.isSymbolicLink != true else { throw ProjectRepositoryError.escapedWorkspace }
         }
         let canonical = workspace.resolvingSymlinksInPath().standardizedFileURL
         let root = brandHome.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent("workspaces", isDirectory: true)
@@ -49,16 +74,35 @@ enum MobileUserStorage {
         return canonical.path
     }
 
+    /// Convert the already-validated owner manifest's host directory to the
+    /// corresponding guest path; no catalog or arbitrary cwd grants access.
+    static func scheduledGuestWorkspace(sessionID: String, managedRoot: String = LXISHDefaultWorkspace.managedRootPath()) throws -> String {
+        let paths = directories(managedRoot: managedRoot)
+        let home = URL(fileURLWithPath: paths.home, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path
+        let workspace = URL(fileURLWithPath: try scheduledWorkspace(sessionID: sessionID, managedRoot: managedRoot), isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        guard workspace.hasPrefix(home + "/") else { throw ProjectRepositoryError.escapedWorkspace }
+        return paths.guestHome + workspace.dropFirst(home.count)
+    }
+
     static var projectsURL: URL {
         URL(fileURLWithPath: directories().projects, isDirectory: true)
     }
 
-    /// Selects exact, native Project-authorized guest paths for iOS Mobile
-    /// Linux bind mounts. The Project record is the authority; this method
-    /// never expands a grant to the whole home, `.lingxi`, or `.apps` tree.
+    /// Finds app-source paths that additionally require a native authoring
+    /// receipt. The Project record alone never authorizes an app source.
+    static func localAppSourceDirectories(for project: ProjectSnapshot) -> [String] {
+        let root = directories().appsGuestPath + "/"
+        return Array(Set((project.record.additionalDirectories + [project.record.activeDirectory])
+            .filter { $0.hasPrefix(root) })).sorted()
+    }
+
+    /// Selects exact Project paths; an app source also needs the separately
+    /// authenticated source path. Never expands to home or a management root.
     static func projectMountGrantPaths(
         activeDirectory: String,
         additionalDirectories: [String],
+        authorizedLocalAppSource: String? = nil,
         managedRoot: String = LXISHDefaultWorkspace.managedRootPath()
     ) throws -> [String] {
         let paths = directories(managedRoot: managedRoot)
@@ -74,6 +118,11 @@ enum MobileUserStorage {
             .resolvingSymlinksInPath().standardizedFileURL
         let primaryProjectsHost = URL(fileURLWithPath: paths.projects, isDirectory: true)
             .resolvingSymlinksInPath().standardizedFileURL
+        let managedContentRoots = [
+            (guest: paths.chatGuestCwd, host: paths.chatCwd),
+            (guest: paths.codeGuestCwd, host: paths.codeCwd),
+            (guest: paths.scheduledGuestCwd, host: paths.scheduledCwd),
+        ]
 
         var candidates = additionalDirectories
         if !activeDirectory.isEmpty, !candidates.contains(activeDirectory) {
@@ -97,13 +146,28 @@ enum MobileUserStorage {
             }
 
             let isLocalAppSource = guestPath.hasPrefix(appsGuest + "/")
+            if isLocalAppSource && guestPath != authorizedLocalAppSource {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
             if guestPath == appsGuest || appsGuest.hasPrefix(guestPath + "/") {
                 throw ProjectRepositoryError.escapedWorkspace
             }
             let overlapsConfigGuest = guestPath == configGuest
                 || guestPath.hasPrefix(configGuest + "/")
                 || configGuest.hasPrefix(guestPath + "/")
-            if overlapsConfigGuest && !isLocalAppSource {
+            let contentRoot = managedContentRoots.first {
+                guestPath == $0.guest || guestPath.hasPrefix($0.guest + "/")
+            }
+            if let contentRoot {
+                let relative = String(guestPath.dropFirst(contentRoot.guest.count))
+                let components = relative.split(separator: "/").map { $0.lowercased() }
+                guard !(contentRoot.guest == paths.scheduledGuestCwd && relative.isEmpty),
+                      !components.contains(paths.configDirName.lowercased()),
+                      !components.contains("provider"), !components.contains("providers"),
+                      !zip(components, components.dropFirst()).contains(where: { $0.0 == "library" && $0.1 == "preferences" })
+                else { throw ProjectRepositoryError.escapedWorkspace }
+            }
+            if overlapsConfigGuest && !isLocalAppSource && contentRoot == nil {
                 throw ProjectRepositoryError.escapedWorkspace
             }
 
@@ -117,7 +181,11 @@ enum MobileUserStorage {
                 throw ProjectRepositoryError.escapedWorkspace
             }
             let overlapsConfigHost = overlaps(hostPath, configHost)
-            if overlapsConfigHost && !(isLocalAppSource && hostPath.path.hasPrefix(appsHost.path + "/")) {
+            let isManagedContent = contentRoot.map { root in
+                let expected = URL(fileURLWithPath: root.host, isDirectory: true).standardizedFileURL.path
+                return hostPath.path == expected || hostPath.path.hasPrefix(expected + "/")
+            } ?? false
+            if overlapsConfigHost && !(isLocalAppSource && hostPath.path.hasPrefix(appsHost.path + "/")) && !isManagedContent {
                 throw ProjectRepositoryError.escapedWorkspace
             }
             if overlaps(hostPath, appsHost) && !isLocalAppSource {
@@ -133,11 +201,13 @@ enum MobileUserStorage {
 
     static func projectMountGrantPaths(
         for project: ProjectSnapshot,
+        authorizedLocalAppSource: String? = nil,
         managedRoot: String = LXISHDefaultWorkspace.managedRootPath()
     ) throws -> [String] {
         try projectMountGrantPaths(
             activeDirectory: project.record.activeDirectory,
             additionalDirectories: project.record.additionalDirectories,
+            authorizedLocalAppSource: authorizedLocalAppSource,
             managedRoot: managedRoot
         )
     }
@@ -194,8 +264,9 @@ enum MobileUserStorage {
               let previous = components(target), home.count == 6,
               Array(home.prefix(5)) == ["var", "mobile", "Containers", "Data", "Application"],
               UUID(uuidString: home[5]) != nil else { return false }
+        let profile = directories()
         let managedProjects = ["Library", "Application Support", "mobile-linux", "ios-ish",
-                               "persistent", "lingxi", "lingxi", "projects"]
+                               "persistent", profile.linuxUser, profile.configDirName, "projects"]
         return current == home + managedProjects && previous.count == current.count
             && Array(previous.prefix(5)) == Array(home.prefix(5))
             && UUID(uuidString: previous[5]) != nil && previous[5] != home[5]

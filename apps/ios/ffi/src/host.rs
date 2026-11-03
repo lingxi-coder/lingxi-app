@@ -26,14 +26,14 @@ use super::linux_runtime::{
 use super::linux_types::MobileLinuxRuntimeModeFfi;
 #[cfg(feature = "uniffi")]
 use client::protocol::text::ClientTextDto;
-#[cfg(all(feature = "uniffi", target_os = "ios"))]
-use harness_runtime::mobile::MobileConfig;
 #[cfg(feature = "uniffi")]
 use harness_runtime::mobile::{
     ClientEventListener, MediaAttachmentHandle, MediaAttachmentHost, MediaAttachmentPhase,
     MediaAttachmentRevocation, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
     PermissionRequestSink,
 };
+#[cfg(all(feature = "uniffi", target_os = "ios"))]
+use harness_runtime::mobile::{MobileConfig, MobileSessionMode, SessionModeDto};
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use lingxi_core::host::Platform;
 use lingxi_core::host::{AudioService, CameraControl, SharingService};
@@ -51,6 +51,8 @@ use media_api::{MediaDevicePorts, MediaResourceStore, MediaSessionMode};
 #[cfg(feature = "uniffi")]
 use std::collections::HashMap;
 #[cfg(feature = "uniffi")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "uniffi")]
 use std::sync::Weak;
 
 /// Keeps the latest provider binding alive exactly as long as the engine's
@@ -61,6 +63,8 @@ struct MediaAudioSessionBindingGuard {
     attachment: MediaAttachmentHandle,
     binding: std::sync::Mutex<Option<MediaAudioSessionBindingFfi>>,
     refresh: tokio::sync::Mutex<()>,
+    drain_started: AtomicBool,
+    confirmed_callback_started: Arc<AtomicBool>,
 }
 
 #[cfg(feature = "uniffi")]
@@ -71,6 +75,8 @@ impl MediaAudioSessionBindingGuard {
             attachment,
             binding: std::sync::Mutex::new(None),
             refresh: tokio::sync::Mutex::new(()),
+            drain_started: AtomicBool::new(false),
+            confirmed_callback_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -189,6 +195,18 @@ pub struct MediaAudioSessionBindingFfi {
     pub region: String,
 }
 
+/// Result of observing this host's already-closing media attachments.
+#[cfg(feature = "uniffi")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum IosMediaDrainStatus {
+    /// No attachment remains Revoking or Unknown.
+    Ready,
+    /// An attachment was still Revoking when the observation deadline elapsed.
+    TimedOut,
+    /// An attachment's drain lacks sufficient shutdown evidence.
+    Unknown,
+}
+
 fn replace_attached_audio_session_binding(
     registry: &AudioProviderCloudRegistry,
     attachment_id: &media_api::MediaAttachmentId,
@@ -272,6 +290,12 @@ pub struct PlatformImpls {
     pub mobile_linux: Option<IosMobileLinuxConfigFfi>,
 }
 
+#[cfg(feature = "uniffi")]
+struct TrackedEngineMediaRoute {
+    engine: Weak<MobileEngineHandle>,
+    guard: Weak<MediaAudioSessionBindingGuard>,
+}
+
 /// One explicit app-composed media host shared by native engines and Remote
 /// Control. It owns a single media service, audio route registry, device-port
 /// callback, and owner-scoped resource store for the iOS process.
@@ -290,7 +314,7 @@ pub struct IosNativeMediaHost {
         Arc<std::sync::Mutex<HashMap<(String, u64), Arc<MediaAudioSessionBindingGuard>>>>,
     orphaned_attachment_routes:
         Arc<std::sync::Mutex<HashMap<usize, Arc<MediaAudioSessionBindingGuard>>>>,
-    route_guards: std::sync::Mutex<HashMap<usize, Weak<MediaAudioSessionBindingGuard>>>,
+    route_guards: std::sync::Mutex<HashMap<usize, TrackedEngineMediaRoute>>,
 }
 
 #[cfg(feature = "uniffi")]
@@ -382,6 +406,59 @@ impl IosNativeMediaHost {
         Ok(())
     }
 
+    /// Observe already-closing attachments without closing other active owners.
+    /// Creation still performs its own atomic admission check after this wait.
+    #[uniffi::method(async_runtime = "tokio")]
+    pub async fn wait_for_attachment_drain(&self, timeout_ms: u32) -> IosMediaDrainStatus {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(u64::from(timeout_ms.min(60_000)));
+        loop {
+            let mut closing = None;
+            for attachment in self.media_attachment_host.attachments() {
+                match attachment.phase() {
+                    MediaAttachmentPhase::Unknown => return IosMediaDrainStatus::Unknown,
+                    MediaAttachmentPhase::Revoking => closing = Some(attachment),
+                    MediaAttachmentPhase::Active | MediaAttachmentPhase::Revoked => {}
+                }
+            }
+            let Some(closing) = closing else {
+                return IosMediaDrainStatus::Ready;
+            };
+            match tokio::time::timeout_at(deadline, closing.wait_for_drain_completion()).await {
+                Ok(MediaAttachmentPhase::Revoked) => {}
+                Ok(MediaAttachmentPhase::Unknown | MediaAttachmentPhase::Active) => {
+                    return IosMediaDrainStatus::Unknown;
+                }
+                Ok(MediaAttachmentPhase::Revoking) | Err(_) => {
+                    return if self
+                        .media_attachment_host
+                        .attachments()
+                        .iter()
+                        .any(|attachment| attachment.phase() == MediaAttachmentPhase::Unknown)
+                    {
+                        IosMediaDrainStatus::Unknown
+                    } else {
+                        IosMediaDrainStatus::TimedOut
+                    };
+                }
+            }
+        }
+    }
+
+    /// Synchronously fence this exact engine's attachment before its final
+    /// native reference is released. Repeated calls join the same drain.
+    pub fn begin_engine_attachment_drain(
+        &self,
+        engine: Arc<MobileEngineHandle>,
+    ) -> Result<(), MobileEngineError> {
+        let guard = self.engine_route(&engine).ok_or_else(|| {
+            MobileEngineError::Internal(
+                "iOS engine has no attachment issued by this media host".into(),
+            )
+        })?;
+        self.begin_attachment_drain(guard)
+    }
+
     /// Refresh trusted provider/session bindings after an engine attaches or
     /// changes session. Provider credentials remain inside the engine/runtime.
     /// An unconfigured inference route returns `None` without registering a
@@ -391,18 +468,11 @@ impl IosNativeMediaHost {
         &self,
         engine: Arc<MobileEngineHandle>,
     ) -> Result<Option<MediaAudioSessionBindingFfi>, MobileEngineError> {
-        let engine_key = Arc::as_ptr(&engine) as usize;
-        let guard = self
-            .route_guards
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(&engine_key)
-            .and_then(Weak::upgrade)
-            .ok_or_else(|| {
-                MobileEngineError::Internal(
-                    "iOS engine has no attachment issued by this media host".into(),
-                )
-            })?;
+        let guard = self.engine_route(&engine).ok_or_else(|| {
+            MobileEngineError::Internal(
+                "iOS engine has no attachment issued by this media host".into(),
+            )
+        })?;
         // Serialize refreshes for this engine so an older unconfigured result
         // cannot retire a newer successful binding.
         let _refresh = guard.refresh.lock().await;
@@ -473,14 +543,7 @@ impl IosNativeMediaHost {
         engine: Arc<MobileEngineHandle>,
         binding: MediaAudioSessionBindingFfi,
     ) {
-        let engine_key = Arc::as_ptr(&engine) as usize;
-        let route = self
-            .route_guards
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(&engine_key)
-            .and_then(Weak::upgrade);
-        if let Some(route) = route {
+        if let Some(route) = self.engine_route(&engine) {
             route.remove_session_context(&binding);
         }
     }
@@ -564,8 +627,12 @@ impl IosNativeMediaHost {
         let binding_ptr = Arc::as_ptr(binding) as usize;
         let attachment = binding.attachment.clone();
         let registry = binding.registry.clone();
+        let callback_started = binding.confirmed_callback_started.clone();
         Arc::new(move || {
             if attachment.phase() != MediaAttachmentPhase::Revoked {
+                return;
+            }
+            if callback_started.swap(true, Ordering::AcqRel) {
                 return;
             }
             registry.unregister_attachment(attachment.id());
@@ -574,6 +641,7 @@ impl IosNativeMediaHost {
             if let Err(error) = harness_runtime::mobile::spawn_mobile_lifecycle_task(async move {
                 callback.attachment_drained(host_id, generation).await;
             }) {
+                callback_started.store(false, Ordering::Release);
                 tracing::error!(%error, "could not schedule confirmed iOS attachment callback");
                 return;
             }
@@ -595,31 +663,99 @@ impl IosNativeMediaHost {
         })
     }
 
-    fn revoke_unbuilt_attachment(&self, binding: Arc<MediaAudioSessionBindingGuard>) {
+    fn begin_attachment_drain(
+        &self,
+        binding: Arc<MediaAudioSessionBindingGuard>,
+    ) -> Result<(), MobileEngineError> {
         binding.attachment.begin_revoke();
+        if binding.drain_started.swap(true, Ordering::AcqRel) {
+            if binding.attachment.phase() == MediaAttachmentPhase::Revoked
+                && self
+                    .media_attachment_host
+                    .attachment(binding.attachment.id())
+                    .is_none()
+            {
+                self.attachment_confirmed_callback(&binding)();
+            }
+            return Ok(());
+        }
         let attachment = binding.attachment.clone();
         let on_confirmed = self.attachment_confirmed_callback(&binding);
-        if let Err(error) = harness_runtime::mobile::spawn_mobile_lifecycle_task(async move {
-            match attachment.revoke(std::time::Duration::from_secs(5)).await {
-                MediaAttachmentRevocation::Confirmed => on_confirmed(),
-                MediaAttachmentRevocation::Unknown { reason }
-                    if attachment.phase() == MediaAttachmentPhase::Revoking =>
-                {
-                    tracing::warn!(%reason, "unbuilt iOS media drain remains in flight");
-                    if attachment.wait_for_drain_completion().await == MediaAttachmentPhase::Revoked
-                    {
-                        on_confirmed();
-                    }
-                }
-                MediaAttachmentRevocation::Unknown { reason } => {
-                    tracing::error!(%reason, "unbuilt iOS media attachment remains unknown");
-                }
+        if let Err(error) =
+            harness_runtime::mobile::spawn_mobile_lifecycle_task(Self::finish_attachment_drain(
+                attachment,
+                on_confirmed,
+                std::time::Duration::from_secs(5),
+            ))
+        {
+            binding.drain_started.store(false, Ordering::Release);
+            return Err(MobileEngineError::Internal(format!(
+                "could not schedule iOS media attachment cleanup; admission remains closed: {error}"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn finish_attachment_drain(
+        attachment: MediaAttachmentHandle,
+        on_confirmed: Arc<dyn Fn() + Send + Sync>,
+        timeout: std::time::Duration,
+    ) {
+        match attachment.revoke(timeout).await {
+            MediaAttachmentRevocation::Confirmed => on_confirmed(),
+            MediaAttachmentRevocation::Unknown { reason } => {
+                Self::finish_unconfirmed_attachment(attachment, on_confirmed, reason).await;
             }
-        }) {
-            // The strong attachment route remains in `attachment_routes`; the
-            // failure is visible and no caller may assume cleanup completed.
+        }
+    }
+
+    async fn finish_unconfirmed_attachment(
+        attachment: MediaAttachmentHandle,
+        on_confirmed: Arc<dyn Fn() + Send + Sync>,
+        reason: String,
+    ) {
+        let phase = match attachment.phase() {
+            MediaAttachmentPhase::Revoking => {
+                tracing::warn!(%reason, "iOS media drain remains in flight");
+                attachment.wait_for_drain_completion().await
+            }
+            phase => phase,
+        };
+        if phase == MediaAttachmentPhase::Revoked
+            && matches!(
+                attachment.revoke(std::time::Duration::from_secs(5)).await,
+                MediaAttachmentRevocation::Confirmed
+            )
+        {
+            on_confirmed();
+        } else {
+            tracing::error!(%reason, ?phase, "iOS media attachment remains unconfirmed");
+        }
+    }
+
+    fn revoke_unbuilt_attachment(&self, binding: Arc<MediaAudioSessionBindingGuard>) {
+        if let Err(error) = self.begin_attachment_drain(binding) {
+            // The host retains the unconfirmed route and later admission fails
+            // closed even though construction could not return its engine.
             tracing::error!(%error, "could not schedule unbuilt iOS media attachment drain");
         }
+    }
+
+    fn engine_route(
+        &self,
+        engine: &Arc<MobileEngineHandle>,
+    ) -> Option<Arc<MediaAudioSessionBindingGuard>> {
+        let key = Arc::as_ptr(engine) as usize;
+        let guards = self
+            .route_guards
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tracked = guards.get(&key)?;
+        let recorded_engine = tracked.engine.upgrade()?;
+        if !Arc::ptr_eq(&recorded_engine, engine) {
+            return None;
+        }
+        tracked.guard.upgrade()
     }
 
     fn track_engine_route(
@@ -631,8 +767,14 @@ impl IosNativeMediaHost {
             .route_guards
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        guards.retain(|_, weak| weak.strong_count() > 0);
-        guards.insert(Arc::as_ptr(engine) as usize, Arc::downgrade(guard));
+        guards.retain(|_, route| route.engine.strong_count() > 0 && route.guard.strong_count() > 0);
+        guards.insert(
+            Arc::as_ptr(engine) as usize,
+            TrackedEngineMediaRoute {
+                engine: Arc::downgrade(engine),
+                guard: Arc::downgrade(guard),
+            },
+        );
     }
 
     pub(crate) fn audio_service(&self) -> Arc<dyn AudioService> {
@@ -709,7 +851,11 @@ pub fn build_mobile_engine(
         directories.prepare()?;
         directories
             .validate_projects_mount(&linux.workspace_host_path, &linux.stable_workspace_id)?;
-        let (cwd, logical_cwd) = directories.resolve_cwd(None)?;
+        let default_mode = match MobileConfig::default().session_mode {
+            MobileSessionMode::Chat => SessionModeDto::Chat,
+            MobileSessionMode::Code => SessionModeDto::Code,
+        };
+        let (cwd, logical_cwd) = directories.resolve_cwd(None, default_mode)?;
         let cfg = MobileConfig {
             brand_runtime_profile: brand_profile.clone(),
             build_info: harness_runtime::mobile::BuildInfo::new(
@@ -782,17 +928,8 @@ pub fn build_ios_cron_store(
 
     let directories = harness_runtime::mobile::mobile_user_directories(managed_root.clone())?;
     directories.prepare()?;
-    let scheduled_cwd;
-    let project_cwd = match project_cwd {
-        Some(path) => Some(path),
-        None => {
-            scheduled_cwd = std::path::PathBuf::from(&directories.scheduled_cwd);
-            std::fs::create_dir_all(&scheduled_cwd)
-                .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-            Some(scheduled_cwd.to_string_lossy().into_owned())
-        }
-    };
-    let cwd = ios_project_cwd(&managed_root, project_cwd.as_deref())?;
+    let project_cwd = project_cwd.unwrap_or_else(|| directories.scheduled_cwd.clone());
+    let cwd = ios_project_cwd(&managed_root, &project_cwd)?;
     let app_root = std::path::Path::new(&app_sandbox_root)
         .canonicalize()
         .map_err(|error| {
@@ -1221,6 +1358,7 @@ mod mobile_media_scope_tests {
     use super::super::callbacks::{CameraFfiError, CapturedImageFfi, IosAudioFfiError};
     use super::*;
     use client::protocol::{audio as audio_dto, media as media_dto};
+    use media_api::audio::{AudioOperation, AudioOperationContext, AudioOperationId};
     use media_api::{
         MediaOperation, MediaOperationContext, MediaOperationId, MediaOperationKind, MediaOwner,
         MediaResult,
@@ -1302,6 +1440,306 @@ mod mobile_media_scope_tests {
             panic!("this fixture does not open devices")
         }
         async fn attachment_drained(&self, _: String, _: u64) {}
+    }
+
+    fn test_media_host(audio: Box<dyn IosAudioService>) -> Arc<IosNativeMediaHost> {
+        let config = r#"{"schemaVersion":4,"recognition":{"source":"automatic","cloud":{"binding":"follow_session"}},"speech":{"source":"automatic","cloud":{"binding":"follow_session"}},"language":"auto","rate":1.0}"#;
+        IosNativeMediaHost::new(audio, Box::new(Camera), Box::new(Devices), config.into()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn attachment_drain_waits_for_closing_scope_without_revoking_active_scope() {
+        let host = test_media_host(Box::new(Audio));
+        let (closing, _) = host.create_engine_media_scope().unwrap();
+        let (active, _) = host.create_engine_media_scope().unwrap();
+        assert_eq!(
+            host.wait_for_attachment_drain(100).await,
+            IosMediaDrainStatus::Ready
+        );
+
+        let mut fence = closing.attachment.retain_for_host_cleanup().unwrap();
+        closing.attachment.begin_revoke();
+        assert_eq!(
+            closing.attachment.drain_media(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        assert_eq!(closing.attachment.phase(), MediaAttachmentPhase::Revoking);
+        assert_eq!(
+            host.wait_for_attachment_drain(5).await,
+            IosMediaDrainStatus::TimedOut
+        );
+        assert!(host.create_engine_media_scope().is_err());
+
+        let waiter_host = host.clone();
+        let waiter =
+            tokio::spawn(async move { waiter_host.wait_for_attachment_drain(2_000).await });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        fence.confirm().unwrap();
+        assert_eq!(
+            host.wait_for_attachment_drain(2_000).await,
+            IosMediaDrainStatus::Ready
+        );
+        assert_eq!(closing.attachment.phase(), MediaAttachmentPhase::Revoked);
+        assert_eq!(active.attachment.phase(), MediaAttachmentPhase::Active);
+        let (replacement, _) = host.create_engine_media_scope().unwrap();
+        assert_ne!(replacement.attachment.id(), active.attachment.id());
+        host.attachment_confirmed_callback(&closing)();
+        for guard in [&active, &replacement] {
+            assert_eq!(
+                guard.attachment.revoke(Duration::from_secs(2)).await,
+                MediaAttachmentRevocation::Confirmed
+            );
+            host.attachment_confirmed_callback(guard)();
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_drain_late_confirmation_removes_unbuilt_host_entry() {
+        let host = test_media_host(Box::new(Audio));
+        let (guard, _) = host.create_engine_media_scope().unwrap();
+        let attachment = guard.attachment.clone();
+        let id = attachment.id().clone();
+        let mut fence = attachment.retain_for_host_cleanup().unwrap();
+        attachment.begin_revoke();
+        let drain = IosNativeMediaHost::finish_attachment_drain(
+            attachment.clone(),
+            host.attachment_confirmed_callback(&guard),
+            Duration::from_millis(1),
+        );
+        tokio::pin!(drain);
+        // Poll the same drain future past its initial observation deadline
+        // while the cleanup fence keeps the attachment in Revoking.
+        tokio::select! {
+            biased;
+            _ = &mut drain => panic!("drain completed before host cleanup"),
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+        }
+        assert_eq!(attachment.phase(), MediaAttachmentPhase::Revoking);
+        assert!(host.media_attachment_host.attachment(&id).is_some());
+        fence.confirm().unwrap();
+        drain.await;
+        assert_eq!(attachment.phase(), MediaAttachmentPhase::Revoked);
+        assert!(host.media_attachment_host.attachment(&id).is_none());
+        assert!(!host
+            .attachment_routes
+            .lock()
+            .unwrap()
+            .contains_key(&guard.identity()));
+    }
+
+    #[tokio::test]
+    async fn attachment_drain_confirmed_between_timeout_and_phase_check_releases_route() {
+        let host = test_media_host(Box::new(Audio));
+        let (guard, _) = host.create_engine_media_scope().unwrap();
+        let attachment = guard.attachment.clone();
+        let mut fence = attachment.retain_for_host_cleanup().unwrap();
+        attachment.begin_revoke();
+        let reason = match attachment.revoke(Duration::from_millis(1)).await {
+            MediaAttachmentRevocation::Unknown { reason } => reason,
+            MediaAttachmentRevocation::Confirmed => panic!("host cleanup fence was not held"),
+        };
+        assert_eq!(
+            attachment.drain_media(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        fence.confirm().unwrap();
+        assert_eq!(attachment.phase(), MediaAttachmentPhase::Revoked);
+        assert!(host
+            .attachment_routes
+            .lock()
+            .unwrap()
+            .contains_key(&guard.identity()));
+        // The initial observer has timed out, but final confirmation arrived
+        // before the production handler reads the phase.
+        IosNativeMediaHost::finish_unconfirmed_attachment(
+            attachment,
+            host.attachment_confirmed_callback(&guard),
+            reason,
+        )
+        .await;
+        assert!(!host
+            .attachment_routes
+            .lock()
+            .unwrap()
+            .contains_key(&guard.identity()));
+    }
+
+    #[test]
+    fn attachment_drain_fences_exact_engine_while_native_arc_is_retained() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = test_media_host(Box::new(Audio));
+        let (closing, conversation) = host.create_engine_media_scope().unwrap();
+        let on_confirmed = host.attachment_confirmed_callback(&closing);
+        let engine = crate::tests::build_handle_with_config(temp.path(), |cfg| {
+            cfg.media_service = Some(closing.attachment.service());
+            cfg.media_attachment_handle = Some(closing.attachment.clone());
+            cfg.media_attachment_confirmed_callback = Some(on_confirmed);
+            cfg.media_conversation_attachment = Some(conversation);
+        });
+        let retained_engine = engine.clone();
+        let weak_engine = Arc::downgrade(&engine);
+        let (active, _) = host.create_engine_media_scope().unwrap();
+        let foreign_host = test_media_host(Box::new(Audio));
+        let (foreign, _) = foreign_host.create_engine_media_scope().unwrap();
+        host.track_engine_route(&engine, &closing);
+        let mut fence = closing.attachment.retain_for_host_cleanup().unwrap();
+
+        drop(engine);
+        assert!(weak_engine.upgrade().is_some());
+        assert_eq!(closing.attachment.phase(), MediaAttachmentPhase::Active);
+        assert!(foreign_host
+            .begin_engine_attachment_drain(retained_engine.clone())
+            .is_err());
+        assert_eq!(foreign.attachment.phase(), MediaAttachmentPhase::Active);
+        host.begin_engine_attachment_drain(retained_engine.clone())
+            .unwrap();
+        host.begin_engine_attachment_drain(retained_engine.clone())
+            .unwrap();
+        assert_eq!(closing.attachment.phase(), MediaAttachmentPhase::Revoking);
+        assert_eq!(active.attachment.phase(), MediaAttachmentPhase::Active);
+
+        let observer = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        observer.block_on(async {
+            assert_eq!(
+                closing.attachment.drain_media(Duration::from_secs(2)).await,
+                MediaAttachmentRevocation::Confirmed
+            );
+            assert_eq!(
+                host.wait_for_attachment_drain(5).await,
+                IosMediaDrainStatus::TimedOut
+            );
+            assert!(host.create_engine_media_scope().is_err());
+            let waiter_host = host.clone();
+            let waiter =
+                tokio::spawn(async move { waiter_host.wait_for_attachment_drain(2_000).await });
+            tokio::task::yield_now().await;
+            assert!(!waiter.is_finished());
+            waiter.abort();
+            assert!(waiter.await.unwrap_err().is_cancelled());
+        });
+        // SDK Drop begins revocation of the same attachment while its host
+        // cleanup fence and the detached drain are still outstanding.
+        drop(retained_engine);
+        assert!(weak_engine.upgrade().is_none());
+        assert_eq!(closing.attachment.phase(), MediaAttachmentPhase::Revoking);
+        observer.block_on(async {
+            fence.confirm().unwrap();
+            assert_eq!(
+                host.wait_for_attachment_drain(2_000).await,
+                IosMediaDrainStatus::Ready
+            );
+            assert_eq!(closing.attachment.phase(), MediaAttachmentPhase::Revoked);
+            assert_eq!(active.attachment.phase(), MediaAttachmentPhase::Active);
+            assert_eq!(foreign.attachment.phase(), MediaAttachmentPhase::Active);
+            for (owner, guard) in [(&host, &active), (&foreign_host, &foreign)] {
+                assert_eq!(
+                    guard.attachment.revoke(Duration::from_secs(2)).await,
+                    MediaAttachmentRevocation::Confirmed
+                );
+                owner.attachment_confirmed_callback(guard)();
+            }
+        });
+    }
+
+    struct FailedOwnerEndAudio;
+    #[async_trait::async_trait]
+    impl IosAudioService for FailedOwnerEndAudio {
+        fn capabilities(&self) -> audio_dto::AudioCapabilitySnapshotDto {
+            audio_dto::AudioCapabilitySnapshotDto {
+                service_epoch: 1,
+                support_revision: 1,
+                supported_operations: vec![audio_dto::AudioOperationKindDto::Record],
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            request: audio_dto::AudioOperationRequestDto,
+        ) -> audio_dto::AudioOperationResultDto {
+            match request.operation {
+                audio_dto::AudioOperationDto::StartRecording { .. } => {
+                    audio_dto::AudioOperationResultDto::RecordingStarted {
+                        handle: "recording-1".into(),
+                    }
+                }
+                audio_dto::AudioOperationDto::EndOwner => {
+                    audio_dto::AudioOperationResultDto::FailedWithoutResource {
+                        error: audio_dto::AudioErrorDto {
+                            kind: audio_dto::AudioErrorKindDto::NativeFailure,
+                            message: "owner end unconfirmed".into(),
+                        },
+                    }
+                }
+                audio_dto::AudioOperationDto::Status { .. } => {
+                    audio_dto::AudioOperationResultDto::Status {
+                        status: audio_dto::AudioStatusDto {
+                            recording: true,
+                            playing: false,
+                        },
+                    }
+                }
+                _ => panic!("unexpected audio operation"),
+            }
+        }
+
+        async fn cancel(&self, _: audio_dto::AudioOperationIdDto) -> Result<(), IosAudioFfiError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn attachment_drain_unknown_fails_closed_and_retains_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = test_media_host(Box::new(FailedOwnerEndAudio));
+        let (guard, conversation) = host.create_engine_media_scope().unwrap();
+        let on_confirmed = host.attachment_confirmed_callback(&guard);
+        let engine = crate::tests::build_handle_with_config(temp.path(), |cfg| {
+            cfg.media_service = Some(guard.attachment.service());
+            cfg.media_attachment_handle = Some(guard.attachment.clone());
+            cfg.media_attachment_confirmed_callback = Some(on_confirmed);
+            cfg.media_conversation_attachment = Some(conversation);
+        });
+        host.track_engine_route(&engine, &guard);
+        let audio = guard
+            .attachment
+            .audio_service(host.audio_service())
+            .unwrap();
+        engine.runtime().block_on(async {
+            audio
+                .execute(
+                    AudioOperationContext::new(
+                        AudioOperationId::new(1, 1),
+                        MediaOwner::Session {
+                            session_id: "session-a".into(),
+                        },
+                    ),
+                    AudioOperation::StartRecording {
+                        sample_rate_hz: 24_000,
+                        format: "wav".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            host.begin_engine_attachment_drain(engine.clone()).unwrap();
+            assert_eq!(
+                host.wait_for_attachment_drain(2_000).await,
+                IosMediaDrainStatus::Unknown
+            );
+            assert_eq!(guard.attachment.phase(), MediaAttachmentPhase::Unknown);
+            assert!(host.create_engine_media_scope().is_err());
+            assert!(host
+                .media_attachment_host
+                .attachment(guard.attachment.id())
+                .is_some());
+        });
     }
 
     #[tokio::test]

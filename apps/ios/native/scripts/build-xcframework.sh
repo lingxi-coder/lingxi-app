@@ -125,7 +125,7 @@ if [[ "${LINGXI_FFI_REUSE_NATIVE_SUPPORT_ONLY:-0}" == "1" ]]; then
   # without staging a guest rootfs. Device app packaging still checks rootfs
   # in project.yml and verify-linux-runtime.sh; this does not bypass either.
   SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
-  SDK_OUTPUT="${IOS_DIR}/build/mobile-linux-sdk"
+  SDK_OUTPUT="${LINGXI_IOS_NATIVE_SUPPORT_OUTPUT:-${IOS_DIR}/build/mobile-linux-sdk}"
   python3 "${SDK_ROOT}/scripts/checks/verify-ios-native.py" --artifact-dir "${SDK_OUTPUT}"
   diff -qr "${SDK_OUTPUT}/MobileLinuxNativeSupport.xcframework" "${FRAMEWORKS_DIR}/MobileLinuxNativeSupport.xcframework"
   python3 - "${REPO_ROOT}" "${SDK_OUTPUT}" "${BUILD_TARGETS[@]}" <<'CHECK_NATIVE_SUPPORT'
@@ -146,7 +146,7 @@ if any(required[target] not in manifest.get("slices", []) for target in sys.argv
 CHECK_NATIVE_SUPPORT
 elif [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" && "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
   SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
-  SDK_OUTPUT="${IOS_DIR}/build/mobile-linux-sdk"
+  SDK_OUTPUT="${LINGXI_IOS_NATIVE_SUPPORT_OUTPUT:-${IOS_DIR}/build/mobile-linux-sdk}"
   python3 "${SDK_ROOT}/scripts/checks/verify-ios-native.py" --artifact-dir "${SDK_OUTPUT}"
   diff -qr "${SDK_OUTPUT}/MobileLinuxNativeSupport.xcframework" "${FRAMEWORKS_DIR}/MobileLinuxNativeSupport.xcframework"
   python3 - "${REPO_ROOT}" "${SDK_OUTPUT}" <<'CHECK_SIM_SUPPORT'

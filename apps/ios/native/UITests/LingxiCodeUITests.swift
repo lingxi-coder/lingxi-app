@@ -189,6 +189,28 @@ final class LingxiCodeUITests: XCTestCase {
         add(screenshot)
     }
 
+    func testCollapsedLocalAppRejectionExposesTheFullSwitchInstruction() {
+        app.terminate()
+        app.launchArguments = ["-AppleLanguages", "(en)"]
+        app.launchEnvironment["LINGXI_UI_TEST_LOCAL_APP_REQUIRES_CODE"] = "1"
+        app.launch()
+        let summary = app.buttons["conversation.summary-menu"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 10), app.debugDescription)
+        summary.tap()
+        app.buttons["conversation.summary.category.tools"].tap()
+        let batch = app.buttons["conversation.timeline.tool-batch.timeline-tools:ui-local-app-requires-code"]
+        XCTAssertTrue(batch.waitForExistence(timeout: 5), app.debugDescription)
+        batch.tap()
+        let result = app.buttons["conversation.tool-call.ui-local-app-requires-code.toggle"]
+        XCTAssertTrue(result.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(result.label.contains("Chat mode does not support Local App development. Switch to Code mode to continue."),
+                      result.label)
+        let image = XCTAttachment(screenshot: app.screenshot())
+        image.name = "Collapsed-Local-App-requires-Code"
+        image.lifetime = .keepAlways
+        add(image)
+    }
+
     func testComposerTracksKeyboardAndKeepsVoiceModesSeparate() {
         let input = app.textViews["composer.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
@@ -677,25 +699,16 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 5), app.debugDescription)
     }
 
-    /// The sidebar has two entries (scheduled tasks, projects) and one recents
-    /// list with a mode filter — no per-mode tabs and no per-project cards. A
-    /// project is created on the projects page and starts its sessions from
-    /// its own page.
+    /// A project starts its sessions from its own page, while New Chat from
+    /// that conversation opens a fresh global owner in the same mode.
     func testSidebarEntriesCreateProjectAndStartSession() throws {
         let header = app.buttons["conversation.project-context"]
         XCTAssertTrue(header.waitForExistence(timeout: 8), app.debugDescription)
         let initialContext = try XCTUnwrap(header.value as? String)
-        let initialParts = initialContext.components(separatedBy: " · ")
-        XCTAssertEqual(initialParts.count, 2, initialContext)
-        let initialWorkspace = try XCTUnwrap(initialParts.last)
-        let initialMode = try XCTUnwrap(initialParts.first?.components(separatedBy: ", ").last)
 
         openDrawer()
         XCTAssertTrue(app.buttons["drawer.entry.cron"].exists)
         XCTAssertTrue(app.buttons["drawer.entry.projects"].exists)
-        XCTAssertTrue(app.buttons["drawer.filter.all"].exists)
-        XCTAssertTrue(app.buttons["drawer.filter.chat"].exists)
-        XCTAssertTrue(app.buttons["drawer.filter.code"].exists)
 
         app.buttons["drawer.entry.projects"].tap()
         let create = app.buttons["projects.create"]
@@ -725,6 +738,14 @@ final class LingxiCodeUITests: XCTestCase {
         let projectShown = expectation(for: NSPredicate(format: "value CONTAINS %@", projectName),
                                        evaluatedWith: header)
         wait(for: [projectShown], timeout: 10)
+        let projectScope = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "newchat.scope.project.")).firstMatch
+        XCTAssertTrue(projectScope.waitForExistence(timeout: 10), app.debugDescription)
+        let projectContext = try XCTUnwrap(header.value as? String)
+        let projectMode = try XCTUnwrap(projectContext.components(separatedBy: " · ").first?.components(separatedBy: ", ").last)
+        let fixtureReply = app.staticTexts["Hello! I'm ready to help with your software engineering tasks."]
+        let projectOwnerReady = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: fixtureReply)
+        XCTAssertEqual(XCTWaiter.wait(for: [projectOwnerReady], timeout: 10), .completed, app.debugDescription)
 
         let projectDraft = "draft belonging to the project"
         let input = app.textViews["composer.input"]
@@ -734,12 +755,48 @@ final class LingxiCodeUITests: XCTestCase {
         app.buttons["composer.keyboard.dismiss"].tap()
         app.buttons["conversation.new-chat"].tap()
 
+        let globalScope = app.descendants(matching: .any)["newchat.scope.global"]
+        XCTAssertTrue(globalScope.waitForExistence(timeout: 10), app.debugDescription)
         let globalShown = expectation(for: NSPredicate { _, _ in
             guard let value = header.value as? String else { return false }
-            return value.contains(", \(initialMode) · ") && value.hasSuffix(" · \(initialWorkspace)")
+            return value.contains(", \(projectMode) · ") && !value.contains(projectName)
         }, evaluatedWith: header)
-        wait(for: [globalShown], timeout: 10)
+        let globalResult = XCTWaiter.wait(for: [globalShown], timeout: 10)
+        XCTAssertEqual(globalResult, .completed,
+                       "Initial: \(initialContext); project: \(projectContext); after New Chat: \(String(describing: header.value))")
         XCTAssertEqual(app.textViews["composer.input"].value as? String ?? "", "", app.debugDescription)
+    }
+
+    func testOwnerGateRemainsSharedAfterViewRecreation() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_GATE_PROBE"] = "1"
+        app.launch()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
+
+        // Editing recreates the view while preserving the hosted session.
+        let input = app.textViews["composer.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
+        input.tap()
+        input.typeText("gate-owned draft")
+        let heldDraft = input.value as? String ?? ""
+        XCTAssertTrue(heldDraft.contains("gate-owned draft"), app.debugDescription)
+        app.buttons["composer.keyboard.dismiss"].tap()
+
+        let probe = app.staticTexts["test.gate.probe"]
+        app.buttons["test.gate.hold"].tap()
+        let blocked = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "blocked"), object: probe)
+        XCTAssertEqual(XCTWaiter.wait(for: [blocked], timeout: 5), .completed, app.debugDescription)
+        app.buttons["conversation.new-chat"].tap()
+        XCTAssertEqual(input.value as? String, heldDraft, app.debugDescription)
+
+        app.buttons["test.gate.release"].tap()
+        let admitted = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "admitted"), object: probe)
+        XCTAssertEqual(XCTWaiter.wait(for: [admitted], timeout: 5), .completed, app.debugDescription)
+        app.buttons["conversation.new-chat"].tap()
+        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (input.value as? String ?? "").isEmpty
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 10), .completed, app.debugDescription)
     }
 
     /// The drawer supports edge opening while leaving the chat visible.
@@ -751,7 +808,7 @@ final class LingxiCodeUITests: XCTestCase {
         origin.press(forDuration: 0.05, thenDragTo: target)
 
         XCTAssertTrue(
-            app.buttons["drawer.filter.chat"].waitForExistence(timeout: 8),
+            app.buttons["drawer.entry.projects"].waitForExistence(timeout: 8),
             app.debugDescription
         )
 
@@ -956,7 +1013,7 @@ final class LingxiCodeUITests: XCTestCase {
         // Scheduled tasks are an unconditional sidebar entry, so what this leg
         // can honestly pin is that the provider round-trip leaves the sidebar
         // intact.
-        XCTAssertTrue(app.buttons["drawer.filter.chat"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["drawer.entry.projects"].exists, app.debugDescription)
         XCTAssertTrue(app.buttons["drawer.entry.cron"].exists, app.debugDescription)
     }
 
@@ -1262,8 +1319,8 @@ final class LingxiCodeUITests: XCTestCase {
 
     /// Compact layout has an explicit trigger; iPad keeps its system control.
     private func openDrawer() {
-        let chatsTab = app.buttons["drawer.filter.chat"]
-        if chatsTab.exists && chatsTab.isHittable { return }
+        let projectsEntry = app.buttons["drawer.entry.projects"]
+        if projectsEntry.exists && projectsEntry.isHittable { return }
 
         let compactTrigger = app.buttons["drawer.open"]
         let trigger = compactTrigger.exists ? compactTrigger : app.navigationBars.firstMatch.buttons.element(boundBy: 0)
@@ -1271,7 +1328,7 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(waitUntilHittable(trigger, timeout: 5), app.debugDescription)
         trigger.tap()
 
-        if !chatsTab.waitForExistence(timeout: 5),
+        if !projectsEntry.waitForExistence(timeout: 5),
            trigger.exists,
            waitUntilHittable(trigger, timeout: 2) {
             // The UI-test fixture can finish its initial source refresh between
@@ -1279,8 +1336,8 @@ final class LingxiCodeUITests: XCTestCase {
             // Retry only while the original trigger is still actually hittable.
             trigger.tap()
         }
-        XCTAssertTrue(chatsTab.waitForExistence(timeout: 8), app.debugDescription)
-        XCTAssertTrue(waitUntilHittable(chatsTab, timeout: 5), app.debugDescription)
+        XCTAssertTrue(projectsEntry.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(projectsEntry, timeout: 5), app.debugDescription)
     }
 
     /// The transcript identifies the chat column without depending on chrome.

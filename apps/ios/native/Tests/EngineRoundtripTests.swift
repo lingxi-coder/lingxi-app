@@ -381,7 +381,7 @@ import XCTest
             defer { try? FileManager.default.removeItem(at: sandbox) }
             let runtime = try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox)
             let paths = try mobileUserDirectories(managedRoot: runtime.managedRoot)
-            let cwd = paths.defaultGuestCwd
+            let cwd = paths.codeGuestCwd
             // Real transcripts are bucketed by the stable Linux cwd.
             let projectName = String(cwd.map { $0.isASCII && $0.isLetter || $0.isASCII && $0.isNumber ? $0 : "-" })
             let directory = URL(fileURLWithPath: paths.configHome, isDirectory: true)

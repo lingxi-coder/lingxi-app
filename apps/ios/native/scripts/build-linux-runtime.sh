@@ -26,9 +26,26 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 case "${ROOTFS_PROFILE}" in toolchain|base) ;; *) echo "invalid rootfs profile" >&2; exit 2 ;; esac
+SDK_OUTPUT="${LINGXI_IOS_NATIVE_SUPPORT_OUTPUT:-${IOS_DIR}/build/mobile-linux-sdk}"
+CACHE="${LINGXI_IOS_NATIVE_SUPPORT_CACHE:-${IOS_DIR}/build/mobile-linux-cache}"
+[[ "${CACHE}" == /* && "${CACHE}" != / ]] || { echo "Native support cache must be an absolute path." >&2; exit 1; }
+# A caller-supplied output is a fresh staging directory, so this script never
+# removes a pre-existing directory selected by an environment variable.
+if [[ -n "${LINGXI_IOS_NATIVE_SUPPORT_OUTPUT:-}" ]]; then
+  [[ "${SDK_OUTPUT}" == /* && "${SDK_OUTPUT}" != / && ! -e "${SDK_OUTPUT}" && ! -L "${SDK_OUTPUT}" ]] || {
+    echo "Native support output override must be a new absolute path." >&2; exit 1;
+  }
+fi
+# The default output is also removed before a rebuild, so a separately
+# overridden cache must never be located inside it either.
+python3 - "${SDK_OUTPUT}" "${CACHE}" <<'STAGING_PATHS' || {
+import os, sys
+output, cache = (os.path.realpath(path) for path in sys.argv[1:])
+sys.exit(1 if os.path.commonpath((output, cache)) == output else 0)
+STAGING_PATHS
+  echo "Native support cache cannot be inside the output directory." >&2; exit 1;
+}
 SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
-SDK_OUTPUT="${IOS_DIR}/build/mobile-linux-sdk"
-CACHE="${IOS_DIR}/build/mobile-linux-cache"
 # Clang/Swift PCH files embed their module-cache path. A moved checkout cannot
 # reuse that cache; native sources and packaged outputs remain independently pinned.
 MODULE_CACHE="${CACHE}/swift-modules"

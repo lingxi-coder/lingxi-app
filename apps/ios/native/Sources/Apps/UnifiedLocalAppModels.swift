@@ -1,5 +1,100 @@
 import Foundation
 
+enum LocalAppRequestPurpose: Sendable {
+    case ordinary
+    case development(SessionMode)
+    case marketInstallation
+}
+
+enum LocalAppDevelopmentAdmission {
+    static func requireCode(_ mode: SessionMode?) throws {
+        guard mode == .code else {
+            throw LocalAppServiceFailure("requiresCode", String(localized: "local_app_development_requires_code"))
+        }
+    }
+
+    static func requireServiceRequest(_ fields: [String: LocalAppJSON], purpose: LocalAppRequestPurpose) throws {
+        let operation = fields["op"]?.text ?? ""
+        guard ["import", "publish", "prepareAuthoring"].contains(operation) else { return }
+        switch purpose {
+        case .development(let mode): try requireCode(mode)
+        case .marketInstallation where operation != "prepareAuthoring" && fields["marketOrigin"] != nil: break
+        default: try requireCode(nil)
+        }
+    }
+
+    static func requiresCode(forAgentHostRequest request: String) -> Bool {
+        guard let data = request.data(using: .utf8),
+              let fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let op = fields["op"] as? String else { return false }
+        return ["createAuthoring", "prepareAuthoringSource", "bindAuthoringSource", "registerAuthoring",
+                "getAuthoringGrant", "restoreAuthoringSource", "remixAuthoringSource", "importRemixSource"].contains(op)
+    }
+
+    static func requireAgentHostRequest(_ request: String, mode: SessionMode?) throws {
+        if requiresCode(forAgentHostRequest: request) { try requireCode(mode) }
+    }
+}
+
+enum LocalAppToolFailurePresentation {
+    private static let requiresCodeKey = "local_app_development_requires_code"
+
+    static func requiresCode(tool: String, failed: Bool, headline: String?, body: String?) -> Bool {
+        func hasCode(_ text: String?) -> Bool {
+            guard var text = text?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+            if text.hasPrefix("Error: ") { text.removeFirst("Error: ".count) }
+            return text.hasPrefix(requiresCodeKey + ":")
+        }
+        return failed && tool.caseInsensitiveCompare("LocalApp") == .orderedSame
+            && (hasCode(headline) || hasCode(body))
+    }
+
+    static var requiresCodeMessage: String { String(localized: "local_app_development_requires_code") }
+
+    static func visibleText(tool: String, failed: Bool, headline: String?, body: String?, fallback: String?) -> String? {
+        requiresCode(tool: tool, failed: failed, headline: headline, body: body) ? requiresCodeMessage : fallback
+    }
+}
+
+/// Replay the durable native receipt first; only a proven missing archive may
+/// trigger re-fetch of the same immutable Market release.
+@MainActor
+enum LocalAppRemixSubmission {
+    static func run<T>(mode: SessionMode, submit: () async throws -> T,
+                       restoreArchive: () async throws -> Void) async throws -> T {
+        try LocalAppDevelopmentAdmission.requireCode(mode)
+        do { return try await submit() }
+        catch let failure as LocalAppServiceFailure where failure.code == "archiveMissing" {
+            try await restoreArchive()
+            return try await submit()
+        }
+    }
+}
+
+/// A confirmation always applies to the value the user selected, even if a
+/// background refresh changes the page before they respond.
+struct LocalAppRemixSelection<Value> {
+    private var selected: Value?
+
+    mutating func capture(_ value: Value) { selected = value }
+    mutating func take() -> Value? {
+        defer { selected = nil }
+        return selected
+    }
+    mutating func clear() { selected = nil }
+}
+
+@MainActor
+struct LocalAppActionPresentation {
+    let mayPresent: () -> Bool
+    let reportOwnerFailure: (String) -> Void
+
+    func deliverFailure(_ message: String, showOnPage: (String) -> Void) {
+        if mayPresent() { showOnPage(message) }
+        else { reportOwnerFailure(message) }
+    }
+}
+
 /// Values crossing the standalone service boundary. They never contain engine
 /// handles, account credentials, or a currently selected conversation.
 indirect enum LocalAppJSON: Codable, Equatable, Sendable {
@@ -37,6 +132,161 @@ struct LocalAppAuthoring: Codable, Equatable, Sendable {
     var authoringSessionId: String? = nil
     var appId: String? = nil
 }
+
+struct LocalAppAuthoringReceipt: Decodable, Sendable {
+    let authoring: LocalAppAuthoring
+    let sessionMode: SessionMode
+    let sourceId: String
+    let ownerAppId: String?
+
+    private enum CodingKeys: String, CodingKey { case sessionMode, sourceId, ownerAppId }
+    init(from decoder: Decoder) throws {
+        authoring = try LocalAppAuthoring(from: decoder)
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        sessionMode = try fields.decode(SessionMode.self, forKey: .sessionMode)
+        sourceId = try fields.decode(String.self, forKey: .sourceId)
+        guard UUID(uuidString: sourceId) != nil, canonicalSessionID(sourceId) == sourceId else {
+            throw DecodingError.dataCorruptedError(forKey: .sourceId, in: fields,
+                                                   debugDescription: "The source receipt has an invalid identity.")
+        }
+        ownerAppId = try fields.decodeIfPresent(String.self, forKey: .ownerAppId)
+    }
+
+    func matchesSourceID(_ expected: String?) -> Bool {
+        guard let expected else { return true }
+        return UUID(uuidString: expected) != nil && sourceId == canonicalSessionID(expected)
+    }
+}
+
+/// A service-created source can be mounted once while its real session UUID
+/// is being established. It is not an authoring binding until the native
+/// service has persisted and subsequently confirmed the complete tuple.
+struct LocalAppCreatedAuthoringSource: Decodable, Equatable, Sendable {
+    let sourceId: String
+    let requestId: String
+    let sourceDirectory: String
+    let sourcePath: String
+}
+
+struct LocalAppVerifiedAuthoringSource: Decodable, Equatable, Sendable {
+    let sourceId: String
+    let sourceDirectory: String
+    let sourcePath: String
+}
+
+struct LocalAppBoundAuthoringSource: Decodable, Sendable {
+    let requestId: String
+    let sourceId: String
+    let sourceDirectory: String
+    let sourcePath: String
+    let targetAppId: String
+}
+
+struct LocalAppAuthoringOwner: Equatable, Sendable {
+    let sourceDirectory: String
+    let projectID: String
+    let sessionID: String
+    let appID: String?
+
+    func matches(_ binding: LocalAppAuthoring) -> Bool {
+        guard UUID(uuidString: projectID) != nil, UUID(uuidString: sessionID) != nil,
+              binding.sourceDirectory == sourceDirectory,
+              let workspace = binding.workspaceId,
+              case .mobileProject(let project)? = binding.projectRef,
+              let session = binding.authoringSessionId,
+              canonicalSessionID(workspace) == canonicalSessionID(projectID),
+              canonicalSessionID(project) == canonicalSessionID(projectID),
+              canonicalSessionID(session) == canonicalSessionID(sessionID)
+        else { return false }
+        // App ID is optional metadata: publishing may attach it later without
+        // changing the immutable source/project/session owner receipt.
+        return true
+    }
+}
+
+struct LocalAppProvisionalAuthoringOwner: Equatable, Sendable {
+    let sourceDirectory: String
+    let projectID: String
+    let appID: String?
+
+    func matches(_ owner: LocalAppAuthoringOwner) -> Bool {
+        sourceDirectory == owner.sourceDirectory
+            && canonicalSessionID(projectID) == canonicalSessionID(owner.projectID)
+            && appID == owner.appID
+    }
+}
+
+/// Serializes current-pointer writes for one app. A newer user selection
+/// invalidates an older ticket before it enters native code, while a write
+/// already admitted finishes before the newer write is allowed to start.
+@MainActor
+final class LocalAppAuthoringRegistrationOrder {
+    static let shared = LocalAppAuthoringRegistrationOrder()
+    struct Ticket: Equatable, Sendable { let key: String; let revision: UInt64 }
+    struct Lease: Equatable, Sendable { let key: String; let id: UUID }
+    private var revisions: [String: UInt64] = [:]
+    private var owners: [String: UUID] = [:]
+    private var waiters: [String: [CheckedContinuation<Lease, Never>]] = [:]
+    private var selectionAuthorities: [String: WorkspaceWriteAuthority] = [:]
+    private var navigationSequence: UInt64 = 0
+    private var projectSelections: [String: UInt64] = [:]
+
+    private func selectionAuthority(projectID: String) -> WorkspaceWriteAuthority {
+        if let existing = selectionAuthorities[projectID] { return existing }
+        let created = WorkspaceWriteAuthority()
+        selectionAuthorities[projectID] = created
+        return created
+    }
+
+    func issueNavigation() -> UInt64 {
+        navigationSequence &+= 1
+        return navigationSequence
+    }
+
+    /// A slow prepare from an older navigation cannot become the most recent
+    /// selection merely because it learned its project ID after a newer one.
+    func reserveProjectSelection(projectID: String, sequence: UInt64) -> (WorkspaceWriteAuthority, UInt64)? {
+        guard sequence >= (projectSelections[projectID] ?? 0) else { return nil }
+        projectSelections[projectID] = sequence
+        let authority = selectionAuthority(projectID: projectID)
+        authority.invalidate()
+        return (authority, authority.currentRevision())
+    }
+
+    func invalidateProjectSelection(projectID: String) {
+        _ = reserveProjectSelection(projectID: projectID, sequence: issueNavigation())
+    }
+
+    func issue(key: String) -> Ticket {
+        let next = (revisions[key] ?? 0) &+ 1
+        revisions[key] = next
+        return Ticket(key: key, revision: next)
+    }
+
+    func isCurrent(_ ticket: Ticket) -> Bool { revisions[ticket.key] == ticket.revision }
+
+    func acquire(key: String) async -> Lease {
+        if owners[key] == nil {
+            let lease = Lease(key: key, id: UUID())
+            owners[key] = lease.id
+            return lease
+        }
+        return await withCheckedContinuation { waiters[key, default: []].append($0) }
+    }
+
+    func release(_ lease: Lease) {
+        guard owners[lease.key] == lease.id else { return }
+        if var queue = waiters[lease.key], !queue.isEmpty {
+            let next = queue.removeFirst()
+            waiters[lease.key] = queue.isEmpty ? nil : queue
+            let nextLease = Lease(key: lease.key, id: UUID())
+            owners[lease.key] = nextLease.id
+            next.resume(returning: nextLease)
+        } else {
+            owners.removeValue(forKey: lease.key)
+        }
+    }
+}
 struct LocalAppAuthoringSessionBinding: Encodable, Sendable {
     let workspaceId: String
     let sourceDirectory: String
@@ -45,18 +295,57 @@ struct LocalAppAuthoringSessionBinding: Encodable, Sendable {
 }
 
 enum LocalAppAuthoringHostRequest {
-    static func registerPending(_ authoring: LocalAppAuthoring) throws -> [String: LocalAppJSON] {
-        guard authoring.appId == nil,
-              let workspaceID = authoring.workspaceId, !workspaceID.isEmpty,
-              case .mobileProject(let projectID)? = authoring.projectRef,
-              projectID == workspaceID,
-              let sessionID = authoring.authoringSessionId, !sessionID.isEmpty,
-              !authoring.sourceDirectory.isEmpty else {
-            throw LocalAppServiceFailure("INVALID_AUTHORING", "The new app authoring workspace is incomplete.")
+    static func importRemix(_ input: LocalAppMarketRemixInput, archivePath: String,
+                            mode: SessionMode) throws -> [String: LocalAppJSON] {
+        try LocalAppDevelopmentAdmission.requireCode(mode)
+        guard UUID(uuidString: input.requestId) != nil, canonicalSessionID(input.requestId) == input.requestId,
+              (archivePath as NSString).isAbsolutePath, archivePath == input.archivePath else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The market source request is incomplete.")
         }
+        return ["op": .string("importRemixSource"), "requestId": .string(input.requestId),
+                "archivePath": .string(archivePath), "archiveSha256": .string(input.archiveSha256),
+                "archiveBytes": .number(Double(input.archiveBytes)), "manifest": input.signedManifest,
+                "files": input.signedFiles, "dependencies": input.signedDependencies,
+                "marketOrigin": .object([
+                    "appId": .string(input.marketOrigin.appId), "releaseId": .string(input.marketOrigin.releaseId),
+                    "digest": .string(input.marketOrigin.digest)
+                ])]
+    }
+
+    static func getGrant(sourceDirectory: String, projectID: String, sessionID: String,
+                         mode: SessionMode) throws -> [String: LocalAppJSON] {
+        guard !sourceDirectory.isEmpty, UUID(uuidString: projectID) != nil,
+              UUID(uuidString: sessionID) != nil, mode == .code else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The authoring owner is incomplete.")
+        }
+        return ["op": .string("getAuthoringGrant"), "sourceDirectory": .string(sourceDirectory),
+                "projectId": .string(canonicalSessionID(projectID)),
+                "authoringSessionId": .string(canonicalSessionID(sessionID)), "sessionMode": .string(mode.rawValue)]
+    }
+
+    static func register(_ authoring: LocalAppAuthoring, sourceID: String, requestID: String,
+                         mode: SessionMode, setCurrent: Bool) throws -> [String: LocalAppJSON] {
+        guard UUID(uuidString: sourceID) != nil, UUID(uuidString: requestID) != nil, mode == .code else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The app source receipt is incomplete.")
+        }
+        guard let workspaceID = authoring.workspaceId, UUID(uuidString: workspaceID) != nil,
+              case .mobileProject(let projectID)? = authoring.projectRef,
+              UUID(uuidString: projectID) != nil,
+              canonicalSessionID(projectID) == canonicalSessionID(workspaceID),
+              let sessionID = authoring.authoringSessionId, UUID(uuidString: sessionID) != nil,
+              !authoring.sourceDirectory.isEmpty else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The app authoring workspace is incomplete.")
+        }
+        let normalized = LocalAppAuthoring(sourceDirectory: authoring.sourceDirectory,
+            workspaceId: canonicalSessionID(workspaceID), projectRef: .mobileProject(canonicalSessionID(projectID)),
+            authoringSessionId: canonicalSessionID(sessionID), appId: authoring.appId)
         return [
             "op": .string("registerAuthoring"),
-            "authoring": try .encode(authoring)
+            "sourceId": .string(canonicalSessionID(sourceID)),
+            "requestId": .string(canonicalSessionID(requestID)),
+            "sessionMode": .string(mode.rawValue),
+            "setCurrent": .bool(setCurrent),
+            "authoring": try .encode(normalized)
         ]
     }
 }
@@ -145,6 +434,37 @@ struct LocalAppMarketOrigin: Codable, Equatable, Sendable {
     let digest: String
     var remixedFrom: String?
 }
+
+/// The selected immutable release, without download URLs or credentials.
+/// The corresponding ZIP is kept under the request's protected staging directory.
+struct LocalAppMarketRemixInput: Codable, Equatable, Sendable {
+    struct File: Codable, Equatable, Sendable {
+        let path: String
+        let sizeBytes: Int
+        let sha256: String
+        let executable: Bool
+    }
+    let requestId: String
+    let archivePath: String
+    let archiveSha256: String
+    let archiveBytes: Int
+    let manifest: UnifiedAppManifest
+    let files: [File]
+    let dependencies: [File]
+    let signedManifest: LocalAppJSON
+    let signedFiles: LocalAppJSON
+    let signedDependencies: LocalAppJSON
+    let marketOrigin: LocalAppMarketOrigin
+}
+
+struct LocalAppMarketRemixResult: Decodable, Sendable {
+    let requestId: String
+    let sourceId: String
+    let sourceDirectory: String
+    let sourcePath: String
+    let record: UnifiedAppRecord
+    let release: UnifiedAppRelease
+}
 struct UnifiedAppRecord: Codable, Equatable, Identifiable, Sendable {
     var id: String { appId }
     let appId: String
@@ -218,9 +538,18 @@ struct LocalAppRuntimeStatus: Decodable, Sendable { let run: UnifiedAppRun?; let
 struct LocalAppPublishResult: Decodable, Sendable { let record: UnifiedAppRecord; let release: UnifiedAppRelease }
 struct LocalAppAuthoringResolution: Decodable, Sendable {
     let action: String
+    let sourceId: String?
     let sourceDirectory: String
+    let sourcePath: String?
     let authoring: LocalAppAuthoring?
     let authoringSessionId: String?
+}
+struct LocalAppRestoredAuthoringSource: Decodable, Sendable {
+    let record: UnifiedAppRecord
+    let sourceId: String
+    let requestId: String
+    let sourceDirectory: String
+    let sourcePath: String
 }
 struct LocalAppLayout: Decodable, Sendable { let sourcePath: String; let dataPath: String; let releasesPath: String; let runsPath: String }
 struct LocalAppServiceFailure: Error, LocalizedError, Codable, Sendable {

@@ -47,7 +47,7 @@ final class MockConversationSource: ConversationSource {
             }
             if let fixture = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_FILES"],
                fixture.hasPrefix("ui-files-"), fixture.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) {
-                let paths = WorkspaceDirectoryPaths.current()
+                let paths = WorkspaceDirectoryPaths.current(mode: sessionMode)
                 let directory = paths.home.appendingPathComponent(fixture, isDirectory: true)
                 do {
                     try FileManager.default.createDirectory(at: directory.appendingPathComponent("target"), withIntermediateDirectories: true)
@@ -226,6 +226,16 @@ final class MockConversationSource: ConversationSource {
             source.model.activeSessionId = "ui-session"
             // Fixture launches start closed; persistence has isolated model tests.
             source.model.expandedToolCalls = []
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_LOCAL_APP_REQUIRES_CODE"] == "1" {
+                let result = ConversationToolResultDisplay(headline: "Failed", headlineKind: .failed,
+                    headlineArgs: [], diff: nil,
+                    body: "local_app_development_requires_code: Local App development requires a Code session.",
+                    bodyLines: 1, bodyTruncated: false, collapsed: true)
+                let trace = ConversationToolTrace(id: "ui-local-app-requires-code", tool: "LocalApp", status: .failed,
+                                                  inputSummary: nil, elapsedMs: nil, display: result)
+                source.model.messages = []
+                source.model.items = [.toolCall(trace)]
+            }
             if multiAgent {
                 // The prompt a subagent is DISPATCHED with arrives as the first
                 // user bubble of its child transcript, and real ones run to
@@ -460,7 +470,7 @@ final class MockConversationSource: ConversationSource {
         }
         let path = try await WorkspaceDirectoryRepository().canonicalDirectory(path)
         model.workspaceState = SessionWorkspaceState(sessionId: model.activeSessionId, cwd: path,
-            projectRoot: model.workspaceState?.projectRoot ?? LXISHGuestPaths.workspaceRoot,
+            projectRoot: model.workspaceState?.projectRoot ?? LXISHGuestPaths.conversationWorkspace(for: sessionMode),
             additionalDirectories: model.workspaceState?.additionalDirectories ?? [],
             transcriptPath: model.workspaceState?.transcriptPath ?? "")
     }

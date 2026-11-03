@@ -169,6 +169,33 @@ struct RootView: View {
     @State private var voiceInteraction: VoiceInteractionController
     @State private var projectSwitching = false
     @State private var userNavigation = ConversationNavigationIntents<UserConversationNavigation>()
+    @State private var localAppSelectionAuthority = WorkspaceWriteAuthority()
+    @State private var localAppRegistrationOrder = LocalAppAuthoringRegistrationOrder.shared
+    @State private var retiredAuthoringEntriesAwaitingRelease = Set<UUID>()
+    @State private var processingSourceIntents = Set<String>()
+    private struct LocalAppNavigationContext {
+        let generation: UInt64
+        let presentationRevision: UInt64
+        let selectionRevision: UInt64
+        let sequence: UInt64
+        let providerSnapshot: ProviderLaunchSnapshot
+        let registrationTicket: LocalAppAuthoringRegistrationOrder.Ticket
+        let originatingSource: any ConversationSource
+        let originatingEntry: SessionHost.Entry?
+    }
+    private struct PendingAuthoringAttempt {
+        let request: LocalAppDevelopmentRequest
+        let project: ProjectSnapshot
+        var intent: LocalAppAuthoringIntent
+        var setCurrentOnFirstAttempt = true
+        var registrationTicket: LocalAppAuthoringRegistrationOrder.Ticket?
+        var inFlight = false
+        var registrationAttempted = false
+        var registrationConfirmed = false
+        var failureID: UUID?
+    }
+    @State private var pendingAuthoringAttempts: [UUID: PendingAuthoringAttempt] = [:]
+    @State private var allowBlankAuthoringRetryFor: UUID?
     /// `LingxiAppActionStore.drain()` REMOVES what it hands back, so an action
     /// refused by `ConversationSessionMutationPolicy` used to be destroyed by
     /// the very act of reading it. A conversation notification is posted
@@ -201,8 +228,12 @@ struct RootView: View {
     @State private var pendingConversationSelectionRestore: PendingConversationSelectionRestore?
 
     private let appSandboxRoot: String
-    private let scopedPreferences: ProjectScopedPreferences
-    private let cronOwnerGate: CronOwnerAdmissionGate
+    @State private var scopedPreferences: ProjectScopedPreferences
+    @State private var cronOwnerGate: CronOwnerAdmissionGate
+    #if DEBUG
+    @State private var uiTestGateLease: UUID?
+    @State private var uiTestGateProbe = "ready"
+    #endif
     #if canImport(harness_runtimeFFI)
     private let mediaHostComposition: IOSNativeMediaHostComposition?
     private let mediaHostInitializationError: String?
@@ -238,7 +269,7 @@ struct RootView: View {
         #endif
         let root = ConversationSourceFactory.appSandboxRoot()
         let admissionGate = CronOwnerAdmissionGate()
-        cronOwnerGate = admissionGate
+        _cronOwnerGate = State(initialValue: admissionGate)
         let projects = ProjectStore.forRuntime(managedRoot: LXISHDefaultWorkspace.managedRootPath())
         let settings = SettingsStore()
         let providers = ProviderRepository.shared
@@ -286,7 +317,10 @@ struct RootView: View {
         }
         let initialMode = currentMode
         let initialProjectMountGrants: [String]
-        if let activeProject {
+        let initialNeedsAuthoringAuthorization = activeProject.map {
+            !MobileUserStorage.localAppSourceDirectories(for: $0).isEmpty
+        } ?? false
+        if let activeProject, !initialNeedsAuthoringAuthorization {
             initialProjectMountGrants = (try? MobileUserStorage.projectMountGrantPaths(for: activeProject)) ?? []
         } else {
             initialProjectMountGrants = []
@@ -300,11 +334,23 @@ struct RootView: View {
             linuxRuntime: settings.linuxRuntime
         ).config
         let initialRows = initialScope == .scheduled ? [] : (activeProject?.sessions ?? projects.globalSessions)
+        var initialWorkspaceError: Error?
+        let initialScheduledCwd: String?
+        if initialScope == .scheduled {
+            do { initialScheduledCwd = try MobileUserStorage.scheduledWorkspace(sessionID: storedSessionID) }
+            catch {
+                initialScheduledCwd = nil
+                initialWorkspaceError = error
+                projects.errorMessage = error.localizedDescription
+            }
+        } else {
+            initialScheduledCwd = nil
+        }
         let initialCwd = initialRows.first { canonicalSessionID($0.sessionId) == canonicalSessionID(storedSessionID) }?.workspaceDirectory
-            ?? (initialScope == .scheduled ? try? MobileUserStorage.scheduledWorkspace(sessionID: storedSessionID) : nil)
-            ?? activeProject?.record.activeDirectory ?? LXISHGuestPaths.workspaceRoot
+            ?? initialScheduledCwd
+            ?? activeProject?.record.activeDirectory ?? LXISHGuestPaths.conversationWorkspace(for: initialMode)
         var initialTranscriptPath: String?
-        if !storedSessionID.isEmpty {
+        if !storedSessionID.isEmpty, initialWorkspaceError == nil {
             do {
                 initialTranscriptPath = try initialScope == .scheduled
                     ? CronRepository.scheduledTranscriptPath(appSandboxRoot: cronStorageRoot, sessionID: storedSessionID, mode: initialMode)
@@ -331,6 +377,14 @@ struct RootView: View {
         launchOptions.mediaHostComposition = mediaHostComposition
         #endif
         var conversation = ConversationSourceFactory.make(options: launchOptions)
+        #if canImport(harness_runtimeFFI)
+        if initialNeedsAuthoringAuthorization, let engine = conversation as? EngineConversationSource {
+            engine.requireAuthoringMountAuthorization()
+        }
+        #endif
+        if let initialWorkspaceError {
+            conversation.model.error = ConversationError(kind: .host, message: initialWorkspaceError.localizedDescription)
+        }
         #if canImport(harness_runtimeFFI)
         if let mediaHostInitializationError {
             conversation.model.error = ConversationError(kind: .host, message: mediaHostInitializationError)
@@ -609,12 +663,17 @@ struct RootView: View {
             // Keep the saved draft and files intact; the fresh source's first
             // UUID must still pass the normal admission gate.
             storedSessionID = ""
-            let fallbackCwd = activeProject?.record.activeDirectory ?? LXISHGuestPaths.workspaceRoot
+            let fallbackCwd = activeProject?.record.activeDirectory
+                ?? (initialScope == .scheduled ? MobileUserStorage.directories().scheduledGuestCwd
+                    : LXISHGuestPaths.conversationWorkspace(for: initialMode))
             launchOptions.initialSessionId = nil
             launchOptions.initialSessionTranscriptPath = nil
             launchOptions.projectCwd = fallbackCwd
             conversation = ConversationSourceFactory.make(options: launchOptions)
             #if canImport(harness_runtimeFFI)
+            if initialNeedsAuthoringAuthorization, let engine = conversation as? EngineConversationSource {
+                engine.requireAuthoringMountAuthorization()
+            }
             if let mediaHostInitializationError {
                 conversation.model.error = ConversationError(kind: .host, message: mediaHostInitializationError)
             }
@@ -633,6 +692,7 @@ struct RootView: View {
         initialEntry.handoffReference = preferences.handoffReference(sessionID: storedSessionID, scope: initialScope, mode: initialMode)
         sessionHost.onActivity = { [weak projects, weak sessionHost] entry in
             guard let projects, entry.scope != .scheduled,
+                  !entry.source.model.authoringBindingPending,
                   !entry.source.model.sessionTransitionPending, !entry.sessionID.isEmpty,
                   projects.allowsSession(entry.sessionID, in: entry.scope), !entry.isRecordingSession else { return }
             let first = entry.source.model.messages.first(where: { $0.role == .user })
@@ -709,7 +769,7 @@ struct RootView: View {
         _draft = State(initialValue: initialDraft)
         _voiceInteraction = State(initialValue: initialEntry.voice)
         appSandboxRoot = root
-        scopedPreferences = preferences
+        _scopedPreferences = State(initialValue: preferences)
     }
 
     private var session: SessionRef {
@@ -803,6 +863,33 @@ struct RootView: View {
                     .transition(.opacity)
             }
 
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_GATE_PROBE"] == "1" {
+                HStack {
+                    Button("Hold") {
+                        Task { @MainActor in
+                            guard uiTestGateLease == nil,
+                                  let lease = try? await cronOwnerGate.beginScopeMutation() else { return }
+                            uiTestGateLease = lease
+                            uiTestGateProbe = probeHostPreparation() ? "admitted" : "blocked"
+                        }
+                    }.accessibilityIdentifier("test.gate.hold")
+                    Button("Release") {
+                        guard let lease = uiTestGateLease else { return }
+                        cronOwnerGate.endScopeMutation(lease)
+                        uiTestGateLease = nil
+                        uiTestGateProbe = probeHostPreparation() ? "admitted" : "blocked"
+                    }.accessibilityIdentifier("test.gate.release")
+                    Text(uiTestGateProbe).accessibilityIdentifier("test.gate.probe")
+                }
+                .padding(8)
+                .background(.regularMaterial)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .padding(.top, 90)
+                .zIndex(200)
+            }
+            #endif
+
             #if canImport(harness_runtimeFFI)
                 // Keep one root-mounted native sheet presenter so permission
                 // requests work over both the chat and any active SwiftUI sheet.
@@ -825,6 +912,15 @@ struct RootView: View {
           }
         }
     }
+
+    #if DEBUG
+    private func probeHostPreparation() -> Bool {
+        let probe = MockConversationSource()
+        let admitted = sessionHost.beginSourcePreparation?(probe) ?? false
+        if admitted { sessionHost.finishSourcePreparation?(probe) }
+        return admitted
+    }
+    #endif
 
     private func withLifecycleObservers(_ content: some View) -> some View {
         let backgroundLifecycle = content
@@ -915,11 +1011,109 @@ struct RootView: View {
                 externalEngineReady = false
                 let generation = sourceGeneration
                 let current = source
+                let bootstrapDraftRevision = sessionHost.entry(for: current)?.draftRevision
                 do {
                     try await cronRepository.prepareOwnerAdmission()
                     let restoreID = sessionHost.entry(for: current)?.sessionID ?? ""
                     try await cronOwnerGate.waitUntilAvailable(sessionID: restoreID)
                     guard generation == sourceGeneration else { return }
+                    #if canImport(harness_runtimeFFI)
+                    if let engine = current as? EngineConversationSource, engine.needsAuthoringMountAuthorization {
+                        guard let entry = sessionHost.entry(for: current),
+                              let projectID = entry.scope.projectID,
+                              let project = projectStore.projects.first(where: { $0.record.id == projectID }) else {
+                            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The app authoring project is unavailable.")
+                        }
+                        if entry.sessionID.isEmpty {
+                            let sources = MobileUserStorage.localAppSourceDirectories(for: project)
+                            guard entry.mode == .code,
+                                  let intent = try await projectStore.selectedLocalAppAuthoringIntent(projectID: projectID),
+                                  sources == [intent.sourceDirectory] else {
+                                throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app authoring intent is missing or ambiguous.")
+                            }
+                            let initialRequest = try await projectStore.localAppSourceCreateIntent(requestID: intent.intentId)
+                            guard initialRequest == nil || initialRequest?.projectId == projectID else {
+                                throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app creation request belongs to another project.")
+                            }
+                            guard generation == sourceGeneration, sessionHost.entry(for: current) === entry,
+                                  projectStore.projects.first(where: { $0.record.id == projectID })?.record == project.record else {
+                                throw CancellationError()
+                            }
+                            if let sessionID = intent.authoringSessionId, let transcriptPath = intent.transcriptPath {
+                                guard sessionHost.claimIdentity(sessionID, for: current, scope: entry.scope, mode: .code) else {
+                                    throw SessionHost.OwnershipError.conflictingOwner
+                                }
+                                if let bootstrapDraftRevision, entry.draftRevision == bootstrapDraftRevision,
+                                   scopedPreferences.hasDraft(scope: entry.scope, mode: .code, ownerSessionID: sessionID) {
+                                    let saved = scopedPreferences.draft(scope: entry.scope, mode: .code, ownerSessionID: sessionID)
+                                    entry.draft = saved
+                                    entry.draftSourceCodeUnits = scopedPreferences.draftSourceCodeUnits(
+                                        scope: entry.scope, mode: .code, ownerSessionID: sessionID)
+                                    entry.handoffReference = scopedPreferences.handoffReference(
+                                        sessionID: sessionID, scope: entry.scope, mode: .code)
+                                    if source === entry.source, sessionHost.selectedEntryID == entry.id {
+                                        draft = saved
+                                        draftOwnerSessionID = sessionID
+                                    }
+                                }
+                                try engine.expectRecoveredAuthoringSession(sessionID: sessionID, transcriptPath: transcriptPath)
+                                try await reconcileAuthoringIndexIfNeeded(entry: entry, project: project, intent: intent)
+                                guard generation == sourceGeneration, sessionHost.entry(for: current) === entry else {
+                                    throw CancellationError()
+                                }
+                                try validateBootstrapRestore(current)
+                                guard let currentProject = projectStore.projects.first(where: { $0.record.id == projectID }) else {
+                                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The app authoring project is unavailable.")
+                                }
+                                let resolved = try await resolveProjectMountGrants(currentProject, mode: .code, sessionID: sessionID)
+                                guard generation == sourceGeneration, sessionHost.entry(for: current) === entry,
+                                      let owner = resolved.owner else { throw CancellationError() }
+                                try engine.authorizeAuthoringMount(grants: resolved.grants, owner: owner, intent: resolved.missingIntent)
+                            } else {
+                                guard allowBlankAuthoringRetryFor == entry.id else {
+                                    throw LocalAppServiceFailure("AUTHORING_PENDING", "Retry to restore the app source before starting its session.")
+                                }
+                                _ = try await LocalApps.library.prepareAuthoringSource(sourceID: intent.sourceId,
+                                                                                       sourceDirectory: intent.sourceDirectory, mode: intent.mode)
+                                let grants = try MobileUserStorage.projectMountGrantPaths(for: project,
+                                    authorizedLocalAppSource: intent.sourceDirectory)
+                                guard generation == sourceGeneration, sessionHost.entry(for: current) === entry,
+                                      projectStore.projects.first(where: { $0.record.id == projectID })?.record == project.record else {
+                                    throw CancellationError()
+                                }
+                                try engine.authorizeProvisionalAuthoringMount(grants: grants,
+                                    owner: LocalAppProvisionalAuthoringOwner(sourceDirectory: intent.sourceDirectory,
+                                        projectID: intent.projectId, appID: intent.appId))
+                                let request = LocalAppDevelopmentRequest(appId: intent.appId, name: project.record.name,
+                                    sourceDirectory: intent.sourceDirectory, sourceID: intent.sourceId,
+                                    sourceRequestID: intent.sourceRequestId, authoring: nil, prompt: initialRequest?.prompt ?? "")
+                                pendingAuthoringAttempts[entry.id] = PendingAuthoringAttempt(
+                                    request: request, project: project, intent: intent, setCurrentOnFirstAttempt: false)
+                                allowBlankAuthoringRetryFor = nil
+                            }
+                            if let initialRequest, !initialRequest.completed, let bootstrapDraftRevision,
+                               entry.draftRevision == bootstrapDraftRevision,
+                               !scopedPreferences.hasDraft(scope: entry.scope, mode: .code, ownerSessionID: entry.sessionID) {
+                                seedLocalAppDraft(LocalAppDevelopmentRequest(appId: intent.appId, name: project.record.name,
+                                    sourceDirectory: intent.sourceDirectory, sourceID: intent.sourceId,
+                                    sourceRequestID: intent.sourceRequestId, authoring: nil, prompt: initialRequest.prompt), entry: entry)
+                            }
+                        } else {
+                            if !projectStore.isSessionIndexed(entry.sessionID, in: entry.scope) {
+                                let intent = try await savedAuthoringIntent(project: project, sessionID: entry.sessionID)
+                                try await reconcileAuthoringIndexIfNeeded(entry: entry, project: project, intent: intent)
+                            }
+                            try validateBootstrapRestore(current)
+                            guard let currentProject = projectStore.projects.first(where: { $0.record.id == projectID }) else {
+                                throw LocalAppServiceFailure("AUTHORING_CHANGED", "The app authoring project is unavailable.")
+                            }
+                            let resolved = try await resolveProjectMountGrants(currentProject, mode: entry.mode, sessionID: entry.sessionID)
+                            guard generation == sourceGeneration, sessionHost.entry(for: current) === entry,
+                                  let owner = resolved.owner else { throw CancellationError() }
+                            try engine.authorizeAuthoringMount(grants: resolved.grants, owner: owner, intent: resolved.missingIntent)
+                        }
+                    }
+                    #endif
                     try validateBootstrapRestore(current)
                     wireCurrentSource(preserveCatalog: providerCatalogBootstrapped)
                     if !providerCatalogBootstrapped {
@@ -947,6 +1141,18 @@ struct RootView: View {
                         break
                     }
                     guard generation == sourceGeneration else { return }
+                    #if canImport(harness_runtimeFFI)
+                    if let engine = current as? EngineConversationSource,
+                       engine.pendingRecoveredAuthoringOwner != nil,
+                       let entry = sessionHost.entry(for: current) {
+                        try await confirmRecoveredAuthoringOwner(engine, entry: entry)
+                        guard generation == sourceGeneration else { return }
+                    }
+                    #endif
+                    current.setSettingsActive(true)
+                    if let entry = sessionHost.entry(for: current), pendingAuthoringAttempts[entry.id] != nil {
+                        retryAuthoringBinding(for: entry)
+                    }
                     current.listSessions()
                     externalEngineReady = true
                     retryDeferredAppActions()
@@ -961,11 +1167,23 @@ struct RootView: View {
                     #endif
                 } catch {
                     guard generation == sourceGeneration else { return }
+                    #if canImport(harness_runtimeFFI)
+                    if let engine = current as? EngineConversationSource,
+                       engine.needsAuthoringMountAuthorization || engine.pendingRecoveredAuthoringOwner != nil {
+                        current.model.error = ConversationError(kind: .host, message: error.localizedDescription)
+                        current.model.authoringBindingRetryAvailable = true
+                    } else if !cronRepository.ownerAdmissionIsCurrent || projectStore.sessionOwnershipError != nil {
+                        current.model.error = ConversationError(kind: .host, message: error.localizedDescription)
+                    } else {
+                        current.warmUp()
+                    }
+                    #else
                     if !cronRepository.ownerAdmissionIsCurrent || projectStore.sessionOwnershipError != nil {
                         current.model.error = ConversationError(kind: .host, message: error.localizedDescription)
                     } else {
                         current.warmUp()
                     }
+                    #endif
                 }
             }
         let launchLifecycle = bootstrapLifecycle
@@ -1207,7 +1425,7 @@ struct RootView: View {
                 onSelectSessionMode: selectSessionMode,
                 onPickWorkspace: {
                     workspacePickerSource = source
-                    workspacePickerSessionID = source.model.workspaceState?.sessionId ?? ""
+                    workspacePickerSessionID = source.model.activeSessionId
                     workspacePickerOpen = true
                 },
                 onContinueInOtherMode: continueCurrentSessionInOtherMode,
@@ -1236,7 +1454,8 @@ struct RootView: View {
                         projectID: projectStore.activeProjectId,
                         sessionID: request.taskId
                     )
-                }
+                },
+                onRetryAuthoringBinding: { if let owner { retryAuthoringBinding(for: owner) } }
             )
             .environment(\.openLocalApp, { id in
                 navigation.runApp(id)
@@ -1340,25 +1559,42 @@ struct RootView: View {
             .accessibilityIdentifier("conversation.session-details-sheet")
         }
         .sheet(item: $filesBrowserRequest) { request in
-            WorkspaceFilesView(repository: WorkspaceDirectoryRepository(), paths: .current(),
+            let paths = workspaceDirectoryPaths
+            WorkspaceFilesView(repository: WorkspaceDirectoryRepository(paths: paths), paths: paths,
                 initialPath: request.path, protectedPaths: { workspaceProtectedDirectories },
                 canMutate: { request.source === source && request.sessionID == source.model.activeSessionId &&
+                    workspaceDirectoryPaths.managedWorkspaces == paths.managedWorkspaces &&
                     !source.model.requiresBackgroundExecution && !source.model.isCancelling && !source.model.sessionTransitionPending })
         }
         .sheet(isPresented: $workspacePickerOpen, onDismiss: {
             workspacePickerSource = nil
             workspacePickerSessionID = ""
         }) {
+            let paths = workspaceDirectoryPaths
+            let pickerMode = activeMode
             WorkspaceDirectoryPickerSheet(
-                projects: RecentSessionsBuilder.sortedProjects(projectStore.projects, pinnedAt: workspacePinnedAt),
+                paths: paths,
+                projects: RecentSessionsBuilder.sortedProjects(
+                    ProjectSnapshot.visible(projectStore.projects, in: pickerMode),
+                    pinnedAt: workspacePinnedAt),
                 activeScope: activeScope,
                 currentDirectory: currentWorkspaceGuestPath,
                 contextDirectories: source.model.workspaceState?.additionalDirectories
                     ?? projectStore.activeProject?.record.additionalDirectories ?? [],
                 protectedPaths: { workspaceProtectedDirectories },
-                canMutate: { !source.model.requiresBackgroundExecution && !source.model.isCancelling && !source.model.sessionTransitionPending },
+                canMutate: { workspacePickerSource === source && workspacePickerSessionID == source.model.activeSessionId &&
+                    workspaceDirectoryPaths.managedWorkspaces == paths.managedWorkspaces &&
+                    !source.model.requiresBackgroundExecution && !source.model.isCancelling && !source.model.sessionTransitionPending },
                 runtimeStatus: settingsStore.linuxRuntime.rootfsState.label,
-                onSelectScope: { scope in startNewChat(in: scope, mode: activeMode) },
+                onSelectScope: { scope in
+                    guard workspacePickerSource === source, workspacePickerSessionID == source.model.activeSessionId,
+                          activeMode == pickerMode else { return }
+                    if case let .project(id) = scope,
+                       !projectStore.projects.contains(where: { $0.id == id && $0.record.visibleModes.contains(pickerMode) }) {
+                        return
+                    }
+                    startNewChat(in: scope, mode: pickerMode)
+                },
                 onPickDirectory: { path in
                     guard let pickerSource = workspacePickerSource, pickerSource === source else {
                         throw WorkspaceDirectoryError.sessionChanged
@@ -1396,12 +1632,36 @@ struct RootView: View {
             + projectStore.globalSessions.compactMap(\.workspaceDirectory)
     }
 
+    private var workspaceDirectoryPaths: WorkspaceDirectoryPaths {
+        let owner = canonicalSessionID(activeSession)
+        let scheduledOwner = activeScope == .scheduled && !owner.isEmpty &&
+            canonicalSessionID(source.model.activeSessionId) == owner ? owner : nil
+        return .current(mode: activeMode, projects: projectStore.fileWorkspaceProjects(), scheduledSessionID: scheduledOwner)
+    }
+
     private enum UserConversationNavigation {
         case mode(SessionMode)
         case scope(ConversationScope, SessionMode, String?, Bool, String?)
+        case recoverAuthoring(String)
     }
 
     private func requestUserNavigation(_ request: UserConversationNavigation) {
+        if case .recoverAuthoring = request, requestLocalAppDevelopmentMode() == nil { return }
+        if case let .scope(scope, mode, _, _, _) = request, mode == .chat,
+           let projectID = scope.projectID,
+           let project = projectStore.projects.first(where: { $0.id == projectID }),
+           !MobileUserStorage.localAppSourceDirectories(for: project).isEmpty {
+            externalLinkError = String(localized: "local_app_development_requires_code")
+            return
+        }
+        localAppSelectionAuthority.invalidate()
+        let projectID: String?
+        switch request {
+        case let .scope(scope, _, _, _, _): projectID = scope.projectID
+        case let .mode(mode): projectID = scopedPreferences.lastScope(mode: mode)?.projectID
+        case let .recoverAuthoring(id): projectID = id
+        }
+        if let projectID { localAppRegistrationOrder.invalidateProjectSelection(projectID: projectID) }
         if userNavigation.submit(request, whileBusy: projectSwitching) {
             performUserNavigation(request)
         } else {
@@ -1413,10 +1673,146 @@ struct RootView: View {
         switch request {
         case let .mode(mode):
             if mode != activeMode { _ = switchMode(to: mode) }
+        case let .recoverAuthoring(projectID):
+            recoverLocalAppAuthoring(projectID: projectID)
         case let .scope(scope, mode, sessionID, startNew, transcriptPath):
-            _ = switchScope(to: scope, mode: mode, resumeSessionID: sessionID, startNew: startNew,
-                            selectedTranscriptPath: transcriptPath)
+            let generation = userNavigation.generation
+            Task { @MainActor in
+                do {
+                    if !startNew, let sessionID {
+                        #if canImport(harness_runtimeFFI)
+                        try await drainFailedPreparation(requestID: sessionID)
+                        #endif
+                        try await drainFailedAuthoringOwner(sessionID: sessionID, scope: scope, mode: mode, generation: generation)
+                    }
+                    guard userNavigation.isCurrent(generation) else { return }
+                    _ = switchScope(to: scope, mode: mode, resumeSessionID: sessionID, startNew: startNew,
+                                    selectedTranscriptPath: transcriptPath)
+                } catch {
+                    if userNavigation.isCurrent(generation) { projectStore.errorMessage = error.localizedDescription }
+                }
+            }
         }
+    }
+
+    private func recoverLocalAppAuthoring(projectID: String) {
+        let generation = userNavigation.generation
+        Task { @MainActor in
+            do {
+                guard let intent = try await projectStore.selectedLocalAppAuthoringIntent(projectID: projectID),
+                      userNavigation.isCurrent(generation) else { return }
+                #if canImport(harness_runtimeFFI)
+                try await drainFailedPreparation(requestID: intent.intentId)
+                guard userNavigation.isCurrent(generation) else { return }
+                #endif
+                let scope = ConversationScope.project(projectID)
+                if let sessionID = intent.authoringSessionId {
+                    #if canImport(harness_runtimeFFI)
+                    try await drainFailedPreparation(requestID: sessionID)
+                    #endif
+                    try await drainFailedAuthoringOwner(sessionID: sessionID, scope: scope, mode: .code, generation: generation)
+                }
+                guard userNavigation.isCurrent(generation) else { return }
+                if intent.authoringSessionId == nil {
+                    let matches = pendingAuthoringAttempts.filter { intent.matchesInFlightAttempt($0.value.intent) }
+                    guard matches.count <= 1 else { throw SessionHost.OwnershipError.conflictingOwner }
+                    if let (entryID, _) = matches.first,
+                       let retained = sessionHost.entries.first(where: { $0.id == entryID }) {
+                        guard retained.scope == scope, retained.mode == .code,
+                              retained.source.model.authoringBindingPending,
+                              retained.workspace == intent.sourceDirectory else {
+                            throw SessionHost.OwnershipError.sourceIdentityMismatch
+                        }
+                        if !retained.sessionID.isEmpty {
+                            guard let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: retained),
+                                  snapshot.state.cwd == intent.sourceDirectory,
+                                  canonicalSessionID(snapshot.state.sessionId) == canonicalSessionID(retained.sessionID) else {
+                                throw SessionHost.OwnershipError.sourceIdentityMismatch
+                            }
+                        } else if !retained.source.model.activeSessionId.isEmpty {
+                            throw SessionHost.OwnershipError.sourceIdentityMismatch
+                        }
+                        guard userNavigation.isCurrent(generation), sessionHost.entry(for: retained.source) === retained else {
+                            throw CancellationError()
+                        }
+                        if sessionHost.selectedEntryID == retained.id, source === retained.source {
+                            navigation.path.removeAll()
+                            navigation.closeSidebar()
+                        } else {
+                            _ = switchScope(to: scope, mode: .code, resumeSessionID: retained.sessionID, retainedEntry: retained)
+                        }
+                        return
+                    }
+                }
+                if let sessionID = intent.authoringSessionId,
+                   let retained = try sessionHost.entryForClaim(sessionID: sessionID, scope: scope, mode: .code) {
+                    // An admitted source may already own the UUID even though
+                    // its first catalog write has not finished. Select that
+                    // source instead of constructing a competing placeholder.
+                    let pendingMatches = pendingAuthoringAttempts[retained.id].map { intent.matchesInFlightAttempt($0.intent) } ?? false
+                    if !pendingMatches {
+                        let binding = try await LocalApps.library.exactAuthoringBinding(sourceDirectory: intent.sourceDirectory,
+                            projectID: intent.projectId, sessionID: sessionID, mode: retained.mode,
+                            expectedSourceID: intent.sourceId)
+                        let owner = LocalAppAuthoringOwner(sourceDirectory: intent.sourceDirectory, projectID: intent.projectId,
+                                                           sessionID: sessionID, appID: intent.appId)
+                        guard owner.matches(binding) else { throw SessionHost.OwnershipError.sourceIdentityMismatch }
+                    }
+                    guard let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: retained),
+                          intent.matchesRetainedOwner(scope: retained.scope, mode: retained.mode,
+                                                      sessionID: retained.sessionID, workspace: snapshot.state),
+                          userNavigation.isCurrent(generation),
+                          sessionHost.entry(for: retained.source) === retained else {
+                        throw SessionHost.OwnershipError.sourceIdentityMismatch
+                    }
+                    if !pendingMatches {
+                        do {
+                            if try await projectStore.localAppSourceCreateIntent(requestID: intent.intentId) != nil {
+                                try await projectStore.completeLocalAppSourceCreateIntent(requestID: intent.intentId, owner: intent)
+                            }
+                        } catch { projectStore.pendingLocalAppError = error.localizedDescription }
+                        guard userNavigation.isCurrent(generation), sessionHost.entry(for: retained.source) === retained else {
+                            throw CancellationError()
+                        }
+                    }
+                    if sessionHost.selectedEntryID == retained.id, source === retained.source {
+                        navigation.path.removeAll()
+                        navigation.closeSidebar()
+                        return
+                    }
+                    _ = switchScope(to: scope, mode: .code, resumeSessionID: sessionID,
+                                    selectedTranscriptPath: intent.transcriptPath,
+                                    expectedAuthoringWorkspace: pendingMatches ? nil : ExistingAuthoringWorkspace(
+                                        sessionID: sessionID, sourceDirectory: intent.sourceDirectory,
+                                        transcriptPath: intent.transcriptPath ?? ""))
+                } else {
+                    guard userNavigation.isCurrent(generation) else { return }
+                    _ = switchScope(to: scope, mode: .code, recoverAuthoring: true)
+                }
+            } catch {
+                if userNavigation.isCurrent(generation) {
+                    projectStore.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func drainFailedAuthoringOwner(sessionID: String, scope: ConversationScope,
+                                           mode: SessionMode, generation: UInt64) async throws {
+        #if canImport(harness_runtimeFFI)
+        guard let entry = try sessionHost.entryForClaim(sessionID: sessionID, scope: scope, mode: mode),
+              retiredAuthoringEntriesAwaitingRelease.contains(entry.id) else { return }
+        guard sessionHost.selectedEntryID != entry.id, let engine = entry.source as? EngineConversationSource,
+              engine.isRetiredForReconnect else { throw SessionHost.OwnershipError.conflictingOwner }
+        let released = await sessionHost.releaseRetiredAuthoringSourceAfterDrain(engine, entry: entry,
+            stillCurrent: { userNavigation.isCurrent(generation) }, waitForRelease: {
+                await waitForReleasedOwner(engine, sessionID: sessionID)
+            })
+        guard released else {
+            throw LocalAppServiceFailure("OWNER_RELEASE_PENDING", String(localized: "conversation_reconnect_release_pending"))
+        }
+        retiredAuthoringEntriesAwaitingRelease.remove(entry.id)
+        #endif
     }
 
     private func resumePendingUserNavigation() {
@@ -1564,15 +1960,21 @@ struct RootView: View {
         case .teams(let invite):
             TeamsPage(initialInvite: invite, onOpenAccount: { navigation.showSettings(.account) })
         case .apps:
-            AppsPage(library: LocalApps.library, market: LocalApps.market,
+            AppsPage(library: LocalApps.library, market: LocalApps.market, projectStore: projectStore,
                 onOpenApp: { navigation.runApp($0) }, onShowDetails: { navigation.openLocalApp($0) },
-                onDevelop: beginLocalAppDevelopment)
+                currentMode: { activeMode },
+                captureImportPresentation: { captureLocalAppActionPresentation(route: .apps) },
+                onCreate: { name, prompt in try await queueLocalAppCreation(name: name, prompt: prompt) },
+                onRecoverCreation: { resumeLocalAppCreation($0) })
         case .localApp(let appID):
             LocalAppDetailPage(library: LocalApps.library, market: LocalApps.market, appId: appID,
-                onOpenApp: { navigation.runApp($0) }, onDevelop: continueLocalAppDevelopment)
+                onOpenApp: { navigation.runApp($0) }, onDevelop: continueLocalAppDevelopment,
+                onRestore: queueLocalAppRestore, onRemix: queueInstalledLocalAppRemix, currentMode: { activeMode },
+                captureActionPresentation: { captureLocalAppActionPresentation(route: .localApp(id: appID)) })
         case .marketApp(let appID):
             MarketInstallPage(library: LocalApps.library, market: LocalApps.market, appId: appID,
-                onOpenApp: { navigation.openLocalApp($0) })
+                onOpenApp: { navigation.openLocalApp($0) }, currentMode: { activeMode },
+                onRemix: queueLocalAppMarketRemix)
         case .projects:
             ProjectsPage(
                 projectStore: projectStore,
@@ -1606,7 +2008,8 @@ struct RootView: View {
                         requestedCwd: projectStore.projects.first { $0.id == projectID }
                             .map { .guestPath($0.workspace.guestPath) }
                     )
-                }
+                },
+                onRecoverAuthoring: { requestUserNavigation(.recoverAuthoring(projectID)) }
             )
         case .sessionDetails(let sessionID):
             SessionDetailsView(
@@ -1640,7 +2043,9 @@ struct RootView: View {
         if let liveWorkspaceState, liveWorkspaceState.sessionId == source.model.activeSessionId {
             return liveWorkspaceState.cwd
         }
-        return source.model.workspaceState?.cwd ?? projectStore.activeProject?.workspace.guestPath ?? LXISHDefaultWorkspace.guestHome
+        return source.model.workspaceState?.cwd ?? projectStore.activeProject?.workspace.guestPath
+            ?? (activeScope == .scheduled ? MobileUserStorage.directories().scheduledGuestCwd
+                : LXISHGuestPaths.conversationWorkspace(for: activeMode))
     }
 
     private func openCurrentWorkspaceTerminal() {
@@ -1829,14 +2234,356 @@ struct RootView: View {
         #endif
     }
 
+    private struct ProvisionalLocalAppGrant {
+        let intent: LocalAppAuthoringIntent
+    }
+
+    private struct ExistingAuthoringWorkspace {
+        let sessionID: String
+        let sourceDirectory: String
+        let transcriptPath: String
+
+        func matches(_ state: SessionWorkspaceState) -> Bool {
+            canonicalSessionID(state.sessionId) == canonicalSessionID(sessionID)
+                && state.cwd == sourceDirectory && state.transcriptPath == transcriptPath
+        }
+    }
+
+    private func savedAuthoringIntent(project: ProjectSnapshot, sessionID: String) async throws -> LocalAppAuthoringIntent {
+        guard let intent = try await savedAuthoringIntentIfPresent(project: project, sessionID: sessionID) else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app authoring intent is missing or ambiguous.")
+        }
+        return intent
+    }
+
+    private func savedAuthoringIntentIfPresent(project: ProjectSnapshot, sessionID: String) async throws -> LocalAppAuthoringIntent? {
+        let intents = try await projectStore.localAppAuthoringIntents(projectID: project.record.id)
+        return try LocalAppAuthoringIntent.recoveryCandidate(in: intents, projectID: project.record.id,
+            sessionID: sessionID, sourceDirectories: MobileUserStorage.localAppSourceDirectories(for: project))
+    }
+
+    private func reconcileAuthoringIndexIfNeeded(entry: SessionHost.Entry, project: ProjectSnapshot,
+                                                 intent: LocalAppAuthoringIntent) async throws {
+        guard entry.mode == .code, entry.scope == .project(project.record.id),
+              let sessionID = intent.authoringSessionId, let transcriptPath = intent.transcriptPath,
+              canonicalSessionID(entry.sessionID) == sessionID,
+              sessionHost.entry(for: entry.source) === entry else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app session conflicts with an existing owner.")
+        }
+        try await reconcileAuthoringIndexIfNeeded(project: project, intent: intent)
+        guard sessionHost.entry(for: entry.source) === entry,
+              canonicalSessionID(entry.sessionID) == sessionID,
+              try projectStore.transcriptPathForSession(sessionID, in: entry.scope, mode: .code) == transcriptPath else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app owner changed while its index was restored.")
+        }
+    }
+
+    /// The persisted intent contains the UUID and transcript observed from
+    /// the original native handle. Publishing this exact index row does not
+    /// authorize a turn: the reopened engine still validates the transcript
+    /// and obtains its immutable authoring receipt before the gate opens.
+    private func reconcileAuthoringIndexIfNeeded(project: ProjectSnapshot,
+                                                 intent: LocalAppAuthoringIntent) async throws {
+        let scope = ConversationScope.project(project.record.id)
+        guard intent.projectId == project.record.id, intent.mode == .code,
+              let sessionID = intent.authoringSessionId, UUID(uuidString: sessionID) != nil,
+              let transcriptPath = intent.transcriptPath, !transcriptPath.isEmpty,
+              (transcriptPath as NSString).isAbsolutePath,
+              cronOwnerGate.allowsNewOwner(sessionID: sessionID),
+              projectStore.admitsSessionEvidence(sessionID, owner: SessionOwnerEvidence(
+                scope: scope, mode: .code, transcriptPath: transcriptPath)) else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app session conflicts with an existing owner.")
+        }
+        if !projectStore.isSessionIndexed(sessionID, in: scope) {
+            try await projectStore.recordStartedSession(projectId: project.record.id, sessionId: sessionID,
+                title: project.record.name, mode: .code, workspaceDirectory: intent.sourceDirectory,
+                transcriptPath: transcriptPath)
+        }
+        guard try projectStore.transcriptPathForSession(sessionID, in: scope, mode: .code) == transcriptPath else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app transcript conflicts with its owner.")
+        }
+    }
+
+    private func resolveProjectMountGrants(
+        _ project: ProjectSnapshot, mode: SessionMode, sessionID: String?,
+        provisional: ProvisionalLocalAppGrant? = nil
+    ) async throws -> (grants: [String], owner: LocalAppAuthoringOwner?, missingIntent: LocalAppAuthoringIntent?) {
+        let sources = MobileUserStorage.localAppSourceDirectories(for: project)
+        guard !sources.isEmpty else {
+            return (try MobileUserStorage.projectMountGrantPaths(for: project), nil, nil)
+        }
+        guard sources.count == 1, let appSource = sources.first, mode == .code else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The app authoring project has an ambiguous source or mode.")
+        }
+        if let provisional {
+            guard sessionID == nil, provisional.intent.projectId == project.record.id,
+                  provisional.intent.sourceDirectory == appSource,
+                  provisional.intent.authoringSessionId == nil else {
+                throw LocalAppServiceFailure("AUTHORING_CHANGED", "The app authoring request changed before it was opened.")
+            }
+            return (try MobileUserStorage.projectMountGrantPaths(for: project, authorizedLocalAppSource: appSource), nil, nil)
+        }
+        guard let sessionID, UUID(uuidString: sessionID) != nil else {
+            throw LocalAppServiceFailure("AUTHORING_PENDING", "The app authoring session has no confirmed owner.")
+        }
+        let owner: LocalAppAuthoringOwner
+        let savedIntent = try await savedAuthoringIntentIfPresent(project: project, sessionID: sessionID)
+        if let savedIntent {
+            guard savedIntent.sourceDirectory == appSource,
+                  try projectStore.transcriptPathForSession(sessionID, in: .project(project.record.id), mode: .code)
+                    == savedIntent.transcriptPath else {
+                throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app transcript conflicts with its owner.")
+            }
+        }
+        do {
+            let binding = try await LocalApps.library.exactAuthoringBinding(
+                sourceDirectory: appSource, projectID: project.record.id, sessionID: sessionID, mode: mode,
+                expectedSourceID: savedIntent?.sourceId)
+            let matchedOwner = LocalAppAuthoringOwner(sourceDirectory: appSource, projectID: project.record.id,
+                                                      sessionID: sessionID, appID: binding.appId)
+            guard matchedOwner.matches(binding) else {
+                throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app binding no longer matches this owner.")
+            }
+            owner = matchedOwner
+        } catch let failure as LocalAppServiceFailure where failure.code == "notFound" {
+            guard let intent = savedIntent else {
+                throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app authoring intent is missing.")
+            }
+            _ = try await LocalApps.library.prepareAuthoringSource(sourceID: intent.sourceId,
+                                                                   sourceDirectory: intent.sourceDirectory, mode: intent.mode)
+            owner = LocalAppAuthoringOwner(sourceDirectory: appSource, projectID: project.record.id,
+                                           sessionID: sessionID, appID: intent.appId)
+        }
+        guard projectStore.projects.first(where: { $0.record.id == project.record.id })?.record == project.record else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The app authoring binding no longer matches this project and session.")
+        }
+        return (try MobileUserStorage.projectMountGrantPaths(for: project, authorizedLocalAppSource: appSource), owner, savedIntent)
+    }
+
+    #if canImport(harness_runtimeFFI)
+    private func waitForReleasedOwner(_ engine: EngineConversationSource, sessionID: String) async -> Bool {
+        let identity = canonicalSessionID(sessionID)
+        return await SessionOwnerDrainPolicy.confirmed(waitForMedia: {
+            await engine.waitForMediaAttachmentDrain(timeoutMs: 8_000)
+        }, waitForSession: {
+            guard UUID(uuidString: identity) != nil else { return !engine.nativeConstructionStarted }
+            return await waitForMobileSessionRelease(lingxiHome: MobileUserStorage.directories().configHome,
+                                                     sessionId: identity, timeoutMs: 8_000)
+        })
+    }
+
+    /// The source remains turn-gated until the real engine confirms the
+    /// transcript's UUID and fixed Code mode. Only then may a missing native
+    /// receipt be repaired for that captured owner.
+    private func confirmRecoveredAuthoringOwner(_ engine: EngineConversationSource, entry: SessionHost.Entry) async throws {
+        guard let owner = engine.pendingRecoveredAuthoringOwner,
+              entry.scope == .project(owner.projectID), entry.mode == .code,
+              canonicalSessionID(entry.sessionID) == canonicalSessionID(owner.sessionID),
+              sessionHost.entry(for: engine) === entry else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The recovered app owner is unavailable.")
+        }
+        let expectedPath = try projectStore.transcriptPathForSession(owner.sessionID, in: entry.scope, mode: entry.mode)
+        var verified: SessionWorkspaceState?
+        for _ in 0..<100 {
+            if let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: entry) {
+                verified = snapshot.state
+                break
+            }
+            guard sessionHost.entry(for: engine) === entry else { throw CancellationError() }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard let verified, verified.transcriptPath == expectedPath,
+              canonicalSessionID(verified.sessionId) == canonicalSessionID(owner.sessionID),
+              engine.model.sessionModeKnown, engine.model.sessionMode == entry.mode,
+              sessionHost.entry(for: engine) === entry else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The restored app transcript does not match its native owner.")
+        }
+        let binding: LocalAppAuthoring
+        var requiresSourceCwd = false
+        do {
+            binding = try await LocalApps.library.exactAuthoringBinding(sourceDirectory: owner.sourceDirectory,
+                projectID: owner.projectID, sessionID: owner.sessionID, mode: entry.mode,
+                expectedSourceID: engine.recoveredAuthoringIntent?.sourceId)
+        } catch let failure as LocalAppServiceFailure where failure.code == "notFound" {
+            guard let intent = engine.recoveredAuthoringIntent,
+                  intent.projectId == owner.projectID, intent.sourceDirectory == owner.sourceDirectory,
+                  intent.authoringSessionId == canonicalSessionID(owner.sessionID),
+                  intent.transcriptPath == verified.transcriptPath, intent.mode == entry.mode,
+                  verified.cwd == owner.sourceDirectory else {
+                throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app intent does not match the native owner.")
+            }
+            requiresSourceCwd = true
+            let authoring = LocalAppAuthoring(sourceDirectory: owner.sourceDirectory, workspaceId: owner.projectID,
+                projectRef: .mobileProject(owner.projectID), authoringSessionId: owner.sessionID, appId: intent.appId)
+            let registration = Task { @MainActor in
+                try await LocalApps.library.registerAuthoring(authoring, sourceID: intent.sourceId,
+                    requestID: intent.sourceRequestId, mode: entry.mode, setCurrent: false)
+                return try await LocalApps.library.exactAuthoringBinding(sourceDirectory: owner.sourceDirectory,
+                    projectID: owner.projectID, sessionID: owner.sessionID, mode: entry.mode,
+                    expectedSourceID: intent.sourceId)
+            }
+            binding = try await registration.value
+        }
+        guard owner.matches(binding), sessionHost.entry(for: engine) === entry,
+              let current = await sessionHost.authenticatedWorkspaceSnapshot(for: entry),
+              current.state.transcriptPath == expectedPath,
+              canonicalSessionID(current.state.sessionId) == canonicalSessionID(owner.sessionID),
+              !requiresSourceCwd || current.state.cwd == owner.sourceDirectory else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The recovered app binding no longer matches its native owner.")
+        }
+        var intent = engine.recoveredAuthoringIntent
+        if intent == nil,
+           let selected = try? await projectStore.selectedLocalAppAuthoringIntent(projectID: owner.projectID),
+           selected.sourceDirectory == owner.sourceDirectory,
+           selected.authoringSessionId == canonicalSessionID(owner.sessionID),
+           selected.transcriptPath == expectedPath {
+            intent = selected
+        }
+        guard sessionHost.entry(for: engine) === entry,
+              let latest = await sessionHost.authenticatedWorkspaceSnapshot(for: entry),
+              latest.state.transcriptPath == expectedPath,
+              !requiresSourceCwd || latest.state.cwd == owner.sourceDirectory else { throw CancellationError() }
+        try engine.confirmRecoveredAuthoringOwner(owner, binding: binding)
+        if let intent {
+            do {
+                if try await projectStore.localAppSourceCreateIntent(requestID: intent.intentId) != nil {
+                    try await projectStore.completeLocalAppSourceCreateIntent(requestID: intent.intentId, owner: intent)
+                }
+            } catch { projectStore.pendingLocalAppError = error.localizedDescription }
+        }
+    }
+
+    /// A durable intent can acquire its UUID while the task that wrote it is
+    /// suspended before updating its in-memory attempt. Match the immutable
+    /// request first, then authenticate the retained source itself.
+    private func validatePendingAuthoringEntry(_ entry: SessionHost.Entry, intent: LocalAppAuthoringIntent) async throws {
+        guard entry.scope == .project(intent.projectId), entry.mode == .code,
+              entry.workspace == intent.sourceDirectory, entry.source.model.authoringBindingPending,
+              pendingAuthoringAttempts[entry.id].map({ intent.matchesInFlightAttempt($0.intent) }) == true,
+              sessionHost.entry(for: entry.source) === entry else {
+            throw SessionHost.OwnershipError.sourceIdentityMismatch
+        }
+        let sessionID = canonicalSessionID(entry.sessionID)
+        if sessionID.isEmpty {
+            guard intent.authoringSessionId == nil, entry.source.model.activeSessionId.isEmpty else {
+                throw SessionHost.OwnershipError.sourceIdentityMismatch
+            }
+            return
+        }
+        guard intent.authoringSessionId.map(canonicalSessionID).map({ $0 == sessionID }) ?? true else {
+            throw SessionHost.OwnershipError.sourceIdentityMismatch
+        }
+        for _ in 0..<100 {
+            if let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: entry) {
+                guard snapshot.state.cwd == intent.sourceDirectory,
+                      intent.transcriptPath.map({ $0 == snapshot.state.transcriptPath }) ?? true,
+                      !snapshot.state.transcriptPath.isEmpty,
+                      (snapshot.state.transcriptPath as NSString).isAbsolutePath,
+                      pendingAuthoringAttempts[entry.id].map({ intent.matchesInFlightAttempt($0.intent) }) == true,
+                      sessionHost.entry(for: entry.source) === entry else {
+                    throw SessionHost.OwnershipError.sourceIdentityMismatch
+                }
+                return
+            }
+            guard sessionHost.entry(for: entry.source) === entry else { throw CancellationError() }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring workspace could not be authenticated.")
+    }
+
+    private func prepareExistingAuthoringDraft(_ entry: SessionHost.Entry, request: LocalAppDevelopmentRequest,
+                                               transcriptPath: String) async throws {
+        guard entry.mode == .code, !entry.voice.hasOwnedAudio, !entry.source.hasLiveSideChats,
+              let engine = entry.source as? EngineConversationSource,
+              canonicalSessionID(request.authoring?.authoringSessionId ?? "") == canonicalSessionID(entry.sessionID) else {
+            throw SessionHost.OwnershipError.sourceIdentityMismatch
+        }
+        let lease = try engine.beginAuthoringWorkspaceValidation()
+        defer { engine.endAuthoringWorkspaceValidation(lease) }
+        let revision = entry.draftRevision
+        guard let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: entry),
+              snapshot.state.cwd == request.sourceDirectory, snapshot.state.transcriptPath == transcriptPath,
+              sessionHost.entry(for: engine) === entry else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "This conversation is no longer in the app source directory.")
+        }
+        if entry.draftRevision == revision,
+           !scopedPreferences.hasDraft(scope: entry.scope, mode: entry.mode, ownerSessionID: entry.sessionID) {
+            seedLocalAppDraft(request, entry: entry)
+        }
+    }
+
+    private func discardFailedUnselectedAuthoringEntry(_ entry: SessionHost.Entry,
+                                                        engine: EngineConversationSource) async {
+        guard sessionHost.selectedEntryID != entry.id, sessionHost.entry(for: engine) === entry,
+              !entry.voice.hasOwnedAudio else { return }
+        do {
+            try await engine.retireForReconnect(allowUnconfirmedAuthoring: engine.pendingRecoveredAuthoringOwner != nil)
+            let ownerID = canonicalSessionID(entry.sessionID)
+            retiredAuthoringEntriesAwaitingRelease.insert(entry.id)
+            let released = await sessionHost.releaseRetiredAuthoringSourceAfterDrain(engine, entry: entry,
+                stillCurrent: { true }, waitForRelease: {
+                    await waitForReleasedOwner(engine, sessionID: ownerID)
+                })
+            if released { retiredAuthoringEntriesAwaitingRelease.remove(entry.id) }
+        } catch {
+            // Keep the exact owner whenever activity or release is uncertain.
+        }
+    }
+
+    private func quarantineFailedPreparation(_ source: any ConversationSource, requestID: String,
+                                             scope: ConversationScope, mode: SessionMode, sessionID: String?) async {
+        guard let engine = source as? EngineConversationSource, engine.nativeConstructionStarted,
+              sessionHost.entry(for: source) == nil else { return }
+        do {
+            // Strongly retain the handle and its preparation lease before
+            // awaiting anything, including the native workspace query.
+            try sessionHost.quarantineFailedPreparation(source, requestID: requestID,
+                                                        scope: scope, mode: mode, sessionID: sessionID)
+            try await drainFailedPreparation(requestID: requestID)
+        } catch {
+            projectStore.errorMessage = error.localizedDescription
+        }
+    }
+
+    private func drainFailedPreparation(requestID: String) async throws {
+        try await sessionHost.drainFailedPreparation(requestID: requestID) { source in
+            guard let engine = source as? EngineConversationSource else {
+                throw SessionHost.OwnershipError.conflictingOwner
+            }
+            // Keep the fence global while an in-flight builder is retiring.
+            // Only its authenticated UUID can narrow the fence.
+            try await engine.retireFailedPreparationForRelease()
+            guard let identity = await engine.preparedSessionIDForRelease() else {
+                throw LocalAppServiceFailure("OWNER_RELEASE_PENDING", String(localized: "conversation_reconnect_release_pending"))
+            }
+            try self.sessionHost.identifyFailedPreparation(requestID: requestID, source: engine, sessionID: identity)
+            let released = await self.sessionHost.releaseFailedPreparationAfterDrain(requestID: requestID,
+                source: engine, sessionID: identity, waitForRelease: {
+                    await self.waitForReleasedOwner(engine, sessionID: identity)
+                })
+            guard released else {
+                throw LocalAppServiceFailure("OWNER_RELEASE_PENDING", String(localized: "conversation_reconnect_release_pending"))
+            }
+        }
+    }
+
+    private func drainFailedPreparations(scope: ConversationScope, mode: SessionMode, sessionID: String) async throws {
+        for requestID in sessionHost.failedPreparationIDs(scope: scope, mode: mode, sessionID: sessionID) {
+            try await drainFailedPreparation(requestID: requestID)
+        }
+    }
+    #endif
+
     private func makeSource(
         scope: ConversationScope,
         snapshot: ProviderLaunchSnapshot,
         mode: SessionMode,
         sessionID: String? = nil,
-        selectedTranscriptPath: String? = nil
-    ) throws -> any ConversationSource {
-        let projectCwd: String?
+        selectedTranscriptPath: String? = nil,
+        provisionalAuthoring: ProvisionalLocalAppGrant? = nil,
+        allowAuthoringRecovery: Bool = false
+    ) async throws -> any ConversationSource {
+        var projectCwd: String?
         let transcriptPath: String?
         let project: ProjectSnapshot?
         switch scope {
@@ -1849,7 +2596,7 @@ struct RootView: View {
             }
             let rows = project?.sessions ?? projectStore.globalSessions
             projectCwd = rows.first(where: { canonicalSessionID($0.sessionId) == canonicalSessionID(sessionID ?? "") })?.workspaceDirectory
-                ?? project?.record.activeDirectory ?? LXISHGuestPaths.workspaceRoot
+                ?? project?.record.activeDirectory ?? LXISHGuestPaths.conversationWorkspace(for: mode)
             transcriptPath = try sessionID.flatMap { id in
                 id.isEmpty ? nil : try projectStore.transcriptPathForSession(id, in: scope, mode: mode)
             }
@@ -1868,9 +2615,26 @@ struct RootView: View {
             project: project,
             linuxRuntime: settingsStore.linuxRuntime
         ).config
-        let projectMountGrants = try project.map {
-            try MobileUserStorage.projectMountGrantPaths(for: $0)
-        } ?? []
+        let resolvedGrants: (grants: [String], owner: LocalAppAuthoringOwner?, missingIntent: LocalAppAuthoringIntent?)
+        var needsAuthoringRecovery = false
+        if let project {
+            let sources = MobileUserStorage.localAppSourceDirectories(for: project)
+            if allowAuthoringRecovery, sessionID == nil, provisionalAuthoring == nil, !sources.isEmpty {
+                guard mode == .code,
+                      let selected = try await projectStore.selectedLocalAppAuthoringIntent(projectID: project.record.id),
+                      sources == [selected.sourceDirectory] else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app authoring intent is missing or ambiguous.")
+                }
+                projectCwd = selected.sourceDirectory
+                resolvedGrants = ([], nil, nil)
+                needsAuthoringRecovery = true
+            } else {
+                resolvedGrants = try await resolveProjectMountGrants(project, mode: mode, sessionID: sessionID,
+                                                                    provisional: provisionalAuthoring)
+            }
+        } else {
+            resolvedGrants = ([], nil, nil)
+        }
         var launchOptions = ConversationSourceFactory.LaunchOptions(
             projectCwd: projectCwd,
             additionalWorkspaceDirectories: project?.record.additionalDirectories ?? [],
@@ -1881,14 +2645,39 @@ struct RootView: View {
             defaultModelID: snapshot.defaultModelID,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
             mobileLinux: runtime,
-            projectMountGrants: projectMountGrants,
+            projectMountGrants: resolvedGrants.grants,
             initialSessionId: sessionID.flatMap { $0.isEmpty ? nil : $0 },
             initialSessionTranscriptPath: transcriptPath
         )
         #if canImport(harness_runtimeFFI)
         launchOptions.mediaHostComposition = mediaHostComposition
         #endif
-        return ConversationSourceFactory.make(options: launchOptions)
+        let replacement = ConversationSourceFactory.make(options: launchOptions)
+        #if canImport(harness_runtimeFFI)
+        if let engine = replacement as? EngineConversationSource {
+            if needsAuthoringRecovery { engine.requireAuthoringMountAuthorization() }
+            else if let owner = resolvedGrants.owner { try engine.setVerifiedAuthoringOwner(owner, intent: resolvedGrants.missingIntent) }
+            else if let provisionalAuthoring {
+                try engine.requireAuthoringBindingBeforeTurns(LocalAppProvisionalAuthoringOwner(
+                    sourceDirectory: provisionalAuthoring.intent.sourceDirectory,
+                    projectID: provisionalAuthoring.intent.projectId, appID: provisionalAuthoring.intent.appId))
+            }
+        } else if needsAuthoringRecovery {
+            throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+        }
+        #endif
+        #if DEBUG
+        if sessionID == nil, ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1",
+           let mock = replacement as? MockConversationSource {
+            // Every new UI-test conversation needs its own owner, just like
+            // a native session. Reusing the canned fixture's fixed ID makes
+            // SessionHost correctly reject a cross-scope switch.
+            mock.startNewConversation()
+            mock.model.activeSessionId = UUID().uuidString
+            mock.model.workspaceState = nil
+        }
+        #endif
+        return replacement
     }
 
     private func rebuildSource(
@@ -1907,13 +2696,32 @@ struct RootView: View {
         persistConversationScope()
         let old = source
         try requireSourceReplacementAllowed(old)
+        #if canImport(harness_runtimeFFI)
+        try await drainFailedPreparations(scope: activeScope, mode: activeMode, sessionID: activeSession)
+        try requireSourceReplacementAllowed(old)
+        #endif
         try await cronRepository.prepareOwnerAdmission()
         try requireSourceReplacementAllowed(old)
-        let replacement = try makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode, sessionID: activeSession)
+        #if canImport(harness_runtimeFFI)
+        let unsentTranscriptPath: String?
+        if !old.model.unsentPrompts.isEmpty {
+            guard let state = old.model.workspaceState,
+                  canonicalSessionID(state.sessionId) == canonicalSessionID(activeSession),
+                  !state.transcriptPath.isEmpty, (state.transcriptPath as NSString).isAbsolutePath else {
+                throw SessionHost.OwnershipError.sourceIdentityMismatch
+            }
+            unsentTranscriptPath = state.transcriptPath
+        } else { unsentTranscriptPath = nil }
+        #else
+        let unsentTranscriptPath: String? = nil
+        #endif
+        let replacement = try await makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode,
+                                               sessionID: activeSession, selectedTranscriptPath: unsentTranscriptPath)
         guard sessionHost.beginReplacement(of: old, with: replacement, sessionID: activeSession,
                                            scope: activeScope, mode: activeMode) else {
             throw SessionHost.OwnershipError.conflictingOwner
         }
+        let preparationID = UUID().uuidString.lowercased()
         defer { sessionHost.endPreparingClaim(of: replacement) }
         sessionHost.protectIdentity(of: replacement, scope: activeScope, mode: activeMode, sessionID: activeSession)
         #if canImport(harness_runtimeFFI)
@@ -1946,16 +2754,12 @@ struct RootView: View {
         do {
             #if canImport(harness_runtimeFFI)
             if let engine = old as? EngineConversationSource {
+                var ownerID = canonicalSessionID(sessionHost.entry(for: old)?.sessionID ?? engine.model.activeSessionId)
                 try await engine.retireForReconnect()
-                let ownerID = canonicalSessionID(engine.model.activeSessionId)
-                if !ownerID.isEmpty {
-                    let released = await waitForMobileSessionRelease(
-                        lingxiHome: MobileUserStorage.directories().configHome,
-                        sessionId: ownerID, timeoutMs: 8_000)
-                    guard released else {
-                        throw NSError(domain: "ConversationSourceReplacement", code: 3,
-                            userInfo: [NSLocalizedDescriptionKey: String(localized: "conversation_reconnect_release_pending")])
-                    }
+                if ownerID.isEmpty { ownerID = await engine.preparedSessionIDForRelease() ?? "" }
+                guard await waitForReleasedOwner(engine, sessionID: ownerID) else {
+                    throw NSError(domain: "ConversationSourceReplacement", code: 3,
+                        userInfo: [NSLocalizedDescriptionKey: String(localized: "conversation_reconnect_release_pending")])
                 }
             }
             #endif
@@ -1964,8 +2768,27 @@ struct RootView: View {
             try requireSourceReplacementAllowed(old)
             let workspace = sessionHost.entry(for: old)?.workspace ?? currentWorkspaceGuestPath
             entry = try sessionHost.replaceIdleSource(old, with: replacement, scope: activeScope,
-                mode: activeMode, sessionID: confirmedSession, workspace: workspace, draft: draft)
+                mode: activeMode, sessionID: confirmedSession, workspace: workspace, draft: draft,
+                validateUnsentOwner: {
+                    guard let unsentTranscriptPath else { throw SessionHost.OwnershipError.sourceIdentityMismatch }
+                    let currentPath: String?
+                    switch activeScope {
+                    case .global, .project:
+                        currentPath = try projectStore.transcriptPathForSession(activeSession, in: activeScope, mode: activeMode)
+                    case .scheduled:
+                        currentPath = try cronRepository.scheduledTranscriptPath(sessionID: activeSession, mode: activeMode)
+                    case .remote:
+                        throw SessionHost.OwnershipError.sourceIdentityMismatch
+                    }
+                    guard currentPath == unsentTranscriptPath else {
+                        throw SessionHost.OwnershipError.sourceIdentityMismatch
+                    }
+                })
         } catch {
+            #if canImport(harness_runtimeFFI)
+            await quarantineFailedPreparation(replacement, requestID: preparationID, scope: activeScope,
+                                              mode: activeMode, sessionID: activeSession.isEmpty ? nil : activeSession)
+            #endif
             if !old.isAvailableForPrompts {
                 old.model.error = ConversationError(kind: .host,
                     message: String(localized: "conversation_reconnect_disconnected"))
@@ -1993,6 +2816,9 @@ struct RootView: View {
         _ previous: any ConversationSource
     ) throws {
         guard source === previous else { throw CancellationError() }
+        guard !previous.model.authoringBindingPending else {
+            throw LocalAppServiceFailure("AUTHORING_PENDING", "Wait for the app authoring binding to finish.")
+        }
         guard sessionHost.entry(for: previous)?.voice.hasOwnedAudio != true else {
             throw NSError(domain: "ConversationSourceReplacement", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: String(localized: "chat_error_finish_background_turn_first")])
@@ -2093,9 +2919,13 @@ struct RootView: View {
     private func switchMode(to mode: SessionMode) -> Bool {
         let remembered = scopedPreferences.lastScope(mode: mode) ?? .global
         let destination: ConversationScope
-        if let projectID = remembered.projectID,
-           !projectStore.projects.contains(where: { $0.id == projectID && $0.record.visibleModes.contains(mode) }) {
-            destination = .global
+        if let projectID = remembered.projectID {
+            if let project = projectStore.projects.first(where: { $0.id == projectID && $0.record.visibleModes.contains(mode) }),
+               mode != .chat || MobileUserStorage.localAppSourceDirectories(for: project).isEmpty {
+                destination = remembered
+            } else {
+                destination = .global
+            }
         } else {
             destination = remembered
         }
@@ -2109,18 +2939,40 @@ struct RootView: View {
         resumeSessionID: String? = nil,
         startNew: Bool = false,
         handoffDraft: SessionHandoffDraft? = nil,
-        selectedTranscriptPath: String? = nil
+        selectedTranscriptPath: String? = nil,
+        recoverAuthoring: Bool = false,
+        expectedAuthoringWorkspace: ExistingAuthoringWorkspace? = nil,
+        retainedEntry: SessionHost.Entry? = nil,
+        sourceSnapshot: ProviderLaunchSnapshot? = nil,
+        onFailure: ((Error) -> Void)? = nil
     ) -> Bool {
+        localAppSelectionAuthority.invalidate()
+        if let projectID = scope.projectID {
+            localAppRegistrationOrder.invalidateProjectSelection(projectID: projectID)
+        }
         guard !projectSwitching else { return false }
         let navigationGeneration = userNavigation.generation
         if case .remote = scope { return false }
         let targetMode = mode ?? activeMode
-        let targetID = startNew ? "" : canonicalSessionID(resumeSessionID ?? restoredSessionID(scope: scope, mode: targetMode))
+        let targetID = (startNew || recoverAuthoring) ? "" : canonicalSessionID(resumeSessionID ?? restoredSessionID(scope: scope, mode: targetMode))
         let existing: SessionHost.Entry?
         do {
-            existing = try sessionHost.entryForClaim(sessionID: targetID, scope: scope, mode: targetMode)
+            if let retainedEntry {
+                guard !startNew, sessionHost.entry(for: retainedEntry.source) === retainedEntry,
+                      retainedEntry.scope == scope, retainedEntry.mode == targetMode,
+                      targetID.isEmpty || canonicalSessionID(retainedEntry.sessionID) == targetID else {
+                    throw SessionHost.OwnershipError.sourceIdentityMismatch
+                }
+                existing = retainedEntry
+            } else {
+                existing = try sessionHost.entryForClaim(sessionID: targetID, scope: scope, mode: targetMode)
+            }
         } catch {
             projectStore.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
+            return false
+        }
+        if let existing, retiredAuthoringEntriesAwaitingRelease.contains(existing.id) {
+            projectStore.errorMessage = String(localized: "conversation_reconnect_release_pending")
             return false
         }
         guard existing != nil || cronOwnerGate.allowsNewOwner(sessionID: targetID) else {
@@ -2130,8 +2982,34 @@ struct RootView: View {
         guard existing != nil || targetID.isEmpty || projectStore.admitsSessionIdentity(targetID, in: scope, mode: targetMode) else {
             return false
         }
+        #if canImport(harness_runtimeFFI)
+        var initialValidation: (EngineConversationSource, UUID)?
+        if expectedAuthoringWorkspace != nil, let existing {
+            do {
+                guard !existing.voice.hasOwnedAudio, !existing.source.hasLiveSideChats,
+                      let engine = existing.source as? EngineConversationSource else {
+                    throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+                }
+                initialValidation = (engine, try engine.beginAuthoringWorkspaceValidation())
+            } catch {
+                onFailure?(error)
+                return false
+            }
+        }
+        #endif
         markHandoffNavigationChanged()
-        if selectedTranscriptPath == nil, !startNew, scope == activeScope, targetMode == activeMode,
+        #if canImport(harness_runtimeFFI)
+        if recoverAuthoring, scope == activeScope, targetMode == activeMode,
+           let entry = sessionHost.entry(for: source),
+           (source as? EngineConversationSource)?.needsAuthoringMountAuthorization == true {
+            allowBlankAuthoringRetryFor = entry.id
+            sourceGeneration = UUID()
+            navigation.path.removeAll()
+            navigation.closeSidebar()
+            return true
+        }
+        #endif
+        if selectedTranscriptPath == nil, expectedAuthoringWorkspace == nil, !startNew, !recoverAuthoring, scope == activeScope, targetMode == activeMode,
            (targetID.isEmpty || canonicalSessionID(targetID) == canonicalSessionID(source.model.activeSessionId)) {
             navigation.path.removeAll()
             navigation.closeSidebar()
@@ -2146,10 +3024,16 @@ struct RootView: View {
             ?? projectStore.globalSessions
         let workspace = rows.first(where: { canonicalSessionID($0.sessionId) == targetID })?.workspaceDirectory
             ?? scope.projectID.flatMap { id in projectStore.projects.first(where: { $0.id == id })?.record.activeDirectory }
-            ?? (scope == .scheduled ? ((try? MobileUserStorage.scheduledWorkspace(sessionID: targetID)) ?? LXISHGuestPaths.workspaceRoot) : LXISHGuestPaths.workspaceRoot)
+            ?? (scope == .scheduled ? ((try? MobileUserStorage.scheduledWorkspace(sessionID: targetID)) ?? MobileUserStorage.directories().scheduledGuestCwd)
+                : LXISHGuestPaths.conversationWorkspace(for: targetMode))
         projectSwitching = true
         Task { @MainActor in
+            #if canImport(harness_runtimeFFI)
+            var validation = initialValidation
+            defer { if let validation { validation.0.endAuthoringWorkspaceValidation(validation.1) } }
+            #endif
             var rollback: ProjectActiveSelectionRollback?
+            var newlyRetained: SessionHost.Entry?
             do {
                 if startNew, let projectID = scope.projectID {
                     try await projectStore.addMode(targetMode, projectID: projectID)
@@ -2170,12 +3054,19 @@ struct RootView: View {
                 if let existing {
                     entry = existing
                 } else {
+                    #if canImport(harness_runtimeFFI)
+                    try await drainFailedPreparations(scope: scope, mode: targetMode, sessionID: targetID)
+                    guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
+                    #endif
                     try await cronRepository.prepareOwnerAdmission()
                     try await cronOwnerGate.waitUntilAvailable(sessionID: targetID)
                     guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
-                    let replacement = try makeSource(scope: scope, snapshot: providerRepository.makeLaunchSnapshot(),
+                    let replacement = try await makeSource(scope: scope, snapshot: sourceSnapshot ?? providerRepository.makeLaunchSnapshot(),
                                                      mode: targetMode, sessionID: targetID.isEmpty ? nil : targetID,
-                                                     selectedTranscriptPath: selectedTranscriptPath)
+                                                     selectedTranscriptPath: selectedTranscriptPath,
+                                                     allowAuthoringRecovery: !startNew)
+                    guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
+                    let preparationID = UUID().uuidString.lowercased()
                     defer { sessionHost.endPreparingClaim(of: replacement) }
                     sessionHost.protectIdentity(of: replacement, scope: scope, mode: targetMode,
                                                 sessionID: targetID)
@@ -2185,14 +3076,69 @@ struct RootView: View {
                     let restoredDraft = startNew ? "" : scopedPreferences.draft(scope: scope, mode: targetMode, ownerSessionID: targetID)
                     // An unprepared source must never be published for reuse.
                     // Keep the old owner current if preparation fails.
-                    try await replacement.prepare()
-                    entry = try sessionHost.retain(source: replacement, scope: scope, mode: targetMode,
-                                                   sessionID: targetID, workspace: workspace, draft: restoredDraft)
+                    do {
+                        #if canImport(harness_runtimeFFI)
+                        if (replacement as? EngineConversationSource)?.needsAuthoringMountAuthorization != true {
+                            try await replacement.prepare()
+                        }
+                        #else
+                        try await replacement.prepare()
+                        #endif
+                        entry = try sessionHost.retain(source: replacement, scope: scope, mode: targetMode,
+                                                       sessionID: targetID, workspace: workspace, draft: restoredDraft)
+                    } catch {
+                        #if canImport(harness_runtimeFFI)
+                        await quarantineFailedPreparation(replacement, requestID: preparationID,
+                            scope: scope, mode: targetMode, sessionID: targetID.isEmpty ? nil : targetID)
+                        #endif
+                        throw error
+                    }
+                    newlyRetained = entry
                     if !startNew {
                         entry.draftSourceCodeUnits = scopedPreferences.draftSourceCodeUnits(
                             scope: scope, mode: targetMode, ownerSessionID: targetID)
                         entry.handoffReference = scopedPreferences.handoffReference(sessionID: targetID, scope: scope, mode: targetMode)
                     }
+                }
+                #if canImport(harness_runtimeFFI)
+                if let engine = entry.source as? EngineConversationSource, engine.pendingRecoveredAuthoringOwner != nil {
+                    try await confirmRecoveredAuthoringOwner(engine, entry: entry)
+                    guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
+                }
+                #endif
+                if let expected = expectedAuthoringWorkspace {
+                    #if canImport(harness_runtimeFFI)
+                    guard let engine = entry.source as? EngineConversationSource else {
+                        throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+                    }
+                    if validation == nil {
+                        // A newly prepared source can receive its resume
+                        // event after prepare returns. It is still hidden and
+                        // cannot accept UI input during this wait.
+                        for _ in 0..<100 where engine.model.sessionTransitionPending {
+                            guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
+                            try await Task.sleep(for: .milliseconds(50))
+                        }
+                        validation = (engine, try engine.beginAuthoringWorkspaceValidation())
+                    }
+                    guard validation?.0 === engine else { throw SessionHost.OwnershipError.sourceIdentityMismatch }
+                    var authenticated: SessionWorkspaceState?
+                    for _ in 0..<100 {
+                        if let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: entry) {
+                            authenticated = snapshot.state
+                            break
+                        }
+                        guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
+                        try await Task.sleep(for: .milliseconds(50))
+                    }
+                    guard let authenticated, expected.matches(authenticated),
+                          sessionHost.entry(for: engine) === entry,
+                          userNavigation.isCurrent(navigationGeneration) else {
+                        throw LocalAppServiceFailure("AUTHORING_CHANGED", "This conversation is no longer in the app source directory.")
+                    }
+                    #else
+                    throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+                    #endif
                 }
                 guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
                 scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
@@ -2242,8 +3188,43 @@ struct RootView: View {
                 hasUnsavedConversationMedia = entry.attachment != nil
                 liveWorkspaceState = source.model.workspaceState
                 sourceGeneration = entry.id
+                if recoverAuthoring { allowBlankAuthoringRetryFor = entry.id }
+                #if canImport(harness_runtimeFFI)
+                if let held = validation {
+                    held.0.endAuthoringWorkspaceValidation(held.1)
+                    validation = nil
+                }
+                #endif
                 await cronRepository.refresh()
             } catch {
+                #if canImport(harness_runtimeFFI)
+                if let entry = newlyRetained,
+                   sessionHost.selectedEntryID != entry.id, sessionHost.entry(for: entry.source) === entry,
+                   !entry.voice.hasOwnedAudio, let engine = entry.source as? EngineConversationSource,
+                   expectedAuthoringWorkspace != nil || engine.pendingRecoveredAuthoringOwner != nil {
+                    if let held = validation, held.0 === engine {
+                        held.0.endAuthoringWorkspaceValidation(held.1)
+                        validation = nil
+                    }
+                    // Retire only this unselected, idle source. A permission,
+                    // turn or audio owner keeps its entry and is never
+                    // cancelled merely because navigation failed.
+                    do {
+                        try await engine.retireForReconnect(allowUnconfirmedAuthoring: engine.pendingRecoveredAuthoringOwner != nil)
+                        let ownerID = canonicalSessionID(entry.sessionID)
+                        retiredAuthoringEntriesAwaitingRelease.insert(entry.id)
+                        let released = await sessionHost.releaseRetiredAuthoringSourceAfterDrain(engine, entry: entry,
+                            stillCurrent: { true }, waitForRelease: {
+                                await waitForReleasedOwner(engine, sessionID: ownerID)
+                            })
+                        if released { retiredAuthoringEntriesAwaitingRelease.remove(entry.id) }
+                    } catch {
+                        // Keeping the live entry is safer than replacing a
+                        // source whose activity could not be drained.
+                    }
+                }
+                #endif
+                onFailure?(error)
                 if let rollback, source === previousSource {
                     do { _ = try await projectStore.rollbackActiveSwitch(rollback) }
                     catch {
@@ -2834,6 +3815,13 @@ struct RootView: View {
     }
 
     private func continueLocalAppDevelopment(_ app: UnifiedAppRecord) {
+        guard let initiatingMode = requestLocalAppDevelopmentMode() else { return }
+        guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !hasUnsavedConversationMedia, !projectSwitching else {
+            externalLinkError = "Finish or save the current conversation draft before opening app development."
+            return
+        }
+        let context = beginLocalAppNavigation(key: "app:" + app.appId)
         Task { @MainActor in
             do {
                 var sessions: [String: LocalAppAuthoringSessionBinding] = [:]
@@ -2847,141 +3835,741 @@ struct RootView: View {
                         )
                     }
                 }
-                let result = try await LocalApps.library.prepareAuthoring(app.appId, sessions: sessions)
+                let result = try await LocalApps.library.prepareAuthoring(app.appId, sessions: sessions, mode: initiatingMode)
                 guard result.action != "sourceMissing" else { throw LocalAppServiceFailure("SOURCE_MISSING", "Source folder is missing. Import an editable copy before continuing development.") }
+                guard let sourceID = result.sourceId, let sourcePath = result.sourcePath else {
+                    throw LocalAppServiceFailure("INVALID_AUTHORING", "The app service did not return its source receipt.")
+                }
+                try UnifiedLocalApps.validateAuthoringSource(sourceID: sourceID,
+                    sourceDirectory: result.sourceDirectory, sourcePath: sourcePath)
                 var authoring = result.authoring
                 if let sessionID = result.authoringSessionId {
                     authoring?.authoringSessionId = sessionID
                 }
-                beginLocalAppDevelopment(.init(appId: app.appId, name: app.name, sourceDirectory: result.sourceDirectory,
-                    authoring: authoring, prompt: "继续开发这个应用。"))
-            } catch { externalLinkError = error.localizedDescription }
+                let project: ProjectSnapshot? = {
+                    guard let authoring, authoring.sourceDirectory == result.sourceDirectory,
+                          let workspaceID = authoring.workspaceId,
+                          case .mobileProject(let projectID)? = authoring.projectRef,
+                          canonicalSessionID(workspaceID) == canonicalSessionID(projectID) else { return nil }
+                    return projectStore.projects.first { $0.id == projectID && $0.record.activeDirectory == result.sourceDirectory }
+                }()
+                if let project, let sessionID = authoring?.authoringSessionId,
+                   let row = project.sessions.first(where: { canonicalSessionID($0.sessionId) == canonicalSessionID(sessionID)
+                       && $0.mode == .code && $0.workspaceDirectory == result.sourceDirectory }) {
+                    let saved = try await LocalApps.library.exactAuthoringBinding(sourceDirectory: result.sourceDirectory,
+                        projectID: project.id, sessionID: sessionID, mode: .code, expectedSourceID: sourceID)
+                    let owner = LocalAppAuthoringOwner(sourceDirectory: result.sourceDirectory, projectID: project.id,
+                                                       sessionID: sessionID, appID: app.appId)
+                    guard owner.matches(saved) else { throw SessionHost.OwnershipError.sourceIdentityMismatch }
+                    let request = LocalAppDevelopmentRequest(appId: app.appId, name: app.name,
+                        sourceDirectory: result.sourceDirectory, sourceID: sourceID, sourceRequestID: nil,
+                        authoring: authoring, prompt: "继续开发这个应用。")
+                    let entry = try await prepareParkedExistingAuthoringOwner(project: project, row: row,
+                                                                              request: request, context: context)
+                    if isCurrentLocalAppNavigation(context),
+                       localAppRegistrationOrder.isCurrent(context.registrationTicket) {
+                        guard let transcriptPath = row.transcriptPath else { throw ProjectRepositoryError.missingSessionTranscriptPath }
+                        let accepted = switchScope(to: entry.scope, mode: .code, resumeSessionID: sessionID,
+                            selectedTranscriptPath: transcriptPath,
+                            expectedAuthoringWorkspace: ExistingAuthoringWorkspace(sessionID: sessionID,
+                                sourceDirectory: request.sourceDirectory, transcriptPath: transcriptPath),
+                            retainedEntry: entry, sourceSnapshot: context.providerSnapshot,
+                            onFailure: { error in reportLocalAppNavigationFailure(error, context: context) })
+                        if !accepted {
+                            throw LocalAppServiceFailure("CONVERSATION_BUSY", "The conversation cannot switch to the app source project right now.")
+                        }
+                    }
+                    return
+                }
+                let intent = LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
+                    projectId: project?.id ?? UUID().uuidString.lowercased(), mode: initiatingMode,
+                    name: app.name, prompt: "继续开发这个应用。",
+                    operation: .bind, appId: app.appId, sourceId: canonicalSessionID(sourceID),
+                    sourceDirectory: result.sourceDirectory)
+                try await projectStore.storeLocalAppSourceCreateIntent(intent)
+                resumeLocalAppCreation(intent, context: context)
+            } catch { reportLocalAppNavigationFailure(error, context: context) }
         }
     }
 
-    private func beginLocalAppDevelopment(_ request: LocalAppDevelopmentRequest) {
-        guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !hasUnsavedConversationMedia,
-              !projectSwitching else {
-            externalLinkError = "Finish or save the current conversation draft before opening app development."; return
+    private func queueLocalAppRestore(_ app: UnifiedAppRecord) {
+        guard let initiatingMode = requestLocalAppDevelopmentMode() else { return }
+        guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !hasUnsavedConversationMedia, !projectSwitching else {
+            externalLinkError = "Finish or save the current conversation draft before opening app development."
+            return
         }
+        guard let revision = Int(exactly: app.currentRevision), revision > 0 else {
+            externalLinkError = "The app has no restorable release."
+            return
+        }
+        let context = beginLocalAppNavigation(key: "app:" + app.appId)
+        let intent = LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
+            projectId: UUID().uuidString.lowercased(), mode: initiatingMode, name: app.name, prompt: "继续开发这个应用。",
+            operation: .restore, appId: app.appId, revision: revision)
         Task { @MainActor in
             do {
-                let existingBinding = request.authoring
-                let boundProject: ProjectSnapshot? = {
-                    guard let existingBinding,
-                          existingBinding.sourceDirectory == request.sourceDirectory,
-                          let workspaceID = existingBinding.workspaceId,
-                          case .mobileProject(let projectID)? = existingBinding.projectRef,
-                          workspaceID == projectID else { return nil }
-                    return projectStore.projects.first {
-                        $0.record.id == projectID && $0.record.activeDirectory == request.sourceDirectory
-                    }
-                }()
-                let project: ProjectSnapshot
-                if let boundProject { project = boundProject }
-                else {
-                    project = try await projectStore.createLocalAppAuthoringProject(
-                        name: request.name,
-                        sourceDirectory: request.sourceDirectory
-                    )
-                }
-                let existingSession = existingBinding?.authoringSessionId.flatMap { id in
-                    project.sessions.first {
-                        canonicalSessionID($0.sessionId) == canonicalSessionID(id)
-                            && $0.mode == .code
-                            && $0.workspaceDirectory == request.sourceDirectory
-                    }?.sessionId
-                }
-                let scope = ConversationScope.project(project.record.id)
-                guard switchScope(to: scope, mode: .code, resumeSessionID: existingSession, startNew: existingSession == nil) else {
-                    throw LocalAppServiceFailure("CONVERSATION_BUSY", "The conversation cannot switch to the app source project right now.")
-                }
-                for _ in 0..<400 {
-                    if !projectSwitching, activeScope == scope, !source.model.sessionTransitionPending { break }
-                    try await Task.sleep(for: .milliseconds(50))
-                }
-                guard !projectSwitching, activeScope == scope else { throw LocalAppServiceFailure("ROUTE_TIMEOUT", "The authoring workspace did not open.") }
-                guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !hasUnsavedConversationMedia else { throw LocalAppServiceFailure("DRAFT_EXISTS", "Save the destination workspace draft before starting app development.") }
-                #if canImport(harness_runtimeFFI)
-                guard let engine = source as? EngineConversationSource else { throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.") }
-                let sessionID: String
-                if let existing = existingSession {
-                    guard engine.model.activeSessionId == existing, engine.model.workspaceState?.cwd == request.sourceDirectory else { throw LocalAppServiceFailure("AUTHORING_MOVED", "The source session moved. Refresh the app details before continuing.") }
-                    sessionID = existing
-                } else {
-                    guard !engine.model.activeSessionId.isEmpty, engine.model.workspaceState?.cwd == request.sourceDirectory else {
-                        throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring workspace did not start at its source directory.")
-                    }
-                    sessionID = engine.model.activeSessionId
-                }
-                guard source === engine, engine.model.activeSessionId == sessionID,
-                      engine.model.workspaceState?.cwd == request.sourceDirectory,
-                      activeMode == .code, activeScope == scope else { throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.") }
-                let authoring = LocalAppAuthoring(
-                    sourceDirectory: request.sourceDirectory,
-                    workspaceId: project.record.id,
-                    projectRef: .mobileProject(project.record.id),
-                    authoringSessionId: sessionID,
-                    appId: request.appId
-                )
-                if let entry = sessionHost.entry(for: engine),
-                   let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: entry),
-                   source === engine, activeScope == scope, activeMode == .code,
-                   engine.model.activeSessionId == sessionID, !engine.model.sessionTransitionPending,
-                   snapshot.state.cwd == request.sourceDirectory,
-                   entry.workspaceWriteAuthority.currentRevision() == snapshot.revision {
-                    let workspace = snapshot.state
-                    try await projectStore.recordStartedSession(projectId: project.record.id, sessionId: sessionID,
-                        title: existingSession == nil ? project.record.name : "", mode: .code, workspaceDirectory: workspace.cwd,
-                        transcriptPath: workspace.transcriptPath)
-                    guard source === engine, activeScope == scope, activeMode == .code,
-                          engine.model.activeSessionId == sessionID, !engine.model.sessionTransitionPending else {
-                        throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
-                    }
-                    guard let current = await sessionHost.authenticatedWorkspaceSnapshot(for: entry),
-                          current.state.cwd == request.sourceDirectory, current.state.transcriptPath == workspace.transcriptPath,
-                          source === engine, activeScope == scope, activeMode == .code,
-                          sessionHost.entry(for: engine) === entry else {
-                        throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
-                    }
-                    let authority = entry.workspaceWriteAuthority
-                    try await projectStore.recordAuthenticatedWorkspace(current.state, in: scope, mode: .code,
-                                                                         authority: authority, revision: current.revision)
-                    guard source === engine, activeScope == scope, activeMode == .code,
-                          engine.model.activeSessionId == sessionID, !engine.model.sessionTransitionPending,
-                          !projectSwitching, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                          !hasUnsavedConversationMedia else {
-                        throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
-                    }
-                } else {
-                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring workspace could not be recorded. No draft was inserted.")
-                }
-                if let appId = request.appId {
-                    try await LocalApps.library.bindAuthoring(appId, authoring: authoring)
-                } else {
-                    try await LocalApps.library.registerPendingAuthoring(authoring)
-                }
-                guard source === engine, engine.model.activeSessionId == sessionID,
-                      engine.model.workspaceState?.cwd == request.sourceDirectory,
-                      !engine.model.sessionTransitionPending, activeMode == .code, activeScope == scope,
-                      !projectSwitching,
-                      draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      !hasUnsavedConversationMedia else {
-                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
-                }
-                draft = """
-                Use the local-app skill to develop \(request.name) in \(request.sourceDirectory). Use the schema 2 standalone LocalApp service. This ordinary authoring session is \(sessionID). Existing app ID: \(request.appId ?? "new app"). Publish locally only; publishing to the market is a separate user action.
-
-                If the app uses an Agent, persist recoverable app state and the pending runId and threadId before submission. On reopen, read host task status and event or chat history, and reconnect to the same run and thread read-only. Do not automatically submit, resend or replay tools after an uncertain request or interruption. Show running only when the host confirms it, and show interrupted or unknown state and the action needed from the user; after the user reviews any side effects, a new attempt requires an explicit user action and a new runId. Only show completion when supported by the host's terminal result. iOS may suspend or terminate background work; do not promise indefinite execution.
-
-                \(request.prompt)
-                """
-                navigation.path.removeAll(); navigation.focusDetail()
-                #else
-                throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
-                #endif
-            } catch { externalLinkError = error.localizedDescription }
+                try await projectStore.storeLocalAppSourceCreateIntent(intent)
+                resumeLocalAppCreation(intent, context: context)
+            } catch { reportLocalAppNavigationFailure(error, context: context) }
         }
+    }
+
+    private func beginMarketRemixNavigation(key: String) -> LocalAppNavigationContext? {
+        guard requestLocalAppDevelopmentMode() != nil else { return nil }
+        guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !hasUnsavedConversationMedia, !projectSwitching else {
+            externalLinkError = "Finish or save the current conversation draft before opening app development."
+            return nil
+        }
+        return beginLocalAppNavigation(key: key)
+    }
+
+    private func queueLocalAppMarketRemix(_ release: MarketDistribution) {
+        let requestID = UUID().uuidString.lowercased()
+        guard let context = beginMarketRemixNavigation(key: "market-request:" + requestID) else { return }
+        Task { @MainActor in
+            do { try await persistMarketRemix(release, requestID: requestID, context: context) }
+            catch { reportLocalAppNavigationFailure(error, context: context) }
+        }
+    }
+
+    private func queueInstalledLocalAppRemix(_ app: UnifiedAppRecord) {
+        let requestID = UUID().uuidString.lowercased()
+        guard let origin = app.marketOrigin, origin.remixedFrom == nil,
+              let context = beginMarketRemixNavigation(key: "market-request:" + requestID) else { return }
+        Task { @MainActor in
+            do {
+                let release = try await LocalApps.market.distribution(origin.appId, versionID: origin.releaseId)
+                guard release.releaseDigest == origin.digest else { throw MarketFailure("RELEASE_CHANGED") }
+                try await persistMarketRemix(release, requestID: requestID, context: context)
+            } catch { reportLocalAppNavigationFailure(error, context: context) }
+        }
+    }
+
+    private func persistMarketRemix(_ release: MarketDistribution, requestID: String,
+                                    context: LocalAppNavigationContext) async throws {
+        let configHome = URL(fileURLWithPath: MobileUserStorage.directories().configHome, isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL
+        let archivePath = configHome.appendingPathComponent("local-app-imports", isDirectory: true)
+            .appendingPathComponent("market-" + requestID, isDirectory: true).appendingPathComponent("source.zip").path
+        let input = try LocalApps.market.remixInput(release, requestID: requestID, archivePath: archivePath, mode: .code)
+        let name = input.manifest.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let intent = LocalAppSourceCreateIntent(requestId: requestID, projectId: UUID().uuidString.lowercased(),
+            mode: .code, name: name, prompt: "", operation: .marketRemix,
+            remixInputDigest: try ProjectRepository.localAppRemixInputDigest(input))
+        try await projectStore.storeLocalAppRemixRequest(intent, input: input, configHome: configHome)
+        // The captured Code owner completes even if another conversation is
+        // selected before download, import, or native owner admission finishes.
+        resumeLocalAppCreation(intent, context: context)
+    }
+
+    private func beginLocalAppNavigation(key: String) -> LocalAppNavigationContext {
+        userNavigation.invalidate()
+        localAppSelectionAuthority.invalidate()
+        return LocalAppNavigationContext(generation: userNavigation.generation,
+            presentationRevision: navigation.presentationRevision,
+            selectionRevision: localAppSelectionAuthority.currentRevision(),
+            sequence: localAppRegistrationOrder.issueNavigation(),
+            providerSnapshot: providerRepository.makeLaunchSnapshot(),
+            registrationTicket: localAppRegistrationOrder.issue(key: key),
+            originatingSource: source, originatingEntry: sessionHost.entry(for: source))
+    }
+
+    private func reportLocalAppNavigationFailure(_ error: Error, context: LocalAppNavigationContext) {
+        guard !(error is CancellationError) else { return }
+        if isCurrentLocalAppNavigation(context) {
+            externalLinkError = error.localizedDescription
+        } else {
+            let failure = ConversationError(kind: .host, message: error.localizedDescription)
+            if let entry = context.originatingEntry { sessionHost.deliverOperationFailure(failure, to: entry) }
+            else { context.originatingSource.model.error = failure }
+        }
+    }
+
+    private func isCurrentLocalAppNavigation(_ context: LocalAppNavigationContext) -> Bool {
+        userNavigation.isCurrent(context.generation) && navigation.presentationRevision == context.presentationRevision
+    }
+
+    private func captureLocalAppActionPresentation(route: AppRoute) -> LocalAppActionPresentation {
+        let revision = navigation.presentationRevision
+        let generation = userNavigation.generation
+        let owner = source
+        let entry = sessionHost.entry(for: owner)
+        return LocalAppActionPresentation(mayPresent: {
+            navigation.mayPresent(capturedRevision: revision, on: route) && userNavigation.isCurrent(generation)
+        }, reportOwnerFailure: { message in
+            let failure = ConversationError(kind: .host, message: message)
+            if let entry { sessionHost.deliverOperationFailure(failure, to: entry) }
+            else { owner.model.error = failure }
+        })
+    }
+
+    private func requestLocalAppDevelopmentMode() -> SessionMode? {
+        do {
+            try LocalAppDevelopmentAdmission.requireCode(activeMode)
+            return activeMode
+        } catch {
+            externalLinkError = error.localizedDescription
+            return nil
+        }
+    }
+
+    private func queueLocalAppCreation(name: String, prompt: String) async throws {
+        let initiatingMode = activeMode
+        try LocalAppDevelopmentAdmission.requireCode(initiatingMode)
+        guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !hasUnsavedConversationMedia, !projectSwitching else {
+            throw LocalAppServiceFailure("CONVERSATION_BUSY", "Finish or save the current conversation draft before opening app development.")
+        }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, cleanName.unicodeScalars.count <= 80 else {
+            throw LocalAppServiceFailure("INVALID_NAME", String(localized: "local_app_authoring_name_invalid"))
+        }
+        let intent = LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
+            projectId: UUID().uuidString.lowercased(), mode: initiatingMode, name: cleanName, prompt: prompt)
+        let context = beginLocalAppNavigation(key: "source-request:" + intent.requestId)
+        // This must reach durable storage before native can create a source.
+        do { try await projectStore.storeLocalAppSourceCreateIntent(intent) }
+        catch {
+            if !isCurrentLocalAppNavigation(context) { reportLocalAppNavigationFailure(error, context: context) }
+            throw error
+        }
+        resumeLocalAppCreation(intent, context: context)
+    }
+
+    private func resumeLocalAppCreation(_ intent: LocalAppSourceCreateIntent, context supplied: LocalAppNavigationContext? = nil) {
+        if supplied == nil, requestLocalAppDevelopmentMode() == nil { return }
+        if supplied == nil, !(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                              !hasUnsavedConversationMedia && !projectSwitching) {
+            externalLinkError = "Finish or save the current conversation draft before opening app development."
+            return
+        }
+        let context = supplied ?? beginLocalAppNavigation(key: intent.appId.map { "app:" + $0 } ?? "source-request:" + intent.requestId)
+        guard processingSourceIntents.insert(intent.requestId).inserted else { return }
+        Task { @MainActor in
+            defer { processingSourceIntents.remove(intent.requestId) }
+            do {
+                // The service returns the original proof if this exact request
+                // was committed before a crash or an unknown response.
+                guard try await projectStore.localAppSourceCreateIntent(requestID: intent.requestId) == intent else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app creation request changed.")
+                }
+                #if canImport(harness_runtimeFFI)
+                try await drainFailedPreparation(requestID: intent.requestId)
+                #endif
+                if projectStore.projects.contains(where: { $0.id == intent.projectId }) {
+                    let ownerIntents = try await projectStore.localAppAuthoringIntents(projectID: intent.projectId)
+                    if ownerIntents.contains(where: { $0.intentId == intent.requestId }),
+                       isCurrentLocalAppNavigation(context),
+                       let (authority, revision) = localAppRegistrationOrder.reserveProjectSelection(
+                            projectID: intent.projectId, sequence: context.sequence) {
+                        do {
+                            try await projectStore.selectLocalAppAuthoringIntent(projectID: intent.projectId, intentID: intent.requestId,
+                                authority: localAppSelectionAuthority, revision: context.selectionRevision,
+                                projectAuthority: authority, projectRevision: revision)
+                            if isCurrentLocalAppNavigation(context) {
+                                requestUserNavigation(.recoverAuthoring(intent.projectId))
+                                return
+                            }
+                        } catch WorkspaceWriteAuthority.Failure.stale {
+                            // Another navigation owns selection now. Finish
+                            // the captured request without changing it.
+                        }
+                    }
+                }
+                let created: LocalAppCreatedAuthoringSource
+                var resultingAppID = intent.appId
+                switch intent.operation {
+                case .create:
+                    created = try await LocalApps.library.createAuthoring(name: intent.name, requestID: intent.requestId, mode: intent.mode)
+                case .restore:
+                    guard let appID = intent.appId, let revision = intent.revision else {
+                        throw LocalAppServiceFailure("INVALID_AUTHORING", "The restore app or revision is missing.")
+                    }
+                    created = try await LocalApps.library.restoreAuthoringSource(appID: appID, revision: revision,
+                                                                                 requestID: intent.requestId, mode: intent.mode)
+                case .bind:
+                    guard let appID = intent.appId, let sourceID = intent.sourceId, let sourceDirectory = intent.sourceDirectory else {
+                        throw LocalAppServiceFailure("INVALID_AUTHORING", "The app source binding is incomplete.")
+                    }
+                    created = try await LocalApps.library.bindAuthoringSource(requestID: intent.requestId, sourceID: sourceID,
+                        sourceDirectory: sourceDirectory, appID: appID, mode: intent.mode)
+                case .marketRemix:
+                    let configHome = URL(fileURLWithPath: MobileUserStorage.directories().configHome, isDirectory: true)
+                        .resolvingSymlinksInPath().standardizedFileURL
+                    let (input, archive) = try await projectStore.localAppRemixInput(intent, configHome: configHome)
+                    let result = try await LocalAppRemixSubmission.run(mode: intent.mode, submit: {
+                        try await LocalApps.library.importMarketRemix(input, archivePath: archive.path, mode: intent.mode)
+                    }, restoreArchive: {
+                        try await LocalApps.market.downloadRemixArchive(input, intent: intent,
+                                                                        store: projectStore, configHome: configHome)
+                    })
+                    resultingAppID = result.record.appId
+                    created = LocalAppCreatedAuthoringSource(sourceId: result.sourceId, requestId: result.requestId,
+                        sourceDirectory: result.sourceDirectory, sourcePath: result.sourcePath)
+                }
+                let request = LocalAppDevelopmentRequest(appId: resultingAppID, name: intent.name,
+                    sourceDirectory: created.sourceDirectory, sourceID: created.sourceId,
+                    sourceRequestID: created.requestId, authoring: nil, prompt: intent.prompt)
+                let entry = try await prepareParkedLocalAppOwner(request: request, intent: intent, context: context,
+                                                                 maySetCurrent: supplied != nil)
+                if isCurrentLocalAppNavigation(context), !projectSwitching {
+                    _ = switchScope(to: entry.scope, mode: entry.mode, resumeSessionID: entry.sessionID,
+                                    retainedEntry: entry, sourceSnapshot: context.providerSnapshot)
+                }
+            } catch { reportLocalAppNavigationFailure(error, context: context) }
+        }
+    }
+
+    /// A previously bound owner remains independent of the foreground after
+    /// the user moves away during its read-only prepare. Reopen only its exact
+    /// indexed transcript; never interrupt an already retained source.
+    private func prepareParkedExistingAuthoringOwner(project: ProjectSnapshot, row: ProjectSessionSummary,
+                                                     request: LocalAppDevelopmentRequest,
+                                                     context: LocalAppNavigationContext) async throws -> SessionHost.Entry {
+        #if canImport(harness_runtimeFFI)
+        let scope = ConversationScope.project(project.id)
+        let sessionID = canonicalSessionID(row.sessionId)
+        guard row.mode == .code, UUID(uuidString: sessionID) != nil,
+              let transcriptPath = row.transcriptPath, !transcriptPath.isEmpty,
+              (transcriptPath as NSString).isAbsolutePath else {
+            throw ProjectRepositoryError.missingSessionTranscriptPath
+        }
+        try await drainFailedPreparation(requestID: sessionID)
+        if let entry = try sessionHost.entryForClaim(sessionID: sessionID, scope: scope, mode: .code) {
+            try await prepareExistingAuthoringDraft(entry, request: request, transcriptPath: transcriptPath)
+            return entry
+        }
+        try await cronRepository.prepareOwnerAdmission()
+        try await cronOwnerGate.waitUntilAvailable(sessionID: sessionID)
+        if let entry = try sessionHost.entryForClaim(sessionID: sessionID, scope: scope, mode: .code) {
+            try await prepareExistingAuthoringDraft(entry, request: request, transcriptPath: transcriptPath)
+            return entry
+        }
+        guard !sessionHost.hasPreparingClaim(sessionID: sessionID),
+              try projectStore.transcriptPathForSession(sessionID, in: scope, mode: .code) == transcriptPath else {
+            throw SessionHost.OwnershipError.conflictingOwner
+        }
+        let replacement = try await makeSource(scope: scope, snapshot: context.providerSnapshot, mode: .code,
+            sessionID: sessionID, selectedTranscriptPath: transcriptPath)
+        defer { sessionHost.endPreparingClaim(of: replacement) }
+        sessionHost.protectIdentity(of: replacement, scope: scope, mode: .code, sessionID: sessionID)
+        installExternalEventHandler(on: replacement)
+        var retained = false
+        do {
+            try await replacement.prepare()
+            guard let engine = replacement as? EngineConversationSource,
+                  engine.pendingRecoveredAuthoringOwner != nil else {
+                throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+            }
+            let restoredDraft = scopedPreferences.draft(scope: scope, mode: .code, ownerSessionID: sessionID)
+            let entry = try sessionHost.retain(source: replacement, scope: scope, mode: .code,
+                                               sessionID: sessionID, workspace: request.sourceDirectory, draft: restoredDraft)
+            retained = true
+            entry.draftSourceCodeUnits = scopedPreferences.draftSourceCodeUnits(scope: scope, mode: .code, ownerSessionID: sessionID)
+            entry.handoffReference = scopedPreferences.handoffReference(sessionID: sessionID, scope: scope, mode: .code)
+            let draftRevision = entry.draftRevision
+            do {
+                try await confirmRecoveredAuthoringOwner(engine, entry: entry)
+            } catch {
+                await discardFailedUnselectedAuthoringEntry(entry, engine: engine)
+                throw error
+            }
+            guard let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: entry),
+                  snapshot.state.transcriptPath == transcriptPath,
+                  snapshot.state.cwd == request.sourceDirectory else {
+                // Keep a valid existing owner and its actual /cd state. Never
+                // inject an app prompt into a different workspace.
+                engine.model.error = ConversationError(kind: .host,
+                    message: "This conversation is no longer in the app source directory.")
+                throw LocalAppServiceFailure("AUTHORING_CHANGED", "This conversation is no longer in the app source directory.")
+            }
+            if sessionHost.entry(for: engine) === entry, entry.draftRevision == draftRevision,
+               !scopedPreferences.hasDraft(scope: scope, mode: .code, ownerSessionID: sessionID) {
+                seedLocalAppDraft(request, entry: entry)
+            }
+            return entry
+        } catch {
+            if !retained {
+                await quarantineFailedPreparation(replacement, requestID: sessionID,
+                                                  scope: scope, mode: .code, sessionID: sessionID)
+            }
+            throw error
+        }
+        #else
+        throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+        #endif
+    }
+
+    /// Finish an already admitted Code request without changing whichever
+    /// conversation the user selected while its source operation was pending.
+    private func prepareParkedLocalAppOwner(request: LocalAppDevelopmentRequest, intent: LocalAppSourceCreateIntent,
+                                            context: LocalAppNavigationContext, maySetCurrent: Bool) async throws -> SessionHost.Entry {
+        #if canImport(harness_runtimeFFI)
+        guard intent.mode == .code, request.sourceRequestID.map(canonicalSessionID) == intent.requestId,
+              (intent.operation == .marketRemix ? (intent.appId == nil && request.appId?.isEmpty == false)
+                                                 : request.appId == intent.appId) else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app source request changed.")
+        }
+        let project: ProjectSnapshot
+        var savedIntent: LocalAppAuthoringIntent
+        if let existing = projectStore.projects.first(where: { $0.id == intent.projectId }) {
+            guard existing.record.activeDirectory == request.sourceDirectory else {
+                throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved project now uses a different source.")
+            }
+            project = existing
+            let matching = try await projectStore.localAppAuthoringIntents(projectID: intent.projectId)
+                .filter { $0.intentId == intent.requestId }
+            guard matching.count <= 1 else { throw SessionHost.OwnershipError.conflictingOwner }
+            savedIntent = matching.first ?? LocalAppAuthoringIntent(intentId: intent.requestId,
+                sourceId: canonicalSessionID(request.sourceID), sourceRequestId: intent.requestId,
+                sourceDirectory: request.sourceDirectory, projectId: intent.projectId, appId: request.appId)
+        } else {
+            let created = try await projectStore.createLocalAppAuthoringProject(name: request.name,
+                sourceDirectory: request.sourceDirectory, sourceID: canonicalSessionID(request.sourceID),
+                sourceRequestID: intent.requestId, appID: request.appId, projectID: intent.projectId, intentID: intent.requestId)
+            project = created.0
+            savedIntent = created.1
+        }
+        guard savedIntent.sourceId == canonicalSessionID(request.sourceID),
+              savedIntent.sourceRequestId == intent.requestId, savedIntent.sourceDirectory == request.sourceDirectory,
+              savedIntent.projectId == project.id, savedIntent.appId == request.appId else {
+            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app intent no longer matches its source.")
+        }
+        try await projectStore.storeLocalAppAuthoringIntent(savedIntent)
+        if isCurrentLocalAppNavigation(context),
+           let (authority, revision) = localAppRegistrationOrder.reserveProjectSelection(projectID: project.id,
+                                                                                           sequence: context.sequence) {
+            do {
+                try await projectStore.selectLocalAppAuthoringIntent(projectID: project.id, intentID: savedIntent.intentId,
+                    authority: localAppSelectionAuthority, revision: context.selectionRevision,
+                    projectAuthority: authority, projectRevision: revision)
+            } catch WorkspaceWriteAuthority.Failure.stale {
+                // Selection belongs to a newer navigation; this admitted
+                // owner still completes in the background.
+            }
+        }
+        if let sessionID = savedIntent.authoringSessionId {
+            if let retained = try sessionHost.entryForClaim(sessionID: sessionID, scope: .project(project.id), mode: .code) {
+                if retained.source.model.authoringBindingPending {
+                    try await validatePendingAuthoringEntry(retained, intent: savedIntent)
+                } else {
+                    let binding = try await LocalApps.library.exactAuthoringBinding(
+                        sourceDirectory: savedIntent.sourceDirectory, projectID: project.id, sessionID: sessionID,
+                        mode: .code, expectedSourceID: savedIntent.sourceId)
+                    let owner = LocalAppAuthoringOwner(sourceDirectory: savedIntent.sourceDirectory, projectID: project.id,
+                                                       sessionID: sessionID, appID: savedIntent.appId)
+                    guard owner.matches(binding), let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: retained),
+                          savedIntent.matchesRetainedOwner(scope: retained.scope, mode: retained.mode,
+                                                           sessionID: retained.sessionID, workspace: snapshot.state),
+                          sessionHost.entry(for: retained.source) === retained else {
+                        throw SessionHost.OwnershipError.sourceIdentityMismatch
+                    }
+                }
+                return retained
+            }
+            // A process can stop after persisting the native UUID but before
+            // publishing the session index or registering its receipt. Reuse
+            // that exact owner in the background, never mint a second UUID.
+            try await cronRepository.prepareOwnerAdmission()
+            try await cronOwnerGate.waitUntilAvailable(sessionID: sessionID)
+            try await reconcileAuthoringIndexIfNeeded(project: project, intent: savedIntent)
+            if let retained = try sessionHost.entryForClaim(sessionID: sessionID, scope: .project(project.id), mode: .code) {
+                try await validatePendingAuthoringEntry(retained, intent: savedIntent)
+                return retained
+            }
+            guard !sessionHost.hasPreparingClaim(sessionID: sessionID), let transcriptPath = savedIntent.transcriptPath else {
+                throw SessionHost.OwnershipError.conflictingOwner
+            }
+            let scope = ConversationScope.project(project.id)
+            let replacement = try await makeSource(scope: scope, snapshot: context.providerSnapshot, mode: .code,
+                sessionID: sessionID, selectedTranscriptPath: transcriptPath)
+            defer { sessionHost.endPreparingClaim(of: replacement) }
+            sessionHost.protectIdentity(of: replacement, scope: scope, mode: .code, sessionID: sessionID)
+            installExternalEventHandler(on: replacement)
+            var retained = false
+            do {
+                try await replacement.prepare()
+                guard let engine = replacement as? EngineConversationSource,
+                      engine.pendingRecoveredAuthoringOwner != nil else {
+                    throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+                }
+                let restoredDraft = scopedPreferences.draft(scope: scope, mode: .code, ownerSessionID: sessionID)
+                let entry = try sessionHost.retain(source: replacement, scope: scope, mode: .code,
+                                                   sessionID: sessionID, workspace: savedIntent.sourceDirectory, draft: restoredDraft)
+                retained = true
+                entry.draftSourceCodeUnits = scopedPreferences.draftSourceCodeUnits(scope: scope, mode: .code, ownerSessionID: sessionID)
+                entry.handoffReference = scopedPreferences.handoffReference(sessionID: sessionID, scope: scope, mode: .code)
+                if !scopedPreferences.hasDraft(scope: scope, mode: .code, ownerSessionID: sessionID) {
+                    seedLocalAppDraft(request, entry: entry)
+                }
+                do {
+                    try await confirmRecoveredAuthoringOwner(engine, entry: entry)
+                    return entry
+                } catch {
+                    await discardFailedUnselectedAuthoringEntry(entry, engine: engine)
+                    throw error
+                }
+            } catch {
+                if !retained {
+                    await quarantineFailedPreparation(replacement, requestID: intent.requestId,
+                                                      scope: scope, mode: .code, sessionID: sessionID)
+                }
+                throw error
+            }
+        }
+        let pending = pendingAuthoringAttempts.filter { savedIntent.matchesInFlightAttempt($0.value.intent) }
+        guard pending.count <= 1 else { throw SessionHost.OwnershipError.conflictingOwner }
+        if let (id, _) = pending.first, let retained = sessionHost.entries.first(where: { $0.id == id }) {
+            try await validatePendingAuthoringEntry(retained, intent: savedIntent)
+            return retained
+        }
+        try await cronRepository.prepareOwnerAdmission()
+        try await cronOwnerGate.waitUntilAvailable(sessionID: "")
+        let scope = ConversationScope.project(project.id)
+        let provisional = ProvisionalLocalAppGrant(intent: savedIntent)
+        let replacement = try await makeSource(scope: scope, snapshot: context.providerSnapshot,
+            mode: .code, provisionalAuthoring: provisional)
+        defer { sessionHost.endPreparingClaim(of: replacement) }
+        sessionHost.protectIdentity(of: replacement, scope: scope, mode: .code)
+        installExternalEventHandler(on: replacement)
+        var retained = false
+        var preparedSessionID: String?
+        do {
+            try await replacement.prepare()
+            guard let engine = replacement as? EngineConversationSource else {
+                throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+            }
+            let owner = LocalAppProvisionalAuthoringOwner(sourceDirectory: savedIntent.sourceDirectory,
+                projectID: savedIntent.projectId, appID: savedIntent.appId)
+            let workspace = try await engine.preparedProvisionalAuthoringWorkspace(owner)
+            preparedSessionID = workspace.sessionId
+            // Transfer the native claim to SessionHost before any asynchronous
+            // index write. A failed write then leaves the same gated owner alive
+            // and retryable instead of remounting its UUID.
+            let entry = try sessionHost.retain(source: replacement, scope: scope, mode: .code,
+                                               sessionID: workspace.sessionId, workspace: workspace.cwd, draft: "")
+            retained = true
+            pendingAuthoringAttempts[entry.id] = PendingAuthoringAttempt(request: request, project: project,
+                intent: savedIntent, setCurrentOnFirstAttempt: maySetCurrent, registrationTicket: context.registrationTicket)
+            seedLocalAppDraft(request, entry: entry)
+            retryAuthoringBinding(for: entry)
+            return entry
+        } catch {
+            if !retained {
+                await quarantineFailedPreparation(replacement, requestID: intent.requestId,
+                                                  scope: scope, mode: .code, sessionID: preparedSessionID)
+            }
+            throw error
+        }
+        #else
+        throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+        #endif
+    }
+
+    private func seedLocalAppDraft(_ request: LocalAppDevelopmentRequest, entry: SessionHost.Entry) {
+        guard entry.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              entry.attachment == nil, entry.draftSourceCodeUnits == nil, entry.handoffReference == nil else { return }
+        let sessionID = entry.sessionID
+        let ownerDescription = sessionID.isEmpty ? "" : " This ordinary authoring session is \(sessionID)."
+        let text = """
+        Use the local-app skill to develop \(request.name) in \(request.sourceDirectory). Use the schema 2 standalone LocalApp service.\(ownerDescription) Existing app ID: \(request.appId ?? "new app"). Publish locally only; publishing to the market is a separate user action.
+
+        If the app uses an Agent, persist recoverable app state and the pending runId and threadId before submission. On reopen, read host task status and event or chat history, and reconnect to the same run and thread read-only. Do not automatically submit, resend or replay tools after an uncertain request or interruption. Show running only when the host confirms it, and show interrupted or unknown state and the action needed from the user; after the user reviews any side effects, a new attempt requires an explicit user action and a new runId. Only show completion when supported by the host's terminal result. iOS may suspend or terminate background work; do not promise indefinite execution.
+
+        \(request.prompt)
+        """
+        entry.draft = text
+        scopedPreferences.setDraft(text, scope: entry.scope, mode: entry.mode, ownerSessionID: sessionID)
+        let hasOtherBlankOwner = sessionHost.entries.contains {
+            $0 !== entry && $0.scope == entry.scope && $0.mode == entry.mode && $0.sessionID.isEmpty
+        }
+        if !sessionID.isEmpty && !isRestorableSession(sessionID, scope: entry.scope, mode: entry.mode),
+           !hasOtherBlankOwner,
+           !scopedPreferences.hasDraft(scope: entry.scope, mode: entry.mode, ownerSessionID: "") {
+            scopedPreferences.setDraft(text, scope: entry.scope, mode: entry.mode, ownerSessionID: "")
+        }
+        if source === entry.source, sessionHost.selectedEntryID == entry.id { draft = text }
+    }
+
+    private func retryAuthoringBinding(for entry: SessionHost.Entry) {
+        guard sessionHost.entry(for: entry.source) === entry else { return }
+        if var attempt = pendingAuthoringAttempts[entry.id] {
+            guard !attempt.inFlight else { return }
+            attempt.inFlight = true
+            pendingAuthoringAttempts[entry.id] = attempt
+            entry.source.model.authoringBindingRetryAvailable = false
+            Task { @MainActor in
+                await finishLocalAppDevelopment(attempt.request, project: attempt.project, entry: entry)
+            }
+            return
+        }
+        #if canImport(harness_runtimeFFI)
+        if source === entry.source, let engine = entry.source as? EngineConversationSource,
+           engine.needsAuthoringMountAuthorization || engine.pendingRecoveredAuthoringOwner != nil {
+            entry.source.model.authoringBindingRetryAvailable = false
+            entry.source.model.error = nil
+            if entry.sessionID.isEmpty { allowBlankAuthoringRetryFor = entry.id }
+            sourceGeneration = UUID()
+        }
+        #endif
+    }
+
+    private func finishLocalAppDevelopment(
+        _ request: LocalAppDevelopmentRequest, project: ProjectSnapshot,
+        entry: SessionHost.Entry
+    ) async {
+        #if canImport(harness_runtimeFFI)
+        defer {
+            if var attempt = pendingAuthoringAttempts[entry.id] {
+                attempt.inFlight = false
+                pendingAuthoringAttempts[entry.id] = attempt
+            }
+        }
+        do {
+            guard let engine = entry.source as? EngineConversationSource, entry.mode == .code,
+                  entry.scope == .project(project.record.id) else {
+                throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+            }
+            for _ in 0..<400 {
+                if !engine.model.sessionTransitionPending, !engine.model.activeSessionId.isEmpty,
+                   canonicalSessionID(engine.model.activeSessionId) == canonicalSessionID(entry.sessionID),
+                   engine.model.workspaceState?.cwd == request.sourceDirectory { break }
+                guard sessionHost.entry(for: engine) === entry else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring owner is no longer available.")
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let sessionID = entry.sessionID
+            let owner = LocalAppAuthoringOwner(sourceDirectory: request.sourceDirectory, projectID: project.record.id,
+                                               sessionID: sessionID, appID: request.appId)
+            guard UUID(uuidString: sessionID) != nil,
+                  canonicalSessionID(engine.model.activeSessionId) == canonicalSessionID(sessionID),
+                  engine.model.workspaceState?.cwd == request.sourceDirectory,
+                  !engine.model.sessionTransitionPending,
+                  sessionHost.entry(for: engine) === entry,
+                  let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: entry),
+                  snapshot.state.cwd == request.sourceDirectory,
+                  entry.workspaceWriteAuthority.currentRevision() == snapshot.revision else {
+                throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring workspace could not be authenticated.")
+            }
+            do {
+                guard var attempt = pendingAuthoringAttempts[entry.id], let sourceRequestID = request.sourceRequestID,
+                      attempt.intent.projectId == project.record.id,
+                      attempt.intent.sourceDirectory == request.sourceDirectory,
+                      attempt.intent.sourceId == canonicalSessionID(request.sourceID),
+                      attempt.intent.sourceRequestId == canonicalSessionID(sourceRequestID) else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring intent no longer matches this owner.")
+                }
+                if attempt.intent.authoringSessionId == nil {
+                    let previous = attempt.intent
+                    attempt.intent.authoringSessionId = canonicalSessionID(sessionID)
+                    attempt.intent.transcriptPath = snapshot.state.transcriptPath
+                    try await projectStore.storeLocalAppAuthoringIntent(attempt.intent, replacing: previous)
+                    guard sessionHost.entry(for: engine) === entry,
+                          canonicalSessionID(engine.model.activeSessionId) == canonicalSessionID(sessionID) else {
+                        throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring owner changed before its intent was saved.")
+                    }
+                    pendingAuthoringAttempts[entry.id] = attempt
+                }
+                guard attempt.intent.authoringSessionId == canonicalSessionID(sessionID) else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring intent belongs to another session.")
+                }
+                try await projectStore.recordStartedSession(
+                    projectId: project.record.id, sessionId: sessionID, title: project.record.name, mode: .code,
+                    workspaceDirectory: snapshot.state.cwd, transcriptPath: snapshot.state.transcriptPath)
+                guard sessionHost.entry(for: engine) === entry,
+                      canonicalSessionID(engine.model.activeSessionId) == canonicalSessionID(sessionID),
+                      let current = await sessionHost.authenticatedWorkspaceSnapshot(for: entry),
+                      current.state.cwd == request.sourceDirectory,
+                      current.state.transcriptPath == snapshot.state.transcriptPath else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring owner changed before registration.")
+                }
+                try await projectStore.recordAuthenticatedWorkspace(
+                    current.state, in: entry.scope, mode: .code,
+                    authority: entry.workspaceWriteAuthority, revision: current.revision)
+                guard sessionHost.entry(for: engine) === entry,
+                      canonicalSessionID(engine.model.activeSessionId) == canonicalSessionID(sessionID),
+                      engine.model.workspaceState?.cwd == request.sourceDirectory else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring owner changed before registration.")
+                }
+                guard var attempt = pendingAuthoringAttempts[entry.id] else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring attempt is unavailable.")
+                }
+                var savedBinding: LocalAppAuthoring?
+                if attempt.registrationAttempted {
+                    do {
+                        let existing = try await LocalApps.library.exactAuthoringBinding(
+                            sourceDirectory: request.sourceDirectory, projectID: project.record.id, sessionID: sessionID,
+                            mode: entry.mode, expectedSourceID: attempt.intent.sourceId)
+                        guard owner.matches(existing) else {
+                            throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app binding does not match this owner.")
+                        }
+                        savedBinding = existing
+                    } catch let error as LocalAppServiceFailure where error.code == "notFound" && !attempt.registrationConfirmed {
+                        // A previous write had an unknown result. Only an
+                        // authoritative absence permits an idempotent retry.
+                    }
+                }
+                if savedBinding == nil && !attempt.registrationConfirmed {
+                    let lease = await localAppRegistrationOrder.acquire(
+                        key: attempt.registrationTicket?.key ?? "source:" + attempt.intent.sourceId)
+                    defer { localAppRegistrationOrder.release(lease) }
+                    let setCurrent = !attempt.registrationAttempted && attempt.setCurrentOnFirstAttempt
+                        && (attempt.registrationTicket.map(localAppRegistrationOrder.isCurrent) ?? false)
+                    attempt.registrationAttempted = true
+                    pendingAuthoringAttempts[entry.id] = attempt
+                    let authoring = LocalAppAuthoring(sourceDirectory: request.sourceDirectory, workspaceId: project.record.id,
+                        projectRef: .mobileProject(project.record.id), authoringSessionId: sessionID, appId: request.appId)
+                    try await LocalApps.library.registerAuthoring(authoring, sourceID: attempt.intent.sourceId,
+                                                                  requestID: attempt.intent.sourceRequestId, mode: entry.mode, setCurrent: setCurrent)
+                    guard var currentAttempt = pendingAuthoringAttempts[entry.id] else {
+                        throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring attempt is unavailable.")
+                    }
+                    currentAttempt.registrationConfirmed = true
+                    pendingAuthoringAttempts[entry.id] = currentAttempt
+                }
+            }
+            // A successful write alone is not authority to unlock another
+            // session. Read back the exact, native-owned tuple after the ACK.
+            let binding = try await LocalApps.library.exactAuthoringBinding(
+                sourceDirectory: request.sourceDirectory, projectID: project.record.id, sessionID: sessionID,
+                mode: entry.mode, expectedSourceID: request.sourceID)
+            guard owner.matches(binding), sessionHost.entry(for: engine) === entry,
+                  canonicalSessionID(engine.model.activeSessionId) == canonicalSessionID(sessionID),
+                  engine.model.workspaceState?.cwd == request.sourceDirectory else {
+                throw LocalAppServiceFailure("AUTHORING_CHANGED", "The saved app binding does not match this owner.")
+            }
+            try engine.confirmAuthoringBinding(owner, binding: binding)
+            if let attempt = pendingAuthoringAttempts[entry.id] {
+                do {
+                    if try await projectStore.localAppSourceCreateIntent(requestID: attempt.intent.intentId) != nil {
+                        try await projectStore.completeLocalAppSourceCreateIntent(requestID: attempt.intent.intentId, owner: attempt.intent)
+                    }
+                } catch {
+                    // The owner is already confirmed. Leave the explicit
+                    // recovery offer visible if its advisory marker fails.
+                    projectStore.pendingLocalAppError = error.localizedDescription
+                }
+            }
+            let previousFailure = pendingAuthoringAttempts[entry.id]?.failureID
+            pendingAuthoringAttempts.removeValue(forKey: entry.id)
+            engine.model.authoringBindingRetryAvailable = false
+            if let previousFailure, engine.model.error?.id == previousFailure { engine.model.error = nil }
+        } catch {
+            let failure = ConversationError(kind: .host, message: error.localizedDescription)
+            entry.source.model.error = failure
+            if var attempt = pendingAuthoringAttempts[entry.id] {
+                attempt.failureID = failure.id
+                pendingAuthoringAttempts[entry.id] = attempt
+                entry.source.model.authoringBindingRetryAvailable = true
+            }
+            if source === entry.source { externalLinkError = error.localizedDescription }
+        }
+        #else
+        entry.source.model.error = ConversationError(kind: .host, message: "App development requires the local conversation engine.")
+        #endif
     }
 
     private func syncConversationBackgroundSurfaces() {
@@ -3033,8 +4621,12 @@ enum ConversationSourceReplacementPolicy {
     }
 
     @MainActor
-    static func allowsReplacement(of model: ConversationModel, hasActiveRealtimeAudio: Bool = false) -> Bool {
-        guard !hasActiveRealtimeAudio, !model.streaming, !model.isCancelling, !model.sessionTransitionPending,
+    static func allowsReplacement(of model: ConversationModel, hasActiveRealtimeAudio: Bool = false,
+                                  allowUnconfirmedAuthoring: Bool = false,
+                                  allowPendingSessionTransition: Bool = false) -> Bool {
+        guard !hasActiveRealtimeAudio, (!model.authoringBindingPending || allowUnconfirmedAuthoring),
+              !model.streaming, !model.isCancelling,
+              (!model.sessionTransitionPending || allowPendingSessionTransition),
               !model.slashCommandPending,
               !model.hasUnresolvedTurnRecovery, !model.hasInactiveDurableRecovery else { return false }
         if model.backgroundTasks.contains(where: { $0.status.requiresExecutionLease }) {
@@ -3135,6 +4727,11 @@ private struct ConversationProjectBridge: View {
                 handleActiveSession(model.activeSessionId)
                 if model.engineSessionsLoaded { synchronizeSessions(model.engineSessions) }
             }
+            .onChange(of: model.authoringBindingPending) { _, pending in
+                guard !pending else { return }
+                handleActiveSession(model.activeSessionId)
+                if model.engineSessionsLoaded { synchronizeSessions(model.engineSessions) }
+            }
             .onChange(of: pendingRestoreID) { _, pending in
                 guard pending == nil, model.engineSessionsLoaded else { return }
                 synchronizeSessions(model.engineSessions)
@@ -3162,7 +4759,7 @@ private struct ConversationProjectBridge: View {
     private func handleActiveSession(_ sessionID: String) {
         // A replacement engine can emit its bootstrap SessionStarted before an
         // explicit New/Resume command confirms. Never persist that transient id.
-        guard !model.sessionTransitionPending,
+        guard !model.authoringBindingPending, !model.sessionTransitionPending,
               !sessionID.isEmpty,
               onSessionChanged(sessionID)
         else { return }
@@ -3177,7 +4774,7 @@ private struct ConversationProjectBridge: View {
     private func synchronizeSessions(_ rows: [EngineSession]) {
         // The scheduled scope's engine catalog must never replace a project's
         // cached session index.
-        guard scope != .scheduled else { return }
+        guard scope != .scheduled, !model.authoringBindingPending else { return }
         guard ConversationSessionIndexPolicy.shouldSynchronize(
             transitionPending: model.sessionTransitionPending,
             restorePending: pendingRestoreID != nil,

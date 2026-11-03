@@ -17,7 +17,7 @@ final class DurableConversationTurnClientStore {
     private var liveAckSequences: [UInt64: UInt64] = [:]
 
     init(config: EngineConfig, ledger: DurableConversationTurnLedger = .shared) {
-        scope = config.projectCwd ?? LXISHGuestPaths.workspaceRoot
+        scope = config.projectCwd ?? LXISHGuestPaths.conversationWorkspace(for: config.sessionMode)
         sessionID = config.initialSessionId.map(canonicalSessionID).flatMap { $0.isEmpty ? nil : $0 }
         url = URL(fileURLWithPath: config.appSandboxRoot, isDirectory: true)
             .appendingPathComponent("durable-conversation-turns.json")

@@ -128,11 +128,15 @@ final class VoiceInteractionControllerTests: XCTestCase {
         XCTAssertTrue(first.model.streaming)
         XCTAssertEqual(first.cancelCalls, 0)
 
-        first.model.turnSpeechUpdates.send(.init(token: token, sequence: 1, delta: "Reply from A."))
-        await settle(30)
-        XCTAssertEqual(player.configurations.first?.audioOwner, ownerA)
-        XCTAssertEqual(player.configurations.first?.configurationSnapshot, pinned)
-        first.complete(token: token, text: "Reply from A.")
+        first.model.turnSpeechUpdates.send(.init(token: token, sequence: 1, delta: "Reply from A!"))
+        let openDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while player.configurations.isEmpty && ContinuousClock.now < openDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let speechConfiguration = try XCTUnwrap(player.configurations.first)
+        XCTAssertEqual(speechConfiguration.audioOwner, ownerA)
+        XCTAssertEqual(speechConfiguration.configurationSnapshot, pinned)
+        first.complete(token: token, text: "Reply from A!")
         await settle(50)
         XCTAssertFalse(voiceA.isPresented)
         XCTAssertFalse(voiceA.hasOwnedAudio)
@@ -141,6 +145,7 @@ final class VoiceInteractionControllerTests: XCTestCase {
         await settle(30)
         XCTAssertEqual(laterCapture.transcribeCalls, 1)
         voiceB.close()
+        withExtendedLifetime(host) {}
     }
 
     func testNavigationPreservesRejectedCapturedSpeechForOriginalDraft() async {
@@ -993,7 +998,7 @@ final class VoiceInteractionControllerTests: XCTestCase {
         let firstCapture = ControllerVoiceSession(transcript: "first", automaticallyFinishesWhenEndpointingEnabled: true)
         let nextCapture = ControllerVoiceSession(transcript: "after cleanup")
         let player = BlockingStopStreamingSpeechPlayer()
-        let barge = ControllerBargeInRecognizer(sessions: [ControllerBargeInSession()])
+        let barge = ControllerBargeInRecognizer(sessions: [ControllerBargeInSession(), ControllerBargeInSession()])
         let first = ControllerConversationSource()
         let original = ControllerConversationSource()
         let controller = makeController(sessions: [firstCapture, nextCapture], player: player, bargeInRecognizer: barge)
@@ -1016,6 +1021,7 @@ final class VoiceInteractionControllerTests: XCTestCase {
         controller.finishListening()
         await settle(30)
         XCTAssertEqual(original.sentTexts, ["after cleanup"])
+        XCTAssertEqual(barge.startCalls, 2)
         controller.close()
     }
 

@@ -20,25 +20,73 @@ struct WorkspaceDirectoryPaths: Sendable {
     let home: URL
     let guestHome: String
     let workspace: String
+    let chatWorkspace: String
+    let codeWorkspace: String
     let projects: String
+    let scheduled: String
+    let projectWorkspaces: [String]
+    let ownedScheduledWorkspace: String?
     let settings: String
     let savedLocations: URL
 
-    init(home: URL, guestHome: String, workspace: String, projects: String, settings: String) {
+    init(home: URL, guestHome: String, workspace: String, chatWorkspace: String,
+         codeWorkspace: String, projects: String, scheduled: String, settings: String,
+         projectWorkspaces: [String] = [], ownedScheduledWorkspace: String? = nil) {
         self.home = home.standardizedFileURL
         self.guestHome = guestHome
         self.workspace = workspace
+        self.chatWorkspace = chatWorkspace
+        self.codeWorkspace = codeWorkspace
         self.projects = projects
+        self.scheduled = scheduled
+        self.projectWorkspaces = projectWorkspaces.sorted()
+        self.ownedScheduledWorkspace = ownedScheduledWorkspace
         self.settings = settings
         self.savedLocations = home.appendingPathComponent(settings + "/workspace-locations.json")
     }
 
-    static func current() -> Self {
+    static func current(mode: SessionMode, projects: [ProjectSnapshot] = [], scheduledSessionID: String? = nil) -> Self {
         let paths = MobileUserStorage.directories()
+        let projectWorkspaces = projects.compactMap { project -> String? in
+            let id = project.record.id
+            guard UUID(uuidString: id)?.uuidString.lowercased() == id,
+                  project.sourceWorkspace.projectId == id else { return nil }
+            let guest = paths.projectsGuestPath + "/" + id + "/workspace"
+            let host = URL(fileURLWithPath: paths.projects, isDirectory: true)
+                .appendingPathComponent(id, isDirectory: true).appendingPathComponent("workspace", isDirectory: true)
+                .resolvingSymlinksInPath().standardizedFileURL.path
+            guard project.sourceWorkspace.guestPath == guest,
+                  project.sourceWorkspace.hostURL.resolvingSymlinksInPath().standardizedFileURL.path == host else { return nil }
+            return guest
+        }
+        let ownedScheduledWorkspace = scheduledSessionID.flatMap {
+            try? MobileUserStorage.scheduledGuestWorkspace(sessionID: $0)
+        }
         return Self(home: URL(fileURLWithPath: paths.home, isDirectory: true),
-                    guestHome: paths.guestHome, workspace: paths.defaultGuestCwd,
-                    projects: paths.projectsGuestPath,
-                    settings: URL(fileURLWithPath: paths.configHome).lastPathComponent)
+                    guestHome: paths.guestHome, workspace: LXISHGuestPaths.conversationWorkspace(for: mode),
+                    chatWorkspace: paths.chatGuestCwd, codeWorkspace: paths.codeGuestCwd,
+                    projects: paths.projectsGuestPath, scheduled: paths.scheduledGuestCwd,
+                    settings: URL(fileURLWithPath: paths.configHome).lastPathComponent,
+                    projectWorkspaces: projectWorkspaces, ownedScheduledWorkspace: ownedScheduledWorkspace)
+    }
+
+    var managedWorkspaces: [String] {
+        [chatWorkspace, codeWorkspace] + projectWorkspaces + [ownedScheduledWorkspace].compactMap { $0 }
+    }
+    var protectedRoots: [String] { [guestHome, projects, scheduled] + managedWorkspaces }
+    var settingsPath: String { guestHome + "/" + settings }
+
+    func contains(_ path: String, in root: String) -> Bool {
+        path == root || path.hasPrefix(root + "/")
+    }
+
+    func allowsWorkspace(_ path: String) -> Bool {
+        !contains(path, in: settingsPath) || managedWorkspaces.contains { contains(path, in: $0) }
+    }
+
+    func protects(_ path: String, additional: [String]) -> Bool {
+        !allowsWorkspace(path) || (protectedRoots + additional)
+            .contains { $0 == path || $0.hasPrefix(path + "/") }
     }
 
     func display(_ path: String) -> String {
@@ -70,7 +118,7 @@ actor WorkspaceDirectoryRepository {
     let paths: WorkspaceDirectoryPaths
     private let fm = FileManager.default
 
-    init(paths: WorkspaceDirectoryPaths = .current()) { self.paths = paths }
+    init(paths: WorkspaceDirectoryPaths = .current(mode: .code)) { self.paths = paths }
 
     func entries(at path: String, includingHidden: Bool) throws -> [WorkspaceDirectoryEntry] {
         let directory = try resolve(path)
@@ -211,17 +259,30 @@ actor WorkspaceDirectoryRepository {
     }
 
     private func requireWritable(_ path: String) throws {
-        let settings = paths.guestHome + "/" + paths.settings
-        guard path != settings, !path.hasPrefix(settings + "/") else { throw WorkspaceDirectoryError.protectedDirectory }
         let resolved = try resolve(path, directoryOnly: false)
-        let settingsURL = paths.home.appendingPathComponent(paths.settings).resolvingSymlinksInPath()
-        guard resolved.path != settingsURL.path, !resolved.path.hasPrefix(settingsURL.path + "/")
-        else { throw WorkspaceDirectoryError.protectedDirectory }
+        let canonicalPath = guestPath(for: resolved)
+        guard paths.allowsWorkspace(path), paths.allowsWorkspace(canonicalPath) else {
+            throw WorkspaceDirectoryError.protectedDirectory
+        }
+        if paths.contains(path, in: paths.settingsPath) || paths.contains(canonicalPath, in: paths.settingsPath) {
+            // Both names must stay inside the same SDK-owned workspace. This
+            // rejects aliases into config or across workspace boundaries.
+            guard let workspace = paths.managedWorkspaces.first(where: {
+                paths.contains(path, in: $0) && paths.contains(canonicalPath, in: $0)
+            }) else { throw WorkspaceDirectoryError.protectedDirectory }
+            let home = paths.home.resolvingSymlinksInPath().standardizedFileURL
+            let suffix = String(workspace.dropFirst(paths.guestHome.count))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let expected = home.appendingPathComponent(suffix, isDirectory: true).standardizedFileURL
+            guard expected.resolvingSymlinksInPath().standardizedFileURL.path == expected.path else {
+                throw WorkspaceDirectoryError.protectedDirectory
+            }
+        }
     }
 
     private func requireMutable(_ path: String, protectedPaths: [String]) throws {
         try requireWritable(path)
-        let protected = [paths.guestHome, paths.workspace, paths.projects] + protectedPaths
+        let protected = paths.protectedRoots + protectedPaths
         guard !protected.contains(where: { $0 == path || $0.hasPrefix(path + "/") })
         else { throw WorkspaceDirectoryError.protectedDirectory }
         let target = try resolve(path, directoryOnly: false)

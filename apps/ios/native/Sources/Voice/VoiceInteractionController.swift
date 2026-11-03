@@ -803,7 +803,7 @@ final class VoiceInteractionController {
     }
 
     func startFlow(source: any ConversationSource, onRejectedTranscript: @escaping (String) -> Void = { _ in }) {
-        guard controlsRealtimeSession, !source.isTemporaryConversation else { return }
+        guard controlsRealtimeSession, !source.isTemporaryConversation, source.isAvailableForPrompts else { return }
         guard mode != .flow else { return }
         guard mode != .dictation || voiceCapture.phase == .idle else { return }
         guard ownership.acquire(self) else {
@@ -1281,7 +1281,7 @@ final class VoiceInteractionController {
     }
 
     private func startRealtimeConversation() {
-        guard let source, !source.model.streaming, !source.model.isCancelling,
+        guard let source, source.isAvailableForPrompts, !source.model.streaming, !source.model.isCancelling,
               !source.model.sessionTransitionPending else {
             fail(String(localized: "voice_flow_busy_wait_to_open"))
             return

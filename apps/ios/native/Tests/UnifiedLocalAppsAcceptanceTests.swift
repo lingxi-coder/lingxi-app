@@ -18,7 +18,7 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
         throw XCTSkip("Physical iPhone iSH filesystem routing acceptance")
         #else
         LXISHRuntimeResourceBootstrap.prepare()
-        let metadata = LXISHRuntimeBundleMetadata.current()
+        let metadata = try LXISHRuntimeBundleMetadata.current()
         let storage = MobileUserStorage.directories()
         let existingTarget = (try? FileManager.default.destinationOfSymbolicLink(atPath: storage.projects)) ?? "<not a symlink>"
         print("IOS_LOCAL_APP_WORKSPACE_PREPARATION projects=\(storage.projects) linkTarget=\(existingTarget)")
@@ -195,7 +195,7 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
         #else
         let library = UnifiedLocalApps()
         let fixtures = try XCTUnwrap(Bundle(for: Self.self).resourceURL).appendingPathComponent("UnifiedAppFixtures/static")
-        let published: LocalAppPublishResult = try await library.client.request(["op": .string("publish"), "expectedRevision": .number(0), "sourcePath": .string(fixtures.path)])
+        let published: LocalAppPublishResult = try await library.client.request(["op": .string("publish"), "expectedRevision": .number(0), "sourcePath": .string(fixtures.path)], purpose: .development(.code))
         var created = [published.record.appId]
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("source-roundtrip-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -204,7 +204,7 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
             let archive = try await library.sourceArchive(published.record.appId, revision: published.release.revision)
             XCTAssertEqual(Set(archive.files), ["lingxi-app.json", "dist/index.html", "dist/client.js"])
             let zip = folder.appendingPathComponent("source.zip"); try archive.bytes.write(to: zip)
-            let imported = try await library.importSource(zip)
+            let imported = try await library.importSource(zip, mode: .code)
             created.append(imported.record.appId)
             XCTAssertNotEqual(imported.record.appId, published.record.appId)
             XCTAssertNil(imported.record.marketOrigin)
@@ -247,15 +247,12 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
         }
         let session = URLSession(configuration: .ephemeral)
         func publish(_ name: String) async throws -> LocalAppPublishResult {
-            let guest = MobileUserStorage.directories().appsGuestPath + "/acceptance-\(UUID().uuidString.lowercased())"
-            let source = try UnifiedLocalApps.hostSourceDirectory(guest)
-            try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let source = FileManager.default.temporaryDirectory.appendingPathComponent("local-app-acceptance-\(UUID().uuidString.lowercased())", isDirectory: true)
             try FileManager.default.copyItem(at: fixtures.appendingPathComponent(name), to: source)
             sources.append(source)
             let result: LocalAppPublishResult = try await client.request([
-                "op": .string("publish"), "expectedRevision": .number(0), "sourcePath": .string(source.path),
-                "authoring": try .encode(LocalAppAuthoring(sourceDirectory: guest))
-            ])
+                "op": .string("publish"), "expectedRevision": .number(0), "sourcePath": .string(source.path)
+            ], purpose: .development(.code))
             created.append(result.record.appId)
             return result
         }

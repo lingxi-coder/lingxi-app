@@ -17,7 +17,8 @@ enum LXISHRuntimeResourceBootstrap {
         // Resolve existing overrides and Bundle resources once. The Rust host
         // composer resolves the final managed-root fallback per configuration,
         // so a caller's custom managed root never inherits the default root.
-        let resolved = resolvedLegacyResourceOverrides(managedRoot: "", environment: environment)
+        guard (try? LXISHRuntimeBundleMetadata.current()) != nil else { return }
+        let resolved = resolvedResourceOverrides(managedRoot: "", environment: environment)
         for key in [archiveEnvironmentKey, defaultMountEnvironmentKey] {
             if let path = resolved[key] {
                 setenv(key, path, 1)
@@ -35,7 +36,7 @@ enum LXISHRuntimeResourceBootstrap {
         _ = prepared
     }
 
-    static func resolvedLegacyResourceOverrides(
+    static func resolvedResourceOverrides(
         managedRoot: String,
         bundle: Bundle = .main,
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -63,8 +64,11 @@ enum LXISHRuntimeResourceBootstrap {
         fileManager: FileManager = .default
     ) -> URL? {
         let managed = managedRoot.isEmpty ? nil : URL(fileURLWithPath: managedRoot, isDirectory: true)
+        if let override = environment[archiveEnvironmentKey] {
+            guard let url = resourceOverrideURL(override), fileManager.fileExists(atPath: url.path) else { return nil }
+            return url
+        }
         return firstExistingURL([
-            resourceOverrideURL(environment[archiveEnvironmentKey]),
             bundle.url(forResource: "alpine-rootfs", withExtension: "zip"),
             bundle.url(forResource: "alpine-rootfs", withExtension: "zip", subdirectory: "LinuxRuntimeNative"),
             bundle.resourceURL?.appendingPathComponent("alpine-rootfs.zip"),

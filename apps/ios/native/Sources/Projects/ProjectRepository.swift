@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 let projectIndexFileName = "index.json"
 let projectManifestFileName = "project.json"
@@ -7,6 +8,10 @@ let projectSessionIndexFileName = "session-spaces.json"
 let projectSyncBaselineFileName = "sync-baseline.json"
 let projectWorkspaceDirectoryName = "workspace"
 let globalSessionIndexFileName = "global-session-spaces.json"
+private let localAppIntentPrefix = ".local-app-intent-"
+private let localAppSelectionFileName = ".local-app-selection.json"
+private let localAppCreatePrefix = ".local-app-create-"
+private let localAppImportsDirectoryName = "local-app-imports"
 
 protocol ProjectAtomicWriting: Sendable {
     func write<T: Codable>(_ value: T, to url: URL, encoder: JSONEncoder, decoder: JSONDecoder) throws
@@ -241,6 +246,362 @@ final class ProjectRepository: @unchecked Sendable {
         try createProject(name: name, storageKind: .internal, sourceBookmark: nil, mode: mode)
     }
 
+    /// Persist before calling createAuthoring. The request is a recovery hint,
+    /// never authority to mount a source or admit a conversation turn.
+    func storeLocalAppSourceCreateIntent(_ intent: LocalAppSourceCreateIntent) throws {
+        try validateLocalAppSourceCreateIntent(intent)
+        let url = projectsRoot.appendingPathComponent(localAppCreatePrefix + intent.requestId + ".json")
+        let data = try encoder.encode(intent)
+        guard data.count <= 65_536 else { throw ProjectRepositoryError.invalidProjectData }
+        if try ownerCatalogFileExists(url) {
+            let existing = try boundedAuthoringIntentSnapshot(url)
+            guard try decodeLocalAppSourceCreateIntent(existing.bytes) == intent else {
+                throw ProjectRepositoryError.invalidProjectData
+            }
+            try synchronizeOwnerCatalog(url, expectedBytes: existing.bytes)
+            return
+        }
+        try writer.writeData(data, to: url, expected: .absent, validate: { staged in
+            guard try self.decodeLocalAppSourceCreateIntent(staged) == intent else {
+                throw ProjectRepositoryError.invalidProjectData
+            }
+        }, commit: { try $0() })
+        try synchronizeOwnerCatalog(url, expectedBytes: data)
+    }
+
+    func pendingLocalAppSourceCreations() throws -> [LocalAppSourceCreateIntent] {
+        let names = try FileManager.default.contentsOfDirectory(atPath: projectsRoot.path)
+            .filter { $0.hasPrefix(localAppCreatePrefix) }.sorted()
+        guard names.count <= 4096 else { throw ProjectRepositoryError.invalidProjectData }
+        return try names.compactMap { name in
+            guard name.hasSuffix(".json") else { throw ProjectRepositoryError.invalidProjectData }
+            let identifier = String(name.dropFirst(localAppCreatePrefix.count).dropLast(5))
+            guard isLowercaseUUID(identifier) else { throw ProjectRepositoryError.invalidProjectData }
+            let intent = try decodeLocalAppSourceCreateIntent(
+                boundedAuthoringIntentSnapshot(projectsRoot.appendingPathComponent(name)).bytes)
+            guard intent.requestId == identifier else { throw ProjectRepositoryError.invalidProjectData }
+            return intent.completed ? nil : intent
+        }
+    }
+
+    /// Completion hides the recovery offer only after the native owner receipt
+    /// has been checked. It does not provide authorization itself.
+    func completeLocalAppSourceCreateIntent(requestID: String, owner: LocalAppAuthoringIntent) throws {
+        guard let current = try localAppSourceCreateIntent(requestID: requestID),
+              owner.intentId == requestID, owner.projectId == current.projectId,
+              owner.sourceRequestId == requestID,
+              (current.operation == .marketRemix ? (owner.appId?.isEmpty == false) : owner.appId == current.appId),
+              owner.authoringSessionId != nil, owner.transcriptPath != nil else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        if current.operation == .bind {
+            guard current.sourceId == owner.sourceId, current.sourceDirectory == owner.sourceDirectory else {
+                throw ProjectRepositoryError.invalidProjectData
+            }
+        }
+        let matching = try localAppAuthoringIntents(projectId: owner.projectId).filter { $0.intentId == requestID }
+        guard matching.count == 1, matching[0] == owner else { throw ProjectRepositoryError.invalidProjectData }
+        if current.completed { return }
+        let url = projectsRoot.appendingPathComponent(localAppCreatePrefix + requestID + ".json")
+        let snapshot = try boundedAuthoringIntentSnapshot(url)
+        guard try decodeLocalAppSourceCreateIntent(snapshot.bytes) == current else { throw ProjectRepositoryError.invalidProjectData }
+        var updated = current
+        updated.completed = true
+        let data = try encoder.encode(updated)
+        try writer.writeData(data, to: url, expected: .present(snapshot), validate: { staged in
+            guard try self.decodeLocalAppSourceCreateIntent(staged) == updated else {
+                throw ProjectRepositoryError.invalidProjectData
+            }
+        }, commit: { try $0() })
+        try synchronizeOwnerCatalog(url, expectedBytes: data)
+    }
+
+    func localAppSourceCreateIntent(requestID: String) throws -> LocalAppSourceCreateIntent? {
+        guard isLowercaseUUID(requestID) else { throw ProjectRepositoryError.invalidProjectData }
+        let url = projectsRoot.appendingPathComponent(localAppCreatePrefix + requestID + ".json")
+        guard try ownerCatalogFileExists(url) else { return nil }
+        let intent = try decodeLocalAppSourceCreateIntent(boundedAuthoringIntentSnapshot(url).bytes)
+        guard intent.requestId == requestID else { throw ProjectRepositoryError.invalidProjectData }
+        return intent
+    }
+
+    private func decodeLocalAppSourceCreateIntent(_ data: Data) throws -> LocalAppSourceCreateIntent {
+        try UniqueJSONKeyGuard.validate(data)
+        guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        let required: Set<String> = ["version", "requestId", "projectId", "mode", "name", "prompt", "operation", "completed"]
+        let allowed = required.union(["appId", "revision", "sourceId", "sourceDirectory", "remixInputDigest"])
+        guard required.isSubset(of: Set(fields.keys)), Set(fields.keys).isSubset(of: allowed) else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        let intent = try decoder.decode(LocalAppSourceCreateIntent.self, from: data)
+        try validateLocalAppSourceCreateIntent(intent)
+        return intent
+    }
+
+    private func validateLocalAppSourceCreateIntent(_ intent: LocalAppSourceCreateIntent) throws {
+        let name = intent.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard intent.version == 1, intent.mode == .code, isLowercaseUUID(intent.requestId), isLowercaseUUID(intent.projectId),
+              name == intent.name, !name.isEmpty, name.count <= 120,
+              intent.prompt.utf8.count <= 48_000 else { throw ProjectRepositoryError.invalidProjectData }
+        switch intent.operation {
+        case .create:
+            guard name.unicodeScalars.count <= 80,
+                  intent.appId == nil, intent.revision == nil, intent.sourceId == nil, intent.sourceDirectory == nil,
+                  intent.remixInputDigest == nil else {
+                throw ProjectRepositoryError.invalidProjectData
+            }
+        case .restore:
+            guard let appID = intent.appId, !appID.isEmpty, appID.utf8.count <= 256,
+                  let revision = intent.revision, revision > 0, intent.sourceId == nil, intent.sourceDirectory == nil,
+                  intent.remixInputDigest == nil else {
+                throw ProjectRepositoryError.invalidProjectData
+            }
+        case .bind:
+            let prefix = MobileUserStorage.directories().appsGuestPath + "/"
+            guard let appID = intent.appId, !appID.isEmpty, appID.utf8.count <= 256,
+                  let sourceID = intent.sourceId, isLowercaseUUID(sourceID),
+                  let directory = intent.sourceDirectory, directory.hasPrefix(prefix),
+                  !directory.dropFirst(prefix.count).isEmpty,
+                  !directory.dropFirst(prefix.count).contains("/"),
+                  !directory.dropFirst(prefix.count).contains("\\"),
+                  directory.dropFirst(prefix.count) != ".", directory.dropFirst(prefix.count) != "..",
+                  intent.revision == nil, intent.remixInputDigest == nil else { throw ProjectRepositoryError.invalidProjectData }
+        case .marketRemix:
+            guard intent.appId == nil, intent.revision == nil, intent.sourceId == nil, intent.sourceDirectory == nil,
+                  let digest = intent.remixInputDigest, Self.isSHA256(digest) else {
+                throw ProjectRepositoryError.invalidProjectData
+            }
+        }
+    }
+
+    private static func isSHA256(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+
+    private static func digest(_ bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func encodeRemixInput(_ input: LocalAppMarketRemixInput) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(input)
+    }
+
+    static func localAppRemixInputDigest(_ input: LocalAppMarketRemixInput) throws -> String {
+        digest(try encodeRemixInput(input))
+    }
+
+    private func validateRemixInput(_ input: LocalAppMarketRemixInput, intent: LocalAppSourceCreateIntent) throws {
+        let encoder = JSONEncoder()
+        guard try decoder.decode(UnifiedAppManifest.self, from: encoder.encode(input.signedManifest)) == input.manifest,
+              try decoder.decode([LocalAppMarketRemixInput.File].self, from: encoder.encode(input.signedFiles)) == input.files,
+              try decoder.decode([LocalAppMarketRemixInput.File].self, from: encoder.encode(input.signedDependencies)) == input.dependencies else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        guard intent.operation == .marketRemix, input.requestId == intent.requestId,
+              (input.archivePath as NSString).isAbsolutePath,
+              URL(fileURLWithPath: input.archivePath).standardizedFileURL.path == input.archivePath,
+              URL(fileURLWithPath: input.archivePath).lastPathComponent == "source.zip",
+              URL(fileURLWithPath: input.archivePath).deletingLastPathComponent().lastPathComponent == "market-" + intent.requestId,
+              URL(fileURLWithPath: input.archivePath).deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == localAppImportsDirectoryName,
+              input.archiveBytes > 0, input.archiveBytes <= 25 * 1024 * 1024,
+              Self.isSHA256(input.archiveSha256), input.manifest.remix?.allowed == true,
+              input.manifest.name.trimmingCharacters(in: .whitespacesAndNewlines) == intent.name,
+              !input.marketOrigin.appId.isEmpty, !input.marketOrigin.releaseId.isEmpty,
+              input.marketOrigin.remixedFrom == input.marketOrigin.appId,
+              input.files.count > 0, input.files.count <= 2_000,
+              Set(input.files.map(\.path)).count == input.files.count,
+              input.files.contains(where: { $0.path == "lingxi-app.json" }),
+              input.files.allSatisfy({ !$0.path.isEmpty && $0.path.utf16.count <= 512 &&
+                  $0.sizeBytes >= 0 && $0.sizeBytes <= 25 * 1024 * 1024 && Self.isSHA256($0.sha256) }),
+              input.dependencies.allSatisfy({ input.files.contains($0) }) else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+    }
+
+    /// Publish the exact release description before the discoverable request;
+    /// an interrupted write can leave an inert orphan but never a false proof.
+    func storeLocalAppRemixRequest(_ intent: LocalAppSourceCreateIntent, input: LocalAppMarketRemixInput,
+                                   configHome: URL) throws {
+        try validateLocalAppSourceCreateIntent(intent)
+        try validateRemixInput(input, intent: intent)
+        let bytes = try Self.encodeRemixInput(input)
+        guard bytes.count <= 8 * 1024 * 1024, Self.digest(bytes) == intent.remixInputDigest else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        let directory = try remixStagingDirectory(configHome, requestID: intent.requestId)
+        guard input.archivePath == directory.appendingPathComponent("source.zip").path else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        let url = directory.appendingPathComponent("input.json")
+        if try ownerCatalogFileExists(url) {
+            let existing = try boundedOwnerCatalogSnapshot(url, maximumSize: 8 * 1024 * 1024)
+            guard existing.bytes == bytes else { throw ProjectRepositoryError.invalidProjectData }
+        } else {
+            try writer.writeData(bytes, to: url, expected: .absent, validate: { staged in
+                guard staged == bytes else { throw ProjectRepositoryError.invalidProjectData }
+            }, commit: { try $0() })
+        }
+        try synchronizeOwnerCatalog(url, expectedBytes: bytes)
+        try storeLocalAppSourceCreateIntent(intent)
+    }
+
+    /// Loading a completed SDK request must not require its ZIP still to be
+    /// present: the native handler checks the durable request receipt first.
+    func localAppRemixInput(_ intent: LocalAppSourceCreateIntent, configHome: URL) throws -> (LocalAppMarketRemixInput, URL) {
+        try validateLocalAppSourceCreateIntent(intent)
+        guard try localAppSourceCreateIntent(requestID: intent.requestId) == intent else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        let directory = try remixStagingDirectory(configHome, requestID: intent.requestId)
+        let metadata = try boundedOwnerCatalogSnapshot(directory.appendingPathComponent("input.json"),
+                                                       maximumSize: 8 * 1024 * 1024).bytes
+        guard Self.digest(metadata) == intent.remixInputDigest else { throw ProjectRepositoryError.invalidProjectData }
+        try UniqueJSONKeyGuard.validate(metadata)
+        let input = try decoder.decode(LocalAppMarketRemixInput.self, from: metadata)
+        try validateRemixInput(input, intent: intent)
+        return (input, URL(fileURLWithPath: input.archivePath))
+    }
+
+    func storeLocalAppRemixArchive(_ bytes: Data, intent: LocalAppSourceCreateIntent, configHome: URL) throws -> URL {
+        let (input, url) = try localAppRemixInput(intent, configHome: configHome)
+        let currentDirectory = try remixStagingDirectory(configHome, requestID: intent.requestId)
+        guard url.path == currentDirectory.appendingPathComponent("source.zip").path,
+              bytes.count == input.archiveBytes, Self.digest(bytes) == input.archiveSha256 else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        if try ownerCatalogFileExists(url) {
+            let existing = try boundedOwnerCatalogSnapshot(url, maximumSize: 25 * 1024 * 1024)
+            guard existing.bytes == bytes else { throw ProjectRepositoryError.invalidProjectData }
+        } else {
+            try writer.writeData(bytes, to: url, expected: .absent, validate: { staged in
+                guard staged == bytes else { throw ProjectRepositoryError.invalidProjectData }
+            }, commit: { try $0() })
+        }
+        try synchronizeOwnerCatalog(url, expectedBytes: bytes)
+        return url
+    }
+
+    private func remixStagingDirectory(_ configHome: URL, requestID: String) throws -> URL {
+        guard isLowercaseUUID(requestID) else { throw ProjectRepositoryError.invalidProjectData }
+        let root = configHome.standardizedFileURL
+        let descriptor = root.path.withCString { open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+        guard descriptor >= 0 else { throw ProjectRepositoryError.invalidProjectData }
+        defer { close(descriptor) }
+        func openChild(_ parent: Int32, name: String) throws -> Int32 {
+            let made = name.withCString { mkdirat(parent, $0, 0o700) }
+            guard made == 0 || errno == EEXIST else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            if made == 0, fsync(parent) != 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            let child = name.withCString { openat(parent, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+            guard child >= 0 else { throw ProjectRepositoryError.invalidProjectData }
+            var information = stat()
+            guard fstat(child, &information) == 0, information.st_mode & 0o077 == 0 else {
+                close(child)
+                throw ProjectRepositoryError.invalidProjectData
+            }
+            return child
+        }
+        let imports = try openChild(descriptor, name: localAppImportsDirectoryName)
+        defer { close(imports) }
+        let requestName = "market-" + requestID
+        let request = try openChild(imports, name: requestName)
+        defer { close(request) }
+        return root.appendingPathComponent(localAppImportsDirectoryName, isDirectory: true)
+            .appendingPathComponent(requestName, isDirectory: true)
+    }
+
+    /// Publish a complete recoverable project in one directory rename. A
+    /// crash before the rename leaves the durable create request available;
+    /// a crash afterwards exposes both the project and its selected intent.
+    func createLocalAppAuthoringProject(name: String, sourceDirectory: String, sourceID: String, sourceRequestID: String,
+                                        appID: String?, projectID: String, intentID: String)
+        throws -> (ProjectSnapshot, LocalAppAuthoringIntent) {
+        try validateProjectID(projectID)
+        guard isLowercaseUUID(intentID), isLowercaseUUID(sourceID), isLowercaseUUID(sourceRequestID) else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, cleanName.count <= 120 else { throw ProjectRepositoryError.blankProjectName }
+        let intent = LocalAppAuthoringIntent(intentId: intentID, sourceId: sourceID, sourceRequestId: sourceRequestID,
+            sourceDirectory: sourceDirectory, projectId: projectID, appId: appID)
+        let directory = projectDirectory(projectID)
+        if try ownerCatalogFileExists(directory) {
+            let project = try loadProject(id: projectID)
+            let matching = try localAppAuthoringIntents(projectId: projectID).filter { $0.intentId == intentID }
+            guard matching.count == 1, matching[0].sourceId == sourceID, matching[0].sourceRequestId == sourceRequestID,
+                  matching[0].sourceDirectory == sourceDirectory, matching[0].appId == appID else {
+                throw ProjectRepositoryError.invalidProjectData
+            }
+            return (project, matching[0])
+        }
+
+        let indexURL = projectsRoot.appendingPathComponent(projectIndexFileName)
+        var indexExpected = try ownerCatalogExpectation(indexURL)
+        _ = try healthyState()
+        let index = try readIndex()
+        // Ensure an existing, valid index before exposing a directory. The
+        // repository deliberately treats a missing index beside a UUID as
+        // corruption, including after a crash during project creation.
+        if case .absent = indexExpected {
+            try writeIndex(index, expected: .absent)
+            let data = try ownerCatalogSnapshot(indexURL).bytes
+            try synchronizeOwnerCatalog(indexURL, expectedBytes: data)
+            indexExpected = try ownerCatalogExpectation(indexURL)
+        }
+        let staging = projectsRoot.appendingPathComponent(".local-app-staging-" + UUID().uuidString.lowercased(), isDirectory: true)
+        let workspaceURL = staging.appendingPathComponent(projectWorkspaceDirectoryName, isDirectory: true)
+        var published = false
+        do {
+            try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
+            let timestamp = now()
+            let record = ProjectRecord(id: projectID, name: cleanName, storageKind: .internal,
+                createdAt: timestamp, updatedAt: timestamp, activeDirectory: sourceDirectory,
+                additionalDirectories: [sourceDirectory], modeMembership: [.code])
+            let project = ProjectSnapshot(record: record,
+                workspace: try workspaceForDirectory(projectId: projectID, guestPath: sourceDirectory, requireExisting: false),
+                sourceWorkspace: ProjectWorkspace(projectId: projectID, hostURL: workspaceURL), sessions: [])
+            try validateAuthoringIntent(intent, project: project)
+            let selection = LocalAppAuthoringSelection(projectId: projectID, intentId: intentID)
+            try writeDurableStaged(record, to: staging.appendingPathComponent(projectManifestFileName))
+            try writeDurableStaged(ProjectSessionIndex(sessions: []), to: staging.appendingPathComponent(projectSessionIndexFileName))
+            try writeDurableStaged(VersionedBaseline(files: []), to: staging.appendingPathComponent(projectSyncBaselineFileName))
+            try writeDurableStaged(intent, to: staging.appendingPathComponent(localAppIntentPrefix + intentID + ".json"))
+            try writeDurableStaged(selection, to: staging.appendingPathComponent(localAppSelectionFileName))
+            let result: Int32 = staging.withUnsafeFileSystemRepresentation { source in
+                directory.withUnsafeFileSystemRepresentation { destination in
+                    guard let source, let destination else { return -1 }
+                    return Darwin.renamex_np(source, destination, UInt32(RENAME_EXCL))
+                }
+            }
+            guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            published = true
+            let descriptor = projectsRoot.path.withCString { open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+            guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            defer { close(descriptor) }
+            guard fsync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            try writeIndex(ProjectIndex(activeProjectId: index.activeProjectId,
+                projectIds: (index.projectIds + [projectID]).uniqued()), expected: indexExpected)
+            let indexData = try ownerCatalogSnapshot(indexURL).bytes
+            try synchronizeOwnerCatalog(indexURL, expectedBytes: indexData)
+            return (try loadProject(id: projectID), intent)
+        } catch {
+            if !published { try? FileManager.default.removeItem(at: staging) }
+            throw error
+        }
+    }
+
+    private func writeDurableStaged<T: Codable>(_ value: T, to url: URL) throws {
+        let data = try encoder.encode(value)
+        guard data.count <= 65_536 else { throw ProjectRepositoryError.invalidProjectData }
+        try writer.writeData(data, to: url, expected: .absent, validate: { staged in
+            _ = try self.decoder.decode(T.self, from: staged)
+        }, commit: { try $0() })
+        try synchronizeOwnerCatalog(url, expectedBytes: data)
+    }
+
     func createImported(name: String, sourceBookmark: ProjectExternalBookmark, mode: SessionMode = .code) throws -> ProjectSnapshot {
         try createProject(name: name, storageKind: .externalBookmarkMirror, sourceBookmark: sourceBookmark, mode: mode)
     }
@@ -268,6 +629,150 @@ final class ProjectRepository: @unchecked Sendable {
         normalized.updatedAt = now()
         try writeProject(normalized, expected: expected)
         return try loadProject(id: record.id)
+    }
+
+    /// Intent is recovery evidence only. The native Local App service must
+    /// still authenticate sourceId and the exact session before granting use.
+    func localAppAuthoringIntents(projectId: String) throws -> [LocalAppAuthoringIntent] {
+        let project = try loadProject(id: projectId)
+        let directory = projectDirectory(projectId)
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { $0.hasPrefix(localAppIntentPrefix) }.sorted()
+        guard names.count <= 4096 else { throw ProjectRepositoryError.invalidProjectData }
+        return try names.map { name in
+            guard name.hasSuffix(".json") else { throw ProjectRepositoryError.invalidProjectData }
+            let identifier = String(name.dropFirst(localAppIntentPrefix.count).dropLast(5))
+            guard isLowercaseUUID(identifier) else { throw ProjectRepositoryError.invalidProjectData }
+            let snapshot = try boundedAuthoringIntentSnapshot(directory.appendingPathComponent(name))
+            let intent = try decodeAuthoringIntent(snapshot.bytes)
+            try validateAuthoringIntent(intent, project: project)
+            guard intent.intentId == identifier else { throw ProjectRepositoryError.invalidProjectData }
+            return intent
+        }
+    }
+
+    func storeLocalAppAuthoringIntent(_ intent: LocalAppAuthoringIntent,
+                                      replacing previous: LocalAppAuthoringIntent?) throws {
+        let project = try loadProject(id: intent.projectId)
+        try validateAuthoringIntent(intent, project: project)
+        if let previous {
+            guard previous.intentId == intent.intentId, previous.sourceId == intent.sourceId,
+                  previous.sourceRequestId == intent.sourceRequestId,
+                  previous.sourceDirectory == intent.sourceDirectory, previous.projectId == intent.projectId,
+                  previous.mode == intent.mode, previous.appId == intent.appId,
+                  previous.authoringSessionId == nil || previous.authoringSessionId == intent.authoringSessionId,
+                  previous.transcriptPath == nil || previous.transcriptPath == intent.transcriptPath else {
+                throw ProjectRepositoryError.invalidProjectData
+            }
+        }
+        let url = projectDirectory(intent.projectId)
+            .appendingPathComponent(localAppIntentPrefix + intent.intentId + ".json")
+        let expected: OwnerCatalogExpectation
+        if try ownerCatalogFileExists(url) {
+            let snapshot = try boundedAuthoringIntentSnapshot(url)
+            let current = try decodeAuthoringIntent(snapshot.bytes)
+            try validateAuthoringIntent(current, project: project)
+            if current == intent {
+                try synchronizeOwnerCatalog(url, expectedBytes: snapshot.bytes)
+                return
+            }
+            guard current == previous else { throw ProjectRepositoryError.invalidProjectData }
+            expected = .present(snapshot)
+        } else {
+            guard previous == nil else { throw ProjectRepositoryError.invalidProjectData }
+            expected = .absent
+        }
+        let data = try encoder.encode(intent)
+        guard data.count <= 65_536 else { throw ProjectRepositoryError.invalidProjectData }
+        try writer.writeData(data, to: url, expected: expected, validate: { staged in
+            guard try self.decodeAuthoringIntent(staged) == intent else { throw ProjectRepositoryError.invalidProjectData }
+        }, commit: { try $0() })
+        try synchronizeOwnerCatalog(url, expectedBytes: data)
+    }
+
+    func selectedLocalAppAuthoringIntent(projectId: String) throws -> LocalAppAuthoringIntent? {
+        let intents = try localAppAuthoringIntents(projectId: projectId)
+        let url = projectDirectory(projectId).appendingPathComponent(localAppSelectionFileName)
+        guard try ownerCatalogFileExists(url) else { return nil }
+        let snapshot = try boundedAuthoringIntentSnapshot(url)
+        let selection = try decodeAuthoringSelection(snapshot.bytes, projectId: projectId)
+        let matches = intents.filter { $0.intentId == selection.intentId }
+        guard matches.count == 1 else { throw ProjectRepositoryError.invalidProjectData }
+        return matches[0]
+    }
+
+    func selectLocalAppAuthoringIntent(projectId: String, intentId: String,
+                                       authority: WorkspaceWriteAuthority, revision: UInt64,
+                                       projectAuthority: WorkspaceWriteAuthority, projectRevision: UInt64) throws {
+        let intents = try localAppAuthoringIntents(projectId: projectId)
+        guard intents.filter({ $0.intentId == intentId }).count == 1 else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        let url = projectDirectory(projectId).appendingPathComponent(localAppSelectionFileName)
+        let expected: OwnerCatalogExpectation
+        if try ownerCatalogFileExists(url) {
+            let snapshot = try boundedAuthoringIntentSnapshot(url)
+            _ = try decodeAuthoringSelection(snapshot.bytes, projectId: projectId)
+            expected = .present(snapshot)
+        } else {
+            expected = .absent
+        }
+        let selection = LocalAppAuthoringSelection(projectId: projectId, intentId: intentId)
+        let data = try encoder.encode(selection)
+        try writer.writeData(data, to: url, expected: expected, validate: { staged in
+            guard try self.decodeAuthoringSelection(staged, projectId: projectId) == selection else {
+                throw ProjectRepositoryError.invalidProjectData
+            }
+        }, commit: { replace in
+            try authority.commit(revision: revision) { _ in
+                try projectAuthority.commit(revision: projectRevision) { _ in try replace() }
+            }
+        })
+        try synchronizeOwnerCatalog(url, expectedBytes: data)
+    }
+
+    private func decodeAuthoringSelection(_ data: Data, projectId: String) throws -> LocalAppAuthoringSelection {
+        try UniqueJSONKeyGuard.validate(data)
+        guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(fields.keys) == Set(["version", "projectId", "intentId"]) else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        let selection = try decoder.decode(LocalAppAuthoringSelection.self, from: data)
+        guard selection.version == 1, selection.projectId == projectId,
+              isLowercaseUUID(selection.projectId), isLowercaseUUID(selection.intentId) else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        return selection
+    }
+
+    private func decodeAuthoringIntent(_ data: Data) throws -> LocalAppAuthoringIntent {
+        try UniqueJSONKeyGuard.validate(data)
+        guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        let required: Set<String> = ["version", "intentId", "sourceId", "sourceRequestId", "sourceDirectory", "projectId", "mode"]
+        let allowed = required.union(["authoringSessionId", "transcriptPath", "appId"])
+        guard required.isSubset(of: Set(fields.keys)), Set(fields.keys).isSubset(of: allowed) else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        return try decoder.decode(LocalAppAuthoringIntent.self, from: data)
+    }
+
+    private func validateAuthoringIntent(_ intent: LocalAppAuthoringIntent, project: ProjectSnapshot) throws {
+        let root = MobileUserStorage.directories().appsGuestPath + "/"
+        let tail = intent.sourceDirectory.hasPrefix(root) ? String(intent.sourceDirectory.dropFirst(root.count)) : ""
+        guard intent.version == 1, intent.mode == .code,
+              (intent.authoringSessionId == nil && intent.transcriptPath == nil)
+                || (intent.authoringSessionId != nil && intent.transcriptPath.map({ !$0.isEmpty && ($0 as NSString).isAbsolutePath }) == true),
+              isLowercaseUUID(intent.intentId), isLowercaseUUID(intent.sourceId), isLowercaseUUID(intent.sourceRequestId),
+              isLowercaseUUID(intent.projectId), intent.projectId == project.record.id,
+              intent.authoringSessionId.map(isLowercaseUUID) ?? true,
+              !tail.isEmpty, tail != ".", tail != "..", !tail.contains("/"), !tail.contains("\\"),
+              intent.appId.map({ !$0.isEmpty && $0.utf8.count <= 256 }) ?? true,
+              project.record.activeDirectory == intent.sourceDirectory
+                || project.record.additionalDirectories.contains(intent.sourceDirectory) else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
     }
 
     func updateSessions(projectId: String?, sessions: [ProjectSessionSummary]) throws -> ProjectRepositoryState {
@@ -813,6 +1318,33 @@ private func ownerCatalogSnapshot(_ url: URL) throws -> OwnerCatalogSnapshot {
     guard fstat(descriptor, &information) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     let before = try OwnerCatalogVersion(information)
     let bytes = try handle.readToEnd() ?? Data()
+    guard fstat(descriptor, &information) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    let after = try OwnerCatalogVersion(information)
+    guard before == after, try ownerCatalogVersion(url) == after else { throw ProjectRepositoryError.invalidProjectData }
+    return OwnerCatalogSnapshot(version: after, bytes: bytes)
+}
+
+private func boundedAuthoringIntentSnapshot(_ url: URL) throws -> OwnerCatalogSnapshot {
+    try boundedOwnerCatalogSnapshot(url, maximumSize: 65_536)
+}
+
+private func boundedOwnerCatalogSnapshot(_ url: URL, maximumSize: Int) throws -> OwnerCatalogSnapshot {
+    let descriptor = url.path.withCString { Darwin.open($0, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK) }
+    guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    defer { try? handle.close() }
+    var information = stat()
+    guard fstat(descriptor, &information) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    let before = try OwnerCatalogVersion(information)
+    guard before.size >= 0, before.size <= off_t(maximumSize) else { throw ProjectRepositoryError.invalidProjectData }
+    let length = Int(before.size)
+    var bytes = Data()
+    while bytes.count < length {
+        guard let chunk = try handle.read(upToCount: length - bytes.count), !chunk.isEmpty else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        bytes.append(chunk)
+    }
     guard fstat(descriptor, &information) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     let after = try OwnerCatalogVersion(information)
     guard before == after, try ownerCatalogVersion(url) == after else { throw ProjectRepositoryError.invalidProjectData }

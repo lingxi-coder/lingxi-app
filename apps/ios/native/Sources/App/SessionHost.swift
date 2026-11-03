@@ -31,6 +31,14 @@ enum SessionHandoffPresentationPolicy {
     }
 }
 
+@MainActor
+enum SessionOwnerDrainPolicy {
+    static func confirmed(waitForMedia: () async -> Bool, waitForSession: () async -> Bool) async -> Bool {
+        guard await waitForMedia() else { return false }
+        return await waitForSession()
+    }
+}
+
 /// A queued workspace commit must still belong to the same live source and
 /// session revision when the project writer actually reaches it. The lock is
 /// never held while waiting for that queue or a native async operation.
@@ -94,6 +102,7 @@ final class SessionHost {
             didSet { if draftSourceCodeUnits != oldValue { draftRevision &+= 1 } }
         }
         var handoffReference: SessionHandoffReference?
+        fileprivate var replacement: Entry?
         let voice: VoiceInteractionController
         fileprivate let execution = ConversationBackgroundExecutionController.live()
         fileprivate let alerts: ConversationBackgroundAlertController
@@ -140,6 +149,21 @@ final class SessionHost {
         }
     }
     private var preparingClaims: [String: PreparingClaim] = [:]
+    private struct FailedPreparation {
+        let source: any ConversationSource
+        let scope: ConversationScope
+        let mode: SessionMode
+        let expectedSessionID: String?
+        var sessionID: String?
+        var drainID: UUID?
+        var drainTask: Task<Void, Error>?
+    }
+    // A prepared native handle can outlive its Swift call site. Retain it
+    // until its exact native UUID has drained, even if publication failed.
+    private var failedPreparations: [String: FailedPreparation] = [:]
+    #if DEBUG
+    @ObservationIgnored var onFailedPreparationDrainJoinForTesting: (() -> Void)?
+    #endif
     private(set) var liveStatuses: [String: RecentStatus] = [:]
     var onActivity: ((Entry) -> Void)?
     var onWorkspaceChanged: ((Entry) -> Void)?
@@ -226,6 +250,9 @@ final class SessionHost {
         if !identity.isEmpty, !(admitsSessionIdentity?(identity, scope, mode) ?? true) {
             throw OwnershipError.conflictingOwner
         }
+        if failedPreparations.values.contains(where: {
+            $0.source !== source && ($0.sessionID == nil || $0.sessionID == identity)
+        }) { throw OwnershipError.conflictingOwner }
         if let other = preparingClaims[identity]?.source, other !== source {
             throw OwnershipError.duplicateSource
         }
@@ -280,24 +307,109 @@ final class SessionHost {
 
     func releaseIdleSource(_ source: any ConversationSource) {
         guard let entry = entry(for: source) else { return }
+        #if canImport(harness_runtimeFFI)
+        // An unshown rejected input is still owned by this source. It can be
+        // moved only by the same-identity replacement transaction below.
+        guard source.model.unsentPrompts.isEmpty else { return }
+        #endif
         guard !entry.voice.hasOwnedAudio, !source.hasLiveSideChats,
               ConversationSourceReplacementPolicy.allowsReplacement(
                 of: source.model, hasActiveRealtimeAudio: source.hasActiveRealtimeAudio) else { return }
         removeEntry(entry)
     }
 
+    /// An unselected cold authoring source has never admitted a turn. It can
+    /// be removed after the native handle was retired and its claim drained.
+    func releaseRetiredUnconfirmedAuthoringSource(_ source: any ConversationSource) {
+        #if canImport(harness_runtimeFFI)
+        guard let engine = source as? EngineConversationSource, engine.isRetiredForReconnect,
+              engine.pendingRecoveredAuthoringOwner != nil, let entry = entry(for: source),
+              selectedEntryID != entry.id, !entry.voice.hasOwnedAudio, !source.hasLiveSideChats,
+              ConversationSourceReplacementPolicy.allowsReplacement(of: source.model,
+                hasActiveRealtimeAudio: source.hasActiveRealtimeAudio, allowUnconfirmedAuthoring: true) else { return }
+        removeEntry(entry)
+        #endif
+    }
+
+    #if canImport(harness_runtimeFFI)
+    /// A retired source still owns its UUID until native acknowledges drain.
+    /// Recheck the captured entry after the wait before removing its fence.
+    func releaseRetiredAuthoringSourceAfterDrain(_ source: EngineConversationSource, entry: Entry,
+                                                stillCurrent: () -> Bool,
+                                                waitForRelease: () async -> Bool) async -> Bool {
+        guard source.isRetiredForReconnect, self.entry(for: source) === entry,
+              selectedEntryID != entry.id, stillCurrent() else { return false }
+        guard await waitForRelease(), stillCurrent(), self.entry(for: source) === entry,
+              selectedEntryID != entry.id else { return false }
+        if source.pendingRecoveredAuthoringOwner != nil {
+            releaseRetiredUnconfirmedAuthoringSource(source)
+        } else {
+            releaseIdleSource(source)
+        }
+        return self.entry(for: source) == nil
+    }
+    #endif
+
     /// Validate the new source while the old entry remains registered. Once
     /// validation succeeds, the main actor swaps entries without suspension.
     func replaceIdleSource(_ old: any ConversationSource, with replacement: any ConversationSource,
                            scope: ConversationScope, mode: SessionMode, sessionID: String,
-                           workspace: String, draft: String) throws -> Entry {
+                           workspace: String, draft: String,
+                           validateUnsentOwner: (() throws -> Void)? = nil) throws -> Entry {
         guard let previous = entry(for: old) else { throw OwnershipError.conflictingOwner }
+        #if canImport(harness_runtimeFFI)
+        let unsent = old.model.unsentPrompts
+        let ownerID = canonicalSessionID(previous.sessionID)
+        let replacementEngine = replacement as? EngineConversationSource
+        if !unsent.isEmpty {
+            guard let oldEngine = old as? EngineConversationSource,
+                  replacementEngine != nil,
+                  !ownerID.isEmpty, previous.scope == scope, previous.mode == mode,
+                  previous.workspace == workspace, replacement.model.unsentPrompts.isEmpty,
+                  unsent.allSatisfy({ $0.sideID == nil && $0.sessionID == ownerID && oldEngine.ownsUnsentPrompt($0) }),
+                  let oldState = old.model.workspaceState, let newState = replacement.model.workspaceState,
+                  canonicalSessionID(oldState.sessionId) == ownerID,
+                  canonicalSessionID(newState.sessionId) == ownerID,
+                  !oldState.transcriptPath.isEmpty, (oldState.transcriptPath as NSString).isAbsolutePath,
+                  oldState.transcriptPath == newState.transcriptPath,
+                  oldState.cwd == newState.cwd, oldState.projectRoot == newState.projectRoot,
+                  oldState.additionalDirectories == newState.additionalDirectories else {
+                throw OwnershipError.sourceIdentityMismatch
+            }
+            guard let validateUnsentOwner else { throw OwnershipError.sourceIdentityMismatch }
+            try validateUnsentOwner()
+        }
+        #endif
         let next = try retain(source: replacement, scope: scope, mode: mode, sessionID: sessionID,
                               workspace: workspace, draft: draft, voice: previous.voice, replacing: previous)
+        #if canImport(harness_runtimeFFI)
+        if !unsent.isEmpty {
+            replacementEngine?.adoptUnsentPromptsFromVerifiedOwner(unsent)
+            old.model.unsentPrompts.removeAll()
+        }
+        #endif
         next.attachment = previous.attachment
         next.draftSourceCodeUnits = previous.draftSourceCodeUnits
         next.handoffReference = previous.handoffReference
+        previous.replacement = next
         return next
+    }
+
+    /// Long-running host actions report to their captured owner. A settings
+    /// reconnect may replace that owner's idle source while the action runs.
+    func deliverOperationFailure(_ error: ConversationError, to owner: Entry) {
+        var target = owner
+        while let replacement = target.replacement { target = replacement }
+        if entry(for: target.source) === target {
+            target.source.model.error = error
+        } else if !target.sessionID.isEmpty,
+                  let current = try? entryForClaim(sessionID: target.sessionID, scope: target.scope, mode: target.mode) {
+            current.source.model.error = error
+        } else {
+            // The captured source remains the owner; never deliver to a new
+            // foreground conversation merely because it is now selected.
+            target.source.model.error = error
+        }
     }
 
     private func removeEntry(_ entry: Entry) {
@@ -402,6 +514,7 @@ final class SessionHost {
 
     func hasPreparingClaim(sessionID: String) -> Bool {
         let id = canonicalSessionID(sessionID)
+        if failedPreparations.values.contains(where: { $0.sessionID == nil || $0.sessionID == id }) { return true }
         guard let claim = preparingClaims[id] else { return false }
         if claim.source == nil { preparingClaims.removeValue(forKey: id); return false }
         return true
@@ -421,8 +534,104 @@ final class SessionHost {
     }
 
     func endPreparingClaim(of source: any ConversationSource) {
+        guard !failedPreparations.values.contains(where: { $0.source === source }) else { return }
         preparingClaims = preparingClaims.filter { $0.value.source !== source && $0.value.source != nil }
         finishSourcePreparation?(source)
+    }
+
+    func quarantineFailedPreparation(_ source: any ConversationSource, requestID: String,
+                                     scope: ConversationScope, mode: SessionMode, sessionID: String?) throws {
+        let request = canonicalSessionID(requestID)
+        let identity = sessionID.map(canonicalSessionID).flatMap { $0.isEmpty ? nil : $0 }
+        guard UUID(uuidString: request) != nil, identity.map({ UUID(uuidString: $0) != nil }) ?? true,
+              entry(for: source) == nil else { throw OwnershipError.sourceIdentityMismatch }
+        if let existing = failedPreparations[request] {
+            guard existing.source === source, existing.scope == scope, existing.mode == mode,
+                  existing.expectedSessionID == identity else { throw OwnershipError.conflictingOwner }
+            return
+        }
+        // Until the native handle is inspected, block all new identities. A
+        // corrupt result must not be mistaken for the requested UUID.
+        failedPreparations[request] = FailedPreparation(source: source, scope: scope, mode: mode,
+                                                         expectedSessionID: identity, sessionID: nil,
+                                                         drainID: nil, drainTask: nil)
+    }
+
+    func failedPreparation(requestID: String) -> (source: any ConversationSource, scope: ConversationScope,
+                                                  mode: SessionMode, expectedSessionID: String?, sessionID: String?)? {
+        guard let item = failedPreparations[canonicalSessionID(requestID)] else { return nil }
+        return (item.source, item.scope, item.mode, item.expectedSessionID, item.sessionID)
+    }
+
+    /// Only an explicit retry of the same logical destination may drain its
+    /// abandoned preparation. An unidentified preparation remains global
+    /// admission evidence until its actual native UUID is authenticated.
+    func failedPreparationIDs(scope: ConversationScope, mode: SessionMode, sessionID: String) -> [String] {
+        let identity = canonicalSessionID(sessionID)
+        return failedPreparations.compactMap { request, item in
+            guard item.scope == scope, item.mode == mode else { return nil }
+            if identity.isEmpty { return item.expectedSessionID == nil ? request : nil }
+            return item.expectedSessionID == identity || item.sessionID == identity ? request : nil
+        }.sorted()
+    }
+
+    /// Join the whole retirement, identity lookup and drain, not just the
+    /// native wait. Otherwise a second retry can reach identity lookup after
+    /// the first retry has already released this exact preparation.
+    func drainFailedPreparation(requestID: String,
+                                perform: @escaping @MainActor (any ConversationSource) async throws -> Void) async throws {
+        let request = canonicalSessionID(requestID)
+        guard var item = failedPreparations[request] else { return }
+        if let task = item.drainTask {
+            #if DEBUG
+            onFailedPreparationDrainJoinForTesting?()
+            #endif
+            return try await task.value
+        }
+        let drainID = UUID(), source = item.source
+        let task = Task { @MainActor in try await perform(source) }
+        item.drainID = drainID
+        item.drainTask = task
+        failedPreparations[request] = item
+        do {
+            try await task.value
+            clearFailedPreparationDrain(request: request, source: source, drainID: drainID)
+        } catch {
+            clearFailedPreparationDrain(request: request, source: source, drainID: drainID)
+            throw error
+        }
+    }
+
+    private func clearFailedPreparationDrain(request: String, source: any ConversationSource, drainID: UUID) {
+        guard var current = failedPreparations[request], current.source === source,
+              current.drainID == drainID else { return }
+        current.drainID = nil
+        current.drainTask = nil
+        failedPreparations[request] = current
+    }
+
+    func identifyFailedPreparation(requestID: String, source: any ConversationSource, sessionID: String) throws {
+        let request = canonicalSessionID(requestID), identity = canonicalSessionID(sessionID)
+        guard UUID(uuidString: identity) != nil, var item = failedPreparations[request], item.source === source,
+              item.expectedSessionID == nil || item.expectedSessionID == identity,
+              item.sessionID == nil || item.sessionID == identity else { throw OwnershipError.sourceIdentityMismatch }
+        item.sessionID = identity
+        failedPreparations[request] = item
+    }
+
+    func releaseFailedPreparationAfterDrain(requestID: String, source: any ConversationSource,
+                                            sessionID: String, waitForRelease: () async -> Bool) async -> Bool {
+        let request = canonicalSessionID(requestID), identity = canonicalSessionID(sessionID)
+        guard let item = failedPreparations[request], item.source === source, item.sessionID == identity,
+              await waitForRelease() else { return false }
+        // Another waiter may have confirmed this same captured source while
+        // this one was suspended. Absence can only result from that confirmed
+        // release; a different source under the request ID still fails closed.
+        guard let current = failedPreparations[request] else { return true }
+        guard current.source === source, current.sessionID == identity else { return false }
+        failedPreparations.removeValue(forKey: request)
+        endPreparingClaim(of: source)
+        return true
     }
 
     /// Install before `prepare()`: startup and first-turn workspace callbacks
@@ -470,6 +679,7 @@ final class SessionHost {
         // Once a source owns a UUID, later catalog failures must not disrupt
         // that owner or its already accepted work.
         if let entry = entry(for: source), !entry.sessionID.isEmpty { return true }
+        if failedPreparations.values.contains(where: { $0.source !== source && $0.sessionID == nil }) { return false }
         return admitsUnclaimedOwner?() ?? true
     }
 
@@ -491,6 +701,9 @@ final class SessionHost {
         if let own = entry(for: source), !own.claimedSessionID.isEmpty,
            own.scope == scope, own.mode == mode,
            canonicalSessionID(own.claimedSessionID) == identity { return true }
+        if failedPreparations.values.contains(where: {
+            $0.source !== source && ($0.sessionID == nil || $0.sessionID == identity)
+        }) { return false }
         if preparingClaims.contains(where: { key, claim in
             claim.source === source && (key != identity || claim.scope != scope || claim.mode != mode)
         }) { return false }

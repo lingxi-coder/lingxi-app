@@ -917,7 +917,7 @@ final class CronRepositoryTests: XCTestCase {
     func testScheduledScopeHasDedicatedPreferenceAndWorkspaceIdentity() {
         XCTAssertEqual(ConversationScope(workspaceKey: "scheduled"), .scheduled)
         XCTAssertNotEqual(ConversationScope.scheduled.preferenceScope, ConversationScope.global.preferenceScope)
-        XCTAssertEqual(CronScope.global(appSandboxRoot: "/app").guestWorkspacePath, "/app/scheduled/workspace")
+        XCTAssertEqual(CronScope.global(appSandboxRoot: "/app").guestWorkspacePath, LXISHGuestPaths.workspace("scheduled"))
     }
 
     func testProjectCronScopeKeepsItsStorageRootWhenSessionDirectoryChanges() {

@@ -110,8 +110,10 @@ struct ToolCallView: View {
             Text(compactSummary)
                 .font(.footnote.weight(.medium))
                 .foregroundStyle(trace.status == .failed ? t.danger : t.text3)
-                .lineLimit(1)
+                .lineLimit(showsRequiresCodeMessage ? nil : 1)
                 .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: showsRequiresCodeMessage)
+                .layoutPriority(showsRequiresCodeMessage ? 1 : 0)
                 .runtimeTextSweep(isActive: trace.status == .running, highlightColor: t.text)
             Spacer(minLength: 0)
             if isCollapsible {
@@ -138,10 +140,16 @@ struct ToolCallView: View {
 
     private var compactSummary: String {
         var summary = ConversationDesktopTimeline.summary([trace])
-        if let display = trace.display, let headline = ToolDisplayText.headline(display) {
+        if let display = trace.display, let headline = ToolDisplayText.headline(display, trace: trace) {
             summary += " · " + headline
         }
         return summary
+    }
+
+    private var showsRequiresCodeMessage: Bool {
+        guard let display = trace.display else { return false }
+        return LocalAppToolFailurePresentation.requiresCode(tool: trace.tool, failed: trace.status == .failed,
+                                                             headline: display.headline, body: display.body)
     }
 
     // MARK: header
@@ -244,7 +252,7 @@ struct ToolCallView: View {
                     .font(.system(.caption, design: .monospaced))
                     .foregroundColor(t.text4)
                 VStack(alignment: .leading, spacing: 5) {
-                    if let headline = ToolDisplayText.headline(display) {
+                    if let headline = ToolDisplayText.headline(display, trace: trace) {
                         Text(headline)
                             .font(.caption)
                             .foregroundColor(trace.status == .failed ? t.danger : t.text3)
@@ -254,7 +262,7 @@ struct ToolCallView: View {
                         if let diff = display.diff {
                             DiffView(diff: diff)
                         }
-                        if let body = display.body, !body.isEmpty {
+                        if let body = ToolDisplayText.body(display, trace: trace), !body.isEmpty {
                             Text(body)
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundColor(t.text2)
@@ -340,6 +348,18 @@ struct ToolCallView: View {
 /// express — a subagent type, `REPL`, `Web Search`, an MCP tool name — or where
 /// the headline kind IS free text (`failed` / `plain`).
 enum ToolDisplayText {
+    /// This stable host error is localized only for the failed LocalApp tool.
+    /// The source trace retains the original wire text for replay/diagnostics.
+    static func headline(_ display: ConversationToolResultDisplay, trace: ConversationToolTrace) -> String? {
+        LocalAppToolFailurePresentation.visibleText(tool: trace.tool, failed: trace.status == .failed,
+            headline: display.headline, body: display.body, fallback: headline(display))
+    }
+
+    static func body(_ display: ConversationToolResultDisplay, trace: ConversationToolTrace) -> String? {
+        guard let body = display.body, !body.isEmpty else { return display.body }
+        return LocalAppToolFailurePresentation.visibleText(tool: trace.tool, failed: trace.status == .failed,
+            headline: display.headline, body: display.body, fallback: body)
+    }
 
     /// Maps the engine's stable tool verb to a compact action glyph. An orphan
     /// or synthetic row without a start header uses the raw tool name.

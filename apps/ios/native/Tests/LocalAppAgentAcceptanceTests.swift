@@ -105,8 +105,7 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
         }
         let codeModelID = codeProfile.qualifiedModelID
         print("IOS_AGENT_CODE_MODEL providerId=\(codeModel.providerId) modelId=\(codeModel.modelId) qualifiedModelId=\(codeModelID) supportsTools=true selectedFrom=ProviderLaunchSnapshot")
-        let guest = paths.appsGuestPath + "/agent-wake-acceptance-" + UUID().uuidString.lowercased()
-        let source = try UnifiedLocalApps.hostSourceDirectory(guest)
+        let library = UnifiedLocalApps(client: client)
         let fixtures = try XCTUnwrap(Bundle(for: Self.self).resourceURL).appendingPathComponent("UnifiedAppFixtures/\(fixtureName)")
         let projectRepository = ProjectRepository(
             projectsRoot: URL(fileURLWithPath: paths.projects, isDirectory: true),
@@ -116,6 +115,12 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             repository: projectRepository,
             synchronizer: ProjectWorkspaceSynchronizer(repository: projectRepository)
         )
+        let creation = LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
+            projectId: UUID().uuidString.lowercased(), mode: .code, name: projectName, prompt: "")
+        try await projectStore.storeLocalAppSourceCreateIntent(creation)
+        let created = try await library.createAuthoring(name: projectName, requestID: creation.requestId, mode: creation.mode)
+        let guest = created.sourceDirectory
+        let source = try UnifiedLocalApps.hostSourceDirectory(guest)
         let engineRoot = FileManager.default.temporaryDirectory.appendingPathComponent("ios-agent-wake-engine-\(UUID().uuidString)", isDirectory: true)
         var projectID: String?
         var stage = "create-source"
@@ -123,13 +128,20 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
         var pathCandidates: [(String, String)] = []
         do {
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
-            try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try FileManager.default.copyItem(at: fixtures, to: source)
+            for child in try FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) {
+                try FileManager.default.removeItem(at: child)
+            }
+            for child in try FileManager.default.contentsOfDirectory(at: fixtures, includingPropertiesForKeys: nil) {
+                try FileManager.default.copyItem(at: child, to: source.appendingPathComponent(child.lastPathComponent))
+            }
             stage = "create-project"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
-            let project = try await projectStore.createLocalAppAuthoringProject(name: projectName, sourceDirectory: guest)
+            let (project, createdIntent) = try await projectStore.createLocalAppAuthoringProject(
+                name: projectName, sourceDirectory: guest, sourceID: canonicalSessionID(created.sourceId),
+                sourceRequestID: creation.requestId, appID: nil, projectID: creation.projectId, intentID: creation.requestId)
             projectID = project.record.id
-            let projectMountGrants = try MobileUserStorage.projectMountGrantPaths(for: project)
+            var intent = createdIntent
+            let projectMountGrants = try MobileUserStorage.projectMountGrantPaths(for: project, authorizedLocalAppSource: guest)
             print("IOS_AGENT_PROJECT_SETUP projectId=\(project.record.id) guestSource=\(guest) activeDirectory=\(project.record.activeDirectory) additionalDirectories=\(project.record.additionalDirectories.sorted()) workspaceHost=\(project.workspace.hostURL.path) sourceHost=\(source.path) projectMountGrants=\(projectMountGrants.sorted())")
             guard project.record.activeDirectory == guest,
                   project.record.additionalDirectories.contains(guest),
@@ -158,7 +170,7 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             stage = "start-code-session"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
             let conversation = ConversationSourceFactory.make(
-                projectCwd: project.workspace.hostURL.path,
+                projectCwd: guest,
                 additionalWorkspaceDirectories: project.record.additionalDirectories,
                 sessionMode: .code,
                 providerConfigured: true,
@@ -174,6 +186,8 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             guard let activeEngine = engine else {
                 throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "The production conversation factory did not create the engine.")
             }
+            try activeEngine.requireAuthoringBindingBeforeTurns(LocalAppProvisionalAuthoringOwner(
+                sourceDirectory: guest, projectID: project.record.id, appID: nil))
             let grantPathCandidates = try projectMountGrants.enumerated().map { index, guestPath in
                 ("project-grant-\(index)", try UnifiedLocalApps.hostSourceDirectory(guestPath).path)
             }
@@ -182,18 +196,29 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
                 ("managed-root", mobileLinux.managedRoot),
                 ("default-home", paths.home),
                 ("config-home", paths.configHome),
-                ("default-workspace", paths.defaultCwd),
+                ("chat-workspace", paths.chatCwd),
+                ("code-workspace", paths.codeCwd),
                 ("projects-workspace", paths.projects),
                 ("apps-root", paths.apps),
                 ("project-source", source.path),
                 ("project-workspace", project.workspace.hostURL.path),
                 ("descriptor-workspace", runtime.workspace.hostPath ?? ""),
             ].filter { !$0.1.isEmpty } + grantPathCandidates
-            print("IOS_PROJECT_PATH_GUESTS guestHome=\(paths.guestHome) defaultGuestCwd=\(paths.defaultGuestCwd) projectSource=\(guest)")
+            print("IOS_PROJECT_PATH_GUESTS guestHome=\(paths.guestHome) codeGuestCwd=\(paths.codeGuestCwd) projectSource=\(guest)")
             logPathComponentMetadata("before-native-session", candidates: pathCandidates)
             let sessionID: String
             do {
-                sessionID = try await activeEngine.startLocalAppAuthoringSession(cwd: guest)
+                try await activeEngine.prepare()
+                for _ in 0..<400 {
+                    if !activeEngine.model.activeSessionId.isEmpty,
+                       activeEngine.model.workspaceState?.sessionId == activeEngine.model.activeSessionId,
+                       activeEngine.model.workspaceState?.cwd == guest { break }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                sessionID = activeEngine.model.activeSessionId
+                guard !sessionID.isEmpty else {
+                    throw LocalAppServiceFailure("SESSION_CREATION_TIMEOUT", "The authoring session did not confirm its workspace.")
+                }
             } catch {
                 logPathComponentMetadata("after-native-session-error", candidates: pathCandidates)
                 throw error
@@ -211,6 +236,10 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
             let verifiedWorkspaceResult = await activeEngine.authenticatedWorkspaceState(sessionID: sessionID, mode: .code)
             let verifiedWorkspace = try XCTUnwrap(verifiedWorkspaceResult)
+            let previousIntent = intent
+            intent.authoringSessionId = canonicalSessionID(sessionID)
+            intent.transcriptPath = verifiedWorkspace.transcriptPath
+            try await projectStore.storeLocalAppAuthoringIntent(intent, replacing: previousIntent)
             try await projectStore.recordStartedSession(
                 projectId: project.record.id,
                 sessionId: sessionID,
@@ -226,6 +255,20 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             try await projectStore.recordAuthenticatedWorkspace(verifiedWorkspace,
                 in: .project(project.record.id), mode: .code, authority: workspaceAuthority,
                 revision: workspaceAuthority.currentRevision())
+            let authoring = LocalAppAuthoring(
+                sourceDirectory: guest,
+                workspaceId: project.record.id,
+                projectRef: .mobileProject(project.record.id),
+                authoringSessionId: sessionID
+            )
+            stage = "register-pending-authoring"
+            print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
+            try await library.registerAuthoring(authoring, sourceID: created.sourceId, requestID: creation.requestId, mode: .code, setCurrent: true)
+            let binding = try await library.exactAuthoringBinding(sourceDirectory: guest,
+                projectID: project.record.id, sessionID: sessionID, mode: .code)
+            try activeEngine.confirmAuthoringBinding(
+                LocalAppAuthoringOwner(sourceDirectory: guest, projectID: project.record.id,
+                                       sessionID: sessionID, appID: nil), binding: binding)
             if verifyProjectShell {
                 stage = "verify-project-shell-cwd"
                 print("IOS_AGENT_WAKE_CHECKPOINT \(stage) model=\(codeModelID)")
@@ -235,20 +278,18 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
                     hostSource: source
                 )
             }
-            let authoring = LocalAppAuthoring(
-                sourceDirectory: guest,
-                workspaceId: project.record.id,
-                projectRef: .mobileProject(project.record.id),
-                authoringSessionId: sessionID
-            )
-            stage = "register-pending-authoring"
-            print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
-            try await UnifiedLocalApps(client: client).registerPendingAuthoring(authoring)
             stage = "publish"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
-            let result: LocalAppPublishResult = try await client.request([
-                "op": .string("publish"), "sourcePath": .string(source.path), "expectedRevision": .number(0)
-            ])
+            var directPublishRejected = false
+            do {
+                let _: LocalAppPublishResult = try await client.request([
+                    "op": .string("publish"), "sourcePath": .string(source.path), "expectedRevision": .number(0)
+                ], purpose: .development(.code))
+            } catch { directPublishRejected = true }
+            guard directPublishRejected else {
+                throw LocalAppServiceFailure("OWNER_REQUIRED", "A standalone request unexpectedly published a managed app source.")
+            }
+            let result = try await publishFromAuthoringEngine(activeEngine, source: guest, client: client)
             engine = nil
             try? FileManager.default.removeItem(at: engineRoot)
             return PublishedAgentApp(result: result, source: source, projectID: project.record.id, sessionID: sessionID)
@@ -263,6 +304,63 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             try? FileManager.default.removeItem(at: engineRoot)
             throw error
         }
+    }
+
+    @MainActor
+    private func publishFromAuthoringEngine(_ engine: EngineConversationSource, source: String,
+                                            client: LocalAppServiceClient) async throws -> LocalAppPublishResult {
+        let prompt = "Use the LocalApp tool with action publish and bundle_path exactly `\(source)` to publish this existing app locally. Load only the local-app skill if needed. Do not change any files or call other tools."
+        guard let token = await engine.send(prompt) else {
+            throw LocalAppServiceFailure("APP_PUBLISH_NOT_SUBMITTED", "The authoring session did not accept the publish request.")
+        }
+        let deadline = Date().addingTimeInterval(120)
+        while Date() < deadline {
+            try Task.checkCancellation()
+            if let pending = engine.model.pendingPermissions.first {
+                guard case let .toolUseConfirm(toolName, toolInputJson, _) = pending.kind,
+                      let data = toolInputJson.data(using: .utf8),
+                      let input = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    engine.denyPermission(pending.requestId)
+                    try? await engine.cancelAndWait()
+                    throw LocalAppServiceFailure("APP_PUBLISH_PERMISSION_MISMATCH", "The publish request asked for an unexpected permission.")
+                }
+                let keys = Set(input.keys)
+                let isPublish = toolName.lowercased() == "localapp"
+                    && input["action"] as? String == "publish" && input["bundle_path"] as? String == source
+                    && keys.isSubset(of: ["action", "bundle_path"])
+                let isSkill = toolName.lowercased() == "skill" && input["skill"] as? String == "local-app"
+                    && keys.isSubset(of: ["skill"])
+                guard isPublish || isSkill else {
+                    engine.denyPermission(pending.requestId)
+                    try? await engine.cancelAndWait()
+                    throw LocalAppServiceFailure("APP_PUBLISH_PERMISSION_MISMATCH", "The model requested a different tool or source.")
+                }
+                engine.approvePermission(pending.requestId, .allowOnce)
+            }
+            if let completion = engine.model.turnCompletion, completion.token == token {
+                guard completion.outcome == .completed else {
+                    throw LocalAppServiceFailure("APP_PUBLISH_TURN_FAILED", "The native authoring turn did not complete.")
+                }
+                let runs = engine.model.items.reversed().compactMap { item -> ConversationExecutionRun? in
+                    guard case let .run(run) = item, run.turnId == token.clientTurnId else { return nil }
+                    return run
+                }
+                guard let app = runs.flatMap(\.tools).first(where: { $0.tool == "LocalApp" && $0.status == .completed })?.localApp else {
+                    throw LocalAppServiceFailure("APP_PUBLISH_RESULT_MISSING", "The authoring turn did not return a successful LocalApp publish.")
+                }
+                let record: UnifiedAppRecord = try await client.request(["op": .string("get"), "appId": .string(app.id)])
+                let release: UnifiedAppRelease = try await client.request(["op": .string("getRelease"),
+                    "appId": .string(app.id), "revision": .number(Double(app.revision))])
+                guard record.authoring?.sourceDirectory == source,
+                      canonicalSessionID(record.authoring?.authoringSessionId ?? "") == canonicalSessionID(engine.model.activeSessionId) else {
+                    throw LocalAppServiceFailure("APP_PUBLISH_OWNER_MISMATCH", "The published app did not retain the authoring owner.")
+                }
+                return LocalAppPublishResult(record: record, release: release)
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try? await engine.cancelAndWait()
+        throw LocalAppServiceFailure("APP_PUBLISH_TIMEOUT", "The native authoring turn did not complete in time.")
     }
 
     /// Logs only lstat/readlink/realpath metadata for the isolated acceptance

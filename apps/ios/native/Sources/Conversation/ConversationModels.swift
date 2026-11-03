@@ -101,6 +101,54 @@ struct ConversationTurnToken: Equatable, Hashable, Sendable {
     let sessionEpoch: UInt64
 }
 
+#if canImport(harness_runtimeFFI)
+/// A prompt that the exact native turn was proven not to have admitted.
+/// Keep its fields together so a later draft cannot acquire its attachment
+/// or visualization independently of its text.
+struct ConversationUnsentPrompt: Identifiable {
+    let id: UUID
+    let token: ConversationTurnToken
+    let ownerEpoch: UInt64
+    let sessionID: String
+    let sideID: String?
+    let text: String
+    let sourceCodeUnits: [UInt16]?
+    let images: [ImageRefDto]
+    let visualizationContext: VisualizationContextChip?
+    /// False when the chip changed while this send was awaiting admission.
+    let mayRestoreCapturedDraft: Bool
+    let chipRevisionAtCapture: UInt64
+    let chipRevisionAfterAdmission: UInt64
+
+    init(id: UUID = UUID(), token: ConversationTurnToken, sessionID: String, sideID: String?,
+         text: String, sourceCodeUnits: [UInt16]?, images: [ImageRefDto],
+         visualizationContext: VisualizationContextChip?, mayRestoreCapturedDraft: Bool,
+         chipRevisionAtCapture: UInt64, chipRevisionAfterAdmission: UInt64,
+         ownerEpoch: UInt64? = nil) {
+        self.id = id
+        self.token = token
+        self.ownerEpoch = ownerEpoch ?? token.sessionEpoch
+        self.sessionID = sessionID
+        self.sideID = sideID
+        self.text = text
+        self.sourceCodeUnits = sourceCodeUnits
+        self.images = images
+        self.visualizationContext = visualizationContext
+        self.mayRestoreCapturedDraft = mayRestoreCapturedDraft
+        self.chipRevisionAtCapture = chipRevisionAtCapture
+        self.chipRevisionAfterAdmission = chipRevisionAfterAdmission
+    }
+
+    func rebound(toOwnerEpoch epoch: UInt64) -> ConversationUnsentPrompt {
+        ConversationUnsentPrompt(id: id, token: token, sessionID: sessionID, sideID: sideID,
+            text: text, sourceCodeUnits: sourceCodeUnits, images: images,
+            visualizationContext: visualizationContext, mayRestoreCapturedDraft: mayRestoreCapturedDraft,
+            chipRevisionAtCapture: chipRevisionAtCapture, chipRevisionAfterAdmission: chipRevisionAfterAdmission,
+            ownerEpoch: epoch)
+    }
+}
+#endif
+
 /// A terminal result published for consumers that need to react to one exact
 /// turn (for example Flow voice playback). Only `.completed` is a successful
 /// assistant response; all other outcomes must be treated as non-speakable.
@@ -268,6 +316,10 @@ struct ConversationPendingAgentMessage: Equatable {
 @MainActor
 final class ConversationModel: ObservableObject {
     static let mainAgentID = "main"
+    /// The source may be prepared to obtain its UUID, but cannot admit turns
+    /// until the Local App service confirms that exact owner binding.
+    @Published var authoringBindingPending = false
+    @Published var authoringBindingRetryAvailable = false
     private let disclosureStore: ConversationDisclosureStore?
 
     /// The full visible transcript (user + assistant turns).
@@ -457,6 +509,11 @@ final class ConversationModel: ObservableObject {
     /// background execution and notification surfaces can deep-link back to the
     /// exact conversation turn without peeking into source-private state.
     @Published var activeTurnToken: ConversationTurnToken? = nil
+    #if canImport(harness_runtimeFFI)
+    /// Process-local, owner-scoped items that require an explicit restore if
+    /// the original composer has changed since submission.
+    @Published var unsentPrompts: [ConversationUnsentPrompt] = []
+    #endif
     /// Lossless token-scoped assistant-delta stream. A subject is used instead
     /// of an `@Published` latest-value slot because SwiftUI may coalesce several
     /// assignments in one render transaction and silently drop middle deltas.
@@ -532,7 +589,10 @@ final class ConversationModel: ObservableObject {
     /// A follow-up a widget drafted; the composer takes it into its draft.
     @Published var visualizationFollowup: VisualizationFollowup?
     /// The widget the next prompt follows up on; consumed by `send`.
-    @Published var visualizationChip: VisualizationContextChip?
+    @Published var visualizationChip: VisualizationContextChip? {
+        didSet { if visualizationChip != oldValue { visualizationChipRevision &+= 1 } }
+    }
+    private(set) var visualizationChipRevision: UInt64 = 0
 
     @Published var contextUsage: ConversationUsageSnapshot? = nil
     /// The engine validates this immutable mode when the session is opened.

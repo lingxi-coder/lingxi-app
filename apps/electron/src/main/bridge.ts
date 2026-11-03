@@ -209,6 +209,11 @@ export class SessionRuntime {
   private disposed = false;
   private restartChain: Promise<void> = Promise.resolve();
   private generation = 0;
+  private desiredRunning = false;
+  private recoveryEpoch = 0;
+  private recoveryTimer: NodeJS.Timeout | undefined;
+  private automaticRecovery: Promise<void> | undefined;
+  private readonly recoveryAttempts: number[] = [];
   private launchDir: string | null = null;
   private connectionLockfilePath: string | null = null;
   private adoptedPid: number | null = null;
@@ -1112,7 +1117,7 @@ export class SessionRuntime {
   /** A connected transport alone does not prove that owned history restored. */
   get needsSessionResume(): boolean { return this.ownedSessionResumeRequired; }
 
-  get isStarting(): boolean { return this.startPromise !== null; }
+  get isStarting(): boolean { return this.startPromise !== null || this.automaticRecovery !== undefined; }
 
   /** Wait for existing lifecycle work without starting a stopped runtime. */
   async waitForLifecycle(): Promise<void> {
@@ -1532,6 +1537,9 @@ export class SessionRuntime {
 
   async start(): Promise<void> {
     if (this.disposed) throw new Error('SessionRuntime is disposed');
+    this.desiredRunning = true;
+    if (this.automaticRecovery) return this.automaticRecovery;
+    this.cancelAutomaticRecovery();
     if (this.startPromise) return this.startPromise;
     if (this.state.status === 'connected') return;
     const startedAt = Date.now();
@@ -1640,6 +1648,93 @@ export class SessionRuntime {
     }
   }
 
+  private cancelAutomaticRecovery(): void {
+    ++this.recoveryEpoch;
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = undefined;
+  }
+
+  private managedChildExited(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null, established: boolean): void {
+    if (this.child !== child) return;
+    this.diagnostics.add('info', 'host', childExitDiagnostic(code, signal, this.generation));
+    this.child = null;
+    this.nativeMediaClient = undefined;
+    this.invalidateNativeMediaBinding();
+    void this.teardownAudioGeneration(this.generation);
+    if (this.disposed) return;
+    this.setState({ status: 'disconnected', reason: `bridge-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})` });
+    this.managedProcessExited(established);
+  }
+
+  private managedProcessExited(established: boolean): void {
+    if (!established || !this.desiredRunning) return;
+
+    // RAM-only scopes died with this process. Never replay their work or an
+    // interrupted foreground prompt against the replacement process.
+    const interrupted = this.disconnectedForegroundPending;
+    this.activeTurn = false;
+    this.activeTurnGeneration = undefined;
+    this.activeTurnId = undefined;
+    this.disconnectedForegroundPending = false;
+    this.ownedSessionResumeRequired ||= this.sessionHasHistory;
+    const hadSideChats = this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0;
+    for (const requestId of this.pendingSideCreates) this.broadcastClientEvent({ type: 'side_chat_error', request_id: requestId, message: 'The engine exited before the Side Chat was created.' });
+    for (const sideId of this.liveSideChats) this.broadcastClientEvent({ type: 'side_chat_ended', side_id: sideId });
+    this.liveSideChats.clear();
+    this.pendingSideCreates.clear();
+    if (interrupted) {
+      this.broadcastClientEvent({ type: 'turn_ended', outcome: { type: 'cancelled' },
+        cost: { ...(this.lastKnownCost ?? { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0 }), formatted: '' } });
+    }
+    const notice = interrupted
+      ? 'The engine exited. The interrupted turn will not be replayed; restoring this chat automatically.'
+      : 'The engine exited. Restoring this chat automatically.';
+    this.broadcastClientEvent({ type: 'system_notice', message: notice
+      + (hadSideChats ? ' Side Chats were interrupted and have ended.' : ''), is_error: false });
+    this.scheduleAutomaticRecovery();
+  }
+
+  private scheduleAutomaticRecovery(): void {
+    if (this.disposed || !this.desiredRunning || this.recoveryTimer || this.automaticRecovery) return;
+    const now = Date.now();
+    while (this.recoveryAttempts.length && now - this.recoveryAttempts[0] >= 60_000) this.recoveryAttempts.shift();
+    if (this.recoveryAttempts.length >= 3) {
+      this.fail('The engine could not recover after three attempts. Restart the engine to try again.');
+      return;
+    }
+    const epoch = this.recoveryEpoch;
+    const delay = 250 * 2 ** this.recoveryAttempts.length;
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      const operation = this.restartChain.catch(() => undefined).then(async () => {
+        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+        this.recoveryAttempts.push(Date.now());
+        this.setState({ status: 'restarting' });
+        await this.stopBridge();
+        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+        await this.startInternal(false);
+        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+        await this.restoreOwnedSessionIfNeeded();
+        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+        if (!this.child && !this.adoptedPid) throw new Error('The replacement engine exited during recovery.');
+        this.setState({ status: 'connected' });
+        this.diagnostics.add('info', 'host', diagnosticEvent('bridge_auto_recovered', { sessionId: this.sessionId, generation: this.generation }));
+      });
+      this.automaticRecovery = operation;
+      this.restartChain = operation;
+      void operation.then(() => {
+        this.automaticRecovery = undefined;
+        if (epoch === this.recoveryEpoch && this.state.status === 'disconnected') this.scheduleAutomaticRecovery();
+      }, (error) => {
+        this.automaticRecovery = undefined;
+        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+        this.diagnostics.add('warn', 'host', `automatic engine recovery failed: ${sanitizeDiagnostic(error)}`);
+        this.scheduleAutomaticRecovery();
+      });
+    }, delay);
+    this.recoveryTimer.unref();
+  }
+
   private closeDetachedClient(client: BridgeClient): void {
     client.removeAllListeners();
     client.on('error', (error) => {
@@ -1656,6 +1751,8 @@ export class SessionRuntime {
   }
 
   restart(beforeRestart?: () => void | Promise<void>): Promise<void> {
+    this.desiredRunning = true;
+    this.cancelAutomaticRecovery();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) throw new Error('session runtime is no longer open');
       // This runs after any earlier queued lifecycle work and immediately
@@ -1689,6 +1786,8 @@ export class SessionRuntime {
   }
 
   stop(): Promise<void> {
+    this.desiredRunning = false;
+    this.cancelAutomaticRecovery();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) return;
       this.assertNoLiveSideChats();
@@ -1700,6 +1799,8 @@ export class SessionRuntime {
 
   /** Security revocation cannot wait for the user to close Side Chats. */
   stopForComputerPolicyFailure(): Promise<void> {
+    this.desiredRunning = false;
+    this.cancelAutomaticRecovery();
     try { this.revokeComputerAccess(); }
     catch (error) { this.diagnostics.add('warn', 'host', sanitizeDiagnostic(error)); }
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
@@ -1710,7 +1811,7 @@ export class SessionRuntime {
     return this.restartChain;
   }
 
-  private async startInternal(): Promise<void> {
+  private async startInternal(publishConnected = true): Promise<void> {
     this.telemetryRevoked = false;
     this.liveConnectionRecovered = false;
     this.configuredCustomProviderIds = [];
@@ -1750,7 +1851,7 @@ export class SessionRuntime {
           && (!access.workspace || access.workspace === this.projectPath),
         );
         try {
-          await this.connectBridgeClient(reusable.lockfilePath, generation, false);
+          await this.connectBridgeClient(reusable.lockfilePath, generation, false, publishConnected);
           const telemetryConfig = this.opts.getTelemetryConfig?.() ?? resolveDesktopTelemetry({});
           this.telemetry = new DesktopTelemetry({ ...telemetryConfig, enabled: telemetryConfig.enabled && !this.telemetryRevoked }, this.opts.appVersion);
           if (!telemetryConfig.enabled || this.telemetryRevoked) {
@@ -1820,17 +1921,9 @@ export class SessionRuntime {
       ...pluginSecretValues,
     ].filter((value): value is string => Boolean(value)));
 
+    let established = false;
     child.once('exit', (code, signal) => {
-      if (this.child !== child) return;
-      const exitGeneration = this.generation;
-      this.diagnostics.add('info', 'host', childExitDiagnostic(code, signal, exitGeneration));
-      this.child = null;
-      this.nativeMediaClient = undefined;
-      this.invalidateNativeMediaBinding();
-      void this.teardownAudioGeneration(exitGeneration);
-      if (!this.disposed) {
-        this.setState({ status: 'disconnected', reason: `bridge-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})` });
-      }
+      this.managedChildExited(child, code, signal, established);
     });
     child.once('error', (error) => {
       if (this.child !== child) return;
@@ -1850,7 +1943,8 @@ export class SessionRuntime {
       });
       if (this.disposed) throw new Error('SessionRuntime is disposed');
       const connectStartedAt = Date.now();
-      await this.connectBridgeClient(lockfilePath, generation);
+      await this.connectBridgeClient(lockfilePath, generation, true, publishConnected);
+      established = true;
       this.startupDiagnostic('bridge_start_completed', {
         connectDurationMs: Date.now() - connectStartedAt,
         durationMs: Date.now() - startedAt,
@@ -2581,6 +2675,18 @@ export class SessionRuntime {
       this.invalidateNativeMediaBinding();
       void this.teardownAudioGeneration(generation);
       this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
+      // A living peer is never replaced for a transport-only disconnect.
+      const adoptedPid = this.adoptedPid;
+      if (adoptedPid && this.adoptedProcessOwned && this.desiredRunning) {
+        const timer = setTimeout(() => {
+          if (this.disposed || generation !== this.generation || client !== this.client
+            || adoptedPid !== this.adoptedPid || !this.adoptedProcessOwned || this.processIsAlive(adoptedPid)) return;
+          this.adoptedPid = null;
+          this.adoptedProcessOwned = false;
+          this.managedProcessExited(true);
+        }, 250);
+        timer.unref();
+      }
     });
     client.on('error', (error) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
@@ -3635,6 +3741,8 @@ export class SessionRuntime {
   async dispose(options?: { replacing?: boolean }): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.desiredRunning = false;
+    this.cancelAutomaticRecovery();
     await this.restartChain.catch(() => undefined);
     if (this.opts.envelopeEvents) {
       this.setState({ status: 'disconnected', reason: options?.replacing ? 'session runtime replaced' : SESSION_RUNTIME_DISPOSED_REASON });

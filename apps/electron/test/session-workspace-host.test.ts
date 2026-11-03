@@ -858,6 +858,34 @@ test('a first durable prompt records the live writer source without changing ano
   assert.deepEqual(await resolveSavedConversationTranscript(saved, f.catalog as any, owner), { path: f.original.transcriptPath, mode: 'code' });
 });
 
+test('Local App recovery accepts a proven directory alias while retaining its exact catalog selection', { skip: process.platform === 'win32' }, async t => {
+  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  f.settings.conversationSpaces.register(owner);
+  const original = f.original.transcriptPath;
+  const aliasDirectory = join(f.root, 'source-alias'); symlinkSync(f.source, aliasDirectory, 'dir');
+  const selected = { scope: 'repository' as const, transcriptPath: join(aliasDirectory, `${sessionId}.jsonl`) };
+  let captured: typeof selected | undefined;
+  assert.equal(await f.host.rememberCreatedSessionSource(owner, f.original as any, false,
+    async source => { captured = source as typeof selected; }, selected), selected.transcriptPath);
+  assert.deepEqual(captured, selected);
+  assert.deepEqual(f.calls.select.at(-1)?.selection, selected);
+  assert.equal(f.settings.getSessionTranscriptSelection(owner)?.transcriptPath, selected.transcriptPath);
+  f.original.transcriptPath = original;
+  await (f.host as any).assertLocalAppSessionRuntime(owner, f.original, selected.transcriptPath);
+
+  const before = readFileSync(f.settings.settingsPath, 'utf8');
+  const otherDirectory = join(f.root, 'another-source'); mkdirSync(otherDirectory);
+  const other = join(otherDirectory, `${sessionId}.jsonl`); writeFileSync(other, '{}\n');
+  await assert.rejects(f.host.rememberCreatedSessionSource(owner, f.original as any, false, undefined,
+    { ...selected, transcriptPath: other }), /source changed/);
+  await assert.rejects((f.host as any).assertLocalAppSessionRuntime(owner, f.original, other), /source changed/);
+  const leafDirectory = join(f.root, 'leaf-link'); mkdirSync(leafDirectory);
+  const leafLink = join(leafDirectory, `${sessionId}.jsonl`); symlinkSync(original, leafLink);
+  await assert.rejects(f.host.rememberCreatedSessionSource(owner, f.original as any, false, undefined,
+    { ...selected, transcriptPath: leafLink }), /source changed/);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
+});
+
 test('source capture rejects mismatched mode, workspace or writer and preserves the prior source', async t => {
   const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
   f.settings.conversationSpaces.register(owner); writeFileSync(f.original.transcriptPath, '{}\n');

@@ -530,6 +530,16 @@ type CapturedMetadataSource = {
   timer: ReturnType<typeof setTimeout>;
 };
 
+/** Prove two path spellings still name the same existing regular transcript. */
+function sameTranscriptFile(first: unknown, second: unknown): boolean {
+  if (typeof first !== 'string' || typeof second !== 'string' || !isAbsolute(first) || !isAbsolute(second)) return false;
+  try {
+    const a = lstatSync(first), b = lstatSync(second);
+    return a.isFile() && b.isFile() && a.dev === b.dev && a.ino === b.ino
+      && realpathSync.native(first) === realpathSync.native(second);
+  } catch { return false; }
+}
+
 function metadataOpenSelection(value: unknown): SessionOpenSelection | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid session metadata selection.');
@@ -2223,7 +2233,7 @@ export class HostController {
           || live.isStarting || live.needsSessionResume) throw new Error('The Local App session source cannot be confirmed');
         const state = await live.getWorkspaceState();
         if (this.bridge.get(owned.sessionId) !== live || live.connectionState.status !== 'connected'
-          || live.sessionMode !== 'code' || state.transcript_path !== selected.transcriptPath || canonicalWorkspace(state.cwd) !== project) {
+          || live.sessionMode !== 'code' || !sameTranscriptFile(state.transcript_path, selected.transcriptPath) || canonicalWorkspace(state.cwd) !== project) {
           throw new Error('The Local App session source changed');
         }
         runtime = live;
@@ -2257,7 +2267,7 @@ export class HostController {
     if (this.bridge.get(owner.sessionId) !== runtime || runtime.projectPath !== owner.projectPath || runtime.sessionMode !== 'code'
       || !current || current.mode !== 'code' || current.projectId !== owner.projectId || current.projectPath !== owner.projectPath
       || (owner.projectId !== null && (!this.settings.hasProject(owner.projectId) || this.isProjectClosing(owner.projectId)))
-      || state.transcript_path !== path || canonicalWorkspace(state.cwd) !== owner.projectPath) {
+      || !sameTranscriptFile(state.transcript_path, path) || canonicalWorkspace(state.cwd) !== owner.projectPath) {
       throw new Error('The Local App session source changed');
     }
   }
@@ -2281,17 +2291,18 @@ export class HostController {
       || canonicalWorkspace(state.cwd) !== owner.projectPath || !lstatSync(path).isFile()) {
       throw new Error('The live session has no verified transcript source.');
     }
-    if (preferredSource && preferredSource.transcriptPath !== path) throw new Error('The Local App session source changed');
+    if (preferredSource && !sameTranscriptFile(preferredSource.transcriptPath, path)) throw new Error('The Local App session source changed');
+    const catalogPath = preferredSource?.transcriptPath ?? path;
     this.sessionCatalog.invalidate(owner.projectPath);
     let selected: { catalogProjectPath: string; scope: SessionCatalogScope; transcriptPath: string } | undefined;
     for (const scope of preferredSource ? [preferredSource.scope] : ['current', 'repository', 'all'] as const) {
-      const row = await this.sessionCatalog.select(owner.projectPath, owner.sessionId, { scope, transcriptPath: path });
-      if (!row || row.path !== path) continue;
+      const row = await this.sessionCatalog.select(owner.projectPath, owner.sessionId, { scope, transcriptPath: catalogPath });
+      if (!row || row.path !== catalogPath) continue;
       if (row.uuid.toLowerCase() !== owner.sessionId.toLowerCase() || row.mode !== owner.mode
         || (row.workspace_path && canonicalWorkspace(row.workspace_path) !== owner.projectPath)) {
         throw new Error('The catalog source does not match the session owner.');
       }
-      selected = { catalogProjectPath: owner.projectPath, scope, transcriptPath: path };
+      selected = { catalogProjectPath: owner.projectPath, scope, transcriptPath: catalogPath };
       break;
     }
     if (!selected) throw new Error('The live session transcript is not available in its catalog.');
@@ -2306,14 +2317,14 @@ export class HostController {
       if (this.bridge.get(owner.sessionId) !== runtime || runtime.sessionMode !== owner.mode || !after
         || (after && (after.projectPath !== owner.projectPath || after.projectId !== owner.projectId || after.mode !== owner.mode))
         || (owner.projectId !== null && (!this.settings.hasProject(owner.projectId) || this.isProjectClosing(owner.projectId)))
-        || confirmed.transcript_path !== path || canonicalWorkspace(confirmed.cwd) !== owner.projectPath) {
+        || !sameTranscriptFile(confirmed.transcript_path, selected.transcriptPath) || canonicalWorkspace(confirmed.cwd) !== owner.projectPath) {
         throw new Error('The session owner changed before its source was recorded.');
       }
     }
     if (!current) this.settings.conversationSpaces.register(owner);
     this.settings.rememberSessionTranscriptSelection(owner, selected);
-    runtime.rememberTranscriptSelection(path);
-    return path;
+    runtime.rememberTranscriptSelection(selected.transcriptPath);
+    return selected.transcriptPath;
   }
 
   /** Return a mode only when the displayed owner agrees with the committed space. */

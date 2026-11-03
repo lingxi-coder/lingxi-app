@@ -638,6 +638,7 @@ test('recovering Local App source A never retargets a live same-UUID source B', 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const project = join(root, 'project'); mkdirSync(project);
   const original = join(root, 'a', `${sessionId}.jsonl`), livePath = join(root, 'b', `${sessionId}.jsonl`);
+  mkdirSync(join(root, 'a')); mkdirSync(join(root, 'b')); writeFileSync(original, '{}\n'); writeFileSync(livePath, '{}\n');
   const settings = new SettingsStore(join(root, 'settings'));
   settings.addProject(project); settings.conversationSpaces.addProject(project, 'code'); settings.conversationSpaces.setMode('code');
   const ledger = new AuthoringSessionIntents(join(root, 'intents'));

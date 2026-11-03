@@ -10,7 +10,6 @@ import { imageFileToAttachment } from '../bridge/imageInput';
 import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
 import { modelReference } from '../bridge/modelCatalog';
 import type { SideChatsController } from '../bridge/useSideChats';
-import './SideChatPanel.css';
 
 export function SideChatPanel({ controller }: { controller: SideChatsController }) {
   const { tr, locale } = useI18n();
@@ -36,7 +35,7 @@ export function SideChatPanel({ controller }: { controller: SideChatsController 
     try { await controller.sendPrompt(side); } catch (error) { setNotice(String(error)); }
     finally { setSendingIds((current) => { const next = new Set(current); next.delete(side.id); return next; }); }
   };
-  return <aside className="side-chat-panel no-drag" aria-label={tr('desktop_navigation_side_chat')} style={{ width, '--side-bg': t.stageBg, '--side-text': t.text, '--side-muted': t.text3, '--side-border': t.border, '--side-hover': t.surfaceHover, '--side-surface': t.surface, '--side-border-strong': t.borderStrong, '--side-accent': t.accent, '--side-active': t.surfaceActive, '--side-faint': t.text4 } as CSSProperties}>
+  return <aside id="side-chat-panel" className="side-chat-panel no-drag" aria-label={tr('desktop_navigation_side_chat')} style={{ width, '--side-bg': t.stageBg, '--side-text': t.text, '--side-muted': t.text3, '--side-border': t.border, '--side-hover': t.surfaceHover, '--side-surface': t.surface, '--side-border-strong': t.borderStrong, '--side-accent': t.accent, '--side-active': t.surfaceActive, '--side-faint': t.text4 } as CSSProperties}>
     <div className="side-chat-resize" role="separator" aria-label={tr('desktop_navigation_resize_side')} aria-orientation="vertical" tabIndex={0} aria-valuemin={320} aria-valuemax={800} aria-valuenow={width}
       onKeyDown={(event) => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); setWidth((current) => Math.max(320, Math.min(800, current + (event.key === 'ArrowLeft' ? 16 : -16)))); } }}
       onPointerDown={(event) => {
@@ -46,14 +45,6 @@ export function SideChatPanel({ controller }: { controller: SideChatsController 
         const end = () => { target.removeEventListener('pointermove', move); target.removeEventListener('pointerup', end); target.removeEventListener('pointercancel', end); };
         target.addEventListener('pointermove', move); target.addEventListener('pointerup', end); target.addEventListener('pointercancel', end);
       }} />
-    <header className="side-chat-header">
-      <select aria-label={tr('desktop_navigation_select_side')} value={side.id} onChange={(event) => { controller.select(event.target.value); setNotice(undefined); }}>
-        {controller.sides.map((entry, index) => <option key={entry.id} value={entry.id}>{tr('desktop_navigation_side_chat')} {index + 1}</option>)}
-      </select>
-      <button title={tr('desktop_navigation_new_side')} aria-label={tr('desktop_navigation_new_side')} onClick={() => act(controller.create())}><Icon name="plus" size={16} /></button>
-      <button title={side.closing ? tr('desktop_navigation_retry_end_side') : tr('desktop_navigation_end_side')} aria-label={tr('desktop_navigation_end_side')} disabled={side.ending} onClick={() => act(controller.end(side))}><span className="side-chat-aux-label">{side.closing && !side.ending ? tr('desktop_navigation_retry_end') : tr('desktop_navigation_end')}</span><span className="side-chat-aux-icon">×</span></button>
-      <button title={tr('desktop_navigation_hide_side')} aria-label={tr('desktop_navigation_hide_side')} onClick={() => controller.setOpen(false)}><Icon name="topbar-inspector-open" size={18} /></button>
-    </header>
     <div className="side-chat-body">
       {empty ? <div className="side-chat-empty" role="status">
         <Icon name="chatPlus" size={32} stroke={1.65} />
@@ -92,4 +83,23 @@ export function SideChatPanel({ controller }: { controller: SideChatsController 
       </div>
     </div>
   </aside>;
+}
+
+/** Side-chat navigation shares the window toolbar with resource tabs. */
+export function SideChatTabs({ controller }: { controller: SideChatsController }) {
+  const { tr } = useI18n();
+  const [error, setError] = useState<string>();
+  const side = controller.selected;
+  const act = (operation: Promise<unknown>) => { setError(undefined); void operation.catch((cause: Error) => setError(cause.message)); };
+  return <div className="side-chat-toolbar no-drag">
+    {side && <div className="side-chat-tab" data-active={controller.open || undefined}>
+      <Icon name="chatPlus" size={16} />
+      <select aria-label={tr('desktop_navigation_select_side')} value={side.id} onClick={() => controller.setOpen(true)} onChange={(event) => { controller.select(event.target.value); controller.setOpen(true); setError(undefined); }}>
+        {controller.sides.map((entry, index) => <option key={entry.id} value={entry.id}>{tr('desktop_navigation_side_number', index + 1)}</option>)}
+      </select>
+      <button type="button" title={side.closing ? tr('desktop_navigation_retry_end_side') : tr('desktop_navigation_end_side')} aria-label={tr('desktop_navigation_end_side')} disabled={side.ending} onClick={() => act(controller.end(side))}><Icon name="x" size={12} /></button>
+    </div>}
+    <button type="button" className="desktop-topbar-action" title={tr('desktop_navigation_new_side')} aria-label={tr('desktop_navigation_new_side')} onClick={() => act(controller.create())}><Icon name="plus" size={18} /></button>
+    {error && <span className="side-chat-toolbar-error" role="status" title={error}>{error}</span>}
+  </div>;
 }

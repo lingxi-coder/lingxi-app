@@ -1417,7 +1417,10 @@ export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCent
 }) {
   const t = useT();
   const inspectorOpen = bridge.runtimeCenter.inspectorOpen;
+  const panelOpen = sideChatOpen || inspectorOpen;
+  const panelLabel = sideChatOpen ? tr('desktop_navigation_hide_side') : sideChatAvailable && !inspectorOpen ? tr('desktop_chat_reopen_side_chat') : tr('desktop_toggle_right_panel');
   const projectPath = bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path;
+  const sessionTitle = bridge.bootstrap?.projectCatalogs?.[projectPath ?? '']?.sessions.find((session) => session.uuid === bridge.activeSession?.sessionId)?.title;
   const remoteState = useRemoteControl();
   const remote = remoteIndicator(remoteState.sessions, bridge.activeSession?.sessionId);
 
@@ -1431,24 +1434,10 @@ export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCent
   } as CSSProperties;
   return (
     <header className="drag-region desktop-topbar" style={{ '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
-      {bot ? (
-        <div className="desktop-topbar-project" title={bot.name}>
-          <span className="desktop-topbar-project-icon" aria-hidden="true"><Icon name="bot" size={17} stroke={1.65} /></span>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bot.name || tr('bots_chat_badge')}</div>
-            <div style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tr('bots_chat_badge')}</div>
-          </div>
-        </div>
-      ) : (
-        <div className="desktop-topbar-project" title={projectPath}>
-          <span className="desktop-topbar-project-icon" aria-hidden="true"><DesktopIcon name="folder" size={17} /></span>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(projectPath)}</div>
-            <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{projectPath ?? tr('desktop_chat_add_project_begin')}</div>
-          </div>
-        </div>
-      )}
-      {bot && <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('bots_chat_open_bot')} title={tr('bots_chat_open_bot')} onClick={bot.onOpen} style={topbarActionTokens}><Icon name="bot" size={20} stroke={1.75} /></button>}
+      <div className="desktop-topbar-project" title={bot?.name ?? projectPath}>
+        {bot ? <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('bots_chat_open_bot')} title={tr('bots_chat_open_bot')} onClick={bot.onOpen} style={topbarActionTokens}><Icon name="bot" size={18} /></button> : <span className="desktop-topbar-project-icon" aria-hidden="true"><DesktopIcon name="folder" size={17} /></span>}
+        <span className="desktop-topbar-title" style={{ color: t.text }}>{bot?.name || sessionTitle || basename(projectPath)}</span>
+      </div>
       {remote && (
         <span className="no-drag desktop-topbar-remote" role="status" data-remote-viewers={remote.viewers}
           aria-label={remote.viewers > 0 ? tr('desktop_chat_remote_viewers', remote.viewers) : tr('desktop_chat_remote_enabled')}
@@ -1470,19 +1459,20 @@ export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCent
         style={topbarActionTokens}
       ><DesktopIcon name="topbar-summary" size={19} /></button>
       <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('desktop_toggle_terminal')} title={`${tr('desktop_toggle_terminal')} (Ctrl+\`)`} aria-controls="desktop-terminal" aria-expanded={terminalOpen} aria-pressed={terminalOpen} disabled={!terminalAvailable} data-active={terminalOpen ? 'true' : undefined} onClick={onToggleTerminal} style={topbarActionTokens}><DesktopIcon name="topbar-terminal" size={19} /></button>
-      {sideChatAvailable ? <button className="no-drag desktop-topbar-action" type="button" title={tr('desktop_chat_reopen_side_chat')} aria-label={tr('desktop_chat_reopen_side_chat')} aria-expanded={sideChatOpen} aria-pressed={sideChatOpen} onClick={onToggleSideChat} style={topbarActionTokens}><DesktopIcon name="chat" size={19} /></button> : null}
       <div id="runtime-inspector-topbar-controls" className="no-drag runtime-inspector-topbar-controls" style={topbarActionTokens} />
       <button
         className="no-drag desktop-topbar-action desktop-inspector-trigger"
         type="button"
         data-runtime-inspector-trigger="true"
-        aria-label={tr('desktop_toggle_right_panel')}
-        title={tr('desktop_toggle_right_panel')}
-        aria-controls="runtime-inspector"
-        aria-expanded={inspectorOpen}
-        aria-pressed={inspectorOpen}
-        data-active={inspectorOpen ? 'true' : undefined}
-        onClick={() => {
+        aria-label={panelLabel}
+        title={panelLabel}
+        aria-controls={sideChatOpen ? 'side-chat-panel' : 'runtime-inspector'}
+        aria-expanded={panelOpen}
+        aria-pressed={panelOpen}
+        data-active={panelOpen ? 'true' : undefined}
+        onClick={(event) => {
+          event.currentTarget.focus({ preventScroll: true });
+          if (sideChatOpen || (sideChatAvailable && !inspectorOpen)) { onToggleSideChat?.(); return; }
           bridge.setRuntimeInspectorOpen(!inspectorOpen);
           // The inspector is still sliding in; focusing must not scroll its
           // clipped container and jump the panel straight to its resting position.
@@ -1493,7 +1483,7 @@ export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCent
           });
         }}
         style={topbarActionTokens}
-      ><DesktopIcon name={inspectorOpen ? 'topbar-inspector-open' : 'topbar-inspector-closed'} size={19} /></button>
+      ><DesktopIcon name={panelOpen ? 'topbar-inspector-open' : 'topbar-inspector-closed'} size={19} /></button>
     </header>
   );
 }

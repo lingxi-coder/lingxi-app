@@ -262,7 +262,8 @@ body {
 .desktop-topbar .mono {
   font-variant-numeric: tabular-nums;
 }
-.desktop-topbar-project { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.desktop-topbar-project { display: flex; align-items: center; gap: 8px; flex: 1 1 180px; min-width: 70px; }
+.desktop-topbar-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 550; letter-spacing: -.01em; }
 .desktop-topbar-project-icon {
   width: 28px;
   height: 28px;
@@ -271,7 +272,7 @@ body {
   flex: 0 0 auto;
   border-radius: 10px;
   color: var(--topbar-project-color);
-  background: var(--topbar-project-surface);
+  background: transparent;
 }
 .desktop-topbar-action {
   width: 32px;
@@ -2449,9 +2450,6 @@ textarea, input, select { font-family: inherit; }
   .desktop-empty-mark { margin-bottom: 13px; }
   .desktop-empty-steps { display: none; }
 }
-
-/* The expanded pane owns its toggle, as in the Codex split header. */
-.desktop-inspector-trigger[aria-expanded='true'] { display: none; }
 
 /* Stop and send share one fixed trailing action slot. */
 .composer-submit-actions {

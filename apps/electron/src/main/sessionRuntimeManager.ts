@@ -108,7 +108,10 @@ export interface RemoteLease {
  */
 export class SessionRuntimeManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
-  private readonly openingSessions = new Map<string, { projectPath: string; transcriptPath?: string; promise: Promise<SessionRuntime>; activate: boolean }>();
+  private readonly openingSessions = new Map<string, {
+    projectPath: string; transcriptPath?: string; mode?: RuntimeSessionMode;
+    promise: Promise<SessionRuntime>; activationModes: Set<RuntimeSessionMode | undefined>;
+  }>();
   private readonly restartingSessions = new Map<string, Set<Promise<void>>>();
   private readonly backgroundSessionLeases = new Map<string, number>();
   private readonly draftSessions = new Map<string, DraftSession>();
@@ -423,7 +426,12 @@ export class SessionRuntimeManager {
       if (scheduledDurableAnchor) throw new Error('The new scheduled chat is already being opened.');
       if (pending.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
       if (transcriptPath && pending.transcriptPath !== transcriptPath) throw new Error('another transcript selection is being opened');
-      pending.activate ||= activate;
+      if (ref.mode && pending.mode && ref.mode !== pending.mode) throw new Error('session mode does not match its owner');
+      if (activate) pending.activationModes.add(ref.mode);
+      if (ref.mode && !pending.mode) return pending.promise.then(runtime => {
+        if (runtime.sessionMode !== ref.mode) throw new Error('session mode does not match its owner');
+        return runtime;
+      });
       return pending.promise;
     }
     const restarting = this.restartingSessions.get(ref.sessionId);
@@ -451,13 +459,15 @@ export class SessionRuntimeManager {
     const promise = this.openSessionInternal(ref, existing, empty, transcriptPath, remountControls, scheduledDurableAnchor).then((runtime) => {
       runtime.completeWorkspaceRemount();
       if (transcriptPath) this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
-      if (this.openingSessions.get(ref.sessionId)?.activate) this.activate(runtime);
+      const requested = this.openingSessions.get(ref.sessionId)?.activationModes;
+      if (requested?.has(undefined) || (runtime.sessionMode && requested?.has(runtime.sessionMode))) this.activate(runtime);
       return runtime;
     });
     const trackedPromise = promise.finally(() => {
       if (this.openingSessions.get(ref.sessionId)?.promise === trackedPromise) this.openingSessions.delete(ref.sessionId);
     });
-    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, transcriptPath, promise: trackedPromise, activate });
+    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, transcriptPath, mode: ref.mode,
+      promise: trackedPromise, activationModes: new Set(activate ? [ref.mode] : []) });
     return trackedPromise;
   }
 
@@ -695,6 +705,7 @@ export class SessionRuntimeManager {
   private async restartInternal(ref: SessionRef, beforeRestart?: () => void): Promise<void> {
     const runtime = this.require(ref);
     if (runtime.hasActiveAudio) throw new Error('Stop audio before restarting this chat.');
+    if (runtime.hasActiveMetadata) throw new Error('Wait for the session metadata operation before restarting this chat.');
     const recovering = runtime.connectionState.status !== 'connected' || runtime.isStarting;
     const opening = this.openingSessions.get(ref.sessionId);
     if (opening) {

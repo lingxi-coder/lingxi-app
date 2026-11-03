@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { BridgeClient } from '@lingxi/bridge-client';
+import { BridgeClient, SessionMetadataUnconfirmedError } from '@lingxi/bridge-client';
 import type { SetWorkingDirectoryRequest } from '@lingxi/bridge-client';
 
 import { SessionRuntime } from '../src/main/bridge';
@@ -946,6 +946,195 @@ test('a cold selected open exposes its exact transcript before the first start a
   assert.equal(manager.openSession(ref, false, undefined, true, selectedPath), opening);
   finished.resolve(undefined);
   await opening;
+});
+
+test('a concurrent opener can activate only the mode resolved for its session owner', async (t) => {
+  const originalStart = SessionRuntime.prototype.start, originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () { (this as any).setState({ status: 'connected' }); };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  t.after(() => { SessionRuntime.prototype.start = originalStart; SessionRuntime.prototype.resumeOwnedSession = originalResume; });
+  for (const requested of ['code', 'chat'] as const) {
+    const mode = deferred<'chat'>();
+    const manager = new SessionRuntimeManager({
+      launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+      resolveSessionMode: () => mode.promise,
+      resolveSavedTranscript: async () => ({ path: '/saved/selected.jsonl', mode: 'chat' }),
+    });
+    try {
+      const ref = { projectPath: '/project', sessionId };
+      const opening = manager.openSession(ref, false, undefined, false);
+      const joined = manager.openSession({ ...ref, mode: requested }, false, undefined, true);
+      const rejected = requested === 'code' ? assert.rejects(joined, /session mode does not match/) : undefined;
+      mode.resolve('chat');
+      const runtime = await opening;
+      if (rejected) await rejected;
+      else assert.equal(await joined, runtime);
+      assert.equal((manager as any).activeSessionId, requested === 'chat' ? sessionId : null);
+      assert.equal(runtime.sessionMode, 'chat');
+    } finally {
+      await manager.dispose();
+    }
+  }
+  const saved = deferred<{ path: string; mode: 'chat' }>();
+  const manager = new SessionRuntimeManager({
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    resolveSavedTranscript: () => saved.promise,
+  });
+  try {
+    const ref = { projectPath: '/project', sessionId, mode: 'chat' as const };
+    const opening = manager.openSession(ref, false, undefined, false);
+    assert.throws(() => manager.openSession({ ...ref, mode: 'code' }, false, undefined, true), /session mode does not match/);
+    saved.resolve({ path: '/saved/selected.jsonl', mode: 'chat' });
+    await opening;
+    assert.equal((manager as any).activeSessionId, null);
+  } finally {
+    await manager.dispose();
+  }
+});
+
+test('a replaced runtime releases a metadata receipt returned by its old capture', async (t) => {
+  const { runtime } = connectedRuntime(t);
+  const captured = deferred<any>();
+  let releases = 0;
+  (runtime as any).sessionMode = 'code';
+  (runtime as any).client = { captureSessionMetadataOwner: () => captured.promise, close() {} };
+  const opening = runtime.captureSessionMetadataOwner('/saved/selected.jsonl', 'code');
+  (runtime as any).generation++;
+  captured.resolve({ apply: async () => {}, release: async () => { if (++releases < 3) throw new Error('lost acknowledgement'); } });
+  await assert.rejects(opening, /capture owner changed/);
+  assert.equal(releases, 3, 'a lost release acknowledgement is retried on the captured owner');
+});
+
+for (const outcome of ['same-process reconnect', 'process exit'] as const) {
+  test(`unconfirmed metadata keeps its runtime through ${outcome}`, async (t) => {
+    const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
+      launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
+    t.after(() => manager.dispose());
+    const ref = { projectPath: '/project', sessionId, mode: 'code' as const };
+    const runtime = await manager.ensure(ref, false);
+    const internal = runtime as any;
+    const write = deferred<void>(), reconnect = deferred<void>();
+    let alive = true, writes = 0, disposals = 0, reconnects = 0;
+    Object.assign(internal, {
+      child: { pid: process.pid, exitCode: null, signalCode: null },
+      activeWorkspace: ref.projectPath, activeWorkspaceTrusted: true,
+      client: { captureSessionMetadataOwner: async () => ({
+        apply: () => { writes++; return write.promise; }, release: async () => {},
+      }) },
+      processIsAlive: () => alive,
+      dispose: async () => { disposals++; },
+      start: async (options: { reconnectOnly?: boolean }) => {
+        assert.equal(options.reconnectOnly, true); reconnects++;
+        await reconnect.promise;
+        internal.client = {}; internal.generation++; internal.liveConnectionRecovered = true;
+        internal.setState({ status: 'connected' });
+      },
+    });
+    internal.setState({ status: 'connected' });
+    manager.activateSession(ref);
+    const owner = await runtime.captureSessionMetadataOwner('/saved/selected.jsonl', 'code');
+    const mutation = owner.apply('rename', 'title');
+    const rejected = assert.rejects(mutation, /metadata result is unknown/);
+    const other = { projectPath: '/next', sessionId: secondId, mode: 'chat' as const };
+    const releaseOther = manager.retainBackgroundSession(other);
+    await manager.ensure(other, false);
+    manager.activateSession(other);
+    releaseOther();
+    internal.setState({ status: 'disconnected' });
+    write.reject(new SessionMetadataUnconfirmedError());
+    await nextTurn();
+    assert.equal(reconnects, 1);
+    assert.equal(manager.get(sessionId), runtime, 'navigation cannot evict an unconfirmed writer');
+    assert.equal(disposals, 0);
+    await assert.rejects(manager.closeSession(ref), /active work/);
+    await assert.rejects(manager.restart(ref), /metadata operation/);
+    assert.throws(() => runtime.beginWorkspaceChange(), /active work/);
+    if (outcome === 'process exit') { alive = false; reconnect.reject(new Error('sidecar exited')); }
+    else reconnect.resolve(undefined);
+    await rejected;
+    await nextTurn();
+    assert.equal(writes, 1, 'an uncertain mutation must never be replayed');
+    assert.equal(manager.get(sessionId), undefined);
+    assert.equal(disposals, 1, 'the owner becomes evictable only after the drain boundary');
+  });
+}
+
+test('application shutdown waits for an unconfirmed metadata writer to drain', async () => {
+  const runtime = new SessionRuntime({ sessionId, projectPath: '/project',
+    launchConfig: () => ({ workspace: '/project', trusted: true, sessionId }) }, 'code');
+  const internal = runtime as any;
+  const write = deferred<void>(), reconnect = deferred<void>();
+  let stopped = 0;
+  Object.assign(internal, {
+    child: { pid: process.pid, exitCode: null, signalCode: null },
+    activeWorkspace: '/project', activeWorkspaceTrusted: true,
+    processIsAlive: () => true,
+    client: { captureSessionMetadataOwner: async () => ({ apply: () => write.promise, release: async () => {} }) },
+    stopBridge: async () => { stopped++; },
+    start: async (options: { reconnectOnly?: boolean; metadataDrain?: boolean }) => {
+      assert.equal(options.reconnectOnly, true); assert.equal(options.metadataDrain, true);
+      await reconnect.promise;
+      internal.client = {}; internal.generation++; internal.liveConnectionRecovered = true;
+      internal.setState({ status: 'connected' });
+    },
+  });
+  internal.setState({ status: 'connected' });
+  const owner = await runtime.captureSessionMetadataOwner('/saved/selected.jsonl', 'code');
+  const mutation = owner.apply('rename', 'title');
+  const rejected = assert.rejects(mutation, /metadata result is unknown/);
+  internal.setState({ status: 'disconnected' });
+  write.reject(new SessionMetadataUnconfirmedError());
+  await nextTurn();
+  let closed = false;
+  const closing = runtime.dispose().then(() => { closed = true; });
+  await nextTurn();
+  assert.equal(stopped, 0);
+  assert.equal(closed, false, 'shutdown cannot stop a sidecar whose metadata write is unconfirmed');
+  await assert.rejects(owner.apply('touch'), /runtime is changing|owner changed/);
+  reconnect.resolve(undefined);
+  await rejected;
+  await closing;
+  assert.equal(stopped, 1);
+});
+
+test('shutdown reconnects for metadata drain without restoring a live Side Chat', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'lingxi-metadata-drain-reconnect-'));
+  const lockfile = join(directory, 'bridge.lock');
+  writeFileSync(lockfile, JSON.stringify({ pid: process.pid, workspaceFolders: ['/project'],
+    ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef' }));
+  const originalConnect = BridgeClient.prototype.connect, originalSend = BridgeClient.prototype.sendCommand;
+  const hello = deferred<any>(), entered = deferred<void>(), write = deferred<void>();
+  const sent: string[] = [];
+  BridgeClient.prototype.connect = async function () { entered.resolve(undefined); return hello.promise; };
+  BridgeClient.prototype.sendCommand = function (command) { sent.push(command.type); };
+  t.after(() => { BridgeClient.prototype.connect = originalConnect; BridgeClient.prototype.sendCommand = originalSend;
+    rmSync(directory, { recursive: true, force: true }); });
+  const runtime = new SessionRuntime({ sessionId, projectPath: '/project',
+    launchConfig: () => ({ workspace: '/project', trusted: true, sessionId }) }, 'code');
+  const internal = runtime as any;
+  const oldClient = Object.assign(new WorkspaceClient(), { captureSessionMetadataOwner: async () => ({
+    apply: () => write.promise, release: async () => {},
+  }) });
+  let stopped = 0;
+  Object.assign(internal, { child: { pid: process.pid, exitCode: null, signalCode: null },
+    connectionLockfilePath: lockfile, processIsAlive: () => true,
+    activeWorkspace: '/project', activeWorkspaceTrusted: true, client: oldClient,
+    stopBridge: async () => { stopped++; } });
+  internal.liveSideChats.add('side-1');
+  internal.setState({ status: 'connected' });
+  const owner = await runtime.captureSessionMetadataOwner('/saved/selected.jsonl', 'code');
+  const mutation = owner.apply('rename', 'title');
+  const rejected = assert.rejects(mutation, /metadata result is unknown/);
+  internal.setState({ status: 'disconnected' });
+  write.reject(new SessionMetadataUnconfirmedError());
+  await entered.promise;
+  const closing = runtime.dispose();
+  hello.resolve({ server_name: 'fixture', protocol_version: '1', capabilities: { client_protocol_version: '32' } });
+  await rejected;
+  await closing;
+  assert.equal(stopped, 1);
+  assert.deepEqual(sent, [], 'shutdown drain does not restore or start Side Chats');
 });
 
 test('a failed selected open never replaces the last successfully remembered startup transcript', async (t) => {

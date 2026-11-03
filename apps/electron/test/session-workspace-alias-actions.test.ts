@@ -49,7 +49,9 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
   const runtime = {
     projectPath: source, sessionId, sessionMode: 'code' as const, connectionState: { status: 'connected' }, hasActiveWork: false,
     async getWorkspaceState() { return { cwd: this.projectPath, additional_directories: [], transcript_path: path }; },
-    async captureSessionMetadataOwner(selected: string, mode: string) { assert.equal(selected, path); assert.equal(mode, 'code'); return capture(); },
+    async captureSessionMetadataOwner(selected: string, mode: string) {
+      assert.equal(selected, path); assert.equal(mode, 'code'); return { apply: capture(), release: async () => {} };
+    },
     beginArchive() {
       if (this.hasActiveWork) throw new Error('Wait for active work before archiving this chat.');
       return () => undefined;

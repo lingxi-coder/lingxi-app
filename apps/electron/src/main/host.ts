@@ -2421,10 +2421,35 @@ export class HostController {
     const releaseLease = runtime ? this.bridge.retainBackgroundSession(source.ref) : () => {};
     let released = false;
     let inFlight = 0;
-    const release = () => { if (!released) { released = true; if (!inFlight) releaseLease(); } };
+    let releaseReceipt: (() => Promise<void>) | undefined;
+    let releaseStarted = false;
+    const finishRelease = () => {
+      if (!released || inFlight || releaseStarted) return;
+      releaseStarted = true;
+      if (releaseReceipt) {
+        // The server treats release as idempotent. Retry a lost acknowledgement
+        // on the same captured socket; never replay it to a replacement socket.
+        void (async () => {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try { await releaseReceipt!(); return; }
+            catch (error) {
+              if (attempt === 2) this.diagnostics.add('warn', 'host', `metadata release failed: ${sanitizeDiagnostic(error)}`);
+            }
+          }
+        })();
+      }
+      // Sending release begins synchronously. If the runtime is then evicted,
+      // closing its socket also clears every receipt on that connection.
+      releaseLease();
+    };
+    const release = () => { if (!released) { released = true; finishRelease(); } };
     try {
       const apply = runtime
-        ? await runtime.captureSessionMetadataOwner(path, mode)
+        ? await (async () => {
+          const captured = await runtime.captureSessionMetadataOwner(path, mode);
+          releaseReceipt = captured.release;
+          return captured.apply;
+        })()
         : await (async () => {
           const receipt = await this.sessionCatalog.captureMetadataSource(source.ref.projectPath, ref.sessionId, path, mode);
           return async (action: MetadataAction, title?: string) => {
@@ -2458,7 +2483,7 @@ export class HostController {
               throw new Error(action === 'verify' ? detail : `The metadata may have been applied, but its owner changed: ${detail}`);
             }
           }
-          finally { if (!--inFlight && released) releaseLease(); }
+          finally { --inFlight; finishRelease(); }
         }, release, timer });
       return capturedSelection;
     } catch (error) { release(); throw error; }

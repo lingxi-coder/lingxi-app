@@ -13,6 +13,8 @@ export * from './workspace.js';
 export { versionCompatible } from './version.js';
 export {
   BridgeClient,
+  SessionMetadataUnconfirmedError,
   type BridgeClientOptions,
   type BridgeClientEvents,
+  type SessionMetadataOwner,
 } from './client.js';

@@ -15,7 +15,6 @@ const source = {
   transcriptPath: '/source/空 格/selected.jsonl',
   sessionMode: 'code' as const,
 };
-const receipt = '  {"opaque":"雪\\n","order":[2,1]}\n/unchanged==  ';
 const token = '0123456789abcdef0123456789abcdef';
 
 type WireRequest = {
@@ -91,13 +90,22 @@ async function wireFixture(t: TestContext) {
   return { client, sockets, requests, heldHelloConnections, next, nextHeldHello, reply };
 }
 
+function captureReceipt(request: WireRequest): string {
+  const params = request.params as { action: string; receipt: string };
+  assert.equal(params.action, 'capture');
+  assert.match(params.receipt, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.deepEqual(params, { action: 'capture', ...source, receipt: params.receipt });
+  return params.receipt;
+}
+
 async function capture(fixture: Awaited<ReturnType<typeof wireFixture>>) {
   const pending = fixture.client.captureSessionMetadataOwner(source);
   const request = await fixture.next();
   assert.equal(request.method, 'session_metadata');
-  assert.deepEqual(request.params, { action: 'capture', ...source });
+  const receipt = captureReceipt(request);
   fixture.reply(request, { receipt });
-  return { request, mutate: await pending };
+  const owner = await pending;
+  return { request, receipt, owner, mutate: owner.apply };
 }
 
 async function outcomeWithin<T>(promise: Promise<T>): Promise<{ error?: Error; value?: T; timeout?: true }> {
@@ -107,9 +115,9 @@ async function outcomeWithin<T>(promise: Promise<T>): Promise<{ error?: Error; v
   ]);
 }
 
-test('metadata capture and mutations keep the opaque receipt on the authenticated owner socket', { timeout: 5_000 }, async (t) => {
+test('metadata capture and mutations keep their reserved receipt on the authenticated owner socket', { timeout: 5_000 }, async (t) => {
   const fixture = await wireFixture(t);
-  const { request: captured, mutate } = await capture(fixture);
+  const { request: captured, receipt, mutate } = await capture(fixture);
   for (const [action, title] of [['rename', '标题 "A"\nB'], ['touch', undefined], ['verify', undefined]] as const) {
     const pending = mutate(action, title);
     const request = await fixture.next();
@@ -124,11 +132,16 @@ test('metadata capture and mutations keep the opaque receipt on the authenticate
 
 test('metadata rejects malformed capture and mutation confirmations', { timeout: 5_000 }, async (t) => {
   const fixture = await wireFixture(t);
-  for (const result of [null, [], {}, { receipt: '' }, { receipt: 1 }]) {
+  for (const result of [null, [], {}, { receipt: '' }, { receipt: 1 }, { receipt: '22222222-2222-4222-8222-222222222222' }]) {
     const pending = fixture.client.captureSessionMetadataOwner(source);
     const rejected = assert.rejects(pending, /Invalid session metadata capture response/);
-    fixture.reply(await fixture.next(), result);
+    const request = await fixture.next();
+    const receipt = captureReceipt(request);
+    fixture.reply(request, result);
     await rejected;
+    const release = await fixture.next();
+    assert.deepEqual(release.params, { action: 'release', receipt });
+    fixture.reply(release, { ok: true });
   }
   const { mutate } = await capture(fixture);
   for (const result of [null, [], {}, { ok: false }, { ok: 'true' }]) {
@@ -136,6 +149,78 @@ test('metadata rejects malformed capture and mutation confirmations', { timeout:
     fixture.reply(await fixture.next(), result);
     await rejected;
   }
+});
+
+test('metadata release is socket-bound, idempotent and retryable after an unconfirmed response', { timeout: 5_000 }, async (t) => {
+  const fixture = await wireFixture(t);
+  const { request: captured, receipt, owner } = await capture(fixture);
+  const mutation = owner.apply('touch');
+  const mutationRequest = await fixture.next();
+  const release = owner.release();
+  assert.equal(owner.release(), release, 'concurrent release calls share one request');
+  await assert.rejects(owner.apply('verify'), /released/);
+  const releaseRequest = await fixture.next();
+  assert.equal(releaseRequest.socket, captured.socket);
+  assert.deepEqual(releaseRequest.params, { action: 'release', receipt });
+  fixture.reply(mutationRequest, { ok: true });
+  await mutation;
+  fixture.reply(releaseRequest, { ok: false });
+  await assert.rejects(release, /Invalid session metadata release response/);
+  const retry = owner.release();
+  const retryRequest = await fixture.next();
+  assert.deepEqual(retryRequest.params, { action: 'release', receipt });
+  fixture.reply(retryRequest, { ok: true });
+  await retry;
+  await owner.release();
+  assert.equal(fixture.requests.length, 4, 'confirmed release is never sent twice');
+});
+
+test('a timed-out capture releases its reserved token before a late response', { timeout: 5_000 }, async (t) => {
+  const fixture = await wireFixture(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = fixture.client.captureSessionMetadataOwner(source);
+  const rejected = assert.rejects(pending, /timed out/);
+  const request = await fixture.next();
+  const receipt = captureReceipt(request);
+  t.mock.timers.tick(30_001);
+  await rejected;
+  const release = await fixture.next();
+  assert.equal(release.socket, request.socket);
+  assert.deepEqual(release.params, { action: 'release', receipt });
+  fixture.reply(release, { ok: true });
+  fixture.reply(request, { receipt });
+  // The next capture's acknowledgement is a same-socket FIFO sentinel: both
+  // preceding responses have been consumed when it resolves.
+  const next = await capture(fixture);
+  assert.notEqual(next.receipt, receipt);
+  assert.equal((fixture.client as any).pendingResponses.size, 0, 'the late capture cannot revive its rejected request');
+});
+
+test('an admitted metadata write waits past the ordinary RPC deadline for its actual response', { timeout: 5_000 }, async (t) => {
+  const fixture = await wireFixture(t);
+  const { owner } = await capture(fixture);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let settled = false;
+  const mutation = owner.apply('rename', 'title').finally(() => { settled = true; });
+  const request = await fixture.next();
+  t.mock.timers.tick(120_000);
+  await Promise.resolve();
+  assert.equal(settled, false, 'a timer is not evidence that the writer drained');
+  fixture.reply(request, { ok: true });
+  await mutation;
+  assert.equal(settled, true);
+});
+
+test('a replaced socket never receives the previous metadata receipt release', { timeout: 5_000 }, async (t) => {
+  const fixture = await wireFixture(t);
+  const { owner } = await capture(fixture);
+  await fixture.client.connect();
+  await owner.release();
+  const replacement = await capture(fixture);
+  assert.equal(replacement.request.connection, 1);
+  assert.deepEqual(fixture.requests.filter(item => item.connection === 1).map(item => item.params), [
+    { action: 'capture', ...source, receipt: replacement.receipt },
+  ]);
 });
 
 for (const stage of ['capture', 'mutation'] as const) {
@@ -154,7 +239,7 @@ for (const stage of ['capture', 'mutation'] as const) {
     assert.equal(nextOwner.request.connection, 1);
     await delay(20);
     assert.deepEqual(fixture.requests.filter((item) => item.connection === 1).map((item) => item.params), [
-      { action: 'capture', ...source },
+      { action: 'capture', ...source, receipt: nextOwner.receipt },
     ]);
   });
 
@@ -171,28 +256,30 @@ for (const stage of ['capture', 'mutation'] as const) {
     const newOutcome = outcomeWithin(newPending.finally(() => { newSettled = true; }));
     const newRequest = await fixture.next();
     assert.equal(newRequest.connection, 1);
-    fixture.reply(oldRequest, stage === 'capture' ? { receipt } : { ok: true });
+    const oldResult = stage === 'capture' ? { receipt: captureReceipt(oldRequest) } : { ok: true };
+    fixture.reply(oldRequest, oldResult);
     // Even if the replacement sends the old correlation id, it cannot
     // complete a request that belonged to the previous socket.
-    fixture.reply({ ...oldRequest, socket: newRequest.socket }, stage === 'capture' ? { receipt } : { ok: true });
+    fixture.reply({ ...oldRequest, socket: newRequest.socket }, oldResult);
     await delay(20);
     assert.equal(oldSettled, false, 'an obsolete socket response must not acknowledge the old operation');
     assert.equal(newSettled, false, 'an obsolete socket response must not settle the new request');
     oldRequest.socket.terminate();
     assert.ok((await oldOutcome).error, 'the old operation must reject when its socket closes');
     if (owner) await assert.rejects(owner.mutate('touch'), /connection changed/i);
-    fixture.reply(newRequest, { receipt: 'new socket receipt' });
+    const newReceipt = captureReceipt(newRequest);
+    fixture.reply(newRequest, { receipt: newReceipt });
     const current = await newOutcome;
     assert.equal(current.error, undefined);
     assert.equal(current.timeout, undefined);
-    const verified = current.value!('verify');
+    const verified = current.value!.apply('verify');
     const verifyRequest = await fixture.next();
     assert.equal(verifyRequest.connection, 1);
-    assert.deepEqual(verifyRequest.params, { action: 'verify', receipt: 'new socket receipt' });
+    assert.deepEqual(verifyRequest.params, { action: 'verify', receipt: newReceipt });
     fixture.reply(verifyRequest, { ok: true });
     await verified;
     assert.deepEqual(fixture.requests.filter((item) => item.connection === 1).map((item) => item.params), [
-      { action: 'capture', ...source }, { action: 'verify', receipt: 'new socket receipt' },
+      { action: 'capture', ...source, receipt: newReceipt }, { action: 'verify', receipt: newReceipt },
     ]);
   });
 }
@@ -216,11 +303,11 @@ test('closing a replaced socket does not reject a new owner\'s pending request',
   await delay(20);
   const oldOutcome = await oldPending;
   assert.ok(oldOutcome.error, 'the old connection request must reject');
-  fixture.reply(newRequest, { receipt });
+  fixture.reply(newRequest, { receipt: captureReceipt(newRequest) });
   const outcome = await result;
   assert.equal(outcome.error, undefined, 'an old close must not reject a new connection request');
   assert.equal(outcome.timeout, undefined);
-  const mutate = outcome.value!;
+  const mutate = outcome.value!.apply;
   const verified = mutate('verify');
   const verifyRequest = await fixture.next();
   assert.equal(verifyRequest.connection, 1);
@@ -289,11 +376,11 @@ test('an older failed public connect cannot close a newer connected socket', { t
   assert.equal(newRequest.connection, 2);
   oldHello.socket.terminate();
   assert.ok((await oldOutcome).error, 'the failed old connect must reject');
-  fixture.reply(newRequest, { receipt: 'new owner remains connected' });
+  fixture.reply(newRequest, { receipt: captureReceipt(newRequest) });
   const result = await newOutcome;
   assert.equal(result.error, undefined, 'the failed old connect must not close its replacement');
   assert.equal(result.timeout, undefined);
-  const verified = result.value!('verify');
+  const verified = result.value!.apply('verify');
   const verifyRequest = await fixture.next();
   assert.equal(verifyRequest.connection, 2);
   fixture.reply(verifyRequest, { ok: true });

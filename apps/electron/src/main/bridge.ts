@@ -6,6 +6,7 @@ import { protectBridgeTelemetryEnvironment, resolveDesktopTelemetry, telemetryPr
 import { assertComputerAccessSubset } from './computerAccessApproval.js';
 import {
   BridgeClient,
+  SessionMetadataUnconfirmedError,
   SessionEventCorrelator,
   buildNativeUiControlCommand,
   parseUiFrameEvent,
@@ -233,6 +234,11 @@ export class SessionRuntime {
   private archiving = false;
   private changingWorkspace = false;
   private audioOperations = 0;
+  private metadataOperations = 0;
+  private metadataAdmissionBlocked = false;
+  private readonly metadataDrainWaiters = new Set<() => void>();
+  private disposing = false;
+  private disposePromise: Promise<void> | undefined;
   private activeCronExecutions = 0;
   private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
   private readonly pendingScheduledTurns = new Map<string, { resolve: (summary: string) => void; reject: (error: Error) => void }>();
@@ -1144,9 +1150,10 @@ export class SessionRuntime {
   }
 
   get hasActiveAudio(): boolean { return this.audioOperations > 0; }
+  get hasActiveMetadata(): boolean { return this.metadataOperations > 0; }
 
   get hasActiveWork(): boolean {
-    return this.hasActiveAudio || this.resumeOperationInProgress || this.changingWorkspace || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.pendingSlashCommands.size > 0 || this.hasActiveAgents || this.pendingInteractions > 0;
+    return this.hasActiveAudio || this.metadataOperations > 0 || this.resumeOperationInProgress || this.changingWorkspace || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.pendingSlashCommands.size > 0 || this.hasActiveAgents || this.pendingInteractions > 0;
   }
 
   private currentResumeOwner(): PendingSessionResume | null {
@@ -1651,8 +1658,9 @@ export class SessionRuntime {
     }
   }
 
-  async start(options?: { reconnectOnly?: boolean }): Promise<void> {
+  async start(options?: { reconnectOnly?: boolean; metadataDrain?: boolean }): Promise<void> {
     if (this.disposed) throw new Error('SessionRuntime is disposed');
+    if (this.disposing && !options?.metadataDrain) throw new Error('SessionRuntime is closing');
     if (this.startPromise) {
       await this.startPromise;
       if (options?.reconnectOnly && !this.liveConnectionRecovered) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
@@ -1663,13 +1671,14 @@ export class SessionRuntime {
     const starting = this.restartChain.catch(() => undefined).then(async () => {
       try {
         if (this.disposed) throw new Error('SessionRuntime is disposed');
+        if (this.disposing && !options?.metadataDrain) throw new Error('SessionRuntime is closing');
         // Explicit restart/stop operations and automatic connection recovery
         // share one lifecycle queue, so only one sidecar can be started.
         if (this.state.status === 'connected') return;
         if (this.child || this.client || this.adoptedPid) await this.recoverConnection(options?.reconnectOnly);
         else if (options?.reconnectOnly) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
         else await this.startInternal();
-        await this.restoreDraftSessionModeIfNeeded();
+        if (!this.disposing) await this.restoreDraftSessionModeIfNeeded();
       } catch (error) {
         this.startupDiagnostic('bridge_start_failed', {
           durationMs: Date.now() - startedAt,
@@ -1718,7 +1727,15 @@ export class SessionRuntime {
     try {
       await this.connectBridgeClient(lockfilePath, recoveredGeneration, false, false);
       if (this.disposed || recoveredGeneration !== this.generation) throw new Error('bridge connection superseded');
-      const recoveredClient = this.requireClient();
+      // During shutdown the authenticated hello itself is the server's drain
+      // barrier. Do not restore Side Chats, audio, or publish new work merely
+      // to prove that the old metadata writer has finished.
+      if (this.disposing) {
+        this.liveConnectionRecovered = true;
+        this.setState({ status: 'connected' });
+        return;
+      }
+      const recoveredClient = this.requireClient(true);
       await recoveredClient.requestRuntimeSnapshot((events) => {
         // Apply at the response boundary, before later live frames. An old
         // connection response must never overwrite a newer runtime's roster.
@@ -1796,6 +1813,7 @@ export class SessionRuntime {
       await beforeRestart?.();
       this.assertNoLiveSideChats();
       if (this.audioOperations > 0) throw new Error('Stop audio before restarting this chat.');
+      if (this.metadataOperations > 0) throw new Error('Wait for the session metadata operation before restarting this chat.');
       if (this.draftSessionMode !== undefined) this.draftModeRestorationRequired = true;
       this.setState({ status: 'restarting' });
       try {
@@ -1826,6 +1844,7 @@ export class SessionRuntime {
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) return;
       this.assertNoLiveSideChats();
+      if (this.hasActiveMetadata) throw new Error('Wait for the session metadata operation before stopping this chat.');
       await this.stopBridge();
       this.setState({ status: 'idle' });
     });
@@ -1836,12 +1855,22 @@ export class SessionRuntime {
   stopForComputerPolicyFailure(): Promise<void> {
     try { this.revokeComputerAccess(); }
     catch (error) { this.diagnostics.add('warn', 'host', sanitizeDiagnostic(error)); }
-    this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
-      if (this.disposed) return;
-      try { await this.stopBridge(); }
-      finally { this.setState({ status: 'error', message: 'Computer permissions became unavailable. Restart this chat to continue.' }); }
+    this.metadataAdmissionBlocked = true;
+    // Do not occupy the lifecycle queue while waiting: an unconfirmed write
+    // may need that queue to reconnect to its original process and drain.
+    const drained = this.hasActiveMetadata
+      ? new Promise<void>(resolve => this.metadataDrainWaiters.add(resolve)) : Promise.resolve();
+    return drained.then(() => {
+      this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
+        if (this.disposed) return;
+        try { await this.stopBridge(); }
+        finally {
+          this.setState({ status: 'error', message: 'Computer permissions became unavailable. Restart this chat to continue.' });
+          this.metadataAdmissionBlocked = false;
+        }
+      });
+      return this.restartChain;
     });
-    return this.restartChain;
   }
 
   private async startInternal(): Promise<void> {
@@ -2037,6 +2066,7 @@ export class SessionRuntime {
     const handshakeStartedAt = Date.now();
     const hello = await client.connect();
     assertCurrentConnection();
+    if (this.disposing) return;
     if (this.telemetryRevoked || this.opts.getTelemetryConfig?.().enabled === false) {
       this.telemetryRevoked = true;
       this.telemetry?.disable();
@@ -3167,21 +3197,75 @@ export class SessionRuntime {
 
   /** Metadata stays with the captured runtime, socket and writer incarnation. */
   async captureSessionMetadataOwner(transcriptPath: string, mode: 'chat' | 'code'):
-    Promise<(action: 'rename' | 'touch' | 'verify', title?: string) => Promise<void>> {
+    Promise<Awaited<ReturnType<BridgeClient['captureSessionMetadataOwner']>>> {
     const client = this.requireClient();
     const generation = this.generation;
     if (this.sessionMode !== mode) throw new Error('The metadata owner mode changed.');
-    const write = await client.captureSessionMetadataOwner({ sessionId: this.sessionId, transcriptPath, sessionMode: mode });
-    if (this.client !== client || this.generation !== generation || this.disposed) throw new Error('The metadata capture owner changed.');
-    return async (action, title) => {
-      if (this.client !== client || this.generation !== generation || this.disposed || this.sessionMode !== mode) {
-        throw new Error('The metadata runtime owner changed.');
+    const owner = await client.captureSessionMetadataOwner({ sessionId: this.sessionId, transcriptPath, sessionMode: mode });
+    if (this.client !== client || this.generation !== generation || this.disposed || this.sessionMode !== mode) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try { await owner.release(); break; }
+        catch (error) {
+          if (attempt === 2) this.diagnostics.add('warn', 'bridge', `metadata release failed: ${sanitizeDiagnostic(error)}`);
+        }
       }
-      await write(action, title);
-      if (this.client !== client || this.generation !== generation || this.disposed) {
-        throw new Error('The metadata result is unconfirmed after the runtime changed.');
-      }
+      throw new Error('The metadata capture owner changed.');
+    }
+    return {
+      apply: async (action, title) => {
+        if (this.client !== client || this.generation !== generation || this.disposed || this.sessionMode !== mode) {
+          throw new Error('The metadata runtime owner changed.');
+        }
+        if (this.metadataAdmissionBlocked || this.changingWorkspace || this.isStarting || this.state.status !== 'connected') {
+          throw new Error('The metadata runtime is changing.');
+        }
+        const child = this.child;
+        const pid = child?.pid ?? this.adoptedPid;
+        if (!pid) throw new Error('The metadata writer process is unavailable.');
+        this.metadataOperations++;
+        this.notifyActivityChanged();
+        try {
+          try { await owner.apply(action, title); }
+          catch (error) {
+            if (!(error instanceof SessionMetadataUnconfirmedError)) throw error;
+            // A closed socket does not mean its admitted writer stopped. The
+            // server admits a new hello only after those writes have joined.
+            await this.waitForMetadataDrain(pid, child, generation, client);
+            throw new Error('The metadata result is unknown after the connection changed.', { cause: error });
+          }
+          if (this.client !== client || this.generation !== generation || this.disposed) {
+            throw new Error('The metadata result is unconfirmed after the runtime changed.');
+          }
+        } finally {
+          this.metadataOperations--;
+          if (!this.hasActiveMetadata) {
+            for (const resolve of this.metadataDrainWaiters) resolve();
+            this.metadataDrainWaiters.clear();
+          }
+          this.notifyActivityChanged();
+        }
+      },
+      release: () => owner.release(),
     };
+  }
+
+  /** Retain this sidecar until its old metadata writes have a drain proof. */
+  private async waitForMetadataDrain(pid: number, child: ChildProcess | null, generation: number, client: BridgeClient): Promise<void> {
+    const alive = () => (child === null || (child.exitCode === null && child.signalCode === null)) && this.processIsAlive(pid);
+    const recovered = () => this.client !== client && this.generation !== generation
+      && this.state.status === 'connected' && this.liveConnectionRecovered;
+    while (!this.disposed && alive()) {
+      const currentPid = this.child?.pid ?? this.adoptedPid;
+      if (currentPid === pid) {
+        if (recovered()) return;
+        if (this.state.status !== 'connected') {
+          try { await this.start({ reconnectOnly: true, metadataDrain: true }); }
+          catch { /* The original process may still be draining. Keep its lease. */ }
+          if (recovered()) return;
+        }
+      }
+      if (!this.disposed && alive()) await new Promise<void>(resolve => setTimeout(resolve, 250));
+    }
   }
 
   /** Renderer UI control is a narrow typed lane, separate from generic `command()`. */
@@ -3699,7 +3783,8 @@ export class SessionRuntime {
     return this.client !== null;
   }
 
-  private requireClient(): BridgeClient {
+  private requireClient(allowDisposing = false): BridgeClient {
+    if (this.disposing && !allowDisposing) throw new Error('The session is closing.');
     this.refreshAccessState();
     if (!this.activeWorkspaceTrusted) throw new Error('workspace trust is required before using the engine');
     if (!this.client) throw new Error(`bridge client not connected (state=${this.state.status})`);
@@ -3954,17 +4039,25 @@ export class SessionRuntime {
     catch (error) { this.diagnostics.add('warn', 'bridge', `catalog refresh: ${sanitizeDiagnostic(error)}`); }
   }
 
-  async dispose(options?: { replacing?: boolean }): Promise<void> {
-    if (this.disposed) return;
-    this.disposed = true;
-    await this.restartChain.catch(() => undefined);
-    if (this.opts.envelopeEvents) {
-      this.setState({ status: 'disconnected', reason: options?.replacing ? 'session runtime replaced' : SESSION_RUNTIME_DISPOSED_REASON });
-    }
-    await this.stopBridge();
-    this.unsubscribeAudioService?.();
-    this.targets.clear();
-    this.notifyRemote({ type: 'disposed' });
-    this.remoteObservers.clear();
+  dispose(options?: { replacing?: boolean }): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.disposing = true;
+    this.metadataAdmissionBlocked = true;
+    const operation = (async () => {
+      if (this.hasActiveMetadata) await new Promise<void>(resolve => this.metadataDrainWaiters.add(resolve));
+      if (this.disposed) return;
+      this.disposed = true;
+      await this.restartChain.catch(() => undefined);
+      if (this.opts.envelopeEvents) {
+        this.setState({ status: 'disconnected', reason: options?.replacing ? 'session runtime replaced' : SESSION_RUNTIME_DISPOSED_REASON });
+      }
+      await this.stopBridge();
+      this.unsubscribeAudioService?.();
+      this.targets.clear();
+      this.notifyRemote({ type: 'disposed' });
+      this.remoteObservers.clear();
+    })();
+    this.disposePromise = operation;
+    return operation;
   }
 }

@@ -305,13 +305,13 @@ test('session clear accepts Claude Code name syntax and labels the session being
       assert.equal(mode, 'code');
       assert.equal(leases, 1);
       events.push('capture');
-      return async (action: string, title?: string) => {
+      return { apply: async (action: string, title?: string) => {
         assert.equal(action, 'rename');
         assert.equal(title, 'investigation');
         assert.equal(leases, 1);
         events.push('rename');
         appendFileSync(path, `${JSON.stringify({ type: 'custom-title', customTitle: title, sessionId })}\n`);
-      };
+      }, release: async () => {} };
     },
     pendingInteractions: 0,
     pendingAskUserQuestions: [],

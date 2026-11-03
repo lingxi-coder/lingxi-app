@@ -91,6 +91,20 @@ const WS_SUBPROTOCOL = 'mcp';
 /** Auth header the endpoint validates against the lockfile `authToken`. */
 const AUTH_HEADER_NAME = 'X-LingXi-Ide-Authorization';
 
+/** A metadata receipt is private to the socket that captured it. */
+export interface SessionMetadataOwner {
+  apply(action: 'rename' | 'touch' | 'verify', title?: string): Promise<void>;
+  release(): Promise<void>;
+}
+
+/** The old socket closed before the server confirmed a metadata operation. */
+export class SessionMetadataUnconfirmedError extends Error {
+  constructor(cause?: unknown) {
+    super('The metadata result is unconfirmed after the connection closed or changed.', { cause });
+    this.name = 'SessionMetadataUnconfirmedError';
+  }
+}
+
 function mediaServiceError(error: MediaErrorDto): Error {
   const result = new Error(`${error.kind}: ${error.message}`);
   result.name = `MediaServiceError:${error.kind}`;
@@ -553,24 +567,70 @@ export class BridgeClient extends EventEmitter {
 
   /** Bind metadata work to this socket, never to a later reconnection. */
   async captureSessionMetadataOwner(source: { sessionId: string; transcriptPath: string; sessionMode: 'chat' | 'code' }):
-    Promise<(action: 'rename' | 'touch' | 'verify', title?: string) => Promise<void>> {
+    Promise<SessionMetadataOwner> {
     const socket = this.ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('Session metadata requires a connected owner.');
-    const captured = await this.request('session_metadata', { action: 'capture', ...source });
-    if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) throw new Error('The metadata capture connection changed.');
-    if (!captured || typeof captured !== 'object' || Array.isArray(captured)
-      || typeof (captured as { receipt?: unknown }).receipt !== 'string' || !(captured as { receipt: string }).receipt) {
-      throw new Error('Invalid session metadata capture response.');
-    }
-    const receipt = (captured as { receipt: string }).receipt;
-    return async (action, title) => {
-      if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) throw new Error('The session metadata connection changed.');
-      const result = await this.request('session_metadata', { action, receipt, ...(title === undefined ? {} : { title }) });
-      if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) throw new Error('The metadata result is unconfirmed after the connection changed.');
-      if (!result || typeof result !== 'object' || Array.isArray(result) || (result as { ok?: unknown }).ok !== true) {
-        throw new Error('Invalid session metadata response.');
-      }
+    // The client knows the token even if the capture response is lost. The
+    // server reserves it before starting I/O, so release can cancel a still
+    // pending capture without leaving a late result in the connection quota.
+    const receipt = randomUUID();
+    let releaseRequested = false, released = false;
+    let pendingRelease: Promise<void> | undefined;
+    const connected = () => this.ws === socket && socket.readyState === WebSocket.OPEN;
+    const validResult = (result: unknown) => result && typeof result === 'object' && !Array.isArray(result)
+      && (result as { ok?: unknown }).ok === true;
+    const owner: SessionMetadataOwner = {
+      apply: async (action, title) => {
+        if (releaseRequested) throw new Error('The session metadata owner was released.');
+        if (!connected()) throw new Error('The session metadata connection changed.');
+        // A local deadline cannot prove that the server's durable append has
+        // drained. Keep the owning runtime leased until the actual response or
+        // this socket closes, including after the renderer leaves the dialog.
+        try {
+          const result = await this.request('session_metadata', { action, receipt, ...(title === undefined ? {} : { title }) }, null);
+          if (!connected()) throw new SessionMetadataUnconfirmedError();
+          if (!validResult(result)) throw new Error('Invalid session metadata response.');
+        } catch (error) {
+          if (!connected() && !(error instanceof SessionMetadataUnconfirmedError)) throw new SessionMetadataUnconfirmedError(error);
+          throw error;
+        }
+      },
+      release: () => {
+        releaseRequested = true;
+        if (released) return Promise.resolve();
+        if (pendingRelease) return pendingRelease;
+        // A replaced or closed connection discards its own server receipts.
+        if (!connected()) { released = true; return Promise.resolve(); }
+        const pending = this.request('session_metadata', { action: 'release', receipt }, 5_000).then(result => {
+          if (!connected()) { released = true; return; }
+          if (!validResult(result)) throw new Error('Invalid session metadata release response.');
+          released = true;
+        }).catch(error => {
+          if (!connected()) { released = true; return; }
+          throw error;
+        }).finally(() => { if (pendingRelease === pending) pendingRelease = undefined; });
+        pendingRelease = pending;
+        return pending;
+      },
     };
+    try {
+      const captured = await this.request('session_metadata', { action: 'capture', ...source, receipt });
+      if (!connected()) throw new Error('The metadata capture connection changed.');
+      if (!captured || typeof captured !== 'object' || Array.isArray(captured)
+        || (captured as { receipt?: unknown }).receipt !== receipt) {
+        throw new Error('Invalid session metadata capture response.');
+      }
+      return owner;
+    } catch (error) {
+      // No result is exposed to the caller on failure, so reclaim the known
+      // token here. The first request is sent synchronously before rejecting.
+      void (async () => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try { await owner.release(); return; } catch { /* retry on this socket */ }
+        }
+      })();
+      throw error;
+    }
   }
 
   async restoreWorkspaceControls(snapshot: string): Promise<void> {

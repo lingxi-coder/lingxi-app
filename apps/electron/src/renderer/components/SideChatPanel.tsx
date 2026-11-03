@@ -35,7 +35,7 @@ export function SideChatPanel({ controller }: { controller: SideChatsController 
     try { await controller.sendPrompt(side); } catch (error) { setNotice(String(error)); }
     finally { setSendingIds((current) => { const next = new Set(current); next.delete(side.id); return next; }); }
   };
-  return <aside className="side-chat-panel no-drag" aria-label={tr('desktop_navigation_side_chat')} style={{ width, '--side-bg': t.stageBg, '--side-text': t.text, '--side-muted': t.text3, '--side-border': t.border, '--side-hover': t.surfaceHover, '--side-surface': t.surface } as CSSProperties}>
+  return <aside className="side-chat-panel no-drag" aria-label={tr('desktop_navigation_side_chat')} style={{ width, '--side-bg': t.stageBg, '--side-text': t.text, '--side-muted': t.text3, '--side-border': t.border, '--side-hover': t.surfaceHover, '--side-surface': t.surface, '--side-border-strong': t.borderStrong, '--side-accent': t.accent, '--side-active': t.surfaceActive, '--side-faint': t.text4 } as CSSProperties}>
     <div className="side-chat-resize" role="separator" aria-label={tr('desktop_navigation_resize_side')} aria-orientation="vertical" tabIndex={0} aria-valuemin={320} aria-valuemax={800} aria-valuenow={width}
       onKeyDown={(event) => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); setWidth((current) => Math.max(320, Math.min(800, current + (event.key === 'ArrowLeft' ? 16 : -16)))); } }}
       onPointerDown={(event) => {
@@ -62,22 +62,27 @@ export function SideChatPanel({ controller }: { controller: SideChatsController 
     </div>
     <div className="side-chat-composer-area">
       {(notice || side.error || side.closing) ? <div role="status" className="side-chat-notice">{notice ?? side.error ?? tr('desktop_navigation_closing_side')}</div> : null}
-      <div className="side-chat-composer">
+      <div className="side-chat-composer beta-composer">
         <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange={(event) => { void attach(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
         {side.images.length ? <div className="side-chat-images">{side.images.map((image) => <button key={image.id} title={tr('desktop_chat_remove_named', image.name)} aria-label={tr('desktop_chat_remove_named', image.name)} onClick={() => controller.images(side.id, side.images.filter((entry) => entry.id !== image.id))}><img src={image.previewUrl} alt={image.name} /><span>×</span></button>)}</div> : null}
-        <textarea aria-label={tr('desktop_navigation_side_message')} onPaste={(event) => { const files = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/')); if (files.length) { event.preventDefault(); void attach(files); } }} placeholder={tr('desktop_navigation_ask_lingxi')} value={side.draft} disabled={side.closing} onChange={(event) => controller.draft(side.id, event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
-        <div className="side-chat-controls">
-          <button title={tr('desktop_navigation_attach_image')} aria-label={tr('desktop_navigation_attach_side_image')} disabled={side.closing} onClick={() => imageInput.current?.click()}><Icon name="plus" size={17} /></button>
-          <span className="side-chat-aux-label side-chat-context" title={tr('desktop_navigation_parent_snapshot_description')}>{tr('desktop_navigation_parent_context')}</span>
-          <span className="side-chat-aux-icon side-chat-context" title={tr('desktop_navigation_parent_snapshot')} aria-label={tr('desktop_navigation_parent_snapshot')}>◷</span>
-          <select aria-label={tr('desktop_navigation_side_model')} title={tr('desktop_navigation_side_model_description')} value={controls?.qualified_model ?? side.desktop.currentModel ?? ''} disabled={side.closing || !side.desktop.models.length} onChange={(event) => act(controller.submit(side, { type: 'set_model', model: event.target.value }))}>
-            {!side.desktop.models.length ? <option value="">{tr('desktop_navigation_inherited_model')}</option> : null}
-            {side.desktop.models.map((model) => <option key={model} value={model}>{modelReference(model).label}</option>)}
-          </select>
-          <select aria-label={tr('desktop_navigation_side_reasoning')} title={tr('desktop_navigation_side_reasoning_description')} value={JSON.stringify(controls?.reasoning.requested ?? {})} disabled={side.closing || !controls?.reasoning.spec.editable} onChange={(event) => act(controller.submit(side, { type: 'set_reasoning_selection', selection: JSON.parse(event.target.value) }))}>
-            {!controls ? <option value="{}">{tr('composer_effort')}</option> : controls.reasoning.spec.options.map((option) => <option key={JSON.stringify(option.selection)} value={JSON.stringify(option.selection)}>{reasoningSelectionLabel(option.selection, locale)}</option>)}
-          </select>
-          {side.conversation.running ? <button className="side-chat-send" aria-label={tr('desktop_navigation_stop_side')} title={tr('desktop_navigation_stop_side')} disabled={side.closing} onClick={() => act(controller.submit(side, { type: 'cancel' }))}>■</button> : <button className="side-chat-send" aria-label={tr('desktop_navigation_send_side')} title={tr('composer_send')} disabled={sending || side.closing || !side.draft.trim()} onClick={() => void send()}>↑</button>}
+        <div className="composer-input-view"><textarea rows={1} className="beta-rich-prompt" aria-label={tr('desktop_navigation_side_message')} onPaste={(event) => { const files = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/')); if (files.length) { event.preventDefault(); void attach(files); } }} placeholder={tr('desktop_navigation_ask_lingxi')} value={side.draft} disabled={side.closing} onChange={(event) => controller.draft(side.id, event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} /></div>
+        <div className="side-chat-controls composer-toolbar">
+          <button title={tr('desktop_navigation_attach_image')} aria-label={tr('desktop_navigation_attach_side_image')} disabled={side.closing} onClick={() => imageInput.current?.click()}><Icon name="image" size={19} /></button>
+          <span className="side-chat-context" title={tr('desktop_navigation_parent_snapshot_description')} aria-label={tr('desktop_navigation_parent_snapshot')}><Icon name="clock" size={18} /><span className="side-chat-control-label">{tr('desktop_navigation_parent_context')}</span></span>
+          <div className="side-chat-picker" title={`${tr('desktop_navigation_side_model')}: ${modelReference(controls?.qualified_model ?? side.desktop.currentModel ?? '').label || tr('desktop_navigation_inherited_model')}`}>
+            <span className="side-chat-picker-display" aria-hidden="true"><Icon name="bot" size={18} /><span className="side-chat-control-label">{modelReference(controls?.qualified_model ?? side.desktop.currentModel ?? '').label || tr('desktop_navigation_inherited_model')}</span><Icon name="chevron" size={12} /></span>
+            <select aria-label={tr('desktop_navigation_side_model')} title={`${tr('desktop_navigation_side_model')}: ${modelReference(controls?.qualified_model ?? side.desktop.currentModel ?? '').label || tr('desktop_navigation_inherited_model')}`} value={controls?.qualified_model ?? side.desktop.currentModel ?? ''} disabled={side.closing || !side.desktop.models.length} onChange={(event) => act(controller.submit(side, { type: 'set_model', model: event.target.value }))}>
+              {!side.desktop.models.length ? <option value="">{tr('desktop_navigation_inherited_model')}</option> : null}
+              {side.desktop.models.map((model) => <option key={model} value={model}>{modelReference(model).label}</option>)}
+            </select>
+          </div>
+          <div className="side-chat-picker" title={`${tr('desktop_navigation_side_reasoning')}: ${reasoningSelectionLabel(controls?.reasoning.requested, locale)}`}>
+            <span className="side-chat-picker-display" aria-hidden="true"><Icon name="brain" size={18} /><span className="side-chat-control-label">{reasoningSelectionLabel(controls?.reasoning.requested, locale)}</span><Icon name="chevron" size={12} /></span>
+            <select aria-label={tr('desktop_navigation_side_reasoning')} title={`${tr('desktop_navigation_side_reasoning')}: ${reasoningSelectionLabel(controls?.reasoning.requested, locale)}`} value={JSON.stringify(controls?.reasoning.requested ?? {})} disabled={side.closing || !controls?.reasoning.spec.editable} onChange={(event) => act(controller.submit(side, { type: 'set_reasoning_selection', selection: JSON.parse(event.target.value) }))}>
+              {!controls ? <option value="{}">{tr('composer_effort')}</option> : controls.reasoning.spec.options.map((option) => <option key={JSON.stringify(option.selection)} value={JSON.stringify(option.selection)}>{reasoningSelectionLabel(option.selection, locale)}</option>)}
+            </select>
+          </div>
+          {side.conversation.running ? <button className="side-chat-send" aria-label={tr('desktop_navigation_stop_side')} title={tr('desktop_navigation_stop_side')} disabled={side.closing} onClick={() => act(controller.submit(side, { type: 'cancel' }))}><Icon name="stop" size={16} /></button> : <button className="side-chat-send" aria-label={tr('desktop_navigation_send_side')} title={tr('composer_send')} disabled={sending || side.closing || !side.draft.trim()} onClick={() => void send()}><Icon name="arrowU" size={18} /></button>}
         </div>
       </div>
     </div>

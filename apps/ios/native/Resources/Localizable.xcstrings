@@ -2,274 +2,36 @@
   "sourceLanguage": "zh-Hans",
   "version": "1.0",
   "strings": {
-    "image_preview_save": {
+    "Allow API charges": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "保存图片"
+            "value": "允许 API 费用"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "儲存圖片"
+            "value": "允許 API 費用"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Save image"
+            "value": "Allow API charges"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "画像を保存"
+            "value": "API の課金を許可"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "이미지 저장"
-          }
-        }
-      }
-    },
-    "image_preview_save_failed": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "图片保存失败，请重试"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "圖片儲存失敗，請重試"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Could not save the image. Try again."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "画像を保存できませんでした。もう一度お試しください。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이미지를 저장하지 못했습니다. 다시 시도하세요."
-          }
-        }
-      }
-    },
-    "image_preview_saved": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "图片已保存"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "圖片已儲存"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image saved"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "画像を保存しました"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이미지를 저장했습니다"
-          }
-        }
-      }
-    },
-    "image_preview_failed": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "无法显示这张图片"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "無法顯示這張圖片"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This image could not be displayed"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "この画像を表示できません"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이 이미지를 표시할 수 없습니다"
-          }
-        }
-      }
-    },
-    "image_preview_loading": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在加载图片…"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在載入圖片…"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Loading image…"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "画像を読み込み中…"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이미지 불러오는 중…"
-          }
-        }
-      }
-    },
-    "image_preview_zoom_in": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "放大"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "放大"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Zoom in"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "拡大"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "확대"
-          }
-        }
-      }
-    },
-    "image_preview_zoom_out": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "缩小"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "縮小"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Zoom out"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "縮小"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "축소"
-          }
-        }
-      }
-    },
-    "image_preview_fit": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "适应窗口"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "符合視窗"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Fit to screen"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "画面に合わせる"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "화면에 맞추기"
+            "value": "API 요금 허용"
           }
         }
       }
@@ -304,6 +66,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "LingXi"
+          }
+        }
+      }
+    },
+    "ChatGPT subscription": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT 订阅"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT 訂閱"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT subscription"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT サブスクリプション"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT 구독"
+          }
+        }
+      }
+    },
+    "Loading accounts…": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载账号…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在載入帳號…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading accounts…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウントを読み込み中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 불러오는 중…"
           }
         }
       }
@@ -440,6 +270,108 @@
           "stringUnit": {
             "state": "translated",
             "value": "灵犀가 음성 인식을 사용해 사용자의 말을 텍스트로 변환합니다."
+          }
+        }
+      }
+    },
+    "Status unverified": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "状态待验证"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "狀態尚未驗證"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Status unverified"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ステータス未確認"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "상태 확인 안 됨"
+          }
+        }
+      }
+    },
+    "Temporarily unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂时不可用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暫時無法使用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Temporarily unavailable"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一時的に利用できません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일시적으로 사용할 수 없음"
+          }
+        }
+      }
+    },
+    "Unable to read account status": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法读取账号状态"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法讀取帳號狀態"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to read account status"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウントの状態を読み取れません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 상태를 읽을 수 없음"
           }
         }
       }
@@ -11778,6 +11710,40 @@
         }
       }
     },
+    "chat_recovery_replay_truncated": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "部分回复暂未显示。任务结束后，重新打开对话可查看完整记录。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "部分回覆暫未顯示。任務結束後，重新開啟對話可查看完整記錄。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some responses are temporarily missing. Reopen the conversation after the task finishes to view the full history."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一部の応答が一時的に表示されていません。タスク終了後に会話を開き直すと、履歴全体を確認できます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일부 응답이 일시적으로 표시되지 않습니다. 작업이 끝난 후 대화를 다시 열면 전체 기록을 볼 수 있습니다."
+          }
+        }
+      }
+    },
     "chat_redacted_thinking": {
       "localizations": {
         "zh-Hans": {
@@ -11808,6 +11774,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "[접힌 생각 과정]"
+          }
+        }
+      }
+    },
+    "chat_restore_unsent_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复未发送的消息"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "還原未傳送的訊息"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore unsent message"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未送信のメッセージを復元"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "전송되지 않은 메시지 복원"
           }
         }
       }
@@ -16198,6 +16198,40 @@
         }
       }
     },
+    "chat_turn_preparing_retry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话正在准备，请稍后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "對話正在準備，請稍後再試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The conversation is getting ready. Please try again shortly."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話を準備しています。しばらくしてからもう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대화를 준비하고 있습니다. 잠시 후 다시 시도해 주세요."
+          }
+        }
+      }
+    },
     "chat_usage_cache": {
       "localizations": {
         "zh-Hans": {
@@ -20206,6 +20240,142 @@
           "stringUnit": {
             "state": "translated",
             "value": "오프라인 상태"
+          }
+        }
+      }
+    },
+    "conversation_handoff_ready": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "交接草稿已准备好"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "交接草稿已準備好"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Handoff draft is ready"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "引き継ぎの下書きができました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이어가기 초안이 준비되었습니다"
+          }
+        }
+      }
+    },
+    "conversation_reconnect_disconnected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话暂未连接，请在设置中重试连接。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "對話暫未連線，請在設定中重試連線。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The session is disconnected. Retry the connection in Settings."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "セッションは未接続です。設定で再接続してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "세션이 연결되지 않았습니다. 설정에서 다시 연결하세요."
+          }
+        }
+      }
+    },
+    "conversation_reconnect_release_pending": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "旧会话仍在关闭，请稍后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "舊對話仍在關閉，請稍後重試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The previous session is still closing. Try again shortly."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "以前のセッションを終了中です。しばらくしてから再試行してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 세션을 종료하는 중입니다. 잠시 후 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "conversation_state_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法加载会话状态，数据格式不受支持或已损坏。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法載入對話狀態，資料格式不受支援或已損毀。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to load conversation state because its format is unsupported or damaged."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話の状態を読み込めません。形式がサポートされていないか、データが破損しています。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대화 상태를 불러올 수 없습니다. 지원되지 않는 형식이거나 데이터가 손상되었습니다."
           }
         }
       }
@@ -24970,6 +25140,40 @@
         }
       }
     },
+    "cron_status_outcome_unknown": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "结果未知"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "結果未知"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Outcome unknown"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "結果不明"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "결과 알 수 없음"
+          }
+        }
+      }
+    },
     "cron_status_queued": {
       "localizations": {
         "zh-Hans": {
@@ -28642,33 +28846,6 @@
         }
       }
     },
-    "conversation_reconnect_release_pending": {
-      "localizations": {
-        "zh-Hans": { "stringUnit": { "state": "translated", "value": "旧会话仍在关闭，请稍后重试。" } },
-        "zh-Hant": { "stringUnit": { "state": "translated", "value": "舊對話仍在關閉，請稍後重試。" } },
-        "en": { "stringUnit": { "state": "translated", "value": "The previous session is still closing. Try again shortly." } },
-        "ja": { "stringUnit": { "state": "translated", "value": "以前のセッションを終了中です。しばらくしてから再試行してください。" } },
-        "ko": { "stringUnit": { "state": "translated", "value": "이전 세션을 종료하는 중입니다. 잠시 후 다시 시도하세요." } }
-      }
-    },
-    "conversation_reconnect_disconnected": {
-      "localizations": {
-        "zh-Hans": { "stringUnit": { "state": "translated", "value": "会话暂未连接，请在设置中重试连接。" } },
-        "zh-Hant": { "stringUnit": { "state": "translated", "value": "對話暫未連線，請在設定中重試連線。" } },
-        "en": { "stringUnit": { "state": "translated", "value": "The session is disconnected. Retry the connection in Settings." } },
-        "ja": { "stringUnit": { "state": "translated", "value": "セッションは未接続です。設定で再接続してください。" } },
-        "ko": { "stringUnit": { "state": "translated", "value": "세션이 연결되지 않았습니다. 설정에서 다시 연결하세요." } }
-      }
-    },
-    "conversation_handoff_ready": {
-      "localizations": {
-        "zh-Hans": { "stringUnit": { "state": "translated", "value": "交接草稿已准备好" } },
-        "zh-Hant": { "stringUnit": { "state": "translated", "value": "交接草稿已準備好" } },
-        "en": { "stringUnit": { "state": "translated", "value": "Handoff draft is ready" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "引き継ぎの下書きができました" } },
-        "ko": { "stringUnit": { "state": "translated", "value": "이어가기 초안이 준비되었습니다" } }
-      }
-    },
     "drawer_session_continue_chat": {
       "localizations": {
         "zh-Hans": {
@@ -31793,6 +31970,278 @@
           "stringUnit": {
             "state": "translated",
             "value": "공식 소스"
+          }
+        }
+      }
+    },
+    "image_preview_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法显示这张图片"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法顯示這張圖片"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This image could not be displayed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この画像を表示できません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 이미지를 표시할 수 없습니다"
+          }
+        }
+      }
+    },
+    "image_preview_fit": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "适应窗口"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "符合視窗"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fit to screen"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "画面に合わせる"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "화면에 맞추기"
+          }
+        }
+      }
+    },
+    "image_preview_loading": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载图片…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在載入圖片…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading image…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "画像を読み込み中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이미지 불러오는 중…"
+          }
+        }
+      }
+    },
+    "image_preview_save": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存图片"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "儲存圖片"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save image"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "画像を保存"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이미지 저장"
+          }
+        }
+      }
+    },
+    "image_preview_save_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "图片保存失败，请重试"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "圖片儲存失敗，請重試"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not save the image. Try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "画像を保存できませんでした。もう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이미지를 저장하지 못했습니다. 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "image_preview_saved": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "图片已保存"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "圖片已儲存"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Image saved"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "画像を保存しました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이미지를 저장했습니다"
+          }
+        }
+      }
+    },
+    "image_preview_zoom_in": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "放大"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "放大"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zoom in"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拡大"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "확대"
+          }
+        }
+      }
+    },
+    "image_preview_zoom_out": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "缩小"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "縮小"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zoom out"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "縮小"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "축소"
           }
         }
       }
@@ -47097,6 +47546,40 @@
         }
       }
     },
+    "remote_restore_unsent": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复未发送的消息"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢復未傳送的訊息"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore unsent message"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未送信のメッセージを復元"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "보내지 않은 메시지 복원"
+          }
+        }
+      }
+    },
     "remote_retry_in_fmt": {
       "localizations": {
         "zh-Hans": {
@@ -47128,44 +47611,6 @@
             "state": "translated",
             "value": "%1$d초 후 다시 시도"
           }
-        }
-      }
-    },
-    "remote_restore_unsent": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": { "state": "translated", "value": "恢复未发送的消息" }
-        },
-        "zh-Hant": {
-          "stringUnit": { "state": "translated", "value": "恢復未傳送的訊息" }
-        },
-        "en": {
-          "stringUnit": { "state": "translated", "value": "Restore unsent message" }
-        },
-        "ja": {
-          "stringUnit": { "state": "translated", "value": "未送信のメッセージを復元" }
-        },
-        "ko": {
-          "stringUnit": { "state": "translated", "value": "보내지 않은 메시지 복원" }
-        }
-      }
-    },
-    "remote_team_approval": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": { "state": "translated", "value": "团队工具审批" }
-        },
-        "zh-Hant": {
-          "stringUnit": { "state": "translated", "value": "團隊工具審批" }
-        },
-        "en": {
-          "stringUnit": { "state": "translated", "value": "Team tool approval" }
-        },
-        "ja": {
-          "stringUnit": { "state": "translated", "value": "チームツールの承認" }
-        },
-        "ko": {
-          "stringUnit": { "state": "translated", "value": "팀 도구 승인" }
         }
       }
     },
@@ -47301,6 +47746,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "오프라인입니다. 마지막으로 받은 내용을 표시합니다."
+          }
+        }
+      }
+    },
+    "remote_session_reload_required": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话数据过多，请重新打开会话以加载。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "對話資料過多，請重新開啟對話以載入。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "There is too much session data. Reopen the session to reload it."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話データが多すぎます。会話を開き直して読み込んでください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대화 데이터가 너무 많습니다. 대화를 다시 열어 불러오세요."
           }
         }
       }
@@ -47607,6 +48086,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "다른 컴퓨터로 전환"
+          }
+        }
+      }
+    },
+    "remote_team_approval": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "团队工具审批"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "團隊工具審批"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Team tool approval"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "チームツールの承認"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "팀 도구 승인"
           }
         }
       }
@@ -48393,6 +48906,74 @@
         }
       }
     },
+    "session_handoff_open_source": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开来源 %1$s 会话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "開啟來源 %1$s 對話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open source %1$s conversation"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "引き継ぎ元の %1$s 会話を開く"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "원본 %1$s 대화 열기"
+          }
+        }
+      }
+    },
+    "session_handoff_preparing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在整理会话摘要…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在整理對話摘要…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing conversation summary…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話の要約を準備しています…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대화 요약을 준비하는 중…"
+          }
+        }
+      }
+    },
     "session_index_save_failed_fmt": {
       "localizations": {
         "zh-Hans": {
@@ -48529,40 +49110,6 @@
         }
       }
     },
-    "session_mode_code": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Code"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Code"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Code"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Code"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Code"
-          }
-        }
-      }
-    },
     "session_mode_chat_description": {
       "localizations": {
         "zh-Hans": {
@@ -48597,6 +49144,40 @@
         }
       }
     },
+    "session_mode_code": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code"
+          }
+        }
+      }
+    },
     "session_mode_code_description": {
       "localizations": {
         "zh-Hans": {
@@ -48627,142 +49208,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "소프트웨어 개발 어시스턴트"
-          }
-        }
-      }
-    },
-    "session_mode_pending": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "将在当前回复结束后切换为 %1$s"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "將在目前回覆結束後切換為 %1$s"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Switching to %1$s after this reply"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "現在の応答後に %1$s に切り替えます"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "현재 응답이 끝나면 %1$s로 전환됩니다"
-          }
-        }
-      }
-    },
-    "session_mode_pending %@": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "将在当前回复结束后切换为 %@"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "將在目前回覆結束後切換為 %@"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Switching to %@ after this reply"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "現在の応答後に %@ に切り替えます"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "현재 응답이 끝나면 %@로 전환됩니다"
-          }
-        }
-      }
-    },
-    "session_mode_setting": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在设置会话模式…"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在設定會話模式…"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Setting the conversation mode…"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "会話モードを設定しています…"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "대화 모드를 설정하는 중…"
-          }
-        }
-      }
-    },
-    "session_mode_retry": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "无法设置模式，请选择模式重试。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "無法設定模式，請選擇模式重試。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Could not set the mode. Choose a mode to retry."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "モードを設定できませんでした。選び直して再試行してください。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "모드를 설정할 수 없습니다. 모드를 선택해 다시 시도하세요."
           }
         }
       }
@@ -48831,6 +49276,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "모드를 바꾸면 새 대화로 분기해 이어갑니다"
+          }
+        }
+      }
+    },
+    "session_reconnect_still_releasing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一个会话仍在关闭，请稍后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一個對話仍在關閉，請稍後重試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The previous session is still closing. Try again shortly."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "前の会話を終了しています。しばらくしてから再試行してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 대화를 종료하는 중입니다. 잠시 후 다시 시도하세요."
           }
         }
       }
@@ -92521,136 +93000,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "세션이 전환되었습니다. 디렉터리 선택 화면을 다시 여세요."
-          }
-        }
-      }
-    },
-    "chat_recovery_replay_truncated": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "部分回复暂未显示。任务结束后，重新打开对话可查看完整记录。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "部分回覆暫未顯示。任務結束後，重新開啟對話可查看完整記錄。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Some responses are temporarily missing. Reopen the conversation after the task finishes to view the full history."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "一部の応答が一時的に表示されていません。タスク終了後に会話を開き直すと、履歴全体を確認できます。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "일부 응답이 일시적으로 표시되지 않습니다. 작업이 끝난 후 대화를 다시 열면 전체 기록을 볼 수 있습니다."
-          }
-        }
-      }
-    },
-    "Unable to read account status": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Unable to read account status"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "无法读取账号状态"
-          }
-        }
-      }
-    },
-    "Loading accounts…": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Loading accounts…"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在加载账号…"
-          }
-        }
-      }
-    },
-    "Temporarily unavailable": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Temporarily unavailable"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "暂时不可用"
-          }
-        }
-      }
-    },
-    "Status unverified": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Status unverified"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "状态待验证"
-          }
-        }
-      }
-    },
-    "ChatGPT subscription": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ChatGPT subscription"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ChatGPT 订阅"
-          }
-        }
-      }
-    },
-    "Allow API charges": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Allow API charges"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "允许 API 费用"
           }
         }
       }

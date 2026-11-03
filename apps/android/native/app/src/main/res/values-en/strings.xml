@@ -1,5 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="conversation_handoff_ready">Handoff draft is ready</string>
+    <string name="conversation_reconnect_disconnected">The session is disconnected. Retry the connection in Settings.</string>
+    <string name="conversation_reconnect_release_pending">The previous session is still closing. Try again shortly.</string>
+    <string name="conversation_state_unavailable">Unable to load conversation state because its format is unsupported or damaged.</string>
+    <string name="image_preview_save">Save image</string>
+    <string name="image_preview_save_failed">Could not save the image. Try again.</string>
+    <string name="image_preview_saved">Image saved</string>
+    <string name="image_preview_failed">This image could not be displayed</string>
+    <string name="image_preview_loading">Loading image…</string>
+    <string name="image_preview_zoom_in">Zoom in</string>
+    <string name="image_preview_zoom_out">Zoom out</string>
+    <string name="image_preview_fit">Fit to screen</string>
     <string name="chat_compact_during_turn">Compact is disabled while a chat is in progress</string>
     <string name="chat_message_copy">Copy</string>
     <string name="chat_message_copied">Copied</string>
@@ -189,6 +201,7 @@
     <string name="chat_plan_title">Plan</string>
     <string name="chat_provider_engine_unavailable">No provider engine is available in this preview environment.</string>
     <string name="chat_redacted_thinking">[Thinking collapsed]</string>
+    <string name="chat_restore_unsent_message">Restore unsent message</string>
     <string name="chat_result_added_label">Added %1$d line(s)</string>
     <string name="chat_result_added_removed_label">Added %1$d line(s), removed %2$d line(s)</string>
     <string name="chat_result_files_found_label">Found %1$d file(s)</string>
@@ -276,6 +289,7 @@
     <string name="chat_tool_verb_task">Task</string>
     <string name="chat_tool_verb_todo">Update Todos</string>
     <string name="chat_tool_verb_update">Update</string>
+    <string name="chat_turn_preparing_retry">The conversation is getting ready. Please try again shortly.</string>
     <string name="chat_usage_cache">Cache</string>
     <string name="chat_usage_cache_read">Cache read</string>
     <string name="chat_usage_cache_write">Cache write</string>
@@ -442,6 +456,7 @@
     <string name="cron_scope_label">Scope</string>
     <string name="cron_section_scheduling">Scheduling</string>
     <string name="cron_started_at_label">Started At</string>
+    <string name="cron_status_outcome_unknown">Outcome unknown</string>
     <string name="cron_status_queued">Queued</string>
     <string name="cron_status_recent_failed">Recently failed</string>
     <string name="cron_status_recent_succeeded">Recently succeeded</string>
@@ -477,9 +492,6 @@
     <string name="drawer_clear_search_a11y">Clear search</string>
     <string name="drawer_close_a11y">Close drawer</string>
     <string name="drawer_close_sidebar_a11y">Close sidebar</string>
-    <string name="session_handoff_preparing">Preparing conversation summary…</string>
-    <string name="session_handoff_open_source">Open source %1$s conversation</string>
-    <string name="session_reconnect_still_releasing">The previous session is still closing. Try again shortly.</string>
     <string name="drawer_continue_session_in_progress">Wait for the current continue action to finish.</string>
     <string name="drawer_continue_session_timeout">Continuing this session timed out. Try again.</string>
     <string name="drawer_cron_new_results_fmt">%1$d new</string>
@@ -726,6 +738,9 @@
     <string name="provider_llm_blurb">LingXi doesn\'t call any cloud LLM on its own — inference is handled by the providers you add. Keys are encrypted locally only.</string>
     <string name="provider_no_providers_added">No providers added yet</string>
     <string name="provider_search_blurb">Give the AI real-time web search — choose a search provider to enable \"Web\" mode.</string>
+    <string name="remote_restore_unsent">Restore unsent message</string>
+    <string name="remote_session_reload_required">There is too much session data. Reopen the session to reload it.</string>
+    <string name="remote_team_approval">Team tool approval</string>
     <string name="session_details_agent_count">Agents</string>
     <string name="session_details_agents">Agents</string>
     <string name="session_details_agents_subtitle">Collaborators in this session</string>
@@ -745,7 +760,8 @@
     <string name="session_details_tasks_subtitle">Tool calls and shell commands</string>
     <string name="session_details_title">Session Details</string>
     <string name="session_details_workspace">Workspace</string>
-    <string name="conversation_state_unavailable">Unable to load conversation state because its format is unsupported or damaged.</string>
+    <string name="session_handoff_open_source">Open source %1$s conversation</string>
+    <string name="session_handoff_preparing">Preparing conversation summary…</string>
     <string name="session_index_save_failed_fmt">Failed to save session index: %1$s</string>
     <string name="session_index_save_new_failed_fmt">Failed to save new session index: %1$s</string>
     <string name="session_mode_chat">Chat</string>
@@ -754,6 +770,7 @@
     <string name="session_mode_code_description">Software engineering assistant</string>
     <string name="session_panel_make_scheduled">Make it a scheduled task</string>
     <string name="session_panel_mode_hint">Changing the mode continues in a new, forked chat</string>
+    <string name="session_reconnect_still_releasing">The previous session is still closing. Try again shortly.</string>
     <string name="session_relative_days_ago_fmt">%1$d days ago</string>
     <string name="session_relative_hours_ago_fmt">%1$d hr ago</string>
     <string name="session_relative_minutes_ago_fmt">%1$d min ago</string>
@@ -2050,7 +2067,6 @@
     <string name="remote_needs_permission">Waiting for permission</string>
     <string name="remote_needs_question">Waiting for an answer</string>
     <string name="remote_needs_computer_access">Waiting on the computer</string>
-    <string name="remote_session_reload_required">There is too much session data. Reopen the session to reload it.</string>
     <string name="remote_session_loading">Loading the session…</string>
     <string name="remote_session_offline">Offline. Showing what was received last.</string>
     <string name="remote_session_closed">This session is no longer shared.</string>

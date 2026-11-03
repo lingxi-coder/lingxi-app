@@ -1,5 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="conversation_handoff_ready">交接草稿已准备好</string>
+    <string name="conversation_reconnect_disconnected">会话暂未连接，请在设置中重试连接。</string>
+    <string name="conversation_reconnect_release_pending">旧会话仍在关闭，请稍后重试。</string>
+    <string name="conversation_state_unavailable">无法加载会话状态，数据格式不受支持或已损坏。</string>
+    <string name="image_preview_save">保存图片</string>
+    <string name="image_preview_save_failed">图片保存失败，请重试</string>
+    <string name="image_preview_saved">图片已保存</string>
+    <string name="image_preview_failed">无法显示这张图片</string>
+    <string name="image_preview_loading">正在加载图片…</string>
+    <string name="image_preview_zoom_in">放大</string>
+    <string name="image_preview_zoom_out">缩小</string>
+    <string name="image_preview_fit">适应窗口</string>
     <string name="chat_compact_during_turn">对话进行中，暂时无法压缩上下文</string>
     <string name="chat_message_copy">复制</string>
     <string name="chat_message_copied">已复制</string>
@@ -189,6 +201,7 @@
     <string name="chat_plan_title">任务清单</string>
     <string name="chat_provider_engine_unavailable">当前预览环境没有可用的 Provider 引擎。</string>
     <string name="chat_redacted_thinking">[已折叠的思考]</string>
+    <string name="chat_restore_unsent_message">恢复未发送的消息</string>
     <string name="chat_result_added_label">新增 %1$d 行</string>
     <string name="chat_result_added_removed_label">新增 %1$d 行，删除 %2$d 行</string>
     <string name="chat_result_files_found_label">找到 %1$d 个文件</string>
@@ -276,6 +289,7 @@
     <string name="chat_tool_verb_task">委派</string>
     <string name="chat_tool_verb_todo">更新任务清单</string>
     <string name="chat_tool_verb_update">修改</string>
+    <string name="chat_turn_preparing_retry">会话正在准备，请稍后重试。</string>
     <string name="chat_usage_cache">缓存</string>
     <string name="chat_usage_cache_read">缓存命中</string>
     <string name="chat_usage_cache_write">缓存写入</string>
@@ -442,6 +456,7 @@
     <string name="cron_scope_label">作用域</string>
     <string name="cron_section_scheduling">调度</string>
     <string name="cron_started_at_label">开始时间</string>
+    <string name="cron_status_outcome_unknown">结果未知</string>
     <string name="cron_status_queued">已排队</string>
     <string name="cron_status_recent_failed">最近失败</string>
     <string name="cron_status_recent_succeeded">最近成功</string>
@@ -477,9 +492,6 @@
     <string name="drawer_clear_search_a11y">清除搜索</string>
     <string name="drawer_close_a11y">关闭抽屉</string>
     <string name="drawer_close_sidebar_a11y">关闭侧栏</string>
-    <string name="session_handoff_preparing">正在整理会话摘要…</string>
-    <string name="session_handoff_open_source">打开来源 %1$s 会话</string>
-    <string name="session_reconnect_still_releasing">上一个会话仍在关闭，请稍后重试。</string>
     <string name="drawer_continue_session_in_progress">请等待当前继续操作完成。</string>
     <string name="drawer_continue_session_timeout">继续会话超时，请重试。</string>
     <string name="drawer_cron_new_results_fmt">%1$d 个新结果</string>
@@ -726,6 +738,9 @@
     <string name="provider_llm_blurb">灵犀本身不调用云端 LLM — 由你添加的提供商完成推理。密钥仅本机加密。</string>
     <string name="provider_no_providers_added">尚未添加任何提供商</string>
     <string name="provider_search_blurb">让 AI 接入实时网页搜索 — 选择一个搜索提供商以启用\"联网\"模式。</string>
+    <string name="remote_restore_unsent">恢复未发送的消息</string>
+    <string name="remote_session_reload_required">会话数据过多，请重新打开会话以加载。</string>
+    <string name="remote_team_approval">团队工具审批</string>
     <string name="session_details_agent_count">Agents</string>
     <string name="session_details_agents">Agents</string>
     <string name="session_details_agents_subtitle">当前会话中的协作 Agent</string>
@@ -745,7 +760,8 @@
     <string name="session_details_tasks_subtitle">工具调用与 Shell 命令</string>
     <string name="session_details_title">会话详情</string>
     <string name="session_details_workspace">工作区</string>
-    <string name="conversation_state_unavailable">无法加载会话状态，数据格式不受支持或已损坏。</string>
+    <string name="session_handoff_open_source">打开来源 %1$s 会话</string>
+    <string name="session_handoff_preparing">正在整理会话摘要…</string>
     <string name="session_index_save_failed_fmt">会话索引保存失败：%1$s</string>
     <string name="session_index_save_new_failed_fmt">新会话索引保存失败：%1$s</string>
     <string name="session_mode_chat">Chat</string>
@@ -754,6 +770,7 @@
     <string name="session_mode_code_description">软件工程助手</string>
     <string name="session_panel_make_scheduled">设为定时任务</string>
     <string name="session_panel_mode_hint">换模式会分叉成新会话继续</string>
+    <string name="session_reconnect_still_releasing">上一个会话仍在关闭，请稍后重试。</string>
     <string name="session_relative_days_ago_fmt">%1$d 天前</string>
     <string name="session_relative_hours_ago_fmt">%1$d 小时前</string>
     <string name="session_relative_minutes_ago_fmt">%1$d 分钟前</string>
@@ -2050,7 +2067,6 @@
     <string name="remote_needs_permission">等待授权</string>
     <string name="remote_needs_question">等待回答</string>
     <string name="remote_needs_computer_access">等待电脑上的授权</string>
-    <string name="remote_session_reload_required">会话数据过多，请重新打开会话以加载。</string>
     <string name="remote_session_loading">正在加载会话…</string>
     <string name="remote_session_offline">已离线，显示的是最后收到的内容。</string>
     <string name="remote_session_closed">这个会话已不再共享。</string>

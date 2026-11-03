@@ -544,4 +544,158 @@ final class ProviderAccountRepositoryTests: XCTestCase {
         repository.configure(load: { current }, command: { _, _ in current })
         XCTAssertFalse(repository.wasLastUsed(account))
     }
+
+    func testSameLocalStoreRebindAppliesBufferedRoutingOnlyAfterSnapshot() async throws {
+        let repository = ProviderAccountRepository()
+        let current = try snapshot(4)
+        repository.configure(load: { current }, command: { _, _ in current }, localStoreID: "/local/store")
+        await repository.refresh()
+        let first = try XCTUnwrap(repository.snapshot.accounts.first { $0.accountId == "a" })
+        let second = try XCTUnwrap(repository.snapshot.accounts.first { $0.accountId == "b" })
+        repository.recordRouting(#"{"status":"selected","selectedAccountId":"a","identityGeneration":1,"failedAccounts":[]}"#)
+        XCTAssertTrue(repository.wasLastUsed(first))
+
+        var pending: CheckedContinuation<String, Never>?
+        repository.configure(load: { await withCheckedContinuation { pending = $0 } },
+            command: { _, _ in current }, localStoreID: "/local/store")
+        let refresh = Task { await repository.refresh() }
+        while pending == nil { await Task.yield() }
+        XCTAssertFalse(repository.wasLastUsed(first), "Old selections stay hidden until the replacement snapshot verifies them")
+        repository.recordRouting(#"{"status":"selected","selectedAccountId":"b","identityGeneration":1,"failedAccounts":[]}"#)
+        repository.recordRouting(#"{"status":"selected","selectedAccountId":"a","identityGeneration":0,"failedAccounts":[]}"#)
+        XCTAssertFalse(repository.wasLastUsed(second))
+        pending?.resume(returning: current)
+        _ = await refresh.value
+        XCTAssertTrue(repository.wasLastUsed(second), "A hidden owner's newer same-store routing wins after verification")
+        XCTAssertFalse(repository.wasLastUsed(first))
+    }
+
+    func testSameStoreRebindDoesNotReviveDeletedOrReplacedIdentity() async throws {
+        for replaceIdentity in [false, true] {
+            let repository = ProviderAccountRepository()
+            let initial = try snapshot(4)
+            repository.configure(load: { initial }, command: { _, _ in initial }, localStoreID: "/local/store")
+            await repository.refresh()
+            repository.recordRouting(#"{"status":"selected","selectedAccountId":"b","identityGeneration":1,"failedAccounts":[]}"#)
+
+            var changed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try snapshot(5, accounts: ["b"]).utf8)) as? [String: Any])
+            if replaceIdentity {
+                var rows = try XCTUnwrap(changed["accounts"] as? [[String: Any]])
+                rows[0]["identityGeneration"] = 2
+                changed["accounts"] = rows
+            } else {
+                changed["accounts"] = []
+            }
+            let replacement = String(decoding: try JSONSerialization.data(withJSONObject: changed), as: UTF8.self)
+            let restored = try snapshot(6, accounts: ["b"])
+            var reads = 0
+            repository.configure(load: { reads += 1; return reads == 1 ? replacement : restored },
+                command: { _, _ in replacement }, localStoreID: "/local/store")
+            repository.recordRouting(#"{"status":"selected","selectedAccountId":"b","identityGeneration":1,"failedAccounts":[]}"#)
+            await repository.refresh()
+            if let account = repository.snapshot.accounts.first { XCTAssertFalse(repository.wasLastUsed(account)) }
+            await repository.refresh()
+            let account = try XCTUnwrap(repository.snapshot.accounts.first { $0.accountId == "b" })
+            XCTAssertFalse(repository.wasLastUsed(account), "A rejected identity must not reappear when an old ID is later present")
+        }
+    }
+
+    func testDifferentOrRemoteStoreCannotInheritLocalRouting() async throws {
+        let repository = ProviderAccountRepository()
+        let current = try snapshot(4)
+        repository.configure(load: { current }, command: { _, _ in current }, localStoreID: "/store-a")
+        await repository.refresh()
+        let account = try XCTUnwrap(repository.snapshot.accounts.first { $0.accountId == "b" })
+        repository.recordRouting(#"{"status":"selected","selectedAccountId":"b","identityGeneration":1,"failedAccounts":[]}"#)
+        XCTAssertTrue(repository.wasLastUsed(account))
+
+        repository.configure(load: { current }, command: { _, _ in current }, localStoreID: "/store-b")
+        await repository.refresh()
+        XCTAssertFalse(repository.wasLastUsed(account), "The same UUID in another store is not the same routing owner")
+        repository.configure(load: { current }, command: { _, _ in current })
+        repository.recordRouting(#"{"status":"selected","selectedAccountId":"b","identityGeneration":1,"failedAccounts":[]}"#)
+        await repository.refresh()
+        XCTAssertFalse(repository.wasLastUsed(account), "A remote binding cannot inherit or buffer local routing")
+    }
+
+    func testReboundLocalSnapshotMustMatchThePreviouslyVerifiedStoreScope() async throws {
+        let repository = ProviderAccountRepository()
+        let original = try snapshot(4)
+        repository.configure(load: { original }, command: { _, _ in original }, localStoreID: "/local/store")
+        await repository.refresh()
+        let account = try XCTUnwrap(repository.snapshot.accounts.first { $0.accountId == "b" })
+        repository.recordRouting(#"{"status":"selected","selectedAccountId":"b","identityGeneration":1,"failedAccounts":[]}"#)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any])
+        object["storeScope"] = "different-authority"
+        let replacement = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        repository.configure(load: { replacement }, command: { _, _ in replacement }, localStoreID: "/local/store")
+        repository.recordRouting(#"{"status":"selected","selectedAccountId":"b","identityGeneration":1,"failedAccounts":[]}"#)
+        await repository.refresh()
+        XCTAssertFalse(repository.wasLastUsed(account), "A changed authoritative store scope cannot inherit pending routing")
+    }
+
+    func testEmptyStoreScopeCannotRevivePriorRouting() async throws {
+        let repository = ProviderAccountRepository()
+        let current = try snapshot(4)
+        var emptyScope = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any])
+        emptyScope["storeScope"] = ""
+        let invalid = String(decoding: try JSONSerialization.data(withJSONObject: emptyScope), as: UTF8.self)
+        var reads = 0
+        repository.configure(load: { reads += 1; return reads == 2 ? invalid : current },
+            command: { _, _ in current }, localStoreID: "/local/store")
+        await repository.refresh()
+        let account = try XCTUnwrap(repository.snapshot.accounts.first { $0.accountId == "b" })
+        repository.recordRouting(#"{"status":"selected","selectedAccountId":"b","identityGeneration":1,"failedAccounts":[]}"#)
+        XCTAssertTrue(repository.wasLastUsed(account))
+        await repository.refresh()
+        XCTAssertFalse(repository.wasLastUsed(account))
+        await repository.refresh()
+        XCTAssertFalse(repository.wasLastUsed(account), "An unverified empty store scope cannot retain or resurrect routing")
+    }
+
+    func testEmptyScopeCannotAuthorizeRoutingForAChangedStore() async throws {
+        let repository = ProviderAccountRepository()
+        let original = try snapshot(4)
+        var emptyScope = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any])
+        emptyScope["storeScope"] = ""
+        let invalid = String(decoding: try JSONSerialization.data(withJSONObject: emptyScope), as: UTF8.self)
+        emptyScope["storeScope"] = "different-authority"
+        let replacement = String(decoding: try JSONSerialization.data(withJSONObject: emptyScope), as: UTF8.self)
+        var reads = 0
+        repository.configure(load: {
+            reads += 1
+            return reads == 1 ? original : (reads == 2 ? invalid : replacement)
+        }, command: { _, _ in original }, localStoreID: "/local/store")
+        await repository.refresh()
+        let account = try XCTUnwrap(repository.snapshot.accounts.first { $0.accountId == "b" })
+        await repository.refresh()
+        repository.recordRouting(#"{"status":"selected","selectedAccountId":"b","identityGeneration":1,"failedAccounts":[]}"#)
+        XCTAssertFalse(repository.wasLastUsed(account))
+        await repository.refresh()
+        XCTAssertFalse(repository.wasLastUsed(account), "Accounts from an empty scope cannot authorize a different store")
+    }
+
+    func testOldSameStoreGatewayResponseCannotRevivePriorSelection() async throws {
+        let repository = ProviderAccountRepository()
+        let old = try snapshot(4)
+        repository.configure(load: { old }, command: { _, _ in old }, localStoreID: "/local/store")
+        await repository.refresh()
+        repository.recordRouting(#"{"status":"selected","selectedAccountId":"b","identityGeneration":1,"failedAccounts":[]}"#)
+        var pending: CheckedContinuation<String, Never>?
+        repository.configure(load: { await withCheckedContinuation { pending = $0 } },
+            command: { _, _ in old }, localStoreID: "/local/store")
+        let stale = Task { await repository.refresh() }
+        while pending == nil { await Task.yield() }
+        let removed = try snapshot(5, accounts: ["a"])
+        repository.configure(load: { removed }, command: { _, _ in removed }, localStoreID: "/local/store")
+        await repository.refresh()
+        pending?.resume(returning: old)
+        _ = await stale.value
+        XCTAssertEqual(repository.snapshot.accounts.map(\.accountId), ["a"])
+        let later = try snapshot(6)
+        repository.configure(load: { later }, command: { _, _ in later }, localStoreID: "/local/store")
+        await repository.refresh()
+        let b = try XCTUnwrap(repository.snapshot.accounts.first { $0.accountId == "b" })
+        XCTAssertFalse(repository.wasLastUsed(b))
+    }
 }

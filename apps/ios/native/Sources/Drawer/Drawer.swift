@@ -33,7 +33,7 @@ struct Drawer: View {
     let openProjects: () -> Void
     let openProject: (String) -> Void
     let closeSidebar: () -> Void
-    let onOpenSession: (ConversationScope, SessionMode, String) -> Void
+    let onOpenSession: (ConversationScope, SessionMode, String, String?) -> Void
     let onToggleSessionPinned: (String) -> Void
     let onContinueInMode: (ConversationScope, String, SessionMode, SessionMode) -> Void
     /// The independent app library remains available without a chat engine.
@@ -68,7 +68,7 @@ struct Drawer: View {
         openProjects: @escaping () -> Void = {},
         openProject: @escaping (String) -> Void = { _ in },
         closeSidebar: @escaping () -> Void,
-        onOpenSession: @escaping (ConversationScope, SessionMode, String) -> Void,
+        onOpenSession: @escaping (ConversationScope, SessionMode, String, String?) -> Void,
         onToggleSessionPinned: @escaping (String) -> Void = { _ in },
         onContinueInMode: @escaping (ConversationScope, String, SessionMode, SessionMode) -> Void = { _, _, _, _ in },
         appLibrary: UnifiedLocalApps? = nil,
@@ -501,7 +501,7 @@ struct Drawer: View {
         let active = row.scope == activeScope && row.id == activeSession
         let targetMode: SessionMode = row.mode == .chat ? .code : .chat
         return Button {
-            onOpenSession(row.scope, row.mode, row.id)
+            onOpenSession(row.scope, row.mode, row.id, row.transcriptPath)
         } label: {
             HStack(spacing: 10) {
                 row.mode.glyph(t, size: 15)

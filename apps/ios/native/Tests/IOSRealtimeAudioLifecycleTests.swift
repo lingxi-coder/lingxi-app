@@ -132,10 +132,73 @@ private final class RealtimeCommitSession: IosRealtimeAudioSession, @unchecked S
     override func close() async throws { await calls.closed() }
     override func abort() async { await calls.aborted() }
 }
+
+private final class RealtimeTestEngine: MobileEngineHandle, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { super.init(unsafeFromHandle: handle) }
+    init() { super.init(noHandle: .init()) }
+}
+
+@MainActor
+private final class RealtimeOpenGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var arrived = false
+    func wait() async { arrived = true; await withCheckedContinuation { continuation = $0 } }
+    func release() { continuation?.resume(); continuation = nil }
+}
 #endif
 
 extension IOSRealtimeAudioLifecycleTests {
     #if DEBUG
+    @MainActor
+    func testReservedStartupKeepsOriginalEngineAndRouteAcrossDetachAndReplacement() async throws {
+        let provider = IOSAudioProviderService.shared
+        let firstID = "realtime-start-a-\(UUID().uuidString)"
+        let secondID = "realtime-start-b-\(UUID().uuidString)"
+        let first = RealtimeTestEngine()
+        let second = RealtimeTestEngine()
+        let attachmentA = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: UUID().uuidString.lowercased(), generation: 1))
+        let attachmentB = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: UUID().uuidString.lowercased(), generation: 1))
+        let ownerA = IOSAudioOwner.attached(attachment: attachmentA, logicalOwner: .session(sessionID: "session-a"))
+        defer { provider.clearSessionContext(ownerID: firstID); provider.clearSessionContext(ownerID: secondID) }
+        provider.claimSessionContext(ownerID: firstID)
+        XCTAssertTrue(provider.attach(engine: first, ownerID: firstID, engineAttachmentIdentity: attachmentA))
+        XCTAssertTrue(provider.setSessionContext(sessionID: "session-a", profileID: "profile-a", accountScope: "account-a",
+            ownerID: firstID, engineAttachmentIdentity: attachmentA, engine: first))
+        let gate = RealtimeOpenGate()
+        let device = RealtimeStopDevice()
+        let session = RealtimeCommitSession()
+        var openedWithFirst = false
+        let service = IOSRealtimeAudioService(device: device, observeInvalidation: false, openOverride: { engine, owner, _ in
+            openedWithFirst = engine === first && owner == ownerA && provider.sessionContext(for: owner)?.profileId == "profile-a"
+            await gate.wait()
+            return session
+        })
+        service.attach(engine: first, ownerID: firstID)
+        XCTAssertTrue(service.reserveStart(owner: ownerA))
+        // These are the two operations performed by setSettingsActive(false),
+        // followed by the replacement source's normal selection and attach.
+        provider.releaseSessionContextSelection(ownerID: firstID)
+        service.detach(ownerID: firstID)
+        provider.claimSessionContext(ownerID: secondID)
+        XCTAssertTrue(provider.attach(engine: second, ownerID: secondID, engineAttachmentIdentity: attachmentB))
+        XCTAssertTrue(provider.setSessionContext(sessionID: "session-b", profileID: "profile-b", accountScope: "account-b",
+            ownerID: secondID, engineAttachmentIdentity: attachmentB, engine: second))
+        service.attach(engine: second, ownerID: secondID)
+        XCTAssertTrue(service.boundEngineForTesting === first)
+        let snapshot = AudioConfigurationSnapshot(configuration: AudioConfigurationV4(
+            recognition: .init(source: .system), speech: .init(source: .system)), revision: 1)
+        let starting = Task { try await service.start(snapshot: snapshot) }
+        while !gate.arrived { await Task.yield() }
+        XCTAssertTrue(openedWithFirst)
+        XCTAssertEqual(device.stopCalls, 0, "A pending start is not drained before it completes")
+        gate.release()
+        try await starting.value
+        while device.stopCalls == 0 { await Task.yield() }
+        device.finishStop(true)
+        while service.isActive { await Task.yield() }
+        XCTAssertTrue(service.boundEngineForTesting === second)
+    }
+
     @MainActor
     func testSubmitTapBeforeNavigationKeepsTurnUntilTerminal() async {
         let device = RealtimeStopDevice()

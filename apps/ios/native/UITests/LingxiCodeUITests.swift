@@ -12,6 +12,7 @@ final class LingxiCodeUITests: XCTestCase {
         // intentionally verify the zh-Hans product copy.
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)"]
         app.launchEnvironment["LINGXI_UI_TESTING"] = "1"
+        app.launchEnvironment["LINGXI_ISOLATED_SIM_TEST"] = "1"
         app.launch()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
     }

@@ -69,3 +69,23 @@ enum ConversationScope: Equatable, Hashable, Sendable {
         }
     }
 }
+
+/// A newer user selection supersedes an in-flight navigation, while retaining
+/// the complete latest destination until the current operation has unwound.
+struct ConversationNavigationIntents<Destination> {
+    private(set) var generation: UInt64 = 0
+    private var pending: Destination?
+
+    mutating func submit(_ destination: Destination, whileBusy: Bool) -> Bool {
+        generation &+= 1
+        pending = whileBusy ? destination : nil
+        return !whileBusy
+    }
+
+    mutating func takePending() -> Destination? {
+        defer { pending = nil }
+        return pending
+    }
+
+    func isCurrent(_ generation: UInt64) -> Bool { self.generation == generation }
+}

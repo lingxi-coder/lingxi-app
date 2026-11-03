@@ -32,11 +32,13 @@ final class FirebaseAccount {
     @ObservationIgnored private var appleState: String?
 
     static func configure() {
+        guard !IsolatedSimulatorTesting.enabled else { return }
         guard FirebaseApp.app() == nil else { return }
         FirebaseApp.configure()
         CrashReporting.configure()
     }
     private init() {
+        guard !IsolatedSimulatorTesting.enabled else { return }
         Self.configure()
         user = Auth.auth().currentUser.map(LingxiAccountProfile.init)
         listener = Auth.auth().addStateDidChangeListener { [weak self] _, user in
@@ -44,6 +46,7 @@ final class FirebaseAccount {
         }
     }
     private func perform(_ operation: @escaping @MainActor () async throws -> Void) {
+        guard !IsolatedSimulatorTesting.enabled else { return }
         guard !busy else { return }
         busy = true
         message = nil

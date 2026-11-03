@@ -180,7 +180,7 @@ import XCTest
                 nativeConfigHome: directories.configHome,
                 apiBase: "https://api.anthropic.com",
                 model: snapshot.defaultModelID ?? "",
-                sessionMode: .code, initialSessionId: nil,
+                sessionMode: .code, initialSessionId: nil, initialSessionTranscriptPath: nil, schedulerController: false,
                 visionDelegationEnabled: snapshot.visionDelegationEnabled,
                 appSandboxRoot: sandbox.path,
                 projectCwd: nil,

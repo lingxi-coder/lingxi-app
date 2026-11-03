@@ -105,6 +105,14 @@ private struct ProviderAccountRoutingObservation: Decodable {
     let failedAccounts: [Failure]
 }
 
+private struct PendingProviderAccountSelection {
+    let accountID: String
+    let identityGeneration: UInt64
+    // A selection carried from a previously verified snapshot must still
+    // belong to that provider when the replacement snapshot arrives.
+    let providerID: String?
+}
+
 struct ProviderAccountCommand: Encodable {
     let action: String
     var operationId: UInt64?
@@ -205,17 +213,35 @@ final class ProviderAccountRepository {
     private(set) var generation: UInt64 = 0
     private var readRevision: UInt64 = 0
     private var lastSelections: [String: (accountID: String, identityGeneration: UInt64)] = [:]
+    private var localStoreID: String?
+    private var pendingSelectionScope: String?
+    private var pendingSelections: [PendingProviderAccountSelection] = []
 
     var available: Bool { loader != nil && commandHandler != nil }
 
-    func configure(load: SnapshotLoader?, command: CommandHandler?, oauthSupported: Bool = true) {
+    func configure(load: SnapshotLoader?, command: CommandHandler?, oauthSupported: Bool = true,
+                   localStoreID: String? = nil) {
         cancelDeviceOAuth()
         cancelRecoveryRefresh()
+        let sameLocalStore = localStoreID.map { !$0.isEmpty && $0 == self.localStoreID } ?? false
+        if sameLocalStore {
+            if !snapshot.storeScope.isEmpty {
+                pendingSelectionScope = snapshot.storeScope
+                pendingSelections = lastSelections.map { provider, selection in
+                    PendingProviderAccountSelection(accountID: selection.accountID,
+                        identityGeneration: selection.identityGeneration, providerID: provider)
+                }
+            }
+        } else {
+            pendingSelectionScope = nil
+            pendingSelections = []
+        }
         generation &+= 1
         readRevision &+= 1
         loader = load
         commandHandler = command
         self.oauthSupported = oauthSupported
+        self.localStoreID = localStoreID.flatMap { $0.isEmpty ? nil : $0 }
         snapshot = .empty
         snapshotReadFailed = false
         busy = false
@@ -306,16 +332,28 @@ final class ProviderAccountRepository {
     }
 
     func wasLastUsed(_ account: ProviderAccount) -> Bool {
-        guard let selection = lastSelections[account.providerId] else { return false }
+        guard !snapshot.storeScope.isEmpty,
+              snapshot.accounts.contains(where: { $0.accountId == account.accountId
+                  && $0.providerId == account.providerId && $0.identityGeneration == account.identityGeneration }),
+              let selection = lastSelections[account.providerId] else { return false }
         return selection.accountID == account.accountId && selection.identityGeneration == account.identityGeneration
     }
 
     /// Execution Host evidence only. UI never predicts or selects an account.
     func recordRouting(_ json: String) {
         guard let event = try? JSONDecoder().decode(ProviderAccountRoutingObservation.self, from: Data(json.utf8)) else { return }
-        if let id = event.selectedAccountId, let identity = event.identityGeneration,
-           let account = snapshot.accounts.first(where: { $0.accountId == id && $0.identityGeneration == identity }) {
-            lastSelections[account.providerId] = (id, identity)
+        if let id = event.selectedAccountId, let identity = event.identityGeneration {
+            if !snapshot.storeScope.isEmpty,
+               let account = snapshot.accounts.first(where: { $0.accountId == id && $0.identityGeneration == identity }) {
+                lastSelections[account.providerId] = (id, identity)
+            } else if snapshot.storeScope.isEmpty, localStoreID != nil {
+                // The new gateway has not refreshed yet. Keep only identities;
+                // the next authoritative snapshot decides whether they exist.
+                pendingSelections.removeAll { $0.accountID == id && $0.identityGeneration == identity }
+                pendingSelections.append(PendingProviderAccountSelection(accountID: id,
+                    identityGeneration: identity, providerID: nil))
+                if pendingSelections.count > 256 { pendingSelections.removeFirst() }
+            }
         }
         if event.status == "all_unavailable" || !event.failedAccounts.isEmpty {
             Task { await refresh() }
@@ -515,6 +553,32 @@ final class ProviderAccountRepository {
 
     private func accept(_ result: ProviderAccountSnapshot) {
         guard snapshot.storeScope != result.storeScope || result.configRevision >= snapshot.configRevision else { return }
+        if result.storeScope.isEmpty {
+            let verifiedScope = snapshot.storeScope.isEmpty ? pendingSelectionScope : snapshot.storeScope
+            lastSelections = [:]
+            pendingSelections = []
+            pendingSelectionScope = verifiedScope
+        } else {
+            if !snapshot.storeScope.isEmpty && snapshot.storeScope != result.storeScope {
+                lastSelections = [:]
+            } else {
+                lastSelections = lastSelections.filter { provider, selection in
+                    result.accounts.contains { $0.providerId == provider && $0.accountId == selection.accountID
+                        && $0.identityGeneration == selection.identityGeneration }
+                }
+            }
+            if pendingSelectionScope == nil || pendingSelectionScope == result.storeScope {
+                for selection in pendingSelections {
+                    guard let account = result.accounts.first(where: {
+                        $0.accountId == selection.accountID && $0.identityGeneration == selection.identityGeneration
+                            && (selection.providerID == nil || $0.providerId == selection.providerID)
+                    }) else { continue }
+                    lastSelections[account.providerId] = (selection.accountID, selection.identityGeneration)
+                }
+            }
+            pendingSelections = []
+            pendingSelectionScope = nil
+        }
         snapshot = result
         scheduleRecoveryRefresh()
     }

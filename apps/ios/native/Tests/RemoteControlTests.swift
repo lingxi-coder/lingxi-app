@@ -1,10 +1,18 @@
 import XCTest
 import UIKit
+import FirebaseCore
 @testable import LingxiCode
 
 final class RemoteControlTests: XCTestCase {
     private let host = "Hk3xQ9vR2mT7wL1pZ8cN4a"
     private let session = "11111111-2222-4333-8444-555555555555"
+
+    @MainActor
+    func testIsolatedSimulatorDoesNotInitializeFirebase() throws {
+        try XCTSkipUnless(IsolatedSimulatorTesting.enabled, "Requires the isolated simulator fixture")
+        XCTAssertNil(FirebaseApp.app())
+        XCTAssertNil(FirebaseAccount.shared.user)
+    }
 
     func testRemoteLinksPreserveCaseAndDoNotRebindLocalWorkspace() throws {
         let route = "remote/\(host)/\(session)"
@@ -55,16 +63,57 @@ final class RemoteControlTests: XCTestCase {
 
     @MainActor
     func testTeamApprovalCapabilityShowsOnlyPermissionAndNeverInventsMode() async throws {
-        actor Decisions {
-            var values: [Bool] = []
-            func add(_ allow: Bool) { values.append(allow) }
-            func snapshot() -> [Bool] { values }
-        }
-        let decisions = Decisions()
+        let (release, continuation) = AsyncStream<Void>.makeStream()
+        var decisions: [Bool] = []
         let id = "team-approval:" + String(repeating: "a", count: 32)
         let remote = RemoteConversationSource(hostID: host, sessionID: id, uid: "A",
-            remotePermissionResponder: { _, allow in await decisions.add(allow) })
+            remotePermissionResponder: { _, allow in
+                decisions.append(allow)
+                for await _ in release { break }
+            })
         let permission = PermissionRequest(requestId: 1,
+            kind: .toolUseConfirm(toolName: "tool", toolInputJson: "{}", defaultAllow: false),
+            worker: nil, owner: nil, suppressAlwaysAllowRule: true, autoModePrompt: nil)
+        let update = RemoteSessionUpdateFfi(
+            sessionId: id, sessionMode: nil, phase: .live, error: nil, replace: true,
+            messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+            pending: RemotePendingFfi(permissions: [permission], questions: [], computerAccess: []),
+            turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+            hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        remote.receive(update)
+        XCTAssertTrue(remote.isApprovalCapability)
+        XCTAssertEqual(remote.phase, .live)
+        XCTAssertFalse(remote.model.sessionModeKnown)
+        XCTAssertEqual(remote.model.pendingPermissions.count, 1)
+        XCTAssertFalse(remote.isAvailableForPrompts)
+        let rejectedToken = await remote.send("not a chat")
+        XCTAssertNil(rejectedToken)
+        remote.approvePermission(99, .allowOnce)
+        remote.approvePermission(1, .allowOnce)
+        remote.denyPermission(1)
+        for _ in 0..<100 where decisions.isEmpty { await Task.yield() }
+        XCTAssertEqual(decisions, [true])
+        continuation.yield(())
+        continuation.finish()
+        for _ in 0..<100 where !remote.model.pendingPermissions.isEmpty { await Task.yield() }
+        XCTAssertTrue(remote.model.pendingPermissions.isEmpty)
+        remote.receive(update) // A repeated snapshot cannot resurrect a spent capability.
+        remote.denyPermission(1)
+        await Task.yield()
+        XCTAssertEqual(decisions, [true])
+        XCTAssertTrue(remote.model.pendingPermissions.isEmpty)
+    }
+
+    @MainActor
+    func testTeamApprovalDeliveryFailureCanRetryTheStillPendingRequest() async throws {
+        var attempts: [Bool] = []
+        let id = "team-approval:" + String(repeating: "b", count: 32)
+        let remote = RemoteConversationSource(hostID: host, sessionID: id, uid: "A",
+            remotePermissionResponder: { _, allow in
+                attempts.append(allow)
+                if attempts.count == 1 { throw RemoteFfiError.NotConnected }
+            })
+        let permission = PermissionRequest(requestId: 7,
             kind: .toolUseConfirm(toolName: "tool", toolInputJson: "{}", defaultAllow: false),
             worker: nil, owner: nil, suppressAlwaysAllowRule: true, autoModePrompt: nil)
         remote.receive(RemoteSessionUpdateFfi(
@@ -73,20 +122,105 @@ final class RemoteControlTests: XCTestCase {
             pending: RemotePendingFfi(permissions: [permission], questions: [], computerAccess: []),
             turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
             hasOlder: false, loadingOlder: false, answeredElsewhere: false))
-        XCTAssertTrue(remote.isApprovalCapability)
-        XCTAssertEqual(remote.phase, .live)
-        XCTAssertFalse(remote.model.sessionModeKnown)
-        XCTAssertEqual(remote.model.pendingPermissions.count, 1)
-        XCTAssertFalse(remote.isAvailableForPrompts)
-        XCTAssertNil(remote.send("not a chat"))
-        remote.approvePermission(1, .allowOnce)
-        remote.denyPermission(1)
-        for _ in 0..<100 {
-            if await decisions.snapshot().count == 2 { break }
-            try await Task.sleep(for: .milliseconds(10))
+        remote.approvePermission(7, .allowOnce)
+        for _ in 0..<100 where remote.model.error == nil { await Task.yield() }
+        XCTAssertEqual(attempts, [true])
+        XCTAssertEqual(remote.model.pendingPermissions.map(\.requestId), [7])
+        remote.denyPermission(7)
+        for _ in 0..<100 where !remote.model.pendingPermissions.isEmpty { await Task.yield() }
+        XCTAssertEqual(attempts, [true, false])
+        XCTAssertTrue(remote.model.pendingPermissions.isEmpty)
+    }
+
+    @MainActor
+    func testTeamApprovalNotPendingConsumesTheCapability() async {
+        var calls = 0
+        let id = "team-approval:" + String(repeating: "d", count: 32)
+        let remote = RemoteConversationSource(hostID: host, sessionID: id, uid: "A",
+            remotePermissionResponder: { _, _ in
+                calls += 1
+                throw RemoteFfiError.Rpc(code: "not_pending", detail: "already answered")
+            })
+        let permission = PermissionRequest(requestId: 8,
+            kind: .toolUseConfirm(toolName: "tool", toolInputJson: "{}", defaultAllow: false),
+            worker: nil, owner: nil, suppressAlwaysAllowRule: true, autoModePrompt: nil)
+        let update = RemoteSessionUpdateFfi(
+            sessionId: id, sessionMode: nil, phase: .live, error: nil, replace: true,
+            messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+            pending: RemotePendingFfi(permissions: [permission], questions: [], computerAccess: []),
+            turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+            hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        remote.receive(update)
+        remote.approvePermission(8, .allowOnce)
+        for _ in 0..<100 where !remote.answeredElsewhere { await Task.yield() }
+        XCTAssertTrue(remote.answeredElsewhere)
+        XCTAssertTrue(remote.model.pendingPermissions.isEmpty)
+        remote.receive(update)
+        remote.denyPermission(8)
+        await Task.yield()
+        XCTAssertEqual(calls, 1)
+        XCTAssertTrue(remote.model.pendingPermissions.isEmpty)
+    }
+
+    @MainActor
+    func testTeamApprovalUncertainDeliveryCannotBeAnsweredAgain() async {
+        for code in ["timeout", "closed", "internal", "unknown_wire_code"] {
+            var calls = 0
+            let id = "team-approval:" + String(repeating: "e", count: 32)
+            let remote = RemoteConversationSource(hostID: host, sessionID: id, uid: "A",
+                remotePermissionResponder: { _, _ in
+                    calls += 1
+                    throw RemoteFfiError.Rpc(code: code, detail: "delivery unknown")
+                })
+            let permission = PermissionRequest(requestId: 8,
+                kind: .toolUseConfirm(toolName: "tool", toolInputJson: "{}", defaultAllow: false),
+                worker: nil, owner: nil, suppressAlwaysAllowRule: true, autoModePrompt: nil)
+            let update = RemoteSessionUpdateFfi(
+                sessionId: id, sessionMode: nil, phase: .live, error: nil, replace: true,
+                messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+                pending: RemotePendingFfi(permissions: [permission], questions: [], computerAccess: []),
+                turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+                hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+            remote.receive(update)
+            remote.approvePermission(8, .allowOnce)
+            for _ in 0..<100 where remote.model.error == nil { await Task.yield() }
+            XCTAssertNotNil(remote.model.error)
+            remote.receive(update)
+            remote.denyPermission(8)
+            await Task.yield()
+            XCTAssertEqual(calls, 1, code)
+            XCTAssertTrue(remote.model.pendingPermissions.isEmpty, code)
         }
-        let received = await decisions.snapshot()
-        XCTAssertEqual(received.sorted { !$0 && $1 }, [false, true])
+    }
+
+    @MainActor
+    func testTeamApprovalRejectsConversationTurnAndHistoryMetadata() {
+        let id = "team-approval:" + String(repeating: "c", count: 32)
+        let permission = PermissionRequest(requestId: 1,
+            kind: .toolUseConfirm(toolName: "tool", toolInputJson: "{}", defaultAllow: false),
+            worker: nil, owner: nil, suppressAlwaysAllowRule: true, autoModePrompt: nil)
+        func update(mode: SessionModeDto? = nil, running: Bool = false,
+                    turnId: UInt64? = nil, first: UInt64 = 0, hasOlder: Bool = false,
+                    loadingOlder: Bool = false) -> RemoteSessionUpdateFfi {
+            RemoteSessionUpdateFfi(
+                sessionId: id, sessionMode: mode, phase: .live, error: nil, replace: true,
+                messages: [], olderMessages: [], firstMessageIndex: first, records: [],
+                pending: RemotePendingFfi(permissions: [permission], questions: [], computerAccess: []),
+                turn: RemoteTurnFfi(running: running, turnId: turnId), controls: nil, outgoing: [],
+                hasOlder: hasOlder, loadingOlder: loadingOlder, answeredElsewhere: false)
+        }
+        for malformed in [update(mode: .code), update(running: true), update(turnId: 2),
+                          update(first: 1), update(hasOlder: true), update(loadingOlder: true)] {
+            let remote = RemoteConversationSource(hostID: host, sessionID: id, uid: "A")
+            remote.receive(update())
+            XCTAssertEqual(remote.model.pendingPermissions.count, 1)
+            remote.receive(malformed)
+            XCTAssertEqual(remote.phase, .error)
+            XCTAssertTrue(remote.model.pendingPermissions.isEmpty)
+            remote.receive(update())
+            XCTAssertEqual(remote.phase, .error)
+            XCTAssertFalse(remote.model.sessionModeKnown)
+        }
     }
 
     @MainActor
@@ -162,6 +296,66 @@ final class RemoteControlTests: XCTestCase {
     }
 
     @MainActor
+    func testProviderAccountReplyIsDiscardedAfterOfflineAndReconnect() async throws {
+        let (release, continuation) = AsyncStream<Void>.makeStream()
+        var started = false
+        let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A",
+            remoteProviderAccountSender: { _, _ in
+                started = true
+                for await _ in release { break }
+                return "{}"
+            })
+        func update(_ phase: RemoteSessionPhaseFfi) -> RemoteSessionUpdateFfi {
+            RemoteSessionUpdateFfi(
+                sessionId: session, sessionMode: .chat, phase: phase, error: nil, replace: true,
+                messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+                pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+                turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+                hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        }
+        remote.receive(update(.live))
+        let request = Task { try await remote.providerAccountsSnapshot() }
+        for _ in 0..<100 where !started { await Task.yield() }
+        XCTAssertTrue(started)
+        remote.receive(update(.offline))
+        remote.receive(update(.live))
+        continuation.yield(())
+        continuation.finish()
+        do { _ = try await request.value; XCTFail("A reply from before reconnect must be discarded") }
+        catch is CancellationError {}
+        catch { XCTFail("Unexpected error: \(error)") }
+    }
+
+    @MainActor
+    func testProviderAccountReplyIsFencedAtTheBeginningOfStop() async throws {
+        let (release, continuation) = AsyncStream<Void>.makeStream()
+        var started = false
+        let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A",
+            remoteProviderAccountSender: { _, _ in
+                started = true
+                for await _ in release { break }
+                return "{}"
+            })
+        let live = RemoteSessionUpdateFfi(
+            sessionId: session, sessionMode: .chat, phase: .live, error: nil, replace: true,
+            messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+            pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+            turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+            hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        remote.receive(live)
+        let request = Task { try await remote.providerAccountsSnapshot() }
+        for _ in 0..<100 where !started { await Task.yield() }
+        XCTAssertTrue(started)
+        await remote.stop()
+        remote.receive(live) // Even a late LIVE callback cannot validate the old reply.
+        continuation.yield(())
+        continuation.finish()
+        do { _ = try await request.value; XCTFail("A reply admitted before stop must be discarded") }
+        catch is CancellationError {}
+        catch { XCTFail("Unexpected error: \(error)") }
+    }
+
+    @MainActor
     func testAttachmentAdmissionRacePreservesUnsentOriginalImage() async throws {
         let (release, continuation) = AsyncStream<Void>.makeStream()
         let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A",
@@ -180,7 +374,8 @@ final class RemoteControlTests: XCTestCase {
         remote.receive(update(running: false))
         let png = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).image { _ in UIColor.red.setFill(); UIRectFill(CGRect(x: 0, y: 0, width: 2, height: 2)) }
         let original = try XCTUnwrap(png.pngData()).base64EncodedString()
-        XCTAssertNotNil(remote.send("attachment", images: [ImageRefDto(mediaType: "image/png", base64: original)]))
+        let acceptedToken = await remote.send("attachment", images: [ImageRefDto(mediaType: "image/png", base64: original)])
+        XCTAssertNotNil(acceptedToken)
         remote.receive(update(running: true))
         continuation.yield(())
         for _ in 0..<100 {
@@ -213,7 +408,8 @@ final class RemoteControlTests: XCTestCase {
                 })
             remote.receive(update(.live, mode: .chat))
             let units: [UInt16] = [0xD800, 0x0061]
-            XCTAssertNotNil(remote.send("original", sourceCodeUnits: units, images: [], selectedSlashCommand: nil))
+            let acceptedToken = await remote.send("original", sourceCodeUnits: units, images: [], selectedSlashCommand: nil)
+            XCTAssertNotNil(acceptedToken)
             remote.receive(conflict ? update(.live, mode: .code) : update(.loading, mode: nil))
             XCTAssertEqual(remote.phase, conflict ? .error : .loading)
             await remote.stop()
@@ -260,7 +456,8 @@ final class RemoteControlTests: XCTestCase {
             hasOlder: false, loadingOlder: false, answeredElsewhere: false))
         let owner = try XCTUnwrap(remote?.draftOwner)
         weak var admittedOwner = remote
-        XCTAssertNotNil(remote?.send("retain this"))
+        let acceptedToken = await remote?.send("retain this")
+        XCTAssertNotNil(acceptedToken)
         remote = nil
         XCTAssertNotNil(admittedOwner, "the accepted task must own the source before its first suspension")
         continuation.yield(())
@@ -269,6 +466,37 @@ final class RemoteControlTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(owner.unsentPrompts.first?.text, "retain this")
+    }
+
+    @MainActor
+    func testRejectedRemoteSendStaysQueuedAfterEditAndClear() async throws {
+        let (release, continuation) = AsyncStream<Void>.makeStream()
+        let manager = RemoteControlManager()
+        let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A", manager: manager,
+            remotePromptSender: { _, _ in
+                for await _ in release { break }
+                throw RemoteFfiError.NotConnected
+            })
+        remote.receive(RemoteSessionUpdateFfi(
+            sessionId: session, sessionMode: .chat, phase: .live, error: nil, replace: true,
+            messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+            pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+            turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+            hasOlder: false, loadingOlder: false, answeredElsewhere: false))
+        let token = await remote.send("old draft")
+        XCTAssertNotNil(token)
+        let owner = remote.draftOwner
+        owner.draft.text = "new draft"
+        owner.draft.text = ""
+        continuation.yield(())
+        for _ in 0..<100 {
+            if !owner.unsentPrompts.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let pending = try XCTUnwrap(owner.unsentPrompts.first)
+        XCTAssertTrue(owner.draft.text.isEmpty, "failure must not undo a later edit and clear")
+        XCTAssertTrue(owner.draft.restore(pending), "the queued draft remains available for explicit restore")
+        XCTAssertEqual(owner.draft.text, "old draft")
     }
 
     @MainActor
@@ -310,7 +538,7 @@ final class RemoteControlTests: XCTestCase {
     }
 
     @MainActor
-    func testRemoteWaitsForModeAndReplaysSnapshotAndEventsInOrder() {
+    func testRemoteWaitsForModeAndReplaysSnapshotAndEventsInOrder() async {
         let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A")
         func update(mode: SessionModeDto? = nil, replace: Bool = false, records: [RemoteSeqRecordFfi] = [],
                     running: Bool = false) -> RemoteSessionUpdateFfi {
@@ -331,7 +559,8 @@ final class RemoteControlTests: XCTestCase {
         XCTAssertEqual(remote.phase, .loading)
         XCTAssertFalse(remote.model.sessionModeKnown)
         XCTAssertTrue(remote.model.messages.isEmpty)
-        XCTAssertNil(remote.send("not yet"))
+        let earlyToken = await remote.send("not yet")
+        XCTAssertNil(earlyToken)
 
         remote.receive(update(mode: .chat, running: true))
         XCTAssertEqual(remote.phase, .live)
@@ -342,7 +571,8 @@ final class RemoteControlTests: XCTestCase {
         remote.receive(update(mode: .code, running: true))
         XCTAssertEqual(remote.phase, .error)
         XCTAssertEqual(remote.sessionMode, .chat)
-        XCTAssertNil(remote.send("conflicting mode"))
+        let conflictingToken = await remote.send("conflicting mode")
+        XCTAssertNil(conflictingToken)
         remote.receive(update(running: true))
         XCTAssertEqual(remote.phase, .error)
     }
@@ -421,7 +651,7 @@ final class RemoteControlTests: XCTestCase {
     }
 
     @MainActor
-    func testRemoteHistoryImageHydrationPreservesRowsAndAccountInvalidationClearsData() {
+    func testRemoteHistoryImageHydrationPreservesRowsAndAccountInvalidationClearsData() async {
         let source = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
         let ref = session + ":m:0:0"
@@ -436,7 +666,8 @@ final class RemoteControlTests: XCTestCase {
         remote.invalidate()
         XCTAssertTrue(remote.model.messages.isEmpty)
         XCTAssertEqual(remote.phase, .closed)
-        XCTAssertNil(remote.send("must not send"))
+        let rejectedToken = await remote.send("must not send")
+        XCTAssertNil(rejectedToken)
     }
 
     @MainActor

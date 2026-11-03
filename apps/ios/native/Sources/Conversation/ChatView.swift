@@ -2,6 +2,45 @@ import SwiftUI
 import OSLog
 import harness_runtimeFFI
 
+/// Owns the bindings captured when an asynchronous send was requested. The
+/// revision detects edits that return to the same value before admission.
+@MainActor
+struct CapturedComposerDraft {
+    private let draft: Binding<String>
+    private let units: Binding<[UInt16]?>
+    private let attachment: Binding<ComposerAttachment?>
+    private let revision: () -> UInt64?
+    private let originalDraft: [UInt16]
+    private let originalUnits: [UInt16]?
+    private let originalAttachment: ComposerAttachment?
+    private let originalRevision: UInt64?
+
+    init(draft: Binding<String>, units: Binding<[UInt16]?>,
+         attachment: Binding<ComposerAttachment?>, submittedUnits: [UInt16]?,
+         revision: @escaping () -> UInt64?) {
+        self.draft = draft
+        self.units = units
+        self.attachment = attachment
+        self.revision = revision
+        originalDraft = Array(draft.wrappedValue.utf16)
+        originalUnits = submittedUnits
+        originalAttachment = attachment.wrappedValue
+        originalRevision = revision()
+    }
+
+    @discardableResult
+    func clearIfUnchanged() -> Bool {
+        guard let originalRevision, revision() == originalRevision,
+              Array(draft.wrappedValue.utf16) == originalDraft,
+              units.wrappedValue == originalUnits,
+              attachment.wrappedValue == originalAttachment else { return false }
+        draft.wrappedValue = ""
+        units.wrappedValue = nil
+        attachment.wrappedValue = nil
+        return true
+    }
+}
+
 // MARK: - ChatView — main conversation surface
 struct ChatView: View {
     #if canImport(harness_runtimeFFI)
@@ -58,12 +97,14 @@ struct ChatView: View {
 
     @State private var latestMessageRequestRevision: UInt64 = 0
     @State private var pendingAgentDetailID: String?
+    @State private var pendingSubmissionOwners = Set<ObjectIdentifier>()
 
     // Composer draft, HOISTED up to RootView (the iOS analog of Android
     // RootScreen's `draft`) so a hold-to-talk transcription can route its
     // recognized text into the input AND so the root can persist it across the
     // app being backgrounded. ChatView binds to it; it no longer owns it.
     @Binding var draft: String
+    private let draftRevision: () -> UInt64?
     @State private var localDraftSourceCodeUnits: [UInt16]? = nil
     private var externalDraftSourceCodeUnitsBinding: Binding<[UInt16]?>?
     private var draftSourceCodeUnitsBinding: Binding<[UInt16]?> {
@@ -119,6 +160,7 @@ struct ChatView: View {
          draft: Binding<String>,
          voiceInteraction: VoiceInteractionController,
          source: any ConversationSource,
+         draftRevision: @escaping () -> UInt64?,
          draftSourceCodeUnits: Binding<[UInt16]?>? = nil,
          attachmentBinding: Binding<ComposerAttachment?>? = nil,
          projectName: String? = nil,
@@ -162,6 +204,7 @@ struct ChatView: View {
         self.onArchive = onArchive
         self.onNewChat = onNewChat
         self._draft = draft
+        self.draftRevision = draftRevision
         self.voiceInteraction = voiceInteraction
         self.voiceEventsManagedByHost = voiceEventsManagedByHost
         self.source = source
@@ -292,6 +335,7 @@ struct ChatView: View {
                          isCancelling: convo.isCancelling,
                          sendEnabled: !convo.sessionTransitionPending
                              && !convo.slashCommandPending
+                             && !pendingSubmissionOwners.contains(ObjectIdentifier(source))
                              && !source.hasActiveRealtimeAudio
                              && source.isAvailableForPrompts
                              && voiceInteraction.mode != .flow,
@@ -1010,8 +1054,9 @@ struct ChatView: View {
                 convo.error = ConversationError(kind: .rejected, message: String(localized: "side_chat_creation_text_only"))
                 return false
             }
-            let submittedDraft = draft
-            let submittedSourceCodeUnits = sourceCodeUnits
+            let capturedDraft = CapturedComposerDraft(draft: $draft, units: draftSourceCodeUnitsBinding,
+                attachment: attachmentBinding ?? $localAttachment, submittedUnits: sourceCodeUnits,
+                revision: draftRevision)
             let inputSourceCodeUnits = SideChatCommand.inputSourceCodeUnits(
                 raw: txt,
                 sourceCodeUnits: sourceCodeUnits
@@ -1022,35 +1067,33 @@ struct ChatView: View {
                 inputSourceCodeUnits: input.isEmpty ? nil : inputSourceCodeUnits
             ) { success in
                 if success {
-                    if Array(draft.utf16) == Array(submittedDraft.utf16),
-                       draftSourceCodeUnitsBinding.wrappedValue == submittedSourceCodeUnits {
-                        draft = ""
-                        draftSourceCodeUnitsBinding.wrappedValue = nil
-                    }
+                    capturedDraft.clearIfUnchanged()
                     sideChatSheetOpen = true
                 }
             }
             return false
         }
         #endif
-        let images = attachment.map { [ImageRefDto(mediaType: $0.mediaType, base64: $0.base64)] } ?? []
-        guard let token = source.send(
-            txt,
-            sourceCodeUnits: sourceCodeUnits,
-            images: images,
-            selectedSlashCommand: selectedSlashCommand
-        ) else { return false }
-        draft = ""
-        draftSourceCodeUnitsBinding.wrappedValue = nil
-        // The source owns the durable transcript now; remove only after it has
-        // accepted the turn so a failed send leaves the attachment retryable.
-        attachment = nil
-        voiceInteraction.registerAutomaticPlaybackCandidate(token)
-        // Sending is an explicit re-engagement: a reader who had scrolled up to
-        // re-read something must not have their own prompt land off screen. The
-        // re-arm happens only after the turn was accepted.
-        latestMessageRequestRevision &+= 1
-        return true
+        let owner = source
+        let ownerID = ObjectIdentifier(owner)
+        guard pendingSubmissionOwners.insert(ownerID).inserted else { return false }
+        let submittedAttachment = attachment
+        let capturedDraft = CapturedComposerDraft(draft: $draft, units: draftSourceCodeUnitsBinding,
+            attachment: attachmentBinding ?? $localAttachment, submittedUnits: sourceCodeUnits,
+            revision: draftRevision)
+        let images = submittedAttachment.map { [ImageRefDto(mediaType: $0.mediaType, base64: $0.base64)] } ?? []
+        Task { @MainActor in
+            let token = await owner.send(txt, sourceCodeUnits: sourceCodeUnits, images: images,
+                                         selectedSlashCommand: selectedSlashCommand)
+            pendingSubmissionOwners.remove(ownerID)
+            guard let token else { return }
+            capturedDraft.clearIfUnchanged()
+            voiceInteraction.registerAutomaticPlaybackCandidate(token, audioOwner: owner.voiceAudioOwner)
+            latestMessageRequestRevision &+= 1
+        }
+        // The asynchronous admission owns the captured bindings; Composer
+        // must not clear them before its checkpoint has been committed.
+        return false
     }
 
     // PR-4 item 2: interrupt the in-flight turn.
@@ -1073,7 +1116,7 @@ struct ChatView: View {
     private func startVoiceHold() {
         captureStatus = nil
         composerFocused = false
-        voiceInteraction.startDictation(onTranscript: appendVoiceTranscript)
+        voiceInteraction.startDictation(audioOwner: source.voiceAudioOwner, onTranscript: appendVoiceTranscript)
     }
 
     /// Finger lift ends the request that has been recording since press-down;

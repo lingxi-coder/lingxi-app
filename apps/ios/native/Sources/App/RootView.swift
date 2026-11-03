@@ -168,7 +168,7 @@ struct RootView: View {
     @State private var hasUnsavedTerminalInput = false
     @State private var voiceInteraction: VoiceInteractionController
     @State private var projectSwitching = false
-    @State private var pendingModeSelection: SessionMode?
+    @State private var userNavigation = ConversationNavigationIntents<UserConversationNavigation>()
     /// `LingxiAppActionStore.drain()` REMOVES what it hands back, so an action
     /// refused by `ConversationSessionMutationPolicy` used to be destroyed by
     /// the very act of reading it. A conversation notification is posted
@@ -202,6 +202,7 @@ struct RootView: View {
 
     private let appSandboxRoot: String
     private let scopedPreferences: ProjectScopedPreferences
+    private let cronOwnerGate: CronOwnerAdmissionGate
     #if canImport(harness_runtimeFFI)
     private let mediaHostComposition: IOSNativeMediaHostComposition?
     private let mediaHostInitializationError: String?
@@ -236,6 +237,8 @@ struct RootView: View {
         self.mediaHostInitializationError = mediaHostInitializationError
         #endif
         let root = ConversationSourceFactory.appSandboxRoot()
+        let admissionGate = CronOwnerAdmissionGate()
+        cronOwnerGate = admissionGate
         let projects = ProjectStore.forRuntime(managedRoot: LXISHDefaultWorkspace.managedRootPath())
         let settings = SettingsStore()
         let providers = ProviderRepository.shared
@@ -245,7 +248,14 @@ struct RootView: View {
 
         let snapshot = providers.makeLaunchSnapshot()
         let preferences = ProjectScopedPreferences.forRuntime()
+        #if canImport(harness_runtimeFFI)
+        let cronStorageRoot = ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" ? root + "/ui-test-cron" : root
+        #else
+        let cronStorageRoot = root
+        #endif
+        let scheduledOwners = CronSessionOwnershipIndex(appSandboxRoot: cronStorageRoot, preferences: preferences)
         projects.sessionScopeClaims = { preferences.sessionScopeClaims }
+        projects.additionalSessionEvidence = { try scheduledOwners.claims() }
         if let error = projects.sessionOwnershipError {
             projects.errorMessage = error
         }
@@ -263,7 +273,7 @@ struct RootView: View {
         var storedSessionID = ConversationModeRestorePolicy.sessionID(
             mode: currentMode,
             scoped: preferences.storedActiveSessionID(scope: initialScope, mode: currentMode),
-            sessions: activeProject?.sessions ?? projects.globalSessions
+            sessions: initialScope == .scheduled ? [] : (activeProject?.sessions ?? projects.globalSessions)
         )
         #if DEBUG
             // File UI fixtures own an isolated session; never restore a persisted user session over it.
@@ -289,9 +299,20 @@ struct RootView: View {
             project: activeProject,
             linuxRuntime: settings.linuxRuntime
         ).config
-        let initialRows = activeProject?.sessions ?? projects.globalSessions
+        let initialRows = initialScope == .scheduled ? [] : (activeProject?.sessions ?? projects.globalSessions)
         let initialCwd = initialRows.first { canonicalSessionID($0.sessionId) == canonicalSessionID(storedSessionID) }?.workspaceDirectory
+            ?? (initialScope == .scheduled ? try? MobileUserStorage.scheduledWorkspace(sessionID: storedSessionID) : nil)
             ?? activeProject?.record.activeDirectory ?? LXISHGuestPaths.workspaceRoot
+        var initialTranscriptPath: String?
+        if !storedSessionID.isEmpty {
+            do {
+                initialTranscriptPath = try initialScope == .scheduled
+                    ? CronRepository.scheduledTranscriptPath(appSandboxRoot: cronStorageRoot, sessionID: storedSessionID, mode: initialMode)
+                    : projects.transcriptPathForSession(storedSessionID, in: initialScope, mode: initialMode)
+            } catch {
+                projects.errorMessage = error.localizedDescription
+            }
+        }
         var launchOptions = ConversationSourceFactory.LaunchOptions(
             projectCwd: initialCwd,
             additionalWorkspaceDirectories: activeProject?.record.additionalDirectories ?? [],
@@ -303,7 +324,8 @@ struct RootView: View {
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
             mobileLinux: runtime,
             projectMountGrants: initialProjectMountGrants,
-            initialSessionId: storedSessionID.isEmpty ? nil : storedSessionID
+            initialSessionId: storedSessionID.isEmpty ? nil : storedSessionID,
+            initialSessionTranscriptPath: initialTranscriptPath
         )
         #if canImport(harness_runtimeFFI)
         launchOptions.mediaHostComposition = mediaHostComposition
@@ -319,6 +341,25 @@ struct RootView: View {
             let scopes = ProjectCronScopeProvider {
                 (projects.projects, projects.activeProjectId)
             }
+            let cronStores = FfiCronStoreProvider()
+            let validateReservation: @MainActor @Sendable (CronOwnerReservation, CronScope, String) async throws -> CronGeneratedSession = { reservation, scope, title in
+                guard let ownerScope = ConversationScope(workspaceKey: reservation.sessionScopeKey),
+                      ownerScope.projectID == scope.projectID,
+                      !reservation.sessionTranscriptPath.isEmpty else {
+                    throw ProjectRepositoryError.conflictingSessionScope
+                }
+                let owner = SessionOwnerEvidence(scope: ownerScope, mode: reservation.sessionMode,
+                                                 transcriptPath: reservation.sessionTranscriptPath)
+                let evidence = try await scheduledOwners.claimsOffMain()
+                let previouslyKnown = try await projects.validateReservedSessionEvidence(reservation.sessionId, owner: owner, evidence: evidence)
+                guard admissionGate.allowsReservation(sessionID: reservation.sessionId, owner: owner,
+                                                      previouslyKnown: previouslyKnown, checkPreparing: false) else {
+                    throw ProjectRepositoryError.conflictingSessionScope
+                }
+                return CronGeneratedSession(id: reservation.sessionId, projectID: scope.projectID, title: title,
+                    updatedAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                    sessionTranscriptPath: owner.transcriptPath, sessionMode: owner.mode, sessionScopeKey: owner.scope.workspaceKey)
+            }
             let executor = FfiCronExecutor(
                 appSandboxRoot: root,
                 mediaHostComposition: mediaHostComposition,
@@ -332,16 +373,62 @@ struct RootView: View {
                         project: project,
                         linuxRuntime: settings.linuxRuntime
                     ).config
-                }
+                },
+                admissionGate: admissionGate,
+                prepareOwner: { candidate, scope, task in
+                    let id = canonicalSessionID(candidate.sessionId)
+                    guard UUID(uuidString: id) != nil else { return false }
+                    let config = task.configuration
+                    if config.runMode == .selectedSession {
+                        guard canonicalSessionID(config.targetSessionId ?? "") == id,
+                              let key = config.targetSessionScopeKey, let ownerScope = ConversationScope(workspaceKey: key),
+                              ownerScope.projectID == scope.projectID, let mode = config.targetSessionMode,
+                              let path = config.targetSessionTranscriptPath, !path.isEmpty else { return false }
+                        let owner = SessionOwnerEvidence(scope: ownerScope, mode: mode, transcriptPath: path)
+                        guard projects.admitsSessionEvidence(id, owner: owner) else { return false }
+                        let indexedPath = ownerScope == .scheduled ? nil : try? projects.transcriptPathForSession(id, in: ownerScope, mode: mode)
+                        let known = (try? scheduledOwners.claims()[id]) == owner || indexedPath == path
+                        return admissionGate.allowsReservation(sessionID: id, owner: owner, previouslyKnown: known)
+                    }
+                    guard let key = config.sessionScopeKey, let ownerScope = ConversationScope(workspaceKey: key),
+                          ownerScope.projectID == scope.projectID, let mode = config.sessionMode else { return false }
+                    if config.runMode == .taskSession, let owned = config.ownedSessionId, !owned.isEmpty {
+                        guard canonicalSessionID(owned) == id, let owner = try? scheduledOwners.claims()[id],
+                              owner.transcriptPath == candidate.sessionTranscriptPath,
+                              owner.scope == ownerScope, owner.mode == mode,
+                              projects.admitsSessionEvidence(id, owner: owner) else { return false }
+                        return admissionGate.allowsReservation(sessionID: id, owner: owner, previouslyKnown: true)
+                    }
+                    return projects.admitsNewSessionIdentity(id) && admissionGate.allowsUnclaimedReservation(sessionID: id)
+                },
+                confirmOwner: { reservation, scope, task in
+                    guard cronReservationMatchesTask(reservation, task: task) else {
+                        throw ProjectRepositoryError.conflictingSessionScope
+                    }
+                    let row = try await validateReservation(reservation, scope, String(task.prompt.prefix(200)))
+                    try await scheduledOwners.mergeReceipts([row])
+                    _ = try await validateReservation(reservation, scope, String(task.prompt.prefix(200)))
+                },
+                reconcileUnconfirmed: { scope in
+                    let store = try await cronStores.storeForAdmission(for: scope, appSandboxRoot: root)
+                    let reservations = try await store.listOwnerReservations()
+                    var rows: [CronGeneratedSession] = []
+                    for reservation in reservations {
+                        rows.append(try await validateReservation(reservation, scope, reservation.sessionId))
+                    }
+                    try await scheduledOwners.mergeReceipts(rows)
+                    for reservation in reservations { _ = try await validateReservation(reservation, scope, reservation.sessionId) }
+                },
+                blockAdmission: { scheduledOwners.blockNewClaims($0) }
             )
             let cron: CronRepository
             if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" {
-                cron = CronRepository(appSandboxRoot: root + "/ui-test-cron")
+                cron = CronRepository(appSandboxRoot: cronStorageRoot)
             } else {
                 cron = CronRepository(
                     appSandboxRoot: root,
                     scopeProvider: scopes,
-                    storeProvider: FfiCronStoreProvider { (providers.makeLaunchSnapshot().defaultModelID, CronReasoning()) },
+                    storeProvider: cronStores,
                     executor: executor,
                     notifier: UserNotificationCronNotifier(),
                     scheduler: BestEffortBackgroundCronScheduler()
@@ -354,6 +441,53 @@ struct RootView: View {
                 scheduler: BestEffortBackgroundCronScheduler()
             )
         #endif
+
+        cron.startupOwnerIndex = scheduledOwners
+        cron.startupOwnerCatalogPreflight = { [weak projects] in
+            guard let projects, projects.admitsUnclaimedOwner() else {
+                throw ProjectRepositoryError.invalidSessionOwnership(projects?.errorMessage ?? "Session owner catalog unavailable")
+            }
+        }
+        cron.startupReceiptValidator = { [weak projects, weak admissionGate] receipt in
+            guard let projects, let key = receipt.sessionScopeKey, let scope = ConversationScope(workspaceKey: key),
+                  let mode = receipt.sessionMode, let path = receipt.sessionTranscriptPath else {
+                throw ProjectRepositoryError.invalidSessionOwnership(projects?.errorMessage ?? "scheduled: invalid session receipt")
+            }
+            let owner = SessionOwnerEvidence(scope: scope, mode: mode, transcriptPath: path)
+            guard projects.admitsSessionEvidence(receipt.id, owner: owner) else {
+                throw ProjectRepositoryError.invalidSessionOwnership(projects.errorMessage ?? "scheduled: invalid session receipt")
+            }
+            let indexedPath = scope == .scheduled ? nil : try? projects.transcriptPathForSession(receipt.id, in: scope, mode: mode)
+            let known = (try? scheduledOwners.claims()[canonicalSessionID(receipt.id)]) == owner || indexedPath == path
+            guard admissionGate?.allowsReservation(sessionID: receipt.id, owner: owner, previouslyKnown: known) == true else {
+                throw ProjectRepositoryError.invalidSessionOwnership("scheduled: \(receipt.id) conflicts with a live or preparing owner")
+            }
+        }
+        #if canImport(harness_runtimeFFI)
+        if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] != "1" {
+            cron.startupOwnerScopes = { [weak projects] in
+                guard let projects else { throw ProjectRepositoryError.invalidProjectData }
+                return ProjectCronScopeProvider.scopes(appSandboxRoot: root, projects: try projects.projectsForOwnerAdmission())
+            }
+        }
+        #endif
+
+        admissionGate.ownerCatalogIsCurrent = { [weak cron] in cron?.ownerAdmissionIsCurrent ?? false }
+        projects.beginOwnerScopeMutation = { [weak admissionGate] in
+            guard let admissionGate else { throw ProjectRepositoryError.invalidProjectData }
+            return try await admissionGate.beginScopeMutation()
+        }
+        projects.finishOwnerScopeMutation = { [weak admissionGate] token in admissionGate?.endScopeMutation(token) }
+        projects.beginCatalogUpdate = { [weak admissionGate] ids in
+            guard let admissionGate else { throw ProjectRepositoryError.invalidProjectData }
+            return try await admissionGate.beginCatalogUpdate(sessionIDs: ids)
+        }
+        projects.finishCatalogUpdate = { [weak admissionGate] token in admissionGate?.finish(token) }
+        projects.refreshOwnerScopes = { [weak cron] in
+            guard let cron else { throw ProjectRepositoryError.invalidProjectData }
+            cron.invalidateOwnerAdmission()
+            try await cron.prepareOwnerAdmission()
+        }
 
         projects.onWillArchiveSession = { projectID, sessionID in
             try await cron.pauseTasksForArchivedSession(projectID: projectID, sessionID: sessionID)
@@ -405,11 +539,66 @@ struct RootView: View {
                 readinessOverride: voiceReadinessOverride
             )
         }
-        sessionHost.admitsSessionIdentity = { [weak projects] id, scope, mode in
-            projects?.admitsSessionIdentity(id, in: scope, mode: mode) ?? false
+        projects.validateCatalogRows = { [weak sessionHost] rows, scope in
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" { return }
+            #endif
+            guard let sessionHost else { throw ProjectRepositoryError.invalidProjectData }
+            for row in rows {
+                guard await sessionHost.validatesCatalogSource(sessionID: row.sessionId, scope: scope,
+                    mode: row.mode, transcriptPath: row.transcriptPath) else {
+                    throw ProjectRepositoryError.invalidSessionOwnership(
+                        "\(row.sessionId): the session catalog conflicts with its live owner."
+                    )
+                }
+            }
+        }
+        admissionGate.sessionHost = sessionHost
+        sessionHost.beginSourcePreparation = { [weak admissionGate] source in admissionGate?.beginSourcePreparation(source) ?? false }
+        sessionHost.finishSourcePreparation = { [weak admissionGate] source in admissionGate?.endSourcePreparation(source) }
+        sessionHost.admitsSessionIdentity = { [weak projects, weak admissionGate, weak cron] id, scope, mode in
+            (admissionGate?.allowsNewOwner(sessionID: id) ?? false) &&
+                (cron?.ownerAdmissionIsCurrent ?? false) &&
+                (projects?.admitsSessionIdentity(id, in: scope, mode: mode) ?? false)
         }
         sessionHost.admitsUnclaimedOwner = { [weak projects] in
             projects?.admitsUnclaimedOwner() ?? false
+        }
+        sessionHost.startupAdmissionReady = { [weak cron] in
+            guard let cron else { return false }
+            guard cron.ownerAdmissionIsCurrent else {
+                Task { @MainActor [weak cron] in try? await cron?.prepareOwnerAdmission() }
+                return false
+            }
+            return true
+        }
+        sessionHost.onWorkspaceChanged = { [weak projects, weak sessionHost] entry in
+            guard entry.scope == .global || entry.scope.projectID != nil else { return }
+            let source = entry.source
+            let sessionID = entry.sessionID
+            let mode = entry.mode
+            Task { @MainActor [weak projects, weak sessionHost, weak entry, weak source] in
+                guard let projects, let sessionHost, let entry, let source,
+                      sessionHost.entry(for: source) === entry,
+                      let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: entry),
+                      sessionHost.entry(for: source) === entry,
+                      canonicalSessionID(entry.sessionID) == canonicalSessionID(sessionID),
+                      canonicalSessionID(source.model.activeSessionId) == canonicalSessionID(sessionID),
+                      !source.model.sessionTransitionPending else { return }
+                do {
+                    let authority = entry.workspaceWriteAuthority
+                    try await projects.recordAuthenticatedWorkspace(snapshot.state, in: entry.scope, mode: mode,
+                                                                     authority: authority, revision: snapshot.revision)
+                } catch is WorkspaceWriteAuthority.Failure {
+                    // Re-read the retained native owner after a late revision;
+                    // never publish the stale workspace snapshot.
+                    sessionHost.refreshWorkspace(entry)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    source.model.error = ConversationError(kind: .host, message: error.localizedDescription)
+                }
+            }
         }
         let initialRetention = sessionHost.retainInitial(
             source: conversation, scope: initialScope, mode: initialMode,
@@ -422,6 +611,7 @@ struct RootView: View {
             storedSessionID = ""
             let fallbackCwd = activeProject?.record.activeDirectory ?? LXISHGuestPaths.workspaceRoot
             launchOptions.initialSessionId = nil
+            launchOptions.initialSessionTranscriptPath = nil
             launchOptions.projectCwd = fallbackCwd
             conversation = ConversationSourceFactory.make(options: launchOptions)
             #if canImport(harness_runtimeFFI)
@@ -436,35 +626,67 @@ struct RootView: View {
             projects.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
         }
         let initialEntry = initialRetention.entry
+        sessionHost.select(initialEntry)
         _source = State(initialValue: conversation)
-        if !storedSessionID.isEmpty, projects.isSessionIndexed(storedSessionID, in: initialScope),
-           projects.admitsSessionIdentity(storedSessionID, in: initialScope, mode: initialMode),
-           !preferences.claimSessionScope(sessionID: storedSessionID, scope: initialScope),
-           projects.errorMessage == nil {
-            projects.errorMessage = ProjectRepositoryError.conflictingSessionScope.localizedDescription
-        }
         initialEntry.draftSourceCodeUnits = preferences.draftSourceCodeUnits(
             scope: initialScope, mode: initialMode, ownerSessionID: storedSessionID)
         initialEntry.handoffReference = preferences.handoffReference(sessionID: storedSessionID, scope: initialScope, mode: initialMode)
-        sessionHost.onActivity = { [weak projects] entry in
+        sessionHost.onActivity = { [weak projects, weak sessionHost] entry in
             guard let projects, entry.scope != .scheduled,
                   !entry.source.model.sessionTransitionPending, !entry.sessionID.isEmpty,
-                  projects.allowsSession(entry.sessionID, in: entry.scope),
-                  let first = entry.source.model.messages.first(where: { $0.role == .user }),
-                  entry.recordedFirstMessageID != first.id else { return }
-            entry.recordedFirstMessageID = first.id
+                  projects.allowsSession(entry.sessionID, in: entry.scope), !entry.isRecordingSession else { return }
+            let first = entry.source.model.messages.first(where: { $0.role == .user })
+            let indexedRows = entry.scope.projectID.flatMap { projectID in
+                projects.projects.first(where: { $0.id == projectID })?.sessions
+            } ?? projects.globalSessions
+            let indexed = indexedRows.first(where: { canonicalSessionID($0.sessionId) == canonicalSessionID(entry.sessionID) })
+            if indexed != nil && (first == nil || (indexed?.messageCount ?? 0) > 0 || entry.recordedFirstMessageID == first?.id) {
+                entry.recordedFirstMessageID = first?.id
+                return
+            }
+            entry.isRecordingSession = true
             let ownerID = entry.sessionID
-            let workspace = entry.source.model.workspaceState?.cwd ?? entry.workspace
             Task { @MainActor in
+                defer { entry.isRecordingSession = false }
                 do {
+                    guard let sessionHost, sessionHost.entry(for: entry.source) === entry else { return }
+                    let startingRevision = entry.workspaceWriteAuthority.currentRevision()
+                    guard let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: entry) else {
+                        if entry.workspaceWriteAuthority.currentRevision() != startingRevision {
+                            Task { @MainActor in sessionHost.sync(entry) }
+                        }
+                        return
+                    }
+                    guard
+                          sessionHost.entry(for: entry.source) === entry,
+                          canonicalSessionID(entry.sessionID) == canonicalSessionID(ownerID),
+                          canonicalSessionID(entry.source.model.activeSessionId) == canonicalSessionID(ownerID),
+                          !entry.source.model.sessionTransitionPending else { return }
+                    guard entry.workspaceWriteAuthority.currentRevision() == snapshot.revision else {
+                        Task { @MainActor in sessionHost.sync(entry) }
+                        return
+                    }
+                    let workspace = snapshot.state
                     try await projects.recordStartedSession(projectId: entry.scope.projectID, sessionId: ownerID,
-                        title: String(first.text.prefix(120)), mode: entry.mode, initialMessageCount: 1,
-                        workspaceDirectory: workspace)
+                        title: first.map { String($0.text.prefix(120)) } ?? String(localized: "chat_new_conversation"),
+                        mode: entry.mode, initialMessageCount: first == nil ? 0 : 1,
+                        workspaceDirectory: workspace.cwd, transcriptPath: workspace.transcriptPath)
                     guard preferences.claimSessionScope(sessionID: ownerID, scope: entry.scope) else {
                         throw ProjectRepositoryError.conflictingSessionScope
                     }
+                    entry.recordedFirstMessageID = first?.id
+                    preferences.setDraft(entry.draft, scope: entry.scope, mode: entry.mode, ownerSessionID: ownerID)
+                    preferences.setDraftSourceCodeUnits(entry.draftSourceCodeUnits, scope: entry.scope,
+                                                        mode: entry.mode, ownerSessionID: ownerID)
+                    if let reference = entry.handoffReference {
+                        preferences.setHandoffReference(reference, sessionID: ownerID, scope: entry.scope, mode: entry.mode)
+                    }
+                    if sessionHost.selectedEntryID == entry.id,
+                       canonicalSessionID(entry.sessionID) == canonicalSessionID(ownerID) {
+                        preferences.setActiveSessionID(ownerID, scope: entry.scope, mode: entry.mode)
+                    }
+                    sessionHost.refreshWorkspace(entry)
                 } catch {
-                    if entry.recordedFirstMessageID == first.id { entry.recordedFirstMessageID = nil }
                     entry.source.model.error = ConversationError(kind: .host,
                         message: String(localized: "session_index_save_new_failed \(error.localizedDescription)"))
                 }
@@ -628,6 +850,9 @@ struct RootView: View {
                 guard value == draft else { return }
                 sessionHost.entry(for: source)?.draft = value
                 scopedPreferences.setDraft(value, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
+                if !draftOwnerSessionID.isEmpty && !isRestorableSession(draftOwnerSessionID, scope: activeScope, mode: activeMode) {
+                    scopedPreferences.setDraft(value, scope: activeScope, mode: activeMode, ownerSessionID: "")
+                }
             }
             .onChange(of: providerRepository.syncRevision) { _, _ in
                 settingsStore.llmProviders = providerRepository.settingsProviders()
@@ -690,8 +915,13 @@ struct RootView: View {
                 externalEngineReady = false
                 let generation = sourceGeneration
                 let current = source
-                wireCurrentSource(preserveCatalog: providerCatalogBootstrapped)
                 do {
+                    try await cronRepository.prepareOwnerAdmission()
+                    let restoreID = sessionHost.entry(for: current)?.sessionID ?? ""
+                    try await cronOwnerGate.waitUntilAvailable(sessionID: restoreID)
+                    guard generation == sourceGeneration else { return }
+                    try validateBootstrapRestore(current)
+                    wireCurrentSource(preserveCatalog: providerCatalogBootstrapped)
                     if !providerCatalogBootstrapped {
                         providerCatalogBootstrapped = true
                         #if DEBUG
@@ -702,7 +932,20 @@ struct RootView: View {
                         _ = await providerRepository.refreshCatalog()
                         #endif
                     }
-                    try await current.prepare()
+                    while true {
+                        try await cronRepository.prepareOwnerAdmission()
+                        try await cronOwnerGate.waitUntilAvailable(sessionID: restoreID)
+                        guard generation == sourceGeneration else { return }
+                        do { try await current.prepare() }
+                        catch {
+                            sessionHost.endPreparingClaim(of: current)
+                            if !Task.isCancelled && (!cronRepository.ownerAdmissionIsCurrent || cronOwnerGate.scopeMutationPending ||
+                                !cronOwnerGate.allowsNewOwner(sessionID: restoreID)) { continue }
+                            throw error
+                        }
+                        sessionHost.endPreparingClaim(of: current)
+                        break
+                    }
                     guard generation == sourceGeneration else { return }
                     current.listSessions()
                     externalEngineReady = true
@@ -718,11 +961,20 @@ struct RootView: View {
                     #endif
                 } catch {
                     guard generation == sourceGeneration else { return }
-                    current.warmUp()
+                    if !cronRepository.ownerAdmissionIsCurrent || projectStore.sessionOwnershipError != nil {
+                        current.model.error = ConversationError(kind: .host, message: error.localizedDescription)
+                    } else {
+                        current.warmUp()
+                    }
                 }
             }
         let launchLifecycle = bootstrapLifecycle
-            .task { await cronRepository.handleLaunch() }
+            .task {
+                do {
+                    try await cronRepository.prepareOwnerAdmission()
+                    await cronRepository.handleLaunch()
+                } catch { projectStore.errorMessage = error.localizedDescription }
+            }
         return launchLifecycle
             .task { await LocalApps.initializeOnce() }
             .task {
@@ -805,7 +1057,7 @@ struct RootView: View {
                     // 相同的一条路径，而不是另起一套只在设置页生效的切换逻辑。
                     onSwitchProject: { projectID in
                         navigation.closeSettings()
-                        _ = switchScope(to: .project(projectID))
+                        requestScopeNavigation(to: .project(projectID))
                     },
                     onReconnectAfterSecretChange: {
                         #if canImport(harness_runtimeFFI)
@@ -911,12 +1163,16 @@ struct RootView: View {
                         if let owner {
                             scopedPreferences.setDraft(value, scope: owner.scope, mode: owner.mode,
                                                        ownerSessionID: owner.sessionID)
+                            if !owner.sessionID.isEmpty && !isRestorableSession(owner.sessionID, scope: owner.scope, mode: owner.mode) {
+                                scopedPreferences.setDraft(value, scope: owner.scope, mode: owner.mode, ownerSessionID: "")
+                            }
                         }
                         if owner == nil || owner?.source === source { draft = value }
                     }
                 ),
                 voiceInteraction: voiceInteraction,
                 source: source,
+                draftRevision: { owner?.draftRevision },
                 draftSourceCodeUnits: Binding(
                     get: { owner?.draftSourceCodeUnits },
                     set: { units in
@@ -926,6 +1182,10 @@ struct RootView: View {
                                                    ownerSessionID: owner.sessionID)
                         scopedPreferences.setDraftSourceCodeUnits(units, scope: owner.scope, mode: owner.mode,
                                                                   ownerSessionID: owner.sessionID)
+                        if !owner.sessionID.isEmpty && !isRestorableSession(owner.sessionID, scope: owner.scope, mode: owner.mode) {
+                            scopedPreferences.setDraft(owner.draft, scope: owner.scope, mode: owner.mode, ownerSessionID: "")
+                            scopedPreferences.setDraftSourceCodeUnits(units, scope: owner.scope, mode: owner.mode, ownerSessionID: "")
+                        }
                     }
                 ),
                 attachmentBinding: Binding(
@@ -987,13 +1247,27 @@ struct RootView: View {
                 model: source.model,
                 projectStore: projectStore,
                 scope: activeScope,
-                sessionMode: activeMode,
                 pendingRestoreID: pendingSessionRestoreID,
-                onSessionChanged: adoptEngineSession,
-                onSessionTransitionFailed: rollbackFailedSession,
-                onModeChanged: adoptSessionMode,
-                onRefreshSessions: { source.listSessions() },
-                onWorkspaceChanged: { liveWorkspaceState = $0 }
+                onSessionChanged: { [expectedSource = source, expectedGeneration = sourceGeneration] sessionID in
+                    guard source === expectedSource, sourceGeneration == expectedGeneration else { return false }
+                    return adoptEngineSession(sessionID)
+                },
+                onSessionTransitionFailed: { [expectedSource = source, expectedGeneration = sourceGeneration] sessionID in
+                    guard source === expectedSource, sourceGeneration == expectedGeneration else { return false }
+                    return rollbackFailedSession(sessionID)
+                },
+                onModeChanged: { [expectedSource = source, expectedGeneration = sourceGeneration] mode in
+                    guard source === expectedSource, sourceGeneration == expectedGeneration else { return }
+                    adoptSessionMode(mode)
+                },
+                onRefreshSessions: { [expectedSource = source, expectedGeneration = sourceGeneration] in
+                    guard source === expectedSource, sourceGeneration == expectedGeneration else { return }
+                    expectedSource.listSessions()
+                },
+                onWorkspaceChanged: { [expectedSource = source, expectedGeneration = sourceGeneration] workspace in
+                    guard source === expectedSource, sourceGeneration == expectedGeneration else { return }
+                    liveWorkspaceState = workspace
+                }
             )
             .id(sourceGeneration)
 
@@ -1122,9 +1396,43 @@ struct RootView: View {
             + projectStore.globalSessions.compactMap(\.workspaceDirectory)
     }
 
+    private enum UserConversationNavigation {
+        case mode(SessionMode)
+        case scope(ConversationScope, SessionMode, String?, Bool, String?)
+    }
+
+    private func requestUserNavigation(_ request: UserConversationNavigation) {
+        if userNavigation.submit(request, whileBusy: projectSwitching) {
+            performUserNavigation(request)
+        } else {
+            markHandoffNavigationChanged()
+        }
+    }
+
+    private func performUserNavigation(_ request: UserConversationNavigation) {
+        switch request {
+        case let .mode(mode):
+            if mode != activeMode { _ = switchMode(to: mode) }
+        case let .scope(scope, mode, sessionID, startNew, transcriptPath):
+            _ = switchScope(to: scope, mode: mode, resumeSessionID: sessionID, startNew: startNew,
+                            selectedTranscriptPath: transcriptPath)
+        }
+    }
+
+    private func resumePendingUserNavigation() {
+        guard !projectSwitching, let request = userNavigation.takePending() else { return }
+        performUserNavigation(request)
+    }
+
+    private func requestScopeNavigation(to scope: ConversationScope, mode: SessionMode? = nil,
+                                        resumeSessionID: String? = nil, startNew: Bool = false,
+                                        selectedTranscriptPath: String? = nil) {
+        requestUserNavigation(.scope(scope, mode ?? activeMode, resumeSessionID, startNew, selectedTranscriptPath))
+    }
+
     /// Start a fresh conversation with the current composer contents.
     private func startNewChat(in scope: ConversationScope, mode: SessionMode) {
-        switchScope(to: scope, mode: mode, startNew: true)
+        requestScopeNavigation(to: scope, mode: mode, startNew: true)
     }
 
     private func adoptSessionMode(_ mode: SessionMode) {
@@ -1136,7 +1444,7 @@ struct RootView: View {
             scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: owner)
             scopedPreferences.setDraftSourceCodeUnits(sessionHost.entry(for: source)?.draftSourceCodeUnits,
                                                        scope: activeScope, mode: activeMode, ownerSessionID: owner)
-            if draftOwnerSessionID.isEmpty {
+            if draftOwnerSessionID.isEmpty && isRestorableSession(owner, scope: activeScope, mode: mode) {
                 scopedPreferences.setDraft("", scope: activeScope, mode: activeMode, ownerSessionID: "")
                 scopedPreferences.setDraftSourceCodeUnits(nil, scope: activeScope, mode: activeMode, ownerSessionID: "")
                 scopedPreferences.setHandoffReference(nil, sessionID: "", scope: activeScope, mode: activeMode)
@@ -1144,19 +1452,13 @@ struct RootView: View {
             draftOwnerSessionID = owner
         }
         scopedPreferences.setCurrentMode(mode)
-        scopedPreferences.setActiveSessionID(owner.isEmpty ? confirmedSession : owner, scope: activeScope, mode: mode)
+        persistActiveSessionIfRestorable(owner.isEmpty ? confirmedSession : owner, scope: activeScope, mode: mode)
     }
 
     private func selectSessionMode(_ mode: SessionMode) {
-        if projectSwitching {
-            pendingModeSelection = mode
-            scopedPreferences.setLastMode(mode)
-            markHandoffNavigationChanged()
-            return
-        }
-        guard mode != activeMode else { return }
+        guard projectSwitching || mode != activeMode else { return }
         scopedPreferences.setLastMode(mode)
-        _ = switchMode(to: mode)
+        requestUserNavigation(.mode(mode))
     }
 
     private func continueCurrentSessionInOtherMode() {
@@ -1184,6 +1486,7 @@ struct RootView: View {
     private func archiveCurrentSession() {
         let sessionID = activeSession
         let projectID = activeScope.projectID
+        let generation = userNavigation.generation
         guard !sessionID.isEmpty else { return }
         Task { @MainActor in
             do {
@@ -1192,7 +1495,9 @@ struct RootView: View {
                     sessionId: sessionID,
                     archived: true
                 )
-                switchScope(to: .global, mode: activeMode, startNew: true)
+                if userNavigation.isCurrent(generation) {
+                    requestScopeNavigation(to: .global, mode: activeMode, startNew: true)
+                }
             } catch {
                 projectStore.errorMessage = error.localizedDescription
             }
@@ -1288,10 +1593,11 @@ struct RootView: View {
                 onTogglePinned: { toggleWorkspacePinned(ConversationScope.project(projectID).workspaceKey) },
                 onNewSession: { mode in
                     if let mode { scopedPreferences.setLastMode(mode) }
-                    switchScope(to: .project(projectID), mode: mode ?? scopedPreferences.lastMode(), startNew: true)
+                    requestScopeNavigation(to: .project(projectID), mode: mode ?? scopedPreferences.lastMode(), startNew: true)
                 },
-                onOpenSession: { mode, sessionID in
-                    switchScope(to: .project(projectID), mode: mode, resumeSessionID: sessionID)
+                onOpenSession: { mode, sessionID, transcriptPath in
+                    openRecentSession(scope: .project(projectID), mode: mode, sessionID: sessionID,
+                                      transcriptPath: transcriptPath)
                 },
                 onOpenCron: { scopeID, taskID in navigation.openCron(scopeID: scopeID, taskID: taskID) },
                 onOpenTerminal: {
@@ -1361,14 +1667,24 @@ struct RootView: View {
             conversation.setExternalEventHandler { [weak conversation] event in
                 Task { @MainActor in
                     guard let conversation else { return }
-                    clientEventCenter.publish(event)
+                    clientEventCenter.publish(event, owner: conversation, selectedOwner: source)
+                    // Account usage/health belongs to the shared local store,
+                    // including a turn that completes in a hidden owner. Its
+                    // model and plugin events still belong to that owner alone.
+                    if conversation !== source,
+                       conversation is EngineConversationSource, source is EngineConversationSource {
+                        switch event {
+                        case .providerAccountRouting, .turnEnded:
+                            providerRepository.handle(event: event)
+                        default: break
+                        }
+                    }
                     handleExternalEvent(event, owner: conversation)
                 }
             }
         }
 
         private func handleExternalEvent(_ event: ClientEvent, owner: any ConversationSource) {
-            providerRepository.handle(event: event)
             switch event {
             case let .sessionStarted(sessionId, _):
                 triggerPendingForkIfReady(for: sessionId)
@@ -1411,26 +1727,62 @@ struct RootView: View {
         let selected = source.model.activeModelId
         cronRepository.defaultModel = selected.isEmpty ? ProviderRepository.shared.makeLaunchSnapshot().defaultModelID : selected
         cronRepository.defaultReasoning = CronReasoning(selection: source.model.reasoningSelection)
-        var scheduledIDs = Set<String>()
-        let archivedIDs = Set(projectStore.globalSessions.filter(\.isArchived).map(\.sessionId))
-        let scheduledChoices = cronRepository.state.generatedSessions.compactMap { session -> CronSessionChoice? in
-            guard session.projectID == nil, !archivedIDs.contains(session.id), scheduledIDs.insert(session.id).inserted else { return nil }
-            return CronSessionChoice(id: session.id, title: session.title, scopeID: globalCronScopeID)
-        }
-        cronRepository.sessionChoices = scheduledChoices + projectStore.projects.flatMap { project in
-            project.sessions.filter { !$0.isArchived }.map {
-                CronSessionChoice(id: $0.sessionId, title: "\(project.record.name) · \($0.title)", scopeID: project.record.id)
+        cronRepository.editorMode = activeMode
+        let cron = cronRepository
+        let projects = projectStore
+        cron.sessionChoiceProvider = { [weak cron, weak projects] mode in
+            guard let cron, let projects else { return [] }
+            guard let generated = cron.generatedSessionsForAdmission() else {
+                cron.sessionChoiceFailure = cron.state.errorMessage ?? "scheduled: session index unavailable"
+                return []
             }
+            guard projects.admitsUnclaimedOwner() else {
+                cron.sessionChoiceFailure = projects.errorMessage
+                return []
+            }
+            cron.sessionChoiceFailure = nil
+            return projects.cronSessionChoices(mode: mode, generated: generated)
         }
-        cronRepository.onOpenSession = { projectID, sessionID in
-            if let projectID {
-                guard let mode = projectStore.projects.first(where: { $0.record.id == projectID })?
-                    .sessions.first(where: { $0.sessionId == sessionID })?.mode else { return }
-                switchScope(to: .project(projectID), mode: mode, resumeSessionID: sessionID)
+        cronRepository.onOpenSession = { run in
+            guard let id = run.sessionID, let key = run.sessionScopeKey,
+                  let scope = ConversationScope(workspaceKey: key), scope.projectID == run.projectID,
+                  let mode = run.sessionMode, let path = run.sessionTranscriptPath else {
+                projectStore.errorMessage = ProjectRepositoryError.missingSessionTranscriptPath.localizedDescription
+                return
+            }
+            let currentPath: String?
+            if scope == .scheduled {
+                currentPath = try? cronRepository.scheduledTranscriptPath(sessionID: id, mode: mode)
             } else {
-                switchScope(to: .scheduled, mode: .code, resumeSessionID: sessionID)
+                currentPath = try? projectStore.transcriptPathForSession(id, in: scope, mode: mode)
             }
+            guard currentPath == path, projectStore.admitsSessionIdentity(id, in: scope, mode: mode) else {
+                projectStore.errorMessage = projectStore.errorMessage ?? ProjectRepositoryError.conflictingSessionScope.localizedDescription
+                return
+            }
+            requestScopeNavigation(to: scope, mode: mode, resumeSessionID: id, selectedTranscriptPath: path)
         }
+    }
+
+    private func validateBootstrapRestore(_ current: any ConversationSource) throws {
+        #if canImport(harness_runtimeFFI)
+        guard let engine = current as? EngineConversationSource, engine.needsInitialRestoreValidation,
+              let entry = sessionHost.entry(for: current), !entry.sessionID.isEmpty else { return }
+        guard cronOwnerGate.allowsNewOwner(sessionID: entry.sessionID) else {
+            throw ProjectRepositoryError.invalidSessionOwnership("A scheduled conversation is being prepared. Try again.")
+        }
+        guard projectStore.admitsSessionIdentity(entry.sessionID, in: entry.scope, mode: entry.mode) else {
+            throw ProjectRepositoryError.invalidSessionOwnership(projectStore.errorMessage ?? ProjectRepositoryError.conflictingSessionScope.localizedDescription)
+        }
+        let path = try entry.scope == .scheduled
+            ? cronRepository.scheduledTranscriptPath(sessionID: entry.sessionID, mode: entry.mode)
+            : projectStore.transcriptPathForSession(entry.sessionID, in: entry.scope, mode: entry.mode)
+        try engine.validateInitialRestorePath(path)
+        if projectStore.isSessionIndexed(entry.sessionID, in: entry.scope),
+           !scopedPreferences.claimSessionScope(sessionID: entry.sessionID, scope: entry.scope) {
+            throw ProjectRepositoryError.conflictingSessionScope
+        }
+        #endif
     }
 
     private func wireCurrentSource(preserveCatalog: Bool = false) {
@@ -1438,6 +1790,11 @@ struct RootView: View {
         let generation = sourceGeneration
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: current)
+            // Startup events can precede selection. Seed the global view from
+            // the selected owner's already-projected model before later events.
+            clientEventCenter.publish(.modelList(models: current.model.availableModels,
+                current: current.model.activeModelId, currentModelSource: nil, details: []),
+                owner: current, selectedOwner: source)
             ProviderAccountRepository.shared.configure(load: {
                 guard source === current, generation == sourceGeneration else { throw CancellationError() }
                 return try await current.providerAccountsSnapshot()
@@ -1450,7 +1807,8 @@ struct RootView: View {
                 }
                 guard source === current, generation == sourceGeneration else { throw CancellationError() }
                 return try await current.providerAccountCommand(requestJSON: request, credential: credential)
-            }, oauthSupported: !(current is RemoteConversationSource))
+            }, oauthSupported: !(current is RemoteConversationSource),
+               localStoreID: current is EngineConversationSource ? MobileUserStorage.directories().configHome : nil)
             ProviderAccountRepository.shared.setForeground(scenePhase == .active)
             providerRepository.configure(
                 submitCommand: { command in
@@ -1475,9 +1833,11 @@ struct RootView: View {
         scope: ConversationScope,
         snapshot: ProviderLaunchSnapshot,
         mode: SessionMode,
-        sessionID: String? = nil
+        sessionID: String? = nil,
+        selectedTranscriptPath: String? = nil
     ) throws -> any ConversationSource {
         let projectCwd: String?
+        let transcriptPath: String?
         let project: ProjectSnapshot?
         switch scope {
         case .remote:
@@ -1490,9 +1850,18 @@ struct RootView: View {
             let rows = project?.sessions ?? projectStore.globalSessions
             projectCwd = rows.first(where: { canonicalSessionID($0.sessionId) == canonicalSessionID(sessionID ?? "") })?.workspaceDirectory
                 ?? project?.record.activeDirectory ?? LXISHGuestPaths.workspaceRoot
+            transcriptPath = try sessionID.flatMap { id in
+                id.isEmpty ? nil : try projectStore.transcriptPathForSession(id, in: scope, mode: mode)
+            }
         case .scheduled:
             project = nil
             projectCwd = try MobileUserStorage.scheduledWorkspace(sessionID: sessionID)
+            transcriptPath = try sessionID.flatMap { id in
+                id.isEmpty ? nil : try cronRepository.scheduledTranscriptPath(sessionID: id, mode: mode)
+            }
+        }
+        if let selectedTranscriptPath, transcriptPath != selectedTranscriptPath {
+            throw SessionHost.OwnershipError.sourceIdentityMismatch
         }
         let runtime: TerminalRuntimeConfig? = TerminalRuntimeDescriptor.make(
             appSandboxRoot: appSandboxRoot,
@@ -1513,7 +1882,8 @@ struct RootView: View {
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
             mobileLinux: runtime,
             projectMountGrants: projectMountGrants,
-            initialSessionId: sessionID.flatMap { $0.isEmpty ? nil : $0 }
+            initialSessionId: sessionID.flatMap { $0.isEmpty ? nil : $0 },
+            initialSessionTranscriptPath: transcriptPath
         )
         #if canImport(harness_runtimeFFI)
         launchOptions.mediaHostComposition = mediaHostComposition
@@ -1526,21 +1896,53 @@ struct RootView: View {
         preserveSourceGeneration: Bool = false
     ) async throws {
         guard !projectSwitching else { throw CancellationError() }
+        guard cronOwnerGate.allowsNewOwner(sessionID: activeSession) else {
+            throw ProjectRepositoryError.invalidSessionOwnership("A scheduled conversation is being prepared. Try again.")
+        }
         projectSwitching = true
         defer {
             projectSwitching = false
-            if let requestedMode = pendingModeSelection {
-                pendingModeSelection = nil
-                if requestedMode != activeMode { _ = switchMode(to: requestedMode) }
-            }
+            resumePendingUserNavigation()
         }
         persistConversationScope()
         let old = source
         try requireSourceReplacementAllowed(old)
+        try await cronRepository.prepareOwnerAdmission()
+        try requireSourceReplacementAllowed(old)
         let replacement = try makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode, sessionID: activeSession)
+        guard sessionHost.beginReplacement(of: old, with: replacement, sessionID: activeSession,
+                                           scope: activeScope, mode: activeMode) else {
+            throw SessionHost.OwnershipError.conflictingOwner
+        }
+        defer { sessionHost.endPreparingClaim(of: replacement) }
+        sessionHost.protectIdentity(of: replacement, scope: activeScope, mode: activeMode, sessionID: activeSession)
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: replacement)
+            if let engine = replacement as? EngineConversationSource {
+                let restartScope = activeScope
+                let restartMode = activeMode
+                let restartID = canonicalSessionID(activeSession)
+                let projects = projectStore
+                let gate = cronOwnerGate
+                let cron = cronRepository
+                let host = sessionHost
+                engine.setSessionStartupAdmission { [weak projects, weak gate, weak cron] in
+                    guard let projects, gate?.allowsNewOwner(sessionID: restartID) == true,
+                          cron?.ownerAdmissionIsCurrent == true else { return false }
+                    return restartID.isEmpty ? projects.admitsUnclaimedOwner()
+                        : projects.admitsSessionIdentity(restartID, in: restartScope, mode: restartMode)
+                }
+                engine.setSessionOwnerAdmission { [weak projects, weak host, weak gate, weak replacement] id in
+                    guard let projects, let host, let replacement, gate?.allowsNewOwner(sessionID: id) == true else { return false }
+                    if !restartID.isEmpty {
+                        return canonicalSessionID(id) == restartID &&
+                            projects.admitsSessionIdentity(id, in: restartScope, mode: restartMode)
+                    }
+                    return host.claimIdentity(id, for: replacement, scope: restartScope, mode: restartMode)
+                }
+            }
         #endif
+        let entry: SessionHost.Entry
         do {
             #if canImport(harness_runtimeFFI)
             if let engine = old as? EngineConversationSource {
@@ -1560,6 +1962,9 @@ struct RootView: View {
             try requireSourceReplacementAllowed(old)
             try await replacement.prepare()
             try requireSourceReplacementAllowed(old)
+            let workspace = sessionHost.entry(for: old)?.workspace ?? currentWorkspaceGuestPath
+            entry = try sessionHost.replaceIdleSource(old, with: replacement, scope: activeScope,
+                mode: activeMode, sessionID: confirmedSession, workspace: workspace, draft: draft)
         } catch {
             if !old.isAvailableForPrompts {
                 old.model.error = ConversationError(kind: .host,
@@ -1570,16 +1975,9 @@ struct RootView: View {
         activeSession = confirmedSession
         pendingSessionRestoreID = confirmedSession.isEmpty ? nil : confirmedSession
         source.setSettingsActive(false)
-        let oldEntry = sessionHost.entry(for: old)
-        sessionHost.releaseIdleSource(old)
-        let entry = try sessionHost.retain(source: replacement, scope: activeScope, mode: activeMode,
-                                           sessionID: confirmedSession,
-                                           workspace: oldEntry?.workspace ?? currentWorkspaceGuestPath, draft: draft,
-                                           voice: oldEntry?.voice)
-        entry.attachment = oldEntry?.attachment
-        entry.draftSourceCodeUnits = oldEntry?.draftSourceCodeUnits
-        entry.handoffReference = oldEntry?.handoffReference
         source = replacement
+        sessionHost.select(entry)
+        sessionHost.refreshWorkspace(entry)
         source.setSettingsActive(true)
         // The catalog belongs to the engine build, not to a single source
         // instance. Keep it across normal reconnects so changing a provider
@@ -1617,12 +2015,8 @@ struct RootView: View {
     /// project callbacks keep their optional-projectID spelling (`nil` ==
     /// global scope).
     private func switchProject(to projectID: String?, resumeSessionID: String? = nil, startNew: Bool = false) {
-        let scheduled = projectID == nil && resumeSessionID.map { id in
-            cronRepository.state.generatedSessions.contains { $0.projectID == nil && $0.id == id }
-        } == true
         switchScope(
-            to: scheduled ? .scheduled : (projectID.map(ConversationScope.project) ?? .global),
-            mode: scheduled ? .code : nil,
+            to: projectID.map(ConversationScope.project) ?? .global,
             resumeSessionID: resumeSessionID,
             startNew: startNew
         )
@@ -1714,9 +2108,11 @@ struct RootView: View {
         mode: SessionMode? = nil,
         resumeSessionID: String? = nil,
         startNew: Bool = false,
-        handoffDraft: SessionHandoffDraft? = nil
+        handoffDraft: SessionHandoffDraft? = nil,
+        selectedTranscriptPath: String? = nil
     ) -> Bool {
         guard !projectSwitching else { return false }
+        let navigationGeneration = userNavigation.generation
         if case .remote = scope { return false }
         let targetMode = mode ?? activeMode
         let targetID = startNew ? "" : canonicalSessionID(resumeSessionID ?? restoredSessionID(scope: scope, mode: targetMode))
@@ -1727,11 +2123,15 @@ struct RootView: View {
             projectStore.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
             return false
         }
+        guard existing != nil || cronOwnerGate.allowsNewOwner(sessionID: targetID) else {
+            projectStore.errorMessage = "A scheduled conversation is being prepared. Try again."
+            return false
+        }
         guard existing != nil || targetID.isEmpty || projectStore.admitsSessionIdentity(targetID, in: scope, mode: targetMode) else {
             return false
         }
         markHandoffNavigationChanged()
-        if !startNew, scope == activeScope, targetMode == activeMode,
+        if selectedTranscriptPath == nil, !startNew, scope == activeScope, targetMode == activeMode,
            (targetID.isEmpty || canonicalSessionID(targetID) == canonicalSessionID(source.model.activeSessionId)) {
             navigation.path.removeAll()
             navigation.closeSidebar()
@@ -1754,15 +2154,29 @@ struct RootView: View {
                 if startNew, let projectID = scope.projectID {
                     try await projectStore.addMode(targetMode, projectID: projectID)
                 }
+                guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
+                if let selectedTranscriptPath, let existing {
+                    guard let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: existing),
+                          snapshot.state.transcriptPath == selectedTranscriptPath else {
+                        throw SessionHost.OwnershipError.sourceIdentityMismatch
+                    }
+                    guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
+                }
                 if scope != activeScope {
                     rollback = try await projectStore.persistActiveForSwitch(projectId: scope.projectID)
                 }
+                guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
                 let entry: SessionHost.Entry
                 if let existing {
                     entry = existing
                 } else {
+                    try await cronRepository.prepareOwnerAdmission()
+                    try await cronOwnerGate.waitUntilAvailable(sessionID: targetID)
+                    guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
                     let replacement = try makeSource(scope: scope, snapshot: providerRepository.makeLaunchSnapshot(),
-                                                     mode: targetMode, sessionID: targetID.isEmpty ? nil : targetID)
+                                                     mode: targetMode, sessionID: targetID.isEmpty ? nil : targetID,
+                                                     selectedTranscriptPath: selectedTranscriptPath)
+                    defer { sessionHost.endPreparingClaim(of: replacement) }
                     sessionHost.protectIdentity(of: replacement, scope: scope, mode: targetMode,
                                                 sessionID: targetID)
                     #if canImport(harness_runtimeFFI)
@@ -1780,6 +2194,7 @@ struct RootView: View {
                         entry.handoffReference = scopedPreferences.handoffReference(sessionID: targetID, scope: scope, mode: targetMode)
                     }
                 }
+                guard userNavigation.isCurrent(navigationGeneration) else { throw CancellationError() }
                 scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
                 sessionHost.entry(for: previousSource)?.draft = draft
                 voiceInteraction.handleContextChange()
@@ -1801,15 +2216,27 @@ struct RootView: View {
                     scopedPreferences.setDraftSourceCodeUnits(handoffDraft.sourceCodeUnits, scope: scope,
                                                                mode: targetMode, ownerSessionID: entry.sessionID)
                     scopedPreferences.setHandoffReference(handoffDraft.reference, sessionID: entry.sessionID, scope: scope, mode: targetMode)
+                    if entry.sessionID.isEmpty || !isRestorableSession(entry.sessionID, scope: scope, mode: targetMode) {
+                        // Until the exact native source is indexed, a cold
+                        // launch can recover the handoff as a blank-owner draft.
+                        scopedPreferences.prepareUnindexedHandoffDraft(draft, sourceCodeUnits: handoffDraft.sourceCodeUnits,
+                            reference: handoffDraft.reference, scope: scope, mode: targetMode)
+                    }
                     pendingHandoffDrafts.removeAll { $0.id == handoffDraft.id }
                 } else if startNew {
                     scopedPreferences.setDraft("", scope: scope, mode: targetMode, ownerSessionID: "")
                     scopedPreferences.setDraftSourceCodeUnits(nil, scope: scope, mode: targetMode, ownerSessionID: "")
                     scopedPreferences.setHandoffReference(nil, sessionID: "", scope: scope, mode: targetMode)
+                    if entry.sessionID.isEmpty || !isRestorableSession(entry.sessionID, scope: scope, mode: targetMode) {
+                        scopedPreferences.setActiveSessionID("", scope: scope, mode: targetMode)
+                    }
                 }
-                scopedPreferences.setActiveSessionID(confirmedSession, scope: scope, mode: targetMode)
+                persistActiveSessionIfRestorable(confirmedSession, scope: scope, mode: targetMode)
                 previousSource.setSettingsActive(false)
                 source = entry.source
+                sessionHost.select(entry)
+                sessionHost.refreshWorkspace(entry)
+                sessionHost.sync(entry)
                 voiceInteraction = entry.voice
                 source.setSettingsActive(true)
                 hasUnsavedConversationMedia = entry.attachment != nil
@@ -1818,16 +2245,18 @@ struct RootView: View {
                 await cronRepository.refresh()
             } catch {
                 if let rollback, source === previousSource {
-                    _ = try? await projectStore.rollbackActiveSwitch(rollback)
+                    do { _ = try await projectStore.rollbackActiveSwitch(rollback) }
+                    catch {
+                        projectStore.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
+                    }
                 }
-                projectStore.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
+                if userNavigation.isCurrent(navigationGeneration), !(error is CancellationError) {
+                    projectStore.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
+                }
                 pendingBeginActionDraft = nil
             }
             projectSwitching = false
-            if let requestedMode = pendingModeSelection {
-                pendingModeSelection = nil
-                if requestedMode != activeMode { _ = switchMode(to: requestedMode) }
-            }
+            resumePendingUserNavigation()
             applyPendingConversationSelectionRestoreIfPossible()
         }
         return true
@@ -1846,10 +2275,12 @@ struct RootView: View {
         adoptSessionMode(source.model.sessionMode)
         activeSession = sessionID
         confirmedSession = sessionID
-        if let reference = sessionHost.entry(for: source)?.handoffReference {
-            scopedPreferences.setHandoffReference(reference, sessionID: sessionID, scope: activeScope, mode: activeMode)
+        if isRestorableSession(sessionID, scope: activeScope, mode: activeMode) {
+            if let reference = sessionHost.entry(for: source)?.handoffReference {
+                scopedPreferences.setHandoffReference(reference, sessionID: sessionID, scope: activeScope, mode: activeMode)
+            }
+            scopedPreferences.setActiveSessionID(sessionID, scope: activeScope, mode: activeMode)
         }
-        scopedPreferences.setActiveSessionID(sessionID, scope: activeScope, mode: activeMode)
         if pendingSessionRestoreID == sessionID {
             pendingSessionRestoreID = nil
         }
@@ -1881,7 +2312,7 @@ struct RootView: View {
             pendingLinkedSessionID = nil; pendingMessageLink = nil
             externalLinkError = String(localized: "deep_link_conversation_open_failed")
         }
-        scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
+        persistActiveSessionIfRestorable(confirmedSession, scope: activeScope, mode: activeMode)
         if let pending = pendingSessionFork,
            pending.sourceSessionID == sessionID {
             rollbackPendingSessionFork(pending, message: nil)
@@ -1907,14 +2338,17 @@ struct RootView: View {
 
     /// A recents row carries its own workspace and mode, so one switch lands on
     /// the right engine binding — no mode change first, session pick second.
-    private func openRecentSession(scope: ConversationScope, mode: SessionMode, sessionID: String) {
-        let scheduled = scope == .global && cronRepository.state.generatedSessions.contains {
-            $0.projectID == nil && $0.id == sessionID
+    private func openRecentSession(scope: ConversationScope, mode: SessionMode, sessionID: String,
+                                   transcriptPath: String?) {
+        guard let transcriptPath, !transcriptPath.isEmpty, (transcriptPath as NSString).isAbsolutePath else {
+            projectStore.errorMessage = ProjectRepositoryError.missingSessionTranscriptPath.localizedDescription
+            return
         }
-        switchScope(
-            to: scheduled ? .scheduled : scope,
-            mode: scheduled ? .code : mode,
-            resumeSessionID: sessionID
+        requestScopeNavigation(
+            to: scope,
+            mode: mode,
+            resumeSessionID: sessionID,
+            selectedTranscriptPath: transcriptPath
         )
     }
 
@@ -2071,13 +2505,23 @@ struct RootView: View {
         return ConversationModeRestorePolicy.sessionID(
             mode: mode,
             scoped: scopedPreferences.storedActiveSessionID(scope: scope, mode: mode),
-            sessions: scope.projectID.flatMap { id in projectStore.projects.first(where: { $0.id == id })?.sessions } ?? projectStore.globalSessions
+            sessions: scope == .scheduled ? [] : (scope.projectID.flatMap { id in projectStore.projects.first(where: { $0.id == id })?.sessions } ?? projectStore.globalSessions)
         )
     }
 
     private func persistConversationScope() {
         scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
-        scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
+        persistActiveSessionIfRestorable(confirmedSession, scope: activeScope, mode: activeMode)
+    }
+
+    private func isRestorableSession(_ sessionID: String, scope: ConversationScope, mode: SessionMode) -> Bool {
+        sessionID.isEmpty || scope == .scheduled ||
+            (try? projectStore.transcriptPathForSession(sessionID, in: scope, mode: mode)) != nil
+    }
+
+    private func persistActiveSessionIfRestorable(_ sessionID: String, scope: ConversationScope, mode: SessionMode) {
+        guard isRestorableSession(sessionID, scope: scope, mode: mode) else { return }
+        scopedPreferences.setActiveSessionID(sessionID, scope: scope, mode: mode)
     }
 
     private func handleScenePhase(_ oldPhase: ScenePhase, _ phase: ScenePhase) {
@@ -2480,8 +2924,35 @@ struct RootView: View {
                     authoringSessionId: sessionID,
                     appId: request.appId
                 )
-                if let workspace = engine.model.workspaceState, workspace.sessionId == sessionID {
-                    try await projectStore.recordWorkspace(projectId: project.record.id, state: workspace)
+                if let entry = sessionHost.entry(for: engine),
+                   let snapshot = await sessionHost.authenticatedWorkspaceSnapshot(for: entry),
+                   source === engine, activeScope == scope, activeMode == .code,
+                   engine.model.activeSessionId == sessionID, !engine.model.sessionTransitionPending,
+                   snapshot.state.cwd == request.sourceDirectory,
+                   entry.workspaceWriteAuthority.currentRevision() == snapshot.revision {
+                    let workspace = snapshot.state
+                    try await projectStore.recordStartedSession(projectId: project.record.id, sessionId: sessionID,
+                        title: existingSession == nil ? project.record.name : "", mode: .code, workspaceDirectory: workspace.cwd,
+                        transcriptPath: workspace.transcriptPath)
+                    guard source === engine, activeScope == scope, activeMode == .code,
+                          engine.model.activeSessionId == sessionID, !engine.model.sessionTransitionPending else {
+                        throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
+                    }
+                    guard let current = await sessionHost.authenticatedWorkspaceSnapshot(for: entry),
+                          current.state.cwd == request.sourceDirectory, current.state.transcriptPath == workspace.transcriptPath,
+                          source === engine, activeScope == scope, activeMode == .code,
+                          sessionHost.entry(for: engine) === entry else {
+                        throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
+                    }
+                    let authority = entry.workspaceWriteAuthority
+                    try await projectStore.recordAuthenticatedWorkspace(current.state, in: scope, mode: .code,
+                                                                         authority: authority, revision: current.revision)
+                    guard source === engine, activeScope == scope, activeMode == .code,
+                          engine.model.activeSessionId == sessionID, !engine.model.sessionTransitionPending,
+                          !projectSwitching, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                          !hasUnsavedConversationMedia else {
+                        throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
+                    }
                 } else {
                     throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring workspace could not be recorded. No draft was inserted.")
                 }
@@ -2620,7 +3091,6 @@ private struct ConversationProjectBridge: View {
     /// The scheduled scope still adopts/persists the engine session id via the
     /// callbacks, but never writes into the PROJECT session index.
     let scope: ConversationScope
-    let sessionMode: SessionMode
     let pendingRestoreID: String?
     let onSessionChanged: (String) -> Bool
     let onSessionTransitionFailed: (String) -> Bool
@@ -2628,7 +3098,6 @@ private struct ConversationProjectBridge: View {
     let onRefreshSessions: () -> Void
     var onWorkspaceChanged: (SessionWorkspaceState?) -> Void = { _ in }
     @State private var sessionSyncTask: Task<Void, Never>?
-    @State private var workspaceSyncTask: Task<Void, Never>?
 
     private var projectID: String? { scope.projectID }
 
@@ -2676,8 +3145,6 @@ private struct ConversationProjectBridge: View {
             .onDisappear {
                 sessionSyncTask?.cancel()
                 sessionSyncTask = nil
-                workspaceSyncTask?.cancel()
-                workspaceSyncTask = nil
             }
             .onChange(of: model.activeSessionId) { _, sessionID in
                 handleActiveSession(sessionID)
@@ -2690,13 +3157,6 @@ private struct ConversationProjectBridge: View {
 
     private func synchronizeWorkspace() {
         onWorkspaceChanged(model.workspaceState)
-        guard let projectID, let state = model.workspaceState,
-              state.sessionId == model.activeSessionId, !model.sessionTransitionPending else { return }
-        workspaceSyncTask?.cancel()
-        workspaceSyncTask = Task { @MainActor in
-            do { try await projectStore.recordWorkspace(projectId: projectID, state: state) }
-            catch { if !Task.isCancelled { model.error = ConversationError(kind: .host, message: error.localizedDescription) } }
-        }
     }
 
     private func handleActiveSession(_ sessionID: String) {
@@ -2706,43 +3166,6 @@ private struct ConversationProjectBridge: View {
               !sessionID.isEmpty,
               onSessionChanged(sessionID)
         else { return }
-        // Scheduled sessions are adopted (above) but never recorded into the
-        // project session index.
-        guard scope != .scheduled else { return }
-        let indexedRow: ProjectSessionSummary?
-        if let projectID {
-            indexedRow = projectStore.projects.first(where: { $0.record.id == projectID })?
-                .sessions.first(where: { $0.sessionId == sessionID })
-        } else {
-            indexedRow = projectStore.globalSessions.first(where: { $0.sessionId == sessionID })
-        }
-        let firstMessage = model.messages.first(where: { $0.role == .user })
-        Task { @MainActor in
-            guard model.activeSessionId == sessionID, !model.sessionTransitionPending else { return }
-            if (indexedRow?.messageCount ?? 0) == 0, let firstMessage {
-                do {
-                    try await projectStore.recordStartedSession(
-                        projectId: projectID,
-                        sessionId: sessionID,
-                        title: String(firstMessage.text.prefix(120)),
-                        mode: sessionMode,
-                        initialMessageCount: 1,
-                        workspaceDirectory: model.workspaceState?.cwd
-                    )
-                } catch {
-                    if model.activeSessionId == sessionID {
-                        model.error = ConversationError(kind: .host, message: String(localized: "session_index_save_new_failed \(error.localizedDescription)"))
-                    }
-                    return
-                }
-            }
-            guard model.activeSessionId == sessionID, !model.sessionTransitionPending else { return }
-            if let projectID {
-                if let workspace = model.workspaceState, workspace.sessionId == sessionID {
-                    try? await projectStore.recordWorkspace(projectId: projectID, state: workspace)
-                }
-            }
-        }
     }
 
     private func consumeSessionTransitionFailure(_ failure: SessionTransitionFailure?) {

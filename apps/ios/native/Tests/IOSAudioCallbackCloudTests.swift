@@ -3,6 +3,39 @@ import XCTest
 
 @MainActor
 final class IOSAudioCallbackCloudTests: XCTestCase {
+    func testUICloudRecognitionPinsCapturedOwnerEvenAfterAnotherSelection() async throws {
+        for navigate in [false, true] {
+            let host = CallbackCloudHost()
+            let fixture = try makeFixture(host: host, followsSession: true)
+            let first = CallbackTestEngine()
+            let second = CallbackTestEngine()
+            let attachmentA = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: UUID().uuidString.lowercased(), generation: 1))
+            let attachmentB = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: UUID().uuidString.lowercased(), generation: 1))
+            let ownerA = IOSAudioOwner.attached(attachment: attachmentA, logicalOwner: .session(sessionID: "session-a"))
+            fixture.provider.claimSessionContext(ownerID: "a")
+            XCTAssertTrue(fixture.provider.attach(engine: first, ownerID: "a", engineAttachmentIdentity: attachmentA))
+            XCTAssertTrue(fixture.provider.setSessionContext(sessionID: "session-a", profileID: "openai:work", accountScope: "account-a",
+                ownerID: "a", engineAttachmentIdentity: attachmentA, engine: first))
+            var pinnedFirst = false
+            fixture.provider.installSessionHostBuilderForTesting { engine in pinnedFirst = engine === first; return host }
+            if navigate {
+                fixture.provider.releaseSessionContextSelection(ownerID: "a")
+                fixture.provider.claimSessionContext(ownerID: "b")
+                XCTAssertTrue(fixture.provider.attach(engine: second, ownerID: "b", engineAttachmentIdentity: attachmentB))
+                XCTAssertTrue(fixture.provider.setSessionContext(sessionID: "session-b", profileID: "other", accountScope: "account-b",
+                    ownerID: "b", engineAttachmentIdentity: attachmentB, engine: second))
+            }
+            let configuration = AudioConfigurationV4(recognition: .init(source: .provider), speech: .init(source: .system))
+            let text = try await fixture.service.transcribeFromUI(language: "en-US", automaticEndpointAfterSilence: nil,
+                configurationSnapshot: .init(configuration: configuration, revision: 1), audioOwner: ownerA)
+            XCTAssertEqual(text, "recognized")
+            XCTAssertTrue(pinnedFirst)
+            let session = try XCTUnwrap(host.lastTranscriptionRequest?["session"] as? [String: Any])
+            XCTAssertEqual(session["sessionId"] as? String, "session-a")
+            XCTAssertEqual(session["accountScope"] as? String, "account-a")
+        }
+    }
+
     func testAttachedAudioOwnerDtoPreservesAttachmentAndLogicalOwner() throws {
         let hostID = "4c1ca0d5-61cd-4c9d-9d9a-23c8832ebc8f"
         let owner = try IOSAudioServiceCallbackAdapter.localOwner(.attached(
@@ -107,6 +140,7 @@ final class IOSAudioCallbackCloudTests: XCTestCase {
 @MainActor
 private final class CallbackCloudHost: IOSAudioProviderHostDriving {
     var synthesisTexts: [String] = []
+    var lastTranscriptionRequest: [String: Any]?
     var lastSynthesisRequest: [String: Any]?
     var transcribedAudio: [Data] = []
     func capabilities(requestJson: String) async throws -> String {
@@ -116,6 +150,7 @@ private final class CallbackCloudHost: IOSAudioProviderHostDriving {
         return #"{"profileId":"openai:work","providerId":"openai","supported":true,"readiness":"ready","modelId":""# + model + #"","models":[{"id":""# + model + #"","voices":[]}]}"#
     }
     func transcribe(requestJson: String, audio: Data, mimeType: String) async throws -> String {
+        lastTranscriptionRequest = try JSONSerialization.jsonObject(with: Data(requestJson.utf8)) as? [String: Any]
         transcribedAudio.append(audio)
         return #"{"text":"recognized","usage":{"audio_seconds":1}}"#
     }
@@ -125,6 +160,11 @@ private final class CallbackCloudHost: IOSAudioProviderHostDriving {
         return #"{"pcmBase64":"AAABAA==","sampleRateHz":24000,"usage":{"characters":5,"native":{"text":"secret transcript","tokens":2}},"usageContext":{"profileId":"openai:work","accountScope":"account-a","modelId":"actual-tts-model"}}"#
     }
     func cancel(operationId: String) async throws {}
+}
+
+private final class CallbackTestEngine: MobileEngineHandle, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { super.init(unsafeFromHandle: handle) }
+    init() { super.init(noHandle: .init()) }
 }
 
 private final class CallbackRecordingDriver: AudioRecordingDriving, @unchecked Sendable {

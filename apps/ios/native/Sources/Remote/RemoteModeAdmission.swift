@@ -11,6 +11,25 @@ enum RemoteApprovalCapability {
     }
 }
 
+/// A Team capability answers one currently pending request at most once.
+/// Delivery failure releases the reservation so a still-pending request can retry.
+struct RemoteApprovalAdmission {
+    private(set) var delivered = false
+    private var inFlight = false
+
+    mutating func begin(isPending: Bool) -> Bool {
+        guard isPending, !delivered, !inFlight else { return false }
+        inFlight = true
+        return true
+    }
+
+    mutating func finish(delivered: Bool) {
+        guard inFlight else { return }
+        inFlight = false
+        if delivered { self.delivered = true }
+    }
+}
+
 @MainActor
 final class RemoteRequestDrain {
     private var active = 0

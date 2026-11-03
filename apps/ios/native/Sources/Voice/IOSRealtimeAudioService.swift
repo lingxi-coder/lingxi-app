@@ -66,9 +66,11 @@ extension IOSRealtimeAudioDevice: IOSRealtimeAudioDeviceDriving {}
 final class IOSRealtimeAudioService {
     static let shared = IOSRealtimeAudioService()
     private let device: any IOSRealtimeAudioDeviceDriving
+    private let openOverride: (@MainActor (MobileEngineHandle, IOSAudioOwner, AudioConfigurationSnapshot) async throws -> IosRealtimeAudioSession)?
     private var engine: MobileEngineHandle?
     private var engineOwnerID: String?
     private var pendingEngineBinding: (engine: MobileEngineHandle, ownerID: String)?
+    private var startupOwner: IOSAudioOwner?
     private var detachWhenStopped = false
     private var closeAfterCurrentTurn = false
     /// Provider response completion does not prove that an Agent tool or its
@@ -103,10 +105,12 @@ final class IOSRealtimeAudioService {
     init(
         device: (any IOSRealtimeAudioDeviceDriving)? = nil,
         stopTimeout: Duration = .seconds(2),
-        observeInvalidation: Bool = true
+        observeInvalidation: Bool = true,
+        openOverride: (@MainActor (MobileEngineHandle, IOSAudioOwner, AudioConfigurationSnapshot) async throws -> IosRealtimeAudioSession)? = nil
     ) {
         self.device = device ?? IOSRealtimeAudioDevice()
         self.stopTimeout = stopTimeout
+        self.openOverride = openOverride
         if observeInvalidation { invalidationTask = Task { @MainActor [weak self] in
             let events = await VoiceAudioSessionCoordinator.shared.invalidationEvents()
             for await event in events {
@@ -151,7 +155,7 @@ final class IOSRealtimeAudioService {
     deinit { eventTask?.cancel(); invalidationTask?.cancel(); captureTask?.cancel(); deviceStartTask?.cancel() }
 
     var isAttached: Bool { engine != nil }
-    var isActive: Bool { session != nil || phase == .connecting || stopUnconfirmed || stopFlight != nil }
+    var isActive: Bool { startupOwner != nil || session != nil || phase == .connecting || stopUnconfirmed || stopFlight != nil }
     func isActive(ownerID: String) -> Bool { engineOwnerID == ownerID && isActive }
 
     func attach(engine: MobileEngineHandle, ownerID: String) {
@@ -164,6 +168,23 @@ final class IOSRealtimeAudioService {
         pendingEngineBinding = nil
         self.engine = engine
         engineOwnerID = ownerID
+    }
+
+    /// Reserve the exact selected engine before the asynchronous start can be
+    /// scheduled. Deselecting it can then only request a drain, not replace it.
+    func reserveStart(owner: IOSAudioOwner?) -> Bool {
+        guard !isActive, let owner, let engine, let engineOwnerID,
+              IOSAudioProviderService.shared.ownsSessionRoute(owner, ownerID: engineOwnerID, engine: engine) else { return false }
+        startupOwner = owner
+        closeAfterCurrentTurn = false
+        return true
+    }
+
+    func restoreReservedStart(owner: IOSAudioOwner?) {
+        guard let owner, startupOwner == owner else { return }
+        closeAfterCurrentTurn = false
+        detachWhenStopped = false
+        if pendingEngineBinding?.ownerID == engineOwnerID { pendingEngineBinding = nil }
     }
 
     func detach(ownerID: String) {
@@ -197,7 +218,7 @@ final class IOSRealtimeAudioService {
     }
 
     private var canCloseAfterDrain: Bool {
-        closeAfterCurrentTurn && IOSRealtimeAudioDrainPolicy.canClose(
+        closeAfterCurrentTurn && startupOwner == nil && IOSRealtimeAudioDrainPolicy.canClose(
             turnInFlight: turnOwnership.agentTurnInFlight,
             hasUnconfirmedToolWork: turnOwnership.hasUnconfirmedToolWork,
             pendingPlayback: device.hasPendingOutput,
@@ -206,19 +227,27 @@ final class IOSRealtimeAudioService {
     }
 
     func start(snapshot: AudioConfigurationSnapshot) async throws {
-        guard let engine else { throw AudioServiceFailure.nativeFailure(String(localized: "audio_realtime_unavailable")) }
-        guard !isActive else { throw AudioServiceFailure.busy }
-        guard IOSAudioProviderService.shared.sessionContext != nil else { throw AudioServiceFailure.unavailable }
+        guard let engine, let owner = startupOwner else { throw AudioServiceFailure.nativeFailure(String(localized: "audio_realtime_unavailable")) }
+        guard session == nil, phase != .connecting, !stopUnconfirmed, stopFlight == nil else { throw AudioServiceFailure.busy }
+        guard IOSAudioProviderService.shared.sessionContext(for: owner) != nil else { throw AudioServiceFailure.unavailable }
         generation &+= 1
         let operation = generation
         guard snapshot.configuration.conversation.interaction == "turn_based" else { throw AudioServiceFailure.unsupported }
-        closeAfterCurrentTurn = false
         turnOwnership.resetAfterSessionEnd()
         caption = ""
         errorMessage = nil
         update(.connecting)
         let open = Task { @MainActor [self] in
-            let pinned = try await IOSAudioProviderService.shared.pinRealtime(snapshot: snapshot)
+            if let openOverride {
+                let opened = try await openOverride(engine, owner, snapshot)
+                guard generation == operation, self.engine === engine, !Task.isCancelled else {
+                    await opened.abort()
+                    throw CancellationError()
+                }
+                session = opened
+                return
+            }
+            let pinned = try await IOSAudioProviderService.shared.pinRealtime(snapshot: snapshot, owner: owner)
             try Task.checkCancellation()
             guard generation == operation, self.engine === engine else { throw CancellationError() }
             let callback = IOSRealtimeAudioListenerAdapter()
@@ -249,7 +278,11 @@ final class IOSRealtimeAudioService {
             } onCancel: {
                 open.cancel()
             }
-            if generation == operation { openingTask = nil }
+            if generation == operation {
+                openingTask = nil
+                startupOwner = nil
+                if closeAfterCurrentTurn { closeAfterDrainIfReady() }
+            }
         } catch {
             if generation == operation { openingTask = nil }
             if generation == operation { await fail(error.localizedDescription, generation: operation) }
@@ -300,6 +333,7 @@ final class IOSRealtimeAudioService {
     func stop(abort: Bool) async -> Bool {
         if let flight = stopFlight { return await waitForStop(flight.id) }
         generation &+= 1
+        startupOwner = nil
         let old = retiringSession ?? session
         session = nil
         retiringSession = old
@@ -519,8 +553,8 @@ final class IOSRealtimeAudioService {
     }
 
     #if DEBUG
-    func receiveForTesting(_ json: String) async {
-        await receive(json, generation: generation)
+    func receiveForTesting(_ json: String, owner: IOSAudioOwner? = nil, requestJSON: String = "{}") async {
+        await receive(json, generation: generation, owner: owner, requestJSON: requestJSON)
     }
 
     func requestCloseAfterDrainForTesting() {
@@ -533,6 +567,8 @@ final class IOSRealtimeAudioService {
         self.session = session
         update(.listening)
     }
+
+    var boundEngineForTesting: MobileEngineHandle? { engine }
     #endif
 
     private func fail(_ message: String, generation expectedGeneration: UInt64) async {

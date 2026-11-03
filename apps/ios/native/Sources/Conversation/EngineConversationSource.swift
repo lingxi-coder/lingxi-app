@@ -33,7 +33,7 @@ final class EngineConversationSource: ConversationSource {
     var sessionMode: SessionMode { model.sessionMode }
 
     private let isRemoteProjection: Bool
-    private let config: EngineConfig
+    private var config: EngineConfig
     private let handleBuilder: HandleBuilder?
     private let mediaHostComposition: IOSNativeMediaHostComposition?
     private let permissionModeRepository: PermissionModeConfigurationRepository
@@ -41,6 +41,8 @@ final class EngineConversationSource: ConversationSource {
     private var isRetiredForReconnect = false
     private var sessionOwnerAdmission: ((String) -> Bool)?
     private var sessionStartupAdmission: (() -> Bool)?
+    private var sessionStartupLease: (() -> Bool)?
+    private var sessionStartupFinished: (() -> Void)?
     private var sessionOwnerRejected = false
     private let audioContextOwnerID = UUID().uuidString
     private var audioContextGeneration: UInt64 = 0
@@ -104,12 +106,20 @@ final class EngineConversationSource: ConversationSource {
     /// Original user spelling for a slash command awaiting dispatch.
     private var pendingSlashRaw: String?
     private var testCommandSubmitter: ((ClientCommand) async throws -> Void)?
+    private var testResumeSubmitter: ((String, String) async throws -> Void)?
     private var testBypassPermissionsConfirmer: (() async throws -> Void)?
     private var cancellationOperation: CancellationOperation?
     private var nextCancellationOperationID: UInt64 = 1
     private var activeSessionTransitionOperationID: UInt64?
     private var nextSessionTransitionOperationID: UInt64 = 1
     private let durableTurns: DurableConversationTurnClientStore?
+    private var promptAdmissionPending = false
+    private var durableLookupPending = false
+    private var durableCheckpointOwners: [UInt64: String] = [:]
+    private var durableCleanupPending: [String: Set<UInt64>] = [:]
+    private var durableCleanupTasks: [UInt64: Task<Void, Never>] = [:]
+    private var durableCleanupFailures: [String: String] = [:]
+    private var durableUnconfirmedOwners = Set<String>()
     private(set) var sideID: String?
     private var sideEnded = false
     private var sideClosing = false
@@ -139,6 +149,25 @@ final class EngineConversationSource: ConversationSource {
     func setSessionStartupAdmission(_ admission: @escaping () -> Bool) {
         sessionStartupAdmission = admission
     }
+
+    func setSessionStartupLease(begin: @escaping () -> Bool, finish: @escaping () -> Void) {
+        sessionStartupLease = begin
+        sessionStartupFinished = finish
+    }
+
+    func validateInitialRestorePath(_ path: String) throws {
+        guard handle == nil, handleBuildTask == nil, let id = config.initialSessionId, !id.isEmpty else { return }
+        if let existing = config.initialSessionTranscriptPath, existing != path {
+            throw ProjectRepositoryError.invalidSessionOwnership("The selected session transcript changed before it was opened.")
+        }
+        config.initialSessionTranscriptPath = path
+    }
+
+    var needsInitialRestoreValidation: Bool {
+        handle == nil && handleBuildTask == nil && config.initialSessionId?.isEmpty == false
+    }
+
+    var hasPreparedNativeHandle: Bool { handle != nil }
 
     private func admitSessionStartup() -> Bool {
         guard sessionStartupAdmission?() ?? true else {
@@ -240,13 +269,14 @@ final class EngineConversationSource: ConversationSource {
         handleBuilder: HandleBuilder? = nil,
         mediaHostComposition: IOSNativeMediaHostComposition? = nil,
         permissionModeRepository: PermissionModeConfigurationRepository? = nil,
+        recoveryLedger: DurableConversationTurnLedger = .shared,
         memoryOnly: Bool = false,
         remoteProjection: Bool = false
     ) {
         self.isRemoteProjection = remoteProjection
         self.config = config
         self.mediaHostComposition = mediaHostComposition
-        self.durableTurns = (memoryOnly || remoteProjection) ? nil : DurableConversationTurnClientStore(config: config)
+        self.durableTurns = (memoryOnly || remoteProjection) ? nil : DurableConversationTurnClientStore(config: config, ledger: recoveryLedger)
         self.handleBuilder = handleBuilder
         self.permissionModeRepository = permissionModeRepository
             ?? PermissionModeConfigurationRepository()
@@ -541,6 +571,10 @@ final class EngineConversationSource: ConversationSource {
         case let .command(command):
             try await submitCommand(command)
         case let .resumeSelected(sessionID, transcriptPath):
+            if let testResumeSubmitter {
+                try await testResumeSubmitter(sessionID, transcriptPath)
+                return
+            }
             let handle = try await ensureHandle()
             try await handle.resumeWorkspaceSession(sessionId: sessionID, transcriptPath: transcriptPath)
         }
@@ -638,6 +672,7 @@ final class EngineConversationSource: ConversationSource {
     private func invalidateTurnContext() {
         durableRecoveryTask?.cancel()
         durableRecoveryTask = nil
+        durableLookupPending = false
         durableRecoveryPhase = nil
         terminalRecoveryStates.removeAll()
         unresolvedRecoveryTurnID = nil
@@ -1270,7 +1305,7 @@ final class EngineConversationSource: ConversationSource {
         }
 
         if stillOwnsVisibleTurn {
-            durableTurns?.clear(turnID: operation.turnId)
+            clearDurableCheckpoint(operation.turnId)
             if unresolvedRecoveryTurnID == operation.turnId {
                 unresolvedRecoveryTurnID = nil
                 needsDurableForegroundRecoveryTurnID = nil
@@ -1311,6 +1346,47 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
+    /// Fence this owner before the first suspension; a failed clear keeps the
+    /// durable evidence and can be retried without affecting another owner.
+    private func clearDurableCheckpoint(_ turnID: UInt64) {
+        guard let durableTurns, let owner = durableCheckpointOwners[turnID],
+              durableCleanupPending[owner]?.contains(turnID) != true else { return }
+        durableCleanupPending[owner, default: []].insert(turnID)
+        let cleanup = Task { @MainActor [self] in
+            do {
+                try await durableTurns.clear(turnID: turnID, sessionID: owner)
+                durableCheckpointOwners.removeValue(forKey: turnID)
+                durableCleanupFailures.removeValue(forKey: owner)
+                durableUnconfirmedOwners.remove(owner)
+            } catch {
+                let message = "The conversation checkpoint could not be cleared. Retry before sending: \(error)"
+                durableCleanupFailures[owner] = message
+                if model.activeSessionId.isEmpty || canonicalSessionID(model.activeSessionId) == owner {
+                    model.error = ConversationError(kind: .host, message: message)
+                }
+            }
+            durableCleanupPending[owner]?.remove(turnID)
+            if durableCleanupPending[owner]?.isEmpty == true { durableCleanupPending.removeValue(forKey: owner) }
+            durableCleanupTasks.removeValue(forKey: turnID)
+        }
+        durableCleanupTasks[turnID] = cleanup
+    }
+
+    private func durableOwnerIsBlocked(_ owner: String) -> Bool {
+        guard !owner.isEmpty else { return false }
+        if durableUnconfirmedOwners.contains(owner) {
+            model.error = ConversationError(kind: .host, message: "The previous prompt delivery is unconfirmed. Reopen the conversation to recover it.")
+            return true
+        }
+        guard durableCleanupPending[owner]?.isEmpty == false || durableCleanupFailures[owner] != nil else { return false }
+        if durableCleanupPending[owner]?.isEmpty != false,
+           let turnID = durableCheckpointOwners.first(where: { $0.value == owner })?.key {
+            clearDurableCheckpoint(turnID)
+        }
+        model.error = ConversationError(kind: .host, message: durableCleanupFailures[owner] ?? "The previous conversation checkpoint is still being cleared.")
+        return true
+    }
+
     private func startPrompt(_ prompt: TurnPrompt) -> ConversationTurnToken {
         model.notice = nil
         model.streaming = true
@@ -1334,35 +1410,12 @@ final class EngineConversationSource: ConversationSource {
             sessionEpoch: sessionEpoch
         )
         model.activeTurnToken = token
-        let needsInitialOwnerCheckpoint = model.activeSessionId.isEmpty && durableTurns != nil
-        durableTurns?.begin(sessionID: model.activeSessionId, turnID: prompt.turnId, workspace: model.workspaceState?.cwd)
         Self.turnLog.debug(
             "prompt submit turn=\(prompt.turnId, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
         )
 
-        Task { [weak self] in
-            guard let self else { return }
+        Task { [self] in
             do {
-                if needsInitialOwnerCheckpoint, self.testCommandSubmitter == nil {
-                    // The first prompt may arrive before SessionStarted. Ask
-                    // the just-built handle for its owner and persist it
-                    // before admitting the turn to the engine.
-                    let handle = try await self.ensureHandle()
-                    let workspace = await handle.workspaceState()
-                    guard self.activeConversationTurnToken == token, !self.model.isCancelling else { return }
-                    guard !workspace.sessionId.isEmpty,
-                          self.model.activeSessionId.isEmpty
-                            || canonicalSessionID(self.model.activeSessionId) == canonicalSessionID(workspace.sessionId)
-                    else {
-                        throw NSError(domain: "ConversationSessionOwner", code: 1,
-                            userInfo: [NSLocalizedDescriptionKey: "The engine did not confirm the expected session owner."])
-                    }
-                    guard self.admitSessionOwner(workspace.sessionId) else {
-                        throw SessionHost.OwnershipError.conflictingOwner
-                    }
-                    self.durableTurns?.begin(sessionID: workspace.sessionId, turnID: prompt.turnId,
-                                             workspace: workspace.cwd)
-                }
                 try await self.submitCommand(.sendPrompt(
                     text: ClientTextDto(codeUnits: prompt.sourceCodeUnits),
                     promptMode: prompt.promptMode,
@@ -1373,7 +1426,7 @@ final class EngineConversationSource: ConversationSource {
                     }), expectedSessionEpoch: token.sessionEpoch)
             } catch {
                 guard self.activeConversationTurnToken == token else { return }
-                self.fail(.host, "\(error)")
+                self.fail(.host, "\(error)", clearDurable: false)
             }
         }
         return token
@@ -1434,13 +1487,13 @@ final class EngineConversationSource: ConversationSource {
     }
 
     @discardableResult
-    func send(_ text: String) -> ConversationTurnToken? {
-        send(text, sourceCodeUnits: nil, images: [], selectedSlashCommand: nil)
+    func send(_ text: String) async -> ConversationTurnToken? {
+        await send(text, sourceCodeUnits: nil, images: [], selectedSlashCommand: nil)
     }
 
     @discardableResult
-    func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
-        send(text, sourceCodeUnits: nil, images: images, selectedSlashCommand: nil)
+    func send(_ text: String, images: [ImageRefDto]) async -> ConversationTurnToken? {
+        await send(text, sourceCodeUnits: nil, images: images, selectedSlashCommand: nil)
     }
 
     @discardableResult
@@ -1449,14 +1502,17 @@ final class EngineConversationSource: ConversationSource {
         sourceCodeUnits: [UInt16]?,
         images: [ImageRefDto],
         selectedSlashCommand: ConversationSlashCommand?
-    ) -> ConversationTurnToken? {
+    ) async -> ConversationTurnToken? {
         if Self.isCompactSlash(text), model.streaming || model.slashCommandPending {
             model.compactRejectionID = UUID()
             return nil
         }
         guard
+            !Task.isCancelled,
             !isRetiredForReconnect,
             !sessionOwnerRejected,
+            !promptAdmissionPending,
+            !durableLookupPending,
             !sideEnded,
             !sideClosing,
             !model.isCancelling,
@@ -1497,9 +1553,25 @@ final class EngineConversationSource: ConversationSource {
             )
             : nil)
         guard !isSideChat || !model.streaming else { return nil }
+        let currentOwner = canonicalSessionID(model.activeSessionId)
+        if durableOwnerIsBlocked(currentOwner) { return nil }
         if isSideChat { pendingSideInput = (text, sourceCodeUnits, images) }
         if model.streaming {
             guard exactSlashCommand == nil, let token = activeConversationTurnToken else { return nil }
+            if let durableTurns {
+                promptAdmissionPending = true
+                defer { promptAdmissionPending = false }
+                do {
+                    guard let record = try await durableTurns.load(), record.turnID == token.clientTurnId else {
+                        throw DurableConversationRecoveryError.invalidStore
+                    }
+                    try Task.checkCancellation()
+                    guard model.streaming, activeConversationTurnToken == token else { return nil }
+                } catch {
+                    if !(error is CancellationError) { model.error = ConversationError(kind: .host, message: "\(error)") }
+                    return nil
+                }
+            }
             model.isNew = false
             model.notice = nil
             let chip = takeVisualizationChip()
@@ -1527,6 +1599,42 @@ final class EngineConversationSource: ConversationSource {
             return token
         }
 
+        let turnId = nextTurnId
+        nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
+        if exactSlashCommand == nil, let durableTurns {
+            promptAdmissionPending = true
+            defer { promptAdmissionPending = false }
+            let epoch = sessionEpoch
+            var owner = currentOwner
+            var workspace = model.workspaceState?.cwd
+            do {
+                try Task.checkCancellation()
+                if owner.isEmpty {
+                    let handle = try await ensureHandle()
+                    let state = await handle.workspaceState()
+                    owner = canonicalSessionID(state.sessionId)
+                    guard !owner.isEmpty, admitSessionOwner(owner),
+                          model.activeSessionId.isEmpty || canonicalSessionID(model.activeSessionId) == owner else {
+                        throw SessionHost.OwnershipError.conflictingOwner
+                    }
+                    workspace = state.cwd
+                }
+                guard !durableOwnerIsBlocked(owner) else { return nil }
+                guard epoch == sessionEpoch, !isRetiredForReconnect, !sessionOwnerRejected, admitSessionOwner(owner) else { throw CancellationError() }
+                try Task.checkCancellation()
+                try await durableTurns.begin(sessionID: owner, turnID: turnId, workspace: workspace)
+                durableCheckpointOwners[turnId] = owner
+                guard !Task.isCancelled, epoch == sessionEpoch, !isRetiredForReconnect, admitSessionOwner(owner),
+                      model.activeSessionId.isEmpty || canonicalSessionID(model.activeSessionId) == owner else {
+                    clearDurableCheckpoint(turnId)
+                    return nil
+                }
+            } catch {
+                if !(error is CancellationError) { model.error = ConversationError(kind: .host, message: "\(error)") }
+                return nil
+            }
+        }
+
         model.isNew = false
         model.notice = nil
         let chip = exactSlashCommand == nil ? takeVisualizationChip() : nil
@@ -1535,8 +1643,6 @@ final class EngineConversationSource: ConversationSource {
         prompt.visualizationContext = chip
         appendMessage(prompt)
 
-        let turnId = nextTurnId
-        nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
         if exactSlashCommand == nil { pendingUserRowsByToken["client-turn:\(turnId)"] = prompt.id }
         if let exactSlashCommand {
             let token = SlashCommandMatcher.commandToken(in: trimmed) ?? ""
@@ -1735,12 +1841,9 @@ final class EngineConversationSource: ConversationSource {
         // asking the engine to resume it. Cold sources enter this same path
         // from SessionResumed below.
         guard let recoveryTurnID = needsDurableForegroundRecoveryTurnID,
-              unresolvedRecoveryTurnID == recoveryTurnID,
-              let record = durableTurns?.load(),
-              record.turnID == recoveryTurnID,
-              record.sessionID == model.activeSessionId
+              unresolvedRecoveryTurnID == recoveryTurnID
         else { return }
-        reattachDurableTurnIfNeeded(sessionID: record.sessionID)
+        reattachDurableTurnIfNeeded(sessionID: model.activeSessionId, expectedTurnID: recoveryTurnID)
     }
 
     func providerCatalog() async throws -> [ProviderCatalogEntry] {
@@ -1904,13 +2007,14 @@ final class EngineConversationSource: ConversationSource {
         guard !isRemoteProjection else { throw RemoteFfiError.NotConnected }
         if let handle { return handle }
         if let handleBuildTask {
-            let builtHandle = try await handleBuildTask.value
-            guard !isRetiredForReconnect else { throw CancellationError() }
-            return builtHandle
+            return try await handleBuildTask.value
         }
         // Unknown UUIDs cannot be checked for uniqueness when any catalog is
         // unreadable. Refuse before native construction or bootstrap commands.
         guard admitSessionStartup() else { throw SessionHost.OwnershipError.conflictingOwner }
+        guard sessionStartupLease?() ?? true else { throw SessionHost.OwnershipError.conflictingOwner }
+        var leaseTransferred = false
+        defer { if !leaseTransferred { sessionStartupFinished?() } }
 
         let listener = EngineListener(source: self)
         // SHIP-BLOCKER #3: register a real permission sink so a tool that needs
@@ -1965,14 +2069,16 @@ final class EngineConversationSource: ConversationSource {
             try? await handle.submit(command: .taskList(statusFilter: nil, requestId: nil))
             return handle
         }
-        handleBuildTask = buildTask
-
-        do {
-            let builtHandle = try await buildTask.value
-            guard !isRetiredForReconnect, handleBuildAttemptID == attemptID else { throw CancellationError() }
-            if handleBuildAttemptID == attemptID {
+        // Share the entire build, identity admission, and publication rather
+        // than exposing the raw native handle to concurrent callers.
+        let admittedTask = Task { @MainActor [self] in
+            defer { sessionStartupFinished?() }
+            do {
+                let builtHandle = try await buildTask.value
+                guard !isRetiredForReconnect, handleBuildAttemptID == attemptID else { throw CancellationError() }
                 let workspace = await builtHandle.workspaceState()
                 guard !isRetiredForReconnect, handleBuildAttemptID == attemptID else { throw CancellationError() }
+                guard admitSessionOwner(workspace.sessionId) else { throw SessionHost.OwnershipError.conflictingOwner }
                 handle = builtHandle
                 model.workspaceState = SessionWorkspaceState(sessionId: workspace.sessionId, cwd: workspace.cwd,
                     projectRoot: workspace.projectRoot, additionalDirectories: workspace.additionalDirectories, transcriptPath: workspace.transcriptPath)
@@ -1981,14 +2087,17 @@ final class EngineConversationSource: ConversationSource {
                 self.listener = listener
                 self.permissionSink = permissionSink
                 handleBuildTask = nil
+                return builtHandle
+            } catch {
+                if handleBuildAttemptID == attemptID {
+                    handleBuildTask = nil
+                }
+                throw error
             }
-            return handle ?? builtHandle
-        } catch {
-            if handleBuildAttemptID == attemptID {
-                handleBuildTask = nil
-            }
-            throw error
         }
+        handleBuildTask = admittedTask
+        leaseTransferred = true
+        return try await admittedTask.value
     }
 
     /// Build the handle eagerly (independent of the first turn) so the model
@@ -2016,6 +2125,7 @@ final class EngineConversationSource: ConversationSource {
         if isRetiredForReconnect { return }
         await listener?.waitUntilIdle()
         guard !hasLiveSideChats,
+              !promptAdmissionPending, !durableLookupPending, durableCleanupPending.isEmpty,
               ConversationSourceReplacementPolicy.allowsReplacement(
                 of: model, hasActiveRealtimeAudio: hasActiveRealtimeAudio) else {
             throw NSError(domain: "ConversationSourceReplacement", code: 1,
@@ -3759,7 +3869,7 @@ final class EngineConversationSource: ConversationSource {
             } ?? false
             if let currentTurnId {
                 if !awaitingCancellationTerminal {
-                    durableTurns?.clear(turnID: currentTurnId)
+                    clearDurableCheckpoint(currentTurnId)
                     if unresolvedRecoveryTurnID == currentTurnId {
                         unresolvedRecoveryTurnID = nil
                         needsDurableForegroundRecoveryTurnID = nil
@@ -3946,7 +4056,7 @@ final class EngineConversationSource: ConversationSource {
                     model.hasUnresolvedTurnRecovery = false
                 }
                 model.streaming = false
-                durableTurns?.clear(turnID: snapshot.turnId)
+                clearDurableCheckpoint(snapshot.turnId)
                 reattachedTurnIDs.remove(snapshot.turnId)
                 if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
                     clearTurnPointers(keepEpoch: false)
@@ -3975,7 +4085,7 @@ final class EngineConversationSource: ConversationSource {
                     model.hasUnresolvedTurnRecovery = false
                 }
                 model.streaming = false
-                durableTurns?.clear(turnID: snapshot.turnId)
+                clearDurableCheckpoint(snapshot.turnId)
                 reattachedTurnIDs.remove(snapshot.turnId)
                 model.error = ConversationError(
                     kind: .host,
@@ -4013,7 +4123,7 @@ final class EngineConversationSource: ConversationSource {
                     finishActiveRun(.cancelled)
                     publishActiveTurnCompletion(.cancelled)
                 }
-                durableTurns?.clear(turnID: snapshot.turnId)
+                clearDurableCheckpoint(snapshot.turnId)
                 reattachedTurnIDs.remove(snapshot.turnId)
                 if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
                     clearTurnPointers(keepEpoch: false)
@@ -4478,17 +4588,24 @@ final class EngineConversationSource: ConversationSource {
         nextTurnId = turnId == UInt64.max ? 1 : turnId + 1
     }
 
-    func beginDurableTurnForTesting(turnId: UInt64, sessionId: String) {
-        durableTurns?.begin(sessionID: sessionId, turnID: turnId, workspace: model.workspaceState?.cwd)
+    func beginDurableTurnForTesting(turnId: UInt64, sessionId: String) async throws {
+        try await durableTurns?.begin(sessionID: sessionId, turnID: turnId, workspace: model.workspaceState?.cwd)
+        durableCheckpointOwners[turnId] = canonicalSessionID(sessionId)
     }
 
     func recordDurableSequenceForTesting(turnId: UInt64, sequence: UInt64) {
         durableTurns?.updateSequence(turnID: turnId, sequence: sequence)
     }
 
-    func durableAttachCursorForTesting() -> UInt64? {
-        durableTurns?.load()?.lastSequence
+    func durableAttachCursorForTesting() async throws -> UInt64? {
+        try await durableTurns?.load()?.lastSequence
     }
+
+    func waitForDurableCleanupForTesting() async {
+        while let pending = durableCleanupTasks.values.first { await pending.value }
+    }
+
+    func waitForDurableRecoveryForTesting() async { await durableRecoveryTask?.value }
 
     func cancelForTesting() {
         guard model.streaming, currentTurnId != nil else { return }
@@ -4498,6 +4615,10 @@ final class EngineConversationSource: ConversationSource {
 
     func setCommandSubmitterForTesting(_ submitter: ((ClientCommand) async throws -> Void)?) {
         testCommandSubmitter = submitter
+    }
+
+    func setResumeSubmitterForTesting(_ submitter: ((String, String) async throws -> Void)?) {
+        testResumeSubmitter = submitter
     }
 
     func setBypassPermissionsConfirmerForTesting(
@@ -5446,7 +5567,7 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
-    private func fail(_ kind: ConversationError.Kind, _ message: String) {
+    private func fail(_ kind: ConversationError.Kind, _ message: String, clearDurable: Bool = true) {
         restoreFailedSideSubmission()
         if let cancellationOperation,
            cancellationOperation.turnId == currentTurnId {
@@ -5463,7 +5584,10 @@ final class EngineConversationSource: ConversationSource {
         }
         let settledTurn = currentTurnId != nil
         if let currentTurnId {
-            durableTurns?.clear(turnID: currentTurnId)
+            if clearDurable { clearDurableCheckpoint(currentTurnId) }
+            else if let owner = durableCheckpointOwners[currentTurnId] {
+                durableUnconfirmedOwners.insert(owner)
+            }
             if unresolvedRecoveryTurnID == currentTurnId {
                 unresolvedRecoveryTurnID = nil
                 needsDurableForegroundRecoveryTurnID = nil
@@ -5651,6 +5775,33 @@ final class EngineConversationSource: ConversationSource {
         listSessions()
     }
 
+    func authenticatedWorkspaceState(sessionID: String, mode: SessionMode) async -> SessionWorkspaceState? {
+        let identity = canonicalSessionID(sessionID)
+        guard !identity.isEmpty, let handle else { return nil }
+        for _ in 0..<2 {
+            guard self.handle === handle, !isRetiredForReconnect,
+                  !model.sessionTransitionPending, model.sessionModeKnown,
+                  config.sessionMode == mode, model.sessionMode == mode,
+                  canonicalSessionID(model.activeSessionId) == identity else { return nil }
+            let epoch = sessionEpoch
+            let state = await handle.workspaceState()
+            guard self.handle === handle, !isRetiredForReconnect,
+                  !model.sessionTransitionPending, model.sessionModeKnown,
+                  config.sessionMode == mode, model.sessionMode == mode,
+                  canonicalSessionID(model.activeSessionId) == identity,
+                  canonicalSessionID(state.sessionId) == identity,
+                  !state.transcriptPath.isEmpty, (state.transcriptPath as NSString).isAbsolutePath else { return nil }
+            // A same-owner turn cancellation can advance the epoch while the
+            // native read is in flight. Query once more rather than persisting
+            // that stale snapshot or silently losing the workspace update.
+            if sessionEpoch != epoch { continue }
+            return SessionWorkspaceState(sessionId: state.sessionId, cwd: state.cwd,
+                projectRoot: state.projectRoot, additionalDirectories: state.additionalDirectories,
+                transcriptPath: state.transcriptPath)
+        }
+        return nil
+    }
+
     func addWorkspaceDirectory(_ path: String, expectedSessionID: String) {
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -5668,25 +5819,26 @@ final class EngineConversationSource: ConversationSource {
               unresolvedRecoveryTurnID == nil,
               pauseAcknowledgements.isEmpty
         else { return }
-        durableTurns?.bind(sessionID: uuid)
         if uuid == model.activeSessionId,
            pendingSessionTransition == nil,
            (!model.items.isEmpty || !model.messages.isEmpty || hasConfirmedSessionState) {
             return
         }
+        let matches = model.engineSessions.filter { canonicalSessionID($0.id) == canonicalSessionID(uuid) }
+        guard matches.count == 1, let selected = matches.first, selected.mode == config.sessionMode,
+              let path = selected.transcriptPath, !path.isEmpty, (path as NSString).isAbsolutePath else {
+            model.sessionTransitionFailure = SessionTransitionFailure(requestedSessionID: uuid)
+            model.error = ConversationError(kind: .host, message: ProjectRepositoryError.missingSessionTranscriptPath.localizedDescription)
+            return
+        }
+        durableTurns?.bind(sessionID: uuid)
         let turnIdToCancel = inFlightTurnForSessionSwitch()
         model.sessionTransitionFailure = nil
         let transitionOperationID = beginSessionTransition(.resume(uuid))
         prepareSessionTransition(cancelling: turnIdToCancel, isNew: false)
-        let submission: SessionTransitionSubmission
-        if let path = model.engineSessions.first(where: { $0.id == uuid })?.transcriptPath {
-            submission = .resumeSelected(sessionID: uuid, transcriptPath: path)
-        } else {
-            submission = .command(.resumeSession(sessionId: uuid, cwd: nil, expectedMode: config.sessionMode.dto))
-        }
         submitSessionTransition(
             cancelling: turnIdToCancel,
-            submission: submission,
+            submission: .resumeSelected(sessionID: uuid, transcriptPath: path),
             failurePrefix: String(localized: "chat_resume_session_failed"),
             transitionOperationID: transitionOperationID,
             resumeTargetID: uuid,
@@ -5694,32 +5846,49 @@ final class EngineConversationSource: ConversationSource {
         )
     }
 
-    private func reattachDurableTurnIfNeeded(sessionID: String) {
-        guard
-            durableRecoveryTask == nil,
-            let record = durableTurns?.load(),
-            canonicalSessionID(record.sessionID) == canonicalSessionID(sessionID),
-            reattachedTurnIDs.insert(record.turnID).inserted
-        else { return }
-        currentTurnId = record.turnID
-        activeTurnEpoch = sessionEpoch
-        unresolvedRecoveryTurnID = record.turnID
-        model.hasUnresolvedTurnRecovery = true
-        model.hasInactiveDurableRecovery = true
-        executorOwnedTurnID = nil
-        let token = ConversationTurnToken(
-            clientTurnId: record.turnID,
-            sessionEpoch: sessionEpoch
-        )
-        model.activeTurnToken = token
-        model.streaming = false
+    private func reattachDurableTurnIfNeeded(sessionID: String, expectedTurnID: UInt64? = nil) {
+        guard durableRecoveryTask == nil, let durableTurns else { return }
+        let owner = canonicalSessionID(sessionID), epoch = sessionEpoch
+        guard !owner.isEmpty else { return }
+        durableLookupPending = true
         let recoveryTask = Task { @MainActor [weak self] in
             defer {
-                self?.replayingTurnID = nil
-                self?.durableRecoveryPhase = nil
-                self?.durableRecoveryTask = nil
+                if self?.sessionEpoch == epoch {
+                    self?.replayingTurnID = nil
+                    self?.durableRecoveryPhase = nil
+                    self?.durableRecoveryTask = nil
+                    self?.durableLookupPending = false
+                }
             }
             guard let self else { return }
+            let record: DurableConversationTurnRecord
+            do {
+                guard let found = try await durableTurns.load() else {
+                    if expectedTurnID != nil { throw DurableConversationRecoveryError.invalidStore }
+                    return
+                }
+                guard expectedTurnID == nil || found.turnID == expectedTurnID else { throw DurableConversationRecoveryError.invalidStore }
+                record = found
+            } catch {
+                guard self.sessionEpoch == epoch, canonicalSessionID(self.model.activeSessionId) == owner else { return }
+                self.durableUnconfirmedOwners.insert(owner)
+                self.model.error = ConversationError(kind: .host, message: "The conversation recovery record could not be read: \(error)")
+                return
+            }
+            guard self.sessionEpoch == epoch, canonicalSessionID(self.model.activeSessionId) == owner,
+                  canonicalSessionID(record.sessionID) == owner,
+                  self.reattachedTurnIDs.insert(record.turnID).inserted else { return }
+            self.durableLookupPending = false
+            self.durableCheckpointOwners[record.turnID] = owner
+            self.currentTurnId = record.turnID
+            self.activeTurnEpoch = epoch
+            self.unresolvedRecoveryTurnID = record.turnID
+            self.model.hasUnresolvedTurnRecovery = true
+            self.model.hasInactiveDurableRecovery = true
+            self.executorOwnedTurnID = nil
+            let token = ConversationTurnToken(clientTurnId: record.turnID, sessionEpoch: epoch)
+            self.model.activeTurnToken = token
+            self.model.streaming = false
             do {
                 self.replayingTurnID = record.turnID
                 self.durableRecoveryPhase = .attaching(turnID: record.turnID)

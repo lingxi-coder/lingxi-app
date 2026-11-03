@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 let projectIndexFileName = "index.json"
 let projectManifestFileName = "project.json"
@@ -10,28 +11,72 @@ let globalSessionIndexFileName = "global-session-spaces.json"
 protocol ProjectAtomicWriting: Sendable {
     func write<T: Codable>(_ value: T, to url: URL, encoder: JSONEncoder, decoder: JSONDecoder) throws
     func writeData(_ data: Data, to url: URL, validate: (Data) throws -> Void) throws
+    func writeData(_ data: Data, to url: URL, expected: OwnerCatalogExpectation, validate: (Data) throws -> Void,
+                   commit: (_ replace: () throws -> Void) throws -> Void) throws
 }
 
 struct DefaultProjectAtomicWriter: ProjectAtomicWriting {
+    private let onGuardedStaged: (@Sendable (URL) -> Void)?
+    private let onGuardedVerified: (@Sendable () -> Void)?
+
+    init(onGuardedStaged: (@Sendable (URL) -> Void)? = nil, onGuardedVerified: (@Sendable () -> Void)? = nil) {
+        self.onGuardedStaged = onGuardedStaged
+        self.onGuardedVerified = onGuardedVerified
+    }
+
     func write<T: Codable>(_ value: T, to url: URL, encoder: JSONEncoder, decoder: JSONDecoder) throws {
         let data = try encoder.encode(value)
         try writeData(data, to: url) { try _ = decoder.decode(T.self, from: $0) }
     }
 
     func writeData(_ data: Data, to url: URL, validate: (Data) throws -> Void) throws {
+        try stageData(data, to: url, expected: ownerCatalogExpectation(url), validate: validate) { try $0() }
+    }
+
+    func writeData(_ data: Data, to url: URL, expected: OwnerCatalogExpectation, validate: (Data) throws -> Void,
+                   commit: (_ replace: () throws -> Void) throws -> Void) throws {
+        try stageData(data, to: url, expected: expected, validate: validate, commit: commit)
+    }
+
+    private func stageData(_ data: Data, to url: URL, expected: OwnerCatalogExpectation,
+                           validate: (Data) throws -> Void,
+                           commit: (_ replace: () throws -> Void) throws -> Void) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard try ownerCatalogExpectation(url) == expected else { throw ProjectRepositoryError.invalidProjectData }
         let tempURL = url.deletingLastPathComponent()
             .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
         do {
             try data.write(to: tempURL, options: .atomic)
-            let staged = try Data(contentsOf: tempURL)
-            try validate(staged)
-            if fm.fileExists(atPath: url.path) {
-                _ = try fm.replaceItemAt(url, withItemAt: tempURL)
-            } else {
-                try fm.moveItem(at: tempURL, to: url)
+            let staged = try ownerCatalogSnapshot(tempURL)
+            guard staged.bytes == data else { throw ProjectRepositoryError.invalidProjectData }
+            try validate(staged.bytes)
+            onGuardedStaged?(tempURL)
+            guard try ownerCatalogExpectation(url) == expected,
+                  try ownerCatalogSnapshot(tempURL) == staged else { throw ProjectRepositoryError.invalidProjectData }
+            onGuardedVerified?()
+            // Both paths are in the same directory. POSIX rename atomically
+            // replaces an existing file without Foundation's LaunchServices
+            // XPC, which can block while another task owns the history lock.
+            try commit {
+                // Recheck both names at the publication boundary. POSIX has no
+                // inode-CAS here, so a non-cooperating process can still race
+                // the final check and rename; we do not claim otherwise.
+                guard try ownerCatalogExpectationMatchesVersion(url, expected),
+                      try ownerCatalogVersion(tempURL) == staged.version else {
+                    throw ProjectRepositoryError.invalidProjectData
+                }
+                let result: Int32 = tempURL.withUnsafeFileSystemRepresentation { source in
+                    url.withUnsafeFileSystemRepresentation { destination in
+                        guard let source, let destination else { return Int32(-1) }
+                        return Darwin.rename(source, destination)
+                    }
+                }
+                guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
             }
+            // A conditional commit may intentionally leave the staged file
+            // unused when its owner is no longer selected.
+            try? fm.removeItem(at: tempURL)
         } catch {
             try? fm.removeItem(at: tempURL)
             throw error
@@ -206,23 +251,30 @@ final class ProjectRepository: @unchecked Sendable {
             guard FileManager.default.fileExists(atPath: projectDirectory(projectId).appendingPathComponent(projectManifestFileName).path)
             else { throw ProjectRepositoryError.projectDoesNotExist(projectId) }
         }
+        let expected = try ownerCatalogExpectation(projectsRoot.appendingPathComponent(projectIndexFileName))
         let current = try healthyState()
-        try writeIndex(ProjectIndex(activeProjectId: projectId, projectIds: current.projects.map(\.record.id)))
+        try writeIndex(ProjectIndex(activeProjectId: projectId, projectIds: current.projects.map(\.record.id)), expected: expected)
         return load()
     }
 
     func updateProject(_ record: ProjectRecord) throws -> ProjectSnapshot {
+        try validateProjectID(record.id)
+        let expected = try ownerCatalogExpectation(projectDirectory(record.id).appendingPathComponent(projectManifestFileName))
         _ = try healthyState()
         try validateProjectID(record.id)
         guard FileManager.default.fileExists(atPath: projectDirectory(record.id).path)
         else { throw ProjectRepositoryError.projectDoesNotExist(record.id) }
         var normalized = record
         normalized.updatedAt = now()
-        try writeProject(normalized)
+        try writeProject(normalized, expected: expected)
         return try loadProject(id: record.id)
     }
 
     func updateSessions(projectId: String?, sessions: [ProjectSessionSummary]) throws -> ProjectRepositoryState {
+        if let projectId { try validateProjectID(projectId) }
+        let sessionURL = projectId.map { projectDirectory($0).appendingPathComponent(projectSessionIndexFileName) }
+            ?? projectsRoot.appendingPathComponent(globalSessionIndexFileName)
+        let expected = try ownerCatalogExpectation(sessionURL)
         let state = try healthyState()
         let snapshot = try projectId.map { try loadProject(id: $0) }
         let existing = try snapshot?.sessions ?? readSessions(at: projectsRoot.appendingPathComponent(globalSessionIndexFileName), required: false)
@@ -233,8 +285,14 @@ final class ProjectRepository: @unchecked Sendable {
             try checkSessionScope(identity, projectId: projectId, state: state)
             if let previous = incomingByID[identity], previous != row { throw ProjectRepositoryError.invalidSessionID }
             incomingByID[identity] = row
-            if let prior = existing.first(where: { canonicalSessionID($0.sessionId) == identity }), prior.mode != row.mode {
-                throw ProjectRepositoryError.conflictingSessionMode
+            if let prior = existing.first(where: { canonicalSessionID($0.sessionId) == identity }) {
+                guard prior.mode == row.mode else { throw ProjectRepositoryError.conflictingSessionMode }
+                if let oldPath = prior.transcriptPath, !oldPath.isEmpty,
+                   let newPath = row.transcriptPath, !newPath.isEmpty, oldPath != newPath {
+                    throw ProjectRepositoryError.invalidSessionOwnership(
+                        "\(identity): the session catalog conflicts with its saved transcript path."
+                    )
+                }
             }
         }
         let incoming = sessions
@@ -248,7 +306,7 @@ final class ProjectRepository: @unchecked Sendable {
                 }
                 row.workspaceDirectory = row.workspaceDirectory ?? cached?.workspaceDirectory
                 row.originalProjectDirectory = row.originalProjectDirectory ?? cached?.originalProjectDirectory
-                row.transcriptPath = row.transcriptPath ?? cached?.transcriptPath
+                if row.transcriptPath?.isEmpty != false { row.transcriptPath = cached?.transcriptPath }
                 row.isArchived = cached?.isArchived ?? false
                 row.pendingCatalogConfirmation = false
                 return row
@@ -256,20 +314,22 @@ final class ProjectRepository: @unchecked Sendable {
             .uniqued(on: \.sessionId)
             .sorted { $0.updatedAt > $1.updatedAt }
         let incomingIDs = Set(incoming.map(\.sessionId))
-        // Keep unacknowledged starts and archive metadata across stale engine lists.
+        // Catalogs can cover only one workspace. An omitted confirmed source
+        // remains an owner even when a later listing does not include it.
         let normalized = (incoming + existing.filter {
-            !incomingIDs.contains($0.sessionId) && ($0.pendingCatalogConfirmation || $0.isArchived ||
+            !incomingIDs.contains($0.sessionId) && ($0.transcriptPath?.isEmpty == false || $0.pendingCatalogConfirmation || $0.isArchived ||
                 (snapshot != nil && $0.workspaceDirectory != nil && $0.workspaceDirectory != snapshot?.record.activeDirectory))
         }).sorted { $0.updatedAt > $1.updatedAt }
         if let projectId {
             try validateProjectID(projectId)
-            try writeSessions(projectId: projectId, sessions: normalized)
+            try writeSessions(projectId: projectId, sessions: normalized, expected: expected)
+            let manifestExpected = try ownerCatalogExpectation(projectDirectory(projectId).appendingPathComponent(projectManifestFileName))
             let snapshot = try loadProject(id: projectId)
             var record = snapshot.record
             record.modeMembership.formUnion(incoming.map(\.mode))
-            try writeProject(record)
+            try writeProject(record, expected: manifestExpected)
         } else {
-            try writeSessionIndex(normalized, to: projectsRoot.appendingPathComponent(globalSessionIndexFileName))
+            try writeSessionIndex(normalized, to: sessionURL, expected: expected)
         }
         return load()
     }
@@ -280,8 +340,14 @@ final class ProjectRepository: @unchecked Sendable {
         title: String,
         mode: SessionMode = .code,
         initialMessageCount: Int = 0,
-        workspaceDirectory: String? = nil
+        workspaceDirectory: String? = nil,
+        authoritativeTranscriptPath: String
     ) throws -> ProjectRepositoryState {
+        if let projectId { try validateProjectID(projectId) }
+        let sessionURL = projectId.map { projectDirectory($0).appendingPathComponent(projectSessionIndexFileName) }
+            ?? projectsRoot.appendingPathComponent(globalSessionIndexFileName)
+        let expected = try ownerCatalogExpectation(sessionURL)
+        let manifestExpected = try projectId.map { try ownerCatalogExpectation(projectDirectory($0).appendingPathComponent(projectManifestFileName)) }
         let state = try healthyState()
         let canonicalID = canonicalSessionID(sessionId)
         guard !canonicalID.isEmpty else { throw ProjectRepositoryError.invalidSessionID }
@@ -291,6 +357,12 @@ final class ProjectRepository: @unchecked Sendable {
         let timestamp = now()
         let existing = sessions.first(where: { $0.sessionId == canonicalID })
         guard existing == nil || existing?.mode == mode else { throw ProjectRepositoryError.conflictingSessionMode }
+        guard !authoritativeTranscriptPath.isEmpty, (authoritativeTranscriptPath as NSString).isAbsolutePath else {
+            throw ProjectRepositoryError.missingSessionTranscriptPath
+        }
+        if let old = existing?.transcriptPath, !old.isEmpty, old != authoritativeTranscriptPath {
+            throw ProjectRepositoryError.invalidSessionOwnership("\(canonicalID): the started session conflicts with its saved transcript path.")
+        }
         let started = ProjectSessionSummary(
             sessionId: canonicalID,
             title: title.isEmpty ? (existing?.title ?? String(localized: "chat_new_conversation")) : title,
@@ -303,16 +375,16 @@ final class ProjectRepository: @unchecked Sendable {
                 initialMessageCount > (existing?.messageCount ?? 0),
             workspaceDirectory: workspaceDirectory ?? existing?.workspaceDirectory ?? snapshot?.record.activeDirectory,
             originalProjectDirectory: existing?.originalProjectDirectory ?? snapshot?.record.activeDirectory,
-            transcriptPath: existing?.transcriptPath
+            transcriptPath: existing?.transcriptPath?.isEmpty == false ? existing?.transcriptPath : authoritativeTranscriptPath
         )
         let updated = ([started] + sessions.filter { $0.sessionId != canonicalID })
         if let projectId {
-            try writeSessions(projectId: projectId, sessions: updated)
+            try writeSessions(projectId: projectId, sessions: updated, expected: expected)
             if let snapshot {
-                try writeProject(snapshot.record.with(updatedAt: timestamp))
+                try writeProject(snapshot.record.with(updatedAt: timestamp), expected: manifestExpected!)
             }
         } else {
-            try writeSessionIndex(updated, to: projectsRoot.appendingPathComponent(globalSessionIndexFileName))
+            try writeSessionIndex(updated, to: sessionURL, expected: expected)
         }
         return load()
     }
@@ -327,6 +399,10 @@ final class ProjectRepository: @unchecked Sendable {
     }
 
     func setSessionArchived(projectId: String?, sessionId: String, archived: Bool) throws -> ProjectRepositoryState {
+        if let projectId { try validateProjectID(projectId) }
+        let sessionURL = projectId.map { projectDirectory($0).appendingPathComponent(projectSessionIndexFileName) }
+            ?? projectsRoot.appendingPathComponent(globalSessionIndexFileName)
+        let expected = try ownerCatalogExpectation(sessionURL)
         _ = try healthyState()
         let canonicalID = canonicalSessionID(sessionId)
         let sessions = try projectId.map { try loadProject(id: $0).sessions }
@@ -343,14 +419,15 @@ final class ProjectRepository: @unchecked Sendable {
             return row
         }
         if let projectId {
-            try writeSessions(projectId: projectId, sessions: updated)
+            try writeSessions(projectId: projectId, sessions: updated, expected: expected)
         } else {
-            try writeSessionIndex(updated, to: projectsRoot.appendingPathComponent(globalSessionIndexFileName))
+            try writeSessionIndex(updated, to: sessionURL, expected: expected)
         }
         return load()
     }
 
     func deleteProject(projectId: String) throws -> ProjectRepositoryState {
+        let expected = try ownerCatalogExpectation(projectsRoot.appendingPathComponent(projectIndexFileName))
         let current = try healthyState()
         try validateProjectID(projectId)
         let directory = projectDirectory(projectId)
@@ -360,7 +437,7 @@ final class ProjectRepository: @unchecked Sendable {
         try FileManager.default.removeItem(at: directory)
         let nextIDs = current.projects.map(\.record.id).filter { $0 != projectId }
         let nextActive = current.activeProjectId == projectId ? nil : current.activeProjectId
-        try writeIndex(ProjectIndex(activeProjectId: nextActive, projectIds: nextIDs))
+        try writeIndex(ProjectIndex(activeProjectId: nextActive, projectIds: nextIDs), expected: expected)
         return load()
     }
 
@@ -397,25 +474,76 @@ final class ProjectRepository: @unchecked Sendable {
         try loadProject(id: projectId).workspace
     }
 
-    func recordWorkspace(projectId: String, state: SessionWorkspaceState) throws -> ProjectRepositoryState {
-        _ = try healthyState()
-        let snapshot = try loadProject(id: projectId)
-        _ = try workspaceForDirectory(projectId: projectId, guestPath: state.cwd)
-        for directory in state.additionalDirectories { _ = try workspaceForDirectory(projectId: projectId, guestPath: directory, requireExisting: false) }
-        var record = snapshot.record
-        record.activeDirectory = state.cwd
-        record.additionalDirectories = (record.additionalDirectories + state.additionalDirectories + [state.cwd])
-            .filter { $0 != record.directory }.uniqued()
-        try writeProject(record)
-        try writeSessions(projectId: projectId, sessions: snapshot.sessions.map { row in
-            guard row.sessionId == state.sessionId else { return row }
-            var row = row
-            row.workspaceDirectory = state.cwd
-            row.originalProjectDirectory = state.projectRoot
-            row.transcriptPath = state.transcriptPath
-            return row
-        })
+    /// A verified engine workspace may update the owner's cwd, but `/cd`
+    /// preserves its original transcript. Recheck the exact source at the
+    /// serialized write boundary, including when the owner is off screen.
+    func recordAuthenticatedWorkspace(projectId: String?, state: SessionWorkspaceState,
+                                      mode: SessionMode, authority: WorkspaceWriteAuthority,
+                                      revision: UInt64) throws -> ProjectRepositoryState {
+        let catalog = try healthyState()
+        let identity = canonicalSessionID(state.sessionId)
+        guard !identity.isEmpty, !state.transcriptPath.isEmpty,
+              (state.transcriptPath as NSString).isAbsolutePath else {
+            throw ProjectRepositoryError.missingSessionTranscriptPath
+        }
+        try checkSessionScope(identity, projectId: projectId, state: catalog)
+        if let projectId { try validateProjectID(projectId) }
+        let indexURL = projectId.map { projectDirectory($0).appendingPathComponent(projectSessionIndexFileName) }
+            ?? projectsRoot.appendingPathComponent(globalSessionIndexFileName)
+        let indexBefore = try ownerCatalogFileExists(indexURL) ? ownerCatalogSnapshot(indexURL) : nil
+        let manifestURL = projectId.map { projectDirectory($0).appendingPathComponent(projectManifestFileName) }
+        let manifestBefore = try manifestURL.map { try ownerCatalogSnapshot($0) }
+        let snapshot = try projectId.map { try loadProject(id: $0) }
+        var rows = try snapshot?.sessions ?? readSessions(at: projectsRoot.appendingPathComponent(globalSessionIndexFileName), required: false)
+        if let indexBefore {
+            guard try ownerCatalogSnapshot(indexURL) == indexBefore else { throw ProjectRepositoryError.invalidProjectData }
+        } else if try ownerCatalogFileExists(indexURL) {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        if let manifestURL, let manifestBefore {
+            guard try ownerCatalogSnapshot(manifestURL) == manifestBefore else { throw ProjectRepositoryError.invalidProjectData }
+        }
+        if let index = rows.firstIndex(where: { canonicalSessionID($0.sessionId) == identity }) {
+            guard rows[index].mode == mode else { throw ProjectRepositoryError.conflictingSessionMode }
+            if let existing = rows[index].transcriptPath, !existing.isEmpty, existing != state.transcriptPath {
+                throw ProjectRepositoryError.invalidSessionOwnership("\(identity): the workspace source conflicts with its saved transcript path.")
+            }
+        }
+        if let projectId {
+            _ = try workspaceForDirectory(projectId: projectId, guestPath: state.cwd)
+            for directory in state.additionalDirectories {
+                _ = try workspaceForDirectory(projectId: projectId, guestPath: directory, requireExisting: false)
+            }
+        }
+        if let index = rows.firstIndex(where: { canonicalSessionID($0.sessionId) == identity }) {
+            rows[index].workspaceDirectory = state.cwd
+            rows[index].originalProjectDirectory = state.projectRoot
+            rows[index].transcriptPath = state.transcriptPath
+            guard let indexBefore else { throw ProjectRepositoryError.missingSessionIndex }
+            try writeWorkspaceRecord(ProjectSessionIndex(sessions: rows), to: indexURL, expected: indexBefore,
+                                     authority: authority, revision: revision, selectedOnly: false)
+            if projectId == nil { observedGlobalIndex = true }
+        }
+        if let snapshot, let manifestURL, let manifestBefore {
+            var record = snapshot.record
+            record.activeDirectory = state.cwd
+            record.additionalDirectories = (record.additionalDirectories + state.additionalDirectories + [state.cwd])
+                .filter { $0 != record.directory }.uniqued()
+            try writeWorkspaceRecord(record, to: manifestURL, expected: manifestBefore,
+                                     authority: authority, revision: revision, selectedOnly: true)
+        }
         return load()
+    }
+
+    private func writeWorkspaceRecord<T: Codable>(_ value: T, to url: URL, expected: OwnerCatalogSnapshot,
+                                                  authority: WorkspaceWriteAuthority, revision: UInt64,
+                                                  selectedOnly: Bool) throws {
+        let data = try encoder.encode(value)
+        try writer.writeData(data, to: url, expected: .present(expected), validate: { _ = try self.decoder.decode(T.self, from: $0) }) { replace in
+            try authority.commit(revision: revision) { selected in
+                if !selectedOnly || selected { try replace() }
+            }
+        }
     }
 
     private func workspaceForDirectory(projectId: String, guestPath: String, requireExisting: Bool = true) throws -> ProjectWorkspace {
@@ -451,6 +579,7 @@ final class ProjectRepository: @unchecked Sendable {
         sourceBookmark: ProjectExternalBookmark?,
         mode: SessionMode
     ) throws -> ProjectSnapshot {
+        let indexExpected = try ownerCatalogExpectation(projectsRoot.appendingPathComponent(projectIndexFileName))
         _ = try healthyState()
         let index = try readIndex()
         let id = newId()
@@ -475,13 +604,13 @@ final class ProjectRepository: @unchecked Sendable {
         )
         do {
             try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
-            try writeProject(record)
-            try writeSessions(projectId: id, sessions: [])
+            try writeProject(record, expected: .absent)
+            try writeSessions(projectId: id, sessions: [], expected: .absent)
             try writeBaseline(projectId: id, baseline: ProjectSyncBaseline())
             try writeIndex(ProjectIndex(
                 activeProjectId: index.activeProjectId,
                 projectIds: (index.projectIds + [id]).uniqued()
-            ))
+            ), expected: indexExpected)
         } catch {
             try? FileManager.default.removeItem(at: directory)
             throw error
@@ -523,24 +652,24 @@ final class ProjectRepository: @unchecked Sendable {
         guard isLowercaseUUID(projectId) else { throw ProjectRepositoryError.invalidProjectID }
     }
 
-    private func writeProject(_ record: ProjectRecord) throws {
-        try write(record, to: projectDirectory(record.id).appendingPathComponent(projectManifestFileName))
+    private func writeProject(_ record: ProjectRecord, expected: OwnerCatalogExpectation) throws {
+        try write(record, to: projectDirectory(record.id).appendingPathComponent(projectManifestFileName), expected: expected)
     }
 
-    private func writeSessions(projectId: String, sessions: [ProjectSessionSummary]) throws {
-        try writeSessionIndex(sessions, to: projectDirectory(projectId).appendingPathComponent(projectSessionIndexFileName))
+    private func writeSessions(projectId: String, sessions: [ProjectSessionSummary], expected: OwnerCatalogExpectation) throws {
+        try writeSessionIndex(sessions, to: projectDirectory(projectId).appendingPathComponent(projectSessionIndexFileName), expected: expected)
     }
 
-    private func writeSessionIndex(_ sessions: [ProjectSessionSummary], to url: URL) throws {
+    private func writeSessionIndex(_ sessions: [ProjectSessionSummary], to url: URL, expected: OwnerCatalogExpectation) throws {
         if FileManager.default.fileExists(atPath: url.path) {
             _ = try readSessions(at: url, required: true)
         }
-        try write(ProjectSessionIndex(sessions: sessions), to: url)
+        try write(ProjectSessionIndex(sessions: sessions), to: url, expected: expected)
         if url == projectsRoot.appendingPathComponent(globalSessionIndexFileName) { observedGlobalIndex = true }
     }
 
     private func readSessions(at url: URL, required: Bool) throws -> [ProjectSessionSummary] {
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        guard try ownerCatalogFileExists(url) else {
             if required { throw ProjectRepositoryError.missingSessionIndex }
             return []
         }
@@ -559,7 +688,7 @@ final class ProjectRepository: @unchecked Sendable {
 
     private func readIndex() throws -> ProjectIndex {
         let url = projectsRoot.appendingPathComponent(projectIndexFileName)
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        guard try ownerCatalogFileExists(url) else {
             let children = try FileManager.default.contentsOfDirectory(atPath: projectsRoot.path)
             guard !observedProjectIndex, !children.contains(where: isLowercaseUUID) else { throw ProjectRepositoryError.missingProjectIndex }
             return ProjectIndex()
@@ -573,25 +702,141 @@ final class ProjectRepository: @unchecked Sendable {
         return decoded
     }
 
-    private func writeIndex(_ index: ProjectIndex) throws {
-        try write(index, to: projectsRoot.appendingPathComponent(projectIndexFileName))
+    private func writeIndex(_ index: ProjectIndex, expected: OwnerCatalogExpectation) throws {
+        try write(index, to: projectsRoot.appendingPathComponent(projectIndexFileName), expected: expected)
         observedProjectIndex = true
     }
 
-    private func write<T: Codable>(_ value: T, to url: URL) throws {
-        try writer.write(value, to: url, encoder: encoder, decoder: decoder)
+    private func write<T: Codable>(_ value: T, to url: URL, expected: OwnerCatalogExpectation? = nil) throws {
+        let expected = try expected ?? ownerCatalogExpectation(url)
+        let data = try encoder.encode(value)
+        try writer.writeData(data, to: url, expected: expected, validate: { _ = try self.decoder.decode(T.self, from: $0) }, commit: { try $0() })
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from url: URL) throws -> T {
+        guard try ownerCatalogFileExists(url) else { throw ProjectRepositoryError.invalidProjectData }
         let data = try Data(contentsOf: url)
-        try ProjectJSONKeyGuard.validate(data)
+        try UniqueJSONKeyGuard.validate(data)
         return try decoder.decode(type, from: data)
     }
 }
 
+struct OwnerCatalogVersion: Equatable, Sendable {
+    let device: dev_t
+    let inode: ino_t
+    let size: off_t
+    let modifiedSeconds: Int
+    let modifiedNanoseconds: Int
+    let changedSeconds: Int
+    let changedNanoseconds: Int
+
+    init(_ information: stat) throws {
+        guard (information.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        device = information.st_dev
+        inode = information.st_ino
+        size = information.st_size
+        modifiedSeconds = information.st_mtimespec.tv_sec
+        modifiedNanoseconds = information.st_mtimespec.tv_nsec
+        changedSeconds = information.st_ctimespec.tv_sec
+        changedNanoseconds = information.st_ctimespec.tv_nsec
+    }
+}
+
+struct OwnerCatalogSnapshot: Equatable, Sendable {
+    let version: OwnerCatalogVersion
+    let bytes: Data
+}
+
+enum OwnerCatalogExpectation: Equatable, Sendable {
+    case absent
+    case present(OwnerCatalogSnapshot)
+
+    var bytes: Data? {
+        if case let .present(snapshot) = self { return snapshot.bytes }
+        return nil
+    }
+}
+
+func ownerCatalogExpectation(_ url: URL) throws -> OwnerCatalogExpectation {
+    guard try ownerCatalogFileExists(url) else { return .absent }
+    return .present(try ownerCatalogSnapshot(url))
+}
+
+/// Flush a newly published catalog and its directory before acknowledging a
+/// reservation. Detect a visible replacement while doing so.
+func synchronizeOwnerCatalog(_ url: URL, expectedBytes: Data) throws {
+    let expected = try ownerCatalogExpectation(url)
+    guard case let .present(snapshot) = expected, snapshot.bytes == expectedBytes else { throw ProjectRepositoryError.invalidProjectData }
+    let descriptor = url.path.withCString { open($0, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK) }
+    guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    defer { close(descriptor) }
+    var information = stat()
+    guard fstat(descriptor, &information) == 0,
+          try OwnerCatalogVersion(information) == snapshot.version else { throw ProjectRepositoryError.invalidProjectData }
+    guard fsync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    guard fstat(descriptor, &information) == 0,
+          try OwnerCatalogVersion(information) == snapshot.version else { throw ProjectRepositoryError.invalidProjectData }
+    let directory = url.deletingLastPathComponent().path.withCString { open($0, O_RDONLY | O_CLOEXEC) }
+    guard directory >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    defer { close(directory) }
+    guard fsync(directory) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    guard try ownerCatalogExpectation(url) == expected else { throw ProjectRepositoryError.invalidProjectData }
+}
+
+private func ownerCatalogExpectationMatchesVersion(_ url: URL, _ expected: OwnerCatalogExpectation) throws -> Bool {
+    switch expected {
+    case .absent: return try !ownerCatalogFileExists(url)
+    case let .present(snapshot):
+        guard try ownerCatalogFileExists(url) else { return false }
+        return try ownerCatalogVersion(url) == snapshot.version
+    }
+}
+
+private func ownerCatalogVersion(_ url: URL) throws -> OwnerCatalogVersion {
+    var information = stat()
+    guard url.path.withCString({ lstat($0, &information) }) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    return try OwnerCatalogVersion(information)
+}
+
+/// Read the same regular file that remains at this directory entry. Capturing
+/// both its identity and bytes lets a staged update reject a changed source.
+private func ownerCatalogSnapshot(_ url: URL) throws -> OwnerCatalogSnapshot {
+    let descriptor = url.path.withCString { Darwin.open($0, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK) }
+    guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    defer { try? handle.close() }
+    var information = stat()
+    guard fstat(descriptor, &information) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    let before = try OwnerCatalogVersion(information)
+    let bytes = try handle.readToEnd() ?? Data()
+    guard fstat(descriptor, &information) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    let after = try OwnerCatalogVersion(information)
+    guard before == after, try ownerCatalogVersion(url) == after else { throw ProjectRepositoryError.invalidProjectData }
+    return OwnerCatalogSnapshot(version: after, bytes: bytes)
+}
+
+/// Inspect the directory entry itself, including dangling symlinks. URL
+/// resource values can be cached and fileExists follows symlinks.
+func ownerCatalogFileExists(_ url: URL) throws -> Bool {
+    var information = stat()
+    let result = url.path.withCString { lstat($0, &information) }
+    if result != 0 {
+        if errno == ENOENT { return false }
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    guard (information.st_mode & mode_t(S_IFMT)) != mode_t(S_IFLNK) else {
+        throw ProjectRepositoryError.invalidProjectData
+    }
+    return true
+}
+
 /// Foundation's keyed decoder accepts duplicate JSON names. Reject them before
 /// decoding so corrupt indexes cannot be interpreted as a different owner.
-private struct ProjectJSONKeyGuard {
+struct UniqueJSONKeyGuard {
     private let bytes: [UInt8]
     private var offset = 0
 
@@ -690,6 +935,7 @@ enum ProjectRepositoryError: LocalizedError {
     case missingSessionIndex
     case conflictingSessionMode
     case conflictingSessionScope
+    case missingSessionTranscriptPath
     case invalidSessionOwnership(String)
 
     var errorDescription: String? {
@@ -711,6 +957,7 @@ enum ProjectRepositoryError: LocalizedError {
         case .missingSessionIndex: return "The project session index is missing; existing files were preserved."
         case .conflictingSessionMode: return "The session already belongs to a different mode."
         case .conflictingSessionScope: return "The session belongs to conflicting conversation spaces; the original files were preserved."
+        case .missingSessionTranscriptPath: return "The selected session's transcript path is unavailable. The session was not opened."
         case .invalidSessionOwnership(let message): return message
         }
     }

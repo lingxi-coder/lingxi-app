@@ -32,6 +32,8 @@ struct VoiceSpeechRequest: Equatable {
     var route: AudioRouteResolution? = nil
     var maxPayloadBytes: UInt64? = nil
     var configurationRevision: UInt64? = nil
+    var configurationSnapshot: AudioConfigurationSnapshot? = nil
+    var audioOwner: IOSAudioOwner? = nil
 }
 
 struct VoiceSpeechConfiguration: Equatable {
@@ -66,6 +68,8 @@ protocol VoiceSpeechPlaying: AnyObject {
     func speak(_ request: VoiceSpeechRequest) async throws -> VoiceSpeechPlaybackOutcome
     func stop()
     func stopAndWait() async
+    /// Stop only ordinary automatic speech, with a native cleanup receipt.
+    func stopAutomaticPlaybackAndWait() async -> Bool
     func openStream(
         configuration: VoiceSpeechConfiguration,
         managesAudioSession: Bool
@@ -74,6 +78,7 @@ protocol VoiceSpeechPlaying: AnyObject {
 
 extension VoiceSpeechPlaying {
     func stopAndWait() async { stop() }
+    func stopAutomaticPlaybackAndWait() async -> Bool { await stopAndWait(); return true }
 }
 
 @MainActor
@@ -101,7 +106,9 @@ final class SystemVoiceSpeechPlayer: VoiceSpeechPlaying {
                 speed: request.speed,
                 route: request.route,
                 maxPayloadBytes: request.maxPayloadBytes,
-                configurationRevision: request.configurationRevision
+                configurationRevision: request.configurationRevision,
+                configurationSnapshot: request.configurationSnapshot,
+                audioOwner: request.audioOwner
             ),
             managesAudioSession: true
         )
@@ -492,14 +499,12 @@ final class VoicePreviewPlayback {
     }
 
     func stop() async {
-        let task = activeTask
+        guard let task = activeTask else { return }
         activeID = nil
         activeTask = nil
-        task?.cancel()
-        player.stop()
-        if let task {
-            _ = await task.result
-        }
+        task.cancel()
+        _ = await player.stopAutomaticPlaybackAndWait()
+        _ = await task.result
     }
 
     private func clearIfCurrent(_ id: UUID) {
@@ -540,19 +545,59 @@ private final class FlowResponseContext {
 @MainActor
 final class VoiceInteractionOwnership {
     static let shared = VoiceInteractionOwnership()
-    private var owner: VoiceInteractionController?
+    private let lane = VoiceAudioOwnership<VoiceInteractionController>()
 
     func acquire(_ candidate: VoiceInteractionController) -> Bool {
-        guard owner == nil || owner === candidate else { return false }
-        owner = candidate
-        return true
+        guard !(lane.owner === candidate && lane.kind == .automatic) else { return false }
+        return lane.acquire(candidate, kind: .explicit)
     }
 
-    func owns(_ candidate: VoiceInteractionController) -> Bool { owner === candidate }
+    func acquireAutomatic(_ candidate: VoiceInteractionController) -> Bool {
+        lane.acquire(candidate, kind: .automatic)
+    }
+    func isAutomatic(_ candidate: VoiceInteractionController) -> Bool {
+        lane.owner === candidate && lane.kind == .automatic
+    }
+    func reserveExplicit(_ candidate: VoiceInteractionController) -> VoiceInteractionController? {
+        lane.reserveExplicit(candidate)
+    }
+    func finishReservation(_ candidate: VoiceInteractionController, canAcquire: Bool) -> Bool {
+        let acquired = lane.finishReservation(candidate, canAcquire: canAcquire)
+        if !acquired { drainAutomatic() }
+        return acquired
+    }
+    func enqueueAutomatic(_ candidate: VoiceInteractionController) { lane.enqueueAutomatic(candidate) }
+    func removeAutomatic(_ candidate: VoiceInteractionController) { lane.removeAutomatic(candidate) }
+    func reconsiderAutomatic() { drainAutomatic() }
+    func owns(_ candidate: VoiceInteractionController) -> Bool { lane.owner === candidate }
     func release(_ candidate: VoiceInteractionController) {
-        if owner === candidate { owner = nil }
+        lane.release(candidate)
+        drainAutomatic()
+    }
+    private func drainAutomatic() {
+        var remaining = lane.waitingCount
+        while remaining > 0, let candidate = lane.nextAutomatic() {
+            remaining -= 1
+            _ = candidate.resumePendingAutomaticPlayback()
+        }
     }
 }
+
+@MainActor
+protocol VoiceRealtimeControlling: AnyObject {
+    var isActive: Bool { get }
+    var isAttached: Bool { get }
+    var onStateChange: ((IOSRealtimeAudioPhase, String, String?) -> Void)? { get set }
+    func reserveStart(owner: IOSAudioOwner?) -> Bool
+    func restoreReservedStart(owner: IOSAudioOwner?)
+    func start(snapshot: AudioConfigurationSnapshot) async throws
+    func stop(abort: Bool) async -> Bool
+    func commitInput()
+    func interrupt() async
+    func finishCurrentTurnAndClose()
+}
+
+extension IOSRealtimeAudioService: VoiceRealtimeControlling {}
 
 /// Main-actor state machine for both chat dictation and hands-free Flow Mode.
 /// A generation is captured by every async/callback edge so a closed panel or
@@ -574,16 +619,25 @@ final class VoiceInteractionController {
     private let bargeInRecognizer: (any VoiceBargeInRecognizing)?
     private let readinessOverride: (@MainActor () -> VoiceConfigurationReadiness)?
     private let permissionRequester: @MainActor () async -> Void
+    private let realtimeSession: any VoiceRealtimeControlling
+    private let realtimeReadinessOverride: (@MainActor () -> Bool)?
     private let loopDelay: Duration
     private let flowSilenceInterval: Duration
     private var source: (any ConversationSource)?
     private var flowContext: FlowResponseContext?
     private var activeFlowToken: ConversationTurnToken?
+    private var flowSubmitPending = false
     private var suppressedFlowToken: ConversationTurnToken?
     private var automaticPlaybackToken: ConversationTurnToken?
+    private var automaticPlaybackOwner: IOSAudioOwner?
+    private var automaticPlaybackSnapshot: AudioConfigurationSnapshot?
+    private var pendingAutomaticCompletion: ConversationTurnCompletion?
+    private var automaticPlaybackCleanup: Task<Bool, Never>?
+    private var automaticStopUnconfirmed = false
     private var dictationCompletion: ((String) -> Void)?
     private var rejectedFlowTranscript: ((String) -> Void)?
     private var transitionTask: Task<Void, Never>?
+    private var captureStartGeneration: UInt64?
     private var speechTask: Task<Void, Never>?
     private var responseSetupTask: Task<Void, Never>?
     private var bargeInEventTask: Task<Void, Never>?
@@ -600,10 +654,12 @@ final class VoiceInteractionController {
     private let controlsRealtimeSession: Bool
     private let ownership: VoiceInteractionOwnership
     private var ownsRealtimeSession = false
+    private var realtimeStartPending = false
     private var finishFlowAfterNavigation = false
     private var finishRealtimeAfterNavigation = false
     private var finishDictationAfterNavigation = false
     private var activeAudioConfigurationSnapshot: AudioConfigurationSnapshot?
+    private var activeRecognitionRoute: AudioRouteResolution?
     private var activeSpeechRoute: AudioRouteResolution?
     private var activeVoiceAudioOwner: IOSAudioOwner?
 
@@ -617,6 +673,8 @@ final class VoiceInteractionController {
         bargeInRecognizer = IOSAudioService.shared.bargeInRecognizer
         readinessOverride = nil
         permissionRequester = { await capability.requestPermissions() }
+        realtimeSession = IOSRealtimeAudioService.shared
+        realtimeReadinessOverride = nil
         loopDelay = .milliseconds(350)
         flowSilenceInterval = .milliseconds(1_200)
     }
@@ -630,6 +688,8 @@ final class VoiceInteractionController {
         ownership: VoiceInteractionOwnership? = nil,
         readinessOverride: (@MainActor () -> VoiceConfigurationReadiness)? = nil,
         permissionRequester: (@MainActor () async -> Void)? = nil,
+        realtimeSession: (any VoiceRealtimeControlling)? = nil,
+        realtimeReadinessOverride: (@MainActor () -> Bool)? = nil,
         loopDelay: Duration = .milliseconds(350),
         flowSilenceInterval: Duration = .milliseconds(1_200)
     ) {
@@ -643,6 +703,8 @@ final class VoiceInteractionController {
         self.permissionRequester = permissionRequester ?? {
             await capability.requestPermissions()
         }
+        self.realtimeSession = realtimeSession ?? IOSRealtimeAudioService.shared
+        self.realtimeReadinessOverride = realtimeReadinessOverride
         self.loopDelay = loopDelay
         self.flowSilenceInterval = flowSilenceInterval
     }
@@ -716,15 +778,22 @@ final class VoiceInteractionController {
         }
     }
 
-    func startDictation(onTranscript: @escaping (String) -> Void) {
+    func startDictation(audioOwner: IOSAudioOwner? = nil, onTranscript: @escaping (String) -> Void) {
         guard mode != .flow else { return }
         guard phase != .requestingPermission else { return }
         guard ownership.acquire(self) else {
+            if deferExplicitStart(for: .dictation, resume: { [weak self] in
+                self?.startDictation(audioOwner: audioOwner, onTranscript: onTranscript)
+            }) { return }
             mode = .dictation
             fail(String(localized: "voice_session_busy_retry"))
             return
         }
         beginOperation(mode: .dictation)
+        activeVoiceAudioOwner = audioOwner
+        activeAudioConfigurationSnapshot = capability.configurationSnapshot
+        activeRecognitionRoute = AudioConfigurationRuntime.route(kind: .recognition, snapshot: capability.configurationSnapshot)
+        activeSpeechRoute = AudioConfigurationRuntime.route(kind: .speech, snapshot: capability.configurationSnapshot)
         dictationCompletion = onTranscript
         guard currentReadiness.isReadyForDictation else {
             recoverUnavailablePermissionsOrRequireConfiguration(for: .dictation)
@@ -741,11 +810,18 @@ final class VoiceInteractionController {
             mode = .flow
             self.source = source
             rejectedFlowTranscript = onRejectedTranscript
+            if deferExplicitStart(for: .flow, resume: { [weak self] in
+                self?.startFlow(source: source, onRejectedTranscript: onRejectedTranscript)
+            }) { return }
             fail(String(localized: "voice_session_busy_retry"))
             return
         }
         beginOperation(mode: .flow)
         self.source = source
+        activeVoiceAudioOwner = source.voiceAudioOwner
+        activeAudioConfigurationSnapshot = capability.configurationSnapshot
+        activeRecognitionRoute = AudioConfigurationRuntime.route(kind: .recognition, snapshot: capability.configurationSnapshot)
+        activeSpeechRoute = AudioConfigurationRuntime.route(kind: .speech, snapshot: capability.configurationSnapshot)
         rejectedFlowTranscript = onRejectedTranscript
         if capability.configurationSnapshot.configuration.conversation.mode == "realtime" {
             startRealtimeConversation()
@@ -767,8 +843,8 @@ final class VoiceInteractionController {
 
     func finishListening() {
         if mode == .flow, controlsRealtimeSession, ownsRealtimeSession,
-           IOSRealtimeAudioService.shared.isActive {
-            IOSRealtimeAudioService.shared.commitInput()
+           realtimeSession.isActive {
+            realtimeSession.commitInput()
             return
         }
         if phase == .requestingPermission, mode == .dictation {
@@ -787,8 +863,9 @@ final class VoiceInteractionController {
 
     func handleOrbTap() {
         if mode == .flow, controlsRealtimeSession, ownsRealtimeSession,
-           IOSRealtimeAudioService.shared.isActive, phase == .thinking || phase == .speaking {
-            Task { await IOSRealtimeAudioService.shared.interrupt() }
+           realtimeSession.isActive, phase == .thinking || phase == .speaking {
+            let realtimeSession = realtimeSession
+            Task { await realtimeSession.interrupt() }
             return
         }
         switch phase {
@@ -804,11 +881,16 @@ final class VoiceInteractionController {
     }
 
     func retry() {
+        guard let requestedMode = mode else { return }
         guard ownership.acquire(self) else {
+            if deferExplicitStart(for: requestedMode, resetMode: false, resume: { [weak self] in self?.retry() }) { return }
             fail(String(localized: "voice_session_busy_retry"))
             return
         }
         capability.reloadFromDefaults()
+        activeAudioConfigurationSnapshot = capability.configurationSnapshot
+        activeRecognitionRoute = AudioConfigurationRuntime.route(kind: .recognition, snapshot: capability.configurationSnapshot)
+        activeSpeechRoute = AudioConfigurationRuntime.route(kind: .speech, snapshot: capability.configurationSnapshot)
         detailOverride = nil
         if mode == .flow, capability.configurationSnapshot.configuration.conversation.mode == "realtime" {
             startRealtimeConversation()
@@ -865,12 +947,14 @@ final class VoiceInteractionController {
     /// Register the exact ordinary-chat turn that may be played when the
     /// user's auto-play preference is enabled. Flow turns bypass this path and
     /// always speak through their owned token.
-    func registerAutomaticPlaybackCandidate(_ token: ConversationTurnToken) {
+    func registerAutomaticPlaybackCandidate(_ token: ConversationTurnToken, audioOwner: IOSAudioOwner? = nil) {
+        ownership.removeAutomatic(self)
+        pendingAutomaticCompletion = nil
         automaticPlaybackToken = token
-        if speechTask != nil {
-            nextGeneration()
-            speechTask?.cancel()
-            speechPlayer.stop()
+        automaticPlaybackOwner = audioOwner
+        automaticPlaybackSnapshot = capability.configurationSnapshot
+        if ownership.isAutomatic(self), speechTask != nil || automaticPlaybackCleanup != nil {
+            _ = beginAutomaticPlaybackCleanup()
         }
     }
 
@@ -891,6 +975,10 @@ final class VoiceInteractionController {
     }
 
     func handleTurnCompletion(_ completion: ConversationTurnCompletion) {
+        if completion.token == automaticPlaybackToken {
+            handleAutomaticTurnCompletion(completion, allowPlayback: mode == nil)
+            return
+        }
         guard mode == .flow else {
             handleAutomaticTurnCompletion(completion, allowPlayback: mode == nil)
             return
@@ -951,15 +1039,27 @@ final class VoiceInteractionController {
     }
 
     func handleBackground() {
-        guard ownership.owns(self) else { return }
+        if !ownership.owns(self) {
+            ownership.removeAutomatic(self)
+            pendingAutomaticCompletion = nil
+            automaticPlaybackToken = nil
+            automaticPlaybackOwner = nil
+            automaticPlaybackSnapshot = nil
+            return
+        }
         if controlsRealtimeSession && ownsRealtimeSession {
+            let realtimeSession = realtimeSession
             Task { @MainActor [weak self] in
-                if await IOSRealtimeAudioService.shared.stop(abort: true) {
+                if await realtimeSession.stop(abort: true) {
                     self?.ownsRealtimeSession = false
                 }
             }
         }
         automaticPlaybackToken = nil
+        automaticPlaybackOwner = nil
+        automaticPlaybackSnapshot = nil
+        ownership.removeAutomatic(self)
+        pendingAutomaticCompletion = nil
         if mode == nil {
             close(cancelOwnedTurn: false)
             return
@@ -988,9 +1088,22 @@ final class VoiceInteractionController {
     }
 
     func handleContextChange() {
+        // An ordinary turn's optional reply playback belongs to this owner,
+        // even if its view disappears before the turn or playback finishes.
+        if mode == nil, automaticPlaybackToken != nil || speechTask != nil || automaticPlaybackCleanup != nil || automaticStopUnconfirmed { return }
         if mode == .flow, activeFlowToken != nil, flowContext != nil {
             finishFlowAfterNavigation = true
             return
+        }
+        if mode == .flow, flowSubmitPending, ownership.owns(self) {
+            finishFlowAfterNavigation = true
+            return
+        }
+        // Permission and prior-audio cleanup may suspend after this owner has
+        // already acquired the explicit lane, before capture leaves idle.
+        if captureStartGeneration != nil, ownership.owns(self) {
+            if mode == .dictation { finishDictationAfterNavigation = true; return }
+            if mode == .flow { finishFlowAfterNavigation = true; return }
         }
         // A capture may already contain speech even before a turn exists.
         // Keep its callback bound to the old draft/owner until it settles.
@@ -1002,17 +1115,99 @@ final class VoiceInteractionController {
             finishFlowAfterNavigation = true
             return
         }
-        if controlsRealtimeSession && ownsRealtimeSession && IOSRealtimeAudioService.shared.isActive {
+        if controlsRealtimeSession && ownsRealtimeSession {
             finishRealtimeAfterNavigation = true
-            IOSRealtimeAudioService.shared.finishCurrentTurnAndClose()
+            if !realtimeStartPending { realtimeSession.finishCurrentTurnAndClose() }
             return
         }
         close(cancelOwnedTurn: false)
     }
 
+    /// Explicit capture may interrupt optional auto-play, but never an active
+    /// Flow or dictation owner. The reservation prevents queued speech from
+    /// reacquiring the lane until native playback has actually drained.
+    private func deferExplicitStart(for requestedMode: VoiceInteractionMode, resetMode: Bool = true,
+                                    resume: @escaping @MainActor () -> Void) -> Bool {
+        guard let previous = ownership.reserveExplicit(self) else { return false }
+        let operation = nextGeneration()
+        mode = requestedMode
+        transition(to: .requestingPermission)
+        transitionTask?.cancel()
+        transitionTask = Task { @MainActor [self, previous] in
+            let stopped = await previous.stopAutomaticPlaybackForPreemption()
+            let current = !Task.isCancelled && generation == operation && mode == requestedMode
+            let acquired = ownership.finishReservation(self, canAcquire: stopped && current)
+            guard current else {
+                if acquired { ownership.release(self) }
+                return
+            }
+            guard acquired else {
+                transitionTask = nil
+                fail(String(localized: "voice_session_busy_retry"))
+                return
+            }
+            transitionTask = nil
+            if resetMode { mode = nil }
+            phase = .paused
+            resume()
+        }
+        return true
+    }
+
+    private func stopAutomaticPlaybackForPreemption() async -> Bool {
+        guard let cleanup = beginAutomaticPlaybackCleanup() else { return false }
+        return await cleanup.value
+    }
+
+    private func beginAutomaticPlaybackCleanup() -> Task<Bool, Never>? {
+        if let automaticPlaybackCleanup { return automaticPlaybackCleanup }
+        guard ownership.isAutomatic(self) else { return nil }
+        let active = speechTask
+        speechTask = nil
+        automaticStopUnconfirmed = true
+        active?.cancel()
+        let cleanup = Task { @MainActor [self] in
+            let stopped = await speechPlayer.stopAutomaticPlaybackAndWait()
+            let drained: Bool
+            if let active, stopped {
+                drained = await VoiceAudioStopDeadline.completed(active, within: .seconds(5))
+            } else {
+                drained = stopped
+            }
+            if drained {
+                automaticPlaybackCleanup = nil
+                automaticStopUnconfirmed = false
+                ownership.release(self)
+            } else {
+                // Keep the lane quarantined until a later retry confirms native
+                // cleanup; a finished caller is not a device stop receipt.
+                automaticPlaybackCleanup = nil
+                speechTask = active
+            }
+            return drained
+        }
+        automaticPlaybackCleanup = cleanup
+        return cleanup
+    }
+
+    fileprivate func resumePendingAutomaticPlayback() -> Bool {
+        guard let completion = pendingAutomaticCompletion else { return true }
+        if mode != nil {
+            ownership.enqueueAutomatic(self)
+            return false
+        }
+        pendingAutomaticCompletion = nil
+        handleAutomaticTurnCompletion(completion, allowPlayback: mode == nil)
+        return pendingAutomaticCompletion == nil
+    }
+
     func handleContextRestored() {
         finishFlowAfterNavigation = false
         finishDictationAfterNavigation = false
+        if realtimeStartPending {
+            finishRealtimeAfterNavigation = false
+            realtimeSession.restoreReservedStart(owner: source?.voiceAudioOwner)
+        }
     }
 
     func close() {
@@ -1021,29 +1216,32 @@ final class VoiceInteractionController {
 
     private func close(cancelOwnedTurn: Bool) {
         let ownedAudio = ownership.owns(self)
+        let automaticStop = ownership.isAutomatic(self) ? beginAutomaticPlaybackCleanup() : nil
         var realtimeStop: Task<Bool, Never>?
         if controlsRealtimeSession && ownsRealtimeSession {
+            let realtimeSession = realtimeSession
             if cancelOwnedTurn {
-                realtimeStop = Task { await IOSRealtimeAudioService.shared.stop(abort: true) }
+                realtimeStop = Task { await realtimeSession.stop(abort: true) }
             } else {
-                IOSRealtimeAudioService.shared.finishCurrentTurnAndClose()
+                realtimeSession.finishCurrentTurnAndClose()
             }
         }
-        let ownedSource = activeFlowToken == nil ? nil : source
+        let ownedSource = activeFlowToken == nil && !flowSubmitPending ? nil : source
         let context = flowContext
         let activeSpeech = speechTask
+        let hasOwnedPlayback = activeSpeech != nil || context?.speechSession != nil
         invalidateTasks(keepingMode: false, cancelOwnedTurn: false)
         stopFlowAudioDetached(context)
         let capture = voiceCapture.cancelForDrain()
-        if ownedAudio { speechPlayer.stop() }
+        if ownedAudio, automaticStop == nil, hasOwnedPlayback { speechPlayer.stop() }
         activeFlowToken = nil
+        flowSubmitPending = false
         suppressedFlowToken = nil
         flowContext = nil
         pendingInterruptionTranscript = nil
         isCancellingFlowTurn = false
         flowPausedInBackground = false
         source = nil
-        automaticPlaybackToken = nil
         dictationCompletion = nil
         rejectedFlowTranscript = nil
         caption = ""
@@ -1054,8 +1252,9 @@ final class VoiceInteractionController {
         finishFlowAfterNavigation = false
         finishRealtimeAfterNavigation = false
         finishDictationAfterNavigation = false
+        if !ownedAudio { ownership.reconsiderAutomatic() }
 
-        if ownedAudio {
+        if ownedAudio, automaticStop == nil {
             let closedGeneration = generation
             let cleanup = audioCleanupTask?.task
             Task { @MainActor [weak self] in
@@ -1070,7 +1269,7 @@ final class VoiceInteractionController {
                     return
                 }
                 self.ownsRealtimeSession = false
-                await self.speechPlayer.stopAndWait()
+                if hasOwnedPlayback { await self.speechPlayer.stopAndWait() }
                 guard self.generation == closedGeneration, self.mode == nil else { return }
                 self.ownership.release(self)
             }
@@ -1087,20 +1286,26 @@ final class VoiceInteractionController {
             fail(String(localized: "voice_flow_busy_wait_to_open"))
             return
         }
-        let realtime = IOSRealtimeAudioService.shared
+        let realtime = realtimeSession
         guard !realtime.isActive else {
             fail(String(localized: "voice_session_busy_retry"))
             return
         }
-        guard realtime.isAttached, capability.cloudService.realtimeCapability?.supported == true else {
+        let supported = realtimeReadinessOverride?() ?? (capability.cloudService.realtimeCapability?.supported == true)
+        guard realtime.isAttached, supported else {
             detailOverride = capability.cloudService.realtimeCapability?.reason ?? String(localized: "audio_realtime_unavailable")
             transition(to: .configurationRequired)
             resumeAfterConfiguration = true
             return
         }
-        let snapshot = capability.configurationSnapshot
+        let snapshot = activeAudioConfigurationSnapshot ?? capability.configurationSnapshot
+        guard realtime.reserveStart(owner: source.voiceAudioOwner) else {
+            fail(String(localized: "voice_session_busy_retry"))
+            return
+        }
         let operation = nextGeneration()
         ownsRealtimeSession = true
+        realtimeStartPending = true
         realtime.onStateChange = { [weak self] state, caption, error in
             guard let self, self.mode == .flow, self.generation == operation else { return }
             self.caption = caption
@@ -1123,12 +1328,31 @@ final class VoiceInteractionController {
         }
         transitionTask?.cancel()
         transitionTask = Task { @MainActor [weak self] in
-            do { try await realtime.start(snapshot: snapshot) }
-            catch is CancellationError {}
+            guard let self, !Task.isCancelled, self.generation == operation else { return }
+            do {
+                try await realtime.start(snapshot: snapshot)
+                guard !Task.isCancelled, self.generation == operation else { return }
+                self.realtimeStartPending = false
+                self.transitionTask = nil
+                if self.finishRealtimeAfterNavigation { realtime.finishCurrentTurnAndClose() }
+            }
+            catch is CancellationError {
+                guard !Task.isCancelled, self.generation == operation else { return }
+                let stopped = await realtime.stop(abort: true)
+                guard self.generation == operation else { return }
+                self.realtimeStartPending = false
+                self.ownsRealtimeSession = !stopped
+                if self.finishRealtimeAfterNavigation { self.close(cancelOwnedTurn: false) }
+                else { self.fail(String(localized: "voice_turn_cancelled_retry")) }
+            }
             catch {
-                guard let self, self.generation == operation else { return }
-                self.ownsRealtimeSession = false
-                self.fail(error.localizedDescription)
+                guard self.generation == operation else { return }
+                let stopped = await realtime.stop(abort: true)
+                guard self.generation == operation else { return }
+                self.realtimeStartPending = false
+                self.ownsRealtimeSession = !stopped
+                if self.finishRealtimeAfterNavigation { self.close(cancelOwnedTurn: false) }
+                else { self.fail(error.localizedDescription) }
             }
         }
     }
@@ -1137,13 +1361,27 @@ final class VoiceInteractionController {
         readinessOverride?() ?? capability.configurationReadiness
     }
 
+    private func admittedCaptureIsReady(for mode: VoiceInteractionMode) -> Bool {
+        if readinessOverride != nil {
+            return mode == .flow ? currentReadiness.isReadyForFlow : currentReadiness.isReadyForDictation
+        }
+        guard let recognition = activeRecognitionRoute, recognition.effective != nil,
+              capability.microphonePermissionStatus == .granted else { return false }
+        let systemRecognition = recognition.effective?.source == .system
+        guard !systemRecognition || capability.speechAuthorization == .authorized else { return false }
+        let recognitionReady = recognition.status == .ready ||
+            (systemRecognition && recognition.status == .permissionRequired)
+        return recognitionReady && (mode != .flow || activeSpeechRoute?.status == .ready)
+    }
+
     private func beginOperation(mode: VoiceInteractionMode) {
         if self.mode != mode {
             let context = flowContext
+            let hadSpeech = speechTask != nil || context?.speechSession != nil
             invalidateTasks(keepingMode: false, cancelOwnedTurn: false)
             stopFlowAudioDetached(context)
             voiceCapture.cancel()
-            speechPlayer.stop()
+            if hadSpeech { speechPlayer.stop() }
             activeFlowToken = nil
             suppressedFlowToken = nil
             flowContext = nil
@@ -1151,7 +1389,6 @@ final class VoiceInteractionController {
             isCancellingFlowTurn = false
             flowPausedInBackground = false
             source = nil
-            automaticPlaybackToken = nil
             dictationCompletion = nil
             rejectedFlowTranscript = nil
         }
@@ -1163,6 +1400,10 @@ final class VoiceInteractionController {
     }
 
     private func requireConfiguration(for mode: VoiceInteractionMode) {
+        if (mode == .dictation && finishDictationAfterNavigation) || (mode == .flow && finishFlowAfterNavigation) {
+            close(cancelOwnedTurn: false)
+            return
+        }
         resumeAfterConfiguration = true
         detailOverride = configurationMessage(for: mode)
         transition(to: .configurationRequired)
@@ -1183,6 +1424,7 @@ final class VoiceInteractionController {
         detailOverride = String(localized: "voice_needs_permission_setup")
         transition(to: .requestingPermission)
         let operation = nextGeneration()
+        captureStartGeneration = operation
         transitionTask?.cancel()
         transitionTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1193,13 +1435,12 @@ final class VoiceInteractionController {
             else { return }
 
             self.capability.reloadFromDefaults()
-            let isReady = mode == .flow
-                ? self.currentReadiness.isReadyForFlow
-                : self.currentReadiness.isReadyForDictation
+            let isReady = self.admittedCaptureIsReady(for: mode)
             self.transitionTask = nil
             if isReady {
                 self.scheduleListening()
             } else {
+                self.captureStartGeneration = nil
                 self.requireConfiguration(for: mode)
             }
         }
@@ -1234,7 +1475,15 @@ final class VoiceInteractionController {
     }
 
     private func scheduleListening(after delay: Duration? = nil) {
+        if delay != nil {
+            activeAudioConfigurationSnapshot = capability.configurationSnapshot
+            activeRecognitionRoute = AudioConfigurationRuntime.route(kind: .recognition, snapshot: capability.configurationSnapshot)
+            activeSpeechRoute = AudioConfigurationRuntime.route(kind: .speech, snapshot: capability.configurationSnapshot)
+        }
         let operation = nextGeneration()
+        // Automatic relistening is idle work; only an explicitly requested
+        // capture is retained when its owner leaves the screen.
+        captureStartGeneration = delay == nil ? operation : nil
         transitionTask?.cancel()
         transitionTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1244,17 +1493,19 @@ final class VoiceInteractionController {
             guard !Task.isCancelled, self.generation == operation else { return }
             await self.waitForFlowAudioCleanup()
             guard !Task.isCancelled, self.generation == operation else { return }
+            await VoicePreviewPlayback.shared.stop()
+            guard !Task.isCancelled, self.generation == operation else { return }
             await self.stopPlaybackAndWait()
             guard !Task.isCancelled, self.generation == operation else { return }
+            self.captureStartGeneration = nil
+            self.transitionTask = nil
             self.beginCapture(operation: operation)
         }
     }
 
     private func beginCapture(operation: UInt64) {
         guard generation == operation, let mode else { return }
-        let ready = mode == .flow
-            ? currentReadiness.isReadyForFlow
-            : currentReadiness.isReadyForDictation
+        let ready = admittedCaptureIsReady(for: mode)
         guard ready else {
             requireConfiguration(for: mode)
             return
@@ -1262,6 +1513,7 @@ final class VoiceInteractionController {
         if mode == .flow,
            let source,
            source.model.streaming || source.model.isCancelling || source.model.sessionTransitionPending {
+            if finishFlowAfterNavigation { close(cancelOwnedTurn: false); return }
             fail(String(localized: "voice_previous_turn_not_finished"))
             return
         }
@@ -1269,15 +1521,13 @@ final class VoiceInteractionController {
         caption = ""
         detailOverride = nil
         resumeAfterConfiguration = false
-        let audioConfigurationSnapshot = capability.configurationSnapshot
-        activeAudioConfigurationSnapshot = audioConfigurationSnapshot
-        activeSpeechRoute = AudioConfigurationRuntime.route(kind: .speech, snapshot: audioConfigurationSnapshot)
-        activeVoiceAudioOwner = source?.voiceAudioOwner
+        let audioConfigurationSnapshot = activeAudioConfigurationSnapshot ?? capability.configurationSnapshot
         transition(to: .listening)
         voiceCapture.start(
-            language: capability.language,
+            language: audioConfigurationSnapshot.configuration.language,
             automaticEndpointAfterSilence: mode == .flow ? flowSilenceInterval : nil,
-            configurationSnapshot: audioConfigurationSnapshot
+            configurationSnapshot: audioConfigurationSnapshot,
+            audioOwner: activeVoiceAudioOwner
         ) { [weak self] result in
             guard let self, self.generation == operation else { return }
             self.handleCaptureResult(result, operation: operation)
@@ -1335,27 +1585,34 @@ final class VoiceInteractionController {
         }
         caption = text
         transition(to: .thinking)
-        guard let token = source.send(text) else {
-            rejectedFlowTranscript?(text)
-            if finishFlowAfterNavigation { close(cancelOwnedTurn: false); return }
-            fail(String(localized: "voice_session_busy_retry"))
-            return
-        }
-        activeFlowToken = token
-        suppressedFlowToken = nil
-        flowPausedInBackground = false
-        pendingInterruptionTranscript = nil
         let operation = nextGeneration()
         let snapshot = activeAudioConfigurationSnapshot ?? capability.configurationSnapshot
-        let context = FlowResponseContext(
-            token: token,
-            operation: operation,
-            audioConfigurationSnapshot: snapshot,
-            speechConfiguration: speechConfiguration(snapshot: snapshot, owner: activeVoiceAudioOwner,
-                                                      route: activeSpeechRoute)
-        )
-        flowContext = context
-        startBargeInMonitoring(context)
+        let speech = speechConfiguration(snapshot: snapshot, owner: activeVoiceAudioOwner, route: activeSpeechRoute)
+        flowSubmitPending = true
+        transitionTask?.cancel()
+        transitionTask = Task { @MainActor [weak self, source] in
+            let token = await source.send(text)
+            guard let self, self.generation == operation, self.mode == .flow, self.source === source else {
+                if token != nil { try? await source.cancelAndWait() }
+                return
+            }
+            self.flowSubmitPending = false
+            self.transitionTask = nil
+            guard let token else {
+                self.rejectedFlowTranscript?(text)
+                if self.finishFlowAfterNavigation { self.close(cancelOwnedTurn: false); return }
+                self.fail(String(localized: "voice_session_busy_retry"))
+                return
+            }
+            self.activeFlowToken = token
+            self.suppressedFlowToken = nil
+            self.flowPausedInBackground = false
+            self.pendingInterruptionTranscript = nil
+            let context = FlowResponseContext(token: token, operation: operation,
+                audioConfigurationSnapshot: snapshot, speechConfiguration: speech)
+            self.flowContext = context
+            self.startBargeInMonitoring(context)
+        }
     }
 
     private var speechConfiguration: VoiceSpeechConfiguration {
@@ -1758,18 +2015,36 @@ final class VoiceInteractionController {
         allowPlayback: Bool
     ) {
         guard completion.token == automaticPlaybackToken else { return }
-        automaticPlaybackToken = nil
-        guard allowPlayback,
-              completion.outcome == .completed,
+        guard completion.outcome == .completed,
               capability.autoPlay,
               currentReadiness.ttsReady
-        else { return }
+        else {
+            automaticPlaybackToken = nil
+            automaticPlaybackOwner = nil
+            automaticPlaybackSnapshot = nil
+            return
+        }
         let text = Self.spokenText(from: completion.finalAssistantText)
-        guard !text.isEmpty else { return }
-        guard ownership.acquire(self) else { return }
+        guard !text.isEmpty else {
+            automaticPlaybackToken = nil
+            automaticPlaybackOwner = nil
+            automaticPlaybackSnapshot = nil
+            return
+        }
+        guard allowPlayback, mode == nil, automaticPlaybackCleanup == nil,
+              ownership.acquireAutomatic(self) else {
+            pendingAutomaticCompletion = completion
+            ownership.enqueueAutomatic(self)
+            return
+        }
+        let snapshot = automaticPlaybackSnapshot ?? capability.configurationSnapshot
+        let audioOwner = automaticPlaybackOwner
+        automaticPlaybackToken = nil
+        automaticPlaybackOwner = nil
+        automaticPlaybackSnapshot = nil
+        pendingAutomaticCompletion = nil
 
         let operation = nextGeneration()
-        let snapshot = capability.configurationSnapshot
         let route = AudioConfigurationRuntime.route(kind: .speech, snapshot: snapshot)
         let request = VoiceSpeechRequest(
             text: text,
@@ -1781,13 +2056,16 @@ final class VoiceInteractionController {
             speed: snapshot.configuration.rate,
             route: route,
             maxPayloadBytes: IOSAudioService.shared.maximumPayloadBytes,
-            configurationRevision: snapshot.revision
+            configurationRevision: snapshot.revision,
+            configurationSnapshot: snapshot,
+            audioOwner: audioOwner
         )
         speechTask?.cancel()
         speechTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                if self.generation == operation, self.mode == nil {
+                if self.generation == operation, self.mode == nil, !self.automaticStopUnconfirmed {
+                    self.speechTask = nil
                     self.ownership.release(self)
                 }
             }
@@ -1909,10 +2187,10 @@ final class VoiceInteractionController {
     }
 
     private func stopPlaybackAndWait() async {
-        let active = speechTask
-        active?.cancel()
+        guard let active = speechTask else { return }
+        active.cancel()
         speechPlayer.stop()
-        await active?.value
+        await active.value
         speechTask = nil
     }
 
@@ -1932,6 +2210,8 @@ final class VoiceInteractionController {
 
     private func invalidateTasks(keepingMode: Bool, cancelOwnedTurn: Bool) {
         nextGeneration()
+        captureStartGeneration = nil
+        realtimeStartPending = false
         transitionTask?.cancel()
         transitionTask = nil
         speechTask?.cancel()

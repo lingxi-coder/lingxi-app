@@ -37,15 +37,30 @@ enum SideChatCommand {
 }
 
 #if canImport(harness_runtimeFFI)
+struct SideChatUnsentPrompt: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+    let sourceCodeUnits: [UInt16]?
+    let images: [ImageRefDto]
+}
+
 @MainActor @Observable
 final class SideChatEntry: Identifiable {
     let id: String
     let source: EngineConversationSource
-    var draft = ""
-    var draftSourceCodeUnits: [UInt16]?
-    var attachment: ComposerAttachment?
+    private(set) var draftRevision: UInt64 = 0
+    var draft = "" {
+        didSet { if Array(draft.utf16) != Array(oldValue.utf16) { draftRevision &+= 1 } }
+    }
+    var draftSourceCodeUnits: [UInt16]? {
+        didSet { if draftSourceCodeUnits != oldValue { draftRevision &+= 1 } }
+    }
+    var attachment: ComposerAttachment? {
+        didSet { if attachment != oldValue { draftRevision &+= 1 } }
+    }
     var closing = false
     var ending = false
+    private(set) var unsentPrompts: [SideChatUnsentPrompt] = []
     let voice = VoiceInteractionController(voiceCapture: VoiceCapture(), capability: VoiceCapabilityModel(),
         speechPlayer: SystemVoiceSpeechPlayer(), controlsRealtimeSession: false)
     init(source: EngineConversationSource, id: String) {
@@ -53,16 +68,30 @@ final class SideChatEntry: Identifiable {
         self.id = id
         source.onSideSubmissionFailure = { [weak self] text, sourceCodeUnits, images in
             guard let self, !closing else { return }
-            if draft.isEmpty {
-                draft = text
-                draftSourceCodeUnits = sourceCodeUnits
-            }
-            if attachment == nil, let imageRef = images.first,
-               let data = Data(base64Encoded: imageRef.base64), let image = UIImage(data: data) {
-                attachment = ComposerAttachment(image: image, width: Int(image.size.width), height: Int(image.size.height),
-                    mediaType: imageRef.mediaType, base64: imageRef.base64)
-            }
+            unsentPrompts.append(SideChatUnsentPrompt(text: text, sourceCodeUnits: sourceCodeUnits, images: images))
         }
+    }
+
+    var canRestoreUnsent: Bool { draft.isEmpty && draftSourceCodeUnits == nil && attachment == nil }
+
+    @discardableResult
+    func restoreUnsent(_ prompt: SideChatUnsentPrompt) -> Bool {
+        guard canRestoreUnsent, unsentPrompts.contains(prompt), prompt.images.count <= 1 else { return false }
+        var restoredAttachment: ComposerAttachment?
+        if let imageRef = prompt.images.first {
+            guard let data = Data(base64Encoded: imageRef.base64), let image = UIImage(data: data) else { return false }
+            restoredAttachment = ComposerAttachment(image: image, width: Int(image.size.width), height: Int(image.size.height),
+                mediaType: imageRef.mediaType, base64: imageRef.base64)
+        }
+        draft = prompt.text
+        draftSourceCodeUnits = prompt.sourceCodeUnits
+        attachment = restoredAttachment
+        unsentPrompts.removeAll { $0.id == prompt.id }
+        return true
+    }
+
+    func discardUnsent(_ prompt: SideChatUnsentPrompt) {
+        unsentPrompts.removeAll { $0.id == prompt.id }
     }
 }
 
@@ -153,17 +182,32 @@ final class SideChatCollection {
                 entries.append(entry)
                 selectedID = entry.id
                 if let input, !input.isEmpty {
+                    let initialRevision = entry.draftRevision
+                    var admitted = false
                     if !isBackgrounded && self.foregroundGeneration == foregroundGeneration {
-                        if child.send(
+                        admitted = await child.send(
                             input,
                             sourceCodeUnits: inputSourceCodeUnits,
                             images: [],
                             selectedSlashCommand: nil
-                        ) == nil {
-                            entry.draft = input
-                            entry.draftSourceCodeUnits = inputSourceCodeUnits
+                        ) != nil
+                        if admitted && (isBackgrounded || self.foregroundGeneration != foregroundGeneration) {
+                            // Background cancellation may have run while send was
+                            // suspended. Drain again after admission so it cannot
+                            // miss a turn that appeared after the first cancel.
+                            do { try await child.cancelAndWait() }
+                            catch { self.error = error.localizedDescription }
                         }
-                    } else {
+                    }
+                    if !admitted {
+                        // A newly selected child can be edited while admission
+                        // suspends. Leave the parent's original draft intact if
+                        // the child no longer owns an untouched empty draft.
+                        guard entry.draftRevision == initialRevision, entry.draft.isEmpty,
+                              entry.draftSourceCodeUnits == nil, entry.attachment == nil else {
+                            completion(false)
+                            return
+                        }
                         entry.draft = input
                         entry.draftSourceCodeUnits = inputSourceCodeUnits
                     }
@@ -310,13 +354,29 @@ struct SideChatSheet: View {
 private struct SideChatConversation: View {
     @Bindable var entry: SideChatEntry
     var body: some View {
-        ChatView(session: SessionRef(id: entry.id, title: String(localized: "side_chat_title")), draft: $entry.draft,
-                 voiceInteraction: entry.voice, source: entry.source,
-                 draftSourceCodeUnits: $entry.draftSourceCodeUnits, attachmentBinding: $entry.attachment)
-            .background {
-                EnginePermissionPromptHost(model: entry.source.model,
-                    onApprove: entry.source.approvePermission, onDeny: entry.source.denyPermission)
+        let owner = entry
+        VStack(spacing: 0) {
+            ChatView(session: SessionRef(id: owner.id, title: String(localized: "side_chat_title")),
+                 draft: Binding(get: { owner.draft }, set: { owner.draft = $0 }),
+                 voiceInteraction: owner.voice, source: owner.source,
+                 draftRevision: { owner.draftRevision },
+                 draftSourceCodeUnits: Binding(get: { owner.draftSourceCodeUnits }, set: { owner.draftSourceCodeUnits = $0 }),
+                 attachmentBinding: Binding(get: { owner.attachment }, set: { owner.attachment = $0 }))
+                .background {
+                    EnginePermissionPromptHost(model: entry.source.model,
+                        onApprove: entry.source.approvePermission, onDeny: entry.source.denyPermission)
+                }
+            ForEach(owner.unsentPrompts) { prompt in
+                HStack {
+                    if prompt.text.isEmpty { Image(systemName: "photo") }
+                    else { Text(prompt.text).lineLimit(2) }
+                    Spacer()
+                    Button("remote_restore_unsent") { owner.restoreUnsent(prompt) }
+                        .disabled(!owner.canRestoreUnsent)
+                    Button("common_close") { owner.discardUnsent(prompt) }
+                }.font(.caption).padding(10)
             }
+        }
     }
 }
 #endif

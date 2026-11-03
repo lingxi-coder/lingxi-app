@@ -43,11 +43,11 @@ protocol ConversationSource: AnyObject {
     /// MUST be a no-op while a turn is in flight (`model.streaming`) so rapid taps
     /// can't start an overlapping turn (PR-4 item 1).
     @discardableResult
-    func send(_ text: String) -> ConversationTurnToken?
+    func send(_ text: String) async -> ConversationTurnToken?
     /// Submit a prompt and the ordered image attachments reviewed in the composer.
     /// The default keeps mock and non-engine sources source-compatible.
     @discardableResult
-    func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken?
+    func send(_ text: String, images: [ImageRefDto]) async -> ConversationTurnToken?
     /// Submit composer text, preserving exact source code units when the draft
     /// carries identity that a display String cannot represent.
     @discardableResult
@@ -56,7 +56,7 @@ protocol ConversationSource: AnyObject {
         sourceCodeUnits: [UInt16]?,
         images: [ImageRefDto],
         selectedSlashCommand: ConversationSlashCommand?
-    ) -> ConversationTurnToken?
+    ) async -> ConversationTurnToken?
     /// Cancel the in-flight turn (PR-4 item 2): the engine submits `.cancel(...)`
     /// and keeps ownership until the engine confirms safe completion. A no-op
     /// when nothing is streaming.
@@ -122,6 +122,9 @@ protocol ConversationSource: AnyObject {
     /// Await the runtime operation so a native folder picker can display an
     /// error in place and dismiss only after the directory change succeeds.
     func setWorkspaceDirectory(_ path: String, expectedSessionID: String) async throws
+    /// Read the committed workspace from this exact native owner. Event payloads
+    /// and session catalogs alone cannot authorize a change to its stored cwd.
+    func authenticatedWorkspaceState(sessionID: String, mode: SessionMode) async -> SessionWorkspaceState?
     func addWorkspaceDirectory(_ path: String, expectedSessionID: String)
     func listSessions()
     /// Resume a prior session by its engine UUID (submit
@@ -168,6 +171,7 @@ protocol ConversationSource: AnyObject {
 /// hooks are no-ops by default; the engine source may override foregrounding to
 /// refresh state, but backgrounding never implies cancellation.
 extension ConversationSource {
+    func authenticatedWorkspaceState(sessionID: String, mode: SessionMode) async -> SessionWorkspaceState? { nil }
     func setWorkspaceDirectory(_ path: String, expectedSessionID: String) async throws {
         throw WorkspaceDirectoryError.unavailable
     }
@@ -183,8 +187,8 @@ extension ConversationSource {
     var isAvailableForPrompts: Bool { true }
 
     @discardableResult
-    func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
-        send(text)
+    func send(_ text: String, images: [ImageRefDto]) async -> ConversationTurnToken? {
+        await send(text)
     }
 
     func warmUp() {}

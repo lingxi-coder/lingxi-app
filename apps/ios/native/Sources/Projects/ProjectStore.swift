@@ -1,6 +1,12 @@
 import Foundation
 import Observation
 
+struct SessionOwnerEvidence: Equatable, Sendable {
+    let scope: ConversationScope
+    let mode: SessionMode
+    let transcriptPath: String
+}
+
 @MainActor
 @Observable
 final class ProjectStore {
@@ -18,6 +24,13 @@ final class ProjectStore {
     var errorMessage: String?
     var onWillArchiveSession: ((String?, String) async throws -> Void)?
     var sessionScopeClaims: (() -> [String: ConversationScope]?)?
+    var additionalSessionEvidence: (() throws -> [String: SessionOwnerEvidence])?
+    var beginOwnerScopeMutation: (() async throws -> UUID)?
+    var finishOwnerScopeMutation: ((UUID) -> Void)?
+    var refreshOwnerScopes: (() async throws -> Void)?
+    var beginCatalogUpdate: (([String]) async throws -> UUID)?
+    var finishCatalogUpdate: ((UUID) -> Void)?
+    var validateCatalogRows: (([ProjectSessionSummary], ConversationScope) async throws -> Void)?
     private var catalogIsHealthy = true
     private var catalogErrorMessage: String?
     private var projectIndexPresent = false
@@ -65,7 +78,7 @@ final class ProjectStore {
         return ProjectStore(managedRoot: managedRoot)
     }
 
-    private func validatedSessionScopeClaims() throws -> [String: ConversationScope] {
+    private func validatedSessionOwnership() throws -> (claims: [String: ConversationScope], evidence: [String: SessionOwnerEvidence]) {
         guard catalogIsHealthy else {
             throw ProjectRepositoryError.invalidSessionOwnership(catalogErrorMessage ?? ProjectRepositoryError.invalidProjectData.localizedDescription)
         }
@@ -75,7 +88,7 @@ final class ProjectStore {
         if globalIndexPresent, !FileManager.default.fileExists(atPath: repository.projectsRoot.appendingPathComponent(globalSessionIndexFileName).path) {
             throw ProjectRepositoryError.invalidSessionOwnership("global: \(ProjectRepositoryError.missingSessionIndex.localizedDescription)")
         }
-        let claims: [String: ConversationScope]
+        var claims: [String: ConversationScope]
         if let sessionScopeClaims {
             guard let stored = sessionScopeClaims() else {
                 throw ProjectRepositoryError.invalidSessionOwnership("session-scopes: \(ProjectRepositoryError.invalidProjectData.localizedDescription)")
@@ -84,11 +97,34 @@ final class ProjectStore {
         } else {
             claims = [:]
         }
+        let evidence = try additionalSessionEvidence?() ?? [:]
+        for (id, item) in evidence {
+                let scope = item.scope
+                if let existing = claims[id], existing != scope {
+                    throw ProjectRepositoryError.invalidSessionOwnership(
+                        "\(id) (\(existing.workspaceKey), \(scope.workspaceKey)): \(ProjectRepositoryError.conflictingSessionScope.localizedDescription)")
+                }
+                claims[id] = scope
+        }
         if let message = Self.claimsError(claims, projects: projects, globalSessions: globalSessions,
                                           projectIndexPresent: projectIndexPresent, globalIndexPresent: globalIndexPresent) {
             throw ProjectRepositoryError.invalidSessionOwnership(message)
         }
-        return claims
+        if let message = Self.evidenceError(evidence, projects: projects, globalSessions: globalSessions) {
+            throw ProjectRepositoryError.invalidSessionOwnership(message)
+        }
+        return (claims, evidence)
+    }
+
+    private static func evidenceError(_ evidence: [String: SessionOwnerEvidence], projects: [ProjectSnapshot],
+                                      globalSessions: [ProjectSessionSummary]) -> String? {
+        for row in globalSessions + projects.flatMap(\.sessions) {
+            guard let owner = evidence[canonicalSessionID(row.sessionId)] else { continue }
+            if owner.mode != row.mode || owner.transcriptPath != row.transcriptPath {
+                return "\(row.sessionId) (\(owner.scope.workspaceKey)): \(ProjectRepositoryError.conflictingSessionMode.localizedDescription)"
+            }
+        }
+        return nil
     }
 
     private static func claimsError(_ claims: [String: ConversationScope], projects: [ProjectSnapshot],
@@ -111,21 +147,23 @@ final class ProjectStore {
     }
 
     var sessionOwnershipError: String? {
-        do { _ = try validatedSessionScopeClaims(); return nil }
+        do { _ = try validatedSessionOwnership(); return nil }
         catch { return error.localizedDescription }
     }
 
     func allowsSession(_ sessionID: String, in scope: ConversationScope, mode: SessionMode? = nil) -> Bool {
-        guard let claims = try? validatedSessionScopeClaims() else { return false }
+        guard let (claims, evidence) = try? validatedSessionOwnership() else { return false }
+        if let mode, let owner = evidence[canonicalSessionID(sessionID)], owner.mode != mode { return false }
         return SessionCatalogOwnership.allows(sessionID: sessionID, scope: scope, mode: mode,
             projects: projects, globalSessions: globalSessions, claimedScope: claims[canonicalSessionID(sessionID)])
     }
 
     /// Re-read every persisted index before starting or claiming a new owner.
     /// Existing admitted owners are handled by SessionHost and keep running.
-    private func freshAdmissionState() -> (claims: [String: ConversationScope], state: ProjectRepositoryState)? {
+    private func freshAdmissionState() -> (claims: [String: ConversationScope], evidence: [String: SessionOwnerEvidence], state: ProjectRepositoryState)? {
         let claims: [String: ConversationScope]
-        do { claims = try validatedSessionScopeClaims() }
+        let evidence: [String: SessionOwnerEvidence]
+        do { (claims, evidence) = try validatedSessionOwnership() }
         catch { errorMessage = error.localizedDescription; return nil }
         let state = repository.admissionSnapshot()
         if let error = state.errorMessage { errorMessage = error; return nil }
@@ -142,13 +180,36 @@ final class ProjectStore {
             errorMessage = message
             return nil
         }
-        return (claims, state)
+        if let message = Self.evidenceError(evidence, projects: state.projects, globalSessions: state.globalSessions) {
+            errorMessage = message
+            return nil
+        }
+        return (claims, evidence, state)
     }
 
     func admitsUnclaimedOwner() -> Bool { freshAdmissionState() != nil }
 
+    func admitsNewSessionIdentity(_ sessionID: String) -> Bool {
+        guard let (claims, evidence, state) = freshAdmissionState() else { return false }
+        let id = canonicalSessionID(sessionID)
+        guard UUID(uuidString: id) != nil, claims[id] == nil, evidence[id] == nil else { return false }
+        return !(state.globalSessions + state.projects.flatMap(\.sessions))
+            .contains { canonicalSessionID($0.sessionId) == id }
+    }
+
+    func projectsForOwnerAdmission() throws -> [ProjectSnapshot] {
+        guard let (_, _, state) = freshAdmissionState() else {
+            throw ProjectRepositoryError.invalidSessionOwnership(errorMessage ?? ProjectRepositoryError.invalidProjectData.localizedDescription)
+        }
+        return state.projects
+    }
+
     func admitsSessionIdentity(_ sessionID: String, in scope: ConversationScope, mode: SessionMode) -> Bool {
-        guard let (claims, state) = freshAdmissionState() else { return false }
+        guard let (claims, evidence, state) = freshAdmissionState() else { return false }
+        if let owner = evidence[canonicalSessionID(sessionID)], owner.mode != mode {
+            errorMessage = ProjectRepositoryError.conflictingSessionMode.localizedDescription
+            return false
+        }
         guard SessionCatalogOwnership.allows(sessionID: sessionID, scope: scope, mode: mode,
             projects: state.projects, globalSessions: state.globalSessions,
             claimedScope: claims[canonicalSessionID(sessionID)]) else {
@@ -156,6 +217,156 @@ final class ProjectStore {
             return false
         }
         return true
+    }
+
+    func admitsSessionEvidence(_ sessionID: String, owner: SessionOwnerEvidence) -> Bool {
+        guard let (claims, evidence, state) = freshAdmissionState() else { return false }
+        let id = canonicalSessionID(sessionID)
+        guard !id.isEmpty,
+              evidence[id].map({ $0 == owner }) ?? true,
+              SessionCatalogOwnership.allows(sessionID: id, scope: owner.scope, mode: owner.mode,
+                projects: state.projects, globalSessions: state.globalSessions, claimedScope: claims[id]) else {
+            errorMessage = ProjectRepositoryError.conflictingSessionScope.localizedDescription
+            return false
+        }
+        for row in state.globalSessions + state.projects.flatMap(\.sessions) where canonicalSessionID(row.sessionId) == id {
+            guard row.mode == owner.mode, row.transcriptPath == owner.transcriptPath else {
+                errorMessage = ProjectRepositoryError.invalidSessionOwnership("\(id): the session transcript or mode conflicts with its catalog").localizedDescription
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Validate a reserved scheduler UUID without reading project catalogs on
+    /// the main actor. The caller holds that UUID's admission reservation
+    /// across this scan and the ensuing receipt publication.
+    func validateReservedSessionEvidence(_ sessionID: String, owner: SessionOwnerEvidence,
+                                         evidence: [String: SessionOwnerEvidence]) async throws -> Bool {
+        let repository = repository
+        let state = await Task.detached { repository.admissionSnapshot() }.value
+        guard catalogIsHealthy else {
+            throw ProjectRepositoryError.invalidSessionOwnership(catalogErrorMessage ?? ProjectRepositoryError.invalidProjectData.localizedDescription)
+        }
+        if let error = state.errorMessage { throw ProjectRepositoryError.invalidSessionOwnership(error) }
+        guard !projectIndexPresent || state.projectIndexPresent else { throw ProjectRepositoryError.missingProjectIndex }
+        guard !globalIndexPresent || state.globalIndexPresent else { throw ProjectRepositoryError.missingSessionIndex }
+        var claims: [String: ConversationScope]
+        if let sessionScopeClaims {
+            guard let stored = sessionScopeClaims() else { throw ProjectRepositoryError.invalidProjectData }
+            claims = stored
+        } else { claims = [:] }
+        for (id, item) in evidence {
+            if let existing = claims[id], existing != item.scope { throw ProjectRepositoryError.conflictingSessionScope }
+            claims[id] = item.scope
+        }
+        if let message = Self.claimsError(claims, projects: state.projects, globalSessions: state.globalSessions,
+                                          projectIndexPresent: state.projectIndexPresent, globalIndexPresent: state.globalIndexPresent) {
+            throw ProjectRepositoryError.invalidSessionOwnership(message)
+        }
+        if let message = Self.evidenceError(evidence, projects: state.projects, globalSessions: state.globalSessions) {
+            throw ProjectRepositoryError.invalidSessionOwnership(message)
+        }
+        let id = canonicalSessionID(sessionID)
+        guard !id.isEmpty, evidence[id].map({ $0 == owner }) ?? true,
+              SessionCatalogOwnership.allows(sessionID: id, scope: owner.scope, mode: owner.mode,
+                projects: state.projects, globalSessions: state.globalSessions, claimedScope: claims[id]) else {
+            throw ProjectRepositoryError.conflictingSessionScope
+        }
+        let rows = state.globalSessions + state.projects.flatMap(\.sessions)
+        for row in rows where canonicalSessionID(row.sessionId) == id {
+            guard row.mode == owner.mode, row.transcriptPath == owner.transcriptPath else {
+                throw ProjectRepositoryError.invalidSessionOwnership("\(id): the session transcript or mode conflicts with its catalog")
+            }
+        }
+        return evidence[id] == owner || rows.contains {
+            canonicalSessionID($0.sessionId) == id && $0.mode == owner.mode && $0.transcriptPath == owner.transcriptPath
+        }
+    }
+
+    /// Resolve from a fresh, validated catalog, not from the active cwd or a
+    /// UUID search. The native engine validates the file itself at admission.
+    func transcriptPathForSession(_ sessionID: String, in scope: ConversationScope, mode: SessionMode) throws -> String {
+        guard let (claims, evidence, state) = freshAdmissionState() else {
+            throw ProjectRepositoryError.invalidSessionOwnership(errorMessage ?? ProjectRepositoryError.invalidProjectData.localizedDescription)
+        }
+        guard SessionCatalogOwnership.allows(sessionID: sessionID, scope: scope, mode: mode,
+            projects: state.projects, globalSessions: state.globalSessions,
+            claimedScope: claims[canonicalSessionID(sessionID)]) else {
+            throw ProjectRepositoryError.conflictingSessionScope
+        }
+        let rows: [ProjectSessionSummary]
+        switch scope {
+        case .global:
+            rows = state.globalSessions
+        case .project(let projectID):
+            rows = state.projects.first(where: { $0.id == projectID })?.sessions ?? []
+        case .scheduled, .remote:
+            throw ProjectRepositoryError.sessionNotIndexed
+        }
+        let matches = rows.filter { canonicalSessionID($0.sessionId) == canonicalSessionID(sessionID) }
+        // A scheduled run can create a project-owned source before its first
+        // ordinary session-list refresh. Its durable reservation is already
+        // exact owner evidence and may open only that same path and mode.
+        if matches.isEmpty, let owner = evidence[canonicalSessionID(sessionID)],
+           owner.scope == scope, owner.mode == mode, !owner.transcriptPath.isEmpty,
+           (owner.transcriptPath as NSString).isAbsolutePath {
+            return owner.transcriptPath
+        }
+        guard matches.count == 1, let row = matches.first else { throw ProjectRepositoryError.sessionNotIndexed }
+        guard row.mode == mode else { throw ProjectRepositoryError.conflictingSessionMode }
+        guard let path = row.transcriptPath, !path.isEmpty, (path as NSString).isAbsolutePath else {
+            throw ProjectRepositoryError.missingSessionTranscriptPath
+        }
+        return path
+    }
+
+    /// The picker and save operation consult the same fresh catalog. A result
+    /// without a unique fixed-mode owner and exact transcript is never offered.
+    func cronSessionChoices(mode: SessionMode, generated: [CronGeneratedSession]) -> [CronSessionChoice] {
+        guard let (claims, evidence, state) = freshAdmissionState() else { return [] }
+        let generatedByID = Dictionary(grouping: generated, by: { canonicalSessionID($0.id) })
+        func choice(_ row: ProjectSessionSummary, scope: ConversationScope, scopeID: String, title: String) -> CronSessionChoice? {
+            guard !row.isArchived, row.mode == mode,
+                  let path = row.transcriptPath, !path.isEmpty, (path as NSString).isAbsolutePath,
+                  (generatedByID[canonicalSessionID(row.sessionId)] ?? []).allSatisfy({
+                      $0.sessionScopeKey == scope.workspaceKey && $0.sessionMode == mode && $0.sessionTranscriptPath == path
+                  }),
+                  SessionCatalogOwnership.allows(sessionID: row.sessionId, scope: scope, mode: mode,
+                    projects: state.projects, globalSessions: state.globalSessions,
+                    claimedScope: claims[canonicalSessionID(row.sessionId)]) else { return nil }
+            return CronSessionChoice(id: row.sessionId, title: title, scopeID: scopeID,
+                                     owner: scope, mode: mode, transcriptPath: path)
+        }
+        var choices = state.globalSessions.compactMap {
+            choice($0, scope: .global, scopeID: globalCronScopeID, title: $0.title)
+        }
+        for project in state.projects {
+            choices += project.sessions.compactMap {
+                choice($0, scope: .project(project.id), scopeID: project.id,
+                       title: "\(project.record.name) · \($0.title)")
+            }
+        }
+        choices += generated.compactMap { row in
+            guard let key = row.sessionScopeKey, let scope = ConversationScope(workspaceKey: key),
+                  scope.projectID == row.projectID, row.sessionMode == mode, let path = row.sessionTranscriptPath,
+                  !path.isEmpty, (path as NSString).isAbsolutePath,
+                  generatedByID[canonicalSessionID(row.id)]?.count == 1,
+                  evidence[canonicalSessionID(row.id)] == SessionOwnerEvidence(scope: scope, mode: mode, transcriptPath: path),
+                  !(state.globalSessions + state.projects.flatMap(\.sessions)).contains(where: {
+                      canonicalSessionID($0.sessionId) == canonicalSessionID(row.id)
+                  }),
+                  SessionCatalogOwnership.allows(sessionID: row.id, scope: scope, mode: mode,
+                    projects: state.projects, globalSessions: state.globalSessions,
+                    claimedScope: claims[canonicalSessionID(row.id)]) else { return nil }
+            let project = scope.projectID.flatMap { id in state.projects.first(where: { $0.id == id }) }
+            if scope.projectID != nil && project == nil { return nil }
+            let title = project.map { "\($0.record.name) · \(row.title)" } ?? row.title
+            return CronSessionChoice(id: row.id, title: title, scopeID: project?.id ?? globalCronScopeID,
+                                     owner: scope, mode: mode, transcriptPath: path)
+        }
+        let grouped = Dictionary(grouping: choices, by: { canonicalSessionID($0.id) })
+        return choices.filter { grouped[canonicalSessionID($0.id)]?.count == 1 }
     }
 
     func isSessionIndexed(_ sessionID: String, in scope: ConversationScope) -> Bool {
@@ -172,7 +383,7 @@ final class ProjectStore {
     }
 
     private func requireConsistentOwners(projectId: String?) throws -> ConversationScope {
-        _ = try validatedSessionScopeClaims()
+        _ = try validatedSessionOwnership()
         let scope: ConversationScope = projectId.map { .project($0) } ?? .global
         if let projectId, !projects.contains(where: { $0.id == projectId }) {
             throw ProjectRepositoryError.projectDoesNotExist(projectId)
@@ -198,17 +409,19 @@ final class ProjectStore {
 
     @discardableResult
     func createInternal(name: String, mode: SessionMode = .code) async throws -> ProjectSnapshot {
-        try await runThrowingOperation(.create, message: String(localized: "project_creating_message")) {
-            _ = try self.requireConsistentOwners(projectId: nil)
-            let repository = self.repository
-            let executionDomain = self.executionDomain
-            return try await executionDomain.async {
-                let created = try repository.createInternal(name: name, mode: mode)
-                return StoreCreateResult(project: created, state: repository.load())
+        try await withOwnerScopeMutation {
+            try await self.runThrowingOperation(.create, message: String(localized: "project_creating_message")) {
+                _ = try self.requireConsistentOwners(projectId: nil)
+                let repository = self.repository
+                let executionDomain = self.executionDomain
+                return try await executionDomain.async {
+                    let created = try repository.createInternal(name: name, mode: mode)
+                    return StoreCreateResult(project: created, state: repository.load())
+                }
+            } onSuccess: { result in
+                self.publish(result.state)
+                return result.project
             }
-        } onSuccess: { result in
-            self.publish(result.state)
-            return result.project
         }
     }
 
@@ -235,34 +448,36 @@ final class ProjectStore {
 
     @discardableResult
     func importExternal(name: String, directoryURL: URL, mode: SessionMode = .code) async throws -> ProjectSnapshot {
-        try await runThrowingOperation(.import, message: String(localized: "project_importing_message")) {
-            _ = try self.requireConsistentOwners(projectId: nil)
-            let repository = self.repository
-            let synchronizer = self.synchronizer
-            let bookmarkResolver = self.bookmarkResolver
-            let executionDomain = self.executionDomain
-            return try await executionDomain.async {
-                try bookmarkResolver.withInitialAccess(to: directoryURL) { scopedURL in
-                    let bookmark = try bookmarkResolver.makeBookmark(for: scopedURL)
-                    _ = try requireCanonicalDirectory(scopedURL)
-                    let created = try repository.createImported(name: name, sourceBookmark: bookmark, mode: mode)
-                    do {
-                        let syncResult = try synchronizer.importInitial(projectId: created.record.id)
-                        return StoreSyncResult(
-                            project: syncResult.project,
-                            state: repository.load(),
-                            conflicts: syncResult.conflicts
-                        )
-                    } catch {
-                        _ = try? repository.deleteProject(projectId: created.record.id)
-                        throw error
+        try await withOwnerScopeMutation {
+            try await self.runThrowingOperation(.import, message: String(localized: "project_importing_message")) {
+                _ = try self.requireConsistentOwners(projectId: nil)
+                let repository = self.repository
+                let synchronizer = self.synchronizer
+                let bookmarkResolver = self.bookmarkResolver
+                let executionDomain = self.executionDomain
+                return try await executionDomain.async {
+                    try bookmarkResolver.withInitialAccess(to: directoryURL) { scopedURL in
+                        let bookmark = try bookmarkResolver.makeBookmark(for: scopedURL)
+                        _ = try requireCanonicalDirectory(scopedURL)
+                        let created = try repository.createImported(name: name, sourceBookmark: bookmark, mode: mode)
+                        do {
+                            let syncResult = try synchronizer.importInitial(projectId: created.record.id)
+                            return StoreSyncResult(
+                                project: syncResult.project,
+                                state: repository.load(),
+                                conflicts: syncResult.conflicts
+                            )
+                        } catch {
+                            _ = try? repository.deleteProject(projectId: created.record.id)
+                            throw error
+                        }
                     }
                 }
+            } onSuccess: { result in
+                self.publish(result.state)
+                self.conflicts = result.conflicts
+                return result.project
             }
-        } onSuccess: { result in
-            self.publish(result.state)
-            self.conflicts = result.conflicts
-            return result.project
         }
     }
 
@@ -304,23 +519,59 @@ final class ProjectStore {
         publish(persisted, preservingConflicts: true)
     }
 
-    func recordWorkspace(projectId: String, state: SessionWorkspaceState) async throws {
-        let scope = try requireConsistentOwners(projectId: projectId)
-        guard allowsSession(state.sessionId, in: scope) else { throw ProjectRepositoryError.conflictingSessionScope }
-        let persisted = try await executionDomain.async { [repository] in
-            try repository.recordWorkspace(projectId: projectId, state: state)
+    /// Called after querying the retained native owner. The UUID lease fences
+    /// other claims while an async queued commit checks its source revision.
+    func recordAuthenticatedWorkspace(_ state: SessionWorkspaceState, in scope: ConversationScope,
+                                      mode: SessionMode, authority: WorkspaceWriteAuthority,
+                                      revision: UInt64) async throws {
+        try Task.checkCancellation()
+        let lease = try await beginCatalogUpdate?([state.sessionId])
+        defer { if let lease { finishCatalogUpdate?(lease) } }
+        guard scope == .global || scope.projectID != nil,
+              let (claims, evidence, catalog) = freshAdmissionState() else {
+            throw ProjectRepositoryError.invalidSessionOwnership(errorMessage ?? ProjectRepositoryError.invalidProjectData.localizedDescription)
         }
-        publish(persisted, preservingConflicts: true)
+        let id = canonicalSessionID(state.sessionId)
+        guard SessionCatalogOwnership.allows(sessionID: id, scope: scope, mode: mode,
+            projects: catalog.projects, globalSessions: catalog.globalSessions, claimedScope: claims[id]) else {
+            throw ProjectRepositoryError.conflictingSessionScope
+        }
+        if let owner = evidence[id] {
+            guard owner == SessionOwnerEvidence(scope: scope, mode: mode, transcriptPath: state.transcriptPath) else {
+                throw ProjectRepositoryError.invalidSessionOwnership("\(id): the workspace source conflicts with its durable owner.")
+            }
+        }
+        _ = try await executionDomain.async { [repository] in
+            try repository.recordAuthenticatedWorkspace(projectId: scope.projectID, state: state, mode: mode,
+                                                         authority: authority, revision: revision)
+        }
+        // Another queued operation can finish before this continuation gets
+        // the main actor. Publish a fresh snapshot, not an older completion.
+        publish(repository.admissionSnapshot(), preservingConflicts: true)
     }
 
     func syncEngineSessions(projectId: String?, rows: [ProjectSessionSummary]) async throws {
+        let lease = try await beginCatalogUpdate?(rows.map(\.sessionId))
+        defer { if let lease { finishCatalogUpdate?(lease) } }
         let scope = try requireConsistentOwners(projectId: projectId)
         guard rows.allSatisfy({ allowsSession($0.sessionId, in: scope, mode: $0.mode) }) else {
             throw ProjectRepositoryError.conflictingSessionScope
         }
+        let evidence = try validatedSessionOwnership().evidence
+        let checkedRows = try rows.map { original -> ProjectSessionSummary in
+            var row = original
+            guard let owner = evidence[canonicalSessionID(row.sessionId)] else { return row }
+            guard owner.scope == scope, owner.mode == row.mode,
+                  row.transcriptPath.map({ $0.isEmpty || $0 == owner.transcriptPath }) ?? true else {
+                throw ProjectRepositoryError.invalidSessionOwnership("\(row.sessionId): the session catalog conflicts with its durable owner.")
+            }
+            row.transcriptPath = owner.transcriptPath
+            return row
+        }
+        try await validateCatalogRows?(checkedRows, scope)
         let repository = repository
         let next = try await executionDomain.async {
-            try repository.updateSessions(projectId: projectId, sessions: rows)
+            try repository.updateSessions(projectId: projectId, sessions: checkedRows)
         }
         publish(next, preservingConflicts: true)
     }
@@ -331,10 +582,18 @@ final class ProjectStore {
         title: String,
         mode: SessionMode = .code,
         initialMessageCount: Int = 0,
-        workspaceDirectory: String? = nil
+        workspaceDirectory: String? = nil,
+        transcriptPath: String
     ) async throws {
         let scope = try requireConsistentOwners(projectId: projectId)
         guard allowsSession(sessionId, in: scope, mode: mode) else { throw ProjectRepositoryError.conflictingSessionScope }
+        let owner = try validatedSessionOwnership().evidence[canonicalSessionID(sessionId)]
+        guard !transcriptPath.isEmpty, (transcriptPath as NSString).isAbsolutePath else {
+            throw ProjectRepositoryError.missingSessionTranscriptPath
+        }
+        guard owner.map({ $0.scope == scope && $0.mode == mode && $0.transcriptPath == transcriptPath }) ?? true else {
+            throw ProjectRepositoryError.invalidSessionOwnership("\(sessionId): the started session conflicts with its durable owner.")
+        }
         let repository = repository
         let next = try await executionDomain.async {
             try repository.recordStartedSession(
@@ -343,7 +602,8 @@ final class ProjectStore {
                 title: title,
                 mode: mode,
                 initialMessageCount: initialMessageCount,
-                workspaceDirectory: workspaceDirectory
+                workspaceDirectory: workspaceDirectory,
+                authoritativeTranscriptPath: transcriptPath
             )
         }
         publish(next, preservingConflicts: true)
@@ -476,6 +736,19 @@ final class ProjectStore {
             publish(executionDomain.sync { repository.load() }, preservingConflicts: true)
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func withOwnerScopeMutation<T>(_ work: () async throws -> T) async throws -> T {
+        guard let beginOwnerScopeMutation, let finishOwnerScopeMutation else { return try await work() }
+        let token = try await beginOwnerScopeMutation()
+        defer { finishOwnerScopeMutation(token) }
+        let result: Result<T, Error>
+        do { result = .success(try await work()) }
+        catch { result = .failure(error) }
+        // Re-scan even after failure: a partial mutation may have left files
+        // behind. A failed scan keeps subsequent owner admission closed.
+        try await refreshOwnerScopes?()
+        return try result.get()
     }
 
     private func runThrowingOperation<T, Output>(

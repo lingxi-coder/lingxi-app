@@ -7,6 +7,18 @@ extension Notification.Name {
     static let lingxiCronNotificationOpened = Notification.Name("LingxiCronNotificationOpened")
 }
 
+/// Opt-in isolation for task-owned simulator tests; release builds cannot
+/// disable account or background services through their environment.
+enum IsolatedSimulatorTesting {
+    static var enabled: Bool {
+        #if DEBUG && targetEnvironment(simulator)
+        ProcessInfo.processInfo.environment["LINGXI_ISOLATED_SIM_TEST"] == "1"
+        #else
+        false
+        #endif
+    }
+}
+
 final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     static var cronBackgroundBridge: CronBackgroundTaskBridge = .shared
     static var cronBackgroundRegistrarFactory: () -> any CronBackgroundTaskRegistrar = {
@@ -18,15 +30,18 @@ final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNoti
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
-        PushRegistration.shared.start()
-        Self.cronBackgroundBridge.registerAtLaunch(
-            taskIdentifier: cronBackgroundTaskIdentifier,
-            registrar: Self.cronBackgroundRegistrarFactory()
-        )
+        if !IsolatedSimulatorTesting.enabled {
+            PushRegistration.shared.start()
+            Self.cronBackgroundBridge.registerAtLaunch(
+                taskIdentifier: cronBackgroundTaskIdentifier,
+                registrar: Self.cronBackgroundRegistrarFactory()
+            )
+        }
         return true
     }
 
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        guard !IsolatedSimulatorTesting.enabled else { return }
         Messaging.messaging().apnsToken = deviceToken
         PushRegistration.shared.refresh()
     }

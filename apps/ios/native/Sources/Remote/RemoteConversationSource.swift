@@ -18,7 +18,7 @@ struct RemoteConversationDraft {
     var attachment: ComposerAttachment?
 
     mutating func restore(_ prompt: RemoteUnsentPrompt) -> Bool {
-        guard text.isEmpty, attachment == nil, prompt.images.count <= 1 else { return false }
+        guard text.isEmpty, sourceCodeUnits == nil, attachment == nil, prompt.images.count <= 1 else { return false }
         var restoredAttachment: ComposerAttachment?
         if let imageRef = prompt.images.first {
             guard let data = Data(base64Encoded: imageRef.base64), let image = UIImage(data: data) else { return false }
@@ -34,7 +34,16 @@ struct RemoteConversationDraft {
 
 @MainActor @Observable
 final class RemoteDraftOwner {
-    var draft = RemoteConversationDraft()
+    private(set) var draftRevision: UInt64 = 0
+    var draft = RemoteConversationDraft() {
+        didSet {
+            if Array(draft.text.utf16) != Array(oldValue.text.utf16)
+                || draft.sourceCodeUnits != oldValue.sourceCodeUnits
+                || draft.attachment != oldValue.attachment {
+                draftRevision &+= 1
+            }
+        }
+    }
     var unsentPrompts: [RemoteUnsentPrompt] = []
 }
 
@@ -67,6 +76,9 @@ final class RemoteConversationSource: ConversationSource {
     @ObservationIgnored private let remoteProviderAccountSender: ((String, String?) async throws -> String)?
     @ObservationIgnored private var modeAdmission = RemoteModeAdmission<RemoteSessionUpdateFfi>()
     @ObservationIgnored private var approvalFailed = false
+    @ObservationIgnored private var approvalOutcomeUncertain = false
+    @ObservationIgnored private var approvalAdmission = RemoteApprovalAdmission()
+    @ObservationIgnored private var accountEpoch: UInt64 = 0
     @ObservationIgnored private var history: [MessageDto] = []
     @ObservationIgnored private var records: [RemoteSeqRecordFfi] = []
     @ObservationIgnored private var lastSequence: UInt64?
@@ -117,7 +129,13 @@ final class RemoteConversationSource: ConversationSource {
         catch { if valid { model.error = ConversationError(kind: .host, message: String(localized: "remote_err_generic")) } }
     }
 
-    func stop() async { await manager.unfollow(self); phase = .offline }
+    func stop() async {
+        // Fence pending account replies before detaching, which may wait for
+        // already-admitted requests to finish.
+        accountEpoch &+= 1
+        setPhase(.offline)
+        await manager.unfollow(self)
+    }
 
     func invalidate() {
         valid = false
@@ -131,7 +149,8 @@ final class RemoteConversationSource: ConversationSource {
         records = []
         outgoing = []
         projection.replaceRemoteTranscript([], sessionID: sessionID)
-        phase = .closed
+        accountEpoch &+= 1
+        setPhase(.closed)
     }
 
     private func client() throws -> IosRemoteControlClient {
@@ -170,7 +189,7 @@ final class RemoteConversationSource: ConversationSource {
                                      estimatedBytes: { RemoteUpdateMemoryEstimate.bytes(of: update) }) {
         case .waiting:
             // A LIVE partial update alone does not identify Chat or Code.
-            phase = update.phase == .live ? .loading : update.phase
+            setPhase(update.phase == .live ? .loading : update.phase)
             if let error = update.error { model.error = ConversationError(kind: .host, message: error.message) }
         case let .replay(mode, updates):
             guard projection.confirmRemoteSessionMode(mode, sessionID: sessionID) else {
@@ -191,25 +210,34 @@ final class RemoteConversationSource: ConversationSource {
               update.messages.isEmpty, update.olderMessages.isEmpty, update.records.isEmpty,
               update.controls == nil, update.outgoing.isEmpty,
               update.pending.questions.isEmpty, update.pending.computerAccess.isEmpty,
-              !update.turn.running else {
+              !update.turn.running, update.turn.turnId == nil,
+              update.firstMessageIndex == 0, !update.hasOlder, !update.loadingOlder else {
             approvalFailed = true
+            model.pendingPermissions.removeAll()
             failModeAdmission()
             return
         }
-        phase = update.phase
+        setPhase(update.phase)
         projection.reconcileRemoteState(update)
+        if approvalAdmission.delivered { model.pendingPermissions.removeAll() }
         if let error = update.error { model.error = ConversationError(kind: .host, message: error.message) }
-        else if update.phase == .live { model.error = nil }
+        else if update.phase == .live && !approvalOutcomeUncertain { model.error = nil }
     }
 
     private func failModeAdmission() {
-        phase = .error
+        if isApprovalCapability { model.pendingPermissions.removeAll() }
+        setPhase(.error)
         model.error = ConversationError(kind: .host, message: String(localized: "remote_err_generic"))
+    }
+
+    private func setPhase(_ next: RemoteSessionPhaseFfi) {
+        if phase == .live && next != .live { accountEpoch &+= 1 }
+        phase = next
     }
 
     private func applyUpdate(_ update: RemoteSessionUpdateFfi) {
         let becameLive = phase != .live && update.phase == .live
-        phase = update.phase
+        setPhase(update.phase)
         hasOlder = update.hasOlder
         loadingOlder = update.loadingOlder
         outgoing = update.outgoing
@@ -329,10 +357,11 @@ final class RemoteConversationSource: ConversationSource {
     }
 
     @discardableResult
-    func send(_ text: String) -> ConversationTurnToken? { send(text, images: []) }
+    func send(_ text: String) async -> ConversationTurnToken? { await send(text, images: []) }
     @discardableResult
-    func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
-        submit(text, sourceCodeUnits: nil, images: images)
+    func send(_ text: String, images: [ImageRefDto]) async -> ConversationTurnToken? {
+        guard !Task.isCancelled else { return nil }
+        return submit(text, sourceCodeUnits: nil, images: images)
     }
 
     private func submit(_ text: String, sourceCodeUnits: [UInt16]?, images: [ImageRefDto]) -> ConversationTurnToken? {
@@ -379,8 +408,9 @@ final class RemoteConversationSource: ConversationSource {
         }
         return token
     }
-    func send(_ text: String, sourceCodeUnits: [UInt16]?, images: [ImageRefDto], selectedSlashCommand: ConversationSlashCommand?) -> ConversationTurnToken? {
-        submit(text, sourceCodeUnits: sourceCodeUnits, images: images)
+    func send(_ text: String, sourceCodeUnits: [UInt16]?, images: [ImageRefDto], selectedSlashCommand: ConversationSlashCommand?) async -> ConversationTurnToken? {
+        guard !Task.isCancelled else { return nil }
+        return submit(text, sourceCodeUnits: sourceCodeUnits, images: images)
     }
     func removeUnsentPrompt(_ id: UUID) { draftOwner.unsentPrompts.removeAll { $0.id == id } }
     func cancel() { perform { try await $0.cancelTurn(sessionId: self.sessionID) } }
@@ -418,6 +448,46 @@ final class RemoteConversationSource: ConversationSource {
     private func respondPermission(_ requestId: UInt64, allow: Bool) {
         let canApprove = isApprovalCapability && !approvalFailed && phase == .live
         guard valid, canControl || canApprove else { return }
+        if isApprovalCapability {
+            guard canApprove, approvalAdmission.begin(isPending: model.pendingPermissions.contains { $0.requestId == requestId }) else { return }
+            let admitted: IosRemoteControlClient?
+            if remotePermissionResponder != nil {
+                admitted = nil
+            } else if let ticket = manager.connectionTicket(hostID: hostID, uid: uid),
+                      let client = try? manager.admitSessionRequest(hostID: hostID, uid: uid, ticket: ticket) {
+                admitted = client
+            } else {
+                approvalAdmission.finish(delivered: false)
+                return
+            }
+            Task { [self] in
+                defer { if admitted != nil { manager.finishSessionRequest() } }
+                do {
+                    if let remotePermissionResponder {
+                        try await remotePermissionResponder(requestId, allow)
+                    } else if let admitted {
+                        try await admitted.respondPermission(sessionId: sessionID, requestId: requestId, allow: allow)
+                    }
+                    approvalAdmission.finish(delivered: true)
+                    model.pendingPermissions.removeAll()
+                } catch RemoteFfiError.Rpc(let code, _) where code == "not_pending" {
+                    approvalAdmission.finish(delivered: true)
+                    model.pendingPermissions.removeAll()
+                    answeredElsewhere = true
+                } catch RemoteFfiError.NotConnected {
+                    finishApprovalFailure(uncertain: false)
+                } catch RemoteFfiError.InvalidArgument {
+                    finishApprovalFailure(uncertain: false)
+                } catch RemoteFfiError.Rpc(let code, _) where ["not_approved", "capacity", "invalid_params", "unknown_session", "not_remote_enabled", "forbidden", "upgrade_required"].contains(code) {
+                    finishApprovalFailure(uncertain: false)
+                } catch {
+                    // Unknown errors, cancellation and lost connections do not
+                    // prove that the host failed to apply the first decision.
+                    finishApprovalFailure(uncertain: true)
+                }
+            }
+            return
+        }
         if let remotePermissionResponder {
             Task { [weak self] in
                 do { try await remotePermissionResponder(requestId, allow) }
@@ -426,6 +496,14 @@ final class RemoteConversationSource: ConversationSource {
         } else {
             perform(allowApproval: true) { try await $0.respondPermission(sessionId: self.sessionID, requestId: requestId, allow: allow) }
         }
+    }
+    private func finishApprovalFailure(uncertain: Bool) {
+        approvalAdmission.finish(delivered: uncertain)
+        if uncertain {
+            approvalOutcomeUncertain = true
+            model.pendingPermissions.removeAll()
+        }
+        if valid { model.error = ConversationError(kind: .host, message: String(localized: "remote_err_generic")) }
     }
     func submitEngineCommand(_ command: ClientCommand) async throws {
         guard canControl, let ticket = manager.connectionTicket(hostID: hostID, uid: uid) else { throw RemoteFfiError.NotConnected }
@@ -452,16 +530,17 @@ final class RemoteConversationSource: ConversationSource {
         guard canControl, !isApprovalCapability else {
             throw RemoteFfiError.Rpc(code: "forbidden", detail: String(localized: "remote_err_forbidden"))
         }
+        let epoch = accountEpoch
         if let remoteProviderAccountSender {
             let result = try await remoteProviderAccountSender(requestJSON, credential)
-            guard canControl, !isApprovalCapability, !Task.isCancelled else { throw CancellationError() }
+            guard canControl, !isApprovalCapability, accountEpoch == epoch, !Task.isCancelled else { throw CancellationError() }
             return result
         }
         guard let ticket = manager.connectionTicket(hostID: hostID, uid: uid) else { throw RemoteFfiError.NotConnected }
         let result = try await manager.withSessionClient(hostID: hostID, uid: uid, ticket: ticket) {
             try await $0.providerAccountCommand(requestJson: requestJSON, credential: credential)
         }
-        guard canControl, !isApprovalCapability, !Task.isCancelled,
+        guard canControl, !isApprovalCapability, accountEpoch == epoch, !Task.isCancelled,
               manager.connectionTicket(hostID: hostID, uid: uid) == ticket else { throw CancellationError() }
         return result
     }

@@ -10,10 +10,11 @@ import XCTest
 
 @MainActor
 final class ConversationTurnCompletionTests: XCTestCase {
-    func testMockBackgroundingKeepsActiveTurnRunning() {
+    func testMockBackgroundingKeepsActiveTurnRunning() async {
         let source = MockConversationSource()
 
-        XCTAssertNotNil(source.send("hello"))
+        let sentToken = await source.send("hello")
+        XCTAssertNotNil(sentToken)
         source.handleBackground()
 
         XCTAssertTrue(source.model.streaming)
@@ -21,10 +22,10 @@ final class ConversationTurnCompletionTests: XCTestCase {
         source.cancel()
     }
 
-    func testMockSendReturnsTokenAndCancellationPublishesMatchingTerminal() {
+    func testMockSendReturnsTokenAndCancellationPublishesMatchingTerminal() async {
         let source = MockConversationSource()
 
-        let token = source.send("hello")
+        let token = await source.send("hello")
         XCTAssertNotNil(token)
         XCTAssertNil(source.model.turnCompletion)
 
@@ -35,13 +36,14 @@ final class ConversationTurnCompletionTests: XCTestCase {
         XCTAssertEqual(source.model.turnCompletion?.finalAssistantText, "")
     }
 
-    func testMockRunningSendQueuesPendingMessage() {
+    func testMockRunningSendQueuesPendingMessage() async {
         let source = MockConversationSource()
         let originalCount = source.model.messages.count
 
-        let token = source.send("first")
+        let token = await source.send("first")
         XCTAssertNotNil(token)
-        XCTAssertEqual(source.send("pending"), token)
+        let pendingToken = await source.send("pending")
+        XCTAssertEqual(pendingToken, token)
 
         XCTAssertEqual(source.model.messages.count, originalCount + 2)
         XCTAssertEqual(source.model.messages.last?.text, "pending")
@@ -71,6 +73,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             )
             let source = EngineConversationSource(config: config)
             source.setCommandSubmitterForTesting { _ in }
+            source.model.activeSessionId = "test-session"
             return source
         }
 
@@ -78,10 +81,10 @@ final class ConversationTurnCompletionTests: XCTestCase {
             for _ in 0..<count { await Task.yield() }
         }
 
-        func testEnginePublishesTrimmedFinalTextForMatchingCompletedTurn() {
+        func testEnginePublishesTrimmedFinalTextForMatchingCompletedTurn() async {
             let source = makeSource()
 
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
@@ -106,12 +109,13 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.setCommandSubmitterForTesting { submitted.append($0) }
             let sourceUnits: [UInt16] = [0xD800, 0x0078]
 
-            XCTAssertNotNil(source.send(
+            let sentToken = await source.send(
                 "\u{FFFD}x",
                 sourceCodeUnits: sourceUnits,
                 images: [],
                 selectedSlashCommand: nil
-            ))
+            )
+            XCTAssertNotNil(sentToken)
             await flushTasks()
 
             guard case let .sendPrompt(text, _, _, _, _) = submitted.first else {
@@ -120,10 +124,10 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertEqual(text.codeUnits, sourceUnits)
         }
 
-        func testEngineBackgroundingKeepsActiveTurnRunning() {
+        func testEngineBackgroundingKeepsActiveTurnRunning() async {
             let source = makeSource()
 
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
@@ -139,13 +143,14 @@ final class ConversationTurnCompletionTests: XCTestCase {
             var submitted: [ClientCommand] = []
             source.setCommandSubmitterForTesting { command in submitted.append(command) }
 
-            guard let token = source.send("first") else {
+            guard let token = await source.send("first") else {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
             source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
 
-            XCTAssertEqual(source.send("pending 🧭"), token)
+            let pendingToken = await source.send("pending 🧭")
+            XCTAssertEqual(pendingToken, token)
             await flushTasks()
 
             XCTAssertTrue(source.model.streaming)
@@ -163,13 +168,14 @@ final class ConversationTurnCompletionTests: XCTestCase {
             var submitted: [ClientCommand] = []
             source.setCommandSubmitterForTesting { submitted.append($0) }
 
-            guard let token = source.send("first") else {
+            guard let token = await source.send("first") else {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
             source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
 
-            XCTAssertEqual(source.send("!  printf !!  "), token)
+            let pendingToken = await source.send("!  printf !!  ")
+            XCTAssertEqual(pendingToken, token)
             await flushTasks()
 
             XCTAssertEqual(source.model.messages.suffix(2).map(\.text), ["first", "!  printf !!  "])
@@ -185,7 +191,8 @@ final class ConversationTurnCompletionTests: XCTestCase {
             var submitted: [ClientCommand] = []
             source.setCommandSubmitterForTesting { submitted.append($0) }
 
-            XCTAssertNotNil(source.send("!  printf !!  "))
+            let sentToken = await source.send("!  printf !!  ")
+            XCTAssertNotNil(sentToken)
             await flushTasks()
 
             guard case let .sendPrompt(text, mode, _, _, _) = submitted.first else {
@@ -202,7 +209,8 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.setCommandSubmitterForTesting { submitted.append($0) }
             let input = "!\u{0301}cmd"
 
-            XCTAssertNotNil(source.send(input))
+            let sentToken = await source.send(input)
+            XCTAssertNotNil(sentToken)
             await flushTasks()
 
             guard case let .sendPrompt(text, mode, _, _, _) = submitted.first else {
@@ -218,7 +226,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.model.activeSessionId = "test-session"
             var commands: [ClientCommand] = []
             source.setCommandSubmitterForTesting { commands.append($0) }
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
@@ -257,7 +265,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                     throw SubmitFailure.rejected
                 }
             }
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
@@ -294,7 +302,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                     )))
                 }
             }
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
@@ -315,7 +323,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             // A second foreground delivery while the first recovery chain is
             // running must not submit another AttachTurn.
             source.handleForeground()
-            await flushTasks(16)
+            await source.waitForDurableRecoveryForTesting()
 
             let recoveryCommands = commands.compactMap { command -> ClientCommand? in
                 switch command {
@@ -367,7 +375,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                     break
                 }
             }
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
@@ -382,7 +390,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             )))
 
             source.handleForeground()
-            await flushTasks(24)
+            await source.waitForDurableRecoveryForTesting()
 
             XCTAssertTrue(commands.contains { if case .resumeTurn = $0 { return true }; return false })
             XCTAssertFalse(source.model.streaming)
@@ -390,7 +398,8 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertTrue(source.model.hasUnresolvedTurnRecovery)
             XCTAssertEqual(source.model.activeTurnToken?.clientTurnId, token.clientTurnId)
             XCTAssertFalse(source.model.requiresBackgroundExecution)
-            XCTAssertNil(source.send("must wait"))
+            let blockedToken = await source.send("must wait")
+            XCTAssertNil(blockedToken)
         }
 
         func testPausedAttachReplayToolResumeFailureSettlesOnlyCorrelatedMainRun() async throws {
@@ -424,7 +433,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                     break
                 }
             }
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
@@ -439,7 +448,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             )))
 
             source.handleForeground()
-            await flushTasks(24)
+            await source.waitForDurableRecoveryForTesting()
 
             XCTAssertTrue(source.model.hasInactiveDurableRecovery)
             XCTAssertTrue(source.model.hasUnresolvedTurnRecovery)
@@ -460,7 +469,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             let source = makeSource()
             source.model.activeSessionId = "test-session"
             source.setCommandSubmitterForTesting { _ in }
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
@@ -473,10 +482,12 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 reason: "background_time_expired"
             )))
 
-            XCTAssertNil(source.send("must wait"))
+            let blockedToken = await source.send("must wait")
+            XCTAssertNil(blockedToken)
             source.startNewConversation()
             XCTAssertEqual(source.model.activeSessionId, "test-session")
-            XCTAssertEqual(source.durableAttachCursorForTesting(), 0)
+            let durableCursor = try await source.durableAttachCursorForTesting()
+            XCTAssertEqual(durableCursor, 0)
 
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
@@ -487,7 +498,9 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 safeToResume: false,
                 reason: nil
             )))
-            XCTAssertNotNil(source.send("after recovery"))
+            await source.waitForDurableCleanupForTesting()
+            let resumedToken = await source.send("after recovery")
+            XCTAssertNotNil(resumedToken)
         }
 
         func testResumeWaitingForUserRemainsGatedAndForegroundIsIdempotent() async throws {
@@ -508,7 +521,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                     )))
                 }
             }
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
@@ -524,9 +537,9 @@ final class ConversationTurnCompletionTests: XCTestCase {
             )))
 
             source.handleForeground()
-            await flushTasks(16)
+            await source.waitForDurableRecoveryForTesting()
             source.handleForeground()
-            await flushTasks(8)
+            await source.waitForDurableRecoveryForTesting()
 
             XCTAssertEqual(commands.filter {
                 if case .attachTurn = $0 { return true }
@@ -537,7 +550,8 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 return false
             }.count, 1)
             XCTAssertFalse(source.model.streaming)
-            XCTAssertNil(source.send("must wait"))
+            let blockedToken = await source.send("must wait")
+            XCTAssertNil(blockedToken)
         }
 
         func testInactiveWaitingForUserCanCancelAndTerminalStateReleasesGates() async throws {
@@ -559,7 +573,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                     reason: "user_discarded"
                 )))
             }
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
@@ -588,7 +602,8 @@ final class ConversationTurnCompletionTests: XCTestCase {
             )))
             XCTAssertFalse(source.model.streaming)
             XCTAssertTrue(source.model.hasInactiveDurableRecovery)
-            XCTAssertNil(source.send("must wait"))
+            let blockedToken = await source.send("must wait")
+            XCTAssertNil(blockedToken)
 
             try await source.cancelAndWait()
 
@@ -600,8 +615,11 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertFalse(source.model.isCancelling)
             XCTAssertFalse(source.model.hasInactiveDurableRecovery)
             XCTAssertEqual(source.model.notice, .cancelled)
-            XCTAssertNil(source.durableAttachCursorForTesting())
-            XCTAssertNotNil(source.send("after discard"), "terminal recovery must release the send gate")
+            await source.waitForDurableCleanupForTesting()
+            let durableCursor = try await source.durableAttachCursorForTesting()
+            XCTAssertNil(durableCursor)
+            let resumedToken = await source.send("after discard")
+            XCTAssertNotNil(resumedToken, "terminal recovery must release the send gate")
         }
 
         func testCancelCommandOKRetainsOwnershipUntilMatchingTerminalRecoveryState() async throws {
@@ -609,7 +627,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.model.activeSessionId = "test-session"
             var commands: [ClientCommand] = []
             source.setCommandSubmitterForTesting { commands.append($0) }
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
@@ -657,7 +675,9 @@ final class ConversationTurnCompletionTests: XCTestCase {
             try await cancellation.value
             XCTAssertFalse(source.model.isCancelling)
             XCTAssertFalse(source.model.hasInactiveDurableRecovery)
-            XCTAssertNotNil(source.send("after discard"))
+            await source.waitForDurableCleanupForTesting()
+            let resumedToken = await source.send("after discard")
+            XCTAssertNotNil(resumedToken)
         }
 
         func testEngineListenerPreservesFIFOEventOrder() async {
@@ -705,11 +725,11 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertTrue(listener.isIdleForTesting)
         }
 
-        func testEnginePublishesSequencedSpeechDeltasForOwnedTurn() {
+        func testEnginePublishesSequencedSpeechDeltasForOwnedTurn() async {
             let source = makeSource()
             var updates: [ConversationTurnSpeechUpdate] = []
             let subscription = source.model.turnSpeechUpdates.sink { updates.append($0) }
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
 
@@ -726,11 +746,12 @@ final class ConversationTurnCompletionTests: XCTestCase {
             withExtendedLifetime(subscription) {}
         }
 
-        func testSessionSwitchDropsLateSpeechDelta() {
+        func testSessionSwitchDropsLateSpeechDelta() async {
             let source = makeSource()
             var updates: [ConversationTurnSpeechUpdate] = []
             let subscription = source.model.turnSpeechUpdates.sink { updates.append($0) }
-            XCTAssertNotNil(source.send("old question"))
+            let oldToken = await source.send("old question")
+            XCTAssertNotNil(oldToken)
             source.applyForTesting(.textDelta(text: "old".clientTextDto))
             XCTAssertEqual(updates.count, 1)
 
@@ -741,10 +762,10 @@ final class ConversationTurnCompletionTests: XCTestCase {
             withExtendedLifetime(subscription) {}
         }
 
-        func testCompletedTurnPublishesOnlyAssistantTextBlocksForSpeech() {
+        func testCompletedTurnPublishesOnlyAssistantTextBlocksForSpeech() async {
             let source = makeSource()
 
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             source.applyForTesting(
@@ -773,10 +794,10 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertEqual(source.model.turnCompletion?.finalAssistantText, "spoken answer")
         }
 
-        func testEngineFailurePublishesNonSpeakableCompletion() {
+        func testEngineFailurePublishesNonSpeakableCompletion() async {
             let source = makeSource()
 
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             source.applyForTesting(.textDelta(text: "partial response".clientTextDto))
@@ -787,10 +808,10 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertEqual(source.model.turnCompletion?.finalAssistantText, "")
         }
 
-        func testSessionSwitchInvalidatesTokenAndDropsLateTerminal() {
+        func testSessionSwitchInvalidatesTokenAndDropsLateTerminal() async {
             let source = makeSource()
 
-            guard let oldToken = source.send("old question") else {
+            guard let oldToken = await source.send("old question") else {
                 return XCTFail("expected a turn token")
             }
             source.applyForTesting(.textDelta(text: "stale answer".clientTextDto))
@@ -803,17 +824,18 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertNil(source.model.turnCompletion)
             XCTAssertFalse(source.model.streaming)
 
-            guard let newToken = source.send("new question") else {
+            await source.waitForDurableRecoveryForTesting()
+            guard let newToken = await source.send("new question") else {
                 return XCTFail("expected a token in the new session")
             }
             XCTAssertNotEqual(newToken, oldToken)
             XCTAssertNotEqual(newToken.sessionEpoch, oldToken.sessionEpoch)
         }
 
-        func testCancelledCompletionNeverCarriesPartialAssistantText() {
+        func testCancelledCompletionNeverCarriesPartialAssistantText() async {
             let source = makeSource()
 
-            guard let token = source.send("question") else {
+            guard let token = await source.send("question") else {
                 return XCTFail("expected a turn token")
             }
             source.applyForTesting(.textDelta(text: "partial response".clientTextDto))
@@ -839,7 +861,8 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 throw SubmitFailure.rejected
             }
 
-            XCTAssertNotNil(source.send("old question"))
+            let oldToken = await source.send("old question")
+            XCTAssertNotNil(oldToken)
             await flushTasks()
             source.expectSessionResumeForTesting("new-session")
             source.applyForTesting(.sessionResumed(sessionId: "new-session", mode: .code, messages: []))

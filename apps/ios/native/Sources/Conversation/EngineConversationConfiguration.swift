@@ -54,6 +54,7 @@ struct EngineConfig {
     /// `additionalWorkspaceDirectories`.
     var projectMountGrants: [String] = []
     var initialSessionId: String? = nil
+    var initialSessionTranscriptPath: String? = nil
 
     /// Persisted API keys are resolved per request from native secure storage.
     static func fromEnvironment(appSandboxRoot: String,

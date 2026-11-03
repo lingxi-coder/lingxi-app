@@ -182,68 +182,12 @@ actor JsonCronStoreClient: CronStoreClient {
         try readTasks().sorted(by: taskSort)
     }
 
-    func create(cronExpr: String, prompt: String, recurring: Bool) async throws -> CronTaskRecord {
-        let expr = try CronExpression(cronExpr)
-        let timestamp = now()
-        var tasks = try readTasks()
-        let record = CronTaskRecord(
-            id: makeID(),
-            cron: cronExpr.trimmingCharacters(in: .whitespacesAndNewlines),
-            prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines),
-            createdAtMs: timestamp,
-            lastFiredAtMs: nil,
-            recurring: recurring,
-            nextFireMs: expr.nextFire(after: timestamp, calendar: calendar),
-            human: expr.humanDescription()
-        )
-        tasks.append(record)
-        try writeTasks(tasks)
-        return record
-    }
-
-    func update(taskID: String, cronExpr: String, prompt: String, recurring: Bool) async throws -> CronTaskRecord {
-        let expr = try CronExpression(cronExpr)
-        let timestamp = now()
-        var tasks = try readTasks()
-        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else {
-            throw CronStoreError.missingTask(taskID)
-        }
-        let previous = tasks[index]
-        let anchor = max(timestamp, previous.lastFiredAtMs ?? previous.createdAtMs)
-        let updated = CronTaskRecord(
-            id: previous.id,
-            cron: cronExpr.trimmingCharacters(in: .whitespacesAndNewlines),
-            prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines),
-            createdAtMs: previous.createdAtMs,
-            lastFiredAtMs: previous.lastFiredAtMs,
-            recurring: recurring,
-            nextFireMs: expr.nextFire(after: anchor, calendar: calendar),
-            human: expr.humanDescription(),
-            automation: previous.automation
-        )
-        tasks[index] = updated
-        try writeTasks(tasks)
-        return updated
-    }
-
-    func migrateLegacyTasks(defaultModel: String?, reasoning: CronReasoning) async throws {
-        var tasks = try readTasks()
-        var changed = false
-        for i in tasks.indices where tasks[i].automation == nil {
-            var config = CronAutomation()
-            config.model = defaultModel ?? ""
-            config.reasoning = reasoning
-            if !tasks[i].recurring && tasks[i].nextFireMs == nil {
-                config.status = .completed
-            } else if config.model?.isEmpty != false {
-                config.status = .paused
-                config.statusReason = "Choose a model to resume this task."
-                tasks[i].nextFireMs = nil
-            }
-            tasks[i].automation = config
-            changed = true
-        }
-        if changed { try writeTasks(tasks) }
+    func listOwnerReservations() async throws -> [CronOwnerReservation] {
+        let ledger = fileURL.deletingLastPathComponent().appendingPathComponent("owner-reservations.json")
+        guard try ownerCatalogFileExists(ledger) else { return [] }
+        let data = try Data(contentsOf: ledger)
+        try UniqueJSONKeyGuard.validate(data)
+        return try JSONDecoder().decode([CronOwnerReservation].self, from: data)
     }
 
     func saveConfigured(draft: CronTaskDraft) async throws -> CronTaskRecord {
@@ -342,9 +286,11 @@ actor JsonCronStoreClient: CronStoreClient {
     }
 
     private func readTasks() throws -> [CronTaskRecord] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
+        guard try ownerCatalogFileExists(fileURL) else { return [] }
         let data = try Data(contentsOf: fileURL)
+        try UniqueJSONKeyGuard.validate(data)
         let envelope = try JSONDecoder().decode(CronTasksEnvelope.self, from: data)
+        guard envelope.version == 2 else { throw ProjectRepositoryError.unsupportedVersion }
         return envelope.tasks
     }
 

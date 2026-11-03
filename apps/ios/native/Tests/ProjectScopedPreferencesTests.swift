@@ -2,6 +2,27 @@ import XCTest
 @testable import LingxiCode
 
 final class ProjectScopedPreferencesTests: XCTestCase {
+    func testUnindexedHandoffRestoresBlankDraftBeforeOwnerRegistration() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        preferences.setActiveSessionID("prior", scope: .global, mode: .chat)
+        preferences.setDraft("prior draft", scope: .global, mode: .chat, ownerSessionID: "prior")
+        let units: [UInt16] = [0x61, 0xD800, 0x62]
+        let text = String(decoding: units, as: UTF16.self)
+        let reference = SessionHandoffReference(sourceScopeKey: "project.p", sourceSessionID: "source",
+            sourceMode: .code, targetMode: .chat, cutoff: "cutoff", requestID: "request")
+        preferences.prepareUnindexedHandoffDraft(text, sourceCodeUnits: units, reference: reference,
+                                                  scope: .global, mode: .chat)
+        let reopened = ProjectScopedPreferences(defaults: defaults)
+        XCTAssertEqual(reopened.activeSessionID(scope: .global, mode: .chat), "")
+        XCTAssertEqual(reopened.draft(scope: .global, mode: .chat, ownerSessionID: ""), text)
+        XCTAssertEqual(reopened.draftSourceCodeUnits(scope: .global, mode: .chat, ownerSessionID: ""), units)
+        XCTAssertEqual(reopened.handoffReference(sessionID: "", scope: .global, mode: .chat), reference)
+        XCTAssertEqual(reopened.draft(scope: .global, mode: .chat, ownerSessionID: "prior"), "prior draft")
+    }
+
     func testHandoffDraftSourceAndReferenceSurviveRestoreWithoutChangingOwners() {
         let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

@@ -140,7 +140,7 @@ struct ProjectPage: View {
     let onTogglePinned: () -> Void
     /// nil while the list shows every mode: the caller keeps its current mode.
     let onNewSession: (SessionMode?) -> Void
-    let onOpenSession: (SessionMode, String) -> Void
+    let onOpenSession: (SessionMode, String, String?) -> Void
     /// `(scopeID, taskID)`; `(nil, nil)` opens the full task list.
     let onOpenCron: (String?, String?) -> Void
     let onOpenTerminal: () -> Void
@@ -159,7 +159,7 @@ struct ProjectPage: View {
         activeSession: String,
         onTogglePinned: @escaping () -> Void,
         onNewSession: @escaping (SessionMode?) -> Void,
-        onOpenSession: @escaping (SessionMode, String) -> Void,
+        onOpenSession: @escaping (SessionMode, String, String?) -> Void,
         onOpenCron: @escaping (String?, String?) -> Void,
         onOpenTerminal: @escaping () -> Void
     ) {
@@ -268,7 +268,7 @@ struct ProjectPage: View {
                         .foregroundStyle(t.text4)
                 }
                 ForEach(rows) { row in
-                    Button { onOpenSession(row.mode, row.id) } label: {
+                    Button { onOpenSession(row.mode, row.id, row.transcriptPath) } label: {
                         HStack(spacing: 10) {
                             row.mode.glyph(t, size: 15)
                             VStack(alignment: .leading, spacing: 3) {

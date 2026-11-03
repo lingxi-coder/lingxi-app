@@ -180,6 +180,14 @@ struct ProjectScopedPreferences {
 
     var hasValidSessionScopeRegistry: Bool { sessionScopeClaims != nil }
 
+    var hasObservedScheduledSessionIndex: Bool {
+        defaults.bool(forKey: "conversation.spaces.scheduled-index-observed")
+    }
+
+    func markScheduledSessionIndexObserved() {
+        defaults.set(true, forKey: "conversation.spaces.scheduled-index-observed")
+    }
+
     private func sessionScopeRegistry() -> [String: String]? {
         let key = "conversation.spaces.session-scopes"
         guard let stored = defaults.object(forKey: key) else {
@@ -216,6 +224,17 @@ struct ProjectScopedPreferences {
             values.removeValue(forKey: owner)
         }
         defaults.set(values, forKey: storageKey)
+    }
+
+    /// Preserve a handoff before its new owner has an indexed exact source.
+    /// A cold launch can reopen the blank draft if registration is interrupted.
+    func prepareUnindexedHandoffDraft(_ draft: String, sourceCodeUnits: [UInt16],
+                                      reference: SessionHandoffReference, scope: ConversationScope,
+                                      mode: SessionMode) {
+        setDraft(draft, scope: scope, mode: mode, ownerSessionID: "")
+        setDraftSourceCodeUnits(sourceCodeUnits, scope: scope, mode: mode, ownerSessionID: "")
+        setHandoffReference(reference, sessionID: "", scope: scope, mode: mode)
+        setActiveSessionID("", scope: scope, mode: mode)
     }
 
     func handoffReference(sessionID: String, scope: ConversationScope, mode: SessionMode) -> SessionHandoffReference? {

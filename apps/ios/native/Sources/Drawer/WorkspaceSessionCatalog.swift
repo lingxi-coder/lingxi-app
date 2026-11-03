@@ -14,6 +14,7 @@ struct WorkspaceSessionRow: Identifiable, Equatable, Sendable {
     let modifiedAt: Date?
     let relativeTime: String
     let messageCount: Int
+    let transcriptPath: String?
 }
 
 struct WorkspaceGroupSeed: Equatable, Sendable {
@@ -46,7 +47,8 @@ enum WorkspaceGroupBuilder {
             mode: session.mode,
             modifiedAt: session.modifiedAt,
             relativeTime: session.relativeTime,
-            messageCount: session.messageCount
+            messageCount: session.messageCount,
+            transcriptPath: session.transcriptPath
         )
     }
 
@@ -57,7 +59,8 @@ enum WorkspaceGroupBuilder {
             mode: session.mode,
             modifiedAt: session.modifiedAt,
             relativeTime: session.relativeTime,
-            messageCount: session.messageCount
+            messageCount: session.messageCount,
+            transcriptPath: session.transcriptPath
         )
     }
 }

@@ -178,6 +178,7 @@ final class IOSAudioProviderService {
     }
 
     private var hostBuilder: HostBuilder? = { try IOSAudioProviderHost(profilesJSON: $0, region: $1) }
+    private var sessionHostBuilder: (MobileEngineHandle) -> any IOSAudioProviderHostDriving = { IOSAudioProviderHost(engine: $0) }
     private var host: (any IOSAudioProviderHostDriving)?
     private var sessionRoutes = IOSAudioAttachmentSessionRoutes()
     private var sessionEngines: [IOSMediaAttachmentIdentity: WeakSessionEngine] = [:]
@@ -201,6 +202,12 @@ final class IOSAudioProviderService {
         profilesJSON = nil
         invalidateCapabilities()
     }
+
+    #if DEBUG
+    func installSessionHostBuilderForTesting(_ builder: @escaping (MobileEngineHandle) -> any IOSAudioProviderHostDriving) {
+        sessionHostBuilder = builder
+    }
+    #endif
 
     func claimSessionContext(ownerID: String) {
         guard sessionContextOwnerID != ownerID else { return }
@@ -354,6 +361,15 @@ final class IOSAudioProviderService {
         sessionRoutes.context(for: owner)
     }
 
+    /// An admitted realtime start must stay bound to the engine and route
+    /// that supplied the user's action, even after another session is shown.
+    func ownsSessionRoute(_ owner: IOSAudioOwner, ownerID: String, engine: MobileEngineHandle) -> Bool {
+        guard case let .attached(attachment, _) = owner,
+              sessionRoutes.ownerID(for: attachment) == ownerID,
+              sessionEngines[attachment]?.value === engine else { return false }
+        return sessionRoutes.context(for: owner) != nil
+    }
+
     var routeCapabilities: [AudioProviderCapability] { capabilities.values.map(\.route) }
 
     func profileID(for binding: AudioCloudBinding) -> String? {
@@ -414,19 +430,20 @@ final class IOSAudioProviderService {
         IOSAudioService.shared.publishCapabilitySnapshot()
     }
 
-    func pinRealtime(snapshot: AudioConfigurationSnapshot) async throws -> (host: IosAudioProviderHost, requestJSON: String, owner: IOSAudioOwner?) {
+    func pinRealtime(snapshot: AudioConfigurationSnapshot, owner: IOSAudioOwner) async throws -> (host: IosAudioProviderHost, requestJSON: String, owner: IOSAudioOwner?) {
         guard snapshot.configuration.conversation.interaction == "turn_based" else {
             throw AudioServiceFailure.nativeFailure("Interruptible realtime capture is unavailable. Select turn-based conversation.")
         }
         let binding = snapshot.configuration.conversation.cloud
-        let owner = binding.binding == "follow_session" ? selectedFollowSessionOwner() : nil
-        let capturedContext = sessionRoutes.context(for: owner)
-        guard let profileID = profileID(for: binding), !profileID.isEmpty else { throw AudioServiceFailure.unavailable }
-        let transport = try obtainHost(binding: binding)
+        let routeOwner: IOSAudioOwner? = binding.binding == "follow_session" ? owner : nil
+        let capturedContext = sessionRoutes.context(for: routeOwner)
+        try validateOwner(routeOwner, binding: binding)
+        guard let profileID = profileID(for: binding, owner: routeOwner), !profileID.isEmpty else { throw AudioServiceFailure.unavailable }
+        let transport = try obtainHost(binding: binding, owner: routeOwner)
         guard let adapter = transport as? IOSAudioProviderHost else { throw AudioServiceFailure.unsupported }
-        let request = try requestJSON(binding: binding, kind: "realtime", operationID: UUID().uuidString.lowercased(), snapshot: snapshot, voice: snapshot.configuration.conversation.voice?.id)
+        let request = try requestJSON(binding: binding, kind: "realtime", operationID: UUID().uuidString.lowercased(), snapshot: snapshot, voice: snapshot.configuration.conversation.voice?.id, sessionContext: capturedContext)
         var object = try Self.object(try await transport.capabilities(requestJson: request))
-        guard sessionRoutes.context(for: owner) == capturedContext else { throw CancellationError() }
+        guard sessionRoutes.context(for: routeOwner) == capturedContext else { throw CancellationError() }
         let capability = Self.parseRealtimeCapability(object)
         let modelID = binding.modelId ?? capability.modelID
         guard capability.supported, capability.readiness == "ready", capability.models.contains(modelID) else {
@@ -440,7 +457,7 @@ final class IOSAudioProviderService {
         var cloud = object["cloud"] as? [String: Any] ?? [:]
         cloud["modelId"] = modelID as Any? ?? NSNull()
         object["cloud"] = cloud
-        return (adapter.host, String(decoding: try JSONSerialization.data(withJSONObject: object, options: .sortedKeys), as: UTF8.self), owner)
+        return (adapter.host, String(decoding: try JSONSerialization.data(withJSONObject: object, options: .sortedKeys), as: UTF8.self), routeOwner)
     }
 
     private static func parseRealtimeCapability(_ object: [String: Any]) -> IOSRealtimeCapability {
@@ -676,7 +693,7 @@ final class IOSAudioProviderService {
                   let accountScope = context.accountScope, !accountScope.isEmpty else {
                 throw AudioServiceFailure.nativeFailure("Open a session before using its cloud audio profile.")
             }
-            return IOSAudioProviderHost(engine: sessionEngine)
+            return sessionHostBuilder(sessionEngine)
         }
         let snapshot = ProviderRepository.shared.makeLaunchSnapshot()
         let configuredRegion = contextRegion ?? (DesktopSettingsRepository.shared.effective["providerRegion"] as? String)

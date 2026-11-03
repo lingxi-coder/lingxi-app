@@ -373,9 +373,13 @@ private struct RemoteSessionView: View {
                 RemoteSessionLoadingError(model: source.model)
             }
             if source.model.sessionModeKnown {
-                ChatView(session: SessionRef(id: source.sessionID, title: title), draft: $draft.draft.text,
-                    voiceInteraction: voice, source: source, draftSourceCodeUnits: $draft.draft.sourceCodeUnits,
-                    attachmentBinding: $draft.draft.attachment, sessionMode: source.sessionMode, workspaceName: title,
+                let owner = draft
+                ChatView(session: SessionRef(id: source.sessionID, title: title),
+                    draft: Binding(get: { owner.draft.text }, set: { owner.draft.text = $0 }),
+                    voiceInteraction: voice, source: source, draftRevision: { owner.draftRevision },
+                    draftSourceCodeUnits: Binding(get: { owner.draft.sourceCodeUnits }, set: { owner.draft.sourceCodeUnits = $0 }),
+                    attachmentBinding: Binding(get: { owner.draft.attachment }, set: { owner.draft.attachment = $0 }),
+                    sessionMode: source.sessionMode, workspaceName: title,
                     workspaceKey: ConversationScope.remote(hostID: source.hostID, sessionID: source.sessionID).workspaceKey)
                     .disabled(source.phase != .live || !source.hasReadyConnection)
                     .background {
@@ -399,7 +403,7 @@ private struct RemoteSessionView: View {
                     Text(prompt.text).lineLimit(2)
                     Spacer()
                     Button("remote_restore_unsent") { restoreUnsent(prompt) }
-                        .disabled(!draft.draft.text.isEmpty || draft.draft.attachment != nil)
+                        .disabled(!draft.draft.text.isEmpty || draft.draft.sourceCodeUnits != nil || draft.draft.attachment != nil)
                 }.font(.caption).padding(10)
             }
             ForEach(source.outgoing, id: \.id) { prompt in
@@ -417,14 +421,8 @@ private struct RemoteSessionView: View {
         // scrolling transcript inside this navigation destination's bounds.
         .clipped()
         .navigationTitle(title)
-        .task {
-            if let first = source.unsentPrompts.first { restoreUnsent(first) }
-            await source.start()
-        }
+        .task { await source.start() }
         .onDisappear { Task { await source.stop() } }
-        .onChange(of: source.unsentPrompts) { _, prompts in
-            if let first = prompts.first { restoreUnsent(first) }
-        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { source.handleForeground() }
             else if phase == .background { source.handleBackground() }

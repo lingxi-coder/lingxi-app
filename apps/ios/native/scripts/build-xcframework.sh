@@ -490,6 +490,47 @@ for marker in M10-P4:IosNativeMediaHost M10-P4:buildIosEngineWithConfig M10-P4:b
   }
 done
 
+# MobileCronAdmission owns a callback from the harness_runtime namespace.
+# The shared rustCall helper above initializes only the client namespace, so a
+# synchronous construction followed by an immediate release must initialize
+# the callback's vtable even if no harness async operation has run yet.
+HARNESSF="${GEN_DIR}/harness_runtime.swift"
+[[ -f "${HARNESSF}" ]] || { echo "ERROR: ${HARNESSF} missing after bindgen" >&2; exit 1; }
+HARNESS_MARKER="M10-P4:MobileCronAdmission"
+if ! grep -qF "${HARNESS_MARKER}" "${HARNESSF}"; then
+  tmp="${HARNESSF}.initpatch"
+  awk -v marker="${HARNESS_MARKER}" '
+    /^open class / { target = index($0, "open class MobileCronAdmission:") == 1 }
+    target && /^public convenience init\(owner:/ {
+      print
+      print "    uniffiEnsureHarnessRuntimeInitialized() // " marker " register callback vtable before lowering"
+      next
+    }
+    { print }
+  ' "${HARNESSF}" > "${tmp}"
+  mv "${tmp}" "${HARNESSF}"
+fi
+awk -v marker="${HARNESS_MARKER}" '
+  /^open class / { target = index($0, "open class MobileCronAdmission:") == 1 }
+  target && /^public convenience init\(owner:/ {
+    constructors++
+    if (getline > 0 && index($0, "    uniffiEnsureHarnessRuntimeInitialized() // " marker " ") == 1) patched++
+  }
+  END { exit !(constructors == 1 && patched == 1) }
+' "${HARNESSF}" || {
+  echo "ERROR: expected one MobileCronAdmission constructor with harness callback initialization" >&2
+  exit 1
+}
+awk '
+  /^private let initializationResult: InitializationResult = \{/ { initialization = 1; initializers++; next }
+  initialization && /^\}\(\)$/ { initialization = 0 }
+  initialization && /^    uniffiCallbackInitMobileCronOwnerAdmission\(\)$/ { registrations++ }
+  END { exit !(initializers == 1 && registrations == 1) }
+' "${HARNESSF}" || {
+  echo "ERROR: harness namespace does not register the MobileCronOwnerAdmission callback" >&2
+  exit 1
+}
+
 SWIFT_COUNT="$(find "${GEN_DIR}" -maxdepth 1 -type f -name '*.swift' -print | wc -l | tr -d ' ')"
 [[ "${SWIFT_COUNT}" -gt 0 ]] || { echo "ERROR: no Swift bindings generated in ${GEN_DIR}" >&2; exit 1; }
 log "Swift bindings: ${SWIFT_COUNT} .swift file(s) + headers + module.modulemap (single-module deduped)"

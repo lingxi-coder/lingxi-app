@@ -58,6 +58,7 @@ struct RecentSession: Identifiable, Equatable, Sendable {
     let modifiedAt: Date?
     let pinnedAt: Date?
     let status: RecentStatus
+    let transcriptPath: String?
 
     var workspaceKey: String { scope.workspaceKey }
 }
@@ -112,7 +113,8 @@ enum RecentSessionsBuilder {
                         relativeTime: row.relativeTime,
                         modifiedAt: row.modifiedAt,
                         pinnedAt: pinnedAt[row.id],
-                        status: statusFor(row.id)
+                        status: statusFor(row.id),
+                        transcriptPath: row.transcriptPath
                     )
                 )
             }

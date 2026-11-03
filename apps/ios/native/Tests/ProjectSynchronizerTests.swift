@@ -28,7 +28,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let bookmarkResolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try bookmarkResolver.makeBookmark(for: externalRoot))
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: bookmarkResolver,
             coordinator: PassthroughCoordinator()
@@ -47,12 +47,68 @@ final class ProjectSynchronizerTests: XCTestCase {
         XCTAssertEqual(["src/main.swift"], baseline.files.keys.sorted())
     }
 
+    func testSyncKeepsLocalAndExternalSchedulerOwnershipFilesSeparate() throws {
+        let ledger = ".lingxi/scheduled_owner_reservations.jsonl"
+        let lock = ".lingxi/scheduled_tasks.lock"
+        try writeExternal(ledger, "external ledger")
+        try writeExternal(lock, "external lock")
+        try writeExternal(".lingxi/config.toml", "user configuration")
+        let repository = ProjectRepository(projectsRoot: root)
+        let resolver = TestBookmarkResolver()
+        let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
+        let synchronizer = makeSynchronizer(repository: repository, bookmarkResolver: resolver,
+                                                         coordinator: PassthroughCoordinator())
+        _ = try synchronizer.importInitial(projectId: project.record.id)
+        let localLedger = project.sourceWorkspace.hostURL.appendingPathComponent(ledger)
+        let localLock = project.sourceWorkspace.hostURL.appendingPathComponent(lock)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: localLedger.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: localLock.path))
+        let localConfig = project.sourceWorkspace.hostURL.appendingPathComponent(".lingxi/config.toml")
+        XCTAssertEqual(try String(contentsOf: localConfig, encoding: .utf8), "user configuration")
+        try Data("local ledger".utf8).write(to: localLedger)
+        try Data("local lock".utf8).write(to: localLock)
+        // Even an older baseline containing these paths cannot turn an absent
+        // scanned file into a deletion on either side.
+        var baseline = try repository.readBaseline(projectId: project.record.id)
+        for path in [ledger, lock] {
+            baseline.files[path] = ProjectSyncFile(relativePath: path, sha256: "previous", sizeBytes: 1)
+        }
+        try repository.writeBaseline(projectId: project.record.id, baseline: baseline)
+        let backup = ledger + ".__lingxi_backup__" + UUID().uuidString
+        try writeExternal(backup, "external backup")
+        _ = try synchronizer.reimport(projectId: project.record.id)
+        _ = try synchronizer.export(projectId: project.record.id)
+        _ = try synchronizer.resolve(projectId: project.record.id, resolution: .keepExternal)
+        _ = try synchronizer.resolve(projectId: project.record.id, resolution: .keepInternal)
+        XCTAssertEqual(try Data(contentsOf: localLedger), Data("local ledger".utf8))
+        XCTAssertEqual(try Data(contentsOf: localLock), Data("local lock".utf8))
+        XCTAssertEqual(try Data(contentsOf: externalRoot.appendingPathComponent(ledger)), Data("external ledger".utf8))
+        XCTAssertEqual(try Data(contentsOf: externalRoot.appendingPathComponent(lock)), Data("external lock".utf8))
+        XCTAssertEqual(try Data(contentsOf: externalRoot.appendingPathComponent(backup)), Data("external backup".utf8))
+        try Data("updated configuration".utf8).write(to: localConfig)
+        _ = try synchronizer.export(projectId: project.record.id)
+        XCTAssertEqual(try String(contentsOf: externalRoot.appendingPathComponent(".lingxi/config.toml"), encoding: .utf8),
+                       "updated configuration")
+    }
+
+    func testInsufficientCapacityLeavesTheExternalSourceUntouched() throws {
+        try writeExternal("notes.txt", "original")
+        let repository = ProjectRepository(projectsRoot: root)
+        let resolver = TestBookmarkResolver()
+        let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
+        let synchronizer = makeSynchronizer(repository: repository, bookmarkResolver: resolver,
+                                            coordinator: PassthroughCoordinator(), availableCapacity: { _ in 0 })
+        XCTAssertThrowsError(try synchronizer.importInitial(projectId: project.record.id))
+        XCTAssertEqual(try Data(contentsOf: externalRoot.appendingPathComponent("notes.txt")), Data("original".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: project.sourceWorkspace.hostURL.appendingPathComponent("notes.txt").path))
+    }
+
     func testReimportDetectsConflictWithoutOverwritingEitherSide() throws {
         try writeExternal("notes.txt", "external-v1")
         let repository = ProjectRepository(projectsRoot: root)
         let bookmarkResolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try bookmarkResolver.makeBookmark(for: externalRoot))
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: bookmarkResolver,
             coordinator: PassthroughCoordinator()
@@ -82,14 +138,14 @@ final class ProjectSynchronizerTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let bookmarkResolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try bookmarkResolver.makeBookmark(for: externalRoot))
-        let baselineSynchronizer = ProjectWorkspaceSynchronizer(
+        let baselineSynchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: bookmarkResolver,
             coordinator: PassthroughCoordinator()
         )
         _ = try baselineSynchronizer.importInitial(projectId: project.record.id)
         try Data("replacement".utf8).write(to: project.workspace.hostURL.appendingPathComponent("notes.txt"))
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: bookmarkResolver,
             coordinator: PassthroughCoordinator(),
@@ -115,7 +171,7 @@ final class ProjectSynchronizerTests: XCTestCase {
             name: "Repo",
             sourceBookmark: try resolver.makeBookmark(for: externalRoot)
         )
-        let initial = ProjectWorkspaceSynchronizer(
+        let initial = makeSynchronizer(
             repository: repository,
             bookmarkResolver: resolver,
             coordinator: PassthroughCoordinator()
@@ -125,7 +181,7 @@ final class ProjectSynchronizerTests: XCTestCase {
             to: project.workspace.hostURL.appendingPathComponent("notes.txt")
         )
 
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: resolver,
             coordinator: MutatingWriteCoordinator(
@@ -152,7 +208,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let workingResolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try workingResolver.makeBookmark(for: externalRoot))
-        let initial = ProjectWorkspaceSynchronizer(
+        let initial = makeSynchronizer(
             repository: repository,
             bookmarkResolver: workingResolver,
             coordinator: PassthroughCoordinator()
@@ -161,7 +217,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         try Data("device copy".utf8).write(to: project.workspace.hostURL.appendingPathComponent("notes.txt"))
 
         let brokenResolver = TestBookmarkResolver(shouldFailResolve: true)
-        let broken = ProjectWorkspaceSynchronizer(
+        let broken = makeSynchronizer(
             repository: repository,
             bookmarkResolver: brokenResolver,
             coordinator: PassthroughCoordinator()
@@ -181,7 +237,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let resolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: resolver,
             coordinator: PassthroughCoordinator()
@@ -201,7 +257,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let resolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: resolver,
             coordinator: PassthroughCoordinator()
@@ -220,7 +276,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let resolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: resolver,
             coordinator: PassthroughCoordinator()
@@ -240,7 +296,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let resolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: resolver,
             coordinator: PassthroughCoordinator()
@@ -262,7 +318,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let resolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: resolver,
             coordinator: PassthroughCoordinator()
@@ -284,7 +340,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let resolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: resolver,
             coordinator: PassthroughCoordinator()
@@ -306,7 +362,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let resolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: resolver,
             coordinator: PassthroughCoordinator()
@@ -341,7 +397,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let linked = externalRoot.appendingPathComponent("linked", isDirectory: true)
         try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: outsideRoot)
 
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: resolver,
             coordinator: PassthroughCoordinator()
@@ -377,7 +433,7 @@ final class ProjectSynchronizerTests: XCTestCase {
             withDestinationURL: outsideRoot
         )
 
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: resolver,
             coordinator: PassthroughCoordinator()
@@ -394,7 +450,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let bookmarkResolver = TestBookmarkResolver(staleOnResolve: true, refreshedBookmarkData: Data("fresh-bookmark".utf8))
         let project = try repository.createImported(name: "Repo", sourceBookmark: try bookmarkResolver.makeBookmark(for: externalRoot))
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: bookmarkResolver,
             coordinator: PassthroughCoordinator()
@@ -418,7 +474,7 @@ final class ProjectSynchronizerTests: XCTestCase {
             name: "Repo",
             sourceBookmark: try bookmarkResolver.makeBookmark(for: externalRoot)
         )
-        let synchronizer = ProjectWorkspaceSynchronizer(
+        let synchronizer = makeSynchronizer(
             repository: repository,
             bookmarkResolver: bookmarkResolver,
             coordinator: FailingReadCoordinator()
@@ -503,6 +559,15 @@ final class ProjectSynchronizerTests: XCTestCase {
                 internalSha256: nil
             )
         )
+    }
+
+    private func makeSynchronizer(
+        repository: ProjectRepository, bookmarkResolver: any ProjectBookmarkResolving,
+        coordinator: any ProjectPathCoordinating, hooks: ProjectExternalTransactionHooks = .init(),
+        availableCapacity: @escaping @Sendable (URL) throws -> Int64 = { _ in Int64.max }
+    ) -> ProjectWorkspaceSynchronizer {
+        ProjectWorkspaceSynchronizer(repository: repository, bookmarkResolver: bookmarkResolver,
+                                     coordinator: coordinator, hooks: hooks, availableCapacity: availableCapacity)
     }
 
     private func writeExternal(_ relativePath: String, _ contents: String) throws {

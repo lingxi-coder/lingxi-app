@@ -26,6 +26,12 @@ struct CronScope: Identifiable, Hashable, Codable, Sendable {
             guestWorkspacePath: MobileUserStorage.directories().scheduledGuestCwd
         )
     }
+
+    static func project(_ project: ProjectSnapshot) -> CronScope {
+        CronScope(scopeID: project.record.id, projectID: project.record.id, projectName: project.record.name,
+                  projectCwd: project.sourceWorkspace.hostURL.path,
+                  guestWorkspacePath: project.sourceWorkspace.guestPath)
+    }
 }
 
 enum CronTaskStatus: String, Codable, CaseIterable, Sendable {
@@ -90,6 +96,7 @@ struct CronReasoning: Codable, Hashable, Sendable {
 struct CronAutomationRun: Codable, Hashable, Sendable {
     var id: String
     var taskId: String
+    var ownerPid: UInt32? = nil
     var scheduledAt: UInt64
     var startedAt: UInt64?
     var finishedAt: UInt64?
@@ -97,6 +104,9 @@ struct CronAutomationRun: Codable, Hashable, Sendable {
     var model: String
     var reasoning: CronReasoning?
     var sessionId: String?
+    var sessionTranscriptPath: String? = nil
+    var sessionMode: SessionMode? = nil
+    var sessionScopeKey: String? = nil
     var summary: String?
     var error: String?
     var claimGeneration: UInt64?
@@ -112,12 +122,20 @@ struct CronAutomation: Codable, Hashable, Sendable {
     var model: String?
     var reasoning = CronReasoning()
     var runMode: CronRunMode = .newSession
+    var sessionMode: SessionMode?
+    var sessionScopeKey: String?
     var targetSessionId: String?
+    var targetSessionTranscriptPath: String?
+    var targetSessionMode: SessionMode?
+    var targetSessionScopeKey: String?
     var ownedSessionId: String?
+    var ownedSessionTranscriptPath: String?
+    var ownedSessionMode: SessionMode?
+    var ownedSessionScopeKey: String?
     var notificationPolicy: CronNotificationPolicy = .all
 
     enum CodingKeys: String, CodingKey {
-        case version, status, statusReason, name, model, reasoning, runMode, targetSessionId, ownedSessionId, notificationPolicy, runs
+        case version, status, statusReason, name, model, reasoning, runMode, sessionMode, sessionScopeKey, targetSessionId, targetSessionTranscriptPath, targetSessionMode, targetSessionScopeKey, ownedSessionId, ownedSessionTranscriptPath, ownedSessionMode, ownedSessionScopeKey, notificationPolicy, runs
     }
     init() {}
     init(from decoder: Decoder) throws {
@@ -130,13 +148,28 @@ struct CronAutomation: Codable, Hashable, Sendable {
         model = try c.decodeIfPresent(String.self, forKey: .model)
         reasoning = try c.decodeIfPresent(CronReasoning.self, forKey: .reasoning) ?? CronReasoning()
         runMode = try c.decodeIfPresent(CronRunMode.self, forKey: .runMode) ?? .newSession
+        sessionMode = try c.decodeIfPresent(SessionMode.self, forKey: .sessionMode)
+        sessionScopeKey = try c.decodeIfPresent(String.self, forKey: .sessionScopeKey)
         targetSessionId = try c.decodeIfPresent(String.self, forKey: .targetSessionId)
+        targetSessionTranscriptPath = try c.decodeIfPresent(String.self, forKey: .targetSessionTranscriptPath)
+        targetSessionMode = try c.decodeIfPresent(SessionMode.self, forKey: .targetSessionMode)
+        targetSessionScopeKey = try c.decodeIfPresent(String.self, forKey: .targetSessionScopeKey)
         ownedSessionId = try c.decodeIfPresent(String.self, forKey: .ownedSessionId)
+        ownedSessionTranscriptPath = try c.decodeIfPresent(String.self, forKey: .ownedSessionTranscriptPath)
+        ownedSessionMode = try c.decodeIfPresent(SessionMode.self, forKey: .ownedSessionMode)
+        ownedSessionScopeKey = try c.decodeIfPresent(String.self, forKey: .ownedSessionScopeKey)
         notificationPolicy = try c.decodeIfPresent(CronNotificationPolicy.self, forKey: .notificationPolicy) ?? .all
     }
 
     func shouldNotify(_ status: CronRunStatus) -> Bool {
         notificationPolicy.shouldNotify(status)
+    }
+
+    mutating func clearOwnedSession() {
+        ownedSessionId = nil
+        ownedSessionTranscriptPath = nil
+        ownedSessionMode = nil
+        ownedSessionScopeKey = nil
     }
 }
 
@@ -144,6 +177,192 @@ struct CronSessionChoice: Identifiable, Equatable {
     let id: String
     let title: String
     let scopeID: String
+    let owner: ConversationScope
+    let mode: SessionMode
+    let transcriptPath: String
+}
+
+/// Durable native reservation; unlike run history it survives task deletion.
+struct CronOwnerReservation: Codable, Equatable, Sendable {
+    let sessionId: String
+    let sessionTranscriptPath: String
+    let sessionMode: SessionMode
+    let sessionScopeKey: String
+}
+
+struct CronOwnerCandidate: Equatable, Sendable {
+    let sessionId: String
+    let sessionMode: SessionMode
+    let sessionScopeKey: String
+    let sessionTranscriptPath: String?
+}
+
+func cronCandidateMatchesTask(_ candidate: CronOwnerCandidate, task: CronTaskRecord) -> Bool {
+    let id = canonicalSessionID(candidate.sessionId)
+    guard UUID(uuidString: id) != nil else { return false }
+    let config = task.configuration
+    switch config.runMode {
+    case .selectedSession:
+        return canonicalSessionID(config.targetSessionId ?? "") == id &&
+            config.targetSessionMode == candidate.sessionMode && config.targetSessionScopeKey == candidate.sessionScopeKey &&
+            config.targetSessionTranscriptPath != nil && config.targetSessionTranscriptPath == candidate.sessionTranscriptPath
+    case .newSession, .taskSession:
+        guard config.sessionMode == candidate.sessionMode, config.sessionScopeKey == candidate.sessionScopeKey else { return false }
+        if config.runMode == .taskSession, let owned = config.ownedSessionId, !owned.isEmpty {
+            return canonicalSessionID(owned) == id && candidate.sessionTranscriptPath?.isEmpty == false &&
+                candidate.sessionTranscriptPath == config.ownedSessionTranscriptPath &&
+                candidate.sessionMode == config.ownedSessionMode && candidate.sessionScopeKey == config.ownedSessionScopeKey
+        }
+        return candidate.sessionTranscriptPath == nil
+    }
+}
+
+func cronReservationMatchesTask(_ reservation: CronOwnerReservation, task: CronTaskRecord) -> Bool {
+    let config = task.configuration
+    switch config.runMode {
+    case .selectedSession:
+        return canonicalSessionID(config.targetSessionId ?? "") == canonicalSessionID(reservation.sessionId) &&
+            config.targetSessionTranscriptPath == reservation.sessionTranscriptPath &&
+            config.targetSessionMode == reservation.sessionMode && config.targetSessionScopeKey == reservation.sessionScopeKey
+    case .newSession, .taskSession:
+        guard config.sessionMode == reservation.sessionMode, config.sessionScopeKey == reservation.sessionScopeKey else { return false }
+        if config.runMode == .taskSession, let owned = config.ownedSessionId, !owned.isEmpty {
+            return canonicalSessionID(owned) == canonicalSessionID(reservation.sessionId) &&
+                config.ownedSessionTranscriptPath == reservation.sessionTranscriptPath &&
+                config.ownedSessionMode == reservation.sessionMode && config.ownedSessionScopeKey == reservation.sessionScopeKey
+        }
+        return true
+    }
+}
+
+/// A scheduler reserves only the UUID it is about to persist. Other owners,
+/// including already admitted turns for that UUID, remain independent.
+@MainActor
+final class CronOwnerAdmissionGate {
+    private var reservations: [String: UUID] = [:]
+    private var catalogUpdates = Set<UUID>()
+    private var preparingSources = Set<ObjectIdentifier>()
+    private var scopeMutation: UUID?
+    private var pendingScopeMutations = 0
+    private var scopeWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var scopeRevision: UInt64 = 0
+    weak var sessionHost: SessionHost?
+    var ownerCatalogIsCurrent: (() -> Bool)?
+
+    func begin(sessionID: String, token: UUID) -> Bool {
+        let id = canonicalSessionID(sessionID)
+        guard UUID(uuidString: id) != nil, scopeMutation == nil, pendingScopeMutations == 0,
+              reservations[id] == nil else { return false }
+        reservations[id] = token
+        return true
+    }
+
+    func finish(_ token: UUID) {
+        reservations = reservations.filter { $0.value != token }
+        catalogUpdates.remove(token)
+        wakeScopeWaiters()
+    }
+
+    /// Hold just the listed identities while a catalog update is validated,
+    /// written and published. A scheduler reservation for the same UUID must
+    /// settle first; unrelated new owners are not blocked by this lease.
+    func beginCatalogUpdate(sessionIDs: [String]) async throws -> UUID {
+        let identities = Set(sessionIDs.map(canonicalSessionID).filter { UUID(uuidString: $0) != nil })
+        while true {
+            try Task.checkCancellation()
+            if !scopeMutationPending && identities.allSatisfy({ reservations[$0] == nil }) {
+                let token = UUID()
+                catalogUpdates.insert(token)
+                for id in identities { reservations[id] = token }
+                return token
+            }
+            try await waitForScopeChange(since: scopeRevision)
+        }
+    }
+
+    func allowsNewOwner(sessionID: String) -> Bool {
+        scopeMutation == nil && reservations[canonicalSessionID(sessionID)] == nil
+    }
+
+    var scopeMutationPending: Bool { scopeMutation != nil || pendingScopeMutations > 0 }
+
+    func beginSourcePreparation(_ source: any ConversationSource) -> Bool {
+        let id = ObjectIdentifier(source)
+        if preparingSources.contains(id) { return true }
+        guard scopeMutation == nil, pendingScopeMutations == 0 else { return false }
+        preparingSources.insert(id)
+        return true
+    }
+
+    func endSourcePreparation(_ source: any ConversationSource) {
+        preparingSources.remove(ObjectIdentifier(source))
+        wakeScopeWaiters()
+    }
+
+    func beginScopeMutation() async throws -> UUID {
+        pendingScopeMutations += 1
+        defer { pendingScopeMutations -= 1; wakeScopeWaiters() }
+        while true {
+            try Task.checkCancellation()
+            if scopeMutation == nil && preparingSources.isEmpty && reservations.isEmpty && catalogUpdates.isEmpty {
+                let token = UUID()
+                scopeMutation = token
+                return token
+            }
+            try await waitForScopeChange(since: scopeRevision)
+        }
+    }
+
+    func endScopeMutation(_ token: UUID) {
+        guard scopeMutation == token else { return }
+        scopeMutation = nil
+        wakeScopeWaiters()
+    }
+
+    private func wakeScopeWaiters() {
+        scopeRevision &+= 1
+        let waiting = Array(scopeWaiters.values)
+        scopeWaiters.removeAll()
+        waiting.forEach { $0.resume() }
+    }
+
+    private func waitForScopeChange(since revision: UInt64) async throws {
+        try Task.checkCancellation()
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled || revision != scopeRevision { continuation.resume() }
+                else { scopeWaiters[id] = continuation }
+            }
+        } onCancel: { [weak self] in
+            Task { @MainActor in self?.scopeWaiters.removeValue(forKey: id)?.resume() }
+        }
+        try Task.checkCancellation()
+    }
+
+    func waitUntilAvailable(sessionID: String) async throws {
+        while scopeMutationPending || !allowsNewOwner(sessionID: sessionID) {
+            try await waitForScopeChange(since: scopeRevision)
+        }
+        try Task.checkCancellation()
+    }
+
+    func allowsReservation(sessionID: String, owner: SessionOwnerEvidence, previouslyKnown: Bool,
+                           checkPreparing: Bool = true) -> Bool {
+        guard let sessionHost, !checkPreparing || !sessionHost.hasPreparingClaim(sessionID: sessionID) else { return false }
+        do {
+            guard let entry = try sessionHost.entryForClaim(sessionID: sessionID, scope: owner.scope, mode: owner.mode) else { return true }
+            if let path = entry.source.model.workspaceState?.transcriptPath, !path.isEmpty {
+                return path == owner.transcriptPath
+            }
+            return previouslyKnown
+        } catch { return false }
+    }
+
+    func allowsUnclaimedReservation(sessionID: String) -> Bool {
+        guard let sessionHost, !sessionHost.hasPreparingClaim(sessionID: sessionID) else { return false }
+        return !sessionHost.entries.contains { canonicalSessionID($0.sessionID) == canonicalSessionID(sessionID) }
+    }
 }
 
 struct CronTaskRecord: Identifiable, Hashable, Codable, Sendable {
@@ -243,6 +462,9 @@ struct CronRunRecord: Identifiable, Hashable, Codable, Sendable {
     var errorKind: CronRunErrorKind?
     let manual: Bool
     var sessionID: String? = nil
+    var sessionTranscriptPath: String? = nil
+    var sessionMode: SessionMode? = nil
+    var sessionScopeKey: String? = nil
     var actualModel: String? = nil
     var notificationPolicy: CronNotificationPolicy? = nil
 
@@ -305,6 +527,9 @@ struct CronGeneratedSession: Identifiable, Codable, Equatable, Sendable {
     var projectID: String?
     var title: String
     var updatedAtMs: UInt64
+    var sessionTranscriptPath: String? = nil
+    var sessionMode: SessionMode? = nil
+    var sessionScopeKey: String? = nil
 }
 
 struct CronRepositoryState: Equatable, Sendable {
@@ -407,6 +632,9 @@ struct CronExecutionOutcome: Equatable, Sendable {
     let errorMessage: String?
     let errorKind: CronRunErrorKind?
     var sessionID: String? = nil
+    var sessionTranscriptPath: String? = nil
+    var sessionMode: SessionMode? = nil
+    var sessionScopeKey: String? = nil
     var actualModel: String? = nil
 }
 
@@ -427,9 +655,7 @@ protocol CronScopeProviding: Sendable {
 
 protocol CronStoreClient: Sendable {
     func list() async throws -> [CronTaskRecord]
-    func migrateLegacyTasks(defaultModel: String?, reasoning: CronReasoning) async throws
-    func create(cronExpr: String, prompt: String, recurring: Bool) async throws -> CronTaskRecord
-    func update(taskID: String, cronExpr: String, prompt: String, recurring: Bool) async throws -> CronTaskRecord
+    func listOwnerReservations() async throws -> [CronOwnerReservation]
     func saveConfigured(draft: CronTaskDraft) async throws -> CronTaskRecord
     func updateAutomation(taskID: String, automation: CronAutomation) async throws -> CronTaskRecord
     func delete(taskID: String) async throws -> Bool
@@ -440,6 +666,13 @@ protocol CronStoreClient: Sendable {
 
 protocol CronStoreProviding: Sendable {
     func store(for scope: CronScope, appSandboxRoot: String) async throws -> any CronStoreClient
+    func storeForAdmission(for scope: CronScope, appSandboxRoot: String) async throws -> any CronStoreClient
+}
+
+extension CronStoreProviding {
+    func storeForAdmission(for scope: CronScope, appSandboxRoot: String) async throws -> any CronStoreClient {
+        try await store(for: scope, appSandboxRoot: appSandboxRoot)
+    }
 }
 
 protocol CronTaskExecuting: Sendable {
@@ -653,7 +886,6 @@ func formatCronEpoch(_ epochMs: UInt64) -> String {
 }
 
 extension CronStoreClient {
-    func migrateLegacyTasks(defaultModel: String?, reasoning: CronReasoning) async throws {}
     func saveConfigured(draft: CronTaskDraft) async throws -> CronTaskRecord {
         throw CronExecutionError(kind: .validation, message: "This task store must be upgraded before saving task settings.", statusOverride: .failed)
     }

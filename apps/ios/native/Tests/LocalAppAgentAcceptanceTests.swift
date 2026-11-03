@@ -209,15 +209,23 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             print("IOS_AGENT_CODE_SESSION sessionId=\(sessionID) activeSessionId=\(activeEngine.model.activeSessionId) cwd=\(workspace.cwd) projectRoot=\(workspace.projectRoot) additionalDirectories=\(workspace.additionalDirectories.sorted())")
             stage = "record-code-session"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
+            let verifiedWorkspaceResult = await activeEngine.authenticatedWorkspaceState(sessionID: sessionID, mode: .code)
+            let verifiedWorkspace = try XCTUnwrap(verifiedWorkspaceResult)
             try await projectStore.recordStartedSession(
                 projectId: project.record.id,
                 sessionId: sessionID,
                 title: projectName,
-                mode: .code
+                mode: .code,
+                workspaceDirectory: verifiedWorkspace.cwd,
+                transcriptPath: verifiedWorkspace.transcriptPath
             )
             stage = "record-workspace"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
-            try await projectStore.recordWorkspace(projectId: project.record.id, state: workspace)
+            let workspaceAuthority = WorkspaceWriteAuthority()
+            workspaceAuthority.setSelected(true)
+            try await projectStore.recordAuthenticatedWorkspace(verifiedWorkspace,
+                in: .project(project.record.id), mode: .code, authority: workspaceAuthority,
+                revision: workspaceAuthority.currentRevision())
             if verifyProjectShell {
                 stage = "verify-project-shell-cwd"
                 print("IOS_AGENT_WAKE_CHECKPOINT \(stage) model=\(codeModelID)")
@@ -333,7 +341,7 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
 
         let command = "pwd && cat ./\(markerName)"
         let prompt = "Use the Bash tool once with this exact command: `\(command)`. Do not infer the output."
-        guard let token = engine.send(prompt) else {
+        guard let token = await engine.send(prompt) else {
             throw LocalAppServiceFailure("PROJECT_SHELL_NOT_SUBMITTED", "The Code session did not accept the Project mount probe.")
         }
 

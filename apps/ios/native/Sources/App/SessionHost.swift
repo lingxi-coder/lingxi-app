@@ -31,6 +31,29 @@ enum SessionHandoffPresentationPolicy {
     }
 }
 
+/// A queued workspace commit must still belong to the same live source and
+/// session revision when the project writer actually reaches it. The lock is
+/// never held while waiting for that queue or a native async operation.
+final class WorkspaceWriteAuthority: @unchecked Sendable {
+    enum Failure: Error { case stale }
+    private let lock = NSLock()
+    private var revision: UInt64 = 0
+    private var live = true
+    private var selected = false
+
+    func currentRevision() -> UInt64 { lock.withLock { revision } }
+    func invalidate() { lock.withLock { revision &+= 1 } }
+    func retire() { lock.withLock { live = false; revision &+= 1 } }
+    func setSelected(_ value: Bool) { lock.withLock { selected = value } }
+
+    func commit<T>(revision expected: UInt64, _ write: (Bool) throws -> T) throws -> T {
+        try lock.withLock {
+            guard live, revision == expected else { throw Failure.stale }
+            return try write(selected)
+        }
+    }
+}
+
 /// Owns every live conversation independently of the visible SwiftUI projection.
 /// Switching tabs never tears down a source or changes its session owner.
 @MainActor
@@ -60,9 +83,16 @@ final class SessionHost {
         let initialSessionID: String
         fileprivate var claimedSessionID: String
         let workspace: String
-        var draft: String
-        var attachment: ComposerAttachment?
-        var draftSourceCodeUnits: [UInt16]?
+        private(set) var draftRevision: UInt64 = 0
+        var draft: String {
+            didSet { if Array(draft.utf16) != Array(oldValue.utf16) { draftRevision &+= 1 } }
+        }
+        var attachment: ComposerAttachment? {
+            didSet { if attachment != oldValue { draftRevision &+= 1 } }
+        }
+        var draftSourceCodeUnits: [UInt16]? {
+            didSet { if draftSourceCodeUnits != oldValue { draftRevision &+= 1 } }
+        }
         var handoffReference: SessionHandoffReference?
         let voice: VoiceInteractionController
         fileprivate let execution = ConversationBackgroundExecutionController.live()
@@ -70,8 +100,13 @@ final class SessionHost {
         fileprivate var observer: AnyCancellable?
         fileprivate var speechObserver: AnyCancellable?
         fileprivate var completionObserver: AnyCancellable?
+        fileprivate var workspaceInvalidationObservers: [AnyCancellable] = []
+        let workspaceWriteAuthority = WorkspaceWriteAuthority()
         var recordedFirstMessageID: UUID?
+        var isRecordingSession = false
         fileprivate var syncScheduled = false
+        fileprivate var observedWorkspaceState: SessionWorkspaceState?
+        fileprivate var observedWorkspaceSessionID = ""
 
         init(source: any ConversationSource, scope: ConversationScope, mode: SessionMode,
              sessionID: String, workspace: String, draft: String, voice: VoiceInteractionController) {
@@ -94,10 +129,26 @@ final class SessionHost {
     }
 
     private(set) var entries: [Entry] = []
+    private final class PreparingClaim {
+        weak var source: (any ConversationSource)?
+        let scope: ConversationScope
+        let mode: SessionMode
+        init(source: any ConversationSource, scope: ConversationScope, mode: SessionMode) {
+            self.source = source
+            self.scope = scope
+            self.mode = mode
+        }
+    }
+    private var preparingClaims: [String: PreparingClaim] = [:]
     private(set) var liveStatuses: [String: RecentStatus] = [:]
     var onActivity: ((Entry) -> Void)?
+    var onWorkspaceChanged: ((Entry) -> Void)?
+    private(set) var selectedEntryID: UUID?
     var admitsSessionIdentity: ((String, ConversationScope, SessionMode) -> Bool)?
     var admitsUnclaimedOwner: (() -> Bool)?
+    var startupAdmissionReady: (() -> Bool)?
+    var beginSourcePreparation: ((any ConversationSource) -> Bool)?
+    var finishSourcePreparation: ((any ConversationSource) -> Void)?
     private var scenePhase: ScenePhase = .active
     private var preferences = NotificationPreferencesStore.load()
     private let voiceFactory: @MainActor () -> VoiceInteractionController
@@ -133,7 +184,17 @@ final class SessionHost {
     @discardableResult
     func retain(source: any ConversationSource, scope: ConversationScope, mode: SessionMode,
                 sessionID: String, workspace: String, draft: String,
-                voice: VoiceInteractionController? = nil) throws -> Entry {
+                voice: VoiceInteractionController? = nil, replacing: Entry? = nil) throws -> Entry {
+        if let replacing {
+            guard entries.contains(where: { $0 === replacing }), replacing.source !== source,
+                  entry(for: source) == nil,
+                  replacing.scope == scope, replacing.mode == mode,
+                  !replacing.voice.hasOwnedAudio, !replacing.source.hasLiveSideChats,
+                  ConversationSourceReplacementPolicy.allowsReplacement(
+                    of: replacing.source.model, hasActiveRealtimeAudio: replacing.source.hasActiveRealtimeAudio) else {
+                throw OwnershipError.conflictingOwner
+            }
+        }
         let requestedID = canonicalSessionID(sessionID)
         let activeID = canonicalSessionID(source.model.activeSessionId)
         if !source.model.sessionTransitionPending, !requestedID.isEmpty, !activeID.isEmpty,
@@ -147,18 +208,41 @@ final class SessionHost {
             }
             return existing
         }
-        let identity = requestedID.isEmpty ? activeID : requestedID
+        let sourceClaims = preparingClaims.filter { $0.value.source === source }
+        guard sourceClaims.count <= 1 else { throw OwnershipError.conflictingOwner }
+        let prepared = sourceClaims.first
+        if let prepared {
+            guard prepared.value.scope == scope, prepared.value.mode == mode,
+                  requestedID.isEmpty || requestedID == prepared.key,
+                  source.model.sessionTransitionPending || activeID.isEmpty || activeID == prepared.key else {
+                throw OwnershipError.sourceIdentityMismatch
+            }
+        }
+        let identity = requestedID.isEmpty ? (prepared?.key ?? activeID) : requestedID
+        if let replacing {
+            let oldIdentity = canonicalSessionID(replacing.sessionID)
+            guard oldIdentity.isEmpty || oldIdentity == identity else { throw OwnershipError.sourceIdentityMismatch }
+        }
         if !identity.isEmpty, !(admitsSessionIdentity?(identity, scope, mode) ?? true) {
             throw OwnershipError.conflictingOwner
         }
-        if try entryForClaim(sessionID: identity, scope: scope, mode: mode) != nil {
+        if let other = preparingClaims[identity]?.source, other !== source {
+            throw OwnershipError.duplicateSource
+        }
+        if let existing = try entryForClaim(sessionID: identity, scope: scope, mode: mode), existing !== replacing {
             // The caller must reuse the existing entry before starting another
             // source. A late collision must never publish a second owner.
             throw OwnershipError.duplicateSource
         }
         let entry = Entry(source: source, scope: scope, mode: mode, sessionID: sessionID,
                           workspace: workspace, draft: draft, voice: voice ?? voiceFactory())
+        // The native workspace admission can finish before SessionStarted is
+        // delivered. Transfer its authenticated temporary claim atomically to
+        // the retained owner before the preparation lease is released.
+        entry.claimedSessionID = identity
+        if let replacing { removeEntry(replacing) }
         entries.append(entry)
+        if preparingClaims[identity]?.source === source { preparingClaims.removeValue(forKey: identity) }
         protectIdentity(of: source, scope: scope, mode: mode, sessionID: identity)
         entry.alerts.setPreferences(preferences)
         entry.alerts.setScenePhase(scenePhase)
@@ -171,6 +255,16 @@ final class SessionHost {
                 self.sync(entry)
             }
         }
+        // Published values notify before mutation. Invalidate a queued write
+        // immediately, even if the main-actor sync task has not yet run.
+        let authority = entry.workspaceWriteAuthority
+        entry.workspaceInvalidationObservers = [
+            source.model.$workspaceState.dropFirst().sink { _ in authority.invalidate() },
+            source.model.$activeSessionId.dropFirst().sink { _ in authority.invalidate() },
+            source.model.$sessionTransitionPending.dropFirst().sink { _ in authority.invalidate() },
+            source.model.$sessionMode.dropFirst().sink { _ in authority.invalidate() },
+            source.model.$activeTurnToken.dropFirst().sink { _ in authority.invalidate() }
+        ]
         // These subscriptions live with the owner, even while its view is off
         // screen. An admitted Flow turn can therefore finish its audio response.
         entry.speechObserver = source.model.turnSpeechUpdates.sink { [weak entry] update in
@@ -185,14 +279,36 @@ final class SessionHost {
     }
 
     func releaseIdleSource(_ source: any ConversationSource) {
-        guard let index = entries.firstIndex(where: { $0.source === source }) else { return }
-        guard !entries[index].voice.hasOwnedAudio, !source.hasLiveSideChats,
+        guard let entry = entry(for: source) else { return }
+        guard !entry.voice.hasOwnedAudio, !source.hasLiveSideChats,
               ConversationSourceReplacementPolicy.allowsReplacement(
                 of: source.model, hasActiveRealtimeAudio: source.hasActiveRealtimeAudio) else { return }
-        let entry = entries.remove(at: index)
+        removeEntry(entry)
+    }
+
+    /// Validate the new source while the old entry remains registered. Once
+    /// validation succeeds, the main actor swaps entries without suspension.
+    func replaceIdleSource(_ old: any ConversationSource, with replacement: any ConversationSource,
+                           scope: ConversationScope, mode: SessionMode, sessionID: String,
+                           workspace: String, draft: String) throws -> Entry {
+        guard let previous = entry(for: old) else { throw OwnershipError.conflictingOwner }
+        let next = try retain(source: replacement, scope: scope, mode: mode, sessionID: sessionID,
+                              workspace: workspace, draft: draft, voice: previous.voice, replacing: previous)
+        next.attachment = previous.attachment
+        next.draftSourceCodeUnits = previous.draftSourceCodeUnits
+        next.handoffReference = previous.handoffReference
+        return next
+    }
+
+    private func removeEntry(_ entry: Entry) {
+        guard let index = entries.firstIndex(where: { $0 === entry }) else { return }
+        entries.remove(at: index)
+        entry.workspaceWriteAuthority.retire()
+        if selectedEntryID == entry.id { selectedEntryID = nil }
         entry.observer?.cancel()
         entry.speechObserver?.cancel()
         entry.completionObserver?.cancel()
+        entry.workspaceInvalidationObservers.forEach { $0.cancel() }
         entry.execution.setTurnActive(false)
         entry.alerts.clear()
     }
@@ -203,6 +319,63 @@ final class SessionHost {
 
     func entry(for source: any ConversationSource) -> Entry? {
         entries.first { $0.source === source }
+    }
+
+    func select(_ entry: Entry) {
+        guard entries.contains(where: { $0 === entry }) else { return }
+        if let previous = entries.first(where: { $0.id == selectedEntryID }), previous !== entry {
+            previous.workspaceWriteAuthority.setSelected(false)
+        }
+        entry.workspaceWriteAuthority.setSelected(true)
+        selectedEntryID = entry.id
+    }
+
+    func refreshWorkspace(_ entry: Entry) {
+        guard entries.contains(where: { $0 === entry }) else { return }
+        onWorkspaceChanged?(entry)
+    }
+
+    /// Bind the returned workspace to the revision that preceded its native
+    /// read. A workspace event arriving while the read is suspended forces a
+    /// new read; callers must carry this revision through the disk CAS.
+    func authenticatedWorkspaceSnapshot(for entry: Entry) async -> (state: SessionWorkspaceState, revision: UInt64)? {
+        let source = entry.source
+        let id = canonicalSessionID(entry.sessionID)
+        guard !id.isEmpty else { return nil }
+        for _ in 0..<2 {
+            guard self.entry(for: source) === entry,
+                  canonicalSessionID(entry.sessionID) == id,
+                  canonicalSessionID(source.model.activeSessionId) == id,
+                  !source.model.sessionTransitionPending else { return nil }
+            let revision = entry.workspaceWriteAuthority.currentRevision()
+            guard let state = await source.authenticatedWorkspaceState(sessionID: id, mode: entry.mode),
+                  self.entry(for: source) === entry,
+                  canonicalSessionID(entry.sessionID) == id,
+                  canonicalSessionID(source.model.activeSessionId) == id,
+                  canonicalSessionID(state.sessionId) == id,
+                  !source.model.sessionTransitionPending else { return nil }
+            if entry.workspaceWriteAuthority.currentRevision() != revision { continue }
+            return (state, revision)
+        }
+        return nil
+    }
+
+    /// A catalog may discover a session while its owner is already live but
+    /// its first row is still being written. Only that owner's native handle
+    /// can confirm that the listed UUID resolves to the same transcript.
+    func validatesCatalogSource(sessionID: String, scope: ConversationScope,
+                                mode: SessionMode, transcriptPath: String?) async -> Bool {
+        guard !hasPreparingClaim(sessionID: sessionID) else { return false }
+        do {
+            guard let entry = try entryForClaim(sessionID: sessionID, scope: scope, mode: mode) else { return true }
+            guard let path = transcriptPath, !path.isEmpty, (path as NSString).isAbsolutePath else { return false }
+            let source = entry.source
+            guard let state = await source.authenticatedWorkspaceState(sessionID: sessionID, mode: mode),
+                  self.entry(for: source) === entry,
+                  canonicalSessionID(entry.sessionID) == canonicalSessionID(sessionID),
+                  canonicalSessionID(state.sessionId) == canonicalSessionID(sessionID) else { return false }
+            return state.transcriptPath == path
+        } catch { return false }
     }
 
     func entry(sessionID: String, scope: ConversationScope, mode: SessionMode) -> Entry? {
@@ -227,16 +400,65 @@ final class SessionHost {
         return existing
     }
 
+    func hasPreparingClaim(sessionID: String) -> Bool {
+        let id = canonicalSessionID(sessionID)
+        guard let claim = preparingClaims[id] else { return false }
+        if claim.source == nil { preparingClaims.removeValue(forKey: id); return false }
+        return true
+    }
+
+    func beginReplacement(of old: any ConversationSource, with replacement: any ConversationSource,
+                          sessionID: String, scope: ConversationScope, mode: SessionMode) -> Bool {
+        let id = canonicalSessionID(sessionID)
+        guard !id.isEmpty else { return beginSourcePreparation?(replacement) ?? true }
+        guard admitsSessionIdentity?(id, scope, mode) ?? true,
+              let existing = try? entryForClaim(sessionID: id, scope: scope, mode: mode),
+              existing.source === old, !hasPreparingClaim(sessionID: id),
+              beginSourcePreparation?(replacement) ?? true else { return false }
+        existing.workspaceWriteAuthority.invalidate()
+        preparingClaims[id] = PreparingClaim(source: replacement, scope: scope, mode: mode)
+        return true
+    }
+
+    func endPreparingClaim(of source: any ConversationSource) {
+        preparingClaims = preparingClaims.filter { $0.value.source !== source && $0.value.source != nil }
+        finishSourcePreparation?(source)
+    }
+
     /// Install before `prepare()`: startup and first-turn workspace callbacks
     /// can discover the UUID after the source was constructed.
     func protectIdentity(of source: any ConversationSource, scope: ConversationScope, mode: SessionMode,
                          sessionID: String = "") {
         #if canImport(harness_runtimeFFI)
         guard let engine = source as? EngineConversationSource else { return }
-        engine.setSessionStartupAdmission { [weak self, weak source] in
-            guard let self, let source else { return false }
-            return self.allowsStartup(of: source, sessionID: sessionID, scope: scope, mode: mode)
+        engine.setSessionStartupAdmission { [weak self, weak source, weak engine] in
+            guard let self, let source, let engine else { return false }
+            if engine.hasPreparedNativeHandle, let entry = self.entry(for: source), !entry.sessionID.isEmpty {
+                self.endPreparingClaim(of: source)
+                return true
+            }
+            guard self.startupAdmissionReady?() ?? true else { return false }
+            // An initial UI placeholder may have been retained before the
+            // scheduler's durable receipts were loaded; recheck it now.
+            let identity = canonicalSessionID(sessionID)
+            if !identity.isEmpty, !(self.admitsSessionIdentity?(identity, scope, mode) ?? true) { return false }
+            guard self.allowsStartup(of: source, sessionID: sessionID, scope: scope, mode: mode) else { return false }
+            return true
         }
+        engine.setSessionStartupLease(begin: { [weak self, weak source] in
+            guard let self, let source else { return false }
+            guard self.beginSourcePreparation?(source) ?? true else {
+                self.endPreparingClaim(of: source)
+                return false
+            }
+            let id = canonicalSessionID(sessionID)
+            if !id.isEmpty { self.preparingClaims[id] = PreparingClaim(source: source, scope: scope, mode: mode) }
+            return true
+        }, finish: { [weak self, weak source] in
+            guard let self, let source else { return }
+            // A new source stays fenced until RootView retains or discards it.
+            if self.entry(for: source) != nil { self.finishSourcePreparation?(source) }
+        })
         engine.setSessionOwnerAdmission { [weak self, weak source] sessionID in
             guard let self, let source else { return false }
             return self.claimIdentity(sessionID, for: source, scope: scope, mode: mode)
@@ -269,14 +491,23 @@ final class SessionHost {
         if let own = entry(for: source), !own.claimedSessionID.isEmpty,
            own.scope == scope, own.mode == mode,
            canonicalSessionID(own.claimedSessionID) == identity { return true }
+        if preparingClaims.contains(where: { key, claim in
+            claim.source === source && (key != identity || claim.scope != scope || claim.mode != mode)
+        }) { return false }
         guard admitsSessionIdentity?(identity, scope, mode) ?? true else { return false }
         do {
             if let existing = try entryForClaim(sessionID: identity, scope: scope, mode: mode),
                existing.source !== source { return false }
+            if let other = preparingClaims[identity]?.source, other !== source { return false }
             if let own = entry(for: source) {
                 guard own.scope == scope, own.mode == mode,
                       own.claimedSessionID.isEmpty || canonicalSessionID(own.claimedSessionID) == identity else { return false }
                 if own.claimedSessionID.isEmpty { own.claimedSessionID = sessionID }
+                preparingClaims.removeValue(forKey: identity)
+            } else {
+                // Preparation may suspend before the source is retained. The
+                // scheduler must see this claim before reserving its UUID.
+                preparingClaims[identity] = PreparingClaim(source: source, scope: scope, mode: mode)
             }
             return true
         } catch { return false }
@@ -335,8 +566,19 @@ final class SessionHost {
             }
             return
         }
-        onActivity?(entry)
         let model = entry.source.model
+        if model.sessionTransitionPending {
+            entry.observedWorkspaceState = nil
+            entry.observedWorkspaceSessionID = ""
+        }
+        if !model.sessionTransitionPending, let workspace = model.workspaceState,
+           canonicalSessionID(workspace.sessionId) == canonicalSessionID(entry.sessionID), !entry.sessionID.isEmpty,
+           (workspace != entry.observedWorkspaceState || entry.observedWorkspaceSessionID != entry.sessionID) {
+            entry.observedWorkspaceState = workspace
+            entry.observedWorkspaceSessionID = entry.sessionID
+            onWorkspaceChanged?(entry)
+        }
+        onActivity?(entry)
         let token = model.activeTurnToken
         var awaiting = !model.pendingQuestions.isEmpty
         #if canImport(harness_runtimeFFI)

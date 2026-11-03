@@ -18,6 +18,44 @@ final class ProjectRepositoryTests: XCTestCase {
         }
     }
 
+    func testGuardedPublicationRejectsChangedTargetAndChangedStagingFile() throws {
+        let target = root.appendingPathComponent("guarded.json")
+        let original = Data("original".utf8)
+        let replacement = Data("replacement".utf8)
+        for attack in 0..<4 {
+            try? FileManager.default.removeItem(at: target)
+            if attack != 3 { try original.write(to: target) }
+            let expected = try ownerCatalogExpectation(target)
+            let writer = DefaultProjectAtomicWriter(onGuardedStaged: { staged in
+                switch attack {
+                case 0: try? FileManager.default.removeItem(at: target)
+                case 1: try? replacement.write(to: target, options: .atomic)
+                case 2: try? replacement.write(to: staged, options: .atomic)
+                default: try? replacement.write(to: target)
+                }
+            })
+            XCTAssertThrowsError(try writer.writeData(Data("new".utf8), to: target, expected: expected,
+                                                       validate: { _ in }, commit: { try $0() }))
+            if attack == 0 { XCTAssertFalse(FileManager.default.fileExists(atPath: target.path)) }
+            else if attack == 2 { XCTAssertEqual(try Data(contentsOf: target), original) }
+            else { XCTAssertEqual(try Data(contentsOf: target), replacement) }
+        }
+    }
+
+    func testCatalogUpdateRejectsAnIndexReplacedDuringStaging() throws {
+        let initial = ProjectRepository(projectsRoot: root)
+        _ = try initial.updateSessions(projectId: nil, sessions: [session("first", at: Date())])
+        let file = root.appendingPathComponent(globalSessionIndexFileName)
+        let replacement = Data("external owner evidence".utf8)
+        let writer = DefaultProjectAtomicWriter(onGuardedStaged: { staged in
+            guard staged.lastPathComponent.contains(globalSessionIndexFileName) else { return }
+            try? replacement.write(to: file, options: .atomic)
+        })
+        let repository = ProjectRepository(projectsRoot: root, writer: writer)
+        XCTAssertThrowsError(try repository.updateSessions(projectId: nil, sessions: [session("second", at: Date())]))
+        XCTAssertEqual(try Data(contentsOf: file), replacement)
+    }
+
     func testModeMembershipSurvivesAnEmptyCatalog() throws {
         let repository = ProjectRepository(projectsRoot: root)
         let project = try repository.createInternal(name: "Code")
@@ -114,7 +152,7 @@ final class ProjectRepositoryTests: XCTestCase {
         let bytes = Data("keep original".utf8)
         try bytes.write(to: invalid)
         XCTAssertTrue(repository.load().errorMessage?.contains("project.\(id)") == true)
-        XCTAssertThrowsError(try repository.recordStartedSession(projectId: nil, sessionId: "new", title: "New"))
+        XCTAssertThrowsError(try repository.recordStartedSession(projectId: nil, sessionId: "new", title: "New", authoritativeTranscriptPath: "/catalog/new.jsonl"))
         XCTAssertEqual(try Data(contentsOf: invalid), bytes)
     }
 
@@ -151,8 +189,49 @@ final class ProjectRepositoryTests: XCTestCase {
         var conflicting = original
         conflicting.mode = .code
         XCTAssertThrowsError(try repository.updateSessions(projectId: nil, sessions: [conflicting]))
-        XCTAssertThrowsError(try repository.recordStartedSession(projectId: nil, sessionId: "same", title: "A", mode: .code))
+        XCTAssertThrowsError(try repository.recordStartedSession(projectId: nil, sessionId: "same", title: "A", mode: .code, authoritativeTranscriptPath: "/catalog/same.jsonl"))
         XCTAssertEqual(try Data(contentsOf: index), bytes)
+    }
+
+    func testCatalogCannotReplaceOrForgetAnExactSourceInAnyScope() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Project")
+        for projectID: String? in [nil, project.id] {
+            let id = projectID == nil ? "global-source" : "project-source"
+            let original = ProjectSessionSummary(sessionId: id, title: "Original", messageCount: 1,
+                relativeTime: "Now", updatedAt: Date(), mode: .chat, transcriptPath: "/catalog/original.jsonl")
+            _ = try repository.updateSessions(projectId: projectID, sessions: [original])
+            let index = projectID.map { root.appendingPathComponent($0).appendingPathComponent(projectSessionIndexFileName) }
+                ?? root.appendingPathComponent(globalSessionIndexFileName)
+            let bytes = try Data(contentsOf: index)
+            var otherCopy = original
+            otherCopy.transcriptPath = "/catalog/other.jsonl"
+            XCTAssertThrowsError(try repository.updateSessions(projectId: projectID, sessions: [otherCopy]))
+            XCTAssertEqual(try Data(contentsOf: index), bytes)
+
+            // Missing source in a catalog row, or an omitted row, cannot
+            // replace or remove an already confirmed owner.
+            var noPath = original
+            noPath.transcriptPath = ""
+            _ = try repository.updateSessions(projectId: projectID, sessions: [noPath])
+            _ = try repository.updateSessions(projectId: projectID, sessions: [])
+            let rows = try projectID.map { try repository.project(projectId: $0).sessions }
+                ?? repository.load().globalSessions
+            XCTAssertEqual(rows.first(where: { $0.sessionId == id })?.transcriptPath, original.transcriptPath)
+        }
+    }
+
+    func testWorkspaceNotificationCannotReplaceAnIndexedTranscript() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Project")
+        let row = ProjectSessionSummary(sessionId: "session", title: "Original", messageCount: 1,
+            relativeTime: "Now", updatedAt: Date(), mode: .chat, transcriptPath: "/catalog/original.jsonl")
+        _ = try repository.updateSessions(projectId: project.id, sessions: [row])
+        XCTAssertThrowsError(try recordWorkspace(repository, projectId: project.id,
+            state: SessionWorkspaceState(sessionId: row.sessionId, cwd: project.record.directory,
+                projectRoot: project.record.directory, additionalDirectories: [], transcriptPath: "/catalog/other.jsonl"),
+            mode: .chat, updateProjectDirectory: true))
+        XCTAssertEqual(try repository.project(projectId: project.id).sessions.first?.transcriptPath, row.transcriptPath)
     }
 
     func testCrossScopeSessionWritesAreRejectedBeforeEitherIndexChanges() throws {
@@ -168,7 +247,7 @@ final class ProjectRepositoryTests: XCTestCase {
         var alias = row
         alias.sessionId = "sess:" + id.uppercased()
         XCTAssertThrowsError(try repository.updateSessions(projectId: project.id, sessions: [alias]))
-        XCTAssertThrowsError(try repository.recordStartedSession(projectId: project.id, sessionId: alias.sessionId, title: "wrong"))
+        XCTAssertThrowsError(try repository.recordStartedSession(projectId: project.id, sessionId: alias.sessionId, title: "wrong", authoritativeTranscriptPath: "/catalog/wrong.jsonl"))
         XCTAssertEqual(try Data(contentsOf: globalURL), global)
         XCTAssertEqual(try Data(contentsOf: projectURL), projectIndex)
     }
@@ -191,7 +270,7 @@ final class ProjectRepositoryTests: XCTestCase {
                 projects: state.projects, globalSessions: state.globalSessions, claimedScope: scope))
         }
         XCTAssertThrowsError(try repository.updateSessions(projectId: nil, sessions: []))
-        XCTAssertThrowsError(try repository.recordStartedSession(projectId: project.id, sessionId: id, title: "wrong"))
+        XCTAssertThrowsError(try repository.recordStartedSession(projectId: project.id, sessionId: id, title: "wrong", authoritativeTranscriptPath: "/catalog/wrong.jsonl"))
         XCTAssertEqual(try Data(contentsOf: globalURL), duplicate)
         XCTAssertEqual(try Data(contentsOf: projectURL), duplicate)
     }
@@ -218,8 +297,9 @@ final class ProjectRepositoryTests: XCTestCase {
         let original = ProjectSessionSummary(sessionId: "a", title: "A", messageCount: 2,
             relativeTime: "Now", updatedAt: Date(), workspaceDirectory: project.record.directory, transcriptPath: "/catalog/a.jsonl")
         _ = try repository.updateSessions(projectId: project.id, sessions: [original])
-        _ = try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "draft",
-            cwd: linked, projectRoot: linked, additionalDirectories: [linked], transcriptPath: ""))
+        _ = try recordWorkspace(repository, projectId: project.id, state: SessionWorkspaceState(sessionId: "draft",
+            cwd: linked, projectRoot: linked, additionalDirectories: [linked], transcriptPath: "/catalog/draft.jsonl"),
+            mode: .code, updateProjectDirectory: true)
         let incoming = ProjectSessionSummary(sessionId: "b", title: "B", messageCount: 2,
             relativeTime: "Now", updatedAt: Date(), workspaceDirectory: linked, transcriptPath: "/catalog/b.jsonl")
         _ = try repository.updateSessions(projectId: project.id, sessions: [incoming])
@@ -228,15 +308,16 @@ final class ProjectRepositoryTests: XCTestCase {
         XCTAssertEqual(restored.sessions.first { $0.sessionId == "a" }?.workspaceDirectory, project.record.directory)
         XCTAssertEqual(restored.sessions.first { $0.sessionId == "b" }?.workspaceDirectory, linked)
         _ = try repository.updateSessions(projectId: project.id, sessions: [])
-        XCTAssertEqual(try repository.project(projectId: project.id).sessions.map(\.sessionId), ["a"])
+        XCTAssertEqual(Set(try repository.project(projectId: project.id).sessions.map(\.sessionId)), Set(["a", "b"]))
     }
 
     func testMissingLinkedDirectoryDoesNotBlockLiveWorkspacePersistence() throws {
         let repository = ProjectRepository(projectsRoot: root)
         let project = try repository.createInternal(name: "Missing linked folder")
         let missing = "/home/lingxi/lingxi/projects/deleted"
-        _ = try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "draft",
-            cwd: project.record.directory, projectRoot: project.record.directory, additionalDirectories: [missing], transcriptPath: ""))
+        _ = try recordWorkspace(repository, projectId: project.id, state: SessionWorkspaceState(sessionId: "draft",
+            cwd: project.record.directory, projectRoot: project.record.directory, additionalDirectories: [missing], transcriptPath: "/catalog/draft.jsonl"),
+            mode: .code, updateProjectDirectory: true)
         XCTAssertEqual(try repository.project(projectId: project.id).record.additionalDirectories, [missing])
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("deleted").path))
     }
@@ -249,8 +330,9 @@ final class ProjectRepositoryTests: XCTestCase {
     func testUserHomeCanBeSelectedAsWorkspaceWithoutChangingSource() throws {
         let repository = ProjectRepository(projectsRoot: root.appendingPathComponent("projects"), userHome: root)
         let project = try repository.createInternal(name: "User home")
-        _ = try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "draft",
-            cwd: "/home/lingxi", projectRoot: project.record.directory, additionalDirectories: ["/home/lingxi"], transcriptPath: ""))
+        _ = try recordWorkspace(repository, projectId: project.id, state: SessionWorkspaceState(sessionId: "draft",
+            cwd: "/home/lingxi", projectRoot: project.record.directory, additionalDirectories: ["/home/lingxi"], transcriptPath: "/catalog/draft.jsonl"),
+            mode: .code, updateProjectDirectory: true)
         let restored = try repository.project(projectId: project.id)
         XCTAssertEqual(restored.workspace.hostURL.path, root.resolvingSymlinksInPath().path)
         XCTAssertEqual(restored.sourceWorkspace, project.sourceWorkspace)
@@ -346,7 +428,7 @@ final class ProjectRepositoryTests: XCTestCase {
     func testPendingSessionSurvivesStaleCatalogUntilAcknowledged() throws {
         let repository = ProjectRepository(projectsRoot: root)
         let project = try repository.createInternal(name: "Project")
-        _ = try repository.recordStartedSession(projectId: project.record.id, sessionId: "sess:20000000-0000-4000-8000-0000000000AA", title: "First prompt", mode: .chat)
+        _ = try repository.recordStartedSession(projectId: project.record.id, sessionId: "sess:20000000-0000-4000-8000-0000000000AA", title: "First prompt", mode: .chat, authoritativeTranscriptPath: "/catalog/first.jsonl")
         _ = try repository.updateSessions(projectId: project.record.id, sessions: [])
         let restored = try ProjectRepository(projectsRoot: root).project(projectId: project.record.id)
         XCTAssertEqual(restored.sessions.map(\.sessionId), ["20000000-0000-4000-8000-0000000000aa"])
@@ -356,7 +438,7 @@ final class ProjectRepositoryTests: XCTestCase {
         _ = try repository.updateSessions(projectId: project.record.id, sessions: [confirmed, confirmed])
         XCTAssertFalse(try repository.project(projectId: project.record.id).sessions[0].pendingCatalogConfirmation)
         _ = try repository.updateSessions(projectId: project.record.id, sessions: [])
-        XCTAssertTrue(try repository.project(projectId: project.record.id).sessions.isEmpty)
+        XCTAssertEqual(try repository.project(projectId: project.record.id).sessions.first?.transcriptPath, "/catalog/first.jsonl")
     }
 
     func testArchiveSurvivesCatalogAndReloadAndRestoresData() throws {
@@ -382,16 +464,16 @@ final class ProjectRepositoryTests: XCTestCase {
         _ = try repository.updateSessions(projectId: project.record.id, sessions: [row])
         _ = try repository.setSessionArchived(projectId: project.record.id, sessionId: row.sessionId, archived: true)
         XCTAssertFalse(repository.load().globalSessions[0].isArchived)
-        _ = try repository.recordStartedSession(projectId: project.record.id, sessionId: row.sessionId, title: row.title)
+        _ = try repository.recordStartedSession(projectId: project.record.id, sessionId: row.sessionId, title: row.title, authoritativeTranscriptPath: "/catalog/project-id.jsonl")
         XCTAssertTrue(try repository.project(projectId: project.record.id).sessions[0].isArchived)
     }
 
     func testFirstSubmissionCountDoesNotRegressOrUnarchiveExistingSession() throws {
         let repository = ProjectRepository(projectsRoot: root)
-        _ = try repository.recordStartedSession(projectId: nil, sessionId: "first", title: "Prompt", initialMessageCount: 1)
+        _ = try repository.recordStartedSession(projectId: nil, sessionId: "first", title: "Prompt", initialMessageCount: 1, authoritativeTranscriptPath: "/catalog/first.jsonl")
         XCTAssertEqual(repository.load().globalSessions[0].messageCount, 1)
         _ = try repository.setSessionArchived(projectId: nil, sessionId: "first", archived: true)
-        _ = try repository.recordStartedSession(projectId: nil, sessionId: "first", title: "Prompt", initialMessageCount: 0)
+        _ = try repository.recordStartedSession(projectId: nil, sessionId: "first", title: "Prompt", initialMessageCount: 0, authoritativeTranscriptPath: "/catalog/first.jsonl")
         XCTAssertEqual(repository.load().globalSessions[0].messageCount, 1)
         XCTAssertTrue(repository.load().globalSessions[0].isArchived)
     }
@@ -401,7 +483,7 @@ final class ProjectRepositoryTests: XCTestCase {
         var incoming = ProjectSessionSummary(sessionId: "first", title: "New conversation", messageCount: 0,
                                              relativeTime: "Before", updatedAt: Date(timeIntervalSince1970: 900))
         _ = try repository.updateSessions(projectId: nil, sessions: [incoming])
-        _ = try repository.recordStartedSession(projectId: nil, sessionId: "first", title: "First prompt", initialMessageCount: 1)
+        _ = try repository.recordStartedSession(projectId: nil, sessionId: "first", title: "First prompt", initialMessageCount: 1, authoritativeTranscriptPath: "/catalog/first.jsonl")
         _ = try repository.updateSessions(projectId: nil, sessions: [incoming])
         let pending = ProjectRepository(projectsRoot: root).load().globalSessions[0]
         XCTAssertEqual(pending.title, "First prompt")
@@ -422,9 +504,10 @@ final class ProjectRepositoryTests: XCTestCase {
         let linked = root.appendingPathComponent("linked", isDirectory: true)
         try FileManager.default.createDirectory(at: linked, withIntermediateDirectories: true)
         let guest = "/home/lingxi/lingxi/projects/linked"
-        _ = try repository.recordStartedSession(projectId: project.id, sessionId: "session-one", title: "Shared", mode: .code)
-        _ = try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "session-one", cwd: guest,
-            projectRoot: project.record.directory, additionalDirectories: [guest], transcriptPath: "/home/lingxi/.lingxi/projects/b/session-one.jsonl"))
+        _ = try repository.recordStartedSession(projectId: project.id, sessionId: "session-one", title: "Shared", mode: .code, authoritativeTranscriptPath: "/home/lingxi/.lingxi/projects/b/session-one.jsonl")
+        _ = try recordWorkspace(repository, projectId: project.id, state: SessionWorkspaceState(sessionId: "session-one", cwd: guest,
+            projectRoot: project.record.directory, additionalDirectories: [guest], transcriptPath: "/home/lingxi/.lingxi/projects/b/session-one.jsonl"),
+            mode: .code, updateProjectDirectory: true)
         let restored = try ProjectRepository(projectsRoot: root).project(projectId: project.id)
         XCTAssertEqual(restored.workspace.hostURL, linked.resolvingSymlinksInPath())
         XCTAssertEqual(restored.sourceWorkspace, project.sourceWorkspace)
@@ -440,12 +523,20 @@ final class ProjectRepositoryTests: XCTestCase {
         let repository = ProjectRepository(projectsRoot: root)
         let project = try repository.createInternal(name: "Empty draft")
         let guest = project.record.directory
-        _ = try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "draft", cwd: guest,
-            projectRoot: guest, additionalDirectories: [], transcriptPath: ""))
+        _ = try recordWorkspace(repository, projectId: project.id, state: SessionWorkspaceState(sessionId: "draft", cwd: guest,
+            projectRoot: guest, additionalDirectories: [], transcriptPath: "/catalog/draft.jsonl"), mode: .code, updateProjectDirectory: true)
         XCTAssertTrue(try repository.project(projectId: project.id).sessions.isEmpty)
-        XCTAssertThrowsError(try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "draft", cwd: "/root",
-            projectRoot: guest, additionalDirectories: [], transcriptPath: "")))
+        XCTAssertThrowsError(try recordWorkspace(repository, projectId: project.id, state: SessionWorkspaceState(sessionId: "draft", cwd: "/root",
+            projectRoot: guest, additionalDirectories: [], transcriptPath: "/catalog/draft.jsonl"), mode: .code, updateProjectDirectory: true))
         XCTAssertEqual(try repository.project(projectId: project.id).record.activeDirectory, guest)
+    }
+
+    private func recordWorkspace(_ repository: ProjectRepository, projectId: String?, state: SessionWorkspaceState,
+                                 mode: SessionMode, updateProjectDirectory: Bool) throws -> ProjectRepositoryState {
+        let authority = WorkspaceWriteAuthority()
+        authority.setSelected(updateProjectDirectory)
+        return try repository.recordAuthenticatedWorkspace(projectId: projectId, state: state, mode: mode,
+                                                            authority: authority, revision: authority.currentRevision())
     }
 
     private func session(_ id: String, at date: Date) -> ProjectSessionSummary {
@@ -474,5 +565,11 @@ private struct FailingWriter: ProjectAtomicWriting {
             throw CocoaError(.fileWriteUnknown)
         }
         try DefaultProjectAtomicWriter().writeData(data, to: url, validate: validate)
+    }
+
+    func writeData(_ data: Data, to url: URL, expected: OwnerCatalogExpectation, validate: (Data) throws -> Void,
+                   commit: (_ replace: () throws -> Void) throws -> Void) throws {
+        if url.lastPathComponent == failingFileName { throw CocoaError(.fileWriteUnknown) }
+        try DefaultProjectAtomicWriter().writeData(data, to: url, expected: expected, validate: validate, commit: commit)
     }
 }

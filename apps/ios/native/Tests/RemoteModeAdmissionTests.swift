@@ -151,6 +151,18 @@ final class RemoteModeAdmissionTests: XCTestCase {
         }
     }
 
+    func testTeamApprovalReservesOnePendingDecisionAndRetriesOnlyAfterFailure() {
+        var gate = RemoteApprovalAdmission()
+        XCTAssertFalse(gate.begin(isPending: false))
+        XCTAssertTrue(gate.begin(isPending: true))
+        XCTAssertFalse(gate.begin(isPending: true))
+        gate.finish(delivered: false)
+        XCTAssertTrue(gate.begin(isPending: true))
+        gate.finish(delivered: true)
+        XCTAssertTrue(gate.delivered)
+        XCTAssertFalse(gate.begin(isPending: true))
+    }
+
     func testUnknownUpdatesReplayInOrderAfterModeIsKnown() {
         var gate = RemoteModeAdmission<String>()
         guard case .waiting = gate.receive("snapshot", announcedModes: []) else { return XCTFail() }

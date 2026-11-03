@@ -466,12 +466,13 @@ final class MockConversationSource: ConversationSource {
     }
 
     @discardableResult
-    func send(_ text: String) -> ConversationTurnToken? {
-        send(text, images: [])
+    func send(_ text: String) async -> ConversationTurnToken? {
+        await send(text, images: [])
     }
 
     @discardableResult
-    func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
+    func send(_ text: String, images: [ImageRefDto]) async -> ConversationTurnToken? {
+        guard !Task.isCancelled else { return nil }
         guard !model.isSelectedAgentReadOnly else { return nil }
         if model.streaming {
             guard let activeTurnToken else { return nil }
@@ -577,8 +578,8 @@ final class MockConversationSource: ConversationSource {
         sourceCodeUnits: [UInt16]?,
         images: [ImageRefDto],
         selectedSlashCommand: ConversationSlashCommand?
-    ) -> ConversationTurnToken? {
-        send(text, images: images)
+    ) async -> ConversationTurnToken? {
+        await send(text, images: images)
     }
 
     func cancel() {

@@ -29,6 +29,11 @@ export interface TeamSidebarProps {
   locale?: string;
   /** The current time, for the "Yesterday" and weekday labels. Defaults to now. */
   now?: number | Date;
+  /**
+   * Narrow the lists to the conversations whose name or newest-message preview contains this text (any case, surrounding
+   * space ignored). While it is set every match is listed, with no "Show more".
+   */
+  query?: string;
 }
 
 export interface ConnectionStatus { kind: 'ok' | 'offline' | 'error'; label: string; detail: string; action?: 'refresh' | 'reconnect' }
@@ -58,7 +63,7 @@ type DialogState = { kind: 'createTeam' } | { kind: 'joinTeam'; code: string } |
  * Channels, Direct messages and Bot DMs. It owns only transient UI state (menus, dialogs, the
  * focused row); everything else comes from the workspace.
  */
-export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSettings, onConversationSelected, onOpenDetails, initialInvite, onInviteHandled, locale, now }: TeamSidebarProps): ReactElement {
+export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSettings, onConversationSelected, onOpenDetails, initialInvite, onInviteHandled, locale, now, query }: TeamSidebarProps): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const tag = locale ?? (zh ? 'zh-CN' : 'en-US');
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -79,14 +84,21 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
   const authorName = (author: { kind: 'user' | 'bot'; uid: string; botKey?: string }) => author.kind === 'bot'
     ? snapshot.bots.find(bot => bot.key === author.botKey)?.name || 'Bot'
     : snapshot.directory.find(member => member.uid === author.uid)?.displayName || (author.uid === uid ? t('You', '你') : t('Member', '成员'));
+  const needle = (query ?? '').trim().toLocaleLowerCase(), searching = needle !== '';
+  const matches = (conversation: TeamConversation): boolean => {
+    const label = conversationLabel(conversation, snapshot.directory, uid, { bots: snapshot.bots, zh });
+    const preview = conversationPreview(conversation, uid, zh, last => last.author ? authorName(last.author) : '');
+    return label.toLocaleLowerCase().includes(needle) || preview.toLocaleLowerCase().includes(needle);
+  };
+  const narrowed = (rows: TeamConversation[]) => searching ? rows.filter(matches) : rows;
   const sections = [
-    { id: 'channels' as const, title: t('Channels', '频道'), add: t('New channel', '新建频道'), empty: t('No channels yet. Create one with +.', '还没有频道，点击 + 新建。'), rows: groups.channels, dialog: { kind: 'channel' } as const },
-    { id: 'direct' as const, title: t('Direct messages', '私信'), add: t('New message', '新建私信'), empty: t('No messages yet. Start one with +.', '还没有私信，点击 + 开始。'), rows: groups.direct, dialog: { kind: 'direct' } as const },
-    { id: 'botDirect' as const, title: t('Bot DMs', 'Bot 对话'), add: t('Message a Bot', '与 Bot 对话'), empty: t('No Bot chats yet. Start one with +.', '还没有 Bot 对话，点击 + 开始。'), rows: groups.botDirect, dialog: { kind: 'botDm' } as const },
+    { id: 'channels' as const, title: t('Channels', '频道'), add: t('New channel', '新建频道'), empty: t('No channels yet. Create one with +.', '还没有频道，点击 + 新建。'), rows: narrowed(groups.channels), dialog: { kind: 'channel' } as const },
+    { id: 'direct' as const, title: t('Direct messages', '私信'), add: t('New message', '新建私信'), empty: t('No messages yet. Start one with +.', '还没有私信，点击 + 开始。'), rows: narrowed(groups.direct), dialog: { kind: 'direct' } as const },
+    { id: 'botDirect' as const, title: t('Bot DMs', 'Bot 对话'), add: t('Message a Bot', '与 Bot 对话'), empty: t('No Bot chats yet. Start one with +.', '还没有 Bot 对话，点击 + 开始。'), rows: narrowed(groups.botDirect), dialog: { kind: 'botDm' } as const },
   ];
   const shown = sections.map(section => {
     const index = section.rows.findIndex(row => row.id === selectedId);
-    const limit = Math.max(limits[section.id], index + 1);
+    const limit = searching ? section.rows.length : Math.max(limits[section.id], index + 1);
     return { ...section, visible: section.rows.slice(0, limit), hidden: Math.max(0, section.rows.length - limit) };
   });
   const flat = shown.flatMap(section => section.visible);
@@ -152,6 +164,7 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
       : !team ? <p className="tw-empty-line" role="status">{t('Opening team…', '正在打开团队…')}</p>
       : <div className="tw-sections" onKeyDown={move}>
         {loadingRows ? <p className="tw-empty-line" role="status">{t('Loading conversations…', '正在加载会话…')}</p> : null}
+        {searching && !loadingRows && !flat.length ? <p className="tw-empty-line" role="status">{t('No matching conversations.', '没有匹配的会话。')}</p> : null}
         {shown.map(section => {
           const headId = `tw-section-${section.id}`;
           return <section key={section.id} className="tw-section" aria-labelledby={headId}>
@@ -164,7 +177,7 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
                 selected={conversation.id === selectedId} tabStop={conversation.id === tabStop} locale={tag} now={nowMs} authorName={authorName}
                 menuOpen={menuFor === conversation.id} onMenu={setMenuFor} onFocusRow={setFocusId}
                 onSelect={select} onMarkRead={id => void workspace.markRead(id)} onOpenDetails={onOpenDetails} />)}
-            </ul> : loadingRows ? null : <p className="tw-empty-line">{section.empty}</p>}
+            </ul> : loadingRows || searching ? null : <p className="tw-empty-line">{section.empty}</p>}
             {section.hidden > 0 ? <button type="button" className="tw-link tw-more" onClick={() => setLimits(old => ({ ...old, [section.id]: old[section.id] + ROW_LIMIT }))}>{t(`Show ${section.hidden} more`, `显示另外 ${section.hidden} 个`)}</button> : null}
           </section>;
         })}

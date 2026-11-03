@@ -2,6 +2,7 @@ import { providerAccountSummary } from '../../shared/providerAccounts';
 import { providerAccountUnavailableReasons } from '../bridge/credentialRecovery';
 import { reasoningSelectionLabel } from '../model/reasoningLabel';
 import { tr } from '../i18n/locale';
+import { unreadBadgeText } from '../bridge/teamsUnread';
 import { DesktopIcon } from './DesktopIcon';
 import { ImagePreview } from './ImagePreview';
 import { localAppAuthoringPrompt, localAppDraftDisposition, type LocalAppDraft } from '../bridge/localAppChat';
@@ -440,7 +441,7 @@ export function SessionRow({ projectPath, session, active, pinned, opening, stat
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, sidebarMode = 'home', onSelectSidebarMode, modePanel, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, sidebarMode = 'home', onSelectSidebarMode, modePanel, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
@@ -452,6 +453,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   changes?: boolean;
   /** Bots can be used on this computer. Where they cannot, the sidebar does not mention them. */
   botsAvailable?: boolean;
+  /** Messages not yet read in the Teams the signed-in account is in, all of them; the rail's Teams button shows the number. */
+  teamsUnread?: number;
   /** What the sidebar lists, and which of the rail's Home, Bots and Teams is marked. Apps, Scheduled and the changes are pages: they do not change it. */
   sidebarMode?: SidebarMode;
   onSelectSidebarMode?(mode: SidebarMode): void;
@@ -513,6 +516,9 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     if (onSelectSidebarMode) onSelectSidebarMode(mode);
     else if (mode === 'home') onOpenChat?.();
   };
+  // The rail's Teams button says how many messages wait: the number is for the eye, the label for everything else.
+  const teamsBadge = unreadBadgeText(teamsUnread);
+  const teamsRailLabel = teamsBadge ? tr('desktop_teams_rail_unread', Math.floor(teamsUnread)) : tr('teams_title');
   const activeCatalogRows = visibleSession ? bridge.bootstrap?.projectCatalogs?.[visibleSession.projectPath]?.sessions : undefined;
   const activeRowIndex = activeCatalogRows?.findIndex((row) => row.uuid === visibleSession?.sessionId) ?? -1;
   const revealedSessionKey = !scheduled && visibleSession && activeRowIndex >= 0
@@ -841,7 +847,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
         <button type="button" className="desktop-rail-button" data-active={sidebarMode === 'home' || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={() => selectMode('home')}><DesktopIcon name="home" size={20} /></button>
         {botsAvailable && <button type="button" className="desktop-rail-button" data-active={sidebarMode === 'bots' || undefined} aria-label={tr('bots_title')} title={tr('bots_title')} onClick={() => selectMode('bots')}><Icon name="bot" size={21} stroke={1.7} /></button>}
-        <button type="button" className="desktop-rail-button" data-active={sidebarMode === 'teams' || undefined} aria-label={tr('teams_title')} title={tr('teams_title')} onClick={() => selectMode('teams')}><Icon name="users" size={21} stroke={1.7} /></button>
+        <button type="button" className="desktop-rail-button desktop-rail-teams" data-active={sidebarMode === 'teams' || undefined} aria-label={teamsRailLabel} title={teamsRailLabel} onClick={() => selectMode('teams')}>
+          <Icon name="users" size={21} stroke={1.7} />
+          {teamsBadge && <span className="desktop-rail-count" data-kind="unread" aria-hidden="true">{teamsBadge}</span>}
+        </button>
         <span className="desktop-rail-divider" aria-hidden="true" />
         <button type="button" className="desktop-rail-button" data-active={apps || undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={onOpenApps}><DesktopIcon name="apps" size={20}/></button>
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label={tr('desktop_chat_scheduled_tasks')} title={tr('desktop_chat_scheduled_tasks')} onClick={onOpenScheduled}><DesktopIcon name="clock" size={20} /></button>

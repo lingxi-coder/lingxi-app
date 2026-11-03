@@ -30,6 +30,9 @@ export function applicationMenuTemplate(
       { type: 'separator' },
       // The window alone knows whether the sidebar is shown, so one item stands for both Show and Hide.
       { label: nativeTr('native_toggle_sidebar'), accelerator: platform === 'darwin' ? 'Control+Command+S' : 'Control+Alt+S', click: () => dispatch('toggle-sidebar') },
+      // The details of the open team, in Teams mode; the window ignores it elsewhere. ⌥⌘I is the DevTools role's own accelerator on macOS
+      // (the development menu below has that role), so the Control key stands in for Option, as it does for the sidebar above.
+      { label: nativeTr('native_team_details'), accelerator: platform === 'darwin' ? 'Control+Command+I' : 'Control+Alt+I', click: () => dispatch('team-details') },
       { label: nativeTr('native_activity'), accelerator: 'CommandOrControl+Alt+U', click: () => dispatch('activity') },
       { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
       { type: 'separator' }, { role: 'togglefullscreen' },

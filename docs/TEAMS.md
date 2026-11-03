@@ -116,7 +116,12 @@ the local conversation and do not need its engine; a pending invite survives the
 login page. The Web removes the code from its address bar after capturing it and
 uses `no-referrer` on invitation/Teams pages.
 
-Desktop/Web share `packages/teams/TeamsPanel.tsx`. Membership administration uses
+The Web page uses `packages/teams/TeamsPanel.tsx`. The Desktop shows the same package as
+workspace views: `TeamSidebar` in the sidebar's Teams mode, `TeamConversationView` and
+`TeamDetailsDrawer` on the Teams page, all reading one `TeamsWorkspace` that the window
+opens for the signed-in account (`apps/electron/src/renderer/components/TeamsSidebar.tsx`,
+`TeamsMain.tsx`). The window keeps it open so that the rail's Teams button can count unread
+messages before the page is shown. Membership administration uses
 authenticated HTTP, with SDK listeners invalidating its views. Ordinary message
 views consume SDK snapshots directly. Web and native clients use their existing
 Firebase account. Desktop main owns the account lifecycle, HTTP credentials and

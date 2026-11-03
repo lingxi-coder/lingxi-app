@@ -3,7 +3,7 @@ import type { DesktopTeamsApi, TeamsApi } from '../../../../../packages/teams';
 import { TeamsWorkspace, type TeamsSnapshot, type TeamsWorkspaceOptions } from '../../../../../packages/teams/workspace';
 import { useAccountState } from './useAccountState';
 
-/** The renderer's `TeamsApi` over the preload bridge: the adapter `components/Teams.tsx` builds inline. */
+/** The renderer's `TeamsApi` over the preload bridge, for one account. */
 export function desktopTeamsApi(desktop: DesktopTeamsApi, uid: string): TeamsApi {
   return {
     localBots: () => desktop.localBots(uid), bindLocalBot: input => desktop.bindLocalBot(uid, input),

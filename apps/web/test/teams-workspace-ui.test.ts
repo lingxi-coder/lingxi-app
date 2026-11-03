@@ -347,6 +347,39 @@ test('sidebar: a long list shows its first fifty rows and "Show more", and alway
   assert.equal(rows().length, 60, 'the open conversation is never hidden behind "Show more"'); assert.doesNotMatch(html(sidebar(workspace, snapshot())), /Show \d+ more/);
 });
 
+test('sidebar: a query narrows every section to the conversations whose name or newest message contains it, and says when there are none', async context => {
+  const { workspace, snapshot } = await open(); context.after(() => workspace.close());
+  const ids = (query?: string) => rowTags(html(sidebar(workspace, snapshot(), query === undefined ? {} : { query }))).map(row => row.id).sort();
+  const everything = ['bot-chat', 'chan-general', 'dm-bob', 'group-1'];
+  assert.deepEqual(ids(), everything, 'no query lists them all');
+  assert.deepEqual(ids(''), everything); assert.deepEqual(ids('   '), everything, 'a blank query is no query');
+  assert.deepEqual(ids('GENERAL'), ['chan-general'], 'by name, in any case');
+  assert.deepEqual(ids('  fixture '), ['bot-chat'], 'surrounding space is ignored');
+  assert.deepEqual(ids('ship it'), ['chan-general'], 'by the newest message');
+  assert.deepEqual(ids('lunch'), ['dm-bob']);
+  assert.deepEqual(ids('owner'), ['group-1'], 'by the name a group is shown under');
+  const none = html(sidebar(workspace, snapshot(), { query: 'zzz-no-such-thing' }));
+  assert.deepEqual(rowTags(none), []); assert.match(none, /<p class="tw-empty-line" role="status">No matching conversations\.<\/p>/);
+  assert.doesNotMatch(none, /No channels yet|No messages yet|No Bot chats yet/, 'a section that has nothing to show for the query does not say it is empty');
+  for (const add of ['New channel', 'New message', 'Message a Bot']) assert.match(none, new RegExp(`aria-label="${add}"`), 'and the sections keep their buttons');
+  assert.doesNotMatch(html(sidebar(workspace, snapshot(), { query: 'general' })), /No matching conversations/);
+  assert.match(html(sidebar(workspace, snapshot(), { query: '搜索', zh: true })), /没有匹配的会话。/);
+});
+
+test('sidebar: while a query is set every match is listed, with no "Show more"', async context => {
+  const base = new Date(2026, 10, 1, 8, 0, 0).getTime();
+  const { workspace, snapshot } = await open(fake => {
+    fake.conversations.set('team-aaaa', Array.from({ length: 60 }, (_, i) => conversation(`c-${String(i).padStart(2, '0')}`, {
+      title: `channel ${i}`, lastSeq: 1, lastReadSeq: 1, lastMessage: { id: `m-${i}`, seq: 1, at: new Date(base + (100 - i) * 1000).toISOString(), preview: 'x', author: { kind: 'user', uid: 'bob' } },
+    })));
+  });
+  context.after(() => workspace.close());
+  const markup = (query?: string) => html(sidebar(workspace, snapshot(), query === undefined ? {} : { query }));
+  assert.equal(rowTags(markup()).length, 50); assert.match(markup(), />Show 10 more</);
+  assert.equal(rowTags(markup('channel')).length, 60, 'all sixty match'); assert.doesNotMatch(markup('channel'), /Show \d+ more/);
+  assert.deepEqual(rowTags(markup('channel 5')).map(row => row.id).sort(), ['c-05', 'c-50', 'c-51', 'c-52', 'c-53', 'c-54', 'c-55', 'c-56', 'c-57', 'c-58', 'c-59'], 'including the ones past the first fifty');
+});
+
 test('conversation view: header, stream with day and unread dividers, grouped runs, quotes, recalls and escaping', async context => {
   const { workspace, snapshot } = await open(); context.after(() => workspace.close());
   assert.match(html(view(workspace, snapshot())), /Choose a conversation/);

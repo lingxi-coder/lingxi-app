@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { PublicSettings, SidebarMode, SidebarPreferences } from '../../shared/settings';
-import { reconcileSidebarMode, SidebarModeSync, type AppPage } from './sidebarMode';
+import { pageForMode, reconcileSidebarMode, SidebarModeSync, type AppPage } from './sidebarMode';
 
 /**
  * The sidebar mode of the window: what the sidebar lists, kept in step with the
@@ -33,9 +33,10 @@ export function useSidebarMode({ page, setPage, botsAvailable, botsKnown, settin
 
   useEffect(() => {
     if (settings === undefined || !botsKnown) return;
-    if (sync.open({ saved, page, mode, botsAvailable }) === 'bots') {
-      setModeState('bots');
-      setPage('bots');
+    const restored = sync.open({ saved, page, mode, botsAvailable });
+    if (restored) {
+      setModeState(restored);
+      setPage(pageForMode(restored, { page, botChat: false }));
     }
   }, [sync, settings, botsKnown, botsAvailable, saved, page, mode, setPage]);
 

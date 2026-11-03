@@ -39,6 +39,13 @@ export const MAX_PROJECTS = 50;
 export const MAX_PINNED_SESSIONS = 100;
 /** How many Bots the sidebar remembers as open; far above any list a person keeps. */
 const MAX_EXPANDED_BOTS = 200;
+/**
+ * The widths the Teams details panel may be saved at. The panel keeps itself inside its own, narrower range when it
+ * draws; this only turns away what cannot be a width at all (a string, NaN, a few pixels, a few screens), so a
+ * range that is later widened or narrowed does not make an older file's choice invalid.
+ */
+const MIN_TEAMS_DRAWER_WIDTH = 200;
+const MAX_TEAMS_DRAWER_WIDTH = 1200;
 export const MAX_REMOTE_SESSIONS = 256;
 export const MAX_DIAGNOSTICS = 200;
 export const MAX_DIAGNOSTIC_LENGTH = 2_000;
@@ -398,7 +405,7 @@ export function parseSidebarPreferences(value: unknown, projects: readonly strin
     }
   }
   const preferences: SidebarPreferences = { organization, chatSort, manualSessionOrder };
-  // The two Bots-sidebar fields are optional: a file written before they existed, or a value that is not one of ours, yields neither.
+  // `mode`, `expandedBots` and `teamsDrawerWidth` are optional: a file written before they existed, or a value that is not one of ours, yields none of them.
   const mode = input['mode'];
   if (mode === 'home' || mode === 'bots' || mode === 'teams') preferences.mode = mode;
   if (Array.isArray(input['expandedBots'])) {
@@ -410,13 +417,18 @@ export function parseSidebarPreferences(value: unknown, projects: readonly strin
     }
     preferences.expandedBots = [...expanded];
   }
+  const drawerWidth = input['teamsDrawerWidth'];
+  if (typeof drawerWidth === 'number' && Number.isFinite(drawerWidth)) {
+    const width = Math.round(drawerWidth);
+    if (width >= MIN_TEAMS_DRAWER_WIDTH && width <= MAX_TEAMS_DRAWER_WIDTH) preferences.teamsDrawerWidth = width;
+  }
   return preferences;
 }
 
 /**
  * Apply a sidebar update over what is saved. The keys the update leaves out keep their saved value, so the part of the
- * app that saves the sidebar mode or the open Bots need not know the organization and sort, and the reverse. Anything
- * that is not an object resets the preferences, as it always has.
+ * app that saves the sidebar mode, the open Bots or the Teams panel width need not know the organization and sort, and the
+ * reverse. Anything that is not an object resets the preferences, as it always has.
  */
 export function patchSidebarPreferences(saved: SidebarPreferences | undefined, update: unknown, projects: readonly string[]): SidebarPreferences {
   return parseSidebarPreferences(isPlainObject(update) ? { ...saved, ...update } : update, projects);
@@ -431,6 +443,7 @@ function cloneSidebarPreferences(value: SidebarPreferences): SidebarPreferences 
     ),
     ...(value.mode ? { mode: value.mode } : {}),
     ...(value.expandedBots ? { expandedBots: [...value.expandedBots] } : {}),
+    ...(value.teamsDrawerWidth !== undefined ? { teamsDrawerWidth: value.teamsDrawerWidth } : {}),
   };
 }
 

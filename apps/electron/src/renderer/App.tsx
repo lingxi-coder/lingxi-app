@@ -10,7 +10,13 @@ import { useSidebarMode } from './bridge/useSidebarMode';
 import { modeForSettledChat, pageForMode, type AppPage } from './bridge/sidebarMode';
 import type { SidebarMode } from '../shared/settings';
 import { BotsSidebar } from './components/BotsSidebar';
-import { TeamsSidebar } from './components/TeamsSidebar';
+import { TeamsSidebar, focusTeamsSidebarSoon } from './components/TeamsSidebar';
+// The Teams workspace's stylesheet (sidebar, page, panel and dialogs), imported once, here, as the package asks. Its rules are scoped to its own classes.
+import '../../../../packages/teams/styles';
+import { useTeams } from './bridge/useTeams';
+import { useTeamsDrawer } from './bridge/useTeamsDrawer';
+import { teamsThemeVariables } from './theme/teamsTheme';
+import type { DrawerTab } from '../../../../packages/teams/ui';
 import { botScopesKey } from './bridge/botRoutines';
 import { localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
 import type { LocalAppEditRequest } from '../shared/localApps';
@@ -73,7 +79,8 @@ interface SessionPickerRequest {
   opener: HTMLElement | null;
 }
 
-const Teams = lazy(() => import('./components/Teams').then(module => ({ default: module.Teams })));
+// The Teams page loads with its first visit: the conversation and the Bot cards in it are the weight. The sidebar and the workspace behind both are not lazy, so the rail can count unread messages from the start.
+const TeamsMain = lazy(() => import('./components/TeamsMain').then(module => ({ default: module.TeamsMain })));
 
 export function App() {
   const { locale, preference } = useI18n();
@@ -216,6 +223,15 @@ export function App() {
     page, setPage, botsAvailable: bots.available, botsKnown: bots.state.availability !== undefined,
     settings: bridge.bootstrap?.settings, save: bridge.updateSidebarPreferences,
   });
+  // Teams: one workspace for the window, which the sidebar, the page and the rail's unread count all read.
+  const zh = locale.startsWith('zh');
+  const teams = useTeams();
+  const teamsDrawer = useTeamsDrawer({
+    savedWidth: bridge.bootstrap?.settings.sidebar?.teamsDrawerWidth,
+    save: (width) => { void bridge.updateSidebarPreferences({ teamsDrawerWidth: width }).catch(() => undefined); },
+  });
+  const { show: showTeamDetails, toggle: toggleTeamDetails } = teamsDrawer;
+  const teamsTheme = useMemo(() => teamsThemeVariables(palette), [palette]);
   // The sidebar follows the chat on screen when that changes from a Bot's chat to a project's or back (a link, the picker, a notification),
   // so the chat is always listed beside it. Only settled changes count: a chat that is still opening says nothing yet.
   const settledBotChat = useRef(botChat);
@@ -233,6 +249,10 @@ export function App() {
     setSidebarMode(mode);
     openPage(pageForMode(mode, { page, botChat }));
   }, [bots.available, botChat, openPage, page, sessionNavigationBlocked, setSidebarMode]);
+  /** Bring the Teams page forward. The sidebar can list Teams while the main area shows the Apps, say; whatever is pressed in it is about Teams. */
+  const showTeams = useCallback(() => { if (page !== 'teams') openPage('teams'); }, [openPage, page]);
+  /** The team menu of the sidebar: the details panel beside the conversation, on a tab when one is asked for. */
+  const openTeamDetails = useCallback((tab?: DrawerTab) => { showTeams(); showTeamDetails(tab); }, [showTeams, showTeamDetails]);
   const showChat = useCallback(() => {
     cancelLocalAppNavigation();
     setPage('chat');
@@ -348,10 +368,15 @@ export function App() {
     } else if ((action === 'home' || action === 'bots' || action === 'teams') && !settingsRoute) {
       // Bots is ignored where Bots cannot run: the menu shows that item dimmed.
       selectSidebarMode(action);
+      // A key brought the person to Teams, so the keyboard comes along: to the open conversation in the sidebar, unless it is in Teams already.
+      if (action === 'teams' && !document.activeElement?.closest('.teams-sidebar, .teams-page')) focusTeamsSidebarSoon();
     } else if (action === 'toggle-sidebar' && !settingsRoute) {
       setSidebarCollapsed((collapsed) => !collapsed);
+    } else if (action === 'team-details' && !settingsRoute) {
+      // The panel belongs to the Teams page: on any other page the menu item does nothing.
+      if (page === 'teams' && teams.workspace) toggleTeamDetails();
     }
-  }), [openSettings, settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked, selectSidebarMode]);
+  }), [openSettings, settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked, selectSidebarMode, page, teams.workspace, toggleTeamDetails]);
 
   const linkBusy = useRef(false);
   const linkSurfacePending = useRef(false);
@@ -384,7 +409,8 @@ export function App() {
           if (!session) throw new Error(tr('desktop_link_open_project_config'));
           if (!await bridge.openSession(delivery.projectPath, session.uuid)) throw new Error(tr('desktop_link_project_conversation_error'));
         }
-        if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); }
+        // The join dialog opens in the sidebar, which cannot be used while it is hidden.
+        if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); setSidebarCollapsed(false); }
         else if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
         else if (kind === 'settings') {
           if (!SETTINGS_NAV.some(page => page.id === id)) throw new Error(tr('desktop_link_settings_unavailable'));
@@ -488,7 +514,7 @@ export function App() {
       <div
         className="desktop-shell"
         data-screen-label="LingXi Code Desktop Beta"
-        style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.sidebarBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent, '--rail-material': palette.sidebarBg, '--nav-panel-border': palette.border } as CSSProperties}
+        style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.sidebarBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent, '--rail-material': palette.sidebarBg, '--nav-panel-border': palette.border, ...teamsTheme } as CSSProperties}
       >
         <SettingsBackground active={bridge.projectCreationOpen || settingsRoute !== null || (sessionPicker !== null && !sessionPickerSuspended)}>
           <BetaSidebar
@@ -499,12 +525,14 @@ export function App() {
             changes={page === 'changes'}
             onOpenApps={() => openPage('apps')}
             botsAvailable={bots.available}
+            teamsUnread={teams.snapshot?.totalUnread ?? 0}
             sidebarMode={sidebarMode}
             onSelectSidebarMode={selectSidebarMode}
             modePanel={(mode, search) => mode === 'bots'
               ? <BotsSidebar bots={bots} sessions={botSessions} bridge={bridge} query={search} chatVisible={page === 'chat'}
                   onOpenChat={showChat} onOpenBot={openBot} onCreateBot={createBot} />
-              : <TeamsSidebar />}
+              : <TeamsSidebar teams={teams} zh={zh} query={search} initialInvite={teamInvite} onInviteHandled={handledTeamInvite}
+                  onShowTeams={showTeams} onOpenSettings={openTeamDetails} />}
             sidebarCollapsed={sidebarCollapsed}
             onSidebarCollapsedChange={setSidebarCollapsed}
             scheduled={page === 'scheduled'}
@@ -535,7 +563,7 @@ export function App() {
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
           {localAppNavigationError && <div role="alert" className="local-app-error">{localAppNavigationError}</div>}
-          {page === 'teams' && <Suspense fallback={<p role="status">{locale.startsWith('zh') ? '正在加载团队…' : 'Loading Teams…'}</p>}><Teams zh={locale.startsWith('zh')} initialInvite={teamInvite} onInviteHandled={handledTeamInvite} /></Suspense>}
+          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} zh={zh} drawer={teamsDrawer} /></Suspense>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}

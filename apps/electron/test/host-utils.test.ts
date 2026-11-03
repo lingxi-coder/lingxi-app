@@ -177,6 +177,42 @@ test('a sidebar update leaves the keys it does not mention as saved, and an upda
   assert.equal(copy.sidebar!.expandedBots, undefined);
 });
 
+test('the width of the Teams details panel is kept when it can be a width, absent from a file that never had it, and dropped when it cannot', () => {
+  const sidebar = (value: Record<string, unknown>) => parseSettings({ version: 1, projects: [], sidebar: value }).sidebar;
+  const order = { organization: 'list', chatSort: 'manual', manualSessionOrder: {} };
+
+  // A file from before the panel has no key at all, not even as `undefined`.
+  assert.ok(!('teamsDrawerWidth' in sidebar(order)!));
+  assert.deepEqual(sidebar({ ...order, teamsDrawerWidth: 360 }), { ...order, teamsDrawerWidth: 360 });
+  assert.equal(sidebar({ ...order, teamsDrawerWidth: 359.6 })!.teamsDrawerWidth, 360, 'a width is whole pixels');
+  for (const edge of [200, 480, 1200]) assert.equal(sidebar({ ...order, teamsDrawerWidth: edge })!.teamsDrawerWidth, edge, `${edge}px`);
+  // The panel clamps to its own range; the file only turns away what cannot be a width at all.
+  for (const width of [0, 199, 1201, -360, Number.NaN, Number.POSITIVE_INFINITY, '360', null, true, {}, []]) {
+    assert.ok(!('teamsDrawerWidth' in sidebar({ ...order, teamsDrawerWidth: width })!), `width ${String(width)}`);
+  }
+});
+
+test('saving the width of the Teams panel leaves the rest of the sidebar as saved, and what is saved is what is read back', () => {
+  const userData = temporaryDirectory();
+  const store = new SettingsStore(userData);
+  const order = { organization: 'list', chatSort: 'manual', manualSessionOrder: {} };
+  store.update({ sidebar: order });
+  store.update({ sidebar: { mode: 'teams' } });
+  store.update({ sidebar: { teamsDrawerWidth: 420 } });
+  assert.deepEqual(store.getPublic().sidebar, { ...order, mode: 'teams', teamsDrawerWidth: 420 }, 'saving the width forgets neither the order nor the mode');
+  store.update({ sidebar: { mode: 'home' } });
+  store.update({ sidebar: { organization: 'project', chatSort: 'manual', manualSessionOrder: {} } });
+  assert.deepEqual(store.getPublic().sidebar, { organization: 'project', chatSort: 'manual', manualSessionOrder: {}, mode: 'home', teamsDrawerWidth: 420 }, 'nor does saving the mode or the order forget the width');
+  assert.deepEqual(new SettingsStore(userData).getPublic().sidebar, store.getPublic().sidebar, 'what was saved is what is read back');
+
+  const copy = store.getPublic();
+  store.update({ sidebar: { teamsDrawerWidth: 300 } });
+  assert.equal(copy.sidebar!.teamsDrawerWidth, 420, 'a copy handed out is not the stored one');
+  assert.equal(store.getPublic().sidebar!.teamsDrawerWidth, 300);
+  store.update({ sidebar: { teamsDrawerWidth: 'wide' } });
+  assert.equal(store.getPublic().sidebar!.teamsDrawerWidth, undefined, 'a value that is not a width removes the saved one');
+});
+
 test('thought collapse preference remains optional and rejects invalid stored values', () => {
   assert.equal(new SettingsStore(temporaryDirectory()).getPublic().collapseThoughtsByDefault, undefined);
   for (const value of [undefined, null, 'false', 'true', 0, 1, {}, []]) {

@@ -54,8 +54,53 @@ test('the sidebar toggle has an accelerator that does not need the Command key o
   assert.equal(toggle.accelerator, 'Control+Alt+S');
 });
 
+test('the View menu shows or hides the details of the open team, after the sidebar toggle, sending its own action', () => {
+  const actions: string[] = [];
+  const view = viewItems(applicationMenuTemplate('darwin', action => actions.push(action), false));
+  const details = view.find(item => item.label === 'Show/Hide Team Details')!;
+  assert.ok(details, 'the item is in the menu');
+  assert.equal(details.accelerator, 'Control+Command+I');
+  (details.click as () => void)();
+  assert.deepEqual(actions, ['team-details']);
+  assert.ok(view.findIndex(item => item.label === 'Show/Hide Sidebar') < view.indexOf(details), 'it follows the sidebar toggle');
+  for (const platform of ['win32', 'linux'] as const) {
+    const other = viewItems(applicationMenuTemplate(platform, () => {}, false)).find(item => item.label === 'Show/Hide Team Details')!;
+    assert.equal(other.accelerator, 'Control+Alt+I', `${platform} does not need the Command key`);
+  }
+});
+
+/** What Electron gives the roles of the View menu when the template names no accelerator (lib/browser/api/menu-item-roles.ts). */
+const roleAccelerators = (platform: 'darwin' | 'win32' | 'linux'): Record<string, string> => ({
+  resetZoom: 'CommandOrControl+0', zoomIn: 'CommandOrControl+Plus', zoomOut: 'CommandOrControl+-',
+  togglefullscreen: platform === 'darwin' ? 'Control+Command+F' : 'F11',
+  toggleDevTools: platform === 'darwin' ? 'Alt+Command+I' : 'Control+Shift+I',
+});
+
+/** An accelerator spelled one way: the modifiers by their platform names, in order, then the key. */
+const canonicalAccelerator = (accelerator: string, platform: string): string => {
+  const names: Record<string, string> = { commandorcontrol: platform === 'darwin' ? 'command' : 'control', cmdorctrl: platform === 'darwin' ? 'command' : 'control', cmd: 'command', ctrl: 'control', option: 'alt' };
+  const parts = accelerator.split('+').map(part => names[part.toLowerCase()] ?? part.toLowerCase());
+  return [...parts.slice(0, -1).sort(), parts.at(-1)].join('+');
+};
+
+test('no two items of the View menu share an accelerator, the DevTools role of the development menu among them', () => {
+  for (const platform of ['darwin', 'win32', 'linux'] as const) {
+    const roles = roleAccelerators(platform);
+    const taken = new Map<string, string>();
+    for (const item of viewItems(applicationMenuTemplate(platform, () => {}, true))) {
+      const accelerator = item.accelerator ?? (item.role ? roles[item.role] : undefined);
+      if (!accelerator) continue;
+      const key = canonicalAccelerator(String(accelerator), platform);
+      const name = item.label ?? item.role ?? '';
+      assert.ok(!taken.has(key), `${platform}: ${name} and ${taken.get(key)} both use ${accelerator}`);
+      taken.set(key, name);
+    }
+    assert.ok(taken.has(canonicalAccelerator(roles['toggleDevTools']!, platform)), `${platform}: the DevTools role is in the development menu, so the check saw it`);
+  }
+});
+
 test('the new View items are named in all five languages', () => {
-  for (const key of ['native_home', 'native_bots', 'native_teams', 'native_toggle_sidebar']) {
+  for (const key of ['native_home', 'native_bots', 'native_teams', 'native_toggle_sidebar', 'native_team_details']) {
     for (const locale of ['zh-Hans', 'zh-Hant', 'en', 'ja', 'ko']) assert.ok(nativeCatalog[key]?.[locale]?.trim(), `${key} ${locale}`);
   }
 });

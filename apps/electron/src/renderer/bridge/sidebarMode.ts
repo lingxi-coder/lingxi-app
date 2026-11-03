@@ -33,11 +33,12 @@ export function reconcileSidebarMode(mode: SidebarMode, page: AppPage, botsAvail
 }
 
 /**
- * The mode to open the window in. Teams is not brought back yet: its sidebar
- * has nothing of its own to return to, so the window opens on Home.
+ * The mode to open the window in: the one it was last left in, except that the
+ * Bots, where they cannot be used, are not a mode to return to and Home is.
  */
 export function restoredSidebarMode(saved: SidebarMode | undefined, botsAvailable: boolean): SidebarMode {
-  return saved === 'bots' && botsAvailable ? 'bots' : 'home';
+  if (saved === 'bots') return botsAvailable ? 'bots' : 'home';
+  return saved === 'teams' ? 'teams' : 'home';
 }
 
 /**
@@ -55,16 +56,18 @@ export class SidebarModeSync {
   private seen: SidebarMode = 'home';
 
   /**
-   * The first look at the saved mode. Answers `'bots'` when the window should
-   * open on the Bots, which it does only while it is still where it opened:
-   * one that the owner or a link has already moved is left where it is.
+   * The first look at the saved mode. Answers `'bots'` or `'teams'` when the
+   * window should open on them, which it does only while it is still where it
+   * opened: one that the owner or a link has already moved is left where it is.
    */
-  open({ saved, page, mode, botsAvailable }: { saved: SidebarMode | undefined; page: AppPage; mode: SidebarMode; botsAvailable: boolean }): 'bots' | undefined {
+  open({ saved, page, mode, botsAvailable }: { saved: SidebarMode | undefined; page: AppPage; mode: SidebarMode; botsAvailable: boolean }): 'bots' | 'teams' | undefined {
     if (this.settled) return undefined;
     this.settled = true;
     this.written = saved ?? 'home';
     this.seen = mode;
-    return page === 'chat' && mode === 'home' && restoredSidebarMode(saved, botsAvailable) === 'bots' ? 'bots' : undefined;
+    if (page !== 'chat' || mode !== 'home') return undefined;
+    const restored = restoredSidebarMode(saved, botsAvailable);
+    return restored === 'home' ? undefined : restored;
   }
 
   /** A mode is about to be picked before the saved one was looked at: the saved one is not brought back over the pick. */

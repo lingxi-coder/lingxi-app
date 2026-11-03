@@ -66,6 +66,8 @@ export interface SidebarPreferences {
   mode?: SidebarMode;
   /** The Bots whose chats the Bots sidebar lists open. Omitted until the owner first opens or closes one. */
   expandedBots?: string[];
+  /** The width, in CSS pixels, the owner gave the Teams details panel. Omitted until they first resize it. */
+  teamsDrawerWidth?: number;
 }
 
 /**

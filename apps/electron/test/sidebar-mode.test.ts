@@ -41,15 +41,16 @@ test('where Bots cannot be used they are no mode and no page', () => {
   assert.equal(reconcileSidebarMode('teams', 'teams', false), 'teams');
 });
 
-test('the window opens on Home unless the Bots were open and can be used; Teams is not brought back', () => {
+test('the window opens in the mode it was left in, except that the Bots, where they cannot be used, are no mode to return to', () => {
   assert.equal(restoredSidebarMode('bots', true), 'bots');
   assert.equal(restoredSidebarMode('bots', false), 'home');
-  assert.equal(restoredSidebarMode('teams', true), 'home');
+  assert.equal(restoredSidebarMode('teams', true), 'teams');
+  assert.equal(restoredSidebarMode('teams', false), 'teams', 'Teams does not depend on the Bots');
   assert.equal(restoredSidebarMode('home', true), 'home');
   assert.equal(restoredSidebarMode(undefined, true), 'home', 'a settings file from before the modes');
 });
 
-test('the saved mode is looked at once, and a window that is still where it opened is taken to the Bots', () => {
+test('the saved mode is looked at once, and a window that is still where it opened is taken to the Bots or the Teams', () => {
   const sync = new SidebarModeSync();
   assert.equal(sync.open({ saved: 'bots', page: 'chat', mode: 'home', botsAvailable: true }), 'bots');
   assert.equal(sync.open({ saved: 'bots', page: 'chat', mode: 'home', botsAvailable: true }), undefined, 'once');
@@ -57,6 +58,12 @@ test('the saved mode is looked at once, and a window that is still where it open
   assert.equal(sync.toSave('home'), 'home');
   assert.equal(sync.toSave('home'), undefined, 'and a change is written once');
   assert.equal(sync.toSave('teams'), 'teams');
+
+  const teams = new SidebarModeSync();
+  assert.equal(teams.open({ saved: 'teams', page: 'chat', mode: 'home', botsAvailable: false }), 'teams', 'even where the Bots cannot run');
+  assert.equal(teams.open({ saved: 'teams', page: 'chat', mode: 'home', botsAvailable: false }), undefined, 'once');
+  assert.equal(teams.toSave('teams'), undefined, 'the file already holds it');
+  assert.equal(teams.toSave('home'), 'home', 'and leaving it is written');
 });
 
 test('a window the owner or a link has moved is not taken anywhere, and its saved mode is kept until a mode is picked', () => {
@@ -70,8 +77,12 @@ test('a window the owner or a link has moved is not taken anywhere, and its save
   assert.equal(unavailable.toSave('home'), undefined);
 
   const teams = new SidebarModeSync();
-  assert.equal(teams.open({ saved: 'teams', page: 'chat', mode: 'home', botsAvailable: true }), undefined);
-  assert.equal(teams.toSave('home'), undefined, 'a window that opened on Home leaves the Teams the file holds');
+  assert.equal(teams.open({ saved: 'teams', page: 'apps', mode: 'home', botsAvailable: true }), undefined);
+  assert.equal(teams.toSave('home'), undefined, 'a window that opened elsewhere leaves the Teams the file holds');
+
+  const onBots = new SidebarModeSync();
+  assert.equal(onBots.open({ saved: 'teams', page: 'chat', mode: 'bots', botsAvailable: true }), undefined, 'a Bot\'s chat that a link opened is not left for the Teams');
+  assert.equal(onBots.toSave('bots'), undefined, 'and it is not written over the file before the owner picks a mode');
 });
 
 test('nothing is written before the saved mode was looked at, and a pick before then is the one saved', () => {

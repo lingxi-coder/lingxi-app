@@ -2704,7 +2704,8 @@ struct RootView: View {
         try requireSourceReplacementAllowed(old)
         #if canImport(harness_runtimeFFI)
         let unsentTranscriptPath: String?
-        if !old.model.unsentPrompts.isEmpty {
+        let hasExpiredSideArchives = (old as? EngineConversationSource)?.sideChats.expiredArchives.isEmpty == false
+        if !old.model.unsentPrompts.isEmpty || hasExpiredSideArchives {
             guard let state = old.model.workspaceState,
                   canonicalSessionID(state.sessionId) == canonicalSessionID(activeSession),
                   !state.transcriptPath.isEmpty, (state.transcriptPath as NSString).isAbsolutePath else {

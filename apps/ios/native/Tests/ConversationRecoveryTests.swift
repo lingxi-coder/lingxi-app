@@ -8,6 +8,13 @@ import XCTest
 import harness_runtimeFFI
 import UIKit
 
+#if DEBUG
+private final class ExpiredSideTestHandle: MobileEngineHandle, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { super.init(unsafeFromHandle: handle) }
+    init() { super.init(noHandle: .init()) }
+}
+#endif
+
 /// The lock makes the injected failure switch safe when the ledger actor writes off-main.
 final class RecoveryWriterFailure: @unchecked Sendable {
     enum Mode: Equatable { case none, beforeLedger, afterLedger, beforeWitness }
@@ -773,6 +780,307 @@ final class ConversationRecoveryTests: XCTestCase {
             mode: .code, sessionID: a, workspace: "/a", draft: "new draft"))
         XCTAssertTrue(host.entry(for: replacement) === next)
         XCTAssertEqual(replacement.model.unsentPrompts.first?.text, "wrong owner")
+    }
+
+    func testIdleExpiredSideArchivesOwnerPayloadAndReleasesSharedHandle() async throws {
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: try root().path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let parent = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        parent.model.activeSessionId = a
+        let child = EngineConversationSource(config: config, memoryOnly: true)
+        child.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a")
+        var handle: ExpiredSideTestHandle? = ExpiredSideTestHandle()
+        weak var weakHandle = handle
+        child.setSideHandleForTesting(try XCTUnwrap(handle))
+        handle = nil
+        let entry = SideChatEntry(source: child, id: "side-a")
+        entry.draft = "draft"
+        entry.draftSourceCodeUnits = [65, 0xd800]
+        let photo = ComposerAttachment(image: UIImage(), width: 1, height: 1, base64: "cA==")
+        entry.attachment = photo
+        let chip = VisualizationContextChip(id: "chart", revision: 1, title: "Chart")
+        child.model.visualizationChip = chip
+        let image = ImageRefDto(mediaType: photo.mediaType, base64: photo.base64)
+        child.onSideSubmissionFailure?("previous failure", [66, 0xd800], [image])
+        let token = ConversationTurnToken(clientTurnId: 7, sessionEpoch: 1)
+        child.model.unsentPrompts = [ConversationUnsentPrompt(token: token, sessionID: a, sideID: "side-a",
+            text: "rejected", sourceCodeUnits: [67, 0xd800], images: [image], visualizationContext: chip,
+            mayRestoreCapturedDraft: false, chipRevisionAtCapture: 1, chipRevisionAfterAdmission: 2)]
+        parent.sideChats.entries.append(entry)
+        parent.sideChats.selectedID = "side-a"
+        parent.sideChats.removeEnded("side-a")
+
+        XCTAssertNil(weakHandle, "an archived side must not retain the shared native handle")
+        XCTAssertFalse(parent.hasLiveSideChats)
+        XCTAssertTrue(parent.sideChats.entries.isEmpty)
+        let archive = try XCTUnwrap(parent.sideChats.expiredArchives.first)
+        XCTAssertEqual(archive.id, "side-a")
+        XCTAssertEqual(archive.parentSessionID, a)
+        XCTAssertEqual(archive.parentOwnerEpoch, 1)
+        XCTAssertEqual(archive.draft, "draft")
+        XCTAssertEqual(archive.draftSourceCodeUnits, [65, 0xd800])
+        XCTAssertEqual(archive.attachment, photo)
+        XCTAssertEqual(archive.visualizationContext, chip)
+        XCTAssertEqual(archive.unsent.first?.sourceCodeUnits, [66, 0xd800])
+        XCTAssertEqual(archive.rejected.first?.sourceCodeUnits, [67, 0xd800])
+        XCTAssertEqual(archive.rejected.first?.images, [image])
+        let denied = await child.send("must not send")
+        XCTAssertNil(denied)
+        try await child.cancelAndWait()
+        XCTAssertTrue(parent.model.unsentPrompts.isEmpty)
+
+        let explicitlyEnded = EngineConversationSource(config: config, memoryOnly: true)
+        explicitlyEnded.setSideOwnerForTesting(parentSessionID: a, sideID: "side-b")
+        let explicitEntry = SideChatEntry(source: explicitlyEnded, id: "side-b")
+        explicitEntry.draft = "user chose to end"
+        explicitEntry.closing = true
+        parent.sideChats.entries.append(explicitEntry)
+        parent.sideChats.removeEnded("side-b")
+        XCTAssertEqual(parent.sideChats.expiredArchives.map(\.id), ["side-a"])
+        parent.sideChats.discardExpired("side-a")
+        XCTAssertTrue(parent.sideChats.expiredArchives.isEmpty)
+    }
+
+    func testSideExpiryBeforeEitherReceiptKeepsOneUnconfirmedOwnerPayload() async throws {
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: try root().path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let parent = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        parent.model.activeSessionId = a
+        let child = EngineConversationSource(config: config, memoryOnly: true)
+        child.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a")
+        let entry = SideChatEntry(source: child, id: "side-a")
+        parent.sideChats.entries.append(entry)
+        parent.sideChats.selectedID = "side-a"
+        let chip = VisualizationContextChip(id: "chart", revision: 1, title: "Chart")
+        child.model.visualizationChip = chip
+        let image = ImageRefDto(mediaType: "image/png", base64: "cA==")
+        let units: [UInt16] = [65, 0xd800]
+        let dispatched = expectation(description: "side send is in flight")
+        let cancelStarted = expectation(description: "side cancel is in flight")
+        var releaseSend: CheckedContinuation<Void, Never>?
+        var releaseCancel: CheckedContinuation<Void, Never>?
+        var sends = 0
+        child.setCommandSubmitterForTesting { command in
+            switch command {
+            case .sendPrompt:
+                sends += 1
+                await withCheckedContinuation { releaseSend = $0; dispatched.fulfill() }
+                throw ClientError.Rejected(message: "turn_cancelled_before_admission")
+            case .cancel:
+                await withCheckedContinuation { releaseCancel = $0; cancelStarted.fulfill() }
+            default: break
+            }
+        }
+        let send = Task { await child.send("input", sourceCodeUnits: units, images: [image], selectedSlashCommand: nil) }
+        await fulfillment(of: [dispatched], timeout: 2)
+        let submitted = await send.value
+        XCTAssertNotNil(submitted)
+        let stop = Task { try? await child.cancelAndWait() }
+        await fulfillment(of: [cancelStarted], timeout: 2)
+        parent.sideChats.removeEnded("side-a")
+        let archive = try XCTUnwrap(parent.sideChats.expiredArchives.first)
+        XCTAssertTrue(archive.rejected.isEmpty)
+        XCTAssertEqual(archive.outstanding.count, 1)
+        XCTAssertEqual(archive.outstanding.first?.parentSessionID, a)
+        XCTAssertEqual(archive.outstanding.first?.sideID, "side-a")
+        XCTAssertEqual(archive.outstanding.first?.text, "input")
+        XCTAssertEqual(archive.outstanding.first?.sourceCodeUnits, units)
+        XCTAssertEqual(archive.outstanding.first?.images, [image])
+        XCTAssertEqual(archive.outstanding.first?.visualizationContext, chip)
+        releaseSend?.resume()
+        releaseCancel?.resume()
+        _ = await stop.value
+        XCTAssertEqual(parent.sideChats.expiredArchives.first?.outstanding.count, 1)
+        XCTAssertTrue(parent.sideChats.expiredArchives.first?.rejected.isEmpty == true)
+        XCTAssertEqual(sends, 1)
+        XCTAssertTrue(parent.model.unsentPrompts.isEmpty)
+    }
+
+    func testSideExpiryDuringInitialAdmissionKeepsParentDraft() async throws {
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: try root().path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let parent = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        parent.model.activeSessionId = a
+        let host = SessionHost()
+        let owner = try host.retain(source: parent, scope: .global, mode: .code,
+                                    sessionID: a, workspace: "/a", draft: "/side keep")
+        let units = Array("/side keep".utf16)
+        owner.draftSourceCodeUnits = units
+        let captured = CapturedComposerDraft(
+            draft: Binding(get: { owner.draft }, set: { owner.draft = $0 }),
+            units: Binding(get: { owner.draftSourceCodeUnits }, set: { owner.draftSourceCodeUnits = $0 }),
+            attachment: Binding(get: { owner.attachment }, set: { owner.attachment = $0 }),
+            submittedUnits: units, revision: { owner.draftRevision })
+        let child = EngineConversationSource(config: config, memoryOnly: true)
+        child.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a")
+        let entry = SideChatEntry(source: child, id: "side-a")
+        let collection = SideChatCollection(parent: parent, createEntry: { _ in entry })
+        let atBarrier = expectation(description: "initial side send is awaiting admission")
+        let completed = expectation(description: "creation reports its result")
+        var resume: CheckedContinuation<Void, Never>?
+        var accepted: Bool?
+        var sends = 0
+        child.setPromptDispatchBarrierForTesting {
+            await withCheckedContinuation { resume = $0; atBarrier.fulfill() }
+        }
+        child.setCommandSubmitterForTesting { command in
+            if case .sendPrompt = command { sends += 1 }
+        }
+        collection.create(input: "keep", inputSourceCodeUnits: Array("keep".utf16)) { result in
+            accepted = result
+            if result { captured.clearIfUnchanged() }
+            completed.fulfill()
+        }
+        await fulfillment(of: [atBarrier], timeout: 2)
+        collection.removeEnded("side-a")
+        resume?.resume()
+        await fulfillment(of: [completed], timeout: 2)
+        XCTAssertEqual(accepted, false)
+        XCTAssertEqual(owner.draft, "/side keep")
+        XCTAssertEqual(owner.draftSourceCodeUnits, units)
+        XCTAssertEqual(sends, 0)
+        XCTAssertTrue(collection.expiredArchives.isEmpty)
+    }
+
+    func testSideExpiryAfterInitialHandoffArchivesOriginalWithoutRestoringParent() async throws {
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: try root().path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let parent = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        parent.model.activeSessionId = a
+        let host = SessionHost()
+        let owner = try host.retain(source: parent, scope: .global, mode: .code,
+                                    sessionID: a, workspace: "/a", draft: "/side keep")
+        let units = Array("/side keep".utf16)
+        owner.draftSourceCodeUnits = units
+        let captured = CapturedComposerDraft(
+            draft: Binding(get: { owner.draft }, set: { owner.draft = $0 }),
+            units: Binding(get: { owner.draftSourceCodeUnits }, set: { owner.draftSourceCodeUnits = $0 }),
+            attachment: Binding(get: { owner.attachment }, set: { owner.attachment = $0 }),
+            submittedUnits: units, revision: { owner.draftRevision })
+        let child = EngineConversationSource(config: config, memoryOnly: true)
+        child.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a")
+        let entry = SideChatEntry(source: child, id: "side-a")
+        let collection = SideChatCollection(parent: parent, createEntry: { _ in entry })
+        let atTransport = expectation(description: "side send crossed the handoff")
+        let completed = expectation(description: "creation reports its result")
+        var resumeSend: CheckedContinuation<Void, Never>?
+        var accepted: Bool?
+        child.setCommandSubmitterForTesting { command in
+            if case .sendPrompt = command {
+                collection.removeEnded("side-a")
+                await withCheckedContinuation { resumeSend = $0; atTransport.fulfill() }
+                throw ClientError.Rejected(message: "turn_cancelled_before_admission")
+            }
+        }
+        collection.create(input: "keep", inputSourceCodeUnits: Array("keep".utf16)) { result in
+            accepted = result
+            if result { captured.clearIfUnchanged() }
+            completed.fulfill()
+        }
+        await fulfillment(of: [atTransport, completed], timeout: 2)
+        XCTAssertEqual(accepted, true)
+        XCTAssertEqual(owner.draft, "")
+        let archive = try XCTUnwrap(collection.expiredArchives.first)
+        XCTAssertEqual(archive.id, "side-a")
+        XCTAssertEqual(archive.parentSessionID, a)
+        XCTAssertEqual(archive.outstanding.count, 1)
+        XCTAssertEqual(archive.outstanding.first?.text, "keep")
+        XCTAssertEqual(archive.outstanding.first?.sourceCodeUnits, Array("keep".utf16))
+        XCTAssertTrue(archive.rejected.isEmpty)
+        resumeSend?.resume()
+    }
+
+    func testSideEndedBeforeCreationReturnsDoesNotClearParentDraft() async throws {
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: try root().path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let parent = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        parent.model.activeSessionId = a
+        let child = EngineConversationSource(config: config, memoryOnly: true)
+        child.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a")
+        let entry = SideChatEntry(source: child, id: "side-a")
+        let factoryWaiting = expectation(description: "side creation has not returned")
+        let completed = expectation(description: "creation rejects the expired side")
+        var resumeFactory: CheckedContinuation<SideChatEntry, Never>?
+        let collection = SideChatCollection(parent: parent, createEntry: { _ in
+            await withCheckedContinuation { resumeFactory = $0; factoryWaiting.fulfill() }
+        })
+        var accepted: Bool?
+        collection.create(input: "keep") { accepted = $0; completed.fulfill() }
+        await fulfillment(of: [factoryWaiting], timeout: 2)
+        collection.removeEnded("side-a")
+        resumeFactory?.resume(returning: entry)
+        await fulfillment(of: [completed], timeout: 2)
+        XCTAssertEqual(accepted, false)
+        XCTAssertTrue(collection.entries.isEmpty)
+        XCTAssertTrue(collection.expiredArchives.isEmpty)
+        XCTAssertFalse(child.isAvailableForPrompts)
+    }
+
+    func testExpiredSideArchiveMovesOnlyWithExactParentAndFreshCatalog() throws {
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: try root().path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let parent = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        parent.model.activeSessionId = a
+        let state = SessionWorkspaceState(sessionId: a, cwd: "/a", projectRoot: "/a",
+                                          additionalDirectories: [], transcriptPath: "/a/session.jsonl")
+        parent.model.workspaceState = state
+        let child = EngineConversationSource(config: config, memoryOnly: true)
+        child.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a")
+        let entry = SideChatEntry(source: child, id: "side-a")
+        entry.draft = "keep side"
+        parent.sideChats.entries.append(entry)
+        parent.sideChats.selectedID = "side-a"
+        parent.sideChats.removeEnded("side-a")
+        let host = SessionHost()
+        let old = try host.retain(source: parent, scope: .global, mode: .code,
+                                  sessionID: a, workspace: "/a", draft: "")
+        host.releaseIdleSource(parent)
+        XCTAssertTrue(host.entry(for: parent) === old)
+        let replacement = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        replacement.model.activeSessionId = a
+        replacement.model.workspaceState = state
+        XCTAssertThrowsError(try host.replaceIdleSource(parent, with: replacement, scope: .global,
+            mode: .code, sessionID: a, workspace: "/a", draft: ""), "archive-only replacement needs a fresh catalog check")
+        XCTAssertThrowsError(try host.replaceIdleSource(parent, with: replacement, scope: .global,
+            mode: .code, sessionID: a, workspace: "/a", draft: "", validateUnsentOwner: {
+                throw SessionHost.OwnershipError.sourceIdentityMismatch
+            }))
+        XCTAssertTrue(host.entry(for: parent) === old)
+        let next = try host.replaceIdleSource(parent, with: replacement, scope: .global,
+            mode: .code, sessionID: a, workspace: "/a", draft: "", validateUnsentOwner: {})
+        XCTAssertTrue(host.entry(for: replacement) === next)
+        XCTAssertTrue(parent.sideChats.expiredArchives.isEmpty)
+        XCTAssertEqual(replacement.sideChats.expiredArchives.first?.draft, "keep side")
+        XCTAssertEqual(replacement.sideChats.selectedID, "side-a")
+
+        let wrong = ExpiredSideChatArchive(id: "side-b", parentSessionID: b, parentOwnerEpoch: 1, sideOwnerEpoch: 1,
+            draft: "other owner", draftSourceCodeUnits: nil, attachment: nil, visualizationContext: nil,
+            unsent: [], rejected: [], outstanding: [])
+        replacement.sideChats.adoptExpiredArchives([wrong])
+        let third = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        third.model.activeSessionId = a
+        third.model.workspaceState = state
+        XCTAssertThrowsError(try host.replaceIdleSource(replacement, with: third, scope: .global,
+            mode: .code, sessionID: a, workspace: "/a", draft: "", validateUnsentOwner: {}))
+        XCTAssertTrue(host.entry(for: replacement) === next)
+        XCTAssertEqual(replacement.sideChats.expiredArchives.count, 2)
+    }
+
+    func testExpiredSideKeepsDuplicatePayloadButShowsItOnceAsUnconfirmed() {
+        let units: [UInt16] = [65, 0xd800]
+        let image = ImageRefDto(mediaType: "image/jpeg", base64: "cA==")
+        let photo = ComposerAttachment(image: UIImage(), width: 1, height: 1, base64: "cA==")
+        let chip = VisualizationContextChip(id: "chart", revision: 1, title: "Chart")
+        let pending = ExpiredSideChatInput(parentSessionID: a, sideID: "side-a", sideOwnerEpoch: 1, text: "same",
+            sourceCodeUnits: units, images: [image], visualizationContext: chip)
+        let archive = ExpiredSideChatArchive(id: "side-a", parentSessionID: a, parentOwnerEpoch: 1, sideOwnerEpoch: 1,
+            draft: "same", draftSourceCodeUnits: units, attachment: photo, visualizationContext: chip,
+            unsent: [], rejected: [], outstanding: [pending])
+        XCTAssertTrue(archive.draftIsUnconfirmed)
+        XCTAssertTrue(archive.visibleOutstanding.isEmpty)
+        XCTAssertEqual(archive.outstanding.count, 1, "the original in-flight payload remains retained")
+        XCTAssertEqual(archive.draftSourceCodeUnits, units)
+        XCTAssertEqual(archive.outstanding.first?.images, [image])
     }
 
     private func exerciseCancelledBeforeAdmission(side: Bool, rejectionFirst: Bool,

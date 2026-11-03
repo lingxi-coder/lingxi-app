@@ -311,6 +311,8 @@ final class SessionHost {
         // An unshown rejected input is still owned by this source. It can be
         // moved only by the same-identity replacement transaction below.
         guard source.model.unsentPrompts.isEmpty else { return }
+        if let engine = source as? EngineConversationSource,
+           !engine.sideChats.expiredArchives.isEmpty { return }
         #endif
         guard !entry.voice.hasOwnedAudio, !source.hasLiveSideChats,
               ConversationSourceReplacementPolicy.allowsReplacement(
@@ -360,13 +362,17 @@ final class SessionHost {
         #if canImport(harness_runtimeFFI)
         let unsent = old.model.unsentPrompts
         let ownerID = canonicalSessionID(previous.sessionID)
+        let oldEngine = old as? EngineConversationSource
         let replacementEngine = replacement as? EngineConversationSource
-        if !unsent.isEmpty {
-            guard let oldEngine = old as? EngineConversationSource,
-                  replacementEngine != nil,
+        let sideArchives = oldEngine?.sideChats.expiredArchives ?? []
+        if !unsent.isEmpty || !sideArchives.isEmpty {
+            guard let oldEngine, let replacementEngine,
                   !ownerID.isEmpty, previous.scope == scope, previous.mode == mode,
                   previous.workspace == workspace, replacement.model.unsentPrompts.isEmpty,
                   unsent.allSatisfy({ $0.sideID == nil && $0.sessionID == ownerID && oldEngine.ownsUnsentPrompt($0) }),
+                  sideArchives.allSatisfy({ $0.parentSessionID == ownerID && oldEngine.ownsExpiredSideArchive($0) }),
+                  replacementEngine.sideChats.expiredArchives.isEmpty,
+                  replacementEngine.sideChats.entries.isEmpty,
                   let oldState = old.model.workspaceState, let newState = replacement.model.workspaceState,
                   canonicalSessionID(oldState.sessionId) == ownerID,
                   canonicalSessionID(newState.sessionId) == ownerID,
@@ -386,6 +392,11 @@ final class SessionHost {
         if !unsent.isEmpty {
             replacementEngine?.adoptUnsentPromptsFromVerifiedOwner(unsent)
             old.model.unsentPrompts.removeAll()
+        }
+        if !sideArchives.isEmpty, let oldEngine, let replacementEngine {
+            let selectedSideID = oldEngine.sideChats.selectedID
+            replacementEngine.adoptExpiredSideArchivesFromVerifiedOwner(
+                oldEngine.sideChats.takeExpiredArchives(), selectedID: selectedSideID)
         }
         #endif
         next.attachment = previous.attachment

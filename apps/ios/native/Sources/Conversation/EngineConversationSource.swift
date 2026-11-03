@@ -171,6 +171,11 @@ final class EngineConversationSource: ConversationSource {
     private var durableUnconfirmedOwners = Set<String>()
     private(set) var sideID: String?
     private var sideParentSessionID: String?
+    private var sideParentSessionEpoch: UInt64?
+    private var archivedSideEpoch: UInt64?
+    var sideArchiveIdentity: (parentID: String?, parentEpoch: UInt64?, sideEpoch: UInt64) {
+        (sideParentSessionID, sideParentSessionEpoch, archivedSideEpoch ?? sessionEpoch)
+    }
     private var sideEnded = false
     private var sideClosing = false
     private var pendingSideInput: (String, [UInt16]?, [ImageRefDto])?
@@ -191,7 +196,7 @@ final class EngineConversationSource: ConversationSource {
         return .attached(attachment: attachment, logicalOwner: .session(sessionID: model.activeSessionId))
     }
     var isAvailableForPrompts: Bool {
-        !isRetiredForReconnect && !sessionOwnerRejected && !authoringMountAuthorizationPending
+        !isRetiredForReconnect && !sideEnded && !sessionOwnerRejected && !authoringMountAuthorizationPending
             && !model.authoringBindingPending && authoringWorkspaceValidation == nil
             && (authoringOwner.map { canonicalSessionID(model.activeSessionId) == canonicalSessionID($0.sessionID) } ?? true)
     }
@@ -1374,9 +1379,11 @@ final class EngineConversationSource: ConversationSource {
     func makeSideChat(requestID: String) async throws -> EngineConversationSource {
         guard isAvailableForPrompts else { throw LocalAppServiceFailure("AUTHORING_PENDING", "The app authoring binding is not ready.") }
         let sharedHandle = try await ensureHandle()
+        let parentEpoch = sessionEpoch
         let parentState = await sharedHandle.workspaceState()
         let parentID = canonicalSessionID(parentState.sessionId)
-        guard !parentID.isEmpty, self.handle === sharedHandle,
+        guard !parentID.isEmpty, sessionEpoch == parentEpoch, !model.sessionTransitionPending,
+              self.handle === sharedHandle,
               model.activeSessionId.isEmpty || canonicalSessionID(model.activeSessionId) == parentID else {
             throw SessionHost.OwnershipError.conflictingOwner
         }
@@ -1388,6 +1395,7 @@ final class EngineConversationSource: ConversationSource {
         child.model.providerConfigured = model.providerConfigured
         child.handle = sharedHandle
         child.sideParentSessionID = parentID
+        child.sideParentSessionEpoch = parentEpoch
         let listener = EngineListener(source: child)
         let sink = EnginePermissionSink(listener: listener)
         child.listener = listener
@@ -1434,6 +1442,56 @@ final class EngineConversationSource: ConversationSource {
         pendingSideInput = nil
         failedSideInput = nil
         onSideSubmissionFailure = nil
+    }
+
+    /// The side manager has already ended this side. Copy any in-flight
+    /// inputs as delivery-unknown before invalidating callbacks, then drop
+    /// every source-owned reference to the shared parent engine. The archive
+    /// remains value-only even if a separate in-flight FFI future is draining.
+    func detachExpiredSideChat() -> (parentID: String?, parentEpoch: UInt64?, sideEpoch: UInt64, outstanding: [ExpiredSideChatInput]) {
+        guard isSideChat else { return (nil, nil, sessionEpoch, []) }
+        let parentID = sideParentSessionID
+        let parentEpoch = sideParentSessionEpoch
+        let sideEpoch = sessionEpoch
+        archivedSideEpoch = sideEpoch
+        var outstanding = originalPrompts.filter { !acceptedSidePrompts.contains($0.key) }.map { element in
+            let original = element.value
+            return ExpiredSideChatInput(parentSessionID: original.item.sessionID, sideID: original.item.sideID,
+                sideOwnerEpoch: original.item.ownerEpoch,
+                text: original.item.text, sourceCodeUnits: original.item.sourceCodeUnits,
+                images: original.item.images, visualizationContext: original.item.visualizationContext)
+        }
+        if originalPrompts.isEmpty, let pendingSideInput {
+            outstanding.append(ExpiredSideChatInput(parentSessionID: parentID, sideID: sideID, sideOwnerEpoch: sideEpoch,
+                text: pendingSideInput.0, sourceCodeUnits: pendingSideInput.1,
+                images: pendingSideInput.2, visualizationContext: model.visualizationChip))
+        }
+        if let failedSideInput {
+            outstanding.append(ExpiredSideChatInput(parentSessionID: parentID, sideID: sideID, sideOwnerEpoch: sideEpoch,
+                text: failedSideInput.0, sourceCodeUnits: failedSideInput.1,
+                images: failedSideInput.2, visualizationContext: nil))
+        }
+        sideEnded = true
+        audioContextGeneration &+= 1
+        audioContextTask?.cancel()
+        audioContextTask = nil
+        handleBuildAttemptID &+= 1
+        handleBuildTask?.cancel()
+        handleBuildTask = nil
+        listener?.detachSource()
+        listener = nil
+        permissionSink = nil
+        handle = nil
+        failedNativeHandle = nil
+        mediaHostSessionEngine = nil
+        mediaHostSessionBinding = nil
+        originalPrompts.removeAll()
+        cancelledBeforeAdmission.removeAll()
+        acceptedSidePrompts.removeAll()
+        rejectedPromptRestorers.removeAll()
+        model.unsentPrompts.removeAll()
+        clearEndedSideChat()
+        return (parentID, parentEpoch, sideEpoch, outstanding)
     }
 
     private func submitCommand(_ command: ClientCommand, expectedSessionEpoch: UInt64? = nil,
@@ -1714,6 +1772,19 @@ final class EngineConversationSource: ConversationSource {
     /// transcript and workspace on both sides of a drained replacement.
     func adoptUnsentPromptsFromVerifiedOwner(_ prompts: [ConversationUnsentPrompt]) {
         model.unsentPrompts = prompts.map { $0.rebound(toOwnerEpoch: sessionEpoch) }
+    }
+
+    func ownsExpiredSideArchive(_ archive: ExpiredSideChatArchive) -> Bool {
+        archive.parentOwnerEpoch == sessionEpoch && archive.parentSessionID != nil &&
+            archive.parentSessionID == canonicalSessionID(model.activeSessionId) &&
+            archive.rejected.allSatisfy({ $0.sessionID == archive.parentSessionID && $0.sideID == archive.id &&
+                $0.ownerEpoch == archive.sideOwnerEpoch }) &&
+            archive.outstanding.allSatisfy({ $0.parentSessionID == archive.parentSessionID && $0.sideID == archive.id &&
+                $0.sideOwnerEpoch == archive.sideOwnerEpoch })
+    }
+
+    func adoptExpiredSideArchivesFromVerifiedOwner(_ archives: [ExpiredSideChatArchive], selectedID: String?) {
+        sideChats.adoptExpiredArchives(archives.map { $0.rebound(toParentEpoch: sessionEpoch) }, selectedID: selectedID)
     }
 
     private func settlePromptRejectedBeforeAdmission(_ token: ConversationTurnToken) {
@@ -2087,6 +2158,7 @@ final class EngineConversationSource: ConversationSource {
         // first prompt has not yet created a visible/native turn.
         promptAdmissionGeneration = UUID()
         if isSideChat {
+            guard !sideEnded else { return }
             // Atomic creation may return before its first TurnStarted reaches
             // Swift. A side-scoped Cancel(nil) still stops that admitted work.
             guard currentTurnId != nil || sideID != nil else { return }
@@ -2488,7 +2560,7 @@ final class EngineConversationSource: ConversationSource {
     /// Build the engine handle once (lazily). Registers the listener so the
     /// adapter can stream events the moment the first turn runs.
     private func ensureHandle() async throws -> MobileEngineHandle {
-        guard !isRetiredForReconnect else { throw CancellationError() }
+        guard !isRetiredForReconnect, !isSideChat || !sideEnded else { throw CancellationError() }
         guard !authoringMountAuthorizationPending else {
             throw LocalAppServiceFailure("AUTHORING_PENDING", "The app authoring binding is not ready.")
         }
@@ -5198,9 +5270,16 @@ final class EngineConversationSource: ConversationSource {
         cancelSubmissionObserverForTesting = observer
     }
 
-    func setSideOwnerForTesting(parentSessionID: String, sideID: String) {
+    func setSideOwnerForTesting(parentSessionID: String, sideID: String, parentEpoch: UInt64 = 1) {
         sideParentSessionID = canonicalSessionID(parentSessionID)
+        sideParentSessionEpoch = parentEpoch
         self.sideID = sideID
+    }
+
+    func setSideHandleForTesting(_ handle: MobileEngineHandle) {
+        precondition(isSideChat)
+        self.handle = handle
+        self.mediaHostSessionEngine = handle
     }
     #endif
 

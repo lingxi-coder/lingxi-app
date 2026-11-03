@@ -5,9 +5,11 @@ import { createHash } from 'node:crypto';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
 import { getFirestore as adminFirestore } from 'firebase-admin/firestore';
-import { collection, deleteDoc, doc, getDoc, getDocs, orderBy, query,
+import { collection, deleteDoc, deleteField, doc, getDoc, getDocs, orderBy, query,
   runTransaction, serverTimestamp, setDoc, updateDoc, where, writeBatch } from 'firebase/firestore';
 import { createTeamConversation } from '../src/team-conversations.mjs';
+import { TeamMessagesStore } from '../src/team-messages.mjs';
+import { messagePreview } from '../src/team-message-preview.mjs';
 
 const projectId = 'demo-lingxi-teams-t0';
 const emulator = process.env.FIRESTORE_EMULATOR_HOST;
@@ -44,10 +46,17 @@ after(async () => {
   if (adminApp) await deleteApp(adminApp);
 });
 
-function mutation(writer, db, current, { operation = 'create', mid = 'message01', changeId = 'change001', text = 'Synthetic message', author = { kind: 'user', uid: 'alice' }, changeSeq = current.lastChangeSeq + 1, seq = current.lastSeq + 1, cid = 'ordinary', generation = 1, textDigest = createHash('sha256').update(operation === 'recall' ? '' : text).digest('hex') } = {}, parts = ['conversation', 'message', 'change']) {
+const defined = value => Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined));
+// `last` overrides lastMessage fields on create (undefined drops a field). `pointer` overrides the dotted lastMessage
+// updates of an edit/recall: by default the newest message gets the refreshed preview / the recall blanking; null writes none.
+function mutation(writer, db, current, { operation = 'create', mid = 'message01', changeId = 'change001', text = 'Synthetic message', author = { kind: 'user', uid: 'alice' }, changeSeq = current.lastChangeSeq + 1, seq = current.lastSeq + 1, cid = 'ordinary', generation = 1, textDigest = createHash('sha256').update(operation === 'recall' ? '' : text).digest('hex'),
+  last = {}, pointer } = {}, parts = ['conversation', 'message', 'change']) {
   const parent = `conversations/${cid}`;
+  const newest = current.lastMessage?.id === mid;
+  const kept = pointer !== undefined ? pointer ?? {} : !newest ? {} : operation === 'recall'
+    ? { 'lastMessage.preview': '', 'lastMessage.recalled': true } : { 'lastMessage.preview': messagePreview(text) };
   if (parts.includes('conversation')) writer.update(ref(db, parent), { lastChangeSeq: changeSeq, lastChange: { id: changeId, seq: changeSeq },
-    ...(operation === 'create' ? { lastSeq: seq, lastMessage: { id: mid, seq, at: serverTimestamp() } } : {}) });
+    ...(operation === 'create' ? { lastSeq: seq, lastMessage: defined({ id: mid, seq, at: serverTimestamp(), author, preview: messagePreview(text), ...last }) } : kept) });
   if (parts.includes('message')) {
     const target = ref(db, `${parent}/messages/${mid}`);
     if (operation === 'create') writer.set(target, { seq, author, kind: 'text', text, createdAt: serverTimestamp(), changeSeq, changeId });
@@ -222,4 +231,124 @@ test('teams: SDK message receipts and reads must match the current membership ge
   await assertSucceeds(send(alice, { generation: 2 }));
   await assertFails(setDoc(ref(alice, 'conversations/ordinary/reads/alice'), { lastReadSeq: 1, generation: 1 }));
   await assertSucceeds(setDoc(ref(alice, 'conversations/ordinary/reads/alice'), { lastReadSeq: 1, generation: 2 }));
+});
+
+const lastOf = async (db, cid = 'ordinary') => (await getDoc(ref(db, `conversations/${cid}`))).data().lastMessage;
+test('teams: lastMessage mirrors the created message with its author and a bounded preview', options, async () => {
+  await create();
+  const alice = user('alice');
+  for (const last of [
+    { preview: undefined }, { author: undefined }, { preview: 'x'.repeat(121) }, { preview: 7 }, { preview: null },
+    { author: { kind: 'user', uid: 'bob' } }, { author: { kind: 'bot', uid: 'alice', botKey } }, { author: { kind: 'user', uid: 'alice', botKey } },
+    { author: 'alice' }, { recalled: true }, { unexpected: 'field' },
+  ]) await assertFails(send(alice, { last }));
+  await assertSucceeds(send(alice, { text: 'Line one\n\n   line two' }));
+  const stored = await lastOf(alice);
+  assert.equal(stored.preview, 'Line one line two'); assert.deepEqual(stored.author, { kind: 'user', uid: 'alice' }); assert.ok(!('recalled' in stored));
+});
+test('teams: a Bot-authored lastMessage must carry the same Bot identity as its message', options, async () => {
+  await create({ ...conversation('bot-chat'), kind: 'bot_dm', participants: ['user:alice', botKey] });
+  const owner = user('owner'), author = { kind: 'bot', uid: 'owner', botKey };
+  await assertFails(send(owner, { cid: 'bot-chat', author, last: { author: { kind: 'bot', uid: 'owner' } } })); // identity dropped
+  await assertFails(send(owner, { cid: 'bot-chat', author, last: { author: { kind: 'user', uid: 'owner' } } })); // posing as the person
+  await assertFails(send(owner, { cid: 'bot-chat', author, last: { author: { kind: 'bot', uid: 'owner', botKey: `bot:owner:${'x'.repeat(22)}:${'b'.repeat(22)}` } } }));
+  await assertSucceeds(send(owner, { cid: 'bot-chat', author, text: 'Bot says hello' }));
+  const stored = await lastOf(owner, 'bot-chat');
+  assert.deepEqual(stored.author, author); assert.equal(stored.preview, 'Bot says hello');
+});
+test('teams: the preview limit is 120 code points, matching the backend cut', options, async () => {
+  await create();
+  const alice = user('alice');
+  // string.size() counts UTF-16 units, so the rule uses an RE2 repetition: a preview of 120 emoji is valid, 121 is not.
+  for (const preview of ['中'.repeat(121), '😀'.repeat(121), `${'a'.repeat(120)}😀`, 'a'.repeat(300), `${'a'.repeat(60)}\n${'😀'.repeat(61)}`]) await assertFails(send(alice, { last: { preview } }));
+  await assertSucceeds(send(alice, { text: '中'.repeat(120) })); // 360 UTF-8 bytes
+  await assertSucceeds(send(alice, { mid: 'message02', changeId: 'change002', text: '😀'.repeat(130) })); // 120 code points, 240 UTF-16 units
+  assert.equal(Array.from((await lastOf(alice)).preview).length, 120);
+  await assertSucceeds(send(alice, { mid: 'message03', changeId: 'change003', text: `${'a'.repeat(119)}😀😀` })); // 120 code points, 121 units
+  await assertSucceeds(send(alice, { mid: 'message04', changeId: 'change004', text: ' \n\t ' })); // whitespace-only text previews as ''
+  assert.equal((await lastOf(alice)).preview, '');
+});
+test('teams: editing the newest message may only refresh its preview and older messages never move the pointer', options, async () => {
+  await create();
+  const alice = user('alice');
+  await send(alice); await send(alice, { mid: 'message02', changeId: 'change002', text: 'Newest body' });
+  await assertFails(send(alice, { operation: 'edit', mid: 'message01', changeId: 'change003', text: 'Edit old', pointer: { 'lastMessage.preview': 'Edit old' } }));
+  await assertFails(send(alice, { operation: 'edit', mid: 'message01', changeId: 'change003', text: 'Edit old', pointer: { 'lastMessage.preview': '' } }));
+  await assertSucceeds(send(alice, { operation: 'edit', mid: 'message01', changeId: 'change003', text: 'Edit old' })); // the pointer stays on message02
+  assert.equal((await lastOf(alice)).id, 'message02'); assert.equal((await lastOf(alice)).preview, 'Newest body');
+  const edit = (pointer, changeId = 'change004') => send(alice, { operation: 'edit', mid: 'message02', changeId, text: 'Edited newest', pointer });
+  for (const pointer of [
+    { 'lastMessage.preview': 'x'.repeat(121) }, { 'lastMessage.preview': 5 }, { 'lastMessage.preview': deleteField() },
+    { 'lastMessage.preview': 'ok', 'lastMessage.seq': 9 }, { 'lastMessage.preview': 'ok', 'lastMessage.id': 'message01' },
+    { 'lastMessage.preview': 'ok', 'lastMessage.at': new Date(0) }, { 'lastMessage.preview': 'ok', 'lastMessage.recalled': true },
+    { 'lastMessage.preview': 'ok', 'lastMessage.author': { kind: 'user', uid: 'bob' } }, { 'lastMessage.preview': 'ok', 'lastMessage.extra': 1 },
+  ]) await assertFails(edit(pointer));
+  await assertSucceeds(edit(undefined, 'change004'));
+  assert.equal((await lastOf(alice)).preview, 'Edited newest');
+  await assertSucceeds(edit(null, 'change005')); // a stale excerpt cannot be proven wrong, so leaving it is accepted
+  assert.equal((await lastOf(alice)).preview, 'Edited newest');
+  await assertSucceeds(edit({ 'lastMessage.preview': 'x'.repeat(120) }, 'change006'));
+});
+test('teams: recalling the newest message must blank its preview and mark the pointer recalled', options, async () => {
+  await create();
+  const alice = user('alice');
+  await send(alice); await send(alice, { mid: 'message02', changeId: 'change002', text: 'Secret detail' });
+  await assertFails(send(alice, { operation: 'recall', mid: 'message01', changeId: 'change003', pointer: { 'lastMessage.preview': '', 'lastMessage.recalled': true } }));
+  await assertSucceeds(send(alice, { operation: 'recall', mid: 'message01', changeId: 'change003' })); // older: pointer untouched
+  assert.equal((await lastOf(alice)).preview, 'Secret detail');
+  const recall = pointer => send(alice, { operation: 'recall', mid: 'message02', changeId: 'change004', pointer });
+  for (const pointer of [
+    null, { 'lastMessage.recalled': true }, { 'lastMessage.preview': '' }, { 'lastMessage.preview': 'Secret detail', 'lastMessage.recalled': true },
+    { 'lastMessage.preview': '', 'lastMessage.recalled': false }, { 'lastMessage.preview': '', 'lastMessage.recalled': 'yes' },
+    { 'lastMessage.preview': '', 'lastMessage.recalled': true, 'lastMessage.seq': 1 }, { 'lastMessage.preview': '', 'lastMessage.recalled': true, 'lastMessage.extra': 1 },
+  ]) await assertFails(recall(pointer));
+  await assertSucceeds(recall(undefined));
+  const last = await lastOf(alice);
+  assert.equal(last.preview, ''); assert.equal(last.recalled, true); assert.equal(last.id, 'message02'); assert.equal(last.seq, 2);
+  assert.deepEqual(last.author, { kind: 'user', uid: 'alice' });
+  await assertFails(send(alice, { mid: 'message03', changeId: 'change005', last: { recalled: true } })); // the marker never rides on a new message
+  await assertSucceeds(send(alice, { mid: 'message03', changeId: 'change005', text: 'Fresh' }));
+  const next = await lastOf(alice);
+  assert.equal(next.preview, 'Fresh'); assert.ok(!('recalled' in next));
+});
+test('teams: a pointer written before previews existed stays valid and can only gain a preview', options, async () => {
+  const legacy = async cid => {
+    await create(conversation(cid));
+    const parent = `teams/team-test/conversations/${cid}`;
+    await admin.doc(`${parent}/messages/message01`).set({ seq: 1, author: { kind: 'user', uid: 'alice' }, kind: 'text', text: 'Legacy', createdAt: new Date(), changeSeq: 1, changeId: 'change001' });
+    await admin.doc(`${parent}/changes/change001`).set({ seq: 1, messageId: 'message01', operation: 'create', actorUid: 'alice', generation: 1, at: new Date(), textDigest: createHash('sha256').update('Legacy').digest('hex') });
+    await admin.doc(parent).update({ lastSeq: 1, lastChangeSeq: 1, lastChange: { id: 'change001', seq: 1 }, lastMessage: { id: 'message01', seq: 1, at: new Date() } });
+  };
+  const alice = user('alice');
+  await legacy('legacy-a'); await legacy('legacy-b'); await legacy('legacy-c');
+  const edit = (cid, changeId, pointer) => send(alice, { cid, operation: 'edit', mid: 'message01', changeId, text: 'Edited', pointer });
+  await assertSucceeds(edit('legacy-a', 'change002', null)); // nothing to refresh
+  assert.deepEqual(Object.keys(await lastOf(alice, 'legacy-a')).sort(), ['at', 'id', 'seq']);
+  await assertFails(edit('legacy-b', 'change002', { 'lastMessage.author': { kind: 'user', uid: 'alice' }, 'lastMessage.preview': 'Edited' })); // backfill belongs to the trusted path
+  await assertSucceeds(edit('legacy-b', 'change002'));
+  assert.deepEqual(Object.keys(await lastOf(alice, 'legacy-b')).sort(), ['at', 'id', 'preview', 'seq']);
+  await assertSucceeds(send(alice, { cid: 'legacy-c', operation: 'recall', mid: 'message01', changeId: 'change002', pointer: null })); // no excerpt to blank
+  await assertSucceeds(send(alice, { cid: 'legacy-a', mid: 'message02', changeId: 'change003' })); // the next message writes the full shape
+  assert.deepEqual(Object.keys(await lastOf(alice, 'legacy-a')).sort(), ['at', 'author', 'id', 'preview', 'seq']);
+});
+test('teams: the trusted HTTP route and the rules-checked SDK write the same lastMessage shape and continue each other', options, async () => {
+  await create();
+  const alice = user('alice'), store = new TeamMessagesStore(admin);
+  const http = (operation, messageId, changeId, text) => store.execute({ uid: 'alice' }, { action: 'mutate', teamId: 'team-test', generation: 1, conversationId: 'ordinary', messageId, changeId, operation, text });
+  const keys = async () => Object.keys(await lastOf(alice)).sort();
+  await http('create', 'message01', 'change001', 'First via HTTP');
+  const shape = await keys();
+  assert.deepEqual(shape, ['at', 'author', 'id', 'preview', 'seq']);
+  await assertSucceeds(send(alice, { mid: 'message02', changeId: 'change002', text: 'Second via SDK' })); // the SDK follows an HTTP-written pointer
+  assert.deepEqual(await keys(), shape); assert.deepEqual((await lastOf(alice)).author, { kind: 'user', uid: 'alice' });
+  await http('edit', 'message02', 'change003', 'Second, edited\nover HTTP'); // HTTP follows an SDK-written pointer
+  assert.equal((await lastOf(alice)).preview, 'Second, edited over HTTP'); assert.deepEqual(await keys(), shape);
+  await http('create', 'message03', 'change004', 'Third via HTTP');
+  await assertSucceeds(send(alice, { operation: 'edit', mid: 'message03', changeId: 'change005', text: 'Third, edited by SDK' })); // rules accept edits of an HTTP-written pointer
+  assert.equal((await lastOf(alice)).preview, 'Third, edited by SDK');
+  await assertSucceeds(send(alice, { operation: 'recall', mid: 'message03', changeId: 'change006' }));
+  const recalled = await lastOf(alice);
+  assert.equal(recalled.preview, ''); assert.equal(recalled.recalled, true); assert.deepEqual(Object.keys(recalled).sort(), [...shape, 'recalled'].sort());
+  await http('create', 'message04', 'change007', 'Fourth via HTTP'); // the next message replaces the recalled pointer
+  assert.deepEqual(await keys(), shape);
 });

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { FieldValue } from 'firebase-admin/firestore';
+import { messagePreview } from './team-message-preview.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/u);
@@ -80,13 +81,16 @@ function appendBotMessage(tx, ref, conversation, trigger, triggerId, suffix, bod
   const messageId = botOutputIdentity(triggerId, suffix), changeId = botOutputIdentity(triggerId, `${suffix}:change`);
   const seq = conversation.lastSeq + 1, changeSeq = conversation.lastChangeSeq + 1;
   if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) fail(409, 'CURSOR_LIMIT');
-  tx.create(ref.collection('messages').doc(messageId), { seq, author: { kind: 'bot', uid: trigger.ownerUid, botKey: trigger.botKey },
+  // Reply, status and question messages all carry their text, so each one previews as its text.
+  const author = { kind: 'bot', uid: trigger.ownerUid, botKey: trigger.botKey };
+  tx.create(ref.collection('messages').doc(messageId), { seq, author,
     kind: extra.question ? 'question' : suffix === 'reply' ? 'text' : 'status', text: body, replyTo: trigger.messageId,
     triggerId, origin: { uid: trigger.actorUid, generation: trigger.generation }, ...extra,
     createdAt: now, changeSeq, changeId });
   tx.create(ref.collection('changes').doc(changeId), { seq: changeSeq, messageId, operation: 'create', actorUid: trigger.ownerUid,
     generation: trigger.ownerGeneration, at: now, textDigest: botDigest(body) });
-  tx.update(ref, { lastSeq: seq, lastMessage: { id: messageId, seq, at: now }, lastChangeSeq: changeSeq, lastChange: { id: changeId, seq: changeSeq } });
+  tx.update(ref, { lastSeq: seq, lastMessage: { id: messageId, seq, at: now, author, preview: messagePreview(body) },
+    lastChangeSeq: changeSeq, lastChange: { id: changeId, seq: changeSeq } });
   return messageId;
 }
 

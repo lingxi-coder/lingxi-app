@@ -72,7 +72,8 @@ test('T3 protocol: a human send and authenticated execution evidence commit once
 test('T3 protocol: SDK mentions/messages cannot enqueue or be upgraded into trusted execution', options, async () => {
   const client = env.authenticatedContext(alice.uid).firestore(), parent = `teams/${teamId}/conversations/${conversationId}`;
   const batch = writeBatch(client), triggerId = triggerIdentity('human-msg01', botKey);
-  batch.update(doc(client, parent), { lastSeq: 1, lastMessage: { id: 'human-msg01', seq: 1, at: serverTimestamp() }, lastChangeSeq: 1, lastChange: { id: 'human-change01', seq: 1 } });
+  batch.update(doc(client, parent), { lastSeq: 1, lastMessage: { id: 'human-msg01', seq: 1, at: serverTimestamp(), author: { kind: 'user', uid: alice.uid }, preview: 'Synthetic request' },
+    lastChangeSeq: 1, lastChange: { id: 'human-change01', seq: 1 } });
   batch.set(doc(client, `${parent}/messages/human-msg01`), { seq: 1, author: { kind: 'user', uid: alice.uid }, kind: 'text', text: 'Synthetic request', mentions: [], createdAt: serverTimestamp(), changeSeq: 1, changeId: 'human-change01' });
   batch.set(doc(client, `${parent}/changes/human-change01`), { seq: 1, messageId: 'human-msg01', operation: 'create', actorUid: alice.uid, generation: 1, at: serverTimestamp(), textDigest: botDigest('Synthetic request') });
   await assertSucceeds(batch.commit());
@@ -267,6 +268,30 @@ test('T3 protocol: reply and checkpoint commit atomically; lost reply ACK never 
   await assert.rejects(execute({ ...command, text: 'Different result' }), { code: 'BOT_RESULT_CONFLICT' });
 });
 
+test('T3 protocol: every Bot message becomes the conversation lastMessage with the Bot author and its text as preview', options, async () => {
+  const pointer = async () => (await root().get()).data().lastMessage;
+  const stored = async id => (await root().collection('messages').doc(id).get()).data();
+  await execute(send(), alice);
+  assert.deepEqual((await pointer()).author, { kind: 'user', uid: alice.uid }); assert.equal((await pointer()).preview, 'Synthetic request');
+  await execute(run('claimBot')); await execute(run('startBot'));
+  const started = await pointer(); // status message
+  assert.equal(started.seq, 2); assert.equal(started.preview, 'Processing on the Bot owner’s computer.');
+  assert.deepEqual(started.author, { kind: 'bot', uid: owner.uid, botKey }); assert.deepEqual(started.author, (await stored(started.id)).author);
+  await execute(run('botQuestion', { questionId: 'question-pre1', text: 'Which\n\n  option   do you want?', questions: ['Which option?'] }));
+  const asked = await pointer(); // question message
+  assert.equal(asked.seq, 3); assert.equal(asked.preview, 'Which option do you want?'); assert.equal((await stored(asked.id)).kind, 'question');
+  const text = `First line\n\n${'日本語 '.repeat(80)}`;
+  const { replyId } = await execute(run('finishBot', { text, outcome: 'completed' }));
+  const replied = await pointer(), reply = await stored(replyId);
+  assert.equal(replied.id, replyId); assert.equal(replied.seq, reply.seq); assert.equal(replied.at.toMillis(), reply.createdAt.toMillis());
+  assert.deepEqual(replied.author, reply.author); assert.deepEqual(replied.author, { kind: 'bot', uid: owner.uid, botKey });
+  assert.equal(replied.preview, `First line ${'日本語 '.repeat(80)}`.slice(0, 120)); assert.equal(Array.from(replied.preview).length, 120);
+  assert.ok(!('recalled' in replied));
+  // Editing the earlier human request is not an edit of the newest message, so the Bot's reply stays in the list.
+  await execute(send({ operation: 'edit', changeId: 'edit-human02', text: 'Edited request' }), alice);
+  assert.deepEqual(await pointer(), replied);
+});
+
 test('T3 protocol: old human generations and revoked/rebound policies cannot revive queued work', options, async () => {
   await execute(send(), alice);
   await teams.execute(owner, { action: 'remove', teamId, uid: alice.uid, generation: 1 });
@@ -312,7 +337,8 @@ test('T3 protocol: participants cannot preoccupy reserved Bot output message or 
   // specifically enforced even when no trusted output exists yet.
   for (const [mid, cid] of [[messageId, 'human-change01'], ['human-msg01', changeId]]) {
     const batch = writeBatch(client);
-    batch.update(doc(client, parent), { lastSeq: 1, lastMessage: { id: mid, seq: 1, at: serverTimestamp() }, lastChangeSeq: 1, lastChange: { id: cid, seq: 1 } });
+    batch.update(doc(client, parent), { lastSeq: 1, lastMessage: { id: mid, seq: 1, at: serverTimestamp(), author: { kind: 'user', uid: alice.uid }, preview: 'Preoccupation' },
+      lastChangeSeq: 1, lastChange: { id: cid, seq: 1 } });
     batch.set(doc(client, `${parent}/messages/${mid}`), { seq: 1, author: { kind: 'user', uid: alice.uid }, kind: 'text', text: 'Preoccupation', mentions: [], createdAt: serverTimestamp(), changeSeq: 1, changeId: cid });
     batch.set(doc(client, `${parent}/changes/${cid}`), { seq: 1, messageId: mid, operation: 'create', actorUid: alice.uid, generation: 1, at: serverTimestamp(), textDigest: botDigest('Preoccupation') });
     await assertFails(batch.commit());

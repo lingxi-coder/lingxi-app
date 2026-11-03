@@ -1,0 +1,112 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { Timestamp } from 'firebase/firestore';
+import { firestoreLastMessage, watchFirestoreMessages } from '../../../packages/teams/firestore.js';
+import { emptyProjection, mergeConversation, mergeDirectory, type MessageSnapshot, type TeamConversation } from '../../../packages/teams/messages.js';
+
+type Last = NonNullable<TeamConversation['lastMessage']>;
+const scope = { teamId: 'test-team', generation: 1 }, uid = 'alice';
+const base: TeamConversation = { id: 'test-chat', kind: 'dm', title: 'Fixture', participants: ['user:alice', 'user:bob'], lastSeq: 2, lastChangeSeq: 2, lastReadSeq: 0 };
+const at = '2026-11-02T10:00:00.000Z';
+const last = (seq: number, more: Partial<Last> = {}): Last => ({ id: `message-${seq}`, seq, at, preview: `Body ${seq}`, author: { kind: 'user', uid: 'bob' }, ...more });
+const withLast = (value: Last | undefined, more: Partial<TeamConversation> = {}): TeamConversation => ({ ...base, ...more, ...(value ? { lastMessage: value } : {}) });
+
+test('conversation merge: rows without a lastMessage stay exactly as they were', () => {
+  const merged = mergeConversation(undefined, base);
+  assert.deepEqual(merged, base); assert.ok(!('lastMessage' in merged));
+  assert.equal(mergeConversation(base, { ...base }), base);
+  const legacy = { id: 'message-2', seq: 2, at }; // pointer from before previews: no preview or author
+  assert.deepEqual(mergeConversation(undefined, withLast(legacy)).lastMessage, legacy);
+});
+
+test('conversation merge: the higher seq wins and an edit or recall at the same seq replaces the preview', () => {
+  const old = withLast(last(2));
+  assert.deepEqual(mergeConversation(undefined, old).lastMessage, last(2));
+  assert.equal(mergeConversation(old, withLast(last(3), { lastSeq: 3 })).lastMessage!.id, 'message-3'); // a newer message
+  assert.equal(mergeConversation(old, withLast(last(1))).lastMessage!.id, 'message-2'); // a stale cache snapshot never steps back
+  const edited = mergeConversation(old, withLast(last(2, { preview: 'Edited body' })));
+  assert.equal(edited.lastMessage!.preview, 'Edited body'); assert.notEqual(edited, old);
+  const recalled = mergeConversation(edited, withLast(last(2, { preview: '', recalled: true })));
+  assert.equal(recalled.lastMessage!.preview, ''); assert.equal(recalled.lastMessage!.recalled, true);
+  assert.equal(mergeConversation(old, withLast(undefined)).lastMessage, old.lastMessage); // a dropped or missing pointer keeps the last good one
+  assert.equal(mergeConversation(old, withLast(undefined)), old);
+});
+
+test('conversation merge: an identical pointer keeps the row identity, any visible difference does not', () => {
+  const old = withLast(last(2));
+  assert.equal(mergeConversation(old, withLast(last(2))), old); // a fresh but equal object from the next snapshot
+  for (const change of [{ preview: 'Other' }, { recalled: true }, { at: '2026-11-02T10:00:01.000Z' }, { id: 'message-9' }, { author: { kind: 'bot' as const, uid: 'owner', botKey: 'bot:owner:h:b' } },
+    { author: { kind: 'user' as const, uid: 'carol' } }, { author: undefined }]) {
+    const next = mergeConversation(old, withLast(last(2, change)));
+    assert.notEqual(next, old, JSON.stringify(change));
+  }
+  const unmarked = withLast(last(2, { recalled: false }));
+  assert.equal(mergeConversation(unmarked, withLast(last(2))), unmarked); // recalled false and absent are the same
+});
+
+test('directory merge: unchanged snapshots reuse the projection and a preview change replaces only that row', () => {
+  const other: TeamConversation = { ...base, id: 'other-chat', lastMessage: last(1) };
+  let state = mergeDirectory(emptyProjection(uid, scope), [withLast(last(2)), other], true);
+  assert.equal(mergeDirectory(state, [withLast(last(2)), { ...other, lastMessage: last(1) }], true), state);
+  const next = mergeDirectory(state, [withLast(last(2, { preview: 'Edited body' })), { ...other, lastMessage: last(1) }], true);
+  assert.notEqual(next, state);
+  assert.equal(next.conversations.find(value => value.id === 'test-chat')!.lastMessage!.preview, 'Edited body');
+  assert.equal(next.conversations.find(value => value.id === 'other-chat'), state.conversations.find(value => value.id === 'other-chat'));
+  state = next;
+  assert.equal(mergeDirectory(state, [withLast(last(2, { preview: 'Edited body' })), { ...other, lastMessage: last(1) }], true), state);
+});
+
+test('Firestore pointer: timestamps become ISO strings and every field of the full shape is kept', () => {
+  const value = { id: 'message-5', seq: 5, at: Timestamp.fromDate(new Date(at)), preview: 'Hello there', author: { kind: 'bot', uid: 'owner', botKey: 'bot:owner:h:b' } };
+  assert.deepEqual(firestoreLastMessage(value), { id: 'message-5', seq: 5, at, preview: 'Hello there', author: { kind: 'bot', uid: 'owner', botKey: 'bot:owner:h:b' } });
+  assert.deepEqual(firestoreLastMessage({ ...value, author: { kind: 'user', uid: 'bob' }, preview: '', recalled: true }),
+    { id: 'message-5', seq: 5, at, preview: '', recalled: true, author: { kind: 'user', uid: 'bob' } });
+  assert.ok(!('recalled' in firestoreLastMessage({ ...value, recalled: false })!));
+});
+
+test('Firestore pointer: legacy and malformed pointers lose only the fields they lack, never throw', () => {
+  const stamp = Timestamp.fromDate(new Date(at));
+  assert.deepEqual(firestoreLastMessage({ id: 'message-2', seq: 2, at: stamp }), { id: 'message-2', seq: 2, at }); // written before previews
+  assert.equal(firestoreLastMessage({ id: 'message-2', seq: 2 })!.at, null);
+  assert.equal(firestoreLastMessage({ id: 'message-2', seq: 2, at: '2026-11-02' })!.at, null);
+  for (const value of [undefined, null, 0, 'message-2', [], {}, { id: 'message-2' }, { seq: 2 }, { id: '', seq: 2 }, { id: 7, seq: 2 }, { id: 'message-2', seq: '2' }, { id: 'message-2', seq: 2.5 }, { id: 'message-2', seq: Number.NaN }]) {
+    assert.equal(firestoreLastMessage(value), undefined, JSON.stringify(value));
+  }
+  const dropped = firestoreLastMessage({ id: 'message-2', seq: 2, at: stamp, preview: 7, recalled: 'yes', author: { kind: 'robot', uid: 'bob' } });
+  assert.deepEqual(dropped, { id: 'message-2', seq: 2, at });
+  for (const author of [null, 'bob', [], { kind: 'user' }, { kind: 'user', uid: '' }, { kind: 'user', uid: 5 }, { uid: 'bob' }]) {
+    assert.ok(!('author' in firestoreLastMessage({ id: 'message-2', seq: 2, at: stamp, author })!), JSON.stringify(author));
+  }
+  assert.deepEqual(firestoreLastMessage({ id: 'message-2', seq: 2, at: stamp, author: { kind: 'user', uid: 'bob', botKey: 7 } })!.author, { kind: 'user', uid: 'bob' });
+});
+
+type Listener = { path: string; next(snapshot: unknown): void };
+test('directory snapshots carry each conversation lastMessage through the Firestore watcher', () => {
+  const listeners: Listener[] = [];
+  const target = (kind: string, path: unknown[]) => ({ kind, path: path.filter(part => typeof part === 'string').join('/') });
+  const sdk = {
+    collection: (_db: unknown, ...path: string[]) => target('collection', path),
+    doc: (_db: unknown, ...path: string[]) => target('doc', path),
+    query: (source: { path: string }) => ({ ...source, kind: 'query' }),
+    where: () => ({}), orderBy: () => ({}),
+    onSnapshot: (source: { kind: string; path: string }, _options: unknown, next: (snapshot: unknown) => void) => { listeners.push({ path: `${source.kind}:${source.path}`, next }); return () => {}; },
+  } as unknown as typeof import('firebase/firestore');
+  const received: MessageSnapshot[] = [];
+  const stop = watchFirestoreMessages(sdk, {} as never, uid, scope, '', value => received.push(value), () => true);
+  const on = (path: string) => listeners.find(value => value.path === path)!;
+  on('doc:teams/test-team/members/alice').next({ data: () => ({ generation: 1 }), metadata: { fromCache: false } });
+  const document = (id: string, value: Record<string, unknown>) => ({ id, data: () => ({ kind: 'dm', title: id, participants: ['user:alice'], lastSeq: 2, lastChangeSeq: 2, ...value }) });
+  on('query:teams/test-team/conversations').next({ metadata: { fromCache: false }, docChanges: () => [], docs: [
+    document('with-preview', { lastMessage: { id: 'message-2', seq: 2, at: Timestamp.fromDate(new Date(at)), preview: 'Hello', author: { kind: 'user', uid: 'bob' } } }),
+    document('legacy', { lastMessage: { id: 'message-2', seq: 2, at: Timestamp.fromDate(new Date(at)) } }),
+    document('empty', { lastMessage: null }),
+    document('absent', {}),
+    document('malformed', { lastMessage: 'oops' }),
+  ] });
+  stop();
+  const directory = received.find((value): value is Extract<MessageSnapshot, { kind: 'directory' }> => value.kind === 'directory')!;
+  const rows = new Map(directory.conversations.map(value => [value.id, value]));
+  assert.deepEqual(rows.get('with-preview')!.lastMessage, { id: 'message-2', seq: 2, at, preview: 'Hello', author: { kind: 'user', uid: 'bob' } });
+  assert.deepEqual(rows.get('legacy')!.lastMessage, { id: 'message-2', seq: 2, at });
+  for (const id of ['empty', 'absent', 'malformed']) assert.ok(!('lastMessage' in rows.get(id)!), id);
+});

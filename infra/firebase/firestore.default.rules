@@ -79,6 +79,32 @@ service cloud.firestore {
         && m.recalled == true && m.text == '' && m.editedAt == request.time
         && hasChange(tid, cid, mid, m, 'recall');
     }
+    // lastMessage feeds the conversation list: a bounded plaintext excerpt of the newest
+    // message (readable by the same members as the message) and the message's own author.
+    // The backend cuts previews at 120 code points. string.size() counts UTF-16 units (an emoji is 2), so the
+    // bound is an RE2 repetition, which counts code points.
+    function validPreview(preview) { return preview is string && preview.matches('[\\s\\S]{0,120}'); }
+    function isCreatedLast(tid, cid, change, after) {
+      let last = after.lastMessage;
+      return last.keys().hasOnly(['id', 'seq', 'at', 'author', 'preview'])
+        && last.keys().hasAll(['id', 'seq', 'at', 'author', 'preview'])
+        && last.id == change.messageId && last.seq == after.lastSeq && last.at == request.time
+        && last.author.keys().hasOnly(['kind', 'uid', 'botKey'])
+        && last.author == getAfter(msgPath(tid, cid, change.messageId)).data.author
+        && validPreview(last.preview);
+    }
+    // An edit/recall of an older message never touches the pointer. For the newest message only its
+    // preview may change, and a recall must blank it (a legacy pointer holds no excerpt to blank).
+    function isKeptLast(before, after, change) {
+      let was = before.lastMessage;
+      let next = after.lastMessage;
+      let isLast = was != null && was.id == change.messageId;
+      return (next == was && (change.operation == 'edit' || !isLast || !('preview' in was)))
+        || (isLast && next != null
+          && ((change.operation == 'edit' && next.diff(was).affectedKeys().hasOnly(['preview']) && validPreview(next.preview))
+            || (change.operation == 'recall' && next.diff(was).affectedKeys().hasOnly(['preview', 'recalled'])
+              && next.preview == '' && next.recalled == true)));
+    }
     function isConversationChange(tid, cid) {
       let before = resource.data;
       let after = request.resource.data;
@@ -90,11 +116,9 @@ service cloud.firestore {
         && !exists(changePath(tid, cid, after.lastChange.id))
         && ((change.operation == 'create'
           && after.lastSeq is int && after.lastSeq == before.lastSeq + 1
-          && after.lastMessage.keys().hasOnly(['id', 'seq', 'at'])
-          && after.lastMessage.id == change.messageId && after.lastMessage.seq == after.lastSeq
-          && after.lastMessage.at == request.time)
+          && isCreatedLast(tid, cid, change, after))
           || (change.operation in ['edit', 'recall'] && after.lastSeq == before.lastSeq
-            && after.lastMessage == before.lastMessage));
+            && isKeptLast(before, after, change)));
     }
     function isNewChange(tid, cid, id) {
       let e = request.resource.data;

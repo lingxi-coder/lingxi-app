@@ -256,14 +256,41 @@ Each mutation is one transaction with exactly three coupled documents:
 
 1. Update the conversation's `lastChangeSeq` by one and set
    `lastChange: {id: changeId, seq: lastChangeSeq}`. For creation only, also
-   increment `lastSeq` and set `lastMessage: {id: messageId, seq: lastSeq, at}`.
+   increment `lastSeq` and set
+   `lastMessage: {id: messageId, seq: lastSeq, at, author, preview}`, where
+   `author` is a copy of the message's own `author` (`{kind, uid, botKey?}`).
 2. Create/update the message and its latest change identity.
 3. Create the immutable change receipt. Its ID must not already exist.
 
 Rules use `getAfter` to require the other writes. Neither a cursor nor a receipt
 can be committed without its matching message mutation. Edits/recalls preserve
-`lastSeq`, so they do not increase unread counts. `lastMessage` is an identity
-pointer, not a cached plaintext preview; clients resolve the current message.
+`lastSeq`, so they do not increase unread counts.
+
+`lastMessage` also feeds conversation lists (last activity time, sender and a
+one-line excerpt), so a list never loads message history:
+
+- `preview` is the message text with whitespace runs (newlines included)
+  collapsed to single spaces, trimmed and cut to at most 120 Unicode code points,
+  never in the middle of a surrogate pair. Bot replies, status lines and
+  questions preview as their text; a whitespace-only message previews as `''`.
+- An edit or recall of the message that is currently `lastMessage.id` updates the
+  pointer in the same transaction: an edit refreshes `preview`, a recall sets
+  `preview: ''` and `recalled: true`. `id`, `seq`, `at` and `author` never change,
+  and edits/recalls of older messages leave the pointer alone. A newer message
+  replaces the pointer as a whole, so `recalled` never carries over.
+- The excerpt is readable by exactly the members who can read the message, and a
+  recall blanks it like the body.
+- Conversations written before previews existed keep `{id, seq, at}` until their
+  next message (an edit or recall of that message only adds `preview` /
+  `recalled`). Clients show no excerpt for them; there is no backfill.
+- Rules accept exactly `id, seq, at, author, preview` on creation (`author` must
+  equal the created message's author) and, for an edit/recall, only a `preview` /
+  `recalled` change of the newest message; a recall must blank the preview. The
+  120 limit is counted in code points with an RE2 repetition, because
+  `string.size()` counts UTF-16 units. Rules cannot recompute the excerpt from the
+  text, so a direct SDK write is held to shape and length only. The shipped
+  clients mutate through the HTTP route, which runs the same transaction as the
+  Admin SDK.
 
 Ordinary clients listen directly to the full selected message query. The SDK
 maintains its own persistent cache and resume state; there is no application

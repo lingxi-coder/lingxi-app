@@ -6,6 +6,18 @@ function timestamp(value: unknown): string | null {
   return null;
 }
 
+/** Conversation `lastMessage` pointer -> list DTO. Legacy docs (id/seq/at only) and unexpected shapes
+ * lose the fields they lack instead of failing the whole directory. */
+export function firestoreLastMessage(value: unknown): TeamConversation['lastMessage'] {
+  if (!value || typeof value !== 'object') return undefined;
+  const { id, seq, at, preview, recalled, author } = value as Record<string, unknown>;
+  if (typeof id !== 'string' || !id || typeof seq !== 'number' || !Number.isSafeInteger(seq)) return undefined;
+  const by = author && typeof author === 'object' ? author as Record<string, unknown> : undefined;
+  return { id, seq, at: timestamp(at), ...(typeof preview === 'string' ? { preview } : {}), ...(recalled === true ? { recalled: true } : {}),
+    ...(by && (by.kind === 'user' || by.kind === 'bot') && typeof by.uid === 'string' && by.uid
+      ? { author: { kind: by.kind, uid: by.uid, ...(typeof by.botKey === 'string' && by.botKey ? { botKey: by.botKey } : {}) } } : {}) };
+}
+
 export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
   return { id, seq: value.seq, author: value.author, kind: value.kind, text: value.text, changeSeq: value.changeSeq, changeId: value.changeId,
     createdAt: timestamp(value.createdAt), editedAt: timestamp(value.editedAt), ...(value.replyTo ? { replyTo: value.replyTo } : {}),
@@ -69,8 +81,8 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
       const allowed = new Set(snapshot.docs.map(value => value.id));
       for (const [id, stop] of reads) if (!allowed.has(id)) { stop(); reads.delete(id); readSeq.delete(id); }
       directory = { fromCache: snapshot.metadata.fromCache, conversations: snapshot.docs.map(snapshot => {
-        const value = snapshot.data();
-        return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants, lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(snapshot.id) ?? 0, ...(value.botKey ? { botKey: value.botKey } : {}) };
+        const value = snapshot.data(), lastMessage = firestoreLastMessage(value.lastMessage);
+        return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants, lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(snapshot.id) ?? 0, ...(value.botKey ? { botKey: value.botKey } : {}), ...(lastMessage ? { lastMessage } : {}) };
       }) };
       for (const id of allowed) if (!reads.has(id)) reads.set(id, onSnapshot(doc(db, ...root, 'conversations', id, 'reads', uid),
         { includeMetadataChanges: true }, mark => {

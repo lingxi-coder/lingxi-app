@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { createTeamConversation } from './team-conversations.mjs';
 import { botActions, TeamBotsStore, prepareBotTriggers, botPermits, triggerIdentity } from './team-bots.mjs';
+import { messagePreview } from './team-message-preview.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
@@ -122,12 +123,19 @@ export class TeamMessagesStore {
         ...(input.operation === 'create' && enqueue.evidence ? { executionIntent: enqueue.evidence } : {}) };
       const update = { lastChangeSeq: changeSeq, lastChange: { id: input.changeId, seq: changeSeq } };
       if (input.operation === 'create') {
-        Object.assign(update, { lastSeq: seq, lastMessage: { id: input.messageId, seq, at: now } });
-        tx.create(msgRef, { seq, author: { kind: 'user', uid: user.uid }, kind: 'text', text: input.text,
+        const author = { kind: 'user', uid: user.uid };
+        // The conversation list reads this pointer instead of the message; the author mirrors the message doc.
+        Object.assign(update, { lastSeq: seq, lastMessage: { id: input.messageId, seq, at: now, author, preview: messagePreview(input.text) } });
+        tx.create(msgRef, { seq, author, kind: 'text', text: input.text,
           mentions: [...(input.targets ?? [])].sort(), ...(input.replyTo ? { replyTo: input.replyTo } : {}), createdAt: now, changeSeq, changeId: input.changeId });
       } else {
         tx.update(msgRef, { text: input.text, editedAt: now, changeSeq, changeId: input.changeId,
           ...(input.operation === 'recall' ? { recalled: true } : {}) });
+        // Only the newest message is mirrored. An older edit/recall leaves the pointer alone; a recall never leaves its text behind.
+        if (c.lastMessage?.id === input.messageId) {
+          update.lastMessage = { ...c.lastMessage, preview: input.operation === 'recall' ? '' : messagePreview(input.text),
+            ...(input.operation === 'recall' ? { recalled: true } : {}) };
+        }
       }
       tx.update(ref, update); tx.create(changeRef, change);
       enqueue?.write(seq, now);

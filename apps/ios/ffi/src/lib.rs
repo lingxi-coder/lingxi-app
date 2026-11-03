@@ -80,7 +80,8 @@ pub use audio_provider::{
 #[cfg(feature = "uniffi")]
 pub use harness_runtime::mobile::{
     max_audio_payload_bytes, ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto,
-    CronTaskDto, FiredCronJobDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
+    CronOwnerCandidateDto, CronOwnerReservationDto, CronTaskDto, FiredCronJobDto, MobileConfig,
+    MobileCronAdmission, MobileCronOwnerAdmission, MobileCronStoreHandle, MobileEngineError,
     MobileEngineHandle, MobileSessionMode, ModelBillingModeDto, ModelCapabilitiesDto,
     ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, PermissionRequestSink,
     ProviderCatalogEntryDto, SessionModeDto,

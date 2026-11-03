@@ -53,6 +53,8 @@ fn launch_config_with_project_mounts(
         model: String::new(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
         initial_session_id: None,
+        initial_session_transcript_path: None,
+        scheduler_controller: false,
         vision_delegation_enabled: false,
         app_sandbox_root: linux.app_sandbox_root.clone(),
         project_cwd,
@@ -88,6 +90,16 @@ fn ios_project_mount_grant_maps_one_registered_local_app_source() {
     assert_eq!(mounts[0].guest_path, guest);
     assert_eq!(mounts[0].purpose, mobile_linux_api::MountPurpose::External);
     assert!(!mounts[0].read_only);
+}
+
+#[test]
+fn ios_scheduler_controller_flag_reaches_mobile_config() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let linux = user_storage_config(temp.path());
+    let mut config = launch_config_with_project_mounts(linux, None, Vec::new(), Vec::new());
+    config.scheduler_controller = true;
+    let mobile = super::ios_mobile_config_from_launch_config(&config).unwrap();
+    assert!(mobile.scheduler_controller);
 }
 
 #[test]
@@ -760,12 +772,18 @@ fn ios_project_cwd_uses_the_linux_user_home_and_accepts_multiple_directories() {
 fn ios_launch_config_parses_provider_json_and_project_scope() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_id = "12345678-1234-4abc-8def-1234567890ab";
+    let session_id = "11111111-2222-4333-8444-555555555555";
     let linux = user_storage_config(temp.path());
     let paths =
         harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone()).unwrap();
     let workspace = std::path::Path::new(&paths.projects)
         .join(project_id)
         .join("workspace");
+    // Catalog paths may be PRoot guest coordinates. The FFI boundary must
+    // carry them unchanged so the SDK can map them through trusted mounts.
+    let selected_transcript = std::path::PathBuf::from(format!(
+        "/home/lingxi/.lingxi/projects/selected-project/{session_id}.jsonl"
+    ));
     std::fs::create_dir_all(&workspace).expect("workspace");
 
     let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
@@ -778,7 +796,9 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
         api_base: "https://example.invalid".to_string(),
         model: "claude-test".to_string(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
-        initial_session_id: None,
+        initial_session_id: Some(session_id.to_owned()),
+        initial_session_transcript_path: Some(selected_transcript.to_string_lossy().into_owned()),
+        scheduler_controller: false,
         vision_delegation_enabled: false,
         app_sandbox_root: temp.path().to_string_lossy().into_owned(),
         project_cwd: Some(workspace.to_string_lossy().into_owned()),
@@ -802,6 +822,11 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
     );
     assert_eq!(cfg.api_base, "https://example.invalid");
     assert_eq!(cfg.default_model, "claude-test");
+    assert_eq!(cfg.initial_session_id.as_deref(), Some(session_id));
+    assert_eq!(
+        cfg.initial_session_transcript_path.as_deref(),
+        Some(selected_transcript.as_path())
+    );
     assert!(cfg.startup_catalog.is_some());
     assert!(!cfg.vision_delegation_enabled);
     assert_eq!(cfg.physical_memory_bytes, 7 * 1024_u64.pow(3));
@@ -853,6 +878,8 @@ fn ios_host_environment_maps_stable_native_facts_without_model_state() {
         model: String::new(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
         initial_session_id: None,
+        initial_session_transcript_path: None,
+        scheduler_controller: false,
         vision_delegation_enabled: true,
         app_sandbox_root: temp.path().to_string_lossy().into_owned(),
         project_cwd: None,
@@ -908,6 +935,8 @@ fn ios_provider_only_app_agent_uses_native_brand_config_without_mobile_linux_set
         model: String::new(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
         initial_session_id: None,
+        initial_session_transcript_path: None,
+        scheduler_controller: false,
         vision_delegation_enabled: false,
         app_sandbox_root: temp.path().to_string_lossy().into_owned(),
         project_cwd: None,
@@ -953,19 +982,35 @@ async fn build_ios_cron_store_round_trips_without_engine() {
     )
     .expect("build cron store");
 
+    let automation = serde_json::json!({
+        "version": 2, "status": "active", "model": "anthropic/test",
+        "reasoning": {"type": "automatic"}, "runMode": "new_session",
+        "sessionMode": "code", "sessionScopeKey": "project.test"
+    })
+    .to_string();
     let created = store
-        .create("* * * * *".to_string(), "hello".to_string(), false)
+        .create_configured(
+            "* * * * *".to_string(),
+            "hello".to_string(),
+            false,
+            automation.clone(),
+        )
         .await
         .expect("one-shot creation");
     let updated = store
-        .update(
+        .update_configured(
             created.id.clone(),
             "*/15 * * * *".to_string(),
             "updated".to_string(),
             true,
+            automation,
         )
         .await
         .expect("recurring update");
+    let saved: serde_json::Value =
+        serde_json::from_str(updated.automation_json.as_deref().unwrap()).unwrap();
+    assert_eq!(saved["sessionMode"], "code");
+    assert_eq!(saved["sessionScopeKey"], "project.test");
     let due = store
         .due_occurrences(updated.next_fire_ms.expect("next fire").saturating_add(1))
         .await;

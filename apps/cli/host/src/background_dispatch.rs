@@ -27,13 +27,12 @@
 use crate::agents_registry::{self, JobStateWrite};
 use crate::argv::Argv;
 use crate::background_launch::{
-    BackgroundLaunchKind, BackgroundLaunchOptions, BackgroundLaunchSpec, TerminalSize,
-    LAUNCH_SPEC_VERSION,
+    BackgroundLaunchKind, BackgroundLaunchOptions, BackgroundLaunchSpec, BackgroundSessionProfile,
+    TerminalSize, LAUNCH_SPEC_VERSION,
 };
 use crate::daemon_lock::{self, LockProbe, SystemLockProbe};
 use crate::exit_codes;
 use std::collections::BTreeMap;
-use std::io::BufRead as _;
 use std::path::{Path, PathBuf};
 
 /// Runtime context known by the live conversation when `/fork` snapshots it.
@@ -45,6 +44,10 @@ pub struct ForkLaunchContext {
     pub system_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     pub options: Option<BackgroundLaunchOptions>,
     pub transcript_path: Option<String>,
+    /// Publication receipt retained until the background job is committed.
+    pub published_branch: Option<crate::init::PublishedBranchSource>,
+    /// Profile captured by an admitted live handoff, before publication.
+    pub session_profile: Option<BackgroundSessionProfile>,
     /// Mid-turn UI boundary restored by the hidden background TUI.
     pub handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     pub shell_handoff: Vec<lingxi_core::host::shell_handoff::ShellTaskHandoff>,
@@ -144,6 +147,13 @@ fn normalize_launch_options(
     mut options: BackgroundLaunchOptions,
     cwd: &str,
 ) -> Result<(BackgroundLaunchOptions, Option<String>), String> {
+    if options.add_dir.as_ref().is_some_and(|paths| {
+        paths
+            .iter()
+            .any(|path| !path.is_absolute() && !path.starts_with("~"))
+    }) {
+        return Err("could not resolve --add-dir against the launch directory".into());
+    }
     let Some(slug) = options.worktree.as_mut() else {
         if options.tmux.is_some() {
             return Err("--tmux requires --worktree".to_string());
@@ -207,9 +217,6 @@ pub async fn dispatch_background(
     resolved_permission_mode: permission::PermissionMode,
 ) -> i32 {
     let preflight_argv = argv_with_resolved_permission_mode(argv, resolved_permission_mode);
-    if !crate::mode::startup_preflight(&preflight_argv).await {
-        return exit_codes::RUNTIME_ERROR;
-    }
     let config_home = crate::run::lingxi_home_dir();
     let runtime_dir = crate::run::daemon_runtime_dir();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -218,15 +225,45 @@ pub async fn dispatch_background(
     // mounts its normal picker here; the detached child must never own setup or
     // selection UI that no terminal is attached to yet.
     let resume_source = if argv.continue_session {
-        crate::run::load_resume_picker_rows()
-            .await
-            .first()
-            .map(|row| row.uuid)
+        let rows = match crate::run::load_resume_rows().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                eprintln!("lingxi-cli: cannot list sessions: {error}");
+                return exit_codes::RUNTIME_ERROR;
+            }
+        };
+        rows.first()
+            .map(|row| (row.uuid, Some(row.path.clone()), None))
     } else if let Some(raw) = argv.resume.as_deref() {
         if raw.trim().is_empty() {
-            let rows = crate::run::load_resume_picker_rows().await;
-            match tokio::task::spawn_blocking(move || tui::resume::run_resume_picker(rows)).await {
-                Ok(Ok(selected)) => selected,
+            let catalog = match crate::run::load_resume_rows().await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    eprintln!("lingxi-cli: cannot list sessions: {error}");
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            };
+            let rows = crate::run::map_resume_rows(&catalog);
+            let capture_home = config_home.clone();
+            match tokio::task::spawn_blocking(move || {
+                tui::resume::run_resume_picker(rows, |selection| {
+                    crate::init::capture_selected_cli_source(
+                        &capture_home,
+                        selection.uuid,
+                        &selection.transcript_path,
+                        Some(lingxi_core::host::session_context::ConversationMode::Code),
+                    )
+                    .map_err(std::io::Error::other)
+                })
+            })
+            .await
+            {
+                Ok(Ok(Some((selection, captured)))) => Some((
+                    selection.uuid,
+                    Some(selection.transcript_path),
+                    Some(captured),
+                )),
+                Ok(Ok(None)) => None,
                 Ok(Err(e)) => {
                     eprintln!("lingxi-cli: resume picker failed: {e}");
                     return exit_codes::RUNTIME_ERROR;
@@ -237,12 +274,16 @@ pub async fn dispatch_background(
                 }
             }
         } else {
-            match uuid::Uuid::parse_str(raw.trim()) {
-                Ok(id) => Some(id),
-                Err(_) => {
-                    eprintln!("Error: Invalid session ID. Must be a valid UUID.");
-                    return exit_codes::RUNTIME_ERROR;
-                }
+            match lingxi_core::types::SessionId::parse_prefixed(raw.trim()) {
+                Some(id) => Some((id.as_uuid(), None, None)),
+                None => match crate::run::resolve_resume_title_source(raw.trim()).await {
+                    Ok(Some(row)) => Some((row.uuid, Some(row.path), None)),
+                    Ok(None) => None,
+                    Err(error) => {
+                        eprintln!("lingxi-cli: {error}");
+                        return exit_codes::RUNTIME_ERROR;
+                    }
+                },
             }
         }
     } else {
@@ -253,7 +294,27 @@ pub async fn dispatch_background(
         eprintln!("lingxi-cli: no session selected to run in background");
         return exit_codes::RUNTIME_ERROR;
     }
-    if let Some(source_id) = resume_source {
+    if let Some((source_id, selected_path, captured)) = resume_source {
+        let mut launch_permission_mode = resolved_permission_mode;
+        // Bind the selected source before any workspace approval can suspend
+        // this foreground dispatch. A replacement during that wait must fail.
+        let captured = match capture_background_resume_source(
+            &config_home,
+            &cwd.display().to_string(),
+            &source_id.to_string(),
+            selected_path.as_deref(),
+            captured,
+        ) {
+            Ok(captured) => captured,
+            Err(error) => {
+                eprintln!("lingxi-cli: could not capture resume transcript: {error}");
+                return exit_codes::RUNTIME_ERROR;
+            }
+        };
+        let selected_path = captured.authority.path();
+        if argv.fork_session && !crate::mode::startup_preflight_at(&preflight_argv, &cwd).await {
+            return exit_codes::RUNTIME_ERROR;
+        }
         let target_id = if argv.fork_session {
             match argv.session_id.as_deref() {
                 Some(raw) => match lingxi_core::types::SessionId::parse_prefixed(raw) {
@@ -268,25 +329,68 @@ pub async fn dispatch_background(
         } else {
             source_id
         };
-        let launch_transcript = match prepare_resume_transcript(
+        let launch_transcript = match prepare_resume_transcript_with_capture(
             &config_home,
             &cwd.display().to_string(),
             &source_id.to_string(),
             &target_id.to_string(),
             argv.fork_session,
+            Some(&selected_path),
+            Some(captured),
         )
         .await
         {
-            Ok(path) => path,
+            Ok(prepared) => prepared,
             Err(e) => {
                 eprintln!("lingxi-cli: could not prepare resume transcript: {e}");
                 return exit_codes::RUNTIME_ERROR;
             }
         };
+        if !argv.fork_session {
+            let Some(captured) = launch_transcript.published_branch.as_ref() else {
+                eprintln!("lingxi-cli: selected source capture is unavailable");
+                return exit_codes::RUNTIME_ERROR;
+            };
+            let execution_cwd = match transcript_cwd(&launch_transcript.path, &captured.content) {
+                Ok(cwd) => cwd,
+                Err(error) => {
+                    eprintln!("lingxi-cli: invalid resume workspace: {error}");
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            };
+            if !Path::new(&execution_cwd).is_dir() {
+                eprintln!(
+                    "lingxi-cli: resume workspace is not an existing directory: {execution_cwd}"
+                );
+                return exit_codes::RUNTIME_ERROR;
+            }
+            let (target_mode, target_notice) =
+                crate::permission_settings::resolve_permission_mode_at(
+                    argv,
+                    Path::new(&execution_cwd),
+                );
+            if let Err(message) =
+                crate::permission_settings::enforce_permission_mode_safety(argv, target_mode).await
+            {
+                eprintln!("{message}");
+                return exit_codes::RUNTIME_ERROR;
+            }
+            if let Some(notice) = target_notice {
+                eprintln!("{notice}");
+            }
+            launch_permission_mode = target_mode;
+            let target_preflight_argv = argv_with_resolved_permission_mode(argv, target_mode);
+            if !crate::mode::startup_preflight_at(&target_preflight_argv, Path::new(&execution_cwd))
+                .await
+            {
+                return exit_codes::RUNTIME_ERROR;
+            }
+        }
         let context = ForkLaunchContext {
             options: Some(BackgroundLaunchOptions::from_argv(argv)),
-            transcript_path: Some(launch_transcript.display().to_string()),
-            resolved_permission_mode: Some(resolved_permission_mode),
+            transcript_path: Some(launch_transcript.path.display().to_string()),
+            published_branch: launch_transcript.published_branch,
+            resolved_permission_mode: Some(launch_permission_mode),
             ..ForkLaunchContext::default()
         };
         let prompt = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
@@ -313,6 +417,9 @@ pub async fn dispatch_background(
                 exit_codes::RUNTIME_ERROR
             }
         };
+    }
+    if !crate::mode::startup_preflight_at(&preflight_argv, &cwd).await {
+        return exit_codes::RUNTIME_ERROR;
     }
     dispatch_background_inner(
         argv,
@@ -393,6 +500,13 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
             return exit_codes::RUNTIME_ERROR;
         }
     };
+    let env = match launch_env(config_home) {
+        Ok(env) => env,
+        Err(error) => {
+            eprintln!("lingxi-cli: could not capture background config home: {error}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
 
     // 3. Persist launch + state under the stable per-job lock. Launch lands
     // first, the non-runnable `creating` row lands second, and the runnable
@@ -433,6 +547,8 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
         launch: BackgroundLaunchKind::Fresh,
         session_id: session_id.clone(),
         transcript_path,
+        session_profile: BackgroundSessionProfile::fresh_code(),
+        published_source: None,
         cwd: cwd.clone(),
         origin_cwd: cwd.clone(),
         worktree_path: worktree_path.clone(),
@@ -443,7 +559,7 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
         shell_handoff: Vec::new(),
         handoff: None,
         options,
-        env: launch_env(),
+        env,
         terminal,
     };
     let _job_lock = match agents_registry::lock_job_state(config_home, &short) {
@@ -629,23 +745,55 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
     let intent = seed_prompt.as_ref().and_then(intent_from_source_prompt);
     let terminal = captured_terminal_size();
     let transcript = match context.transcript_path.as_deref() {
-        Some(path) => validate_transcript_path(config_home, Path::new(path))?,
+        Some(path) => validate_transcript_path(config_home, session_id, Path::new(path))?,
         None => locate_session_transcript(config_home, cwd, session_id)?,
     };
     // A public background resume must reject a Chat transcript before it can
     // publish a job or start a daemon. A live handoff already admitted by the
     // foreground owner is the sole exception: its worker continues that owner.
-    if !context
+    let admitted = context
         .options
         .as_ref()
-        .is_some_and(|options| options.preserve_admitted_context)
-    {
-        validate_public_resume_source(config_home, session_id, &transcript)?;
+        .is_some_and(|options| options.preserve_admitted_context);
+    let id = uuid::Uuid::parse_str(session_id)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let captured = match context.published_branch.as_ref() {
+        Some(source) => {
+            if source.authority.path() != transcript
+                || source
+                    .authority
+                    .read_checked()
+                    .map_err(std::io::Error::other)?
+                    != source.content.as_bytes()
+            {
+                return Err(std::io::Error::other(
+                    "selected transcript changed before publication",
+                ));
+            }
+            source.clone()
+        }
+        None => crate::init::capture_selected_cli_source(config_home, id, &transcript, None)
+            .map_err(std::io::Error::other)?,
+    };
+    let session_profile: BackgroundSessionProfile =
+        session::JsonlWriter::fixed_session_profile_from_source(&captured.content, session_id)
+            .map_err(std::io::Error::other)?
+            .into();
+    if admitted {
+        if context.session_profile != Some(session_profile) {
+            return Err(std::io::Error::other(
+                "admitted session profile changed before publication",
+            ));
+        }
+    } else if session_profile.mode != lingxi_core::host::session_context::ConversationMode::Code {
+        return Err(std::io::Error::other(
+            "session_mode_mismatch: public CLI requires Code",
+        ));
     }
     let effective_cwd = if fork {
         cwd.to_string()
     } else {
-        transcript_cwd(&transcript).unwrap_or_else(|| cwd.to_string())
+        transcript_cwd(&transcript, &captured.content)?
     };
     let transcript_path = transcript.display().to_string();
 
@@ -694,6 +842,7 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let worktree_path = managed_worktree_root_from_cwd(&effective_cwd).or(normalized_worktree_path);
     options.clear_boot_session_options();
+    let env = launch_env(config_home)?;
     let launch_spec = BackgroundLaunchSpec {
         schema_version: LAUNCH_SPEC_VERSION,
         short: short.clone(),
@@ -708,6 +857,10 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
         },
         session_id: session_id.to_string(),
         transcript_path: transcript_path.clone(),
+        session_profile,
+        published_source: Some(
+            crate::background_launch::PublishedSourceReceipt::from_source(&captured),
+        ),
         cwd: effective_cwd.clone(),
         origin_cwd: cwd.to_string(),
         worktree_path: worktree_path.clone(),
@@ -718,10 +871,21 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
         shell_handoff: context.shell_handoff.clone(),
         handoff: context.handoff.clone(),
         options,
-        env: launch_env(),
+        env,
         terminal,
     };
     let _job_lock = agents_registry::lock_job_state(config_home, &short)?;
+    if captured.authority.path() != transcript
+        || captured
+            .authority
+            .read_checked()
+            .map_err(std::io::Error::other)?
+            != captured.content.as_bytes()
+    {
+        return Err(std::io::Error::other(
+            "selected transcript changed before background publication; select it again",
+        ));
+    }
     reserve_unpublished_job(config_home, &short)?;
     // Claim the exact unused identity before the first launch write. Even if
     // dispatch unwinds, recovery can fence this job without touching another.
@@ -778,55 +942,68 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
 /// resume remains stable when invoked from another cwd/worktree.
 pub(crate) fn locate_session_transcript(
     config_home: &Path,
-    cwd: &str,
+    _cwd: &str,
     session_id: &str,
 ) -> std::io::Result<PathBuf> {
-    let expected = session::jsonl::path::session_path(config_home, cwd, session_id);
-    if let Ok(path) = validate_transcript_path(config_home, &expected) {
-        return Ok(path);
-    }
-
-    let projects = config_home.join("projects");
-    let file_name = format!("{session_id}.jsonl");
-    let mut matches = Vec::new();
-    for entry in std::fs::read_dir(&projects)? {
-        let entry = entry?;
-        let metadata = std::fs::symlink_metadata(entry.path())?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            continue;
-        }
-        let candidate = entry.path().join(&file_name);
-        if let Ok(candidate) = validate_transcript_path(config_home, &candidate) {
-            matches.push(candidate);
-        }
-    }
-    match matches.as_slice() {
-        [path] => Ok(path.clone()),
-        [] => Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("session transcript {session_id} was not found"),
-        )),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("session transcript {session_id} is ambiguous across project roots"),
-        )),
-    }
+    let id = uuid::Uuid::parse_str(session_id)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    crate::init::resolve_unique_cli_resume_path(config_home, id)
 }
 
 /// Resolve the source transcript before considering the target id. A fork
 /// receives its own durable transcript copy so subsequent target-session turns
 /// append to a complete history; an in-place resume keeps the exact source.
+#[derive(Debug)]
+struct PreparedResumeTranscript {
+    path: PathBuf,
+    published_branch: Option<crate::init::PublishedBranchSource>,
+}
+
+#[cfg(test)]
 async fn prepare_resume_transcript(
     config_home: &Path,
     cwd: &str,
     source_session_id: &str,
     target_session_id: &str,
     fork: bool,
-) -> std::io::Result<PathBuf> {
-    let source = locate_session_transcript(config_home, cwd, source_session_id)?;
-    validate_public_resume_source(config_home, source_session_id, &source)?;
+    selected_path: Option<&Path>,
+) -> std::io::Result<PreparedResumeTranscript> {
+    prepare_resume_transcript_with_capture(
+        config_home,
+        cwd,
+        source_session_id,
+        target_session_id,
+        fork,
+        selected_path,
+        None,
+    )
+    .await
+}
+
+async fn prepare_resume_transcript_with_capture(
+    config_home: &Path,
+    cwd: &str,
+    source_session_id: &str,
+    target_session_id: &str,
+    fork: bool,
+    selected_path: Option<&Path>,
+    picked_source: Option<crate::init::PublishedBranchSource>,
+) -> std::io::Result<PreparedResumeTranscript> {
+    let captured = capture_background_resume_source(
+        config_home,
+        cwd,
+        source_session_id,
+        selected_path,
+        picked_source,
+    )?;
+    let source = captured.authority.path();
+    let source_id = uuid::Uuid::parse_str(source_session_id)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     if !fork {
-        return Ok(source);
+        return Ok(PreparedResumeTranscript {
+            path: source,
+            published_branch: Some(captured),
+        });
     }
     if source_session_id == target_session_id {
         return Err(std::io::Error::new(
@@ -835,92 +1012,113 @@ async fn prepare_resume_transcript(
         ));
     }
 
-    let source_id = uuid::Uuid::parse_str(source_session_id)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let target_id = uuid::Uuid::parse_str(target_session_id)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    crate::run::create_independent_cli_branch(
+    crate::run::create_independent_cli_branch_from_source(
         config_home,
         cwd,
         source_id,
         target_id,
         Some(&source),
         None,
+        Some(&captured),
     )
     .await
-    .map(|(path, _)| path)
+    .map(|published| PreparedResumeTranscript {
+        path: published.authority.path(),
+        published_branch: Some(published.into()),
+    })
     .map_err(std::io::Error::other)
 }
 
-/// Check the exact source selected for a public background resume before any
-/// durable job, branch or writer authority is created.
-fn validate_public_resume_source(
+fn capture_background_resume_source(
+    config_home: &Path,
+    cwd: &str,
+    source_session_id: &str,
+    selected_path: Option<&Path>,
+    picked_source: Option<crate::init::PublishedBranchSource>,
+) -> std::io::Result<crate::init::PublishedBranchSource> {
+    let source = match selected_path {
+        Some(path) => validate_transcript_path(config_home, source_session_id, path)?,
+        None => locate_session_transcript(config_home, cwd, source_session_id)?,
+    };
+    let source_id = uuid::Uuid::parse_str(source_session_id)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    match picked_source {
+        Some(captured) => {
+            if captured.authority.path() != source
+                || captured
+                    .authority
+                    .read_checked()
+                    .map_err(std::io::Error::other)?
+                    != captured.content.as_bytes()
+            {
+                return Err(std::io::Error::other(
+                    "selected transcript changed; select it again",
+                ));
+            }
+            Ok(captured)
+        }
+        None => crate::init::capture_selected_cli_source(
+            config_home,
+            source_id,
+            &source,
+            Some(lingxi_core::host::session_context::ConversationMode::Code),
+        )
+        .map_err(std::io::Error::other),
+    }
+}
+
+fn validate_transcript_path(
     config_home: &Path,
     session_id: &str,
     path: &Path,
-) -> std::io::Result<()> {
+) -> std::io::Result<PathBuf> {
     let id = uuid::Uuid::parse_str(session_id)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    let path = crate::init::validate_exact_tui_resume_path(config_home, id, path)
+    let path = crate::init::absolute_resolved_tui_resume_path(path.to_path_buf())
         .map_err(std::io::Error::other)?;
-    let content = std::fs::read_to_string(path)?;
-    crate::init::validate_resume_mode(
-        &content,
-        id,
-        Some(lingxi_core::host::session_context::ConversationMode::Code),
-    )
-    .map(|_| ())
-    .map_err(std::io::Error::other)
+    crate::init::validate_exact_tui_resume_path(config_home, id, &path)
+        .map_err(std::io::Error::other)
 }
 
-fn validate_transcript_path(config_home: &Path, path: &Path) -> std::io::Result<PathBuf> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "background transcript is not a regular file",
+/// The latest relocation marker in the same pinned source is authoritative.
+pub(crate) fn transcript_cwd(path: &Path, source: &str) -> std::io::Result<String> {
+    let loaded = session::jsonl::route_lines(source);
+    if loaded.malformed_line_count != 0 {
+        return Err(std::io::Error::other(
+            "resume transcript contains malformed records",
         ));
     }
-    let projects = std::fs::canonicalize(config_home.join("projects"))?;
-    let canonical = std::fs::canonicalize(path)?;
-    if !canonical.starts_with(&projects) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "background transcript escapes the projects directory",
-        ));
-    }
-    Ok(canonical)
-}
-
-/// Recover the original runtime cwd from the transcript without loading the
-/// entire history. Real transcripts may start with metadata-only records, so
-/// inspect a bounded prefix rather than assuming line one is a user message.
-fn transcript_cwd(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    for _ in 0..256 {
-        line.clear();
-        let read = reader.read_line(&mut line).ok()?;
-        if read == 0 {
-            break;
+    let id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| uuid::Uuid::parse_str(stem).ok())
+        .ok_or_else(|| std::io::Error::other("invalid resume session ID"))?;
+    for line in source.lines() {
+        if line.trim().is_empty() {
+            continue;
         }
-        if line.len() > 1024 * 1024 {
-            return None;
-        }
-        let value: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if let Some(cwd) = value
-            .get("cwd")
-            .and_then(serde_json::Value::as_str)
-            .filter(|cwd| !cwd.is_empty())
+        let value = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if value.string_at("/type") == Some("relocated")
+            && value
+                .string_at("/sessionId")
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                == Some(id)
         {
-            return Some(cwd.to_string());
+            value
+                .string_at("/relocatedCwd")
+                .filter(|cwd| !cwd.is_empty() && Path::new(cwd).is_absolute())
+                .ok_or_else(|| {
+                    std::io::Error::other(
+                        "resume transcript contains an invalid relocated workspace",
+                    )
+                })?;
         }
     }
-    None
+    session::jsonl::loader::transcript_workspace_path(path, &loaded)
+        .ok_or_else(|| std::io::Error::other("resume transcript has no valid workspace"))
 }
 
 /// Spawn a detached `lingxi-cli daemon` unless a live supervisor already holds
@@ -959,7 +1157,7 @@ pub(crate) fn ensure_daemon_for_control(runtime_dir: &Path) {
     ensure_daemon(runtime_dir, &SystemLockProbe, &mut RealSpawner);
 }
 
-fn launch_env() -> BTreeMap<String, String> {
+fn launch_env(config_home: &Path) -> std::io::Result<BTreeMap<String, String>> {
     let mut env = BTreeMap::new();
     // The PTY process builder clears its environment, so preserve the minimal
     // shell/locale/certificate baseline needed for a normal interactive CLI.
@@ -1052,7 +1250,18 @@ fn launch_env() -> BTreeMap<String, String> {
             env.insert(key.to_string(), value);
         }
     }
-    env
+    // The PTY can start in a resumed workspace different from this process's
+    // cwd. Freeze the exact config root used to publish its launch spec.
+    let absolute_home = if config_home.is_absolute() {
+        config_home.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(config_home)
+    };
+    let home = absolute_home.to_str().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "config home is not UTF-8")
+    })?;
+    env.insert(branding::CONFIG_DIR_ENV.to_string(), home.to_string());
+    Ok(env)
 }
 
 fn launch_env_key_allowed(key: &str) -> bool {
@@ -1311,7 +1520,10 @@ mod tests {
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         std::fs::write(
             &transcript,
-            format!("{{\"type\":\"fixed-session-mode\",\"sessionId\":\"{session_id}\",\"sessionMode\":\"code\",\"instructionEpoch\":0}}\n{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"/tmp/proj\"}}\n"),
+            format!("{}\n{}\n",
+                serde_json::json!({"type":"fixed-session-mode","sessionId":session_id,"sessionMode":"code","instructionEpoch":0}),
+                serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"parentUuid":null,"sessionId":session_id,"timestamp":"2026-10-21T00:00:00.000Z","cwd":"/tmp/proj","isSidechain":false,"message":{"role":"user","content":"hello"}}),
+            ),
         )
         .unwrap();
         // Empty prompt = resume-as-bg (no seed turn), unlike a fork with a `[prompt]`.
@@ -1356,11 +1568,13 @@ mod tests {
         let transcript = session::jsonl::path::session_path(&home, cwd, &session_id);
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         let original = format!(
-            "{{\"type\":\"fixed-session-mode\",\"sessionId\":\"{session_id}\",\"sessionMode\":\"chat\",\"instructionEpoch\":0}}\n{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"{cwd}\"}}\n"
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":session_id,"sessionMode":"chat","instructionEpoch":0}),
+            serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"parentUuid":null,"sessionId":session_id,"timestamp":"2026-10-21T00:00:00.000Z","cwd":cwd,"isSidechain":false,"message":{"role":"user","content":"hello"}}),
         );
         std::fs::write(&transcript, &original).unwrap();
         for fork in [false, true] {
-            let error = prepare_resume_transcript(&home, cwd, &session_id, &target_id, fork)
+            let error = prepare_resume_transcript(&home, cwd, &session_id, &target_id, fork, None)
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("session_mode_mismatch"));
@@ -1390,6 +1604,88 @@ mod tests {
         assert_eq!(std::fs::read_to_string(transcript).unwrap(), original);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_selected_source_rejects_replaced_projects_or_bucket() {
+        use std::os::unix::fs::symlink;
+        for changed in ["root", "bucket"] {
+            let directory = tempfile::tempdir().unwrap();
+            let home = directory.path().join("config");
+            let a = directory.path().join("a");
+            let b = directory.path().join("b");
+            std::fs::create_dir_all(&a).unwrap();
+            std::fs::create_dir_all(&b).unwrap();
+            let id = uuid::Uuid::new_v4();
+            let selected = crate::init::captured_resume_path_tests::transcript(
+                &home,
+                &a,
+                id,
+                "selected",
+                "2026-10-28T00:00:00.000Z",
+                "code",
+            );
+            let sibling = crate::init::captured_resume_path_tests::transcript(
+                &home,
+                &b,
+                id,
+                "sibling",
+                "2026-10-28T00:00:01.000Z",
+                "code",
+            );
+            let sibling_before = std::fs::read(&sibling).unwrap();
+            if changed == "bucket" {
+                let bucket = selected.parent().unwrap();
+                std::fs::rename(bucket, bucket.with_extension("saved")).unwrap();
+                symlink(sibling.parent().unwrap(), bucket).unwrap();
+            } else {
+                let projects = home.join("projects");
+                let saved = home.join("projects-saved");
+                std::fs::rename(&projects, &saved).unwrap();
+                symlink(saved, projects).unwrap();
+            }
+            let mut spawner = CaptureSpawner::default();
+            let lockp = FakeLockProbe {
+                live: HashMap::new(),
+            };
+            let context = ForkLaunchContext {
+                transcript_path: Some(selected.display().to_string()),
+                ..ForkLaunchContext::default()
+            };
+            assert!(
+                prepare_resume_transcript(
+                    &home,
+                    &a.to_string_lossy(),
+                    &id.to_string(),
+                    &id.to_string(),
+                    false,
+                    Some(&selected)
+                )
+                .await
+                .is_err(),
+                "{changed}"
+            );
+            assert!(
+                dispatch_resumed_session_inner(
+                    &home,
+                    &home,
+                    &a.to_string_lossy(),
+                    &id.to_string(),
+                    &"".into(),
+                    false,
+                    &context,
+                    None,
+                    &lockp,
+                    &mut spawner
+                )
+                .is_err(),
+                "{changed}"
+            );
+            assert!(spawner.spawns.is_empty());
+            assert!(!agents_registry::jobs_dir(&home).exists());
+            assert_eq!(std::fs::read(sibling).unwrap(), sibling_before);
+        }
+    }
+
     #[test]
     fn admitted_chat_handoff_retains_its_identity_in_the_launch_spec() {
         let home = tmpdir();
@@ -1398,7 +1694,9 @@ mod tests {
         let transcript = session::jsonl::path::session_path(&home, cwd, &session_id);
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         let original = format!(
-            "{{\"type\":\"fixed-session-mode\",\"sessionId\":\"{session_id}\",\"sessionMode\":\"chat\",\"instructionEpoch\":0}}\n{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"{cwd}\"}}\n"
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":session_id,"sessionMode":"chat","instructionEpoch":0}),
+            serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"parentUuid":null,"sessionId":session_id,"timestamp":"2026-10-21T00:00:00.000Z","cwd":cwd,"isSidechain":false,"message":{"role":"user","content":"hello"}}),
         );
         std::fs::write(&transcript, &original).unwrap();
         let context = ForkLaunchContext {
@@ -1407,12 +1705,37 @@ mod tests {
                 ..BackgroundLaunchOptions::default()
             }),
             transcript_path: Some(transcript.display().to_string()),
+            session_profile: Some(BackgroundSessionProfile {
+                mode: lingxi_core::host::session_context::ConversationMode::Chat,
+                instruction_epoch: 0,
+            }),
             ..ForkLaunchContext::default()
         };
         let mut spawner = CaptureSpawner::default();
         let lockp = FakeLockProbe {
             live: HashMap::new(),
         };
+        let changed = original.replace("\"instructionEpoch\":0", "\"instructionEpoch\":1");
+        assert_ne!(changed, original);
+        std::fs::write(&transcript, &changed).unwrap();
+        assert!(dispatch_resumed_session_inner(
+            &home,
+            &home,
+            cwd,
+            &session_id,
+            &"".into(),
+            false,
+            &context,
+            None,
+            &lockp,
+            &mut spawner,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("profile changed"));
+        assert!(spawner.spawns.is_empty());
+        assert!(!agents_registry::jobs_dir(&home).exists());
+        std::fs::write(&transcript, &original).unwrap();
         let short = dispatch_resumed_session_inner(
             &home,
             &home,
@@ -1429,6 +1752,7 @@ mod tests {
         let spec = crate::background_launch::read_launch_spec(&home, &short).unwrap();
         assert_eq!(spec.session_id, session_id);
         assert!(spec.options.preserve_admitted_context);
+        assert_eq!(spec.session_profile, context.session_profile.unwrap());
         assert_eq!(
             std::fs::canonicalize(&spec.transcript_path).unwrap(),
             std::fs::canonicalize(&transcript).unwrap()
@@ -1457,12 +1781,50 @@ mod tests {
         }
         filetime::set_file_mtime(&other, filetime::FileTime::from_unix_time(2_000_000_000, 0))
             .unwrap();
-        let branch = prepare_resume_transcript(&home, target_cwd, &source_id, &target_id, true)
-            .await
-            .expect("branch selected source");
-        let content = std::fs::read_to_string(branch).unwrap();
+        assert!(
+            prepare_resume_transcript(&home, target_cwd, &source_id, &target_id, true, None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
+        );
+        let resume = prepare_resume_transcript(
+            &home,
+            target_cwd,
+            &source_id,
+            &source_id,
+            false,
+            Some(&selected),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resume.path, selected.canonicalize().unwrap());
+        let branch = prepare_resume_transcript(
+            &home,
+            target_cwd,
+            &source_id,
+            &target_id,
+            true,
+            Some(&selected),
+        )
+        .await
+        .expect("branch selected source");
+        let content = std::fs::read_to_string(branch.path).unwrap();
         assert!(content.contains("selected source"));
         assert!(!content.contains("other source"));
+        let other_before = std::fs::read(&other).unwrap();
+        std::fs::remove_file(&selected).unwrap();
+        assert!(prepare_resume_transcript(
+            &home,
+            target_cwd,
+            &source_id,
+            &source_id,
+            false,
+            Some(&selected),
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read(other).unwrap(), other_before);
     }
 
     #[tokio::test]
@@ -1484,18 +1846,20 @@ mod tests {
         )
         .unwrap();
         let original = std::fs::read_to_string(&source).unwrap();
-        let target = prepare_resume_transcript(&home, "/tmp/target", source_id, target_id, true)
-            .await
-            .expect("fork should copy from source before resolving the target");
-        assert_ne!(std::fs::canonicalize(&source).unwrap(), target);
+        let target =
+            prepare_resume_transcript(&home, "/tmp/target", source_id, target_id, true, None)
+                .await
+                .expect("fork should copy from source before resolving the target");
+        assert_ne!(std::fs::canonicalize(&source).unwrap(), target.path);
         assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
-        let branch = std::fs::read_to_string(&target).unwrap();
+        let branch = std::fs::read_to_string(&target.path).unwrap();
         let profile =
             session::JsonlWriter::fixed_session_profile_from_source(&branch, target_id).unwrap();
         assert!(profile.instruction_epoch > 0);
         assert!(branch.contains(target_id));
         let context = ForkLaunchContext {
-            transcript_path: Some(target.display().to_string()),
+            transcript_path: Some(target.path.display().to_string()),
+            published_branch: target.published_branch,
             options: Some(BackgroundLaunchOptions {
                 model: Some("captured-model".to_string()),
                 system_prompt: Some("captured system".into()),
@@ -1508,6 +1872,30 @@ mod tests {
             }),
             ..ForkLaunchContext::default()
         };
+
+        let saved_before_publication = target.path.with_extension("before-publication");
+        std::fs::rename(&target.path, &saved_before_publication).unwrap();
+        std::fs::write(&target.path, branch.as_bytes()).unwrap();
+        let announced = std::sync::atomic::AtomicBool::new(false);
+        let announce = |_short: &str| {
+            announced.store(true, std::sync::atomic::Ordering::SeqCst);
+        };
+        assert!(dispatch_resumed_session_inner(
+            &home,
+            &home,
+            "/tmp/target",
+            target_id,
+            &"".into(),
+            true,
+            &context,
+            Some(&announce),
+            &lockp,
+            &mut spawner,
+        )
+        .is_err());
+        assert!(!announced.load(std::sync::atomic::Ordering::SeqCst));
+        std::fs::remove_file(&target.path).unwrap();
+        std::fs::rename(saved_before_publication, &target.path).unwrap();
 
         let short = dispatch_resumed_session_inner(
             &home,
@@ -1527,7 +1915,7 @@ mod tests {
         assert_eq!(spec.session_id, target_id);
         assert_eq!(
             std::fs::canonicalize(&spec.transcript_path).unwrap(),
-            target
+            target.path
         );
         assert_eq!(spec.options.model.as_deref(), Some("captured-model"));
         assert_eq!(
@@ -1543,6 +1931,30 @@ mod tests {
             .expect("mid-turn handoff must survive daemon launch persistence");
         assert_eq!(handoff.queued_commands(), &["/compact"]);
         assert_eq!(handoff.draft(), "保留这段草稿");
+
+        let receipt = spec
+            .published_source
+            .as_ref()
+            .expect("branch publication receipt");
+        let target_id = uuid::Uuid::parse_str(target_id).unwrap();
+        let target_path = std::path::Path::new(&spec.transcript_path);
+        let saved = target_path.with_extension("saved");
+        std::fs::rename(target_path, &saved).unwrap();
+        std::fs::write(target_path, branch.as_bytes()).unwrap();
+        assert!(receipt.recover(&home, target_id, target_path).is_err());
+        std::fs::remove_file(target_path).unwrap();
+        std::fs::rename(&saved, target_path).unwrap();
+        assert!(receipt.recover(&home, target_id, target_path).is_ok());
+        let changed = branch.replace("hello", "changed");
+        assert_ne!(changed, branch);
+        std::fs::write(target_path, changed).unwrap();
+        assert!(receipt.recover(&home, target_id, target_path).is_err());
+        std::fs::write(target_path, branch.as_bytes()).unwrap();
+        crate::background_launch::acknowledge_published_source(&home, &spec).unwrap();
+        assert!(crate::background_launch::read_launch_spec(&home, &short)
+            .unwrap()
+            .published_source
+            .is_none());
     }
 
     #[test]
@@ -1555,14 +1967,281 @@ mod tests {
         std::fs::write(
             &transcript,
             format!(
-                "{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"{original_cwd}\"}}\n"
+                "{}\n{}\n",
+                serde_json::json!({"type":"fixed-session-mode","sessionId":session_id,"sessionMode":"code","instructionEpoch":0}),
+                serde_json::json!({"type":"user","uuid":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","parentUuid":null,"sessionId":session_id,"timestamp":"2026-10-21T00:00:00.000Z","cwd":original_cwd,"isSidechain":false,"message":{"role":"user","content":"hello"}}),
             ),
         )
         .unwrap();
 
         let located = locate_session_transcript(&home, "/tmp/different", session_id).unwrap();
         assert_eq!(located, std::fs::canonicalize(&transcript).unwrap());
-        assert_eq!(transcript_cwd(&located).as_deref(), Some(original_cwd));
+        assert_eq!(
+            transcript_cwd(&located, &std::fs::read_to_string(&located).unwrap()).unwrap(),
+            original_cwd
+        );
+    }
+
+    #[test]
+    fn resume_workspace_uses_latest_relocation_in_captured_source() {
+        let home = tmpdir();
+        let id = uuid::Uuid::new_v4();
+        let original = "/tmp/original-worktree";
+        let intermediate = "/tmp/intermediate-worktree";
+        let moved = "/tmp/relocated-worktree";
+        let transcript = session::jsonl::path::session_path(&home, original, &id.to_string());
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        let content = format!(
+            "{}\n{}\n{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+            serde_json::json!({"type":"user","uuid":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","parentUuid":null,"sessionId":id,"timestamp":"2026-10-21T00:00:00.000Z","cwd":original,"isSidechain":false,"message":{"role":"user","content":"hello"}}),
+            serde_json::json!({"type":"relocated","sessionId":id,"relocatedCwd":intermediate}),
+            serde_json::json!({"type":"relocated","sessionId":id,"relocatedCwd":moved}),
+        );
+        std::fs::write(&transcript, &content).unwrap();
+        assert_eq!(transcript_cwd(&transcript, &content).unwrap(), moved);
+        assert!(transcript_cwd(&transcript, "{broken\n").is_err());
+        let mut spawner = CaptureSpawner::default();
+        let lockp = FakeLockProbe {
+            live: HashMap::new(),
+        };
+        let short = dispatch_resumed_session_inner(
+            &home,
+            &home,
+            original,
+            &id.to_string(),
+            &"".into(),
+            false,
+            &ForkLaunchContext::default(),
+            None,
+            &lockp,
+            &mut spawner,
+        )
+        .unwrap();
+        let launch = crate::background_launch::read_launch_spec(&home, &short).unwrap();
+        assert_eq!(launch.cwd, moved);
+        assert!(launch.published_source.is_some());
+    }
+
+    #[test]
+    fn background_resume_freezes_launch_grants_and_config_home_across_workspaces() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin");
+        let target = root.path().join("target");
+        let home = origin.join(".lingxi-test");
+        std::fs::create_dir_all(origin.join("relative")).unwrap();
+        std::fs::create_dir_all(target.join("relative")).unwrap();
+        let id = uuid::Uuid::new_v4();
+        let transcript =
+            session::jsonl::session_path(&home, &target.to_string_lossy(), &id.to_string());
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, format!("{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+            serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"parentUuid":null,"sessionId":id,"cwd":target,"message":{"role":"user","content":"selected"}}),
+        )).unwrap();
+        let argv = Argv {
+            add_dir: Some(vec!["relative".into()]),
+            ..Argv::default()
+        };
+        let options = BackgroundLaunchOptions::from_argv_at(&argv, Some(&origin));
+        let context = ForkLaunchContext {
+            options: Some(options),
+            ..ForkLaunchContext::default()
+        };
+        let mut spawner = CaptureSpawner::default();
+        let lockp = FakeLockProbe {
+            live: HashMap::new(),
+        };
+        let short = dispatch_resumed_session_inner(
+            &home,
+            &home,
+            &origin.to_string_lossy(),
+            &id.to_string(),
+            &"".into(),
+            false,
+            &context,
+            None,
+            &lockp,
+            &mut spawner,
+        )
+        .unwrap();
+        let launch = crate::background_launch::read_launch_spec(&home, &short).unwrap();
+        assert_eq!(Path::new(&launch.cwd), target);
+        assert_eq!(Path::new(&launch.origin_cwd), origin);
+        assert_eq!(
+            launch.env.get(branding::CONFIG_DIR_ENV).map(String::as_str),
+            home.to_str()
+        );
+        let worker_argv = launch.tui_argv();
+        let frozen = &worker_argv.add_dir.as_ref().unwrap()[0];
+        assert_eq!(frozen, &origin.join("relative"));
+        assert_eq!(
+            crate::background_launch::resolve_add_dir_at(frozen, &target),
+            crate::background_launch::resolve_add_dir_at(Path::new("relative"), &origin)
+        );
+        assert_ne!(frozen, &target.join("relative"));
+        let unresolved = BackgroundLaunchOptions::from_argv_at(&argv, None);
+        assert!(normalize_launch_options(unresolved, &target.to_string_lossy()).is_err());
+    }
+
+    #[tokio::test]
+    async fn background_continue_title_and_uuid_capture_before_preflight() {
+        for explicit_path in [false, true] {
+            let home = tmpdir();
+            let cwd = home.join("workspace");
+            std::fs::create_dir_all(&cwd).unwrap();
+            let id = uuid::Uuid::new_v4();
+            let target = uuid::Uuid::new_v4();
+            let source =
+                session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            let content = format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+                serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"parentUuid":null,"sessionId":id,"cwd":cwd,"message":{"role":"user","content":"selected"}}),
+            );
+            std::fs::write(&source, &content).unwrap();
+            let selected = capture_background_resume_source(
+                &home,
+                &cwd.to_string_lossy(),
+                &id.to_string(),
+                explicit_path.then_some(source.as_path()),
+                None,
+            )
+            .unwrap();
+
+            // Simulate an approval gate yielding while the source is replaced.
+            std::fs::rename(&source, home.join("retired.jsonl")).unwrap();
+            std::fs::write(&source, &content).unwrap();
+            let prepared = prepare_resume_transcript_with_capture(
+                &home,
+                &cwd.to_string_lossy(),
+                &id.to_string(),
+                &target.to_string(),
+                true,
+                Some(&source),
+                Some(selected),
+            )
+            .await;
+            assert!(prepared.is_err());
+            let branch =
+                session::jsonl::session_path(&home, &cwd.to_string_lossy(), &target.to_string());
+            assert!(!branch.exists());
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), content);
+            assert_eq!(
+                std::fs::read_to_string(home.join("retired.jsonl")).unwrap(),
+                content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn background_picker_retains_enter_receipt_before_preparation() {
+        use lingxi_core::host::session_context::ConversationMode;
+        let home = tmpdir();
+        let cwd = home.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let id = uuid::Uuid::new_v4();
+        let source = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+            serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"parentUuid":null,"sessionId":id,"timestamp":"2026-10-21T00:00:00.000Z","cwd":cwd,"isSidechain":false,"message":{"role":"user","content":"selected"}}),
+        );
+        std::fs::write(&source, &content).unwrap();
+        let selected = crate::init::capture_selected_cli_source(
+            &home,
+            id,
+            &source,
+            Some(ConversationMode::Code),
+        )
+        .unwrap();
+        let accepted = prepare_resume_transcript_with_capture(
+            &home,
+            &cwd.to_string_lossy(),
+            &id.to_string(),
+            &id.to_string(),
+            false,
+            Some(&source),
+            Some(selected.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(accepted.published_branch.is_some());
+
+        std::fs::rename(&source, home.join("retired.jsonl")).unwrap();
+        std::fs::write(&source, &content).unwrap();
+        let result = prepare_resume_transcript_with_capture(
+            &home,
+            &cwd.to_string_lossy(),
+            &id.to_string(),
+            &id.to_string(),
+            false,
+            Some(&source),
+            Some(selected),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), content);
+        assert_eq!(
+            std::fs::read_to_string(home.join("retired.jsonl")).unwrap(),
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn background_resume_keeps_selected_inode_until_worker_mount() {
+        let home = tmpdir();
+        let cwd = home.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let id = uuid::Uuid::new_v4();
+        let source = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+            serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"parentUuid":null,"sessionId":id,"timestamp":"2026-10-21T00:00:00.000Z","cwd":cwd,"isSidechain":false,"message":{"role":"user","content":"selected"}}),
+        );
+        std::fs::write(&source, &content).unwrap();
+        let prepared = prepare_resume_transcript(
+            &home,
+            &cwd.to_string_lossy(),
+            &id.to_string(),
+            &id.to_string(),
+            false,
+            Some(&source),
+        )
+        .await
+        .unwrap();
+        let context = ForkLaunchContext {
+            transcript_path: Some(prepared.path.display().to_string()),
+            published_branch: prepared.published_branch,
+            ..ForkLaunchContext::default()
+        };
+        let retired = home.join("retired.jsonl");
+        std::fs::rename(&source, &retired).unwrap();
+        std::fs::write(&source, &content).unwrap();
+        let mut spawner = CaptureSpawner::default();
+        let lockp = FakeLockProbe {
+            live: HashMap::new(),
+        };
+        assert!(dispatch_resumed_session_inner(
+            &home,
+            &home,
+            &cwd.to_string_lossy(),
+            &id.to_string(),
+            &"".into(),
+            false,
+            &context,
+            None,
+            &lockp,
+            &mut spawner,
+        )
+        .is_err());
+        assert!(spawner.spawns.is_empty());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), content);
+        assert_eq!(std::fs::read_to_string(retired).unwrap(), content);
     }
 
     #[cfg(unix)]
@@ -1740,7 +2419,9 @@ mod tests {
             std::fs::write(
                 &transcript,
                 format!(
-                    "{{\"type\":\"fixed-session-mode\",\"sessionId\":\"{session_id}\",\"sessionMode\":\"code\",\"instructionEpoch\":0}}\n{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"{worktree_cwd}\"}}\n"
+                    "{}\n{}\n",
+                    serde_json::json!({"type":"fixed-session-mode","sessionId":session_id,"sessionMode":"code","instructionEpoch":0}),
+                    serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"parentUuid":null,"sessionId":session_id,"timestamp":"2026-10-21T00:00:00.000Z","cwd":worktree_cwd,"isSidechain":false,"message":{"role":"user","content":"hello"}}),
                 ),
             )
             .unwrap();

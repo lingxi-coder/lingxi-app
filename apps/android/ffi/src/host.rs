@@ -817,6 +817,8 @@ pub fn build_android_engine(
         model,
         session_mode,
         initial_session_id,
+        initial_session_transcript_path,
+        scheduler_controller,
         vision_delegation_enabled,
         app_files_root,
         project_cwd,
@@ -839,6 +841,8 @@ pub fn build_android_engine(
         device_control,
         session_mode,
         initial_session_id,
+        initial_session_transcript_path,
+        scheduler_controller,
         vision_delegation_enabled,
         physical_memory_bytes,
         media_host.clone(),
@@ -913,6 +917,9 @@ pub fn build_android_engine(
                 SessionModeDto::Code => MobileSessionMode::Code,
             },
             initial_session_id,
+            initial_session_transcript_path: initial_session_transcript_path
+                .map(std::path::PathBuf::from),
+            scheduler_controller,
             physical_memory_bytes,
             vision_delegation_enabled,
             host_environment: Some(host_environment.map_or_else(

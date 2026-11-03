@@ -15,6 +15,7 @@ import type {
   ClientCommand,
   ClientError,
   ClientEvent,
+  CronAutomationDto,
   MessageDto,
   PermissionRequest,
   PermissionResolved,
@@ -659,6 +660,11 @@ function validateCronAutomation(v: unknown): void {
   assert.ok(['new_session', 'selected_session', 'task_session'].includes(String(config['runMode'])));
   assert.ok(['all', 'failed', 'none'].includes(String(config['notificationPolicy'])));
   assert.ok(isString(config['model'])); validateReasoningSelection(config['reasoning']);
+  for (const key of [
+    'sessionMode', 'sessionScopeKey',
+    'targetSessionId', 'targetSessionTranscriptPath', 'targetSessionMode', 'targetSessionScopeKey',
+    'ownedSessionId', 'ownedSessionTranscriptPath', 'ownedSessionMode', 'ownedSessionScopeKey',
+  ]) if (config[key] != null) assert.ok(isString(config[key]));
   if (config['runs'] != null) {
     assert.ok(Array.isArray(config['runs']));
     for (const value of config['runs'] as unknown[]) {
@@ -666,6 +672,9 @@ function validateCronAutomation(v: unknown): void {
       assert.ok(isString(run['id']) && isString(run['taskId']) && isNumber(run['scheduledAt']));
       assert.ok(['queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted'].includes(String(run['status'])));
       assert.ok(isString(run['model'])); validateReasoningSelection(run['reasoning']);
+      for (const key of ['sessionId', 'sessionTranscriptPath', 'sessionMode', 'sessionScopeKey']) {
+        if (run[key] != null) assert.ok(isString(run[key]));
+      }
     }
   }
 }
@@ -807,7 +816,9 @@ function validateCommand(name: string, v: unknown): void {
       validateTypescriptLspMode(o['mode']);
       break;
     case 'cron_run_started':
-      assert.ok(isString(o['run_id']) && isString(o['session_id']));
+      assert.ok(isString(o['run_id']) && isString(o['session_id'])
+        && isString(o['transcript_path']) && isString(o['session_mode']));
+      if (o['session_scope_key'] != null) assert.ok(isString(o['session_scope_key']));
       break;
     case 'scheduled_run_turn':
       assert.ok(isString(o['run_id']) && isString(o['prompt']) && isString(o['model']));
@@ -1850,6 +1861,34 @@ function validateError(v: unknown): void {
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
+
+test('scheduled run commands and automation preserve the captured source', () => {
+  const source = {
+    sessionId: 'session-1',
+    sessionTranscriptPath: '/project/session.jsonl',
+    sessionMode: 'code',
+    sessionScopeKey: 'scope-1',
+  };
+  const automation: CronAutomationDto = {
+    version: 2, status: 'active', model: 'provider/model', reasoning: { type: 'automatic' },
+    runMode: 'selected_session', notificationPolicy: 'all',
+    sessionMode: source.sessionMode, sessionScopeKey: source.sessionScopeKey,
+    targetSessionId: source.sessionId, targetSessionTranscriptPath: source.sessionTranscriptPath,
+    targetSessionMode: source.sessionMode, targetSessionScopeKey: source.sessionScopeKey,
+    ownedSessionId: source.sessionId, ownedSessionTranscriptPath: source.sessionTranscriptPath,
+    ownedSessionMode: source.sessionMode, ownedSessionScopeKey: source.sessionScopeKey,
+    runs: [{ id: 'run-1', taskId: 'task-1', scheduledAt: 1, status: 'running',
+      model: 'provider/model', reasoning: { type: 'automatic' }, ...source }],
+  };
+  const started: ClientCommand = { type: 'cron_run_started', run_id: 'run-1',
+    session_id: source.sessionId, transcript_path: source.sessionTranscriptPath,
+    session_mode: source.sessionMode, session_scope_key: source.sessionScopeKey };
+  validateCronAutomation(automation);
+  validateCommand('cron_run_started', started);
+  assert.throws(() => validateCommand('cron_run_started', { ...started, transcript_path: undefined }));
+  assert.throws(() => validateCronAutomation({ ...automation, targetSessionMode: 7 }));
+  assert.throws(() => validateCronAutomation({ ...automation, runs: [{ ...automation.runs![0], sessionScopeKey: 7 }] }));
+});
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');

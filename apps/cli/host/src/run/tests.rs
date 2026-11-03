@@ -7,6 +7,24 @@ use session::jsonl::JsonlMessage;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
+
+#[test]
+fn relative_and_empty_config_homes_are_anchored_to_the_launch_directory() {
+    let origin = PathBuf::from("/tmp/launch-origin");
+    assert_eq!(
+        absolute_config_home_at(std::path::Path::new(""), &origin),
+        origin
+    );
+    assert_eq!(
+        absolute_config_home_at(std::path::Path::new(".lingxi-test"), &origin),
+        origin.join(".lingxi-test")
+    );
+    assert_eq!(
+        absolute_config_home_at(std::path::Path::new("/tmp/fixed-home"), &origin),
+        PathBuf::from("/tmp/fixed-home")
+    );
+}
+
 #[test]
 fn failed_switch_remounts_current_session_instead_of_exiting() {
     let current = Uuid::new_v4();
@@ -166,11 +184,11 @@ async fn cli_independent_fork_preserves_source_and_starts_a_new_profile_epoch() 
         .map(|row| format!("{row}\n"))
         .collect::<String>();
     std::fs::write(&path, &content).unwrap();
-    let (target_path, _) = create_independent_cli_branch(&home, &cwd, source, target, None, None)
+    let published = create_independent_cli_branch(&home, &cwd, source, target, None, None)
         .await
         .unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
-    let branch = std::fs::read_to_string(target_path).unwrap();
+    let branch = std::fs::read_to_string(published.authority.path()).unwrap();
     let profile =
         session::JsonlWriter::fixed_session_profile_from_source(&branch, &target.to_string())
             .unwrap();
@@ -182,6 +200,24 @@ async fn cli_independent_fork_preserves_source_and_starts_a_new_profile_epoch() 
             .0
             .is_empty()
     );
+
+    // Even byte-identical replacement must not become the published branch.
+    let target_path = published.authority.path();
+    let mut cfg = harness_runtime::desktop::DesktopConfig::default();
+    cfg.lingxi_home = home.clone();
+    cfg.session_persistence = true;
+    cfg.session_transcript_path = Some(target_path.clone());
+    crate::init::install_published_branch(&mut cfg, target, published.into()).unwrap();
+    let saved = target_path.with_extension("saved");
+    std::fs::rename(&target_path, &saved).unwrap();
+    std::fs::write(&target_path, branch.as_bytes()).unwrap();
+    assert!(
+        crate::init::capture_tui_resume(&mut cfg, target, Some(ConversationMode::Code))
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&target_path).unwrap(), branch.as_bytes());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
 }
 
 #[tokio::test]
@@ -303,6 +339,35 @@ async fn load_resume_rows_from_returns_sorted_rows_with_titles_and_counts() {
     for row in &rows {
         assert_eq!(row.message_count, 1, "one message per fixture session");
     }
+}
+
+#[tokio::test]
+async fn resume_catalog_uses_the_supplied_live_cwd_and_preserves_selected_paths() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let a = temp.path().join("project-a");
+    let b = temp.path().join("project-b");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let project_a = make_project_dir(&home, &a.to_string_lossy());
+    let project_b = make_project_dir(&home, &b.to_string_lossy());
+    let a_id = write_session(&project_a, "A conversation", SystemTime::now());
+    let b_id = write_session(&project_b, "B conversation", SystemTime::now());
+    let rows_a = load_resume_rows_from(&home, &a).await.unwrap();
+    let rows_b = load_resume_rows_from(&home, &b).await.unwrap();
+    assert_eq!(
+        rows_a.iter().map(|row| row.uuid).collect::<Vec<_>>(),
+        vec![a_id]
+    );
+    assert_eq!(
+        rows_b.iter().map(|row| row.uuid).collect::<Vec<_>>(),
+        vec![b_id]
+    );
+    let displayed = map_resume_rows(&rows_b);
+    assert_eq!(
+        displayed[0].transcript_path,
+        project_b.join(format!("{b_id}.jsonl"))
+    );
 }
 
 #[tokio::test]

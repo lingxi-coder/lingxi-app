@@ -213,7 +213,7 @@ pub enum ChatOutcome {
     /// session in-process so the JSONL writer is retargeted to `<uuid>.jsonl` —
     /// NOT an in-place `resume_session` swap (which would fork the conversation
     /// across files).
-    SwitchSession(uuid::Uuid),
+    SwitchSession(crate::resume::ResumeSelection),
     /// The agents view selected a session whose process ownership must be
     /// resolved before any transcript remount. The CLI may live-attach, queue
     /// an exact background resume, or remount only after proving it unowned.
@@ -432,6 +432,7 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::CompactEnded
         | TurnEvent::RawUtilization { .. }
         | TurnEvent::CommandCatalogRefreshed { .. }
+        | TurnEvent::ResumeCatalogRefreshed { .. }
         | TurnEvent::SlashImagesResolved { .. }
         | TurnEvent::PromptAdmissionResolved { .. }
         | TurnEvent::MultiAgent(_)
@@ -657,13 +658,11 @@ pub struct ChatWidget {
     /// clone to seed the manager. `None` (tests / no engine) → empty manager.
     plugin_snapshot:
         Option<std::sync::Arc<std::sync::Mutex<crate::bottom_pane::plugins_view::PluginsSnapshot>>>,
-    /// Preloaded `/resume` session rows (newest-first), wired at startup via
-    /// [`Self::set_resume_rows`]. Loaded async from disk in the CLI before the
-    /// blocking loop starts (the sync TUI loop can't `.await` a disk scan); kept
-    /// DISTINCT from the startup `--resume` picker path. [`Self::cmd_resume`]
-    /// clones these into the picker. Empty (the default) opens an empty-state
-    /// picker.
+    /// `/resume` rows and the cwd of their completed asynchronous scan.
     resume_rows: Vec<crate::resume::ResumeRow>,
+    resume_rows_cwd: Option<std::path::PathBuf>,
+    /// A resumed session cannot admit new work before deferred replay settles.
+    startup_recovery: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
     /// Per-provider login-method tag (from the catalog auth strategy), keyed
     /// by profile_name — the real data `/connect`'s picker groups/labels
     /// from. Empty (default) until [`Self::set_connect_data`] wires it.
@@ -826,6 +825,8 @@ impl ChatWidget {
             permission_snapshot: None,
             plugin_snapshot: None,
             resume_rows: Vec::new(),
+            resume_rows_cwd: None,
+            startup_recovery: None,
             connect_auth_methods: std::collections::BTreeMap::new(),
             connect_availability: std::collections::BTreeMap::new(),
             shell_expansion: None,
@@ -2371,6 +2372,27 @@ impl ChatWidget {
                         .collect(),
                 );
             }
+            TurnEvent::ResumeCatalogRefreshed { cwd, rows } => {
+                if self
+                    .hyperlink_cwd_provider
+                    .as_ref()
+                    .is_some_and(|provider| provider() != cwd)
+                {
+                    return;
+                }
+                self.resume_rows = rows
+                    .into_iter()
+                    .map(|(uuid, transcript_path, title, metadata_label)| {
+                        crate::resume::ResumeRow {
+                            uuid,
+                            transcript_path,
+                            title,
+                            metadata_label,
+                        }
+                    })
+                    .collect();
+                self.resume_rows_cwd = Some(cwd);
+            }
             TurnEvent::AgentStatusSnapshot { agents } => {
                 self.background_agents = agents;
                 self.sync_running_agents();
@@ -2680,6 +2702,33 @@ impl ChatWidget {
     /// into the picker.
     pub fn set_resume_rows(&mut self, rows: Vec<crate::resume::ResumeRow>) {
         self.resume_rows = rows;
+        self.resume_rows_cwd = self
+            .hyperlink_cwd_provider
+            .as_ref()
+            .map(|provider| provider());
+    }
+
+    /// Bind a preloaded catalog to the cwd captured before its disk scan.
+    pub fn set_resume_catalog(
+        &mut self,
+        cwd: std::path::PathBuf,
+        rows: Vec<crate::resume::ResumeRow>,
+    ) {
+        self.resume_rows = rows;
+        self.resume_rows_cwd = Some(cwd);
+    }
+
+    pub fn set_startup_recovery(
+        &mut self,
+        recovery: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
+    ) {
+        self.startup_recovery = recovery;
+    }
+
+    fn startup_recovery_pending(&self) -> bool {
+        self.startup_recovery
+            .as_ref()
+            .is_some_and(|state| state.load(std::sync::atomic::Ordering::Acquire) != 1)
     }
 
     /// Wire the live background-task registry handle (drives `/tasks`). `None`
@@ -3320,6 +3369,33 @@ impl ChatWidget {
     #[must_use]
     pub fn turn_running(&self) -> bool {
         self.current_turn.is_some()
+    }
+
+    /// Navigation may only replace the runtime after every admitted or
+    /// awaiting-admission operation owned by this widget has finished.
+    #[must_use]
+    pub fn can_switch_session(&self) -> bool {
+        !self.startup_recovery_pending()
+            && self.current_turn.is_none()
+            && self.current_compaction.is_none()
+            && self.queued_compact.is_none()
+            && self.ready_compact.is_none()
+            && self.pending_backgrounding.is_none()
+            && !self.session_clear_pending
+            && self.pending_prompt_restores.is_empty()
+            && !self
+                .pending_slash_dispatches
+                .iter()
+                .any(PendingSlashDispatch::is_pending)
+            && self.pending_prompts.is_empty()
+            && !self.has_open_interactive_prompt()
+    }
+
+    pub fn reject_session_switch(&mut self) {
+        self.show_system_text(
+            "Wait for the current work to finish before switching sessions.",
+            false,
+        );
     }
 
     /// True when the 20 Hz tick must redraw even without new input (spinner,
@@ -4253,6 +4329,21 @@ impl ChatWidget {
     /// loop so the runtime is re-mounted against the chosen session in-process
     /// (the JSONL writer is retargeted) — never an in-place engine swap.
     pub(crate) fn cmd_resume(&mut self, args: &str) -> ChatOutcome {
+        if !self.can_switch_session() {
+            self.reject_session_switch();
+            return ChatOutcome::Continue;
+        }
+        if self
+            .hyperlink_cwd_provider
+            .as_ref()
+            .is_some_and(|provider| self.resume_rows_cwd.as_ref() != Some(&provider()))
+        {
+            self.show_system_text(
+                "The session list is updating for this directory. Try /resume again.",
+                false,
+            );
+            return ChatOutcome::Continue;
+        }
         self.bottom_pane
             .show_resume_picker(self.resume_rows.clone(), args.trim());
         ChatOutcome::Continue
@@ -6303,8 +6394,22 @@ impl ChatWidget {
                     path: path.to_string_lossy().into_owned(),
                 })
             }
-            BottomPaneOutcome::SwitchSession(uuid) => ChatOutcome::SwitchSession(uuid),
-            BottomPaneOutcome::OpenAgentSession(target) => ChatOutcome::OpenAgentSession(target),
+            BottomPaneOutcome::SwitchSession(uuid) => {
+                if self.can_switch_session() {
+                    ChatOutcome::SwitchSession(uuid)
+                } else {
+                    self.reject_session_switch();
+                    ChatOutcome::Continue
+                }
+            }
+            BottomPaneOutcome::OpenAgentSession(target) => {
+                if self.can_switch_session() {
+                    ChatOutcome::OpenAgentSession(target)
+                } else {
+                    self.reject_session_switch();
+                    ChatOutcome::Continue
+                }
+            }
             BottomPaneOutcome::RewakePeer => {
                 if self.current_turn.is_some() {
                     ChatOutcome::Continue
@@ -6321,6 +6426,14 @@ impl ChatWidget {
         &mut self,
         text: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> ChatOutcome {
+        if self.startup_recovery_pending() {
+            self.bottom_pane
+                .restore_composer_source_units(&text.string_units("").unwrap_or_default());
+            return self.show_system_text(
+                "Wait for session recovery to finish before submitting.",
+                false,
+            );
+        }
         let units = text.string_units("").unwrap_or_default();
         // Bash mode consumes a UTF-8 process command. It is entered only when
         // the complete source line can be represented exactly as Rust text.
@@ -6351,6 +6464,14 @@ impl ChatWidget {
         &mut self,
         text: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> ChatOutcome {
+        if self.startup_recovery_pending() {
+            self.bottom_pane
+                .restore_composer_source_units(&text.string_units("").unwrap_or_default());
+            return self.show_system_text(
+                "Wait for session recovery to finish before submitting.",
+                false,
+            );
+        }
         if self.session_clear_pending {
             return ChatOutcome::Continue;
         }
@@ -6384,8 +6505,8 @@ impl ChatWidget {
                 .map(|pending| pending.cancellation.clone())
                 .or_else(|| self.current_turn.clone())
                 .expect("queued prompt has an owner");
-            // Retain the owner across dequeue -> host start delivery. Session
-            // switching must still cancel a followup whose start is in transit.
+            // Retain the owner across dequeue -> host start delivery so an
+            // explicit interrupt still reaches a followup in transit.
             self.queued_prompt_owners
                 .retain(|owner| !owner.is_cancelled());
             self.queued_prompt_owners.push(owner.clone());
@@ -6422,7 +6543,8 @@ impl ChatWidget {
     }
 
     fn restore_recovered_prompt_if_available(&mut self) {
-        if !self.bottom_pane.composer().source_units().is_empty() || !self.pending_images.is_empty() {
+        if !self.bottom_pane.composer().source_units().is_empty() || !self.pending_images.is_empty()
+        {
             return;
         }
         if let Some(prompt) = self.recovered_prompts.pop_front() {
@@ -6439,18 +6561,27 @@ impl ChatWidget {
         let units = self.bottom_pane.composer().source_units();
         if !units.is_empty() || !self.pending_images.is_empty() {
             if let Ok(text) = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
-                String::from_utf16_lossy(&units), units,
+                String::from_utf16_lossy(&units),
+                units,
             ) {
-                drafts.push(SwitchDraft { row_token: None, text, images: self.pending_images.clone() });
+                drafts.push(SwitchDraft {
+                    row_token: None,
+                    text,
+                    images: self.pending_images.clone(),
+                });
             }
         }
         drafts.extend(self.recovered_prompts.iter().map(|draft| SwitchDraft {
-            row_token: None, text: draft.text.clone(), images: draft.images.clone(),
+            row_token: None,
+            text: draft.text.clone(),
+            images: draft.images.clone(),
         }));
         let mut pending: Vec<_> = self.pending_prompt_restores.iter().collect();
         pending.sort_by_key(|(_, draft)| draft.sequence);
         drafts.extend(pending.into_iter().map(|(row_token, draft)| SwitchDraft {
-            row_token: Some(row_token.clone()), text: draft.text.clone(), images: draft.images.clone(),
+            row_token: Some(row_token.clone()),
+            text: draft.text.clone(),
+            images: draft.images.clone(),
         }));
         drafts
     }
@@ -6459,7 +6590,10 @@ impl ChatWidget {
     pub fn restore_switch_drafts(&mut self, drafts: Vec<SwitchDraft>) {
         for draft in drafts {
             self.recovered_prompts.push_back(RecoveredPrompt {
-                text: draft.text, images: draft.images, owns_unstarted_turn: false, sequence: 0,
+                text: draft.text,
+                images: draft.images,
+                owns_unstarted_turn: false,
+                sequence: 0,
             });
         }
         self.restore_recovered_prompt_if_available();
@@ -7342,6 +7476,93 @@ mod tests {
 
     fn widget() -> ChatWidget {
         ChatWidget::new(Vec::new(), SessionInfo::default())
+    }
+
+    #[test]
+    fn startup_recovery_retains_input_and_blocks_session_navigation() {
+        let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let mut widget = widget();
+        widget.set_startup_recovery(Some(state.clone()));
+        assert!(!widget.can_switch_session());
+        assert!(matches!(
+            widget.submit_prompt("keep this".into()),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(
+            String::from_utf16(&widget.bottom_pane.composer().source_units()).unwrap(),
+            "keep this"
+        );
+        state.store(1, std::sync::atomic::Ordering::Release);
+        assert!(widget.can_switch_session());
+        assert!(matches!(
+            widget.submit_prompt("keep this".into()),
+            ChatOutcome::Submit(..)
+        ));
+    }
+
+    #[test]
+    fn session_navigation_rejects_running_queued_and_pending_owners_without_cancel() {
+        let mut active = widget();
+        let ChatOutcome::Submit(_, _, _, running) = active.submit_prompt("first".into()) else {
+            panic!("expected running turn");
+        };
+        assert!(matches!(
+            active.submit_prompt("queued".into()),
+            ChatOutcome::QueuePrompt(..)
+        ));
+        assert!(matches!(active.cmd_resume(""), ChatOutcome::Continue));
+        assert!(matches!(
+            active.on_pane_outcome(BottomPaneOutcome::SwitchSession(
+                crate::resume::ResumeSelection {
+                    uuid: uuid::Uuid::new_v4(),
+                    transcript_path: "/test/session.jsonl".into(),
+                }
+            )),
+            ChatOutcome::Continue
+        ));
+        let target = crate::bottom_pane::view::AgentSessionTarget {
+            session_id: uuid::Uuid::new_v4(),
+            background: false,
+            live: false,
+        };
+        assert!(matches!(
+            active.on_pane_outcome(BottomPaneOutcome::OpenAgentSession(target)),
+            ChatOutcome::Continue
+        ));
+        assert!(!running.is_cancelled());
+        assert!(active.turn_running());
+
+        let mut pending = widget();
+        let slash = PendingSlashDispatch::new();
+        pending.pending_slash_dispatches.push(slash.clone());
+        assert!(!pending.can_switch_session());
+        assert!(matches!(pending.cmd_resume(""), ChatOutcome::Continue));
+        assert!(!slash.is_cancelled());
+        slash.completed.cancel();
+        assert!(pending.can_switch_session());
+
+        let (exchange, mut answer) = tool_exchange();
+        pending.open_permission(exchange);
+        let (question, mut question_answer) = ask_exchange();
+        pending.open_ask_user_question(question);
+        assert!(!pending.can_switch_session());
+        assert!(matches!(
+            pending.on_pane_outcome(BottomPaneOutcome::SwitchSession(
+                crate::resume::ResumeSelection {
+                    uuid: uuid::Uuid::new_v4(),
+                    transcript_path: "/test/session.jsonl".into(),
+                }
+            )),
+            ChatOutcome::Continue
+        ));
+        assert!(matches!(
+            answer.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            question_answer.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -9412,13 +9633,20 @@ mod tests {
         let mut widget = widget();
         let units = vec![b'a' as u16, 0xd800, b'b' as u16];
         let prompt = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
-            String::from_utf16_lossy(&units), units.clone(),
-        ).unwrap();
+            String::from_utf16_lossy(&units),
+            units.clone(),
+        )
+        .unwrap();
         let image = std::path::PathBuf::from("/tmp/recover-image.png");
         widget.pending_images.push(image.clone());
-        let ChatOutcome::Submit(_, row_token, _, _) = widget.submit_prompt(prompt) else { panic!("submit") };
+        let ChatOutcome::Submit(_, row_token, _, _) = widget.submit_prompt(prompt) else {
+            panic!("submit")
+        };
         widget.bottom_pane.restore_composer_text("newer draft");
-        widget.apply_turn_event(TurnEvent::PromptAdmissionResolved { row_token, admitted: false });
+        widget.apply_turn_event(TurnEvent::PromptAdmissionResolved {
+            row_token,
+            admitted: false,
+        });
         assert_eq!(widget.bottom_pane.composer().text(), "newer draft");
         assert!(widget.pending_images.is_empty());
         assert_eq!(widget.recovered_prompts.len(), 1);
@@ -9435,7 +9663,8 @@ mod tests {
         let ChatOutcome::Submit(_, _, _, foreground) = widget.submit_prompt("first".into()) else {
             panic!("foreground submit");
         };
-        let ChatOutcome::QueuePrompt(_, queued_row, _, _) = widget.submit_prompt("second".into()) else {
+        let ChatOutcome::QueuePrompt(_, queued_row, _, _) = widget.submit_prompt("second".into())
+        else {
             panic!("queued submit");
         };
         widget.apply_turn_event(TurnEvent::PromptAdmissionResolved {
@@ -9454,7 +9683,10 @@ mod tests {
             panic!("foreground submit");
         };
         widget.bottom_pane.restore_composer_text("  \n ");
-        widget.apply_turn_event(TurnEvent::PromptAdmissionResolved { row_token, admitted: false });
+        widget.apply_turn_event(TurnEvent::PromptAdmissionResolved {
+            row_token,
+            admitted: false,
+        });
         assert_eq!(widget.bottom_pane.composer().text(), "  \n ");
         assert_eq!(widget.recovered_prompts.len(), 1);
     }
@@ -9473,7 +9705,10 @@ mod tests {
         let mut reopened = widget();
         reopened.restore_switch_drafts(drafts);
         assert_eq!(reopened.bottom_pane.composer().text(), "  \n ");
-        assert_eq!(reopened.pending_images, vec![std::path::PathBuf::from("/tmp/draft.png")]);
+        assert_eq!(
+            reopened.pending_images,
+            vec![std::path::PathBuf::from("/tmp/draft.png")]
+        );
         assert!(!reopened.turn_running());
         reopened.bottom_pane.restore_composer_text("");
         reopened.pending_images.clear();
@@ -9484,7 +9719,10 @@ mod tests {
     #[test]
     fn context_manifest_opens_a_diagnostic_view() {
         let (mut widget, _) = widget_with_orchestrator();
-        assert!(matches!(widget.cmd_context("manifest"), ChatOutcome::Continue));
+        assert!(matches!(
+            widget.cmd_context("manifest"),
+            ChatOutcome::Continue
+        ));
         assert!(widget.bottom_pane.has_active_view());
     }
 
@@ -9492,8 +9730,13 @@ mod tests {
     fn images_submitted_during_a_turn_remain_in_the_composer() {
         let mut widget = widget();
         widget.current_turn = Some(CancellationToken::new());
-        widget.pending_images.push(std::path::PathBuf::from("/tmp/image.png"));
-        assert!(matches!(widget.submit_prompt("follow up".into()), ChatOutcome::Continue));
+        widget
+            .pending_images
+            .push(std::path::PathBuf::from("/tmp/image.png"));
+        assert!(matches!(
+            widget.submit_prompt("follow up".into()),
+            ChatOutcome::Continue
+        ));
         assert_eq!(widget.bottom_pane.composer().text(), "follow up");
         assert_eq!(widget.pending_images.len(), 1);
     }
@@ -10375,7 +10618,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_slash_queues_followup_and_session_switch_cancels_dispatch() {
+    fn explicit_cancellation_stops_pending_slash_and_queued_followup() {
         let mut widget = widget();
         let ChatOutcome::DispatchSlash(_, _, pending) =
             widget.dispatch_registry_slash("/slow-skill".into())
@@ -12928,6 +13171,7 @@ mod tests {
         let want = uuid::Uuid::new_v4();
         let rows = vec![ResumeRow {
             uuid: want,
+            transcript_path: "/test/selected.jsonl".into(),
             title: "fix the parser".to_string(),
             metadata_label: "2 minutes ago \u{00b7} 4 messages".to_string(),
         }];
@@ -12947,13 +13191,78 @@ mod tests {
         );
         // Enter on the only row → SwitchSession(uuid), picker closes.
         match widget.handle_key(press(KeyCode::Enter)) {
-            ChatOutcome::SwitchSession(uuid) => assert_eq!(uuid, want),
+            ChatOutcome::SwitchSession(selection) => {
+                assert_eq!(selection.uuid, want);
+                assert_eq!(
+                    selection.transcript_path,
+                    std::path::PathBuf::from("/test/selected.jsonl")
+                );
+            }
             _ => panic!("expected ChatOutcome::SwitchSession"),
         }
         assert!(
             widget.bottom_pane().view_stack().is_empty(),
             "picker closes after a pick"
         );
+    }
+
+    #[test]
+    fn resume_catalog_tracks_live_cwd_and_keeps_the_displayed_source() {
+        use crate::bottom_pane::resume_picker_view::ResumePickerView;
+        use crate::resume::ResumeRow;
+        let current = std::sync::Arc::new(std::sync::Mutex::new(std::path::PathBuf::from("/a")));
+        let provider = current.clone();
+        let id = uuid::Uuid::new_v4();
+        let row = |path: &str, title: &str| ResumeRow {
+            uuid: id,
+            transcript_path: path.into(),
+            title: title.into(),
+            metadata_label: String::new(),
+        };
+        let mut widget = widget();
+        widget.set_hyperlink_cwd_provider(std::sync::Arc::new(move || {
+            provider.lock().unwrap().clone()
+        }));
+        widget.set_resume_catalog("/a".into(), vec![row("/a/source.jsonl", "A")]);
+        *current.lock().unwrap() = "/b".into();
+        assert!(matches!(widget.cmd_resume(""), ChatOutcome::Continue));
+        assert!(!widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ResumePickerView>());
+        widget.apply_turn_event(TurnEvent::ResumeCatalogRefreshed {
+            cwd: "/a".into(),
+            rows: vec![(id, "/a/stale.jsonl".into(), "stale".into(), String::new())],
+        });
+        assert!(matches!(widget.cmd_resume(""), ChatOutcome::Continue));
+        assert!(!widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ResumePickerView>());
+        widget.apply_turn_event(TurnEvent::ResumeCatalogRefreshed {
+            cwd: "/b".into(),
+            rows: vec![(id, "/b/selected.jsonl".into(), "B".into(), String::new())],
+        });
+        widget.cmd_resume("");
+        assert!(widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ResumePickerView>());
+        // A later catalog update cannot change the source already displayed.
+        widget.apply_turn_event(TurnEvent::ResumeCatalogRefreshed {
+            cwd: "/b".into(),
+            rows: vec![(id, "/b/other.jsonl".into(), "other".into(), String::new())],
+        });
+        match widget.handle_key(press(KeyCode::Enter)) {
+            ChatOutcome::SwitchSession(selection) => {
+                assert_eq!(selection.uuid, id);
+                assert_eq!(
+                    selection.transcript_path,
+                    std::path::PathBuf::from("/b/selected.jsonl")
+                );
+            }
+            _ => panic!("expected exact displayed selection"),
+        }
     }
 
     /// `/resume <term>` opens the picker pre-filtered by the argument.
@@ -12966,11 +13275,13 @@ mod tests {
         widget.set_resume_rows(vec![
             ResumeRow {
                 uuid: uuid::Uuid::new_v4(),
+                transcript_path: "/test/first.jsonl".into(),
                 title: "fix bug".to_string(),
                 metadata_label: String::new(),
             },
             ResumeRow {
                 uuid: uuid::Uuid::new_v4(),
+                transcript_path: "/test/second.jsonl".into(),
                 title: "add feature".to_string(),
                 metadata_label: String::new(),
             },

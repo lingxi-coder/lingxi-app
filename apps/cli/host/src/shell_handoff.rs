@@ -842,6 +842,8 @@ mod tests {
             launch: BackgroundLaunchKind::Fork,
             session_id: "session".into(),
             transcript_path: "/tmp/session.jsonl".into(),
+            session_profile: crate::background_launch::BackgroundSessionProfile::fresh_code(),
+            published_source: None,
             cwd: "/tmp".into(),
             origin_cwd: "/tmp".into(),
             worktree_path: None,

@@ -209,6 +209,10 @@ impl ClientEventSink for ObservedSink {
     }
 }
 
+const CRON_TEST_SESSION: &str = "11111111-2222-4333-8444-555555555555";
+const CRON_TEST_PATH: &str = "/project/11111111-2222-4333-8444-555555555555.jsonl";
+const CRON_TEST_SCOPE: &str = "/project-a";
+
 fn automation_request(id: &str) -> cron::automation::AutomationRunRequest {
     cron::automation::AutomationRunRequest {
         run_id: id.into(),
@@ -217,6 +221,7 @@ fn automation_request(id: &str) -> cron::automation::AutomationRunRequest {
             "id":"d00000001", "cron":"* * * * *", "prompt":"scheduled prompt", "createdAt":0,
             "automation": { "version":2, "status":"active", "model":"openai/test",
                 "reasoning":{"type":"automatic"}, "runMode":"new_session",
+                "sessionMode":"code", "sessionScopeKey":CRON_TEST_SCOPE,
                 "notificationPolicy":"none", "runs":[] }
         }))
         .unwrap(),
@@ -622,10 +627,20 @@ async fn cron_claim_identity_and_metadata_fence_stale_failure_completion() {
         }
         events
     }
-    let shared_fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../electron/test/fixtures/cron-claim-replay.json"
-    ))
-    .unwrap();
+    let shared_fixture: serde_json::Value =
+        if let Some(path) = std::env::var_os("LINGXI_EXPORT_CRON_CLAIM_FIXTURE") {
+            // Explicit opt-in export for refreshing the shared Electron fixture
+            // from these actual Rust SDK events, not a hand-authored wire shape.
+            let mut json = serde_json::to_string_pretty(&produced).unwrap();
+            json.push('\n');
+            std::fs::write(path, &json).unwrap();
+            serde_json::from_str(&json).unwrap()
+        } else {
+            serde_json::from_str(include_str!(
+                "../../../electron/test/fixtures/cron-claim-replay.json"
+            ))
+            .unwrap()
+        };
     assert_eq!(
         normalize(serde_json::to_value(&produced).unwrap()),
         normalize(shared_fixture)
@@ -722,7 +737,15 @@ async fn dropped_cron_producer_rejects_late_binding_until_real_host_completion()
     job.abort();
     assert!(job.await.unwrap_err().is_cancelled());
     assert!(firer.cancel_run("producer-dropped").await.is_err());
-    firer.started(&wire_id, "late-session").await;
+    firer
+        .started(
+            &wire_id,
+            CRON_TEST_SESSION,
+            CRON_TEST_PATH,
+            "code",
+            Some(CRON_TEST_SCOPE),
+        )
+        .await;
     assert!(matches!(next_frame(&mut socket).await,
         Frame::Event(ClientEvent::CronRunBound { run_id, error: Some(error) })
         if run_id == wire_id && error.starts_with("cancelled:")));
@@ -792,7 +815,13 @@ async fn cron_binding_and_cancellation_are_serialized() {
     // The actual SDK bind blocks on its durable store lock. While it is parked,
     // cancellation must not get past the claim lock and revoke a cloned input.
     let durable_store = cron::lock_cron_file().await;
-    let mut binding = Box::pin(firer.started(&wire_id, "execution-session"));
+    let mut binding = Box::pin(firer.started(
+        &wire_id,
+        CRON_TEST_SESSION,
+        CRON_TEST_PATH,
+        "code",
+        Some(CRON_TEST_SCOPE),
+    ));
     std::future::poll_fn(|cx| {
         assert!(binding.as_mut().poll(cx).is_pending());
         Poll::Ready(())
@@ -818,6 +847,220 @@ async fn cron_binding_and_cancellation_are_serialized() {
         .await;
     assert!(job.await.unwrap().is_err());
     firer.cancel_run("binding-race").await.unwrap();
+}
+
+#[tokio::test]
+async fn cron_started_rejects_retargeted_source_without_publishing_a_bound_receipt() {
+    let connection = BridgeConnection::new();
+    let (endpoint, mut socket, sink) = captured_sink().await;
+    assert!(connection.claim_outbound(&sink).await);
+    connection.handle_hello(1, hello()).await;
+    assert!(matches!(next_frame(&mut socket).await, Frame::Response(_)));
+    let emitted = Arc::new(Notify::new());
+    let temp = tempfile::tempdir().unwrap();
+    let fs = crate::HostFileSystem::new(temp.path().into());
+    let mut request = automation_request("source-changed");
+    let config = request.task.automation.as_mut().unwrap();
+    config.run_mode = cron::automation::RunMode::SelectedSession;
+    config.target_session_id = Some(CRON_TEST_SESSION.into());
+    config.target_session_transcript_path = Some(CRON_TEST_PATH.into());
+    config.target_session_mode = Some("code".into());
+    config.target_session_scope_key = Some(CRON_TEST_SCOPE.into());
+    let wire_id = crate::cron_host::transport_run_id(&request);
+    let mut task = request.task.clone();
+    task.automation
+        .as_mut()
+        .unwrap()
+        .target_session_transcript_path =
+        Some("/other/11111111-2222-4333-8444-555555555555.jsonl".into());
+    task.automation.as_mut().unwrap().runs = serde_json::from_value(
+        serde_json::to_value(
+            crate::cron_host::requested_task(&request)
+                .automation
+                .unwrap()
+                .runs,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    cron::tasks_file::write_automation_tasks_body(
+        &fs,
+        temp.path(),
+        &serde_json::to_string(&serde_json::json!({"tasks":[task]})).unwrap(),
+    )
+    .await
+    .unwrap();
+    let firer = Arc::new(HostCronFirer::new(
+        Arc::new(ObservedSink {
+            inner: connection.event_sink(),
+            emitted: emitted.clone(),
+        }),
+        temp.path().into(),
+        connection.cron_requests_handle(),
+    ));
+    let running = firer.clone();
+    let job = tokio::spawn(async move { running.fire_automation(&request).await });
+    emitted.notified().await;
+    assert!(matches!(
+        next_frame(&mut socket).await,
+        Frame::Event(ClientEvent::CronRunRequested { .. })
+    ));
+    firer
+        .started(
+            &wire_id,
+            CRON_TEST_SESSION,
+            CRON_TEST_PATH,
+            "code",
+            Some(CRON_TEST_SCOPE),
+        )
+        .await;
+    assert!(matches!(
+        next_frame(&mut socket).await,
+        Frame::Event(ClientEvent::CronRunBound { run_id, error: Some(error) })
+            if run_id == wire_id && error.starts_with("cancelled:")
+    ));
+    let stored = std::fs::read_to_string(cron::scheduled_tasks_path(temp.path())).unwrap();
+    let persisted = cron::parse_tasks(&stored);
+    let config = persisted.tasks[0].automation.as_ref().unwrap();
+    assert_eq!(
+        config.target_session_transcript_path.as_deref(),
+        Some("/other/11111111-2222-4333-8444-555555555555.jsonl")
+    );
+    assert_eq!(config.runs[0].status, cron::AutomationRunStatus::Cancelled);
+    assert!(config.runs[0].session_id.is_none());
+    connection.cron_requests.disconnected().await;
+    let mut replayed = Vec::new();
+    connection
+        .cron_requests
+        .replay(|event| {
+            replayed.push(event);
+            true
+        })
+        .await;
+    let ClientEvent::CronRunRequested { task, .. } = &replayed[0] else {
+        panic!("expected unbound request replay")
+    };
+    assert!(task.automation.as_ref().unwrap().runs[0]
+        .started_at
+        .is_none());
+    firer
+        .complete(
+            &wire_id,
+            None,
+            None,
+            Some("cancelled: rejected stale source".into()),
+        )
+        .await;
+    assert!(job.await.unwrap().is_err());
+    connection.close_connection(Some(&sink)).await;
+    drop(socket);
+    endpoint.shutdown().await;
+}
+
+struct ImmediateMetadataRouter;
+
+#[async_trait]
+impl CommandRouter for ImmediateMetadataRouter {
+    async fn route(&self, _: ClientCommand, _: Arc<dyn ClientEventSink>) {}
+
+    async fn session_metadata(
+        &self,
+        request: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, String> {
+        assert_eq!(request.string_at("/action"), Some("capture"));
+        assert!(request.string_at("/receipt").is_none());
+        Utf16JsonProjection::parse(r#"{"receipt":"underlying-writer-receipt"}"#)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[tokio::test]
+async fn session_metadata_socket_reuses_capacity_over_limit() {
+    let connection =
+        Arc::new(BridgeConnection::new().bind_router(Arc::new(ImmediateMetadataRouter)));
+    let endpoint = bridge::McpEndpoint::start_on_ephemeral_port_with_pump(connection.clone())
+        .await
+        .unwrap();
+    endpoint.set_auth_token("connection-regression-token".into());
+    let mut socket = connect_authenticated(&endpoint).await;
+
+    let hello_request = Frame::Request(BridgeRequest {
+        trace_context: None,
+        id: 1,
+        method: "hello".into(),
+        params: serialize_source(&hello()).unwrap(),
+    });
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&hello_request).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(next_frame(&mut socket).await, Frame::Response(_)));
+
+    for index in 0..(SessionMetadataReceipts::LIMIT + 1) {
+        let token = uuid::Uuid::new_v4().to_string();
+        let capture_id = 2 + index as u64 * 2;
+        let capture = Frame::Request(BridgeRequest {
+            trace_context: None,
+            id: capture_id,
+            method: "session_metadata".into(),
+            params: serialize_source(&serde_json::json!({
+                "action":"capture", "receipt":token,
+                "sessionId":"11111111-2222-4333-8444-555555555555",
+                "transcriptPath":"/tmp/11111111-2222-4333-8444-555555555555.jsonl",
+                "sessionMode":"code"
+            }))
+            .unwrap(),
+        });
+        socket
+            .send(Message::Text(serde_json::to_string(&capture).unwrap()))
+            .await
+            .unwrap();
+        let Frame::Response(captured) = next_frame(&mut socket).await else {
+            panic!("expected capture response")
+        };
+        assert_eq!(captured.id, capture_id);
+        assert!(captured.error.is_none());
+        assert_eq!(
+            captured.result.unwrap().string_at("/receipt"),
+            Some(token.as_str())
+        );
+
+        let release = Frame::Request(BridgeRequest {
+            trace_context: None,
+            id: capture_id + 1,
+            method: "session_metadata".into(),
+            params: serialize_source(&serde_json::json!({"action":"release", "receipt":token}))
+                .unwrap(),
+        });
+        socket
+            .send(Message::Text(serde_json::to_string(&release).unwrap()))
+            .await
+            .unwrap();
+        let Frame::Response(released) = next_frame(&mut socket).await else {
+            panic!("expected release response")
+        };
+        assert_eq!(released.id, capture_id + 1);
+        assert!(released.error.is_none());
+        assert_eq!(
+            released
+                .result
+                .unwrap()
+                .at_pointer("/ok")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    assert!(connection
+        .metadata_receipts
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .receipts
+        .is_empty());
+    drop(socket);
+    endpoint.shutdown().await;
 }
 
 #[tokio::test]
@@ -863,12 +1106,33 @@ async fn bound_cron_claim_replays_for_result_recovery_then_retires_on_completion
         next_frame(&mut first_socket).await,
         Frame::Event(ClientEvent::CronRunRequested { .. })
     ));
-    firer.started(&wire_id, "bound-session").await;
+    firer
+        .started(
+            &wire_id,
+            CRON_TEST_SESSION,
+            CRON_TEST_PATH,
+            "code",
+            Some(CRON_TEST_SCOPE),
+        )
+        .await;
     let bound = next_frame(&mut first_socket).await;
     assert!(
         matches!(&bound,
         Frame::Event(ClientEvent::CronRunBound { run_id, error: None }) if run_id == &wire_id),
         "actual bind acknowledgement: {bound:?}"
+    );
+    let stored = std::fs::read_to_string(cron::scheduled_tasks_path(temp.path())).unwrap();
+    let persisted = cron::parse_tasks(&stored);
+    let persisted_run = &persisted.tasks[0].automation.as_ref().unwrap().runs[0];
+    assert_eq!(persisted_run.session_id.as_deref(), Some(CRON_TEST_SESSION));
+    assert_eq!(
+        persisted_run.session_transcript_path.as_deref(),
+        Some(CRON_TEST_PATH)
+    );
+    assert_eq!(persisted_run.session_mode.as_deref(), Some("code"));
+    assert_eq!(
+        persisted_run.session_scope_key.as_deref(),
+        Some(CRON_TEST_SCOPE)
     );
     connection.close_connection(Some(&first_sink)).await;
 
@@ -887,12 +1151,15 @@ async fn bound_cron_claim_replays_for_result_recovery_then_retires_on_completion
     assert_eq!(run_id, wire_id);
     let run = &task.automation.unwrap().runs[0];
     assert_eq!(run.id, "bound-occurrence");
-    assert_eq!(run.session_id.as_deref(), Some("bound-session"));
+    assert_eq!(run.session_id.as_deref(), Some(CRON_TEST_SESSION));
+    assert_eq!(run.session_transcript_path.as_deref(), Some(CRON_TEST_PATH));
+    assert_eq!(run.session_mode.as_deref(), Some("code"));
+    assert_eq!(run.session_scope_key.as_deref(), Some(CRON_TEST_SCOPE));
     assert!(run.started_at.is_some());
     firer
         .complete(
             &wire_id,
-            Some("bound-session".into()),
+            Some(CRON_TEST_SESSION.into()),
             Some("original result".into()),
             None,
         )

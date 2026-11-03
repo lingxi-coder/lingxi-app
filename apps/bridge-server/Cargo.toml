@@ -113,6 +113,7 @@ anyhow = "1"
 
 [dev-dependencies]
 bytes.workspace = true
+tasks.workspace = true
 # Enable the deterministic policy-refusal probe only in Bridge tests.
 harness-runtime = { workspace = true, default-features = true, features = ["desktop", "test-support"] }
 mobile-linux-api = { workspace = true }

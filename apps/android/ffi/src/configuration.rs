@@ -190,6 +190,11 @@ pub struct AndroidEngineLaunchConfigFfi {
     pub session_mode: SessionModeDto,
     /// Restore this exact session during construction; None creates a new one.
     pub initial_session_id: Option<String>,
+    /// Exact catalog-selected transcript for that session, required on restore.
+    pub initial_session_transcript_path: Option<String>,
+    /// A scheduled controller does not create or own a conversation.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub scheduler_controller: bool,
     pub vision_delegation_enabled: bool,
     pub app_files_root: String,
     /// Optional Android Project workspace. When present it must resolve to

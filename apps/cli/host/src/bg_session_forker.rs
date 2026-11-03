@@ -172,6 +172,101 @@ async fn write_background_snapshot(
     Ok(())
 }
 
+/// Create the snapshot destination once, retain the identity of the created
+/// file, and write through the same durable authority used by its first mount.
+fn create_snapshot_writer(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+    profile: lingxi_core::host::session_context::FixedSessionProfile,
+) -> Result<
+    (
+        session::jsonl::writer::JsonlWriter,
+        session::jsonl::writer::TranscriptFileAuthority,
+        lingxi_core::host::live_sessions::SessionIdClaim,
+    ),
+    BgForkError,
+> {
+    use lingxi_core::host::rooted_fs::{
+        ensure_directory_identity_pinned, open_create_new_file_pinned, opened_file_identity,
+        root_identity,
+    };
+    let claim = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
+        .claim_session_id(session_id, std::process::id())
+        .map_err(|error| BgForkError::Snapshot(error.to_string()))?;
+    let root =
+        std::fs::canonicalize(home).map_err(|error| BgForkError::Snapshot(error.to_string()))?;
+    let identity =
+        root_identity(&root).map_err(|error| BgForkError::Snapshot(error.to_string()))?;
+    let path = session::jsonl::path::session_path(&root, &cwd.to_string_lossy(), session_id);
+    let relative = path
+        .strip_prefix(&root)
+        .map_err(|error| BgForkError::Snapshot(error.to_string()))?;
+    for dir in [
+        std::path::PathBuf::from("projects"),
+        relative.parent().unwrap().to_path_buf(),
+        std::path::PathBuf::from("session-state"),
+        std::path::PathBuf::from("session-state").join(session_id),
+    ] {
+        ensure_directory_identity_pinned(&root, &dir, &identity)
+            .map_err(|error| BgForkError::Snapshot(error.to_string()))?;
+    }
+    if profile.instruction_epoch > (1_u64 << 53) - 1 {
+        return Err(BgForkError::Snapshot("invalid instruction epoch".into()));
+    }
+    let mut file = open_create_new_file_pinned(&root, relative, Some(&identity))
+        .map_err(|error| BgForkError::Snapshot(error.to_string()))?;
+    let file_identity =
+        opened_file_identity(&file).map_err(|error| BgForkError::Snapshot(error.to_string()))?;
+    let authority = session::jsonl::writer::TranscriptFileAuthority::from_capture(
+        root.clone(),
+        relative.to_path_buf(),
+        identity,
+        file_identity,
+    )
+    .map_err(|error| BgForkError::Snapshot(error.to_string()))?;
+    let header = format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "fixed-session-mode",
+            "sessionId": session_id,
+            "sessionMode": profile.mode.as_str(),
+            "instructionEpoch": profile.instruction_epoch,
+        })
+    );
+    use std::io::Write;
+    file.write_all(header.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| BgForkError::Snapshot(error.to_string()))?;
+    if authority
+        .read_checked()
+        .map_err(|error| BgForkError::Snapshot(error.to_string()))?
+        != header.as_bytes()
+    {
+        return Err(BgForkError::Snapshot(
+            "snapshot source changed while initializing".into(),
+        ));
+    }
+    let durable = Arc::new(
+        session::jsonl::DurableTranscriptWriter::open(root.join("session-state").join(session_id))
+            .map_err(|error| BgForkError::Snapshot(error.to_string()))?,
+    );
+    let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.to_path_buf()));
+    let writer =
+        session::jsonl::writer::JsonlWriter::new(path.clone(), fs).with_durable_lock(durable);
+    let id = lingxi_core::types::SessionId::parse_prefixed(session_id)
+        .ok_or_else(|| BgForkError::Snapshot("invalid snapshot session ID".into()))?;
+    writer
+        .activate_session_target_with_authority(
+            id,
+            path,
+            cwd.to_path_buf(),
+            Some(authority.clone()),
+        )
+        .map_err(|error| BgForkError::Snapshot(error.to_string()))?;
+    Ok((writer, authority, claim))
+}
+
 fn pin_resume_source(
     config_home: &std::path::Path,
     cwd: &std::path::Path,
@@ -186,15 +281,15 @@ fn pin_resume_source(
         session_id,
     )
     .map_err(|error| BgForkError::Dispatch(error.to_string()))?;
-    let content = std::fs::read_to_string(&source)
-        .map_err(|error| BgForkError::Dispatch(error.to_string()))?;
-    crate::init::validate_resume_mode(
-        &content,
+    let captured = crate::init::capture_selected_cli_source(
+        config_home,
         uuid,
+        &source,
         Some(lingxi_core::host::session_context::ConversationMode::Code),
     )
     .map_err(|error| BgForkError::Dispatch(error.to_string()))?;
-    context.transcript_path = Some(source.to_string_lossy().into_owned());
+    context.transcript_path = Some(captured.authority.path().to_string_lossy().into_owned());
+    context.published_branch = Some(captured);
     Ok(())
 }
 
@@ -355,9 +450,23 @@ impl CliBgSessionForker {
         } = publication;
         configure_fork_launch_authority(&mut launch_context, handoff.is_some(), system_prompt);
         let cwd = cwd_pb.display().to_string();
-        let session_path = session::jsonl::path::session_path(&config_home, &cwd, &session_id);
-        let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd_pb.clone()));
-        let writer = session::jsonl::writer::JsonlWriter::new(session_path.clone(), fs);
+        let (writer, _initial_authority, target_claim) = match create_snapshot_writer(
+            &config_home,
+            &cwd_pb,
+            &session_id,
+            lingxi_core::host::session_context::FixedSessionProfile {
+                mode: conversation.mode,
+                instruction_epoch: conversation.instruction_epoch,
+            },
+        ) {
+            Ok(created) => created,
+            Err(error) => {
+                if let Some(ticket) = ticket.take() {
+                    ticket.confirm_resolved();
+                }
+                return Err(error);
+            }
+        };
         if let Err(error) =
             write_background_snapshot(&writer, &conversation, &session_id, &cwd, &version, &model)
                 .await
@@ -370,7 +479,40 @@ impl CliBgSessionForker {
         }
         // The copied transcript must remain the worker's source even if it is
         // removed before dispatch; never fall back to another project's UUID.
-        launch_context.transcript_path = Some(session_path.to_string_lossy().into_owned());
+        // An owned compaction may have transferred the authority while the
+        // snapshot was written; retain that transaction's current target.
+        let authority = match writer.active_transcript_authority() {
+            Some(authority) => authority,
+            None => {
+                if let Some(ticket) = ticket.take() {
+                    ticket.confirm_resolved();
+                }
+                return Err(BgForkError::Snapshot(
+                    "snapshot writer lost its source authority".into(),
+                ));
+            }
+        };
+        let source = match authority.read_checked().and_then(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|error| lingxi_core::host::FsError::Io(error.to_string()))
+        }) {
+            Ok(content) => crate::init::PublishedBranchSource {
+                authority: authority.clone(),
+                content,
+            },
+            Err(error) => {
+                if let Some(ticket) = ticket.take() {
+                    ticket.confirm_resolved();
+                }
+                return Err(BgForkError::Snapshot(error.to_string()));
+            }
+        };
+        launch_context.transcript_path = Some(authority.path().to_string_lossy().into_owned());
+        launch_context.published_branch = Some(source);
+        launch_context.session_profile = Some(crate::background_launch::BackgroundSessionProfile {
+            mode: conversation.mode,
+            instruction_epoch: conversation.instruction_epoch,
+        });
         launch_context.model = Some(model);
         launch_context.handoff = handoff;
         if let Some(recovery) = &recovery {
@@ -393,6 +535,9 @@ impl CliBgSessionForker {
                 recovery.record_short(short);
             }
         };
+        // The durable receipt bridges the handoff after releasing the source
+        // claim so the child can acquire the target lease itself.
+        drop(target_claim);
         let short = crate::background_dispatch::dispatch_forked_session_with_context(
             &config_home,
             &runtime_dir,
@@ -509,6 +654,28 @@ impl BgSessionForker for CliBgSessionForker {
         // Pin the selected catalog path before publishing a job. If the file
         // disappears, dispatch must not select the UUID in another project.
         pin_resume_source(&self.config_home, &cwd_pb, session_id, &mut launch_context)?;
+        let source = launch_context
+            .published_branch
+            .as_ref()
+            .ok_or_else(|| BgForkError::Dispatch("selected resume source is unavailable".into()))?;
+        let target_cwd =
+            crate::background_dispatch::transcript_cwd(&source.authority.path(), &source.content)
+                .map_err(|error| BgForkError::Dispatch(error.to_string()))?;
+        let target = std::path::Path::new(&target_cwd);
+        if !target.is_dir() {
+            return Err(BgForkError::Dispatch(
+                "resume workspace is not an existing directory".into(),
+            ));
+        }
+        if target != cwd_pb.as_path()
+            && migrations::global_config::global_config_path().is_some_and(|config| {
+                !migrations::global_config::check_has_trust_dialog_accepted(&config, target)
+            })
+        {
+            return Err(BgForkError::Dispatch(
+                "resume workspace is not trusted; open it and approve trust first".into(),
+            ));
+        }
         let config_home = self.config_home.clone();
         let runtime_dir = self.runtime_dir.clone();
         let session_id = session_id.to_string();
@@ -541,6 +708,34 @@ mod tests {
     use lingxi_core::types::{
         utf16_json::Utf16JsonProjection as Source, ConversationMessage, MessageId,
     };
+
+    #[tokio::test]
+    async fn snapshot_writer_carries_created_inode_and_never_reuses_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let profile = FixedSessionProfile {
+            mode: ConversationMode::Code,
+            instruction_epoch: 1,
+        };
+        let (writer, authority, claim) = create_snapshot_writer(&home, &cwd, &id, profile).unwrap();
+        writer
+            .initialize_fixed_session_mode(&id, ConversationMode::Code, 1)
+            .await
+            .unwrap();
+        let bytes = authority.read_checked().unwrap();
+        let path = authority.path();
+        assert!(writer.verify_active_transcript_source(&authority).is_ok());
+        drop(claim);
+        assert!(create_snapshot_writer(&home, &cwd, &id, profile).is_err());
+        let saved = path.with_extension("saved");
+        std::fs::rename(&path, &saved).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(authority.read_checked().is_err());
+    }
 
     #[tokio::test]
     async fn closed_foreground_rejects_all_launches_before_publication() {

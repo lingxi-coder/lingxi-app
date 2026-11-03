@@ -1343,6 +1343,8 @@ mod tests {
             launch: BackgroundLaunchKind::Fresh,
             session_id: session_id.clone(),
             transcript_path: home.join("session.jsonl").display().to_string(),
+            session_profile: crate::background_launch::BackgroundSessionProfile::fresh_code(),
+            published_source: None,
             cwd: managed.display().to_string(),
             origin_cwd: repo.display().to_string(),
             worktree_path: Some(managed.display().to_string()),

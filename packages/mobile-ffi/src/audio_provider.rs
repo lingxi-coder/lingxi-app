@@ -73,6 +73,11 @@ impl RealtimeAudioCore {
         request_json: String,
         listener: Box<dyn PlatformRealtimeAudioListener>,
     ) -> Result<Self, MobileEngineError> {
+        if engine.is_scheduler_controller() {
+            return Err(MobileEngineError::Internal(
+                "A scheduled controller cannot start realtime audio".into(),
+            ));
+        }
         let runner = engine.clone();
         let (session, events) = audio_provider::realtime::NativeRealtimeSession::start_with_runner(
             engine.audio_orchestrator(),

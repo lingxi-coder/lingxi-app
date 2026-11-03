@@ -236,6 +236,7 @@ struct Assembly {
 
 struct Core {
     state: SessionState,
+    approval_response: ApprovalResponse,
     mode_conflicted: bool,
     active: bool,
     attach_id: u64,
@@ -252,6 +253,13 @@ struct Core {
     foreground: bool,
     seen_turns: Vec<u64>,
     reset_timer: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApprovalResponse {
+    Available,
+    InFlight,
+    Consumed,
 }
 
 impl Core {
@@ -306,6 +314,7 @@ impl SessionController {
         let inner = Arc::new(SessionInner {
             core: Mutex::new(Core {
                 state: SessionState::new(&session_id),
+                approval_response: ApprovalResponse::Available,
                 mode_conflicted: false,
                 active: false,
                 attach_id: 0,
@@ -838,19 +847,25 @@ impl SessionController {
                     "Attachments cannot be sent while a turn is running.",
                 ));
             }
-            let attachments: Vec<ImageRefDto> = images
-                .into_iter()
-                .filter(|i| is_supported_image_media_type(&i.media_type))
-                .take(MAX_IMAGE_ATTACHMENTS)
-                .collect();
-            if text.trim().is_empty() && attachments.is_empty() && file_refs.is_empty() {
+            if images.len() > MAX_IMAGE_ATTACHMENTS
+                || images
+                    .iter()
+                    .any(|image| !is_supported_image_media_type(&image.media_type))
+                || file_refs.len() > 4
+            {
+                return Err(RpcError::new(
+                    RemoteErrorCode::InvalidParams,
+                    "The prompt contains unsupported or too many attachments.",
+                ));
+            }
+            if text.trim().is_empty() && images.is_empty() && file_refs.is_empty() {
                 return Ok(());
             }
             let prompt = OutgoingPrompt {
                 id: random_id(),
                 text: text.to_owned(),
-                images: attachments,
-                file_refs: file_refs.into_iter().take(4).collect(),
+                images,
+                file_refs,
                 status: OutgoingStatus::Sending,
                 turn_id: None,
                 error: None,
@@ -877,6 +892,14 @@ impl SessionController {
             else {
                 return Ok(());
             };
+            if core.state.turn.running
+                && (!prompt.images.is_empty() || !prompt.file_refs.is_empty())
+            {
+                return Err(RpcError::new(
+                    RemoteErrorCode::Forbidden,
+                    "Attachments cannot be sent while a turn is running.",
+                ));
+            }
             self.inner.update_outgoing(&mut core, id, |p| {
                 p.status = OutgoingStatus::Sending;
                 p.error = None;
@@ -1180,6 +1203,7 @@ fn require_permission_response(
         && !core.mode_conflicted
         && core.state.status == SessionStatus::Live
         && core.state.session_mode.is_none()
+        && core.approval_response == ApprovalResponse::Available
         && core
             .state
             .pending
@@ -1365,6 +1389,9 @@ impl SessionInner {
     /// so listener order is the order of changes.
     fn commit(&self, core: &mut Core, change: impl FnOnce(&mut SessionState)) {
         change(&mut core.state);
+        if core.approval_response == ApprovalResponse::Consumed {
+            core.state.pending.permissions.clear();
+        }
         let _ = self.delivery.send(core.visible_state());
     }
 
@@ -1741,9 +1768,9 @@ impl SessionInner {
     }
 
     /// First answer wins: losing the race to another device is not an error, only a quiet note.
-    async fn answer(&self, method: &str, params: Value) -> Result<(), RpcError> {
-        {
-            let core = self.core.lock().expect("core");
+    async fn answer(self: &Arc<Self>, method: &str, params: Value) -> Result<(), RpcError> {
+        let reservation = {
+            let mut core = self.core.lock().expect("core");
             if method == methods::PERMISSION_RESPOND {
                 let request_id = params
                     .get("request_id")
@@ -1752,18 +1779,126 @@ impl SessionInner {
                         RpcError::new(RemoteErrorCode::Closed, "permission is unavailable")
                     })?;
                 require_permission_response(&core, self.io.connected(), request_id)?;
+                if is_team_approval(&self.session_id) {
+                    core.approval_response = ApprovalResponse::InFlight;
+                    Some(ApprovalReservation {
+                        inner: Arc::clone(self),
+                        armed: true,
+                    })
+                } else {
+                    None
+                }
             } else {
                 require_writable(&core, self.io.connected())?;
+                None
             }
+        };
+        if let Some(reservation) = reservation {
+            // The caller may cancel after the RPC has been sent. Keep its
+            // reservation until the transport resolves, because cancelling a
+            // local response waiter does not cancel the host's request.
+            let inner = Arc::clone(self);
+            let method = method.to_owned();
+            return tokio::spawn(async move {
+                inner
+                    .finish_answer(&method, params, Some(reservation))
+                    .await
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(RpcError::new(
+                    RemoteErrorCode::Closed,
+                    "permission response task failed",
+                ))
+            });
         }
+        self.finish_answer(method, params, None).await
+    }
+
+    async fn finish_answer(
+        &self,
+        method: &str,
+        params: Value,
+        reservation: Option<ApprovalReservation>,
+    ) -> Result<(), RpcError> {
         match self.io.request(method, Some(params), None).await {
-            Ok(_) => Ok(()),
-            Err(error) if error.code == RemoteErrorCode::NotPending => {
-                let mut core = self.core.lock().expect("core");
-                self.commit(&mut core, |s| s.answered_elsewhere = true);
+            Ok(_) => {
+                if let Some(mut reservation) = reservation {
+                    reservation.consume(false);
+                }
                 Ok(())
             }
-            Err(error) => Err(error),
+            Err(error) if error.code == RemoteErrorCode::NotPending => {
+                if let Some(mut reservation) = reservation {
+                    reservation.consume(true);
+                } else {
+                    let mut core = self.core.lock().expect("core");
+                    self.commit(&mut core, |s| s.answered_elsewhere = true);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(mut reservation) = reservation {
+                    if matches!(
+                        error.code,
+                        RemoteErrorCode::Timeout
+                            | RemoteErrorCode::Closed
+                            | RemoteErrorCode::Internal
+                    ) {
+                        // Delivery may already have occurred. Do not permit an
+                        // opposite answer merely because the reply was lost.
+                        reservation.consume(false);
+                    } else {
+                        reservation.release();
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+/// A failed request may be retried; a delivered answer consumes the
+/// capability even if a stale snapshot later repeats its pending request.
+struct ApprovalReservation {
+    inner: Arc<SessionInner>,
+    armed: bool,
+}
+
+impl ApprovalReservation {
+    fn release(&mut self) {
+        let mut core = self.inner.core.lock().expect("core");
+        if core.approval_response == ApprovalResponse::InFlight {
+            core.approval_response = ApprovalResponse::Available;
+        }
+        self.armed = false;
+    }
+
+    fn consume(&mut self, answered_elsewhere: bool) {
+        let mut core = self.inner.core.lock().expect("core");
+        core.approval_response = ApprovalResponse::Consumed;
+        self.inner.commit(&mut core, |state| {
+            if answered_elsewhere {
+                state.answered_elsewhere = true;
+            }
+        });
+        self.armed = false;
+    }
+}
+
+impl Drop for ApprovalReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut core = self
+                .inner
+                .core
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if core.approval_response == ApprovalResponse::InFlight {
+                // Task failure leaves delivery unknown, so fail closed.
+                core.approval_response = ApprovalResponse::Consumed;
+                self.inner.commit(&mut core, |_| {});
+            }
         }
     }
 }

@@ -81,6 +81,7 @@ impl std::ops::DerefMut for Runtime {
 pub(crate) struct CapturedTuiResume {
     pub messages: Vec<session::jsonl::JsonlMessage>,
     pub entries: Vec<session::jsonl::JsonlMessage>,
+    pub authority: session::jsonl::writer::TranscriptFileAuthority,
 }
 
 /// Returns the standard [`Runtime`] plus the bridge receiver the TUI
@@ -93,6 +94,7 @@ pub struct TuiBuild {
     pub(crate) captured_resume: Option<CapturedTuiResume>,
     /// Source identity for a read-only resume without a transcript writer.
     pub(crate) resume_transcript_path: Option<std::path::PathBuf>,
+    pub(crate) resume_transcript_authority: Option<session::jsonl::writer::TranscriptFileAuthority>,
     /// Exact launch settings and managed policy cache used by account actions.
     pub provider_account_config: Arc<DesktopConfig>,
     pub initial_draft: Option<String>,
@@ -623,8 +625,12 @@ fn load_settings_view_mode(include_user: bool, include_project: bool) -> Option<
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
 /// glob patterns / absolute paths of `LINGXI.md` files to exclude from the
 /// system prompt (claude-code `isLingxiMdExcluded`). Empty when unset.
-pub(crate) fn load_lingxi_md_excludes(include_user: bool, include_project: bool) -> Vec<String> {
-    load_scoped_settings(include_user, include_project)
+pub(crate) fn load_lingxi_md_excludes_at(
+    cwd: &std::path::Path,
+    include_user: bool,
+    include_project: bool,
+) -> Vec<String> {
+    load_scoped_settings_at(cwd, include_user, include_project)
         .and_then(|eff| eff.settings.lingxi_md_excludes)
         .unwrap_or_default()
 }
@@ -678,6 +684,21 @@ pub(crate) fn resolve_desktop_config(
 ) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     resolve_desktop_config_at(argv, permission_mode, cwd)
+}
+
+/// Project settings follow the restored workspace; explicit relative --add-dir
+/// arguments remain relative to the directory where the CLI was invoked.
+pub(crate) fn resolve_resumed_desktop_config_at(
+    argv: &Argv,
+    permission_mode: permission::PermissionMode,
+    cwd: std::path::PathBuf,
+) -> DesktopConfig {
+    let launch_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut cfg = resolve_desktop_config_at(argv, permission_mode, cwd);
+    for path in &mut cfg.add_dir {
+        *path = crate::background_launch::resolve_add_dir_at(path, &launch_cwd);
+    }
+    cfg
 }
 
 /// Resolve project-scoped configuration against an explicit session directory.
@@ -845,6 +866,7 @@ pub(crate) fn resolve_desktop_config_at(
         __desktop_config.defer_session_start = false;
         __desktop_config.connect_mcp_in_background = false;
         __desktop_config.session_transcript_path = None;
+        __desktop_config.session_transcript_authority = None;
         __desktop_config.session_resume_snapshot = None;
         __desktop_config.session_resume_cost = None;
         __desktop_config.max_structured_output_retries = 5;
@@ -1484,6 +1506,9 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         false,
         None,
         Some(lingxi_core::host::session_context::ConversationMode::Code),
+        None,
+        None,
+        None,
     ))
     .await
 }
@@ -1497,6 +1522,9 @@ pub(crate) async fn build_runtime_for_tui_inner_with_parent_and_native_settings_
     native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext,
     resume_transcript_path: Option<std::path::PathBuf>,
     expected_mode: Option<lingxi_core::host::session_context::ConversationMode>,
+    expected_profile: Option<lingxi_core::host::session_context::FixedSessionProfile>,
+    published_branch: Option<PublishedBranchSource>,
+    resume_cwd: std::path::PathBuf,
 ) -> Result<TuiBuild, InitError> {
     Box::pin(build_runtime_for_tui_inner_with_parent_impl(
         argv,
@@ -1506,8 +1534,115 @@ pub(crate) async fn build_runtime_for_tui_inner_with_parent_and_native_settings_
         true,
         resume_transcript_path,
         expected_mode,
+        expected_profile,
+        published_branch,
+        Some(resume_cwd),
     ))
     .await
+}
+
+/// Carry the inode and exact bytes returned by branch publication into the
+/// ordinary claimed-resume path, where they are checked again before mounting.
+#[derive(Debug, Clone)]
+pub struct PublishedBranchSource {
+    pub authority: session::jsonl::writer::TranscriptFileAuthority,
+    pub content: String,
+}
+
+impl From<session::branch::PublishedBranch> for PublishedBranchSource {
+    fn from(published: session::branch::PublishedBranch) -> Self {
+        Self {
+            authority: published.authority,
+            content: published.content,
+        }
+    }
+}
+
+/// Retain the physical source and the bytes read at the first selected open.
+/// Callers may pass this receipt through UI selection and process handoff;
+/// a later mount must not turn a replacement at the same path into authority.
+pub(crate) fn capture_selected_cli_source(
+    home: &std::path::Path,
+    session_id: uuid::Uuid,
+    path: &std::path::Path,
+    expected_mode: Option<lingxi_core::host::session_context::ConversationMode>,
+) -> Result<PublishedBranchSource, InitError> {
+    let path = validate_exact_tui_resume_path(home, session_id, path)?;
+    let (content, identity) = read_pinned_cli_resume_source(home, &path)?;
+    validate_resume_mode(&content, session_id, expected_mode)?;
+    let root = std::fs::canonicalize(home)
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    let relative = path
+        .strip_prefix(&root)
+        .map_err(|_| InitError::Orchestrator("resume transcript left its captured root".into()))?
+        .to_path_buf();
+    let authority = session::jsonl::writer::TranscriptFileAuthority::from_capture(
+        root, relative, identity.0, identity.1,
+    )
+    .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    if authority
+        .read_checked()
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?
+        != content.as_bytes()
+    {
+        return Err(InitError::Orchestrator(
+            "resume transcript changed during source capture".into(),
+        ));
+    }
+    authority
+        .verify_current()
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    Ok(PublishedBranchSource { authority, content })
+}
+
+/// The workspace used for admission and runtime configuration must come from
+/// the same revision that will be mounted after the trust dialog.
+pub(crate) fn selected_resume_workspace(
+    source: &PublishedBranchSource,
+) -> Result<std::path::PathBuf, InitError> {
+    let bytes = source
+        .authority
+        .read_checked()
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    if bytes != source.content.as_bytes() {
+        return Err(InitError::Orchestrator(
+            "selected transcript changed; select it again".into(),
+        ));
+    }
+    let cwd = crate::background_dispatch::transcript_cwd(&source.authority.path(), &source.content)
+        .map(std::path::PathBuf::from)
+        .map_err(|error| InitError::Orchestrator(format!("resume workspace: {error}")))?;
+    if !cwd.is_absolute() || !cwd.is_dir() {
+        return Err(InitError::Orchestrator(
+            "resume workspace is not an existing absolute directory".into(),
+        ));
+    }
+    Ok(cwd)
+}
+
+pub(crate) fn install_published_branch(
+    cfg: &mut DesktopConfig,
+    session_id: uuid::Uuid,
+    published: PublishedBranchSource,
+) -> Result<(), InitError> {
+    let path = published.authority.path();
+    if cfg.session_transcript_path.as_ref() != Some(&path)
+        || published.authority.read_checked().map_err(|error| {
+            InitError::Orchestrator(format!(
+                "selected transcript changed; select it again: {error}"
+            ))
+        })? != published.content.as_bytes()
+    {
+        return Err(InitError::Orchestrator(
+            "selected transcript changed before resume; select it again".into(),
+        ));
+    }
+    cfg.session_transcript_authority = Some(published.authority);
+    cfg.session_resume_snapshot = Some(harness_runtime::desktop::DesktopSessionResumeSnapshot {
+        source_session_id: session_id.to_string(),
+        content: published.content.into(),
+    });
+    Ok(())
 }
 
 /// Capture one source revision before desktop assembly can run hooks. A
@@ -1518,48 +1653,119 @@ pub(crate) async fn capture_tui_resume(
     session_id: uuid::Uuid,
     expected_mode: Option<lingxi_core::host::session_context::ConversationMode>,
 ) -> Result<CapturedTuiResume, InitError> {
-    #[cfg(unix)]
-    let fs = Arc::new(platform_posix::PosixFileSystem::new(cfg.cwd.clone()));
-    #[cfg(windows)]
-    let fs = Arc::new(platform_windows::WindowsFileSystem::new(cfg.cwd.clone()));
-    let fs: Arc<dyn lingxi_core::host::FileSystem> = fs;
+    capture_tui_resume_with_profile_and_hook(cfg, session_id, expected_mode, None, || {}).await
+}
+
+#[cfg(test)]
+async fn capture_tui_resume_with_hook(
+    cfg: &mut DesktopConfig,
+    session_id: uuid::Uuid,
+    expected_mode: Option<lingxi_core::host::session_context::ConversationMode>,
+    before_claim: impl FnOnce(),
+) -> Result<CapturedTuiResume, InitError> {
+    capture_tui_resume_with_profile_and_hook(cfg, session_id, expected_mode, None, before_claim)
+        .await
+}
+
+async fn capture_tui_resume_with_profile_and_hook(
+    cfg: &mut DesktopConfig,
+    session_id: uuid::Uuid,
+    expected_mode: Option<lingxi_core::host::session_context::ConversationMode>,
+    expected_profile: Option<lingxi_core::host::session_context::FixedSessionProfile>,
+    before_claim: impl FnOnce(),
+) -> Result<CapturedTuiResume, InitError> {
     let path = match cfg.session_transcript_path.as_ref() {
         Some(path) => path.clone(),
-        None => {
-            let path = session::jsonl::resolve_session_path_across_worktrees(
-                &cfg.lingxi_home,
-                &cfg.cwd.to_string_lossy(),
-                session_id,
-            )
-            .await
-            .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
-            absolute_resolved_tui_resume_path(path)?
-        }
+        None => resolve_unique_cli_resume_path(&cfg.lingxi_home, session_id)
+            .map_err(|error| InitError::Orchestrator(error.to_string()))?,
     };
     let path = validate_exact_tui_resume_path(&cfg.lingxi_home, session_id, &path)?;
-    let (_, preflight, preflight_loaded) =
-        session::jsonl::load_routed_session_from_path_with_source(&path, session_id, fs.clone())
-            .await
+    let (preflight, identity) = read_pinned_cli_resume_source(&cfg.lingxi_home, &path)?;
+    // A newly published branch already has a first known file identity and
+    // rendered content. Do not replace that receipt with a later path read.
+    if let Some(authority) = cfg.session_transcript_authority.as_ref() {
+        let snapshot = cfg.session_resume_snapshot.as_ref().ok_or_else(|| {
+            InitError::Orchestrator("captured transcript content is unavailable".into())
+        })?;
+        let root = std::fs::canonicalize(&cfg.lingxi_home)
+            .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+        let relative = path.strip_prefix(&root).map_err(|_| {
+            InitError::Orchestrator("resume transcript left its captured root".into())
+        })?;
+        let current = session::jsonl::writer::TranscriptFileAuthority::from_capture(
+            root,
+            relative.to_path_buf(),
+            identity.0,
+            identity.1,
+        )
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+        if snapshot.source_session_id != session_id.to_string()
+            || snapshot.content.as_ref() != preflight
+            || !authority.same_source(&current)
+            || authority.read_checked().map_err(|error| {
+                InitError::Orchestrator(format!(
+                    "selected transcript changed; select it again: {error}"
+                ))
+            })? != preflight.as_bytes()
+        {
+            return Err(InitError::Orchestrator(
+                "selected transcript changed before resume; select it again".into(),
+            ));
+        }
+    }
+    let preflight_loaded =
+        session::jsonl::loader::route_captured_session_source(&path, session_id, &preflight)
             .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
     let mode = validate_resume_mode(&preflight, session_id, expected_mode)?;
+    let profile = session::JsonlWriter::fixed_session_profile_from_source(
+        &preflight,
+        &session_id.to_string(),
+    )
+    .map_err(InitError::Orchestrator)?;
+    if expected_profile.is_some_and(|expected| expected != profile) {
+        return Err(InitError::Orchestrator(
+            "captured session profile changed before resume".into(),
+        ));
+    }
     // Inspect the fixed ownership before acquiring any writer authority. Once
     // claimed, capture and validate again so the mounted revision is the one
     // checked under that authority.
     let (content, loaded, lease) = if cfg.session_persistence {
+        before_claim();
         let lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
             cfg.lingxi_home.join("sessions"),
         )
         .claim_session_id(&session_id.to_string(), std::process::id())
         .map_err(|error| InitError::DurableSession(error.to_string()))?
         .into_shared();
-        let (_, content, loaded) =
-            session::jsonl::load_routed_session_from_path_with_source(&path, session_id, fs)
-                .await
+        let (content, captured_identity) = read_pinned_cli_resume_source(&cfg.lingxi_home, &path)?;
+        if captured_identity != identity {
+            return Err(InitError::Orchestrator(
+                "resume transcript changed during writer claim".into(),
+            ));
+        }
+        if cfg.session_transcript_authority.is_some()
+            && cfg
+                .session_resume_snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.content.as_ref() != content)
+        {
+            return Err(InitError::Orchestrator(
+                "selected transcript changed during writer claim; select it again".into(),
+            ));
+        }
+        let loaded =
+            session::jsonl::loader::route_captured_session_source(&path, session_id, &content)
                 .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
         let captured_mode = validate_resume_mode(&content, session_id, expected_mode)?;
-        if captured_mode != mode {
+        let captured_profile = session::JsonlWriter::fixed_session_profile_from_source(
+            &content,
+            &session_id.to_string(),
+        )
+        .map_err(InitError::Orchestrator)?;
+        if captured_mode != mode || captured_profile != profile {
             return Err(InitError::Orchestrator(
-                "session_mode_mismatch: session mode changed during resume".into(),
+                "session_mode_mismatch: session profile changed during resume".into(),
             ));
         }
         (content, loaded, Some(lease))
@@ -1567,7 +1773,8 @@ pub(crate) async fn capture_tui_resume(
         (preflight, preflight_loaded, None)
     };
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
-    if messages.is_empty() {
+    if messages.is_empty() && !is_valid_anchored_empty_source(&path, session_id, &content, &loaded)
+    {
         return Err(InitError::Orchestrator(
             "resume transcript has no conversation".into(),
         ));
@@ -1584,6 +1791,30 @@ pub(crate) async fn capture_tui_resume(
     } else {
         None
     };
+    let captured_authority = {
+        let root = std::fs::canonicalize(&cfg.lingxi_home)
+            .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+        let relative = path
+            .strip_prefix(&root)
+            .map_err(|_| {
+                InitError::Orchestrator("resume transcript left its captured root".into())
+            })?
+            .to_path_buf();
+        session::jsonl::writer::TranscriptFileAuthority::from_capture(
+            root, relative, identity.0, identity.1,
+        )
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?
+    };
+    if captured_authority
+        .read_checked()
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?
+        != content.as_bytes()
+    {
+        return Err(InitError::Orchestrator(
+            "resume transcript changed before mount; select it again".into(),
+        ));
+    }
+    cfg.session_transcript_authority = lease.as_ref().map(|_| captured_authority.clone());
     cfg.session_transcript_path = Some(path);
     cfg.session_resume_snapshot = Some(harness_runtime::desktop::DesktopSessionResumeSnapshot {
         source_session_id: session_id.to_string(),
@@ -1594,7 +1825,52 @@ pub(crate) async fn capture_tui_resume(
     Ok(CapturedTuiResume {
         messages,
         entries: loaded.messages_in_order,
+        authority: captured_authority,
     })
+}
+
+/// Read from the trusted home through every original path component without
+/// following links, and retain both home and file identities across the claim.
+pub(crate) fn read_pinned_cli_resume_source(
+    config_home: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<
+    (
+        String,
+        (
+            lingxi_core::host::rooted_fs::RootIdentity,
+            lingxi_core::host::rooted_fs::RootIdentity,
+        ),
+    ),
+    InitError,
+> {
+    use lingxi_core::host::rooted_fs::{
+        open_read_file_pinned, opened_file_identity, root_identity, validate_open_file_single_link,
+    };
+    use std::io::Read;
+    let session_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| uuid::Uuid::parse_str(stem).ok())
+        .ok_or_else(|| InitError::Orchestrator("resume transcript has invalid filename".into()))?;
+    let (home, relative) = exact_tui_resume_location(config_home, session_id, path)?;
+    let root = root_identity(&home)
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    let mut file = open_read_file_pinned(&home, &relative, Some(&root))
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    validate_open_file_single_link(&file)
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    let identity = opened_file_identity(&file)
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    if !content.is_empty() && !content.ends_with('\n') {
+        return Err(InitError::Orchestrator(
+            "resume transcript ends in an incomplete record".into(),
+        ));
+    }
+    Ok((content, (root, identity)))
 }
 
 pub(crate) fn validate_resume_mode(
@@ -1614,6 +1890,28 @@ pub(crate) fn validate_resume_mode(
     Ok(mode)
 }
 
+/// An empty conversation is resumable only when the current-format draft
+/// anchor identifies the same existing workspace as the selected transcript.
+pub(crate) fn is_valid_anchored_empty_source(
+    path: &std::path::Path,
+    session_id: uuid::Uuid,
+    source: &str,
+    loaded: &session::jsonl::LoadedTranscript,
+) -> bool {
+    let session_id = session_id.to_string();
+    if !loaded.mobile_empty_sessions.contains(&session_id) {
+        return false;
+    }
+    let Some(workspace) = session::jsonl::validated_empty_draft_cwd(source, &session_id) else {
+        return false;
+    };
+    workspace.is_dir()
+        && session::jsonl::loader::transcript_workspace_path(path, loaded)
+            .map(std::path::PathBuf::from)
+            .as_deref()
+            == Some(workspace.as_path())
+}
+
 #[cfg(test)]
 #[path = "init/captured_resume_path_tests.rs"]
 pub(crate) mod captured_resume_path_tests;
@@ -1631,33 +1929,126 @@ pub(crate) fn absolute_resolved_tui_resume_path(
         .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))
 }
 
+/// Resolve an unselected UUID only when exactly one physical source exists.
+/// A catalog selection must instead carry its own path through the mount.
+pub(crate) fn resolve_unique_cli_resume_path(
+    config_home: &std::path::Path,
+    session_id: uuid::Uuid,
+) -> std::io::Result<std::path::PathBuf> {
+    let rejected = |message: String| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("resume transcript: {message}"),
+        )
+    };
+    let root = std::fs::canonicalize(config_home.join("projects")).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            error
+        } else {
+            rejected(format!("cannot resolve transcript root: {error}"))
+        }
+    })?;
+    let entries = std::fs::read_dir(&root)
+        .map_err(|error| rejected(format!("cannot inspect transcript root: {error}")))?;
+    let mut selected = None;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| rejected(format!("cannot inspect transcript bucket: {error}")))?;
+        let kind = entry
+            .file_type()
+            .map_err(|error| rejected(format!("cannot inspect transcript bucket: {error}")))?;
+        if !kind.is_dir() || kind.is_symlink() {
+            continue;
+        }
+        let files = std::fs::read_dir(entry.path())
+            .map_err(|error| rejected(format!("cannot inspect transcript bucket: {error}")))?;
+        for file in files {
+            let file = file.map_err(|error| {
+                rejected(format!("cannot inspect transcript candidate: {error}"))
+            })?;
+            let candidate = file.path();
+            if candidate.extension().and_then(|value| value.to_str()) != Some("jsonl")
+                || candidate
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                    != Some(session_id)
+            {
+                continue;
+            }
+            let candidate = validate_exact_tui_resume_path(config_home, session_id, &candidate)
+                .map_err(std::io::Error::other)?;
+            if selected.is_some() {
+                return Err(rejected(format!(
+                    "session {session_id} is ambiguous across project roots"
+                )));
+            }
+            selected = Some(candidate);
+        }
+    }
+    selected.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("session {session_id} was not found"),
+        )
+    })
+}
+
 pub(crate) fn validate_exact_tui_resume_path(
     config_home: &std::path::Path,
     session_id: uuid::Uuid,
     path: &std::path::Path,
 ) -> Result<std::path::PathBuf, InitError> {
+    use lingxi_core::host::rooted_fs::{
+        open_read_file_pinned, root_identity, validate_open_file_single_link,
+    };
     let rejected = |message: &str| InitError::Orchestrator(format!("resume transcript: {message}"));
-    let expected_name = format!("{session_id}.jsonl");
-    if !path.is_absolute()
-        || path.file_name().and_then(|name| name.to_str()) != Some(&expected_name)
-    {
+    let (root, relative) = exact_tui_resume_location(config_home, session_id, path)?;
+    let root_id = root_identity(&root)
+        .map_err(|error| rejected(&format!("cannot inspect transcript home: {error}")))?;
+    let file = open_read_file_pinned(&root, &relative, Some(&root_id))
+        .map_err(|error| rejected(&format!("cannot open selected transcript: {error}")))?;
+    validate_open_file_single_link(&file)
+        .map_err(|error| rejected(&format!("invalid selected transcript: {error}")))?;
+    Ok(root.join(relative))
+}
+
+/// Preserve the selected project's raw components; resolving the full path
+/// first would allow a substituted projects root or bucket to change owner.
+fn exact_tui_resume_location(
+    config_home: &std::path::Path,
+    session_id: uuid::Uuid,
+    path: &std::path::Path,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), InitError> {
+    let rejected = |message: &str| InitError::Orchestrator(format!("resume transcript: {message}"));
+    let matches_id = |path: &std::path::Path| {
+        path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+            && path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                == Some(session_id)
+    };
+    if !path.is_absolute() || !matches_id(path) {
         return Err(rejected("selected path does not match the session UUID"));
     }
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| rejected(&format!("cannot inspect selected path: {error}")))?;
-    if !metadata.file_type().is_file() {
-        return Err(rejected("selected transcript is not a regular file"));
-    }
-    let root = std::fs::canonicalize(config_home.join("projects"))
-        .map_err(|error| rejected(&format!("cannot resolve transcript root: {error}")))?;
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|error| rejected(&format!("cannot resolve selected path: {error}")))?;
-    if !canonical.starts_with(root)
-        || canonical.file_name().and_then(|name| name.to_str()) != Some(&expected_name)
+    let logical_home = absolute_resolved_tui_resume_path(config_home.to_path_buf())?;
+    let root = std::fs::canonicalize(&logical_home)
+        .map_err(|error| rejected(&format!("cannot resolve transcript home: {error}")))?;
+    let logical_projects = logical_home.join("projects");
+    let canonical_projects = root.join("projects");
+    let selected = path
+        .strip_prefix(&logical_projects)
+        .or_else(|_| path.strip_prefix(&canonical_projects))
+        .map_err(|_| rejected("selected path is outside the transcript root"))?;
+    if selected.components().count() != 2
+        || !selected
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
     {
         return Err(rejected("selected path is outside the transcript root"));
     }
-    Ok(canonical)
+    Ok((root, std::path::Path::new("projects").join(selected)))
 }
 
 async fn build_runtime_for_tui_inner_with_parent_impl(
@@ -1668,6 +2059,9 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     capture_resume: bool,
     resume_transcript_path: Option<std::path::PathBuf>,
     expected_mode: Option<lingxi_core::host::session_context::ConversationMode>,
+    expected_profile: Option<lingxi_core::host::session_context::FixedSessionProfile>,
+    published_branch: Option<PublishedBranchSource>,
+    resume_cwd: Option<std::path::PathBuf>,
 ) -> Result<TuiBuild, InitError> {
     crate::startup_trace::mark("tui_runtime_build_start");
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1681,11 +2075,30 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     // (Task 8) Thread the CLI-resolved mode through the interactive TUI path.
     // The guard already ran in `run_cli` (notice already printed there too), so
     // this drops the notice and takes only the mode.
-    let (permission_mode, _notice) = crate::resolve_permission_mode(argv);
+    let (permission_mode, _notice) = match resume_cwd.as_deref() {
+        Some(cwd) => crate::permission_settings::resolve_permission_mode_at(argv, cwd),
+        None => crate::resolve_permission_mode(argv),
+    };
+    let auto_available = match resume_cwd.as_deref() {
+        Some(cwd) => crate::permission_settings::auto_mode_cycle_available_at(argv, cwd),
+        None => crate::auto_mode_cycle_available(argv),
+    };
 
     // (TUI-PERM) Resolve config ONCE so the gate's persist paths come from the
     // SAME cfg the engine builds with (no double resolve, no lost paths).
-    let mut cfg = resolve_desktop_config(argv, permission_mode);
+    let mut cfg = match resume_cwd {
+        Some(cwd) => {
+            if let Some(source) = published_branch.as_ref() {
+                if selected_resume_workspace(source)? != cwd {
+                    return Err(InitError::Orchestrator(
+                        "resume workspace changed after approval".into(),
+                    ));
+                }
+            }
+            resolve_resumed_desktop_config_at(argv, permission_mode, cwd)
+        }
+        None => resolve_desktop_config(argv, permission_mode),
+    };
     if let Some(context) = native_settings_agent_context {
         cfg.native_settings_agent_context = context;
     }
@@ -1710,10 +2123,32 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
             || argv.dangerously_skip_permissions
             || crate::permission_mode_preference::load(argv).is_some();
         cfg.session_transcript_path = resume_transcript_path;
-        Some(capture_tui_resume(&mut cfg, id, expected_mode).await?)
+        if let Some(published) = published_branch {
+            install_published_branch(&mut cfg, id, published)?;
+        }
+        Some(
+            capture_tui_resume_with_profile_and_hook(
+                &mut cfg,
+                id,
+                expected_mode,
+                expected_profile,
+                || {},
+            )
+            .await?,
+        )
     } else {
         None
     };
+    if let Some(captured) = captured_resume.as_ref() {
+        cfg.parent_session_id = crate::run::parent_session_id_from_messages(&captured.messages);
+    }
+    if argv.effort.is_none() {
+        if let Some(effort) = captured_resume.as_ref().and_then(|captured| {
+            orchestrator::runtime_metadata_from_messages(&captured.messages).effort
+        }) {
+            cfg.initial_effort = Some(effort);
+        }
+    }
 
     // Interactive permission gate: an unresolved mutating `Ask` surfaces the
     // TUI dialog over this channel instead of auto-allowing. AllowAlways
@@ -1807,6 +2242,9 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
         .map(permission::permission_mode_from_cli_string)
         .unwrap_or(permission_mode);
     Ok(TuiBuild {
+        resume_transcript_authority: captured_resume
+            .as_ref()
+            .map(|capture| capture.authority.clone()),
         captured_resume,
         resume_transcript_path,
         provider_account_config,
@@ -1825,7 +2263,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
                 || permission_mode == permission::PermissionMode::BypassPermissions),
         // `I1(e)`'s `aC()` half — the same availability gate the boot downgrade
         // and the live `set_permission_mode` use.
-        auto_available: crate::auto_mode_cycle_available(argv),
+        auto_available,
         bridge_rx,
         turn_tx,
         workflow_events,
@@ -2113,6 +2551,86 @@ mod tests {
         )
         .await
         .expect("isolated CLI runtime")
+    }
+
+    #[test]
+    fn resumed_runtime_build_uses_selected_relocated_workspace_and_source() {
+        run_on_supported_runtime_stack(|| async {
+            use lingxi_core::host::session_context::ConversationMode;
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().join("home");
+            let original = root.path().join("original");
+            let moved = root.path().join("moved");
+            let other = root.path().join("other");
+            for path in [&original, &moved, &other] {
+                std::fs::create_dir_all(path).unwrap();
+            }
+            let argv = Argv::default();
+            for (index, destination) in [&moved, &other].into_iter().enumerate() {
+                let id = uuid::Uuid::new_v4();
+                let path = captured_resume_path_tests::transcript(
+                    &home,
+                    &original,
+                    id,
+                    "selected",
+                    "2026-10-21T00:00:00.000Z",
+                    "code",
+                );
+                use std::io::Write;
+                writeln!(
+                    std::fs::OpenOptions::new().append(true).open(&path).unwrap(),
+                    "{}",
+                    serde_json::json!({"type":"relocated", "sessionId":id.to_string(), "relocatedCwd":destination})
+                )
+                .unwrap();
+                let source =
+                    capture_selected_cli_source(&home, id, &path, Some(ConversationMode::Code))
+                        .unwrap();
+                let workspace = selected_resume_workspace(&source).unwrap();
+                assert_eq!(workspace, *destination);
+                let mut cfg = resolve_resumed_desktop_config_at(
+                    &argv,
+                    permission::PermissionMode::Default,
+                    workspace,
+                );
+                cfg.lingxi_home = home.clone();
+                cfg.isolated_credential_storage = true;
+                cfg.startup_catalog = None;
+                cfg.session_id_override = Some(id.to_string());
+                cfg.session_transcript_path = Some(source.authority.path());
+                install_published_branch(&mut cfg, id, source).unwrap();
+                capture_tui_resume(&mut cfg, id, Some(ConversationMode::Code))
+                    .await
+                    .unwrap();
+                let runtime = build_runtime_from_config(
+                    cfg,
+                    Arc::new(orchestrator::test_support::MockOutputStream::new()),
+                )
+                .await
+                .unwrap();
+                assert_eq!(runtime.session_cwd.cwd(), *destination);
+                let writer = runtime.orchestrator.session_transcript_writer().unwrap();
+                assert_eq!(writer.active_path(), std::fs::canonicalize(&path).unwrap());
+                let payload = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    &serde_json::json!({"type":"custom-title", "sessionId":id.to_string(), "customTitle":format!("built-{index}")}).to_string(),
+                ).unwrap();
+                writer
+                    .append_json_once_durable(&format!("test-{id}"), payload)
+                    .await
+                    .unwrap();
+                assert!(std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains(&format!("built-{index}")));
+                assert!(!session::jsonl::session_path(
+                    &home,
+                    &destination.to_string_lossy(),
+                    &id.to_string()
+                )
+                .exists());
+                let report = runtime.session_lifecycle.shutdown_and_drain().await;
+                assert!(report.complete, "shutdown errors: {:?}", report.errors);
+            }
+        });
     }
 
     #[test]

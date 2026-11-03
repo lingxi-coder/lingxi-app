@@ -87,6 +87,11 @@ pub struct IosEngineLaunchConfigFfi {
     pub session_mode: SessionModeDto,
     /// Restore this exact owner before any session lifecycle hooks run.
     pub initial_session_id: Option<String>,
+    /// Exact catalog-selected transcript for that owner, required on restore.
+    pub initial_session_transcript_path: Option<String>,
+    /// A scheduled controller does not create or own a conversation.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub scheduler_controller: bool,
     pub vision_delegation_enabled: bool,
     pub app_sandbox_root: String,
     /// Optional cwd inside the Linux user HOME, in guest or native coordinates.
@@ -316,6 +321,11 @@ pub(super) fn ios_mobile_config_from_launch_config(
         cwd,
         logical_cwd,
         initial_session_id: config.initial_session_id.clone(),
+        initial_session_transcript_path: config
+            .initial_session_transcript_path
+            .as_ref()
+            .map(|path| std::path::PathBuf::from(path.as_str())),
+        scheduler_controller: config.scheduler_controller,
         lingxi_home: config_home,
         session_mode: match config.session_mode {
             SessionModeDto::Chat => MobileSessionMode::Chat,

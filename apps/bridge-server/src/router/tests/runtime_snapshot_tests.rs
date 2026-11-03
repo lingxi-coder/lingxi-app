@@ -6,7 +6,6 @@ use lingxi_core::host::task_registry::{
 use lingxi_core::host::team_registry::{TeamRegistryHandle, WorkerInfo};
 use std::sync::{Arc, Mutex};
 
-
 #[derive(Default)]
 struct SnapshotTasks {
     records: Mutex<Vec<TaskRecord>>,
@@ -85,6 +84,70 @@ fn snapshot_router(team: Arc<SnapshotTeam>) -> EngineCommandRouter {
         None,
     )
     .with_team_registry(team)
+}
+
+#[tokio::test]
+async fn resume_preflight_keeps_captured_source_when_catalog_changes() {
+    use client::adapter::ClientEventSink;
+    use client::protocol::commands::ClientCommand;
+    use client::protocol::events::ClientEvent;
+    use client::protocol::listings::SessionModeDto;
+
+    struct Sink(tokio::sync::Mutex<Vec<ClientEvent>>);
+    #[async_trait::async_trait]
+    impl ClientEventSink for Sink {
+        async fn emit(&self, event: ClientEvent) {
+            self.0.lock().await.push(event);
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let id = "11111111-2222-4333-8444-555555abcdef";
+    let first = home.join("projects/a").join(format!("{id}.jsonl"));
+    let second = home.join("projects/b").join(format!("{id}.jsonl"));
+    std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+    let content = format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+        serde_json::json!({"type":"user","uuid":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","parentUuid":null,"sessionId":id,"timestamp":"2026-10-21T00:00:00.000Z","cwd":cwd,"isSidechain":false,"message":{"role":"user","content":"first source"}})
+    );
+    std::fs::write(&first, &content).unwrap();
+    let router = snapshot_router(Arc::new(SnapshotTeam::default())).with_session_store(
+        SessionStoreContext::new(
+            home.clone(),
+            cwd.to_string_lossy().into_owned(),
+            Arc::new(crate::HostFileSystem::new(cwd)),
+        ),
+    );
+    let command = ClientCommand::ResumeSession {
+        session_id: id.into(),
+        cwd: None,
+        expected_mode: SessionModeDto::Code,
+    };
+    let prepared = router
+        .preflight_session_transition(&command)
+        .await
+        .unwrap()
+        .unwrap();
+    let retired = temp.path().join("retired.jsonl");
+    std::fs::rename(&first, &retired).unwrap();
+    std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+    std::fs::write(&second, &content).unwrap();
+    let sink = Arc::new(Sink(tokio::sync::Mutex::new(Vec::new())));
+    router
+        .route_prepared_session_transition(command, Some(prepared), sink.clone())
+        .await;
+    assert!(sink
+        .0
+        .lock()
+        .await
+        .iter()
+        .any(|event| matches!(event, ClientEvent::Error { .. })));
+    assert_eq!(std::fs::read_to_string(second).unwrap(), content);
+    assert_eq!(std::fs::read_to_string(retired).unwrap(), content);
 }
 
 #[tokio::test]

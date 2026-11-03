@@ -39,6 +39,25 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--session-metadata-json") {
+        let remaining: Vec<_> = std::env::args_os().skip(2).collect();
+        let home = match remaining.as_slice() {
+            [] => boot::brand_home().ok_or_else(|| anyhow::anyhow!("session home unavailable"))?,
+            [flag, path] if flag == "--session-config-home" => {
+                let path = std::path::PathBuf::from(path);
+                if !path.is_absolute() {
+                    return Err(anyhow::anyhow!("session home must be absolute"));
+                }
+                path
+            }
+            _ => return Err(anyhow::anyhow!("invalid session metadata arguments")),
+        };
+        let result = bridge_server::session_metadata::run(&home, std::io::stdin().lock())
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+        println!("{result}");
+        return Ok(());
+    }
     if std::env::args().nth(1).as_deref() == Some("--provider-settings-command") {
         let home = boot::brand_home()
             .ok_or_else(|| anyhow::anyhow!("provider settings home unavailable"))?;
@@ -153,9 +172,18 @@ async fn async_main() -> anyhow::Result<()> {
             .catalog_session_id
             .as_deref()
             .or(args.session_id.as_deref());
-        let json = match args.session_scope {
-            Some(scope) => boot::list_sessions_json_in_scope(&cwd, session_id, scope).await,
-            None => boot::list_sessions_json(&cwd, session_id).await,
+        let json = if let Some(source) = args.session_transcript_path.as_deref() {
+            let id =
+                session_id.ok_or_else(|| anyhow::anyhow!("selected session id is required"))?;
+            let scope = args
+                .session_scope
+                .ok_or_else(|| anyhow::anyhow!("selected session scope is required"))?;
+            boot::list_selected_session_json_in_scope(&cwd, id, source, scope).await
+        } else {
+            match args.session_scope {
+                Some(scope) => boot::list_sessions_json_in_scope(&cwd, session_id, scope).await,
+                None => boot::list_sessions_json(&cwd, session_id).await,
+            }
         }
         .map_err(|e| anyhow::anyhow!(e))?;
         println!("{json}");
@@ -224,6 +252,7 @@ async fn async_main() -> anyhow::Result<()> {
     // the endpoint. It outlives the pump and drains all accepted work before
     // the session claim and discovery record are released.
     let session_lifecycle = bound.session_lifecycle();
+    let metadata_work = bound.connection.metadata_work();
     let requested_exit = bound.wait_for_exit_requested();
     let semantic_worker_failure = bound.wait_for_policy_semantic_worker_failure();
     let semantic_failure_sink = bound.connection.policy_semantic_worker_failure_sink();
@@ -250,7 +279,7 @@ async fn async_main() -> anyhow::Result<()> {
         None => match boot::brand_home() {
             Some(home) => home.join("bridge"),
             None => {
-                endpoint.shutdown().await;
+                drain_endpoint(endpoint, &metadata_work).await;
                 drain_session_lifecycle(&session_lifecycle).await;
                 return Err(anyhow::anyhow!(
                     "no home directory to root the bridge lockfile"
@@ -259,7 +288,7 @@ async fn async_main() -> anyhow::Result<()> {
         },
     };
     if !bridge_dir.is_absolute() {
-        endpoint.shutdown().await;
+        drain_endpoint(endpoint, &metadata_work).await;
         drain_session_lifecycle(&session_lifecycle).await;
         return Err(anyhow::anyhow!(
             "bridge lockfile directory must be absolute"
@@ -275,7 +304,7 @@ async fn async_main() -> anyhow::Result<()> {
         Ok(served) => served,
         Err(error) => {
             let (error, endpoint) = error.into_parts();
-            endpoint.shutdown().await;
+            drain_endpoint(endpoint, &metadata_work).await;
             drain_session_lifecycle(&session_lifecycle).await;
             return Err(anyhow::anyhow!(
                 "failed to publish bridge lockfile: {error}"
@@ -314,7 +343,7 @@ async fn async_main() -> anyhow::Result<()> {
     } {
         Ok(signal) => signal,
         Err(error) => {
-            endpoint.shutdown().await;
+            drain_endpoint(endpoint, &metadata_work).await;
             drain_session_lifecycle(&session_lifecycle).await;
             drop(lock_guard);
             return Err(error);
@@ -324,7 +353,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Explicit teardown: stop accepting, then `lock_guard` drops at end of scope
     // (removing the discovery file).
-    endpoint.shutdown().await;
+    drain_endpoint(endpoint, &metadata_work).await;
     drain_session_lifecycle(&session_lifecycle).await;
     drop(lock_guard);
     if _telemetry_guard.shutdown_async().await.is_err() {
@@ -337,6 +366,14 @@ async fn async_main() -> anyhow::Result<()> {
         return Err(anyhow::Error::new((*failure).clone()));
     }
     Ok(())
+}
+
+async fn drain_endpoint(endpoint: McpEndpoint, work: &bridge_server::server::MetadataWork) {
+    work.close();
+    endpoint.shutdown().await;
+    // Endpoint shutdown has a budget. Accepted metadata writers outlive that
+    // budget and must settle before this process gives up its session owner.
+    work.drain().await;
 }
 
 async fn drain_session_lifecycle(lifecycle: &harness_runtime::desktop::DesktopSessionLifecycle) {

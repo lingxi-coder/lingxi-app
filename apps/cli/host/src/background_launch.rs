@@ -8,16 +8,16 @@
 
 use crate::agents_registry;
 use crate::argv::Argv;
-use crate::daemon_roster::{self, Dispatch, Launch};
 use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 
 /// Current on-disk `launch.json` schema.
-pub const LAUNCH_SPEC_VERSION: u32 = 1;
+pub const LAUNCH_SPEC_VERSION: u32 = 3;
 /// Filename under `jobs/<short>/`.
 pub const LAUNCH_SPEC_FILE: &str = "launch.json";
 /// Owner-only runtime identity for orphan process-tree cleanup.
@@ -160,9 +160,27 @@ pub struct BackgroundLaunchOptions {
     pub brief: bool,
 }
 
+/// Resolve explicit directory grants against the invoking process, before a
+/// resumed background child changes its process cwd to the session workspace.
+pub(crate) fn resolve_add_dir_at(path: &Path, launch_cwd: &Path) -> PathBuf {
+    let value = PathBuf::from(path.to_string_lossy().trim());
+    if let Ok(rest) = value.strip_prefix("~") {
+        dirs::home_dir().map_or(value.clone(), |home| home.join(rest))
+    } else if value.is_absolute() {
+        value
+    } else {
+        launch_cwd.join(value)
+    }
+}
+
 impl BackgroundLaunchOptions {
     #[must_use]
     pub fn from_argv(argv: &Argv) -> Self {
+        let launch_cwd = std::env::current_dir().ok();
+        Self::from_argv_at(argv, launch_cwd.as_deref())
+    }
+
+    pub(crate) fn from_argv_at(argv: &Argv, launch_cwd: Option<&Path>) -> Self {
         Self {
             preserve_admitted_context: false,
             model: argv.model.clone(),
@@ -178,7 +196,14 @@ impl BackgroundLaunchOptions {
             allowed_tools: argv.allowed_tools.clone(),
             disallowed_tools: argv.disallowed_tools.clone(),
             tools: argv.tools.clone(),
-            add_dir: argv.add_dir.clone(),
+            add_dir: argv.add_dir.as_ref().map(|paths| {
+                paths
+                    .iter()
+                    .map(|path| {
+                        launch_cwd.map_or_else(|| path.clone(), |cwd| resolve_add_dir_at(path, cwd))
+                    })
+                    .collect()
+            }),
             settings: argv.settings.clone(),
             mcp_config: argv.mcp_config.clone(),
             verbose: argv.verbose,
@@ -287,6 +312,129 @@ impl BackgroundLaunchOptions {
     }
 }
 
+/// Immutable session identity captured when the job was published.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundSessionProfile {
+    pub mode: lingxi_core::host::session_context::ConversationMode,
+    pub instruction_epoch: u64,
+}
+
+impl BackgroundSessionProfile {
+    pub const fn fresh_code() -> Self {
+        Self {
+            mode: lingxi_core::host::session_context::ConversationMode::Code,
+            instruction_epoch: 0,
+        }
+    }
+}
+
+impl From<lingxi_core::host::session_context::FixedSessionProfile> for BackgroundSessionProfile {
+    fn from(profile: lingxi_core::host::session_context::FixedSessionProfile) -> Self {
+        Self {
+            mode: profile.mode,
+            instruction_epoch: profile.instruction_epoch,
+        }
+    }
+}
+
+impl From<BackgroundSessionProfile> for lingxi_core::host::session_context::FixedSessionProfile {
+    fn from(profile: BackgroundSessionProfile) -> Self {
+        Self {
+            mode: profile.mode,
+            instruction_epoch: profile.instruction_epoch,
+        }
+    }
+}
+
+/// Capture a validated fixed profile from the exact transcript selected by a job.
+pub(crate) fn read_resume_profile(
+    home: &Path,
+    session_id: &str,
+    path: &Path,
+) -> std::io::Result<BackgroundSessionProfile> {
+    let id = uuid::Uuid::parse_str(session_id)
+        .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+    let path = crate::init::absolute_resolved_tui_resume_path(path.to_path_buf())
+        .and_then(|path| crate::init::validate_exact_tui_resume_path(home, id, &path))
+        .map_err(Error::other)?;
+    let (source, _) =
+        crate::init::read_pinned_cli_resume_source(home, &path).map_err(Error::other)?;
+    session::JsonlWriter::fixed_session_profile_from_source(&source, &id.to_string())
+        .map(Into::into)
+        .map_err(Error::other)
+}
+
+/// Publication identity retained until the first claimed mount. The digest
+/// avoids embedding arbitrarily large conversation histories in launch.json.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedSourceReceipt {
+    root: PathBuf,
+    relative: PathBuf,
+    root_identity: rooted_fs::RootIdentity,
+    file_identity: rooted_fs::RootIdentity,
+    content_sha256: [u8; 32],
+}
+
+impl PublishedSourceReceipt {
+    pub(crate) fn from_source(source: &crate::init::PublishedBranchSource) -> Self {
+        let pinned = source.authority.pinned_resume_source(String::new());
+        Self {
+            root: pinned.root,
+            relative: pinned.relative,
+            root_identity: pinned.root_identity,
+            file_identity: pinned.file_identity,
+            content_sha256: Sha256::digest(source.content.as_bytes()).into(),
+        }
+    }
+
+    pub(crate) fn recover(
+        &self,
+        home: &Path,
+        session_id: uuid::Uuid,
+        transcript_path: &Path,
+    ) -> std::io::Result<crate::init::PublishedBranchSource> {
+        let root = std::fs::canonicalize(home)?;
+        if root != self.root {
+            return Err(Error::other("published branch root changed"));
+        }
+        let authority = session::jsonl::writer::TranscriptFileAuthority::from_capture(
+            self.root.clone(),
+            self.relative.clone(),
+            self.root_identity,
+            self.file_identity,
+        )
+        .map_err(Error::other)?;
+        let path = crate::init::validate_exact_tui_resume_path(home, session_id, transcript_path)
+            .map_err(Error::other)?;
+        if authority.path() != path {
+            return Err(Error::other("published branch path changed"));
+        }
+        let bytes = authority.read_checked().map_err(Error::other)?;
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if digest != self.content_sha256 {
+            return Err(Error::other("published branch content changed"));
+        }
+        authority.verify_current().map_err(Error::other)?;
+        let content = String::from_utf8(bytes).map_err(Error::other)?;
+        if !content.is_empty() && !content.ends_with('\n') {
+            return Err(Error::other(
+                "resume transcript ends in an incomplete record",
+            ));
+        }
+        Ok(crate::init::PublishedBranchSource { authority, content })
+    }
+}
+
+fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// Complete durable context for one background PTY child.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -301,6 +449,9 @@ pub struct BackgroundLaunchSpec {
     pub launch: BackgroundLaunchKind,
     pub session_id: String,
     pub transcript_path: String,
+    pub session_profile: BackgroundSessionProfile,
+    #[serde(deserialize_with = "required_option")]
+    pub published_source: Option<PublishedSourceReceipt>,
     pub cwd: String,
     pub origin_cwd: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -617,6 +768,29 @@ pub fn read_launch_spec(config_home: &Path, short: &str) -> std::io::Result<Back
     Ok(spec)
 }
 
+/// Clear the one-shot publication receipt only after the target is mounted
+/// under its writer lease. Subsequent restarts may then use the persisted mode
+/// and path after legitimate appends, compaction, or relocation.
+pub(crate) fn acknowledge_published_source(
+    home: &Path,
+    launch: &BackgroundLaunchSpec,
+) -> std::io::Result<()> {
+    let Some(expected) = launch.published_source.as_ref() else {
+        return Ok(());
+    };
+    let _lock = agents_registry::lock_job_state(home, &launch.short)?;
+    let mut current = read_launch_spec(home, &launch.short)?;
+    if current.session_id != launch.session_id
+        || current.published_source.as_ref() != Some(expected)
+    {
+        return Err(Error::other(
+            "background branch publication changed during mount",
+        ));
+    }
+    current.published_source = None;
+    write_launch_spec(home, &launch.short, &current)
+}
+
 fn refresh_current_background_launch_identity_inner(
     cwd: &Path,
     transcript_path: &Path,
@@ -661,41 +835,39 @@ where
         .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "background job dir is malformed"))?;
     let _job_lock = agents_registry::lock_job_state(config_home, short)?;
     let mut spec = read_launch_spec(config_home, short)?;
-    let expected_name = format!("{}.jsonl", spec.session_id);
-    let projects_root = config_home.join("projects");
-    let transcript_path = if let Ok(metadata) = std::fs::symlink_metadata(transcript_path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "transcript is not a regular file",
-            ));
+    let id = uuid::Uuid::parse_str(&spec.session_id)
+        .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+    let transcript_path = match std::fs::symlink_metadata(transcript_path) {
+        Ok(_) => crate::init::validate_exact_tui_resume_path(config_home, id, transcript_path)
+            .map_err(Error::other)?,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let projects_root = config_home.join("projects");
+            let selected = transcript_path.strip_prefix(&projects_root).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "transcript path does not match the recorded session",
+                )
+            })?;
+            if !transcript_path.is_absolute()
+                || selected.components().count() != 2
+                || !selected
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+                || selected.extension().and_then(|value| value.to_str()) != Some("jsonl")
+                || selected
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                    != Some(id)
+            {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "transcript path does not match the recorded session",
+                ));
+            }
+            transcript_path.to_path_buf()
         }
-        let canonical_transcript = std::fs::canonicalize(transcript_path)?;
-        let canonical_projects_root = std::fs::canonicalize(&projects_root)?;
-        if !canonical_transcript.starts_with(&canonical_projects_root)
-            || canonical_transcript
-                .file_name()
-                .and_then(|name| name.to_str())
-                != Some(expected_name.as_str())
-        {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "transcript path does not match the recorded session",
-            ));
-        }
-        canonical_transcript
-    } else {
-        if !transcript_path.is_absolute()
-            || transcript_path.file_name().and_then(|name| name.to_str())
-                != Some(expected_name.as_str())
-            || transcript_path.strip_prefix(&projects_root).is_err()
-        {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "transcript path does not match the recorded session",
-            ));
-        }
-        transcript_path.to_path_buf()
+        Err(error) => return Err(error),
     };
     spec.cwd = cwd.display().to_string();
     spec.transcript_path = transcript_path.display().to_string();
@@ -761,11 +933,19 @@ fn retarget_background_session(
             "background session identity changed concurrently",
         ));
     }
+    let target_path = session::jsonl::path::session_path(home, &cwd.to_string_lossy(), new_id);
+    let profile = read_resume_profile(home, new_id, &target_path)?;
+    if profile.mode != spec.session_profile.mode {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "new session mode differs from its owner",
+        ));
+    }
     spec.session_id = new_id.to_string();
     spec.cwd = cwd.display().to_string();
-    spec.transcript_path = session::jsonl::path::session_path(home, &spec.cwd, new_id)
-        .display()
-        .to_string();
+    spec.transcript_path = target_path.display().to_string();
+    spec.session_profile = profile;
+    spec.published_source = None;
     spec.launch = BackgroundLaunchKind::Resume;
     spec.initial_prompt = None;
     spec.handoff = None;
@@ -789,125 +969,6 @@ pub fn reconcile_job_cwd_from_launch_spec(
     }
     agents_registry::update_job_cwd_with_lock_held(config_home, short, &spec.cwd)?;
     Ok(true)
-}
-
-/// Load `launch.json`, or convert a protocol-v1 job/roster record once.
-///
-/// `Ok(None)` means neither a launch file nor enough legacy state exists. A
-/// successfully migrated roster is rewritten with a non-secret launch ref and
-/// its old environment map cleared.
-pub fn load_or_migrate_launch_spec(
-    config_home: &Path,
-    runtime_dir: &Path,
-    short: &str,
-) -> std::io::Result<Option<BackgroundLaunchSpec>> {
-    match read_launch_spec(config_home, short) {
-        Ok(spec) => {
-            let _ = reconcile_job_cwd_from_launch_spec(config_home, short);
-            return Ok(Some(spec));
-        }
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    let Some(job) = agents_registry::read_job(config_home, short) else {
-        return Ok(None);
-    };
-    let roster = daemon_roster::read_roster(runtime_dir, 0, false).into_roster();
-    let Some(record) = roster.workers.get(short) else {
-        return Ok(None);
-    };
-    let spec = from_legacy_dispatch(config_home, short, &job, &record.dispatch);
-    write_launch_spec(config_home, short, &spec)?;
-    Ok(Some(spec))
-}
-
-fn from_legacy_dispatch(
-    config_home: &Path,
-    short: &str,
-    job: &agents_registry::JobState,
-    dispatch: &Dispatch,
-) -> BackgroundLaunchSpec {
-    let (launch, transcript_path, raw_args) = match &dispatch.launch {
-        Launch::Prompt { args } => (BackgroundLaunchKind::Fresh, None, args.clone()),
-        Launch::Resume {
-            transcript_path,
-            fork,
-            flag_args,
-            ..
-        } => (
-            if *fork {
-                BackgroundLaunchKind::Fork
-            } else {
-                BackgroundLaunchKind::Resume
-            },
-            transcript_path.clone(),
-            flag_args.clone(),
-        ),
-        Launch::Exec { .. } => (BackgroundLaunchKind::Fresh, None, Vec::new()),
-    };
-    let mut options = argv_from_legacy_args(&raw_args)
-        .as_ref()
-        .map(BackgroundLaunchOptions::from_argv)
-        .unwrap_or_default();
-    if matches!(
-        launch,
-        BackgroundLaunchKind::Resume | BackgroundLaunchKind::Fork
-    ) {
-        options.clear_boot_session_options();
-    }
-    let cwd = job.cwd.clone().unwrap_or_else(|| dispatch.cwd.clone());
-    let session_id = job
-        .session_id
-        .clone()
-        .unwrap_or_else(|| dispatch.session_id.clone());
-    let transcript_path = transcript_path.unwrap_or_else(|| {
-        session::jsonl::path::session_path(config_home, &cwd, &session_id)
-            .display()
-            .to_string()
-    });
-    BackgroundLaunchSpec {
-        schema_version: LAUNCH_SPEC_VERSION,
-        short: short.to_string(),
-        created_at: dispatch.created_at,
-        // Protocol-v1 records predate foreground trust/bypass preflight. They
-        // are migrated for inspection but deliberately cannot launch a hidden
-        // TUI until a foreground path re-authorizes them.
-        preflight_approved: false,
-        launch,
-        session_id,
-        transcript_path,
-        cwd: cwd.clone(),
-        origin_cwd: job.origin_cwd.clone().unwrap_or(cwd),
-        worktree_path: dispatch
-            .worktree
-            .as_ref()
-            .map(|worktree| worktree.path.clone()),
-        worktree_ownership_token: dispatch
-            .worktree
-            .as_ref()
-            .map(|worktree| worktree.ownership_token.clone()),
-        initial_prompt: job
-            .initial_prompt
-            .as_ref()
-            .filter(|prompt| !prompt.trim().is_empty())
-            .cloned()
-            .map(Utf16JsonProjection::from),
-        shell_handoff: Vec::new(),
-        handoff: None,
-        options,
-        env: dispatch.env.clone(),
-        terminal: TerminalSize {
-            cols: u16::try_from(dispatch.cols.unwrap_or(80)).unwrap_or(u16::MAX),
-            rows: u16::try_from(dispatch.rows.unwrap_or(24)).unwrap_or(u16::MAX),
-        },
-    }
-}
-
-fn argv_from_legacy_args(args: &[String]) -> Option<Argv> {
-    let mut tokens = Vec::with_capacity(args.len() + 1);
-    tokens.push("lingxi-cli".to_string());
-    tokens.extend(args.iter().cloned());
-    Argv::from_iter(tokens).ok()
 }
 
 fn validate_short(short: &str) -> std::io::Result<()> {
@@ -1002,6 +1063,8 @@ mod tests {
             launch,
             session_id: "11111111-2222-3333-4444-555555555555".to_string(),
             transcript_path: "/tmp/session.jsonl".to_string(),
+            session_profile: crate::background_launch::BackgroundSessionProfile::fresh_code(),
+            published_source: None,
             cwd: "/tmp/project".to_string(),
             origin_cwd: "/tmp/project".to_string(),
             worktree_path: None,
@@ -1022,6 +1085,14 @@ mod tests {
                 rows: 43,
             },
         }
+    }
+
+    #[test]
+    fn launch_spec_requires_explicit_publication_receipt_field() {
+        let spec = sample("face0001", BackgroundLaunchKind::Resume);
+        let mut value = serde_json::to_value(spec).unwrap();
+        value.as_object_mut().unwrap().remove("publishedSource");
+        assert!(serde_json::from_value::<BackgroundLaunchSpec>(value).is_err());
     }
 
     fn seed_job(home: &std::path::Path, short: &str, session_id: &str, cwd: &str) {
@@ -1225,7 +1296,6 @@ mod tests {
         let future_transcript = home
             .join("projects")
             .join("workspace")
-            .join("nested")
             .join(format!("{session_id}.jsonl"));
 
         let mut spec = sample(short, BackgroundLaunchKind::Fresh);
@@ -1260,6 +1330,53 @@ mod tests {
         );
         let job = agents_registry::read_job(&home, short).unwrap();
         assert_eq!(job.cwd.as_deref(), Some(new_cwd_s.as_str()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_background_identity_rejects_replaced_bucket() {
+        use std::os::unix::fs::symlink;
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tmpdir();
+        let short = "cafe0012";
+        let id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let a = home.join("a");
+        let b = home.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let selected = session::jsonl::session_path(&home, &a.to_string_lossy(), id);
+        let sibling = session::jsonl::session_path(&home, &b.to_string_lossy(), id);
+        for path in [&selected, &sibling] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "source").unwrap();
+        }
+        let mut spec = sample(short, BackgroundLaunchKind::Resume);
+        spec.session_id = id.into();
+        spec.transcript_path = selected.display().to_string();
+        write_launch_spec(&home, short, &spec).unwrap();
+        seed_job(&home, short, id, &a.to_string_lossy());
+        let launch_before = std::fs::read(launch_spec_path(&home, short)).unwrap();
+        let bucket = selected.parent().unwrap();
+        std::fs::rename(bucket, bucket.with_extension("saved")).unwrap();
+        symlink(sibling.parent().unwrap(), bucket).unwrap();
+        let prior = std::env::var_os("LINGXI_JOB_DIR");
+        std::env::set_var(
+            "LINGXI_JOB_DIR",
+            agents_registry::jobs_dir(&home).join(short),
+        );
+        let result = refresh_current_background_launch_identity(&b, &selected);
+        match prior {
+            Some(value) => std::env::set_var("LINGXI_JOB_DIR", value),
+            None => std::env::remove_var("LINGXI_JOB_DIR"),
+        }
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(launch_spec_path(&home, short)).unwrap(),
+            launch_before
+        );
+        assert_eq!(std::fs::read_to_string(sibling).unwrap(), "source");
     }
 
     #[test]
@@ -1462,9 +1579,14 @@ mod tests {
         state["futureField"] = serde_json::json!({"preserved": true});
         std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
         let new_id = uuid::Uuid::new_v4().to_string();
+        let target =
+            session::jsonl::path::session_path(home.path(), &cwd.path().to_string_lossy(), &new_id);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, format!("{{\"type\":\"fixed-session-mode\",\"sessionId\":\"{new_id}\",\"sessionMode\":\"code\",\"instructionEpoch\":9}}\n")).unwrap();
         retarget_background_session(home.path(), short, &spec.session_id, &new_id, cwd.path())
             .unwrap();
         let updated = read_launch_spec(home.path(), short).unwrap();
+        assert_eq!(updated.session_profile.instruction_epoch, 9);
         assert_eq!(updated.session_id, new_id);
         assert_eq!(updated.cwd, cwd.path().display().to_string());
         assert_eq!(updated.launch, BackgroundLaunchKind::Resume);
@@ -1485,6 +1607,27 @@ mod tests {
         let state: serde_json::Value =
             serde_json::from_slice(&std::fs::read(state_path).unwrap()).unwrap();
         assert_eq!(state["futureField"]["preserved"], true);
+    }
+
+    #[test]
+    fn launch_profile_is_required_without_legacy_fallback() {
+        let spec = sample("face0001", BackgroundLaunchKind::Resume);
+        let mut encoded = serde_json::to_value(&spec).unwrap();
+        for field in ["mode", "instructionEpoch"] {
+            let mut missing_field = encoded.clone();
+            assert!(missing_field["sessionProfile"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field)
+                .is_some());
+            assert!(serde_json::from_value::<BackgroundLaunchSpec>(missing_field).is_err());
+        }
+        assert!(encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("sessionProfile")
+            .is_some());
+        assert!(serde_json::from_value::<BackgroundLaunchSpec>(encoded).is_err());
     }
 
     #[test]
@@ -1652,135 +1795,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn legacy_resume_converts_to_versioned_exact_transcript_context() {
-        let home = tmpdir();
-        let short = "cafe0001";
-        let session_id = "11111111-2222-3333-4444-555555555555";
-        let flags = Vec::new();
-        let job = agents_registry::JobStateWrite {
-            state: "working",
-            tempo: Some("active"),
-            name: None,
-            session_id: Some(session_id),
-            cwd: Some("/tmp/project"),
-            origin_cwd: Some("/tmp/origin"),
-            created_at: None,
-            intent: None,
-            display_intent: None,
-            template: Some("bg"),
-            respawn_flags: &flags,
-            in_flight: None,
-            backend: Some("daemon"),
-            initial_prompt: Some("continue".into()),
-            detail: None,
-            worker_pid: None,
-            worker_proc_start: None,
-            phase: None,
-            worker_generation: None,
-            claim_token: None,
-            claim_owner: None,
-            claim_created_at: None,
-            claim_lease_ms: None,
-        };
-        agents_registry::write_job_state(&home, short, &job).unwrap();
-        let job = agents_registry::read_job(&home, short).unwrap();
-        let exact = home.join("custom/session-copy.jsonl").display().to_string();
-        let dispatch = Dispatch {
-            proto: 1,
-            short: short.to_string(),
-            nonce: None,
-            session_id: session_id.to_string(),
-            created_at: 77,
-            source: daemon_roster::DispatchSource::Shell,
-            cwd: "/tmp/project".to_string(),
-            launch: Launch::Resume {
-                session_id: session_id.to_string(),
-                transcript_path: Some(exact.clone()),
-                fork: false,
-                flag_args: vec![
-                    "--worktree".to_string(),
-                    "feature".to_string(),
-                    "--tmux=classic".to_string(),
-                ],
-            },
-            launch_spec: None,
-            env: BTreeMap::from([("ANTHROPIC_API_KEY".to_string(), "secret".to_string())]),
-            reattach_env: None,
-            worktree: Some(daemon_roster::Worktree {
-                path: "/tmp/project/.lingxi/worktrees/feature".to_string(),
-                ownership_token: "token-123".to_string(),
-            }),
-            isolation: daemon_roster::Isolation::None,
-            respawn_flags: Vec::new(),
-            attach_stall_respawns: None,
-            agent: None,
-            routine: None,
-            seed: None,
-            cols: Some(101),
-            rows: Some(37),
-        };
-        let spec = from_legacy_dispatch(&home, short, &job, &dispatch);
-        assert!(
-            !spec.preflight_approved,
-            "legacy migration must fail closed"
-        );
-        assert_eq!(spec.launch, BackgroundLaunchKind::Resume);
-        assert_eq!(spec.transcript_path, exact);
-        assert_eq!(spec.origin_cwd, "/tmp/origin");
-        assert_eq!(
-            spec.worktree_path.as_deref(),
-            Some("/tmp/project/.lingxi/worktrees/feature")
-        );
-        assert_eq!(spec.options.worktree, None);
-        assert_eq!(spec.options.tmux, None);
-        assert_eq!(
-            spec.terminal,
-            TerminalSize {
-                cols: 101,
-                rows: 37
-            }
-        );
-        assert_eq!(
-            spec.env.get("ANTHROPIC_API_KEY").map(String::as_str),
-            Some("secret")
-        );
-
-        let mut roster = daemon_roster::empty_roster(7);
-        roster.workers.insert(
-            short.to_string(),
-            daemon_roster::WorkerRecord {
-                pid: 41,
-                proc_start: Some("start".to_string()),
-                session_id: session_id.to_string(),
-                rendezvous_sock: "live-endpoint".to_string(),
-                pty_sock: Some("live-endpoint".to_string()),
-                messaging_sock: None,
-                cli_version: Some("0.11.0".to_string()),
-                started_at: 77,
-                attempt: 0,
-                cwd: "/tmp/project".to_string(),
-                worktree_path: None,
-                dispatch,
-                pending_respawn: None,
-                dec_modes: None,
-                rv_auth: Some("live-token".to_string()),
-                pty_auth: Some("live-token".to_string()),
-                extra: serde_json::Map::new(),
-            },
-        );
-        daemon_roster::write_roster(&home, &roster).unwrap();
-        let before = daemon_roster::read_roster(&home, 0, false).into_roster();
-        let migrated = load_or_migrate_launch_spec(&home, &home, short)
-            .unwrap()
-            .expect("legacy spec migrated");
-        assert!(!migrated.preflight_approved);
-        let after = daemon_roster::read_roster(&home, 0, false).into_roster();
-        assert_eq!(
-            after, before,
-            "worker-side migration must not rewrite roster"
-        );
-    }
     #[tokio::test]
     async fn shell_handoff_acknowledgements_are_phase_scoped_and_abort_wakes_waiter() {
         let home = tempfile::tempdir().unwrap();

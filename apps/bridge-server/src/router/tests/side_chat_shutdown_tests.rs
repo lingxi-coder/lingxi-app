@@ -35,8 +35,6 @@ const AUTH_TOKEN: &str = "side-chat-shutdown-token-32chars";
 
 type TestSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-
-
 struct EmptyTasks;
 
 #[async_trait]

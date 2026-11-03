@@ -531,7 +531,10 @@ impl crate::router::CommandRouter for RejectingTransitionRouter {
     async fn preflight_session_transition(
         &self,
         command: &ClientCommand,
-    ) -> Result<(), (client::protocol::events::ErrorKindDto, String)> {
+    ) -> Result<
+        Option<crate::router::PreparedSessionTransition>,
+        (client::protocol::events::ErrorKindDto, String),
+    > {
         assert!(matches!(
             command,
             ClientCommand::NewSession { .. } | ClientCommand::ResumeSession { .. }

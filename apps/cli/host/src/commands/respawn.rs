@@ -77,52 +77,34 @@ fn resolve_short(home: &Path, id: &str) -> Result<String, crate::commands::rm::P
 }
 
 /// Make an existing launch context resume its transcript rather than replaying
-/// the original prompt.  Legacy roster data is migrated through the existing
-/// launch loader before the final read/write, when possible.
+/// the original prompt.
 fn load_launch_spec_for_resume(
     home: &Path,
     short: &str,
 ) -> Result<crate::background_launch::BackgroundLaunchSpec, String> {
-    match crate::background_launch::read_launch_spec(home, short) {
-        Ok(spec) => Ok(spec),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            crate::background_launch::load_or_migrate_launch_spec(home, home, short)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "background launch context is missing".to_string())?;
-            crate::background_launch::read_launch_spec(home, short)
-                .map_err(|error| error.to_string())
-        }
-        Err(error) => Err(error.to_string()),
-    }
+    crate::background_launch::read_launch_spec(home, short).map_err(|error| error.to_string())
 }
 
 fn validate_resumable_transcript(
     home: &Path,
     spec: &crate::background_launch::BackgroundLaunchSpec,
 ) -> Result<(), String> {
-    let path = PathBuf::from(&spec.transcript_path);
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|e| format!("could not inspect transcript {}: {e}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("transcript is not a regular file".to_string());
-    }
-    if metadata.len() == 0 {
+    let id = uuid::Uuid::parse_str(&spec.session_id).map_err(|error| error.to_string())?;
+    let path =
+        crate::init::validate_exact_tui_resume_path(home, id, Path::new(&spec.transcript_path))
+            .map_err(|error| error.to_string())?;
+    let content = if let Some(receipt) = spec.published_source.as_ref() {
+        receipt
+            .recover(home, id, &path)
+            .map_err(|error| error.to_string())?
+            .content
+    } else {
+        crate::init::read_pinned_cli_resume_source(home, &path)
+            .map_err(|error| error.to_string())?
+            .0
+    };
+    if content.is_empty() {
         return Err("transcript contains no resumable conversation".to_string());
-    }
-    let canonical_path = std::fs::canonicalize(&path)
-        .map_err(|e| format!("could not resolve transcript {}: {e}", path.display()))?;
-    let projects_root = home.join("projects");
-    let canonical_projects = std::fs::canonicalize(&projects_root).map_err(|e| {
-        format!(
-            "could not resolve transcript root {}: {e}",
-            projects_root.display()
-        )
-    })?;
-    let expected_name = format!("{}.jsonl", spec.session_id);
-    if !canonical_path.starts_with(&canonical_projects)
-        || canonical_path.file_name().and_then(|name| name.to_str()) != Some(&expected_name)
-    {
-        return Err("transcript path does not match the recorded session".to_string());
     }
     Ok(())
 }
@@ -651,6 +633,8 @@ mod tests {
                 launch: BackgroundLaunchKind::Fresh,
                 session_id: session_id.to_string(),
                 transcript_path: transcript.display().to_string(),
+                session_profile: crate::background_launch::BackgroundSessionProfile::fresh_code(),
+                published_source: None,
                 cwd: cwd.display().to_string(),
                 origin_cwd: cwd.display().to_string(),
                 worktree_path: None,
@@ -763,6 +747,8 @@ mod tests {
                 launch: BackgroundLaunchKind::Fresh,
                 session_id: session_id.to_string(),
                 transcript_path: transcript.display().to_string(),
+                session_profile: crate::background_launch::BackgroundSessionProfile::fresh_code(),
+                published_source: None,
                 cwd: cwd.display().to_string(),
                 origin_cwd: cwd.display().to_string(),
                 worktree_path: None,
@@ -787,6 +773,42 @@ mod tests {
                 .and_then(|prompt| prompt.string_at("")),
             Some("do the thing")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_resume_rejects_replaced_bucket_without_rewriting_launch() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let a = home.path().join("a");
+        let b = home.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let short = "cafe0012";
+        let id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        seed_launch_spec(home.path(), short, id, &a, "original prompt");
+        let selected = session::jsonl::session_path(home.path(), &a.to_string_lossy(), id);
+        let sibling = session::jsonl::session_path(home.path(), &b.to_string_lossy(), id);
+        std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+        std::fs::write(&sibling, "sibling history").unwrap();
+        let before = std::fs::read(crate::background_launch::launch_spec_path(
+            home.path(),
+            short,
+        ))
+        .unwrap();
+        let bucket = selected.parent().unwrap();
+        std::fs::rename(bucket, bucket.with_extension("saved")).unwrap();
+        symlink(sibling.parent().unwrap(), bucket).unwrap();
+        assert!(prepare_resume(home.path(), short).is_err());
+        assert_eq!(
+            std::fs::read(crate::background_launch::launch_spec_path(
+                home.path(),
+                short
+            ))
+            .unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read_to_string(sibling).unwrap(), "sibling history");
     }
 
     #[test]

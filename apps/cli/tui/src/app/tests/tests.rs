@@ -11,6 +11,19 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+#[tokio::test]
+async fn recovery_exit_stops_other_work_before_aborting_replay() {
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(std::future::pending::<()>());
+    let guard = AbortStartupRecoveryOnDrop {
+        abort: Some(task.abort_handle()),
+        shutdown: Some(shutdown.clone()),
+    };
+    drop(guard);
+    assert!(shutdown.is_cancelled());
+    assert!(task.await.unwrap_err().is_cancelled());
+}
+
 fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -86,6 +99,7 @@ fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
             on_plugin_action: Box::new(|_| {}),
             on_reload_plugins: Box::new(|| {}),
             on_refresh_command_catalog: Box::new(|| {}),
+            on_capture_resume: Box::new(|_| Ok(ResumeDisposition::Switch)),
             on_bash: Box::new(|_| {}),
             on_compact: Box::new(|_, _| {}),
             on_summarize: Box::new(|_, _, _, _| {}),
@@ -101,6 +115,117 @@ fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
         },
     );
     app
+}
+
+#[test]
+fn recovered_background_initial_prompt_is_submitted_once_after_replay() {
+    let mut app = test_app(Vec::new());
+    let state = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let submissions = Arc::new(AtomicUsize::new(0));
+    let observed = submissions.clone();
+    app.callbacks.on_submit = Box::new(move |prompt, _, _, _| {
+        assert_eq!(prompt.string_at(""), Some("initial background prompt"));
+        observed.fetch_add(1, Ordering::SeqCst);
+    });
+    app.startup_recovery = Some(state.clone());
+    app.chat_widget.set_startup_recovery(Some(state.clone()));
+    app.recovery_initial_prompt = Some("initial background prompt".into());
+    assert!(!app.finish_startup_recovery());
+    assert_eq!(submissions.load(Ordering::SeqCst), 0);
+    state.store(1, Ordering::Release);
+    assert!(app.finish_startup_recovery());
+    assert!(!app.finish_startup_recovery());
+    assert_eq!(submissions.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn session_switch_fence_rechecks_turn_arriving_after_picker_selection() {
+    let mut app = test_app(Vec::new());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    app.events_rx = rx;
+    let turn = CancellationToken::new();
+    let arriving = turn.clone();
+    let aborted = Arc::new(AtomicBool::new(false));
+    let aborted_fence = aborted.clone();
+    app.session_switch_fence = Some(Arc::new(move |action| match action {
+        SessionSwitchFenceAction::Acquire => {
+            tx.send(TurnEvent::TurnStartedWithCancel(arriving.clone()))
+                .unwrap();
+            true
+        }
+        SessionSwitchFenceAction::Abort => {
+            aborted_fence.store(true, Ordering::SeqCst);
+            true
+        }
+        SessionSwitchFenceAction::Commit => panic!("must not commit a busy switch"),
+    }));
+    assert!(!app.admit_session_switch());
+    assert!(aborted.load(Ordering::SeqCst));
+    assert!(!turn.is_cancelled());
+    assert!(app.chat_widget.turn_running());
+}
+
+#[test]
+fn resume_captures_selected_source_before_switch_fence_and_keeps_owner_on_error() {
+    use crate::resume::ResumeRow;
+
+    for disposition in [
+        None,
+        Some(ResumeDisposition::AlreadyCurrent),
+        Some(ResumeDisposition::Switch),
+    ] {
+        let mut app = test_app(Vec::new());
+        let id = uuid::Uuid::new_v4();
+        let path = std::path::PathBuf::from("/selected/session.jsonl");
+        app.chat_widget.set_resume_rows(vec![ResumeRow {
+            uuid: id,
+            transcript_path: path.clone(),
+            title: "session".into(),
+            metadata_label: String::new(),
+        }]);
+        assert!(matches!(
+            app.chat_widget.cmd_resume(""),
+            ChatOutcome::Continue
+        ));
+        let captured = Arc::new(AtomicBool::new(false));
+        let capture_called = captured.clone();
+        let expected_path = path.clone();
+        app.callbacks.on_capture_resume = Box::new(move |selection| {
+            assert_eq!(selection.uuid, id);
+            assert_eq!(selection.transcript_path, expected_path);
+            capture_called.store(true, Ordering::SeqCst);
+            disposition.ok_or_else(|| "capture failed".into())
+        });
+        let fence_calls = Arc::new(AtomicUsize::new(0));
+        let observed_fence_calls = fence_calls.clone();
+        let was_captured = captured.clone();
+        app.session_switch_fence = Some(Arc::new(move |_| {
+            assert!(was_captured.load(Ordering::SeqCst));
+            observed_fence_calls.fetch_add(1, Ordering::SeqCst);
+            true
+        }));
+        let mut terminal = inline_test_terminal(app.viewport_height(80));
+        let mut event_driver = FakeEventDriver {
+            queued: VecDeque::from([
+                Event::Key(press(KeyCode::Enter)),
+                Event::Key(ctrl(KeyCode::Char('c'))),
+                Event::Key(ctrl(KeyCode::Char('c'))),
+            ]),
+            ..Default::default()
+        };
+        let result = app
+            .run_inner(&mut terminal, None, None, &mut event_driver)
+            .unwrap();
+        assert!(captured.load(Ordering::SeqCst));
+        if disposition == Some(ResumeDisposition::Switch) {
+            assert!(matches!(result, AppExit::SwitchSession(selection)
+                if selection.uuid == id && selection.transcript_path == path));
+            assert!(fence_calls.load(Ordering::SeqCst) > 0);
+        } else {
+            assert_eq!(result, AppExit::Quit);
+            assert_eq!(fence_calls.load(Ordering::SeqCst), 0);
+        }
+    }
 }
 
 #[test]

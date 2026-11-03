@@ -2,7 +2,7 @@
 // Do not edit. Run scripts/checks/generate-client-protocol.py after updating the pin.
 // Nested DTOs and semantic validation remain in protocol.ts and validation.ts.
 
-// Custom Serde fingerprints (review changes): command=42b97d850372f8cd event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=8b3bb6706ebf68e9 event_source=3e75ceff9420eced
+// Custom Serde fingerprints (review changes): command=42b97d850372f8cd event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=6dd864af911ef34c event_source=3e75ceff9420eced
 
 import type {
   AgentDto,
@@ -151,7 +151,7 @@ export type ClientCommand =
   | { type: 'fork_session'; session_id: string; target_mode: SessionModeDto }
   | { type: 'cron_manage'; request_id: string; request: CronRequestDto }
   | { type: 'task_message'; task_id: string; message: string }
-  | { type: 'cron_run_started'; run_id: string; session_id: string }
+  | { type: 'cron_run_started'; run_id: string; session_id: string; transcript_path: string; session_mode: string; session_scope_key?: string | null }
   | { type: 'scheduled_run_turn'; run_id: string; prompt: string; model: string; reasoning: ReasoningSelectionDto }
   | { type: 'cron_run_completed'; run_id: string; session_id?: string | null; summary?: string | null; error?: string | null }
   | { type: 'update_audio_capabilities'; capabilities: AudioCapabilitySnapshotDto }

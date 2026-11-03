@@ -284,6 +284,9 @@ export interface CronRunDto {
   model: string;
   reasoning: ReasoningSelectionDto;
   sessionId?: string;
+  sessionTranscriptPath?: string;
+  sessionMode?: string;
+  sessionScopeKey?: string;
   summary?: string;
   error?: string;
 }
@@ -295,8 +298,16 @@ export interface CronAutomationDto {
   model: string;
   reasoning: ReasoningSelectionDto;
   runMode: 'new_session' | 'selected_session' | 'task_session';
+  sessionMode?: string;
+  sessionScopeKey?: string;
   targetSessionId?: string;
+  targetSessionTranscriptPath?: string;
+  targetSessionMode?: string;
+  targetSessionScopeKey?: string;
   ownedSessionId?: string;
+  ownedSessionTranscriptPath?: string;
+  ownedSessionMode?: string;
+  ownedSessionScopeKey?: string;
   notificationPolicy: 'all' | 'failed' | 'none';
   runs?: CronRunDto[];
 }

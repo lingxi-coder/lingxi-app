@@ -203,6 +203,34 @@ fn split_model_selection_source(
     }
 }
 
+/// A one-use resume captured before the connection drains session resources.
+pub struct PreparedSessionTransition {
+    id: uuid::Uuid,
+    mode: ConversationMode,
+    replayed: orchestrator::ReplayedSession,
+    source: lingxi_core::host::PinnedResumeSource,
+}
+
+struct PendingForkSource {
+    identity: lingxi_core::host::PinnedResumeSource,
+    content_len: usize,
+    content_sha256: [u8; 32],
+    // Capacity is reserved before publication and held until the first mount.
+    _slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl PendingForkSource {
+    fn matches(&self, source: &lingxi_core::host::PinnedResumeSource) -> bool {
+        self.identity.root == source.root
+            && self.identity.relative == source.relative
+            && self.identity.root_identity == source.root_identity
+            && self.identity.file_identity == source.file_identity
+            && self.content_len == source.expected_content.len()
+            && self.content_sha256
+                == remote_control_client::encoding::sha256(source.expected_content.as_bytes())
+    }
+}
+
 /// Inputs needed to enumerate and replay the persisted JSONL session store.
 ///
 /// Optional for routers without session operations. Production bridge boot
@@ -213,6 +241,63 @@ pub struct SessionStoreContext {
     runtime_cwd: Option<Arc<tool_api::SessionCwd>>,
     fs: Arc<dyn lingxi_core::host::FileSystem>,
     transcript_writer: Option<Arc<session::jsonl::JsonlWriter>>,
+}
+
+fn replay_pinned_catalog_source(
+    home: &std::path::Path,
+    path: &std::path::Path,
+    id: uuid::Uuid,
+) -> Result<
+    (
+        orchestrator::ReplayedSession,
+        lingxi_core::host::PinnedResumeSource,
+    ),
+    String,
+> {
+    let (authority, content) = crate::boot::capture_selected_transcript_source(home, path, id)?;
+    replay_captured_authority(authority, content, id)
+}
+
+fn replay_captured_authority(
+    authority: session::jsonl::writer::TranscriptFileAuthority,
+    content: String,
+    id: uuid::Uuid,
+) -> Result<
+    (
+        orchestrator::ReplayedSession,
+        lingxi_core::host::PinnedResumeSource,
+    ),
+    String,
+> {
+    let path = authority.path();
+    let loaded = session::jsonl::loader::route_captured_session_source(&path, id, &content)
+        .map_err(|error| format!("resume: selected session is not resumable: {error}"))?;
+    crate::boot::validate_captured_transcript(&path, id, &content, &loaded, false)?;
+    let replayed = orchestrator::resume::replay_captured_session(path, content.clone(), loaded, id)
+        .map_err(|error| format!("resume: selected session is not resumable: {error}"))?;
+    let source = authority.pinned_resume_source(content);
+    Ok((replayed, source))
+}
+
+async fn replay_unique_catalog_source(
+    home: &std::path::Path,
+    id: uuid::Uuid,
+) -> Result<
+    (
+        orchestrator::ReplayedSession,
+        lingxi_core::host::PinnedResumeSource,
+    ),
+    String,
+> {
+    let (_, authority) =
+        harness_runtime::headless::session::resolve_unique_resume_source(home, id).await?;
+    let content = String::from_utf8(
+        authority
+            .read_checked()
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|_| "resume: transcript is not valid UTF-8")?;
+    replay_captured_authority(authority, content, id)
 }
 
 impl SessionStoreContext {
@@ -272,43 +357,22 @@ impl SessionStoreContext {
     }
 
     /// Retain a zero-message conversation that owns a durable scheduled task.
-    async fn ensure_scheduled_chat(&self, session_id: &str) -> Result<(), String> {
-        let session_uuid = lingxi_core::types::SessionId::parse_prefixed(session_id)
-            .ok_or("Invalid scheduled task chat identity")?
-            .as_uuid()
-            .to_string();
-        let session_id = session_uuid.as_str();
-        let path = self.main_transcript_path(session_id);
-        let reader = session::jsonl::reader::JsonlReader::new(path.clone(), self.fs.clone());
-        let mut title = "Scheduled task".to_string();
-        match reader.read_routed().await {
-            Ok(loaded) => {
-                if !loaded.messages_in_order.is_empty()
-                    || loaded.mobile_empty_sessions.contains(session_id)
-                {
-                    return Ok(());
-                }
-                if loaded.malformed_line_count > 0 {
-                    return Err("Cannot attach a scheduled task to an unreadable chat".into());
-                }
-                if let Some(existing) = loaded.custom_titles.get(session_id) {
-                    title.clone_from(existing);
-                }
-            }
-            Err(session::jsonl::reader::ReaderError::Fs(lingxi_core::host::FsError::NotFound(
-                _,
-            ))) => {}
-            Err(error) => {
-                // The desktop filesystem may wrap ENOENT as FsError::Io.
-                // Verify absence without treating permission/corruption errors as empty.
-                if !matches!(tokio::fs::try_exists(&path).await, Ok(false)) {
-                    return Err(format!("Cannot read the scheduled task's chat: {error}"));
-                }
-            }
-        }
-        session::jsonl::writer::JsonlWriter::new(path, self.fs.clone())
-            .append_mobile_empty_session(session_id, &title, &self.current_cwd())
+    async fn ensure_scheduled_chat(
+        &self,
+        session_id: &str,
+        mode: ConversationMode,
+        cwd: &std::path::Path,
+    ) -> Result<(), String> {
+        let session_id = lingxi_core::types::SessionId::parse_prefixed(session_id)
+            .ok_or("Invalid scheduled task chat identity")?;
+        let writer = self
+            .transcript_writer
+            .as_ref()
+            .ok_or("Scheduled task chat storage is unavailable")?;
+        writer
+            .ensure_scheduled_anchor(session_id, mode, cwd)
             .await
+            .map(|_| ())
             .map_err(|error| format!("Cannot retain the scheduled task's chat: {error}"))
     }
 
@@ -371,8 +435,17 @@ pub trait CommandRouter: Send + Sync + 'static {
     async fn preflight_session_transition(
         &self,
         _command: &ClientCommand,
-    ) -> Result<(), (ErrorKindDto, String)> {
-        Ok(())
+    ) -> Result<Option<PreparedSessionTransition>, (ErrorKindDto, String)> {
+        Ok(None)
+    }
+    /// Consume the exact preflight result, if any, for this transition.
+    async fn route_prepared_session_transition(
+        &self,
+        command: ClientCommand,
+        _prepared: Option<PreparedSessionTransition>,
+        sink: Arc<dyn ClientEventSink>,
+    ) {
+        self.route(command, sink).await;
     }
     /// Route one decoded [`ClientCommand`], emitting any reply event(s) through
     /// `sink`. Pure side-effecting: it never blocks the caller for a turn (the
@@ -399,6 +472,14 @@ pub trait CommandRouter: Send + Sync + 'static {
 
     async fn workspace_state(&self) -> Result<Utf16JsonProjection, String> {
         Err("workspace state is unavailable".into())
+    }
+
+    /// Update metadata on the active transcript through its writer authority.
+    async fn session_metadata(
+        &self,
+        _request: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, String> {
+        Err("session metadata is unavailable".into())
     }
 
     async fn restore_workspace_controls(
@@ -665,6 +746,10 @@ pub struct EngineCommandRouter {
     /// Optional persisted-session catalog/replay context. Production boot wires
     /// it; lightweight users of the routing seam can omit it.
     session_store: Option<SessionStoreContext>,
+    /// Exact published targets awaiting their first in-process fork resume.
+    /// A process restart turns a later open into a new catalog selection.
+    pending_fork_sources: std::sync::Mutex<HashMap<uuid::Uuid, Arc<PendingForkSource>>>,
+    pending_fork_capacity: Arc<tokio::sync::Semaphore>,
     /// Process-owned observer facts supplement the live task registry for
     /// foreground children and allocation before the first transcript write.
     session_agent_observer:
@@ -815,13 +900,83 @@ impl EngineCommandRouter {
         None
     }
 
+    async fn replay_resume_source(
+        &self,
+        home: &std::path::Path,
+        uuid: uuid::Uuid,
+    ) -> Result<
+        (
+            orchestrator::ReplayedSession,
+            lingxi_core::host::PinnedResumeSource,
+        ),
+        String,
+    > {
+        let pending = self
+            .pending_fork_sources
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&uuid)
+            .cloned();
+        let Some(pending) = pending else {
+            return replay_unique_catalog_source(home, uuid).await;
+        };
+        let authority = session::jsonl::writer::TranscriptFileAuthority::from_capture(
+            pending.identity.root.clone(),
+            pending.identity.relative.clone(),
+            pending.identity.root_identity,
+            pending.identity.file_identity,
+        )
+        .map_err(|error| format!("resume: invalid fork target authority: {error}"))?;
+        let content = authority
+            .read_checked()
+            .map_err(|error| format!("resume: published fork target changed: {error}"))?;
+        if content.len() != pending.content_len
+            || remote_control_client::encoding::sha256(&content) != pending.content_sha256
+        {
+            return Err("resume: published fork target changed".into());
+        }
+        authority
+            .verify_current()
+            .map_err(|error| format!("resume: published fork target changed: {error}"))?;
+        let content = String::from_utf8(content)
+            .map_err(|_| "resume: published fork target is not valid UTF-8")?;
+        replay_captured_authority(authority, content, uuid)
+    }
+
     async fn resume_replayed_session(
         &self,
         uuid: uuid::Uuid,
         mut replayed: orchestrator::ReplayedSession,
         expected_mode: ConversationMode,
+        source: lingxi_core::host::PinnedResumeSource,
         sink: Arc<dyn ClientEventSink>,
     ) -> Result<(), String> {
+        let pinned_fork_source = self
+            .pending_fork_sources
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&uuid)
+            .cloned();
+        if pinned_fork_source
+            .as_ref()
+            .is_some_and(|expected| !expected.matches(&source))
+        {
+            return Err("resume: published fork target authority changed".into());
+        }
+        let authority = session::jsonl::writer::TranscriptFileAuthority::from_capture(
+            source.root.clone(),
+            source.relative.clone(),
+            source.root_identity,
+            source.file_identity,
+        )
+        .map_err(|error| format!("resume: invalid source authority: {error}"))?;
+        if authority
+            .read_checked()
+            .map_err(|error| format!("resume: selected source changed: {error}"))?
+            != source.expected_content.as_bytes()
+        {
+            return Err("resume: selected source changed after admission".into());
+        }
         let resumed_mode = replayed_conversation_mode(&replayed, uuid)?;
         if resumed_mode != expected_mode
             || self.handle.conversation_mode().await.mode != expected_mode
@@ -842,7 +997,8 @@ impl EngineCommandRouter {
             .await
             .unwrap_or_else(|| "default".to_string());
         let previous_plan_mode = self.handle.plan_mode().await;
-        let runtime_snapshot = replayed.handle_runtime_snapshot();
+        let mut runtime_snapshot = replayed.handle_runtime_snapshot();
+        runtime_snapshot.transcript_source = Some(source);
         let restored_usage = runtime_snapshot.current_usage;
         if resume_plan_mode {
             self.handle
@@ -885,6 +1041,18 @@ impl EngineCommandRouter {
             }
             return Err(format!("resume_session failed: {error}"));
         }
+        if let Some(expected) = pinned_fork_source {
+            let mut pending = self
+                .pending_fork_sources
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if pending
+                .get(&uuid)
+                .is_some_and(|current| Arc::ptr_eq(current, &expected))
+            {
+                pending.remove(&uuid);
+            }
+        }
         if let Some(workspace) = &self.workspace_commands {
             workspace.session_facts().reset(true);
             // Owned resume may append deferred tool results. Publish them with
@@ -917,59 +1085,107 @@ impl EngineCommandRouter {
         source_id: uuid::Uuid,
         target_mode: ConversationMode,
     ) -> Result<uuid::Uuid, String> {
+        self.fork_session_after_capture(source_id, target_mode, || {})
+            .await
+    }
+
+    async fn fork_session_after_capture(
+        &self,
+        source_id: uuid::Uuid,
+        target_mode: ConversationMode,
+        after_capture: impl FnOnce() + Send,
+    ) -> Result<uuid::Uuid, String> {
+        self.fork_session_with_capture_hooks(source_id, target_mode, after_capture, || {})
+            .await
+    }
+
+    async fn fork_session_with_capture_hooks(
+        &self,
+        source_id: uuid::Uuid,
+        target_mode: ConversationMode,
+        after_capture: impl FnOnce() + Send,
+        after_snapshot: impl FnOnce() + Send,
+    ) -> Result<uuid::Uuid, String> {
         if self.is_turn_active() {
             return Err("cannot fork a session while a turn is in flight".into());
         }
+        let slot = self
+            .pending_fork_capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "fork: too many pending fork targets")?;
         let store = self
             .session_store
             .as_ref()
             .ok_or("fork: persisted session store is unavailable")?;
         let cwd = store.current_cwd();
         let current = self.handle.current_session_id().await.as_uuid();
-        let path = if source_id == current {
-            store
-                .transcript_writer
-                .as_ref()
-                .map(|writer| writer.active_path())
-                .ok_or("fork: active transcript is unavailable")?
-        } else {
-            session::jsonl::resolve_session_path_across_worktrees(
-                &store.lingxi_home,
-                &cwd,
-                source_id,
+        let active_writer = if source_id == current {
+            Some(
+                store
+                    .transcript_writer
+                    .as_ref()
+                    .ok_or("fork: active writer authority is unavailable")?,
             )
-            .await
-            .map_err(|error| format!("fork: {error}"))?
+        } else {
+            None
         };
-        let preflight = if source_id == current {
+        let (authority, source_bytes, content) = if let Some(writer) = active_writer {
+            let authority = writer
+                .active_transcript_authority()
+                .ok_or("fork: active transcript authority is unavailable")?;
             let capture = self
                 .workspace_commands
                 .as_ref()
                 .ok_or("fork: active writer authority is unavailable")?
                 .capture_current_transcript(lingxi_core::types::SessionId::from_uuid(source_id))
                 .await?;
-            if capture.transcript_path != path {
+            writer
+                .verify_active_transcript_source(&authority)
+                .map_err(|error| format!("fork: {error}"))?;
+            if capture.transcript_path != authority.path() {
                 return Err("fork: active transcript changed during capture".into());
             }
-            capture.source
+            let bytes = authority
+                .read_checked()
+                .map_err(|error| format!("fork: {error}"))?;
+            // The committed capture excludes a torn final line. Retain the
+            // full pinned bytes for identity/content checks while branching
+            // only the writer's complete, committed prefix.
+            if bytes
+                .strip_prefix(capture.source.as_bytes())
+                .is_none_or(|tail| tail.contains(&b'\n'))
+            {
+                return Err("fork: active transcript changed during capture".into());
+            }
+            (authority, bytes, capture.source)
         } else {
-            session::jsonl::load_routed_session_from_path_with_source(
-                &path,
+            let (_, authority) = harness_runtime::headless::session::resolve_unique_resume_source(
+                &store.lingxi_home,
                 source_id,
-                store.fs.clone(),
             )
             .await
-            .map_err(|error| format!("fork: {error}"))?
-            .1
+            .map_err(|error| format!("fork: {error}"))?;
+            let bytes = authority
+                .read_checked()
+                .map_err(|error| format!("fork: {error}"))?;
+            let content = String::from_utf8(bytes.clone())
+                .map_err(|error| format!("fork: invalid source encoding: {error}"))?;
+            (authority, bytes, content)
         };
-        let source_mode = session::JsonlWriter::fixed_session_mode_from_source(
-            &preflight,
-            &source_id.to_string(),
-        )
-        .map_err(|error| format!("fork: invalid source mode: {error}"))?;
+        let path = authority.path();
+        let loaded =
+            session::jsonl::loader::route_captured_session_source(&path, source_id, &content)
+                .map_err(|error| format!("fork: {error}"))?;
+        crate::boot::validate_captured_transcript(&path, source_id, &content, &loaded, false)
+            .map_err(|error| format!("fork: {error}"))?;
+        let source_mode =
+            session::JsonlWriter::fixed_session_mode_from_source(&content, &source_id.to_string())
+                .map_err(|error| format!("fork: invalid source mode: {error}"))?;
         if source_mode != target_mode {
             return Err("session_mode_mismatch: fork must preserve the source session mode".into());
         }
+        after_capture();
         let live = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
             store.lingxi_home.join("sessions"),
         );
@@ -991,34 +1207,33 @@ impl EngineCommandRouter {
                 .map_err(|error| format!("fork: source session is in use: {error}"))?
                 .into_shared()
         };
-        let (content, loaded) = if source_id == current {
-            let capture = self
-                .workspace_commands
-                .as_ref()
-                .ok_or("fork: active writer authority is unavailable")?
-                .capture_current_transcript(lingxi_core::types::SessionId::from_uuid(source_id))
-                .await?;
-            if capture.transcript_path != path {
-                return Err("fork: active transcript changed during capture".into());
+        let verify_source = || -> Result<(), String> {
+            if let Some(writer) = active_writer {
+                writer
+                    .verify_active_transcript_source(&authority)
+                    .map_err(|error| format!("fork: {error}"))?;
             }
-            let loaded = session::jsonl::route_lines(&capture.source);
-            (capture.source, loaded)
-        } else {
-            let (_, content, loaded) = session::jsonl::load_routed_session_from_path_with_source(
-                &path,
-                source_id,
-                store.fs.clone(),
-            )
-            .await
-            .map_err(|error| format!("fork: {error}"))?;
-            (content, loaded)
+            if authority
+                .read_checked()
+                .map_err(|error| format!("fork: {error}"))?
+                != source_bytes
+            {
+                return Err("fork: source transcript changed during capture".into());
+            }
+            if let Some(writer) = active_writer {
+                writer
+                    .verify_active_transcript_source(&authority)
+                    .map_err(|error| format!("fork: {error}"))?;
+            }
+            authority
+                .verify_current()
+                .map_err(|error| format!("fork: {error}"))?;
+            Ok(())
         };
-        let confirmed =
-            session::JsonlWriter::fixed_session_mode_from_source(&content, &source_id.to_string())
-                .map_err(|error| format!("fork: invalid source mode: {error}"))?;
-        if confirmed != source_mode {
-            return Err("session_mode_mismatch: fork source mode changed during capture".into());
-        }
+        verify_source()?;
+        // The claimed, checked snapshot now identifies the fork source. Any
+        // later changes to the original file cannot change this branch.
+        after_snapshot();
         let target_id = uuid::Uuid::new_v4();
         let _target_lease = live
             .claim_session_id(&target_id.to_string(), std::process::id())
@@ -1029,7 +1244,7 @@ impl EngineCommandRouter {
         let recovery = harness_runtime::desktop::session_state::capture_branch_recovery(
             &store.lingxi_home,
             source_id,
-            source_lease,
+            source_lease.clone(),
         )
         .await
         .map_err(|error| format!("fork: resume the original session first: {error}"))?;
@@ -1058,7 +1273,28 @@ impl EngineCommandRouter {
         )
         .await
         .map_err(|error| format!("fork: {error}"))?;
-        Ok(result.new_session_id)
+        let target_id = result.result.new_session_id;
+        let target_source = Arc::new(PendingForkSource {
+            identity: result.authority.pinned_resume_source(String::new()),
+            content_len: result.content.len(),
+            content_sha256: remote_control_client::encoding::sha256(result.content.as_bytes()),
+            _slot: slot,
+        });
+        let mut pending = self
+            .pending_fork_sources
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match pending.entry(target_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(target_source);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(format!(
+                    "fork: published target {target_id} has a conflicting in-process receipt"
+                ));
+            }
+        }
+        Ok(target_id)
     }
 
     async fn emit_resumed_session(
@@ -1185,6 +1421,8 @@ impl EngineCommandRouter {
             side_chat_runtime: None,
             side_chat_manager: tokio::sync::Mutex::new(None),
             session_store: None,
+            pending_fork_sources: std::sync::Mutex::new(HashMap::new()),
+            pending_fork_capacity: Arc::new(tokio::sync::Semaphore::new(1024)),
             session_agent_observer: None,
             team_registry: None,
             catalog_registry: harness_runtime::desktop::FusionCatalogRegistry::default(),
@@ -1656,7 +1894,7 @@ impl CommandRouter for EngineCommandRouter {
     async fn preflight_session_transition(
         &self,
         command: &ClientCommand,
-    ) -> Result<(), (ErrorKindDto, String)> {
+    ) -> Result<Option<PreparedSessionTransition>, (ErrorKindDto, String)> {
         match command {
             ClientCommand::NewSession { mode, .. } => {
                 if self.handle.conversation_mode().await.mode != conversation_mode_from_dto(*mode) {
@@ -1668,7 +1906,7 @@ impl CommandRouter for EngineCommandRouter {
             }
             ClientCommand::ResumeSession {
                 session_id,
-                cwd,
+                cwd: _,
                 expected_mode,
             } => {
                 let expected = conversation_mode_from_dto(*expected_mode);
@@ -1690,20 +1928,15 @@ impl CommandRouter for EngineCommandRouter {
                         "resume: persisted session store is unavailable".into(),
                     )
                 })?;
-                let cwd = cwd.clone().unwrap_or_else(|| store.current_cwd());
-                let replayed = orchestrator::replay_session_state(
-                    &store.lingxi_home,
-                    &cwd,
-                    uuid,
-                    store.fs.clone(),
-                )
-                .await
-                .map_err(|error| {
-                    (
-                        ErrorKindDto::Protocol,
-                        format!("resume: session {session_id} not resumable: {error}"),
-                    )
-                })?;
+                let (replayed, source) = self
+                    .replay_resume_source(&store.lingxi_home, uuid)
+                    .await
+                    .map_err(|error| {
+                        (
+                            ErrorKindDto::Protocol,
+                            format!("resume: session {session_id} not resumable: {error}"),
+                        )
+                    })?;
                 let actual = replayed_conversation_mode(&replayed, uuid)
                     .map_err(|error| (ErrorKindDto::Rejected, error))?;
                 if actual != expected {
@@ -1712,10 +1945,75 @@ impl CommandRouter for EngineCommandRouter {
                         "session_mode_mismatch: expected mode does not match the session".into(),
                     ));
                 }
+                return Ok(Some(PreparedSessionTransition {
+                    id: uuid,
+                    mode: expected,
+                    replayed,
+                    source,
+                }));
             }
             _ => {}
         }
-        Ok(())
+        Ok(None)
+    }
+
+    async fn route_prepared_session_transition(
+        &self,
+        command: ClientCommand,
+        prepared: Option<PreparedSessionTransition>,
+        sink: Arc<dyn ClientEventSink>,
+    ) {
+        if let ClientCommand::ResumeSession {
+            session_id,
+            expected_mode,
+            ..
+        } = &command
+        {
+            let Some(prepared) = prepared else {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: "resume: missing prepared source".into(),
+                })
+                .await;
+                return;
+            };
+            if uuid::Uuid::parse_str(session_id).ok() != Some(prepared.id)
+                || conversation_mode_from_dto(*expected_mode) != prepared.mode
+            {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: "resume: prepared source does not match request".into(),
+                })
+                .await;
+                return;
+            }
+            if let Err(message) = self
+                .resume_replayed_session(
+                    prepared.id,
+                    prepared.replayed,
+                    prepared.mode,
+                    prepared.source,
+                    sink.clone(),
+                )
+                .await
+            {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: message.into(),
+                })
+                .await;
+            }
+            return;
+        }
+        if prepared.is_some() {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Rejected,
+                message: "unexpected prepared session source".into(),
+            })
+            .await;
+            return;
+        }
+        self.route(command, sink).await;
     }
 
     async fn resume_selected_session(
@@ -1760,11 +2058,8 @@ impl CommandRouter for EngineCommandRouter {
             .session_store
             .as_ref()
             .ok_or("resume: persisted session store is unavailable")?;
-        let replayed =
-            orchestrator::resume::replay_session_state_from_path(&path, id, store.fs.clone())
-                .await
-                .map_err(|error| format!("resume: selected session is not resumable: {error}"))?;
-        self.resume_replayed_session(id, replayed, expected_mode, sink)
+        let (replayed, source) = replay_pinned_catalog_source(&store.lingxi_home, &path, id)?;
+        self.resume_replayed_session(id, replayed, expected_mode, source, sink)
             .await?;
         Utf16JsonProjection::parse(r#"{"status":"ok"}"#).map_err(|error| error.to_string())
     }
@@ -1807,6 +2102,40 @@ impl CommandRouter for EngineCommandRouter {
             .ok_or("workspace state is unavailable")?
             .state()
             .await
+    }
+    async fn session_metadata(
+        &self,
+        request: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, String> {
+        let json = request
+            .to_json_string()
+            .map_err(|_| "invalid session metadata request")?;
+        let request: crate::session_metadata::MetadataMutation =
+            serde_json::from_str(&json).map_err(|_| "invalid session metadata request")?;
+        let session_id = request.session_id()?;
+        let lease = self
+            .workspace_commands
+            .as_ref()
+            .ok_or("session metadata writer authority is unavailable")?
+            .current_writer_lease(session_id)
+            .await?;
+        let writer = self
+            .session_store
+            .as_ref()
+            .and_then(|store| store.transcript_writer.as_ref())
+            .ok_or("session metadata writer is unavailable")?
+            .clone();
+        // The waiter can disappear on disconnect while durable I/O is still
+        // settling. The accepted task keeps the source's UUID claim until the
+        // writer operation completes, even if this caller is cancelled.
+        let result = tokio::spawn(async move {
+            let _lease = lease;
+            crate::session_metadata::apply_active(&writer, request).await
+        })
+        .await
+        .map_err(|_| "session metadata operation failed")??;
+        Utf16JsonProjection::from_serde_value(&result)
+            .map_err(|_| "session metadata response is invalid".to_string())
     }
     async fn set_working_directory(
         &self,
@@ -2333,12 +2662,26 @@ impl CommandRouter for EngineCommandRouter {
             // behind the same trust gate as the `CronManage` mutations below.
             // Without it an untrusted workspace can still mutate the file every
             // other write path refuses to touch.
-            ClientCommand::CronRunStarted { run_id, session_id } => {
+            ClientCommand::CronRunStarted {
+                run_id,
+                session_id,
+                transcript_path,
+                session_mode,
+                session_scope_key,
+            } => {
                 if !self.handle.workspace_trusted().await {
                     return;
                 }
                 if let Some(firer) = &self.cron_firer {
-                    firer.started(&run_id, &session_id).await;
+                    firer
+                        .started(
+                            &run_id,
+                            &session_id,
+                            &transcript_path,
+                            &session_mode,
+                            session_scope_key.as_deref(),
+                        )
+                        .await;
                 }
             }
             ClientCommand::CronRunCompleted {
@@ -2370,20 +2713,51 @@ impl CommandRouter for EngineCommandRouter {
                     return;
                 }
                 let status = self.handle.get_status_snapshot().await;
-                let owner_id = status
-                    .session_id
-                    .strip_prefix("sess:")
-                    .unwrap_or(&status.session_id);
+                let owner_id = lingxi_core::types::SessionId::parse_prefixed(&status.session_id)
+                    .map(|id| id.as_uuid().to_string())
+                    .unwrap_or_else(|| {
+                        status
+                            .session_id
+                            .strip_prefix("sess:")
+                            .unwrap_or(&status.session_id)
+                            .to_owned()
+                    });
                 if request.action == "create" {
-                    let anchor = match self.session_store.as_ref() {
-                        Some(store) => store.ensure_scheduled_chat(owner_id).await,
-                        None => Err("Scheduled task chat storage is unavailable".into()),
+                    let owner = lingxi_core::types::SessionId::parse_prefixed(&owner_id);
+                    let mode = self.handle.conversation_mode().await;
+                    let anchor = match (owner, self.session_store.as_ref()) {
+                        (Some(owner), Some(store))
+                            if lingxi_core::types::SessionId::parse_prefixed(&mode.session_id)
+                                == Some(owner) =>
+                        {
+                            store
+                                .ensure_scheduled_chat(&owner_id, mode.mode, &status.cwd)
+                                .await
+                        }
+                        (_, None) => Err("Scheduled task chat storage is unavailable".into()),
+                        _ => Err("Scheduled task chat changed before it could be retained".into()),
                     };
                     if let Err(error) = anchor {
                         sink.emit(ClientEvent::CronResult {
                             request_id,
                             jobs: Vec::new(),
                             error: Some(error),
+                        })
+                        .await;
+                        return;
+                    }
+                    let current = self.handle.get_status_snapshot().await;
+                    let current_mode = self.handle.conversation_mode().await;
+                    if lingxi_core::types::SessionId::parse_prefixed(&current.session_id) != owner
+                        || lingxi_core::types::SessionId::parse_prefixed(&current_mode.session_id)
+                            != owner
+                        || current_mode.mode != mode.mode
+                        || current.cwd != status.cwd
+                    {
+                        sink.emit(ClientEvent::CronResult {
+                            request_id,
+                            jobs: Vec::new(),
+                            error: Some("Scheduled task chat changed before creation".into()),
                         })
                         .await;
                         return;
@@ -2396,7 +2770,7 @@ impl CommandRouter for EngineCommandRouter {
                     &cwd,
                     request,
                     &self.tasks,
-                    owner_id,
+                    &owner_id,
                 )
                 .await;
                 let (jobs, error) = match result {
@@ -3167,7 +3541,7 @@ impl CommandRouter for EngineCommandRouter {
             }
             ClientCommand::ResumeSession {
                 session_id,
-                cwd,
+                cwd: _,
                 expected_mode,
             } => {
                 if self.is_turn_active() {
@@ -3202,16 +3576,11 @@ impl CommandRouter for EngineCommandRouter {
                     .await;
                     return;
                 };
-                let cwd = cwd.unwrap_or_else(|| store.current_cwd());
-                let replayed = match orchestrator::replay_session_state(
-                    &store.lingxi_home,
-                    &cwd,
-                    uuid,
-                    store.fs.clone(),
-                )
-                .await
+                let (replayed, source) = match self
+                    .replay_resume_source(&store.lingxi_home, uuid)
+                    .await
                 {
-                    Ok(replayed) => replayed,
+                    Ok(result) => result,
                     Err(error) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Protocol,
@@ -3228,6 +3597,7 @@ impl CommandRouter for EngineCommandRouter {
                         uuid,
                         replayed,
                         conversation_mode_from_dto(expected_mode),
+                        source,
                         sink.clone(),
                     )
                     .await
@@ -3454,6 +3824,10 @@ mod scheduled_chat_anchor_tests;
 #[cfg(test)]
 #[path = "router/tests/runtime_snapshot_tests.rs"]
 mod runtime_snapshot_tests;
+
+#[cfg(test)]
+#[path = "router/tests/fork_source_tests.rs"]
+mod fork_source_tests;
 
 #[cfg(test)]
 #[path = "router/tests/side_chat_shutdown_tests.rs"]

@@ -75,7 +75,7 @@ pub enum AppExit {
     /// The `/resume` picker resolved to this session uuid: the embedder must
     /// re-mount that session in-process (writer retargeted via the startup
     /// resume seam).
-    SwitchSession(uuid::Uuid),
+    SwitchSession(crate::resume::ResumeSelection),
     /// The agents view selected a session; the embedder must resolve its live
     /// owner and attach/restart safely before deciding whether remounting is
     /// permitted.
@@ -95,6 +95,22 @@ pub enum AppExit {
         /// Which parts to restore.
         scope: crate::bottom_pane::view::RewindScope,
     },
+}
+
+/// Two-phase host fence for a session switch: hold the admission gate while
+/// the UI consumes any already-published turn and approval events.
+#[derive(Clone, Copy)]
+pub enum SessionSwitchFenceAction {
+    Acquire,
+    Abort,
+    Commit,
+}
+
+/// Result of binding a picker row to its physical transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResumeDisposition {
+    Switch,
+    AlreadyCurrent,
 }
 
 /// The embedding CLI/orchestrator callbacks the event loop executes when the
@@ -143,6 +159,9 @@ pub struct AppCallbacks<'cb> {
     pub on_reload_plugins: Box<dyn FnMut() + 'cb>,
     /// Recompute the visible command catalog after `/reload-skills`.
     pub on_refresh_command_catalog: Box<dyn FnMut() + 'cb>,
+    /// Capture the selected transcript before unwinding the current runtime.
+    pub on_capture_resume:
+        Box<dyn FnMut(&crate::resume::ResumeSelection) -> Result<ResumeDisposition, String> + 'cb>,
     /// Executed on [`ChatOutcome::RunBash`]: the caller runs the `!`-prefixed
     /// command through the sandboxed bash runner (no LLM turn) and folds its
     /// output back via [`TurnEvent::BashOutput`].
@@ -235,7 +254,11 @@ pub struct RataApp<'cb> {
     /// Streaming turn events from the orchestrator bridge, drained into the
     /// widget at the top of every tick.
     events_rx: UnboundedReceiver<TurnEvent>,
+    startup_recovery: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
+    recovery_initial_prompt: Option<Utf16JsonProjection>,
     admitted_rows: Option<std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
+    session_switch_fence:
+        Option<std::sync::Arc<dyn Fn(SessionSwitchFenceAction) -> bool + Send + Sync>>,
     /// Permission requests from the permission bridge, drained into the
     /// widget right after the turn events (the widget serializes prompts).
     permission_rx: Receiver<PermissionExchange>,
@@ -295,6 +318,26 @@ pub struct RataApp<'cb> {
 }
 
 impl<'cb> RataApp<'cb> {
+    fn finish_startup_recovery(&mut self) -> bool {
+        if !self
+            .startup_recovery
+            .as_ref()
+            .is_some_and(|state| state.load(std::sync::atomic::Ordering::Acquire) == 1)
+        {
+            return false;
+        }
+        self.startup_recovery = None;
+        self.chat_widget.set_startup_recovery(None);
+        if let Some(prompt) = self.recovery_initial_prompt.take() {
+            if let ChatOutcome::Submit(prompt, row_token, images, token) =
+                self.chat_widget.submit_prompt(prompt)
+            {
+                (self.callbacks.on_submit)(prompt, row_token, images, token);
+            }
+        }
+        true
+    }
+
     /// Build an app seeded with an initial conversation (may be empty), the
     /// startup [`SessionInfo`] snapshot, the event receivers the loop drains,
     /// and the embedder callbacks.
@@ -315,7 +358,10 @@ impl<'cb> RataApp<'cb> {
         Self {
             chat_widget: ChatWidget::new(messages, session),
             events_rx,
+            startup_recovery: None,
+            recovery_initial_prompt: None,
             admitted_rows: None,
+            session_switch_fence: None,
             permission_rx,
             ask_user_question_rx,
             computer_access_rx,
@@ -342,6 +388,52 @@ impl<'cb> RataApp<'cb> {
             callbacks,
             redraw_interval: Duration::from_millis(50),
         }
+    }
+
+    fn admit_session_switch(&mut self) -> bool {
+        if !self.chat_widget.can_switch_session() {
+            self.chat_widget.reject_session_switch();
+            return false;
+        }
+        if self
+            .session_switch_fence
+            .as_ref()
+            .is_some_and(|fence| !fence(SessionSwitchFenceAction::Acquire))
+        {
+            self.chat_widget.reject_session_switch();
+            return false;
+        }
+        // A turn or approval may have reached the channel since the last tick.
+        // The host fence prevents another turn from being admitted while these
+        // already-published events are checked.
+        while let Ok(event) = self.events_rx.try_recv() {
+            self.apply_turn_event(event);
+        }
+        while let Ok(exchange) = self.permission_rx.try_recv() {
+            self.open_permission(exchange);
+        }
+        while let Ok(exchange) = self.ask_user_question_rx.try_recv() {
+            self.open_ask_user_question(exchange);
+        }
+        while let Ok(exchange) = self.computer_access_rx.try_recv() {
+            self.open_computer_access(exchange);
+        }
+        if !self.chat_widget.can_switch_session() {
+            if let Some(fence) = &self.session_switch_fence {
+                fence(SessionSwitchFenceAction::Abort);
+            }
+            self.chat_widget.reject_session_switch();
+            return false;
+        }
+        if self
+            .session_switch_fence
+            .as_ref()
+            .is_some_and(|fence| !fence(SessionSwitchFenceAction::Commit))
+        {
+            self.chat_widget.reject_session_switch();
+            return false;
+        }
+        true
     }
 
     fn set_orchestrator(
@@ -561,6 +653,7 @@ impl<'cb> RataApp<'cb> {
                 self.open_computer_access(exchange);
                 dirty = true;
             }
+            dirty |= self.finish_startup_recovery();
             // Off-thread clipboard-image paste results (Ctrl+V): attach the
             // temp PNG (or surface the error) as soon as the worker delivers.
             while let Ok(result) = self.paste_rx.try_recv() {
@@ -663,30 +756,52 @@ impl<'cb> RataApp<'cb> {
                     // loop carrying it — the embedder re-mounts that session
                     // in-process (writer retargeted) rather than swapping the
                     // live engine in place (which would fork the JSONL file).
-                    ChatOutcome::SwitchSession(uuid) => {
-                        // Switch-safety: cancel any in-flight streaming turn on
-                        // the OUTGOING runtime before unwinding, so a
-                        // half-streamed turn does not keep writing into the
-                        // session file the user just left. No-op when idle.
-                        self.chat_widget.cancel_active_turn();
-                        return Ok(AppExit::SwitchSession(uuid));
+                    ChatOutcome::SwitchSession(selection) => {
+                        if !self.chat_widget.can_switch_session() {
+                            self.chat_widget.reject_session_switch();
+                            continue;
+                        }
+                        match (self.callbacks.on_capture_resume)(&selection) {
+                            Ok(ResumeDisposition::Switch) => {}
+                            Ok(ResumeDisposition::AlreadyCurrent) => {
+                                self.apply_turn_event(TurnEvent::SystemNotice {
+                                    body: "This session is already open.".into(),
+                                    is_error: false,
+                                });
+                                continue;
+                            }
+                            Err(error) => {
+                                self.apply_turn_event(TurnEvent::SystemNotice {
+                                    body: error.into(),
+                                    is_error: true,
+                                });
+                                continue;
+                            }
+                        }
+                        if !self.admit_session_switch() {
+                            continue;
+                        }
+                        return Ok(AppExit::SwitchSession(selection));
                     }
                     ChatOutcome::OpenAgentSession(target) => {
-                        self.chat_widget.cancel_active_turn();
+                        if !self.admit_session_switch() {
+                            continue;
+                        }
                         return Ok(AppExit::OpenAgentSession(target));
                     }
-                    // `/branch`: same switch-safety as SwitchSession — stop any
-                    // in-flight turn on the OUTGOING runtime before unwinding so
-                    // the embedder can create and mount the branch.
+                    // `/branch` also replaces the runtime, so it shares the
+                    // same idle admission fence as session navigation.
                     ChatOutcome::BranchSession { title } => {
-                        self.chat_widget.cancel_active_turn();
+                        if !self.admit_session_switch() {
+                            continue;
+                        }
                         return Ok(AppExit::BranchSession { title });
                     }
-                    // `/rewind`: same switch-safety as SwitchSession/Branch —
-                    // stop the in-flight turn before unwinding so the embedder
-                    // can rewind files / truncate the transcript and re-mount.
+                    // `/rewind` mutates the source and remounts only when idle.
                     ChatOutcome::Rewind { message, scope } => {
-                        self.chat_widget.cancel_active_turn();
+                        if !self.admit_session_switch() {
+                            continue;
+                        }
                         return Ok(AppExit::Rewind { message, scope });
                     }
                     // `/rewind` → Summarize: runs IN PLACE on the live runtime.
@@ -844,6 +959,22 @@ impl<'cb> RataApp<'cb> {
     }
 }
 
+struct AbortStartupRecoveryOnDrop {
+    abort: Option<tokio::task::AbortHandle>,
+    shutdown: Option<CancellationToken>,
+}
+
+impl Drop for AbortStartupRecoveryOnDrop {
+    fn drop(&mut self) {
+        if let Some(shutdown) = &self.shutdown {
+            shutdown.cancel();
+        }
+        if let Some(abort) = &self.abort {
+            abort.abort();
+        }
+    }
+}
+
 /// Run the interactive chat app on the bottom-anchored custom terminal:
 /// history is committed to the terminal's native scrollback via
 /// [`ChatWidget::flush_scrollback`]; the bottom viewport (status + composer +
@@ -874,6 +1005,9 @@ impl<'cb> RataApp<'cb> {
 pub fn run_app(
     messages: Vec<RenderedMessage>,
     initial_prompt: Option<Utf16JsonProjection>,
+    startup_recovery: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
+    startup_recovery_abort: Option<tokio::task::AbortHandle>,
+    startup_recovery_shutdown: Option<CancellationToken>,
     initial_draft: Option<String>,
     switch_drafts: Vec<crate::chat_widget::SwitchDraft>,
     switch_drafts_out: std::sync::Arc<std::sync::Mutex<Vec<crate::chat_widget::SwitchDraft>>>,
@@ -895,6 +1029,7 @@ pub fn run_app(
         std::sync::Arc<std::sync::Mutex<crate::bottom_pane::plugins_view::PluginsSnapshot>>,
     >,
     resume_rows: Vec<crate::resume::ResumeRow>,
+    resume_rows_cwd: std::path::PathBuf,
     connect_auth_methods: std::collections::BTreeMap<String, String>,
     connect_availability: std::collections::BTreeMap<String, bool>,
     shell_expansion: Option<std::sync::Arc<dyn command_api::ShellExpansionProvider>>,
@@ -929,6 +1064,7 @@ pub fn run_app(
     on_plugin_action: impl FnMut(PluginAction),
     on_reload_plugins: impl FnMut(),
     on_refresh_command_catalog: impl FnMut(),
+    on_capture_resume: impl FnMut(&crate::resume::ResumeSelection) -> Result<ResumeDisposition, String>,
     on_bash: impl FnMut(String),
     on_compact: impl FnMut(String, CancellationToken),
     on_summarize: impl FnMut(
@@ -950,8 +1086,18 @@ pub fn run_app(
         crate::chat_widget::PendingSlashDispatch,
     ),
     on_rewake_peer: impl FnMut(),
+    session_switch_fence: Option<
+        std::sync::Arc<dyn Fn(SessionSwitchFenceAction) -> bool + Send + Sync>,
+    >,
     exit_request_probe: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> io::Result<AppExit> {
+    // Early startup failures must also cancel recovery before its approval
+    // receivers are destroyed. After the app exists the guard is moved below
+    // it, so normal unwinding cancels first and then drops those receivers.
+    let mut recovery_abort_guard = Some(AbortStartupRecoveryOnDrop {
+        abort: startup_recovery_abort,
+        shutdown: startup_recovery_shutdown,
+    });
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
     // raw mode itself, so it runs BEFORE the session guard — then the
@@ -997,6 +1143,7 @@ pub fn run_app(
             on_plugin_action: Box::new(on_plugin_action),
             on_reload_plugins: Box::new(on_reload_plugins),
             on_refresh_command_catalog: Box::new(on_refresh_command_catalog),
+            on_capture_resume: Box::new(on_capture_resume),
             on_bash: Box::new(on_bash),
             on_compact: Box::new(on_compact),
             on_summarize: Box::new(on_summarize),
@@ -1011,7 +1158,11 @@ pub fn run_app(
             on_rewake_peer: Box::new(on_rewake_peer),
         },
     );
+    let _recovery_abort_guard = recovery_abort_guard.take();
     app.admitted_rows = Some(admitted_rows);
+    app.session_switch_fence = session_switch_fence;
+    app.startup_recovery = startup_recovery.clone();
+    app.chat_widget.set_startup_recovery(startup_recovery);
     if let Some(callback) = loop_interrupt {
         app.chat_widget.set_loop_interrupt(callback);
     }
@@ -1052,7 +1203,8 @@ pub fn run_app(
     if let Some(slot) = plugin_snapshot {
         app.chat_widget.set_plugin_snapshot(slot);
     }
-    app.chat_widget.set_resume_rows(resume_rows);
+    app.chat_widget
+        .set_resume_catalog(resume_rows_cwd, resume_rows);
     app.chat_widget
         .set_connect_data(connect_auth_methods, connect_availability);
     // (#3) Wire the prompt shell-expansion provider so `/commit` … expand their
@@ -1120,11 +1272,14 @@ pub fn run_app(
     if let Some(snapshot) = background_handoff.as_ref() {
         app.chat_widget.restore_background_handoff(snapshot);
     }
-    if let Some(prompt) = initial_prompt.filter(|value| {
+    let initial_prompt = initial_prompt.filter(|value| {
         value
             .string_at("")
             .is_some_and(|text| !text.trim().is_empty())
-    }) {
+    });
+    if app.startup_recovery.is_some() {
+        app.recovery_initial_prompt = initial_prompt;
+    } else if let Some(prompt) = initial_prompt {
         if let ChatOutcome::Submit(prompt, row_token, images, token) =
             app.chat_widget.submit_prompt(prompt)
         {
@@ -1146,8 +1301,22 @@ pub fn run_app(
         &mut event_driver,
     );
     app.chat_widget.set_mod_ui_selection(None);
-    app.chat_widget.cancel_active_turn();
-    if matches!(result.as_ref(), Ok(AppExit::SwitchSession(_) | AppExit::OpenAgentSession(_) | AppExit::BranchSession { .. } | AppExit::Rewind { .. })) {
+    if !matches!(
+        result.as_ref(),
+        Ok(AppExit::SwitchSession(_)
+            | AppExit::OpenAgentSession(_)
+            | AppExit::BranchSession { .. }
+            | AppExit::Rewind { .. })
+    ) {
+        app.chat_widget.cancel_active_turn();
+    }
+    if matches!(
+        result.as_ref(),
+        Ok(AppExit::SwitchSession(_)
+            | AppExit::OpenAgentSession(_)
+            | AppExit::BranchSession { .. }
+            | AppExit::Rewind { .. })
+    ) {
         *switch_drafts_out.lock().unwrap() = app.chat_widget.switch_drafts();
     }
     result

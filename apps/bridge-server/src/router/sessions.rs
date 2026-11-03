@@ -233,8 +233,12 @@ impl EngineCommandRouter {
             limit,
             store.fs.clone(),
             mode.map(|mode| match mode {
-                client::protocol::listings::SessionModeDto::Chat => session::jsonl::SessionMode::Chat,
-                client::protocol::listings::SessionModeDto::Code => session::jsonl::SessionMode::Code,
+                client::protocol::listings::SessionModeDto::Chat => {
+                    session::jsonl::SessionMode::Chat
+                }
+                client::protocol::listings::SessionModeDto::Code => {
+                    session::jsonl::SessionMode::Code
+                }
             }),
         )
         .await

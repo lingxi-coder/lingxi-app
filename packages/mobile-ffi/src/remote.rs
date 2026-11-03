@@ -47,8 +47,9 @@ use remote_control_client::rtdb::{
     TokenProvider,
 };
 use remote_control_client::session::{
-    BotThreadsState, BotsState, OutgoingPrompt, OutgoingStatus, RemoteClient, RemoteClientListener,
-    SessionController, SessionListener, SessionState, SessionStatus,
+    is_supported_image_media_type, BotThreadsState, BotsState, OutgoingPrompt, OutgoingStatus,
+    RemoteClient, RemoteClientListener, SessionController, SessionListener, SessionState,
+    SessionStatus, MAX_IMAGE_ATTACHMENTS,
 };
 use remote_control_client::signaling::{
     hosts_path, parse_hosts_listing, DevicePlatform, HostPresence, HostRecord, TransportKind,
@@ -1438,9 +1439,19 @@ fn image_from_data_url(url: &str) -> Result<RemoteImageFfi, RemoteFfiError> {
 }
 
 fn prompt_images(images: Vec<RemotePromptImageFfi>) -> Result<Vec<ImageRefDto>, RemoteFfiError> {
+    if images.len() > MAX_IMAGE_ATTACHMENTS {
+        return Err(RemoteFfiError::InvalidArgument {
+            message: "too many prompt images".into(),
+        });
+    }
     images
         .into_iter()
         .map(|image| {
+            if !is_supported_image_media_type(&image.media_type) {
+                return Err(RemoteFfiError::InvalidArgument {
+                    message: "unsupported prompt image type".into(),
+                });
+            }
             if image.bytes.len() > MAX_PROMPT_IMAGE_BYTES {
                 return Err(RemoteFfiError::InvalidArgument {
                     message: "an image is larger than 2 MiB".into(),

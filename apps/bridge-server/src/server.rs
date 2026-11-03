@@ -694,6 +694,11 @@ pub struct BridgeConnection {
     /// Serialize socket admission with teardown without holding the send lock
     /// across brokers whose cleanup emits an event back through that lock.
     connection_admission: Mutex<()>,
+    /// Opaque metadata receipts belong only to the socket that captured them.
+    metadata_receipts: Arc<StdMutex<SessionMetadataReceipts>>,
+    /// Admitted writer work outlives its socket and must drain before reconnect
+    /// or process shutdown can acknowledge completion.
+    metadata_work: Arc<MetadataWork>,
     cron_requests: Arc<crate::cron_host::HostCronRequests>,
     queued_prompt_payloads: QueuedPromptPayloads,
     tool_names: Arc<Mutex<HashMap<u64, String>>>,
@@ -786,6 +791,178 @@ pub struct BridgeConnection {
     /// Inline visualizations: the `visualization` request host and the store
     /// a follow-up `SendPrompt` snapshots its widget state from.
     visualization: Option<Arc<BridgeVisualization>>,
+}
+
+#[derive(Default)]
+struct SessionMetadataReceipts {
+    connection: Option<uuid::Uuid>,
+    receipts: HashMap<uuid::Uuid, SessionMetadataReceipt>,
+}
+
+struct SessionMetadataReceipt {
+    raw: Option<String>,
+    generation: uuid::Uuid,
+    issued: std::time::Instant,
+}
+
+/// Tracks admitted metadata work independently of any socket's lifetime.
+pub struct MetadataWork {
+    state: StdMutex<(usize, bool)>,
+    changed: tokio::sync::watch::Sender<usize>,
+}
+
+impl Default for MetadataWork {
+    fn default() -> Self {
+        let (changed, _) = tokio::sync::watch::channel(0);
+        Self {
+            state: StdMutex::new((0, false)),
+            changed,
+        }
+    }
+}
+
+struct MetadataWorkGuard(Arc<MetadataWork>);
+
+impl MetadataWork {
+    fn begin(self: &Arc<Self>) -> Option<MetadataWorkGuard> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.1 || state.0 >= SessionMetadataReceipts::LIMIT {
+            return None;
+        }
+        state.0 += 1;
+        self.changed.send_replace(state.0);
+        Some(MetadataWorkGuard(self.clone()))
+    }
+
+    /// Close process-wide admission before endpoint shutdown.
+    pub fn close(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .1 = true;
+    }
+
+    /// Wait for every previously admitted metadata operation to settle.
+    pub async fn drain(&self) {
+        let mut changed = self.changed.subscribe();
+        while *changed.borrow_and_update() != 0 {
+            if changed.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+impl Drop for MetadataWorkGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.0 -= 1;
+        self.0.changed.send_replace(state.0);
+    }
+}
+
+impl SessionMetadataReceipts {
+    const LIMIT: usize = 1024;
+    const BYTE_LIMIT: usize = 1024 * 1024;
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+    fn expire(&mut self, now: std::time::Instant) {
+        self.receipts
+            .retain(|_, receipt| now.saturating_duration_since(receipt.issued) < Self::MAX_AGE);
+    }
+
+    fn get(&mut self, token: uuid::Uuid, now: std::time::Instant) -> Option<&str> {
+        self.expire(now);
+        self.receipts
+            .get(&token)
+            .and_then(|receipt| receipt.raw.as_deref())
+    }
+
+    fn release(&mut self, token: uuid::Uuid, now: std::time::Instant) {
+        self.expire(now);
+        self.receipts.remove(&token);
+    }
+
+    fn reserve(
+        &mut self,
+        token: uuid::Uuid,
+        now: std::time::Instant,
+    ) -> Result<uuid::Uuid, String> {
+        self.expire(now);
+        if self.receipts.contains_key(&token) {
+            return Err("session metadata receipt already exists".into());
+        }
+        if self.receipts.len() >= Self::LIMIT {
+            return Err("too many pending session metadata receipts".into());
+        }
+        let generation = uuid::Uuid::new_v4();
+        self.receipts.insert(
+            token,
+            SessionMetadataReceipt {
+                raw: None,
+                generation,
+                issued: now,
+            },
+        );
+        Ok(generation)
+    }
+
+    fn cancel_reservation(&mut self, token: uuid::Uuid, generation: uuid::Uuid) {
+        if self
+            .receipts
+            .get(&token)
+            .is_some_and(|entry| entry.generation == generation && entry.raw.is_none())
+        {
+            self.receipts.remove(&token);
+        }
+    }
+
+    fn finish_capture(
+        &mut self,
+        token: uuid::Uuid,
+        generation: uuid::Uuid,
+        raw: String,
+        now: std::time::Instant,
+    ) -> Result<(), String> {
+        self.expire(now);
+        if !self
+            .receipts
+            .get(&token)
+            .is_some_and(|entry| entry.generation == generation && entry.raw.is_none())
+        {
+            return Err("session metadata receipt is unavailable".into());
+        }
+        let used: usize = self
+            .receipts
+            .values()
+            .filter_map(|entry| entry.raw.as_ref())
+            .map(String::len)
+            .sum();
+        if raw.len() > Self::BYTE_LIMIT.saturating_sub(used) {
+            self.cancel_reservation(token, generation);
+            return Err("too many pending session metadata receipts".into());
+        }
+        self.receipts
+            .get_mut(&token)
+            .expect("reservation was checked")
+            .raw = Some(raw);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn insert(&mut self, raw: String, now: std::time::Instant) -> Result<uuid::Uuid, String> {
+        let token = uuid::Uuid::new_v4();
+        let generation = self.reserve(token, now)?;
+        self.finish_capture(token, generation, raw, now)?;
+        Ok(token)
+    }
 }
 
 struct BridgeVisualization {
@@ -2711,6 +2888,12 @@ impl Drop for BridgeConnection {
 }
 
 impl BridgeConnection {
+    /// Preserve the writer drain barrier when this connection moves into the endpoint.
+    #[must_use]
+    pub fn metadata_work(&self) -> Arc<MetadataWork> {
+        self.metadata_work.clone()
+    }
+
     /// Create an UNBOUND connection: the outbound sink cell and the tool-name map
     /// exist, but no gate / driver is attached yet. Call
     /// [`Self::event_sink`]/[`Self::permission_sink`] to obtain the sinks to wire
@@ -2720,6 +2903,8 @@ impl BridgeConnection {
         Self {
             out: Arc::new(Mutex::new(None)),
             connection_admission: Mutex::new(()),
+            metadata_receipts: Arc::new(StdMutex::new(SessionMetadataReceipts::default())),
+            metadata_work: Arc::new(MetadataWork::default()),
             cron_requests: Arc::new(crate::cron_host::HostCronRequests::default()),
             queued_prompt_payloads: Arc::new(Mutex::new(HashMap::new())),
             tool_names: Arc::new(Mutex::new(HashMap::new())),
@@ -3406,10 +3591,213 @@ impl BridgeConnection {
                         }
                     }
                 }
+                *self
+                    .metadata_receipts
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = SessionMetadataReceipts {
+                    connection: Some(uuid::Uuid::new_v4()),
+                    receipts: HashMap::new(),
+                };
                 *cell = Some(out.clone());
                 true
             }
         }
+    }
+
+    async fn dispatch_session_metadata(
+        &self,
+        id: u64,
+        params: Utf16JsonProjection,
+        out: FrameSink,
+    ) {
+        // Recheck this exact connection under the lock that fences
+        // disconnect/reconnect before accepting its mutation.
+        let _admission = self.connection_admission.lock().await;
+        let active = self.out.lock().await;
+        if !self.handshaken.load(Ordering::SeqCst)
+            || active
+                .as_ref()
+                .is_none_or(|current| !current.same_channel(&out))
+        {
+            let _ = out.send(Self::error_response(
+                id,
+                "session metadata connection is unavailable",
+            ));
+            return;
+        }
+        let Some(router) = self.router.clone() else {
+            let _ = out.send(Self::error_response(id, "session metadata is unavailable"));
+            return;
+        };
+        let mut request = match deserialize_source::<serde_json::Value>(&params) {
+            Ok(serde_json::Value::Object(request)) => request,
+            _ => {
+                let _ = out.send(Self::error_response(id, "invalid session metadata request"));
+                return;
+            }
+        };
+        let action = request
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let (connection, capture) = {
+            let mut receipts = self
+                .metadata_receipts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let Some(connection) = receipts.connection else {
+                let _ = out.send(Self::error_response(
+                    id,
+                    "session metadata connection is unavailable",
+                ));
+                return;
+            };
+            let capture = match action.as_str() {
+                "capture" => {
+                    let Some(token) = request.remove("receipt").and_then(|value| {
+                        value
+                            .as_str()
+                            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                    }) else {
+                        let _ =
+                            out.send(Self::error_response(id, "invalid session metadata request"));
+                        return;
+                    };
+                    match receipts.reserve(token, std::time::Instant::now()) {
+                        Ok(generation) => Some((token, generation)),
+                        Err(error) => {
+                            let _ = out.send(Self::error_response(id, error));
+                            return;
+                        }
+                    }
+                }
+                "release" => {
+                    let Some(token) = request
+                        .get("receipt")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                    else {
+                        let _ =
+                            out.send(Self::error_response(id, "invalid session metadata request"));
+                        return;
+                    };
+                    // Admission of an earlier mutation already copied its raw
+                    // receipt. Releasing it fences future requests without
+                    // cancelling work that has already reached the writer.
+                    receipts.release(token, std::time::Instant::now());
+                    let result = Utf16JsonProjection::parse(r#"{"ok":true}"#)
+                        .expect("static metadata response is valid JSON");
+                    let _ = out.send(Frame::Response(BridgeResponse {
+                        id,
+                        result: Some(result),
+                        error: None,
+                    }));
+                    return;
+                }
+                "rename" | "touch" | "verify" => {
+                    let receipt = request
+                        .get("receipt")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                        .and_then(|token| receipts.get(token, std::time::Instant::now()));
+                    let Some(receipt) = receipt else {
+                        let _ = out.send(Self::error_response(
+                            id,
+                            "session metadata receipt is unavailable",
+                        ));
+                        return;
+                    };
+                    request.insert(
+                        "receipt".into(),
+                        serde_json::Value::String(receipt.to_owned()),
+                    );
+                    None
+                }
+                _ => {
+                    let _ = out.send(Self::error_response(id, "invalid session metadata request"));
+                    return;
+                }
+            };
+            (connection, capture)
+        };
+        let params = match serialize_source(&serde_json::Value::Object(request)) {
+            Ok(params) => params,
+            Err(_) => {
+                if let Some((token, generation)) = capture {
+                    self.metadata_receipts
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .cancel_reservation(token, generation);
+                }
+                let _ = out.send(Self::error_response(id, "invalid session metadata request"));
+                return;
+            }
+        };
+        let Some(work) = self.metadata_work.begin() else {
+            if let Some((token, generation)) = capture {
+                self.metadata_receipts
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .cancel_reservation(token, generation);
+            }
+            let _ = out.send(Self::error_response(
+                id,
+                "session metadata is busy or shutting down",
+            ));
+            return;
+        };
+        let receipts = self.metadata_receipts.clone();
+        // Writer I/O can wait behind another durable append. Do not hold the
+        // turn gate or block priority cancellation; the captured sink belongs
+        // only to this connection.
+        tokio::spawn(async move {
+            let _work = work;
+            let result = router.session_metadata(params).await;
+            let result = match capture {
+                Some((token, generation)) => {
+                    let mut state = receipts.lock().unwrap_or_else(|poison| poison.into_inner());
+                    if state.connection != Some(connection) {
+                        Err("session metadata connection is unavailable".to_string())
+                    } else {
+                        match result {
+                            Ok(value) => match value.string_at("/receipt") {
+                                Some(raw) if !raw.is_empty() && raw.len() <= 128_000 => state
+                                    .finish_capture(
+                                        token,
+                                        generation,
+                                        raw.to_owned(),
+                                        std::time::Instant::now(),
+                                    )
+                                    .and_then(|()| {
+                                        serialize_source(
+                                            &serde_json::json!({"receipt": token.to_string()}),
+                                        )
+                                    }),
+                                _ => {
+                                    state.cancel_reservation(token, generation);
+                                    Err("invalid session metadata response".into())
+                                }
+                            },
+                            Err(error) => {
+                                state.cancel_reservation(token, generation);
+                                Err(error)
+                            }
+                        }
+                    }
+                }
+                None => result,
+            };
+            let response = match result {
+                Ok(result) => Frame::Response(BridgeResponse {
+                    id,
+                    result: Some(result),
+                    error: None,
+                }),
+                Err(error) => Self::error_response(id, error),
+            };
+            let _ = out.send(response);
+        });
     }
 
     fn error_response(id: u64, message: impl Into<ClientTextDto>) -> Frame {
@@ -4058,19 +4446,22 @@ impl BridgeConnection {
                         .await;
                     return;
                 }
-                if let Some(router) = &self.router {
-                    if let Err((kind, message)) =
-                        router.preflight_session_transition(&command).await
-                    {
-                        self.unscoped_event_sink()
-                            .emit(ClientEvent::Error {
-                                kind,
-                                message: message.into(),
-                            })
-                            .await;
-                        return;
+                let prepared = if let Some(router) = &self.router {
+                    match router.preflight_session_transition(&command).await {
+                        Ok(prepared) => prepared,
+                        Err((kind, message)) => {
+                            self.unscoped_event_sink()
+                                .emit(ClientEvent::Error {
+                                    kind,
+                                    message: message.into(),
+                                })
+                                .await;
+                            return;
+                        }
                     }
-                }
+                } else {
+                    None
+                };
                 let _transition = TransitionScope::begin(&self.transition_active);
                 // Close media admission before the router can change sessions.
                 // If that change fails, update_owner below restores the same
@@ -4108,7 +4499,13 @@ impl BridgeConnection {
                     // usage and notices are connection snapshots, not live
                     // model output. Keep the normal event sink owner-scoped so
                     // late output from an old turn is still dropped.
-                    router.route(command, self.unscoped_event_sink()).await;
+                    router
+                        .route_prepared_session_transition(
+                            command,
+                            prepared,
+                            self.unscoped_event_sink(),
+                        )
+                        .await;
                 }
                 if let (Some(rpc), Some(driver)) =
                     (self.media_service_rpc.as_ref(), self.driver.as_ref())
@@ -4896,11 +5293,11 @@ impl FramePump for BridgeConnection {
         if request.method == "hello" {
             return false;
         }
-        // A widget's document and state requests are independent of the
-        // command stream; a slow control must not leave a card loading.
+        // These authenticated controls are independent of the command stream.
+        // Metadata writes use their own durable writer transaction.
         if matches!(
             request.method.as_str(),
-            "permission_request_scope" | "visualization" | "telemetry_disable"
+            "permission_request_scope" | "visualization" | "telemetry_disable" | "session_metadata"
         ) {
             return self.handshaken.load(Ordering::SeqCst);
         }
@@ -5093,6 +5490,10 @@ impl FramePump for BridgeConnection {
                     }
                     return;
                 }
+                if method == "session_metadata" {
+                    self.dispatch_session_metadata(id, params, out).await;
+                    return;
+                }
                 if matches!(
                     method.as_str(),
                     "set_cwd"
@@ -5275,12 +5676,19 @@ impl FramePump for BridgeConnection {
         // New interaction attempts must fail closed as well as those already
         // parked; a deferred replay can contain more than one pending tool.
         self.handshaken.store(false, Ordering::SeqCst);
+        *self
+            .metadata_receipts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = SessionMetadataReceipts::default();
         self.resume_interactions.cancel(None);
         if let Some(rpc) = self.media_service_rpc.as_ref() {
             rpc.begin_close();
         }
         drop(active);
         self.drain_parked_interactions().await;
+        // A new socket cannot own this runtime until the old socket's admitted
+        // writer work has finished, even if its response can no longer arrive.
+        self.metadata_work.drain().await;
     }
 
     async fn on_close_with_sink(&self, sink: FrameSink) {
@@ -5350,6 +5758,10 @@ impl BridgeConnection {
         // must be able to reacquire it. Those events cannot reach a new socket.
         self.handshaken.store(false, Ordering::SeqCst);
         self.handshake_refused.store(false, Ordering::SeqCst);
+        *self
+            .metadata_receipts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = SessionMetadataReceipts::default();
         self.cron_requests.disconnected().await;
         *active = None;
         drop(active);
@@ -5389,6 +5801,7 @@ impl BridgeConnection {
         self.tool_names.lock().await.clear();
 
         self.drain_parked_interactions().await;
+        self.metadata_work.drain().await;
         if let Some(rpc) = self.media_service_rpc.as_ref() {
             rpc.close().await;
         }
@@ -5528,8 +5941,9 @@ mod tests {
         batchable_prompt_snapshot, deserialize_source, drain_main_thread,
         fail_pending_mod_calls_on_refusal, is_owned_turn_event, run_queued_mod_command,
         serialize_source, text_object_projection, ActiveTurnControl, BridgeConnection,
-        BridgeModCommandQueue, ModQueueDrain, ModQueueEnqueuePause, PendingModCommands,
-        PendingModPrompts, TurnDriver, TurnInteractions, UnscopedFrameEventSink,
+        BridgeModCommandQueue, MetadataWork, ModQueueDrain, ModQueueEnqueuePause,
+        PendingModCommands, PendingModPrompts, SessionMetadataReceipts, TurnDriver,
+        TurnInteractions, UnscopedFrameEventSink,
     };
 
     struct NoTurn;
@@ -8862,6 +9276,501 @@ mod workspace_control_tests {
             method: method.into(),
             params: Utf16JsonProjection::parse(r#"{"path":"/target"}"#).unwrap(),
         })
+    }
+
+    fn metadata_request(id: u64, receipt: &str) -> Frame {
+        Frame::Request(BridgeRequest {
+            trace_context: None,
+            id,
+            method: "session_metadata".into(),
+            params: serialize_source(&serde_json::json!({"action":"verify","receipt":receipt}))
+                .unwrap(),
+        })
+    }
+
+    fn metadata_capture_request(id: u64) -> Frame {
+        metadata_capture_request_for(id, uuid::Uuid::new_v4())
+    }
+
+    fn metadata_capture_request_for(id: u64, receipt: uuid::Uuid) -> Frame {
+        Frame::Request(BridgeRequest {
+            trace_context: None,
+            id,
+            method: "session_metadata".into(),
+            params: serialize_source(&serde_json::json!({
+                "action":"capture", "receipt":receipt,
+                "sessionId":"11111111-2222-4333-8444-555555555555",
+                "transcriptPath":"/tmp/11111111-2222-4333-8444-555555555555.jsonl",
+                "sessionMode":"code"
+            }))
+            .unwrap(),
+        })
+    }
+
+    fn metadata_release_request(id: u64, receipt: &str) -> Frame {
+        Frame::Request(BridgeRequest {
+            trace_context: None,
+            id,
+            method: "session_metadata".into(),
+            params: serialize_source(&serde_json::json!({"action":"release","receipt":receipt}))
+                .unwrap(),
+        })
+    }
+
+    #[derive(Default)]
+    struct MetadataRouter {
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[test]
+    fn session_metadata_receipts_are_bounded_and_expire() {
+        let now = std::time::Instant::now();
+        let mut receipts = SessionMetadataReceipts::default();
+        let first = receipts.insert("x".into(), now).unwrap();
+        for _ in 1..SessionMetadataReceipts::LIMIT {
+            receipts.insert("x".into(), now).unwrap();
+        }
+        assert!(receipts.insert("overflow".into(), now).is_err());
+        assert_eq!(receipts.get(first, now), Some("x"));
+        let expired = now + SessionMetadataReceipts::MAX_AGE;
+        assert!(receipts.get(first, expired).is_none());
+        assert!(receipts.insert("new".into(), expired).is_ok());
+
+        let mut bytes = SessionMetadataReceipts::default();
+        let chunk = "x".repeat(64 * 1024);
+        for _ in 0..16 {
+            bytes.insert(chunk.clone(), now).unwrap();
+        }
+        assert!(bytes.insert("x".into(), now).is_err());
+    }
+
+    #[test]
+    fn released_metadata_receipts_free_capacity_without_disturbing_other_owners() {
+        let now = std::time::Instant::now();
+        let mut receipts = SessionMetadataReceipts::default();
+        let retained = receipts.insert("retained".into(), now).unwrap();
+        for _ in 0..(SessionMetadataReceipts::LIMIT + 1) {
+            let token = receipts.insert("transient".into(), now).unwrap();
+            receipts.release(token, now);
+            receipts.release(token, now);
+            assert!(receipts.get(token, now).is_none());
+        }
+        assert_eq!(receipts.get(retained, now), Some("retained"));
+        assert_eq!(receipts.receipts.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_capture_cannot_fill_a_reused_reservation() {
+        let now = std::time::Instant::now();
+        let mut receipts = SessionMetadataReceipts::default();
+        let token = uuid::Uuid::new_v4();
+        let old = receipts.reserve(token, now).unwrap();
+        assert!(receipts.reserve(token, now).is_err());
+        receipts.release(token, now);
+        let current = receipts.reserve(token, now).unwrap();
+        assert!(receipts
+            .finish_capture(token, old, "old".into(), now)
+            .is_err());
+        receipts
+            .finish_capture(token, current, "current".into(), now)
+            .unwrap();
+        assert_eq!(receipts.get(token, now), Some("current"));
+    }
+
+    #[tokio::test]
+    async fn metadata_shutdown_closes_admission_and_waits_for_accepted_work() {
+        let work = Arc::new(MetadataWork::default());
+        let accepted = work.begin().unwrap();
+        work.close();
+        assert!(work.begin().is_none());
+        let mut draining = {
+            let work = work.clone();
+            tokio::spawn(async move { work.drain().await })
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut draining)
+                .await
+                .is_err()
+        );
+        drop(accepted);
+        tokio::time::timeout(std::time::Duration::from_secs(1), draining)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn released_pending_captures_cannot_exceed_metadata_work_budget() {
+        let work = Arc::new(MetadataWork::default());
+        let mut active = (0..SessionMetadataReceipts::LIMIT)
+            .map(|_| work.begin().unwrap())
+            .collect::<Vec<_>>();
+        assert!(work.begin().is_none());
+        drop(active.pop());
+        assert!(work.begin().is_some());
+    }
+
+    #[async_trait]
+    impl CommandRouter for MetadataRouter {
+        async fn route(&self, _: ClientCommand, _: Arc<dyn ClientEventSink>) {}
+
+        async fn session_metadata(
+            &self,
+            request: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, String> {
+            let result = match request.string_at("/action") {
+                Some("capture") => {
+                    assert_eq!(
+                        request.string_at("/transcriptPath"),
+                        Some("/tmp/11111111-2222-4333-8444-555555555555.jsonl")
+                    );
+                    r#"{"receipt":"opaque-receipt"}"#
+                }
+                Some("verify") => {
+                    assert_eq!(request.string_at("/receipt"), Some("opaque-receipt"));
+                    r#"{"ok":true}"#
+                }
+                _ => panic!("unexpected metadata action"),
+            };
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(Utf16JsonProjection::parse(result).unwrap())
+        }
+    }
+
+    #[tokio::test]
+    async fn session_metadata_requires_hello_and_does_not_wait_for_the_turn_gate() {
+        use super::connection_regression_test::{captured_sink, hello, next_frame};
+        let (endpoint, mut socket, sink) = captured_sink().await;
+        let router = Arc::new(MetadataRouter::default());
+        let connection = BridgeConnection::new().bind_router(router.clone());
+        let mutation = metadata_request(1, "not-a-receipt");
+        assert!(!connection.is_priority_frame(&mutation));
+        connection.on_frame(mutation, sink.clone()).await;
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected unauthenticated refusal")
+        };
+        assert!(response.error.is_some());
+        assert_eq!(router.calls.load(Ordering::SeqCst), 0);
+
+        connection
+            .on_frame(
+                Frame::Request(BridgeRequest {
+                    trace_context: None,
+                    id: 2,
+                    method: "hello".into(),
+                    params: serialize_source(&hello()).unwrap(),
+                }),
+                sink.clone(),
+            )
+            .await;
+        assert!(matches!(next_frame(&mut socket).await, Frame::Response(_)));
+        connection.turn_running.store(true, Ordering::SeqCst);
+        let gate = connection.turn_handoff.lock().await;
+        let mutation = metadata_capture_request(3);
+        assert!(connection.is_priority_frame(&mutation));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            connection.on_frame(mutation, sink.clone()),
+        )
+        .await
+        .expect("a pending writer must not block the priority frame lane");
+        tokio::time::timeout(std::time::Duration::from_secs(1), router.entered.notified())
+            .await
+            .expect("metadata request must reach the writer during a turn");
+        assert_eq!(router.calls.load(Ordering::SeqCst), 1);
+        router.release.notify_one();
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected metadata response")
+        };
+        assert_eq!(response.id, 3);
+        let receipt = response
+            .result
+            .unwrap()
+            .string_at("/receipt")
+            .unwrap()
+            .to_owned();
+        assert!(uuid::Uuid::parse_str(&receipt).is_ok());
+        assert_ne!(receipt, "opaque-receipt");
+        connection
+            .on_frame(metadata_request(4, &receipt), sink.clone())
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), router.entered.notified())
+            .await
+            .unwrap();
+        router.release.notify_one();
+        let Frame::Response(verified) = next_frame(&mut socket).await else {
+            panic!("expected metadata verification response")
+        };
+        assert_eq!(verified.id, 4);
+        assert_eq!(
+            verified
+                .result
+                .unwrap()
+                .at_pointer("/ok")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        drop(gate);
+        connection.turn_running.store(false, Ordering::SeqCst);
+        connection.close_connection(Some(&sink)).await;
+        endpoint.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_metadata_release_fences_new_requests_but_preserves_admitted_work() {
+        use super::connection_regression_test::{captured_sink, hello, next_frame};
+        let (endpoint, mut socket, sink) = captured_sink().await;
+        let router = Arc::new(MetadataRouter::default());
+        let connection = BridgeConnection::new().bind_router(router.clone());
+        connection
+            .on_frame(
+                Frame::Request(BridgeRequest {
+                    trace_context: None,
+                    id: 1,
+                    method: "hello".into(),
+                    params: serialize_source(&hello()).unwrap(),
+                }),
+                sink.clone(),
+            )
+            .await;
+        assert!(matches!(next_frame(&mut socket).await, Frame::Response(_)));
+        connection
+            .on_frame(metadata_capture_request(2), sink.clone())
+            .await;
+        router.entered.notified().await;
+        router.release.notify_one();
+        let Frame::Response(capture) = next_frame(&mut socket).await else {
+            panic!("expected capture response")
+        };
+        let receipt = capture
+            .result
+            .unwrap()
+            .string_at("/receipt")
+            .unwrap()
+            .to_owned();
+
+        // A mutation admitted before release keeps its captured authority even
+        // while the release acknowledgement fences all subsequent requests.
+        connection
+            .on_frame(metadata_request(3, &receipt), sink.clone())
+            .await;
+        router.entered.notified().await;
+        connection
+            .on_frame(metadata_release_request(4, &receipt), sink.clone())
+            .await;
+        let Frame::Response(released) = next_frame(&mut socket).await else {
+            panic!("expected release response")
+        };
+        assert_eq!(released.id, 4);
+        assert_eq!(
+            released
+                .result
+                .unwrap()
+                .at_pointer("/ok")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        connection
+            .on_frame(metadata_request(5, &receipt), sink.clone())
+            .await;
+        let Frame::Response(refused) = next_frame(&mut socket).await else {
+            panic!("expected released receipt refusal")
+        };
+        assert_eq!(refused.id, 5);
+        assert!(refused.error.is_some());
+        connection
+            .on_frame(metadata_release_request(6, &receipt), sink.clone())
+            .await;
+        let Frame::Response(duplicate) = next_frame(&mut socket).await else {
+            panic!("expected idempotent release response")
+        };
+        assert_eq!(duplicate.id, 6);
+        assert!(duplicate.error.is_none());
+        connection
+            .on_frame(metadata_release_request(7, "not-a-uuid"), sink.clone())
+            .await;
+        let Frame::Response(invalid) = next_frame(&mut socket).await else {
+            panic!("expected invalid release refusal")
+        };
+        assert_eq!(invalid.id, 7);
+        assert!(invalid.error.is_some());
+        assert_eq!(router.calls.load(Ordering::SeqCst), 2);
+        router.release.notify_one();
+        let Frame::Response(completed) = next_frame(&mut socket).await else {
+            panic!("expected admitted mutation response")
+        };
+        assert_eq!(completed.id, 3);
+        assert!(completed.error.is_none());
+        connection.close_connection(Some(&sink)).await;
+        endpoint.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_metadata_release_cancels_pending_capture_without_late_leak() {
+        use super::connection_regression_test::{captured_sink, hello, next_frame};
+        let (endpoint, mut socket, sink) = captured_sink().await;
+        let router = Arc::new(MetadataRouter::default());
+        let connection = BridgeConnection::new().bind_router(router.clone());
+        connection
+            .on_frame(
+                Frame::Request(BridgeRequest {
+                    trace_context: None,
+                    id: 1,
+                    method: "hello".into(),
+                    params: serialize_source(&hello()).unwrap(),
+                }),
+                sink.clone(),
+            )
+            .await;
+        assert!(matches!(next_frame(&mut socket).await, Frame::Response(_)));
+        let token = uuid::Uuid::new_v4();
+        connection
+            .on_frame(metadata_capture_request_for(2, token), sink.clone())
+            .await;
+        router.entered.notified().await;
+        connection
+            .on_frame(
+                metadata_release_request(3, &token.to_string()),
+                sink.clone(),
+            )
+            .await;
+        let Frame::Response(released) = next_frame(&mut socket).await else {
+            panic!("expected release")
+        };
+        assert_eq!(released.id, 3);
+        assert!(released.error.is_none());
+        router.release.notify_one();
+        let Frame::Response(late) = next_frame(&mut socket).await else {
+            panic!("expected late capture response")
+        };
+        assert_eq!(late.id, 2);
+        assert!(late.error.is_some());
+        let state = connection
+            .metadata_receipts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert!(!state.receipts.contains_key(&token));
+        drop(state);
+        connection.close_connection(Some(&sink)).await;
+        endpoint.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_metadata_late_response_stays_with_the_original_connection() {
+        use super::connection_regression_test::{captured_sink, hello, next_frame};
+        use futures_util::StreamExt;
+        let (first_endpoint, mut first_socket, first_sink) = captured_sink().await;
+        let (second_endpoint, mut second_socket, second_sink) = captured_sink().await;
+        let router = Arc::new(MetadataRouter::default());
+        let connection = Arc::new(BridgeConnection::new().bind_router(router.clone()));
+        let hello_frame = |id| {
+            Frame::Request(BridgeRequest {
+                trace_context: None,
+                id,
+                method: "hello".into(),
+                params: serialize_source(&hello()).unwrap(),
+            })
+        };
+        connection
+            .on_frame(hello_frame(1), first_sink.clone())
+            .await;
+        assert!(matches!(
+            next_frame(&mut first_socket).await,
+            Frame::Response(_)
+        ));
+        connection
+            .on_frame(metadata_capture_request(2), first_sink.clone())
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), router.entered.notified())
+            .await
+            .unwrap();
+        router.release.notify_one();
+        let Frame::Response(captured) = next_frame(&mut first_socket).await else {
+            panic!("expected captured metadata receipt")
+        };
+        let receipt = captured
+            .result
+            .unwrap()
+            .string_at("/receipt")
+            .unwrap()
+            .to_owned();
+        connection
+            .on_frame(metadata_capture_request(3), first_sink.clone())
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), router.entered.notified())
+            .await
+            .unwrap();
+        let closing = {
+            let connection = connection.clone();
+            let sink = first_sink.clone();
+            tokio::spawn(async move { connection.close_connection(Some(&sink)).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while connection.handshaken.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut reconnect = {
+            let connection = connection.clone();
+            let sink = second_sink.clone();
+            let frame = hello_frame(4);
+            tokio::spawn(async move { connection.on_frame(frame, sink).await })
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut reconnect)
+                .await
+                .is_err()
+        );
+        router.release.notify_one();
+        let Frame::Response(response) = next_frame(&mut first_socket).await else {
+            panic!("expected original connection's response")
+        };
+        assert_eq!(response.id, 3);
+        assert!(response.error.is_some());
+        closing.await.unwrap();
+        reconnect.await.unwrap();
+        assert!(matches!(
+            next_frame(&mut second_socket).await,
+            Frame::Response(_)
+        ));
+        // A request that claimed the old connection before it disconnected
+        // must not be admitted under the new connection's handshake.
+        connection
+            .dispatch_session_metadata(
+                5,
+                Utf16JsonProjection::parse(r#"{"action":"verify"}"#).unwrap(),
+                first_sink.clone(),
+            )
+            .await;
+        let Frame::Response(refused) = next_frame(&mut first_socket).await else {
+            panic!("expected stale connection refusal")
+        };
+        assert_eq!(refused.id, 5);
+        assert!(refused.error.is_some());
+        assert_eq!(router.calls.load(Ordering::SeqCst), 2);
+        connection
+            .on_frame(metadata_request(6, &receipt), second_sink.clone())
+            .await;
+        let Frame::Response(refused) = next_frame(&mut second_socket).await else {
+            panic!("expected old receipt refusal")
+        };
+        assert_eq!(refused.id, 6);
+        assert!(refused.error.is_some());
+        assert_eq!(router.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), second_socket.next())
+                .await
+                .is_err()
+        );
+        connection.close_connection(Some(&second_sink)).await;
+        first_endpoint.shutdown().await;
+        second_endpoint.shutdown().await;
     }
 
     #[tokio::test]

@@ -609,13 +609,9 @@ async fn mode_less_snapshot_pages_and_pending_updates_share_the_wait_budget() {
     }
 }
 
-#[tokio::test]
-async fn team_approval_capability_has_only_permission_response_authority() {
-    let id = "team-approval:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
-    let io = FakeIo::new(|_, _| Ok(json!({})));
-    let controller = SessionController::new(id, io.clone());
+fn team_snapshot(controller: &SessionController, id: &str) {
     feed(
-        &controller,
+        controller,
         snapshot(vec![
             json!({"phase":"begin", "session_id":id, "epoch":"e1", "first_message_index":0}),
             json!({"phase":"end", "session_id":id, "cursor":{"epoch":"e1", "seq":0},
@@ -624,20 +620,32 @@ async fn team_approval_capability_has_only_permission_response_authority() {
                 "questions":[],"computer_access":[]}, "turn":{"running":false}}),
         ]),
     );
+}
+
+#[tokio::test]
+async fn team_approval_capability_has_only_permission_response_authority() {
+    let id = "team-approval:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+    let io = FakeIo::new(|_, _| Ok(json!({})));
+    let controller = SessionController::new(id, io.clone());
+    team_snapshot(&controller, id);
     let state = controller.state();
     assert_eq!(state.status, SessionStatus::Live);
     assert_eq!(state.session_mode, None);
     assert_eq!(state.pending.permissions.len(), 1);
+    io.connected.store(false, Ordering::SeqCst);
+    assert!(controller.respond_permission(1, true).await.is_err());
+    assert!(io.requests.lock().unwrap().is_empty());
+    io.connected.store(true, Ordering::SeqCst);
     controller.respond_permission(1, true).await.unwrap();
-    controller.respond_permission(1, false).await.unwrap();
+    assert!(controller.respond_permission(1, false).await.is_err());
     assert_eq!(
         io.calls("permission.respond")[0]["decision"],
         json!({"type":"allow_once"})
     );
-    assert_eq!(
-        io.calls("permission.respond")[1]["decision"],
-        json!({"type":"deny"})
-    );
+    assert_eq!(io.calls("permission.respond").len(), 1);
+    team_snapshot(&controller, id);
+    assert!(controller.state().pending.permissions.is_empty());
+    assert!(controller.respond_permission(1, false).await.is_err());
     assert_eq!(
         controller
             .respond_permission(9, true)
@@ -690,13 +698,13 @@ async fn team_approval_capability_has_only_permission_response_authority() {
         controller.fetch_image("forbidden").await.unwrap_err().code,
         RemoteErrorCode::Closed
     );
-    assert_eq!(io.requests.lock().unwrap().len(), 2);
+    assert_eq!(io.requests.lock().unwrap().len(), 1);
 
     // A disconnected transport must reject even before its state callback
     // changes the last published Live snapshot.
     io.connected.store(false, Ordering::SeqCst);
     assert!(controller.respond_permission(1, true).await.is_err());
-    assert_eq!(io.requests.lock().unwrap().len(), 2);
+    assert_eq!(io.requests.lock().unwrap().len(), 1);
     io.connected.store(true, Ordering::SeqCst);
 
     // A capability cannot gain conversation authority from an invented mode.
@@ -710,6 +718,215 @@ async fn team_approval_capability_has_only_permission_response_authority() {
             .code,
         RemoteErrorCode::Closed
     );
+}
+
+#[tokio::test]
+async fn team_approval_reserves_concurrent_responses_through_caller_cancellation() {
+    struct BlockingApprovalIo {
+        calls: std::sync::atomic::AtomicUsize,
+        release: tokio::sync::Semaphore,
+        fail_once: AtomicBool,
+    }
+    #[async_trait]
+    impl SessionIo for BlockingApprovalIo {
+        async fn request(
+            &self,
+            _: &str,
+            _: Option<Value>,
+            _: Option<Duration>,
+        ) -> Result<Value, RpcError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.release.acquire().await.unwrap().forget();
+            if self.fail_once.swap(false, Ordering::SeqCst) {
+                Err(RpcError::code(RemoteErrorCode::Capacity))
+            } else {
+                Ok(json!({}))
+            }
+        }
+        async fn notify(&self, _: &str, _: Option<Value>) {}
+        fn connected(&self) -> bool {
+            true
+        }
+    }
+
+    let id = "team-approval:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+    let io = Arc::new(BlockingApprovalIo {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        release: tokio::sync::Semaphore::new(0),
+        fail_once: AtomicBool::new(true),
+    });
+    let controller = SessionController::new(id, io.clone());
+    team_snapshot(&controller, id);
+    let first = tokio::spawn({
+        let controller = controller.clone();
+        async move { controller.respond_permission(1, true).await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while io.calls.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(controller.respond_permission(1, false).await.is_err());
+    assert_eq!(io.calls.load(Ordering::SeqCst), 1);
+    io.release.add_permits(1);
+    assert_eq!(
+        first.await.unwrap().unwrap_err().code,
+        RemoteErrorCode::Capacity
+    );
+    let cancelled = tokio::spawn({
+        let controller = controller.clone();
+        async move { controller.respond_permission(1, true).await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while io.calls.load(Ordering::SeqCst) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // The request has reached the transport; cancelling its caller must not
+    // allow a conflicting answer while the host is still handling it.
+    cancelled.abort();
+    assert!(cancelled.await.unwrap_err().is_cancelled());
+    assert!(controller.respond_permission(1, false).await.is_err());
+    assert_eq!(io.calls.load(Ordering::SeqCst), 2);
+    io.release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !controller.state().pending.permissions.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    team_snapshot(&controller, id);
+    assert!(controller.state().pending.permissions.is_empty());
+    assert!(controller.respond_permission(1, false).await.is_err());
+}
+
+#[tokio::test]
+async fn team_approval_caller_cancellation_keeps_a_sent_rpc_reserved_until_host_finishes() {
+    use remote_control_client::rpc::{RequestHandler, RpcOptions, RpcPeer};
+
+    struct RpcIo(RpcPeer);
+    #[async_trait]
+    impl SessionIo for RpcIo {
+        async fn request(
+            &self,
+            method: &str,
+            params: Option<Value>,
+            timeout: Option<Duration>,
+        ) -> Result<Value, RpcError> {
+            self.0.request(method, params, timeout).await
+        }
+        async fn notify(&self, method: &str, params: Option<Value>) {
+            let _ = self.0.notify(method, params).await;
+        }
+        fn connected(&self) -> bool {
+            !self.0.is_closed()
+        }
+    }
+
+    struct SlowHost {
+        requests: Mutex<Vec<Value>>,
+        received: tokio::sync::Semaphore,
+        release: tokio::sync::Semaphore,
+    }
+    #[async_trait]
+    impl RequestHandler for SlowHost {
+        async fn handle(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+            assert_eq!(method, "permission.respond");
+            self.requests.lock().unwrap().push(params);
+            self.received.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+            Ok(json!({}))
+        }
+    }
+
+    let (viewer_link, host_link) = support::link_pair(1024);
+    let host = Arc::new(SlowHost {
+        requests: Mutex::new(Vec::new()),
+        received: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let _host_peer = RpcPeer::start(
+        host_link,
+        RpcOptions {
+            requests: Some(host.clone()),
+            ..Default::default()
+        },
+    );
+    let peer = RpcPeer::start(viewer_link, RpcOptions::default());
+    let id = "team-approval:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+    let controller = SessionController::new(id, Arc::new(RpcIo(peer)));
+    team_snapshot(&controller, id);
+
+    let first = tokio::spawn({
+        let controller = controller.clone();
+        async move { controller.respond_permission(1, true).await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), host.received.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert!(controller.respond_permission(1, false).await.is_err());
+    assert_eq!(host.requests.lock().unwrap().len(), 1);
+
+    host.release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !controller.state().pending.permissions.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    team_snapshot(&controller, id);
+    assert!(controller.respond_permission(1, false).await.is_err());
+    assert_eq!(host.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn team_approval_transport_loss_cannot_be_answered_with_the_opposite_decision() {
+    for code in [
+        RemoteErrorCode::Timeout,
+        RemoteErrorCode::Closed,
+        RemoteErrorCode::Internal,
+    ] {
+        let id = "team-approval:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+        let io = FakeIo::new(move |_, _| Err(RpcError::code(code)));
+        let controller = SessionController::new(id, io.clone());
+        team_snapshot(&controller, id);
+        assert_eq!(
+            controller
+                .respond_permission(1, true)
+                .await
+                .unwrap_err()
+                .code,
+            code
+        );
+        team_snapshot(&controller, id);
+        assert!(controller.state().pending.permissions.is_empty());
+        assert!(controller.respond_permission(1, false).await.is_err());
+        assert_eq!(io.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn team_approval_answered_elsewhere_is_consumed() {
+    let id = "team-approval:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+    let io = FakeIo::new(|_, _| Err(RpcError::code(RemoteErrorCode::NotPending)));
+    let controller = SessionController::new(id, io.clone());
+    team_snapshot(&controller, id);
+    controller.respond_permission(1, false).await.unwrap();
+    assert!(controller.state().answered_elsewhere);
+    team_snapshot(&controller, id);
+    assert!(controller.state().pending.permissions.is_empty());
+    assert!(controller.respond_permission(1, true).await.is_err());
+    assert_eq!(io.calls("permission.respond").len(), 1);
 }
 
 #[tokio::test]
@@ -1195,17 +1412,40 @@ async fn attachments_are_rejected_while_a_turn_runs() {
         *turn = Default::default();
     }
     feed(&controller, idle);
-    // Idle: supported types only, at most four.
+    // Invalid batches are refused intact instead of silently dropping inputs.
+    for images in [
+        vec![image("image/png"), image("image/bmp")],
+        vec![image("image/png"); 5],
+    ] {
+        assert_eq!(
+            controller
+                .send_prompt("keep draft", images)
+                .await
+                .unwrap_err()
+                .code,
+            RemoteErrorCode::InvalidParams
+        );
+    }
+    assert_eq!(
+        controller
+            .send_prompt_with_files("keep files", vec![], vec!["receipt".into(); 5])
+            .await
+            .unwrap_err()
+            .code,
+        RemoteErrorCode::InvalidParams
+    );
+    assert!(io.calls("prompt.send").is_empty());
+    assert!(controller.state().outgoing.is_empty());
+
+    // Idle: the entire supported batch is sent.
     controller
         .send_prompt(
             "look",
             vec![
                 image("image/png"),
-                image("image/bmp"),
                 image("image/jpeg"),
                 image("image/gif"),
                 image("image/webp"),
-                image("image/png"),
             ],
         )
         .await
@@ -1237,6 +1477,68 @@ async fn attachments_are_rejected_while_a_turn_runs() {
     controller.send_prompt("again", vec![]).await.unwrap();
     assert!(io.calls("prompt.send")[1].get("images").is_none());
     assert_eq!(io.calls("prompt.send").len(), 2);
+}
+
+#[tokio::test]
+async fn retry_retains_failed_attachments_until_the_running_turn_finishes() {
+    for with_image in [true, false] {
+        let mut attempts = 0;
+        let io = FakeIo::new(move |method, _| {
+            if method == "prompt.send" {
+                attempts += 1;
+                if attempts == 1 {
+                    return Err(RpcError::code(RemoteErrorCode::Capacity));
+                }
+                return Ok(json!({ "turn_id": 22 }));
+            }
+            Ok(json!({}))
+        });
+        let controller = SessionController::new("s1", io.clone());
+        let mut idle = full_snapshot("e1", 0, 2);
+        if let SessionSnapshotParams::End { turn, .. } = &mut idle[3] {
+            *turn = Default::default();
+        }
+        feed(&controller, idle);
+        let images = if with_image {
+            vec![ImageRefDto {
+                media_type: "image/png".into(),
+                base64: "AAAA".into(),
+            }]
+        } else {
+            vec![]
+        };
+        let files = if with_image {
+            vec![]
+        } else {
+            vec!["receipt".into()]
+        };
+        controller
+            .send_prompt_with_files("preserve", images, files)
+            .await
+            .unwrap();
+        let failed = controller.state().outgoing[0].clone();
+        assert_eq!(failed.status, OutgoingStatus::Failed);
+
+        controller.handle_event(event(3, json!({"type":"turn_started", "turn_id":9})));
+        assert_eq!(
+            controller.retry_prompt(&failed.id).await.unwrap_err().code,
+            RemoteErrorCode::Forbidden
+        );
+        assert_eq!(controller.state().outgoing[0], failed);
+        assert_eq!(io.calls("prompt.send").len(), 1);
+
+        let mut idle = full_snapshot("e1", 0, 3);
+        if let SessionSnapshotParams::End { turn, .. } = &mut idle[3] {
+            *turn = Default::default();
+        }
+        feed(&controller, idle);
+        controller.retry_prompt(&failed.id).await.unwrap();
+        let sent = io.calls("prompt.send");
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0]["client_request_id"], sent[1]["client_request_id"]);
+        assert_eq!(sent[0].get("images"), sent[1].get("images"));
+        assert_eq!(sent[0].get("file_refs"), sent[1].get("file_refs"));
+    }
 }
 
 #[tokio::test]

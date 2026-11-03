@@ -502,6 +502,11 @@ pub enum TurnEvent {
         /// Complete registry-backed completion catalog.
         commands: Vec<CommandCatalogEntry>,
     },
+    /// Session picker rows for one confirmed live working directory.
+    ResumeCatalogRefreshed {
+        cwd: std::path::PathBuf,
+        rows: Vec<(uuid::Uuid, std::path::PathBuf, String, String)>,
+    },
     /// Full snapshot of background agents that are pending or running. Sent by
     /// the CLI task-registry poller; replaces the previous snapshot atomically.
     AgentStatusSnapshot {

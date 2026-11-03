@@ -629,6 +629,21 @@ fn images_cross_as_bytes_and_stay_within_two_mib() {
         too_big,
         Err(RemoteFfiError::InvalidArgument { .. })
     ));
+    let image = RemotePromptImageFfi {
+        media_type: "image/png".into(),
+        bytes: vec![1],
+    };
+    assert!(matches!(
+        prompt_images(vec![image; MAX_IMAGE_ATTACHMENTS + 1]),
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
+    assert!(matches!(
+        prompt_images(vec![RemotePromptImageFfi {
+            media_type: "image/bmp".into(),
+            bytes: vec![1]
+        }]),
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
 
     let image = image_from_data_url("data:image/png;base64,AQIDBA==").unwrap();
     assert_eq!(image.media_type, "image/png");
@@ -1654,6 +1669,17 @@ async fn pairing_attach_prompt_and_commands_over_the_tunnel() {
     assert!(requests_of(&rig.host, "permission.respond")
         .iter()
         .any(|p| p["session_id"] == approval && p["decision"]["type"] == "allow_once"));
+    assert!(matches!(
+        client.respond_permission(approval.into(), 1, false).await,
+        Err(RemoteFfiError::Rpc { code, .. }) if code == "closed"
+    ));
+    assert_eq!(
+        requests_of(&rig.host, "permission.respond")
+            .iter()
+            .filter(|p| p["session_id"] == approval)
+            .count(),
+        1
+    );
     assert!(
         matches!(client.send_prompt(approval.into(), "forbidden".into(), vec![]).await,
         Err(RemoteFfiError::Rpc { code, .. }) if code == "closed")

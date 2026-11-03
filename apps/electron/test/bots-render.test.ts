@@ -15,6 +15,7 @@ import { emptyRuntimeCenterState } from '../src/renderer/bridge/runtimeCenterSta
 import type { UseBridge } from '../src/renderer/bridge/bridgeTypes.js';
 import type { UseBots } from '../src/renderer/bridge/useBots';
 import { tr } from '../src/renderer/i18n/locale';
+import { agentAvatarIndex } from '../src/renderer/components/AgentAvatar';
 import { BotSaveBar } from '../src/renderer/components/BotDetail';
 import { BotFoldersField, BotGeneralFields, BotPermissionField, BotPersonaField } from '../src/renderer/components/BotFields';
 import { BotMemoryPanel, BotSkillsPanel } from '../src/renderer/components/BotPanels';
@@ -41,6 +42,9 @@ function render(element: React.ReactElement): string {
     console.error = error;
   }
 }
+
+/** The avatars drawn in some markup, as the indexes `AgentAvatar` marks them with, in order. */
+const avatarsOf = (html: string) => [...html.matchAll(/data-agent-avatar="(\d+)"/g)].map((match) => Number(match[1]));
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
   return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: Date.now() - 60 * MINUTES, updatedAt: Date.now(), revision: 1, workspaces: [], ...overrides };
@@ -91,6 +95,9 @@ test('each Bot shows its name, description, whether it is working, and when it w
   assert.match(html, /Active 5 minutes ago/);
   assert.match(html, /No chats yet/);
   assert.ok(!html.includes('No Bots yet'));
+  assert.deepEqual(avatarsOf(html), ['b', 'c', 'a'].map(agentAvatarIndex), 'each card wears the avatar of its Bot\'s id, as in the sidebar and the Teams views');
+  assert.ok(!/class="bots-avatar"[^>]*>[^<]/.test(html), 'and no letter stands in for it');
+  assert.equal([...html.matchAll(/class="bots-avatar" aria-hidden="true"/g)].length, 3, 'the name beside it is what is read out');
 });
 
 // ---- Making a Bot ----
@@ -350,6 +357,8 @@ test('a Bot opens to its general settings, with the routines and tasks listed fi
   const bots = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha', description: 'First helper' })]);
   const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
   assert.match(html, /<h1>Alpha<\/h1>/);
+  assert.match(html, /<div class="bots-detail-identity"><span class="bots-avatar" aria-hidden="true"><img [^>]*data-agent-avatar="\d+"[^>]*\/><\/span><div class="bots-detail-title"><h1>Alpha<\/h1>/, 'its avatar stands beside the name');
+  assert.deepEqual(avatarsOf(html), [agentAvatarIndex('a')], 'the one the list shows for it');
   assert.match(html, /First helper/);
   for (const tab of ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
   assert.ok(html.indexOf('>Routines</button>') < html.indexOf('>Tasks</button>') && html.indexOf('>Tasks</button>') < html.indexOf('>General</button>'), 'the routines and the tasks come before the settings');
@@ -502,13 +511,16 @@ test('the sidebar is hidden when the parent says so, and keeps its own state whe
 
 test('a Bot\'s chat is titled with the Bot, not with a folder path, and offers the way back to the Bot', () => {
   const bridge = { bootstrap: null, sessionLoading: false, desktop: emptyDesktopState(), runtimeCenter: emptyRuntimeCenterState(), activeSession: { projectPath: '/data/bots/a/workspace', sessionId: 's1' } } as unknown as UseBridge;
-  const html = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop, bot: { name: 'Scribe', onOpen: noop } }));
+  const html = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop, bot: { botId: 'scribe-id', name: 'Scribe', onOpen: noop } }));
   assert.match(html, />Scribe<\/div>/);
   assert.match(html, />Bot chat<\/div>/);
   assert.match(html, /aria-label="Open Bot"/);
   assert.ok(!html.includes('/data/bots'), 'the Bot\'s private folder is not shown');
+  assert.deepEqual(avatarsOf(html), [agentAvatarIndex('scribe-id')], 'the title wears the Bot\'s own avatar, not a generic robot');
+  assert.match(html, /class="desktop-topbar-project-icon" aria-hidden="true"><img /, 'which is decoration: the name is written beside it');
 
   const project = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop }));
   assert.ok(!project.includes('Open Bot'));
+  assert.deepEqual(avatarsOf(project), [], 'a project\'s chat has its folder, no avatar');
   assert.match(project, /\/data\/bots\/a\/workspace/, 'a project chat still shows its folder');
 });

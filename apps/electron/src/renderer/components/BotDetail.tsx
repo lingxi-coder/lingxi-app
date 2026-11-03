@@ -11,6 +11,7 @@ import { relativeActivity, removeBot, startBotChat, type BotActivity } from '../
 import { botRemoteAvailability, useRemoteControl } from '../bridge/remoteControl';
 import type { BotsController } from '../bridge/botsStore';
 import type { UseBridge } from '../bridge/bridgeTypes';
+import { AgentAvatar } from './AgentAvatar';
 import { BotMemoryPanel, BotRoutinesPanel, BotSkillsPanel, BotTasksPanel } from './BotPanels';
 import {
   BotAcceptField,
@@ -174,13 +175,16 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   return <div className="bots-detail">
     <button type="button" className="bots-back" data-variant="quiet" onClick={() => { if (dirty) setDiscarding(true); else onBack(); }}>← {tr('bots_back')}</button>
     <header className="bots-detail-header">
-      <div className="bots-detail-title">
-        <h1>{name}</h1>
-        <div className="bots-detail-meta">
-          <BotStateChip activity={activity} />
-          <span className="bots-muted">{lastActive !== undefined ? tr('bots_last_active', relativeActivity(lastActive)) : tr('bots_no_chats_yet')}</span>
+      <div className="bots-detail-identity">
+        <span className="bots-avatar" aria-hidden="true"><AgentAvatar agentId={botId} size={40} /></span>
+        <div className="bots-detail-title">
+          <h1>{name}</h1>
+          <div className="bots-detail-meta">
+            <BotStateChip activity={activity} />
+            <span className="bots-muted">{lastActive !== undefined ? tr('bots_last_active', relativeActivity(lastActive)) : tr('bots_no_chats_yet')}</span>
+          </div>
+          {description ? <p className="bots-muted">{description}</p> : null}
         </div>
-        {description ? <p className="bots-muted">{description}</p> : null}
       </div>
       <div className="bots-detail-actions">
         <button type="button" data-variant="primary" disabled={opening !== undefined || sessionLoading || state.phase === 'failed'} aria-busy={opening === 'new' || undefined} onClick={() => void open()}>

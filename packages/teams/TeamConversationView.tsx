@@ -177,7 +177,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     <header className="tw-conv-head">
       <ConversationLead conversation={conversation} label={label} snapshot={snapshot} zh={zh} size={32} render={renderAvatar} />
       <div className="tw-conv-title">
-        <h2>{conversation.kind === 'channel' ? <span aria-hidden="true" className="tw-hash">#</span> : null}{label}</h2>
+        <h2>{label}</h2>
         {subtitle ? <p>{subtitle}</p> : null}
       </div>
       <span className="tw-platform" title={platformNotice(zh)}>{platformChip(zh)}</span>

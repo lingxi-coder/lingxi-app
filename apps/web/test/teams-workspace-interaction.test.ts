@@ -233,6 +233,19 @@ scenario('sidebar: choosing a row opens it, the team menu switches teams, the ro
   assert.ok(page.find(node => node.props['data-row'] === 'chan-b').length === 1);
 });
 
+scenario('sidebar: the team menu is the way into the details panel, and the sidebar has no button of its own for it', async context => {
+  const { workspace } = await open(context);
+  const opened: Array<string | undefined> = [];
+  const page = await mount(workspace, snapshot => createElement(TeamSidebar, { workspace, snapshot, zh: false, onOpenSettings: (tab?: string) => { opened.push(tab); } } as never)); context.after(() => page.unmount());
+  assert.equal(page.byLabel('Team members & settings').length, 0, 'the conversation header has the panel\'s button; the sidebar does not repeat it');
+  await page.click(page.oneByClass('tw-switcher'));
+  const entry = page.find(node => node.props.role === 'menuitem' && textOf(node) === 'Team members & settings');
+  assert.equal(entry.length, 1, 'the team menu offers the panel, so it can be reached where no conversation (and no header) is open');
+  await page.click(entry[0]);
+  assert.deepEqual(opened, [undefined], 'it opens on the tab it was last on');
+  assert.equal(page.find(node => node.props.role === 'menu').length, 0, 'choosing closes the menu');
+});
+
 scenario('sidebar: arrow keys move between rows; the + buttons open dialogs that create things', async context => {
   const { fake, workspace, snapshot } = await open(context);
   const page = await mount(workspace, snapshot => createElement(TeamSidebar, { workspace, snapshot, zh: false } as never)); context.after(() => page.unmount());

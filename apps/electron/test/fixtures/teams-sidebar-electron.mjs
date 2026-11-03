@@ -64,6 +64,15 @@ try {
   assert.match(await run(`document.querySelector('.teams-page').textContent`), /Choose a conversation/);
   assert.equal(await run(`Boolean(document.querySelector('.sidebar-new-chat'))`), false, 'the projects are Home\'s');
   assert.deepEqual((await writes()).at(-1), ['updateSettings', { sidebar: { mode: 'teams' } }]);
+  // No conversation is open, so there is no header and no header button: the team menu of the sidebar is the way into the details panel.
+  assert.equal(await shown('.tw-conv-head'), false);
+  await click(`${sidebar} .tw-switcher`);
+  await wait(`document.querySelector('${sidebar} [role="menu"]')`);
+  await run(`Array.from(document.querySelectorAll('${sidebar} [role="menuitem"]')).find(item => item.textContent.trim() === 'Team members & settings').click()`);
+  await wait(`document.querySelector('.teams-page > .tw-drawer')`);
+  await wait(`!document.querySelector('${sidebar} [role="menu"]')`);
+  await click('.tw-drawer button[aria-label="Close details"]');
+  await wait(`!document.querySelector('.tw-drawer')`);
   result.teamsMode = true;
 
   // The sidebar's search box narrows the conversations.
@@ -83,7 +92,9 @@ try {
   await click(row('chan-general'));
   await wait(`document.querySelectorAll('.teams-conversation .tw-msg').length === 7`);
   assert.equal(await run(`document.querySelector('${row('chan-general')}').getAttribute('aria-current')`), 'page');
-  assert.equal(await run(`document.querySelector('.teams-conversation .tw-conv-head h2').textContent`), '#general');
+  assert.equal(await run(`document.querySelector('.teams-conversation .tw-conv-head h2').textContent`), 'general');
+  assert.equal(await run(`document.querySelector('.teams-conversation .tw-conv-head').textContent.split('#').length - 1`), 1, 'one #, the tile\'s: the title does not repeat it');
+  assert.equal(await run(`document.querySelector('.teams-conversation .tw-conv-head .tw-chan').textContent`), '#');
   assert.equal(await run(`document.querySelectorAll('.teams-conversation [data-unread-divider]').length`), 1);
   assert.equal(await run(`document.querySelectorAll('.teams-conversation .tw-msg[data-grouped="true"]').length`), 2);
   assert.equal(await shown('.beta-rich-prompt'), false, 'the chat is not on screen');
@@ -127,7 +138,12 @@ try {
   assert.deepEqual(await beside(), { sameWidth: false, flush: true, position: 'relative' });
   await click('.tw-drawer button[aria-label="Close details"]');
   await wait(`!document.querySelector('.tw-drawer')`);
-  await click(`${sidebar} [aria-label="Team members & settings"]`);
+  // The header's button is the one control for the panel: the sidebar's row of the team switcher holds the switcher alone, and the team menu has the entry.
+  assert.equal(await run(`document.querySelectorAll('${sidebar} .tw-sidebar-head button').length`), 1);
+  assert.equal(await run(`Boolean(document.querySelector('${sidebar} [aria-label="Team members & settings"]'))`), false);
+  await click(`${sidebar} .tw-switcher`);
+  await wait(`document.querySelector('${sidebar} [role="menu"]')`);
+  await run(`Array.from(document.querySelectorAll('${sidebar} [role="menuitem"]')).find(item => item.textContent.trim() === 'Team members & settings').click()`);
   await wait(`document.querySelector('.tw-drawer')`);
   await menuAction('team-details');
   await wait(`!document.querySelector('.tw-drawer')`);
@@ -227,6 +243,38 @@ try {
   assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').textContent`), '99+');
   result.cappedBadge = true;
 
+  // A Bot is one avatar wherever it is shown. The Teams views draw it from the id of the team's card of the Bot, which is the local Bot's id,
+  // and the Bots sidebar, the Bots page, the Bot's own page and the title of its chat draw it from that id too; other Bots have other avatars.
+  const avatarIn = selector => run(`document.querySelector(${JSON.stringify(selector)})?.querySelector('img[data-agent-avatar]')?.getAttribute('data-agent-avatar') ?? null`);
+  const botRow = name => `nav[aria-label="Bots"] button[title="${name}"]`;
+  const cardAvatar = name => run(`Array.from(document.querySelectorAll('.bots-card')).find(card => card.querySelector('.bots-card-name').textContent === ${JSON.stringify(name)})?.querySelector('img[data-agent-avatar]')?.getAttribute('data-agent-avatar') ?? null`);
+  await load('?saved=teams');
+  await wait(`document.querySelectorAll('${sidebar} [data-row]').length === 4`);
+  const botAvatar = await avatarIn(row('bot-chat'));
+  assert.notEqual(botAvatar, null, 'the Bot dm wears an avatar');
+  await click(row('chan-general'));
+  await wait(`document.querySelectorAll('.teams-conversation .tw-msg').length === 7`);
+  assert.equal(await avatarIn('.teams-conversation .tw-msg[data-kind="bot"]'), botAvatar, 'the Bot\'s message in a channel');
+  await click(row('bot-chat'));
+  await wait(`document.querySelector('${row('bot-chat')}[aria-current="page"]') && document.querySelector('.teams-conversation .tw-conv-head')`);
+  assert.equal(await avatarIn('.teams-conversation .tw-conv-head'), botAvatar, 'the header of its conversation');
+  await click(rail('Bots'));
+  await wait(`document.querySelectorAll('nav[aria-label="Bots"] button[aria-expanded]:not([aria-haspopup])').length === 3 && document.querySelectorAll('.bots-card').length === 3`);
+  assert.equal(await avatarIn(botRow('Fixture Bot')), botAvatar, 'the Bots sidebar');
+  assert.equal(await cardAvatar('Fixture Bot'), botAvatar, 'its card on the Bots page');
+  const others = [await avatarIn(botRow('Alpha')), await avatarIn(botRow('Beta'))];
+  assert.equal(others.includes(botAvatar) || others[0] === others[1], false, 'the other Bots have avatars of their own');
+  assert.deepEqual([await cardAvatar('Alpha'), await cardAvatar('Beta')], others, 'a card and a row of the same Bot agree');
+  await run(`Array.from(document.querySelectorAll('.bots-card')).find(card => card.querySelector('.bots-card-name').textContent === 'Fixture Bot').click()`);
+  await wait(`document.querySelector('.bots-detail-header h1')?.textContent === 'Fixture Bot'`);
+  assert.equal(await avatarIn('.bots-detail-header'), botAvatar, 'the Bot\'s own page');
+  assert.equal(await run(`document.querySelector('.bots-detail-header .bots-avatar').getAttribute('aria-hidden')`), 'true', 'which is decoration beside the name');
+  await run(`Array.from(document.querySelectorAll('.bots-detail-actions button')).find(button => button.textContent.trim() === 'New chat').click()`);
+  await wait(`document.querySelector('.desktop-topbar-project[title="Fixture Bot"]')`);
+  assert.equal(await avatarIn('.desktop-topbar-project'), botAvatar, 'the title of a chat of the Bot');
+  assert.equal(await run(`Boolean(document.querySelector('.desktop-topbar-project .desktop-topbar-project-icon svg'))`), false, 'not a generic robot');
+  result.botAvatar = true;
+
   if (screenshots) {
     mkdirSync(screenshots, { recursive: true });
     const snap = async name => { writeFileSync(join(screenshots, name), (await win.webContents.capturePage()).toPNG()); };
@@ -242,9 +290,18 @@ try {
       await delay(500);
       await snap(`teams-drawer-${theme}.png`);
       await load(`?saved=bots&theme=${theme}`);
-      await wait(`document.querySelector('.bots-page')?.getClientRects().length > 0 && document.querySelectorAll('nav[aria-label="Bots"] button[aria-expanded]:not([aria-haspopup])').length === 2`);
+      await wait(`document.querySelector('.bots-page')?.getClientRects().length > 0 && document.querySelectorAll('nav[aria-label="Bots"] button[aria-expanded]:not([aria-haspopup])').length === 3`);
       await delay(500);
       await snap(`bots-${theme}.png`);
+      // The Bot's own page and the title of a chat of the Bot, which carry the avatar of the cards and of the Teams views.
+      await run(`Array.from(document.querySelectorAll('.bots-card')).find(card => card.querySelector('.bots-card-name').textContent === 'Fixture Bot').click()`);
+      await wait(`document.querySelector('.bots-detail-header h1')?.textContent === 'Fixture Bot'`);
+      await delay(300);
+      await snap(`bots-detail-${theme}.png`);
+      await run(`Array.from(document.querySelectorAll('.bots-detail-actions button')).find(button => button.textContent.trim() === 'New chat').click()`);
+      await wait(`document.querySelector('.desktop-topbar-project[title="Fixture Bot"]')`);
+      await delay(500);
+      await snap(`bot-chat-${theme}.png`);
     }
     // Beyond those, for a look at the places a layout gives way first: the panel's Bots tab, the narrowest window with the panel open, and Teams without an account.
     await load('?saved=teams&theme=light');

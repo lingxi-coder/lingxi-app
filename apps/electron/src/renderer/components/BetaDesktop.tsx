@@ -3,6 +3,7 @@ import { providerAccountUnavailableReasons } from '../bridge/credentialRecovery'
 import { reasoningSelectionLabel } from '../model/reasoningLabel';
 import { tr } from '../i18n/locale';
 import { unreadBadgeText } from '../bridge/teamsUnread';
+import { AgentAvatar } from './AgentAvatar';
 import { DesktopIcon } from './DesktopIcon';
 import { ImagePreview } from './ImagePreview';
 import { localAppAuthoringPrompt, localAppDraftDisposition, type LocalAppDraft } from '../bridge/localAppChat';
@@ -1430,7 +1431,7 @@ export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCent
   onToggleTerminal?(): void;
   bridge: UseBridge;
   /** Set while a chat of a Bot is on screen: the chat belongs to the Bot, not to a project folder. */
-  bot?: { name: string; onOpen(): void };
+  bot?: { botId: string; name: string; onOpen(): void };
   runtimeCenterOpen: boolean;
   onToggleRuntimeCenter(): void;
 }) {
@@ -1452,7 +1453,7 @@ export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCent
     <header className="drag-region desktop-topbar" style={{ '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
       {bot ? (
         <div className="desktop-topbar-project" title={bot.name}>
-          <span className="desktop-topbar-project-icon" aria-hidden="true"><Icon name="bot" size={17} stroke={1.65} /></span>
+          <span className="desktop-topbar-project-icon" aria-hidden="true"><AgentAvatar agentId={bot.botId} size={28} /></span>
           <div style={{ minWidth: 0 }}>
             <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bot.name || tr('bots_chat_badge')}</div>
             <div style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tr('bots_chat_badge')}</div>

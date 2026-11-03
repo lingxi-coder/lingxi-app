@@ -544,7 +544,7 @@ export function App() {
               <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
-                  bot={activeBotId !== undefined ? { name: activeBot?.name ?? '', onOpen: () => openBot(activeBotId) } : undefined}
+                  bot={activeBotId !== undefined ? { botId: activeBotId, name: activeBot?.name ?? '', onOpen: () => openBot(activeBotId) } : undefined}
                   sideChatOpen={sideChats.open && Boolean(sideChats.selected)}
                   sideChatAvailable={sideChats.sides.length > 0}
                   onToggleSideChat={() => sideChats.setOpen(!sideChats.open)}

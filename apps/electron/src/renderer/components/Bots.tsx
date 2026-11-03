@@ -9,6 +9,7 @@ import { botActivity, botRuntimes, relativeActivity, type BotActivity } from '..
 import type { BotsState } from '../bridge/botsStore';
 import type { UseBots } from '../bridge/useBots';
 import type { UseBridge } from '../bridge/bridgeTypes';
+import { AgentAvatar } from './AgentAvatar';
 import { BotDetail, BotStateChip } from './BotDetail';
 import { BotFoldersField, BotGeneralFields, BotPermissionField, BotPersonaField, type ModelChoices } from './BotFields';
 import { BotsBackground } from './BotsBackground';
@@ -77,7 +78,7 @@ export function BotList({ state, activityOf, onNew, onOpen, onRetry, background 
   /** What the Bots need of this Mac to go on working; shown below the Bots, once there are some. */
   background?: ReactNode;
 }) {
-  const { locale } = useI18n();
+  useI18n();
   const bots = sortBots(state.bots);
   const loading = state.availability === undefined || (state.loading && bots.length === 0);
   const empty = !loading && state.error === undefined && bots.length === 0;
@@ -95,16 +96,16 @@ export function BotList({ state, activityOf, onNew, onOpen, onRetry, background 
       <button type="button" data-variant="primary" onClick={onNew}>{tr('bots_create_first')}</button>
     </div> : null}
     {bots.length > 0 ? <ul className="bots-grid" aria-label={tr('bots_list_label')}>
-      {bots.map((bot) => <BotCard key={bot.botId} bot={bot} activity={activityOf(bot.botId)} locale={locale} onOpen={() => onOpen(bot.botId)} />)}
+      {bots.map((bot) => <BotCard key={bot.botId} bot={bot} activity={activityOf(bot.botId)} onOpen={() => onOpen(bot.botId)} />)}
     </ul> : null}
     {bots.length > 0 ? background : null}
   </>;
 }
 
-function BotCard({ bot, activity, locale, onOpen }: { bot: BotUi; activity: BotActivity; locale: string; onOpen(): void }) {
+function BotCard({ bot, activity, onOpen }: { bot: BotUi; activity: BotActivity; onOpen(): void }) {
   return <li>
     <button type="button" className="bots-card" onClick={onOpen}>
-      <span className="bots-avatar" aria-hidden="true">{Array.from(bot.name)[0]?.toLocaleUpperCase(locale)}</span>
+      <span className="bots-avatar" aria-hidden="true"><AgentAvatar agentId={bot.botId} size={40} /></span>
       <span className="bots-card-name">{bot.name}</span>
       <span className="bots-card-description">{bot.description}</span>
       <span className="bots-card-footer">

@@ -16,7 +16,11 @@ export interface TeamSidebarProps {
   zh: boolean;
   /** Draw your own avatar for a person or Bot; return nothing for the initials avatar. */
   renderAvatar?: RenderAvatar;
-  /** Open team settings (the details drawer), optionally on a tab. Without it the team menu has no settings entry. */
+  /**
+   * Open team settings (the details drawer), optionally on a tab. Without it the team menu has no settings entry.
+   * The sidebar has no button for this besides that entry: the conversation header toggles the same drawer, and the
+   * entry is the way in while no conversation (and so no header) is open.
+   */
   onOpenSettings?(tab?: DrawerTab): void;
   /** A conversation was chosen, including the one already open. */
   onConversationSelected?(id: string): void;
@@ -143,7 +147,6 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
         {switcherOpen ? <PopupMenu label={t('Teams', '团队')} items={teamItems} anchor={switcherRef}
           onClose={restore => { setSwitcherOpen(false); if (restore) switcherRef.current?.focus(); }} /> : null}
       </div>
-      {team && onOpenSettings ? <button type="button" className="tw-icon-btn" aria-label={t('Team members & settings', '团队成员与设置')} title={t('Team members & settings', '团队成员与设置')} onClick={() => onOpenSettings()}><Icon name="panel" /></button> : null}
     </header>
     {status ? <div className="tw-conn" role="status" data-kind={status.kind} title={status.detail}>
       <span className="tw-dot" aria-hidden="true" />

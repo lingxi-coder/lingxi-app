@@ -4,7 +4,7 @@ import { fixtureAccountSnapshot } from './provider-accounts-mock';
 import { FakeTeams, botCard, conversation, message, team } from '../../../web/test/support/fakeTeams';
 import '../../src/renderer/global.css';
 
-// The whole window with a signed-in account, a stand-in Teams service and two Bots, to drive the Teams mode of the sidebar in a real renderer.
+// The whole window with a signed-in account, a stand-in Teams service and three Bots (one of them also a team's Bot), to drive the Teams mode of the sidebar in a real renderer.
 //   ?saved=teams|bots      the settings file says the window was last in that mode
 //   ?drawerWidth=420       the settings file holds this width for the Teams details panel
 //   ?theme=light|dark      the appearance (dark by default)
@@ -85,10 +85,13 @@ const chat = (uuid: string, title: string, minutesAgo: number) => ({
 const bots = [
   { botId: 'alpha', name: 'Alpha', description: 'Writes things down', createdAt: now - 900 * MINUTE, updatedAt: now, revision: 1, workspaces: [], lastActivityAt: now - 30 * MINUTE },
   { botId: 'beta', name: 'Beta', description: 'Reviews changes', createdAt: now - 800 * MINUTE, updatedAt: now, revision: 1, workspaces: [], lastActivityAt: now - 3 * MINUTE },
+  // The Bot the team's card is of, under the same id: it has to look the same here as in the Teams views.
+  { botId: ownerBot.botId, name: ownerBot.name, description: ownerBot.description, createdAt: now - 700 * MINUTE, updatedAt: now, revision: 1, workspaces: [], lastActivityAt: now - 10 * MINUTE },
 ];
 const chats: Record<string, ReturnType<typeof chat>[]> = {
   alpha: [chat('a-1', 'Plan the launch', 30), chat('a-2', 'Weekly notes', 60), chat('a-3', 'Draft the post', 90)],
   beta: [chat('b-1', 'Review the diff', 3)],
+  [ownerBot.botId]: [chat('f-1', 'Summarize the backlog', 10)],
 };
 
 // ---- The window ----

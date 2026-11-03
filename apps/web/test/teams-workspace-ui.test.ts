@@ -296,8 +296,12 @@ test('sidebar: unread rows have a row menu, zh text, and details when the host o
   const zh = html(sidebar(workspace, snapshot(), { zh: true }));
   for (const text of ['频道', '私信', 'Bot 对话', '新建频道', '与 Bot 对话', '已连接']) assert.ok(zh.includes(text), text);
   assert.match(zh, /aria-label="4 条未读"/); assert.match(zh, /class="tw-row-preview">你：Lunch\?</);
-  assert.match(html(sidebar(workspace, snapshot(), { onOpenSettings() {} })), /aria-label="Team members &amp; settings"/, 'the settings button needs a host to open it');
+  // The details panel has one button, the conversation header's. The sidebar reaches the panel through the team menu (an entry that
+  // needs a host to open it, driven in teams-workspace-interaction.test.ts) and has no second always-visible button for it.
+  const withHost = html(sidebar(workspace, snapshot(), { onOpenSettings() {} }));
+  assert.doesNotMatch(withHost, /Team members &amp; settings/, 'no button of its own, even when a host can open the panel');
   assert.doesNotMatch(html(sidebar(workspace, snapshot())), /Team members &amp; settings/);
+  assert.equal(count(/<header class="tw-sidebar-head">[^]*?<\/header>/.exec(withHost)?.[0] ?? '', /<button/g), 1, 'the team switcher is the only control in its row');
 });
 
 test('sidebar: avatars come from the host when it renders them, from initials otherwise', async context => {
@@ -385,7 +389,9 @@ test('conversation view: header, stream with day and unread dividers, grouped ru
   assert.match(html(view(workspace, snapshot())), /Choose a conversation/);
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 7, 'the thread');
   const markup = html(view(workspace, snapshot(), { detailsOpen: false, onToggleDetails() {} }));
-  assert.match(markup, /<h2><span aria-hidden="true" class="tw-hash">#<\/span>general<\/h2>/); assert.match(markup, /<p>3 members<\/p>/);
+  const header = /<header class="tw-conv-head">[^]*?<\/header>/.exec(markup)?.[0] ?? '';
+  assert.match(header, /class="tw-chan"[^>]*>#</, 'a channel\'s header has the # tile'); assert.match(header, /<h2>general<\/h2>/, 'and its title is the name alone'); assert.match(header, /<p>3 members<\/p>/);
+  assert.equal(count(header.replace(/<[^>]*>/g, ''), /#/g), 1, 'one #, the tile\'s: the title does not repeat it');
   assert.match(markup, /class="tw-platform" title="[^"]*readable by the platform[^"]*">Platform readable/);
   assert.match(markup, /role="log" aria-label="Messages" tabindex="0"/);
   assert.equal(count(markup, /class="tw-date"/g), 1); assert.match(markup, /class="tw-date"><span>Today<\/span>/);
@@ -418,11 +424,11 @@ test('conversation view: someone else\'s Bot dm is read-only; a Bot dm needs its
   workspace.selectConversation('others-bot-chat'); await until(() => snapshot().messages.length === 1, 'their thread');
   const observer = html(view(workspace, snapshot()));
   assert.match(observer, /only participants can send messages/); assert.doesNotMatch(observer, /<textarea/); assert.doesNotMatch(observer, /aria-label="Reply"/);
-  assert.match(observer, /Owner: Owner|Online · Owner/); assert.match(observer, /Fixture Bot · Bob/, 'the Bot\'s owner sees whose chat it is');
+  assert.match(observer, /Owner: Owner|Online · Owner/); assert.match(observer, /<h2>Fixture Bot · Bob<\/h2>/, 'the Bot\'s owner sees whose chat it is');
   workspace.selectConversation('bot-chat'); await until(() => snapshot().selectedConversationId === 'bot-chat', 'bot chat');
   const own = html(view(workspace, snapshot()));
   assert.match(own, /<textarea[^>]*placeholder="Message Fixture Bot"/); assert.match(own, /Messages ask this Bot automatically/); assert.doesNotMatch(own, /Ask a Bot \(@\)/, 'a Bot dm asks its Bot by itself');
-  assert.match(own, /Online · Owner: Owner/);
+  assert.match(own, /Online · Owner: Owner/); assert.match(own, /<h2>Fixture Bot<\/h2>/); assert.doesNotMatch(own, /tw-chan/, 'a Bot dm has its Bot\'s picture, not the channel #');
   fake.bots = [botCard({ permitted: false })]; await workspace.refreshBots(); await until(() => snapshot().bots[0]?.permitted === false, 'revoked access');
   const revoked = html(view(workspace, snapshot()));
   assert.match(revoked, /This Bot is not available to you right now/); assert.doesNotMatch(revoked, /<textarea/);
@@ -430,7 +436,7 @@ test('conversation view: someone else\'s Bot dm is read-only; a Bot dm needs its
   assert.match(html(view(workspace, snapshot())), /Bot availability could not be verified/);
   workspace.selectConversation('dm-bob'); await until(() => snapshot().selectedConversationId === 'dm-bob', 'dm');
   const dm = html(view(workspace, snapshot()));
-  assert.match(dm, /placeholder="Message Bob"/); assert.doesNotMatch(dm, /Ask a Bot/); assert.match(dm, /Enter to send, Shift\+Enter for a new line/); assert.match(dm, /No messages yet|Loading messages/);
+  assert.match(dm, /<h2>Bob<\/h2>/); assert.match(dm, /placeholder="Message Bob"/); assert.doesNotMatch(dm, /Ask a Bot/); assert.match(dm, /Enter to send, Shift\+Enter for a new line/); assert.match(dm, /No messages yet|Loading messages/);
 });
 
 test('conversation view: pending messages show their state and can be discarded; offline and errors explain themselves', async context => {

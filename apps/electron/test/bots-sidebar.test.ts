@@ -9,6 +9,8 @@ import type { BotUi } from '../src/shared/bots';
 import { BotsController, type BotsState } from '../src/renderer/bridge/botsStore';
 import { BotSessionsController } from '../src/renderer/bridge/botSessionsStore';
 import { pendingBotPath } from '../src/renderer/bridge/botSession';
+import { agentAvatarIndex } from '../src/renderer/components/AgentAvatar';
+import { renderTeamAvatar } from '../src/renderer/components/TeamAvatar';
 import { tr } from '../src/renderer/i18n/locale';
 import { BotChatList, BotsSidebar, MenuItems, type BotsSidebarProps, type MenuTarget } from '../src/renderer/components/BotsSidebar';
 import { Theme } from '../src/renderer/theme/ThemeContext';
@@ -103,6 +105,20 @@ test('the Bots are listed most recently used first under a heading that makes a 
   assert.equal([...html.matchAll(/aria-expanded="false"/g)].length >= 3, true, 'each Bot is a group that is closed');
   assert.ok(!html.includes('bot-chats-'), 'no chats are listed');
   assert.ok(!html.includes('data-session-id'));
+});
+
+const avatarsOf = (html: string) => [...html.matchAll(/data-agent-avatar="(\d+)"/g)].map((match) => Number(match[1]));
+
+test('each Bot wears the avatar of its id, the one the Teams views draw for it whether they name it by its id or by its key', async () => {
+  const ids = ['alpha', 'k3Qw9ZxLmN8vTb5RpYc2Ud'];
+  const html = await sidebar({ bots: ids.map((id) => bot(id)), expanded: [] });
+  assert.deepEqual(avatarsOf(html).sort((left, right) => left - right), ids.map(agentAvatarIndex).sort((left, right) => left - right));
+  const drawn = (identity: Parameters<typeof renderTeamAvatar>[0]) => avatarsOf(render(React.createElement(React.Fragment, null, renderTeamAvatar(identity, 20))));
+  for (const id of ids) {
+    assert.deepEqual(drawn({ kind: 'bot', id, name: id }), [agentAvatarIndex(id)], 'by id');
+    assert.deepEqual(drawn({ kind: 'bot', id: `bot:owner:${'h'.repeat(22)}:${id}`, name: id }), [agentAvatarIndex(id)], 'by key');
+  }
+  assert.equal(renderTeamAvatar({ kind: 'user', id: 'alice', name: 'Alice' }, 20), undefined, 'people get their initials');
 });
 
 test('an open Bot lists its chats, newest first, five to begin with and the rest behind Show more', async () => {

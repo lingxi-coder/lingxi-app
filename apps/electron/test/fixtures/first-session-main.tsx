@@ -23,7 +23,7 @@ const list = () => ({ projectPath: ref.projectPath, sessions: saved ? [...oldRow
     settings: { projects: ['/fixture'], activeProject: '/fixture', activeSession: ref, pinnedSessions: [], archivedSessions: [] },
     activeSession: ref, workspace: { path: '/fixture', trusted: false }, diagnostics: [],
     conversationSpaces: {
-      activeMode: 'code', projects: { '/fixture': ['code'] }, globalWorkspace: '/global',
+      activeMode: 'code', projects: { '/fixture': ['code'] }, globalWorkspaces: { chat: '/global/chat', code: '/global/code' },
       navigation: { chat: { projectId: null }, code: { projectId: '/fixture', session: ref } },
       sessions: [ref], drafts: [ref],
     },

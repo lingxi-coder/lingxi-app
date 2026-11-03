@@ -7,8 +7,9 @@ test('workspace relocation preserves Global and project membership in both space
     modified_rfc3339: '', message_count: 1 });
   const globalChat = row('global-chat', 'chat'), projectChat = row('project-chat', 'chat');
   const globalCode = row('global-code', 'code'), undiscovered = row('unregistered', 'chat');
+  const unknownGlobal = row('unregistered-global', 'chat');
   const catalogs = {
-    '/global': { sessions: [globalChat] }, // stale alias must not duplicate relocated owner
+    '/global': { sessions: [globalChat, unknownGlobal] }, // stale alias and unknown owner must not be projected
     '/project': { sessions: [globalChat, globalCode, undiscovered] },
     '/elsewhere': { sessions: [projectChat] },
   };
@@ -17,10 +18,10 @@ test('workspace relocation preserves Global and project membership in both space
     { sessionId: 'global-code', mode: 'code' as const, projectId: null, projectPath: '/project' },
     { sessionId: 'project-chat', mode: 'chat' as const, projectId: '/project', projectPath: '/elsewhere' },
   ];
-  assert.deepEqual(sessionsInLogicalScope(catalogs, owners, 'chat', null, ['/global']).map(({ projectPath, session }) => [projectPath, session.uuid]),
+  assert.deepEqual(sessionsInLogicalScope(catalogs, owners, 'chat', null).map(({ projectPath, session }) => [projectPath, session.uuid]),
     [['/project', 'global-chat']]);
-  assert.deepEqual(sessionsInLogicalScope(catalogs, owners, 'code', null, ['/global']).map(({ projectPath, session }) => [projectPath, session.uuid]),
+  assert.deepEqual(sessionsInLogicalScope(catalogs, owners, 'code', null).map(({ projectPath, session }) => [projectPath, session.uuid]),
     [['/project', 'global-code']]);
-  assert.deepEqual(sessionsInLogicalScope(catalogs, owners, 'chat', '/project', ['/global']).map(({ projectPath, session }) => [projectPath, session.uuid]),
-    [['/project', 'unregistered'], ['/elsewhere', 'project-chat']]);
+  assert.deepEqual(sessionsInLogicalScope(catalogs, owners, 'chat', '/project').map(({ projectPath, session }) => [projectPath, session.uuid]),
+    [['/elsewhere', 'project-chat']]);
 });

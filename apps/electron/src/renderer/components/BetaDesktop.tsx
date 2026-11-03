@@ -468,7 +468,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const spaces = bridge.bootstrap?.conversationSpaces;
   const currentSpace = spaces?.activeMode ?? 'chat';
   const scheduledWorkspace = bridge.bootstrap?.scheduledWorkspace;
-  const globalWorkspace = spaces?.globalWorkspace;
+  const globalWorkspace = spaces?.globalWorkspaces[currentSpace];
   const projects = useMemo(
     () => (settings?.projects ?? []).filter((path) => path !== scheduledWorkspace && spaces?.projects[path]?.includes(currentSpace)),
     [scheduledWorkspace, settings?.projects, spaces?.projects, currentSpace],
@@ -791,14 +791,14 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     });
   }, [chatSort, currentSpace, manualSessionOrder, visibleSession]);
   const rowsForProject = useCallback((projectId: string) => {
-    const rows = sessionsInLogicalScope(bridge.bootstrap?.projectCatalogs, spaces?.sessions ?? [], currentSpace, projectId, generalPaths);
+    const rows = sessionsInLogicalScope(bridge.bootstrap?.projectCatalogs, spaces?.sessions ?? [], currentSpace, projectId);
     const paths = new Map(rows.map((row) => [row.session.uuid, row.projectPath]));
     return sortedSessions(projectId, rows.map((row) => row.session))
       .map((session) => ({ projectPath: paths.get(session.uuid)!, projectId, session }));
-  }, [bridge.bootstrap?.projectCatalogs, spaces?.sessions, currentSpace, generalPaths, sortedSessions]);
+  }, [bridge.bootstrap?.projectCatalogs, spaces?.sessions, currentSpace, sortedSessions]);
   const globalSessions = useMemo(() => sessionsInLogicalScope(bridge.bootstrap?.projectCatalogs, spaces?.sessions ?? [],
-    currentSpace, null, generalPaths).sort((left, right) => sidebarSessionTimestamp(right.session) - sidebarSessionTimestamp(left.session)),
-  [bridge.bootstrap?.projectCatalogs, spaces?.sessions, currentSpace, generalPaths]);
+    currentSpace, null).sort((left, right) => sidebarSessionTimestamp(right.session) - sidebarSessionTimestamp(left.session)),
+  [bridge.bootstrap?.projectCatalogs, spaces?.sessions, currentSpace]);
   const allProjectSessions = useMemo(() => projects.flatMap((projectPath) => (
     rowsForProject(projectPath)
   )).sort((left, right) => {

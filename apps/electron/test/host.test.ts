@@ -28,7 +28,7 @@ function deferred<T = void>(): { promise: Promise<T>; resolve(value?: T): void; 
 
 function fakeConversationSpaces() {
   return { snapshot: () => ({ activeMode: 'chat', projects: {}, sessions: [],
-    navigation: { chat: { projectId: null }, code: { projectId: null } }, globalWorkspace: '/global' }),
+    navigation: { chat: { projectId: null }, code: { projectId: null } }, globalWorkspaces: { chat: '/global/chat', code: '/global/code' } }),
     find: () => undefined };
 }
 
@@ -437,6 +437,7 @@ test('failed session resume does not change the selected project or active sessi
   const targetSession = '22222222-3333-4444-8555-666666666666';
   settings.addProject(first);
   settings.addProject(target);
+  settings.conversationSpaces.register({ projectPath: target, projectId: target, sessionId: targetSession, mode: 'code' });
   settings.activateProject(first);
   settings.setActiveSession({ projectPath: first, sessionId: firstSession });
   const bridge = {
@@ -479,6 +480,8 @@ test('navigation mutations execute in invocation order and the last open wins', 
   const settings = new SettingsStore(userData);
   settings.addProject(projectA);
   settings.addProject(projectB);
+  settings.conversationSpaces.register({ projectPath: projectA, projectId: projectA, sessionId: sessionA, mode: 'code' });
+  settings.conversationSpaces.register({ projectPath: projectB, projectId: projectB, sessionId: sessionB, mode: 'code' });
   settings.setTrust(projectA, true);
   settings.setTrust(projectB, true);
   const gates = new Map([[sessionA, deferred<void>()], [sessionB, deferred<void>()]]);
@@ -536,6 +539,7 @@ test('historical startup opens the catalog session before persisting it active',
   const sessionId = '33333333-4444-4555-8666-777777777777';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   settings.conversationSpaces.setMode('code');
   const calls: string[] = [];
   const bridge = {
@@ -619,6 +623,7 @@ test('session open accepts a matching UUID outside the bounded project list', as
   const sessionId = '55555555-6666-4777-8888-999999999999';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let opened: {
     ref: { projectPath: string; sessionId: string };
     empty?: boolean;
@@ -668,6 +673,7 @@ test('host passes zero-count catalog rows to the empty-session open path', async
   const sessionId = '88888888-9999-4aaa-8bbb-cccccccccccc';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let opened: { ref: { projectPath: string; sessionId: string }; empty?: boolean } | undefined;
   const row = { uuid: sessionId, title: 'Empty', modified_rfc3339: '', message_count: 0, mode: 'code',
     path: join(project, `${sessionId}.jsonl`), empty_session: true };
@@ -702,6 +708,7 @@ test('zero-visible historical rows still use resume_session path', async () => {
   const sessionId = '89898989-9999-4aaa-8bbb-cccccccccccc';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let emptyMode: boolean | undefined;
   const row = { uuid: sessionId, title: sessionId.slice(0, 8), modified_rfc3339: '', message_count: 0,
     mode: 'code', path: join(project, `${sessionId}.jsonl`), empty_session: false };
@@ -735,6 +742,7 @@ test('opening an already-connected runtime does not require a persisted catalog 
   const sessionId = '99999999-aaaa-4bbb-8ccc-dddddddddddd';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let catalogLookups = 0;
   let opened = false;
   const host = new HostController(
@@ -838,11 +846,12 @@ test('project session catalogs are patched independently and preserved in bootst
     title,
     modified_rfc3339: '2026-08-26T00:00:00Z',
     message_count: 1,
+    mode: 'code',
     path: `/sessions/${uuid}.jsonl`,
     empty_session: false,
   });
   const settings = {
-    conversationSpaces: fakeConversationSpaces(),
+    conversationSpaces: { ...fakeConversationSpaces(), findBySessionId: () => ({ mode: 'code', projectId: projectA }) },
     isSessionArchived: () => false,
     getWorkspace: () => projectA,
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
@@ -880,7 +889,7 @@ test('host catalog generations keep only the newest deferred response', async ()
     invalidate: () => undefined,
   };
   const settings = {
-    conversationSpaces: fakeConversationSpaces(),
+    conversationSpaces: { ...fakeConversationSpaces(), findBySessionId: () => ({ mode: 'code', projectId: projectPath }) },
     isSessionArchived: () => false,
     getWorkspace: () => projectPath,
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
@@ -894,6 +903,7 @@ test('host catalog generations keep only the newest deferred response', async ()
     title,
     modified_rfc3339: '2026-08-26T00:00:00Z',
     message_count: 1,
+    mode: 'code',
     path: '/session.jsonl',
     empty_session: false,
   });

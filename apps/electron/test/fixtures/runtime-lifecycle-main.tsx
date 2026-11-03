@@ -12,7 +12,7 @@ const snapshot = (sessionId: string, revision: number, mode: 'chat' | 'code' = '
   connection: { status: 'connected' }, diagnostics: [], projectCatalogs: {},
   runtimes: [{ projectPath, projectId: projectPath, sessionId, mode, connection: { status: 'connected' }, turnActive: false, pendingInteractions: 0, pendingAskUserQuestions: 0 }],
   conversationSpaces: {
-    activeMode: mode, globalWorkspace: '/global', projects: { [projectPath]: ['chat', 'code'], [chatProjectPath]: ['chat'], [codeProjectPath]: ['code'] },
+    activeMode: mode, globalWorkspaces: { chat: '/global/chat', code: '/global/code' }, projects: { [projectPath]: ['chat', 'code'], [chatProjectPath]: ['chat'], [codeProjectPath]: ['code'] },
     navigation: { chat: { projectId: null }, code: { projectId: null } },
     sessions: [{ projectPath, projectId: projectPath, sessionId, mode }],
   },

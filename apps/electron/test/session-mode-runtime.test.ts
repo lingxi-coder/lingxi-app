@@ -207,7 +207,7 @@ test('handoff creates a global draft and records a durable source backlink; stal
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-handoff-')));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const settings = new SettingsStore(root);
-    const source = { projectPath: settings.conversationSpaces.globalWorkspace, projectId: null, sessionId, mode: 'chat' as const };
+    const source = { projectPath: settings.conversationSpaces.globalWorkspaces.chat, projectId: null, sessionId, mode: 'chat' as const };
     settings.conversationSpaces.register(source); settings.setActiveSession(source);
     const result = deferred<any>(); let creates = 0, released = 0, ownership: any;
     const bridge = { get: () => ({ prepareSessionHandoff: () => result.promise }), retainBackgroundSession: () => () => { released++; },
@@ -221,8 +221,9 @@ test('handoff creates a global draft and records a durable source backlink; stal
     const output = await pending; assert.equal(released, 1);
     if (stale) { assert.equal(output, null); assert.equal(creates, 0); assert.equal(settings.conversationSpaces.snapshot().activeMode, 'chat'); continue; }
     assert.equal(output.summary, 'Completed work'); assert.equal(ownership.forceNew, true); assert.equal(ownership.projectId, null);
-    assert.deepEqual(new SettingsStore(root).conversationSpaces.find({ projectPath: source.projectPath, sessionId: targetId }),
-      { projectPath: source.projectPath, projectId: null, sessionId: targetId, mode: 'code', handoff: { sourceSessionId: sessionId,
+    const targetPath = settings.conversationSpaces.globalWorkspaces.code;
+    assert.deepEqual(new SettingsStore(root).conversationSpaces.find({ projectPath: targetPath, sessionId: targetId }),
+      { projectPath: targetPath, projectId: null, sessionId: targetId, mode: 'code', handoff: { sourceSessionId: sessionId,
         sourceProjectPath: source.projectPath, sourceMode: 'chat', cutoff: 'persisted:42', requestId: 'op' } });
   }
 });
@@ -243,7 +244,7 @@ test('explicit retry reuses the same operation and source instead of charging fo
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-handoff-retry-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const settings = new SettingsStore(root);
-  const source = { projectPath: settings.conversationSpaces.globalWorkspace, projectId: null, sessionId, mode: 'chat' as const };
+  const source = { projectPath: settings.conversationSpaces.globalWorkspaces.chat, projectId: null, sessionId, mode: 'chat' as const };
   settings.conversationSpaces.register(source); settings.setActiveSession(source);
   const calls: unknown[] = []; let released = 0;
   const runtime = { prepareSessionHandoff: async (id: string, target: string, _signal: AbortSignal, retry: boolean) => {
@@ -260,14 +261,14 @@ test('explicit retry reuses the same operation and source instead of charging fo
   assert.equal(output.summary, 'Progress');
   assert.equal(released, 1);
   assert.deepEqual(calls, [['same-op', 'code', false], ['same-op', 'code', true]]);
-  assert.equal(settings.conversationSpaces.find({ projectPath: source.projectPath, sessionId: targetId })?.handoff?.cutoff, 'same-capture');
+  assert.equal(settings.conversationSpaces.find({ projectPath: settings.conversationSpaces.globalWorkspaces.code, sessionId: targetId })?.handoff?.cutoff, 'same-capture');
 });
 
 test('navigation while a target draft is starting cannot activate the late draft', async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-handoff-start-race-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const settings = new SettingsStore(root);
-  const source = { projectPath: settings.conversationSpaces.globalWorkspace, projectId: null, sessionId, mode: 'chat' as const };
+  const source = { projectPath: settings.conversationSpaces.globalWorkspaces.chat, projectId: null, sessionId, mode: 'chat' as const };
   settings.conversationSpaces.register(source); settings.setActiveSession(source);
   const started = deferred<any>(), closed: unknown[] = [], activated: unknown[] = [];
   const bridge = { get: () => ({ prepareSessionHandoff: async () => ({ cutoff: '1', summary: 'Progress' }) }),
@@ -286,9 +287,9 @@ test('navigation while a target draft is starting cannot activate the late draft
 test('switching spaces keeps the source turn, listener and pending permission owned by its runtime', async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-space-switch-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
-  const target = { projectPath: path, projectId: null, sessionId: targetId, mode: 'code' as const };
+  const target = { projectPath: settings.conversationSpaces.globalWorkspaces.code, projectId: null, sessionId: targetId, mode: 'code' as const };
   settings.conversationSpaces.register(source); settings.conversationSpaces.register(target); settings.setActiveSession(source);
   const sourceRuntime = new EventEmitter(); let events = 0, closes = 0, cancels = 0;
   sourceRuntime.on('permission', () => { events++; });
@@ -324,15 +325,86 @@ test('New Chat remains global when a project is selected', async t => {
   const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
   host.registerWindow(sender as any, frame.url); host.registerIpc();
   await handlers.get(CH_SESSION_NEW)!({ sender, senderFrame: frame }, null, undefined);
-  assert.equal(created.path, settings.conversationSpaces.globalWorkspace);
+  assert.equal(created.path, settings.conversationSpaces.globalWorkspaces.chat);
   assert.equal(created.owner.projectId, null); assert.equal(created.owner.mode, 'chat');
   assert.equal(settings.getPublic().activeSession?.projectId, null);
+});
+
+test('Global New Chat chooses the fixed mode directory without inheriting the selected project', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-global-mode-directories-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const project = join(root, 'project'); mkdirSync(project);
+  const settings = new SettingsStore(join(root, 'settings'));
+  settings.addProject(project);
+  for (const mode of ['chat', 'code'] as const) settings.conversationSpaces.addProject(project, mode);
+  const created: Array<{ path: string; owner: any }> = [];
+  const bridge = { registerWindow() {}, registerIpc() {}, newSession: async (path: string, _model: unknown, owner: any) => {
+    created.push({ path, owner }); return { projectPath: path, sessionId: owner.mode === 'chat' ? sessionId : targetId };
+  }, activateSession() {} };
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+    { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any);
+  (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  for (const mode of ['chat', 'code'] as const) {
+    settings.conversationSpaces.setMode(mode);
+    settings.conversationSpaces.setNavigation(mode, project);
+    settings.activateProject(project);
+    await handlers.get(CH_SESSION_NEW)!({ sender, senderFrame: frame }, null, undefined);
+    assert.equal(created.at(-1)?.path, settings.conversationSpaces.globalWorkspaces[mode]);
+    assert.equal(created.at(-1)?.owner.projectId, null);
+    assert.equal(created.at(-1)?.owner.mode, mode);
+    assert.equal(settings.getPublic().activeSession?.projectId, null);
+  }
+  assert.notEqual(created[0]?.path, created[1]?.path);
+});
+
+test('an unknown catalog row cannot claim a scope from its workspace path', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-unknown-owner-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root);
+  settings.addProject(root);
+  const path = join(root, `${sessionId}.jsonl`);
+  const row = { uuid: sessionId, path, mode: 'chat', workspace_path: root, message_count: 1 };
+  let opened = false, captured = false;
+  const bridge = { get: () => undefined, isProjectClosing: () => false, openSession: async () => { opened = true; } };
+  const catalog = { select: async () => row, invalidate() {}, captureMetadataSource: async () => { captured = true; } };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
+  const selection = { scope: 'current', transcriptPath: path };
+  const ref = { projectPath: root, sessionId };
+  await assert.rejects((host as any).openSessionAndActivateInternal(ref, selection), /no authenticated conversation scope/);
+  await assert.rejects((host as any).prepareMetadataSource(ref, selection), /no authenticated conversation scope/);
+  assert.equal(opened, false); assert.equal(captured, false);
+  assert.equal(settings.conversationSpaces.findBySessionId(sessionId), undefined);
+});
+
+test('a registered Global owner keeps its scope after its cwd moves into a project', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-global-owner-project-cwd-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const project = join(root, 'project'); mkdirSync(project);
+  const settings = new SettingsStore(join(root, 'settings'));
+  settings.addProject(project);
+  const original = { projectPath: settings.conversationSpaces.globalWorkspaces.chat, projectId: null, sessionId, mode: 'chat' as const };
+  settings.conversationSpaces.register(original);
+  const moved = settings.conversationSpaces.relocate(original, project);
+  const path = join(root, `${sessionId}.jsonl`);
+  const row = { uuid: sessionId, path, mode: 'chat', workspace_path: project, message_count: 1 };
+  let opened: any;
+  const bridge = { get: () => undefined, isProjectClosing: () => false, openSession: async (owner: unknown) => { opened = owner; } };
+  const catalog = { select: async () => row, invalidate() {} };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
+  (host as any).bootstrap = () => ({});
+  await (host as any).openSessionAndActivateInternal(moved, { scope: 'current', transcriptPath: path });
+  assert.equal(opened.projectId, null);
+  assert.equal(settings.conversationSpaces.findBySessionId(sessionId)?.projectId, null);
 });
 
 test('a linked session checks its fixed mode before switching spaces and rolls back failed opens', async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-linked-mode-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.code;
   settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId: targetId, mode: 'code' });
   const handlers = new Map<string, (...args: any[]) => any>();
   const bridge = { registerWindow() {}, registerIpc() {} };
@@ -354,9 +426,9 @@ test('a linked session checks its fixed mode before switching spaces and rolls b
 test('voice flow retains its owner and provider context across navigation and rejects another lane', async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-audio-flow-owner-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
-  const target = { projectPath: path, projectId: null, sessionId: targetId, mode: 'code' as const };
+  const target = { projectPath: settings.conversationSpaces.globalWorkspaces.code, projectId: null, sessionId: targetId, mode: 'code' as const };
   settings.conversationSpaces.register(source); settings.conversationSpaces.register(target); settings.setActiveSession(source);
   const handlers = new Map<string, (...args: any[]) => any>(), released: string[] = [], contexts: unknown[] = [];
   let cancels = 0, finishes = 0;
@@ -404,7 +476,7 @@ test('voice flow retains its owner and provider context across navigation and re
 test('a native operation retains its owner until it settles even if its flow lease is released', async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-audio-operation-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId, mode: 'chat' });
   settings.setActiveSession({ projectPath: path, sessionId });
   const finished = deferred<any>(), handlers = new Map<string, (...args: any[]) => any>();
@@ -435,7 +507,7 @@ test('a native operation retains its owner until it settles even if its flow lea
 test('renderer teardown holds the audio runtime until native cancellation is confirmed', async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-audio-detach-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId, mode: 'chat' });
   settings.setActiveSession({ projectPath: path, sessionId });
   const cancelled = deferred<void>(), handlers = new Map<string, (...args: any[]) => any>();
@@ -461,7 +533,7 @@ test('renderer teardown holds the audio runtime until native cancellation is con
 test('a failed latest switch restores the confirmed space after rapid opposing choices', async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-space-failure-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
   settings.conversationSpaces.register(source); settings.setActiveSession(source);
   const first = deferred<void>(), handlers = new Map<string, (...args: any[]) => any>();
@@ -487,7 +559,7 @@ test('a failed latest switch restores the confirmed space after rapid opposing c
 test('failed captures keep one bounded lease until retry is discarded', async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-retry-lease-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
   settings.conversationSpaces.register(source); settings.setActiveSession(source);
   let released = 0;
@@ -506,7 +578,7 @@ test('failed captures keep one bounded lease until retry is discarded', async t 
 test('a slow scheduled history open cannot reactivate its owner after a newer space choice', async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-scheduled-navigation-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
   const target = { ...source, sessionId: targetId };
   settings.conversationSpaces.register(source); settings.conversationSpaces.register(target); settings.setActiveSession(source);
@@ -538,7 +610,7 @@ test('a slow scheduled history open cannot reactivate its owner after a newer sp
 test('a queued scheduled Chat open superseded by New Chat preserves the visible Code mode', async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-scheduled-queued-mode-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspace;
+  const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   settings.conversationSpaces.setMode('code');
   const target = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
   settings.conversationSpaces.register(target);

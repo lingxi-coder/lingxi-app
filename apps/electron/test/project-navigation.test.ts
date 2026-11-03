@@ -48,7 +48,7 @@ function bridgeFixture() {
   return {
     bootstrap: {
       conversationSpaces: {
-        activeMode: 'code', globalWorkspace: '/tmp/global-chat',
+        activeMode: 'code', globalWorkspaces: { chat: '/tmp/global-chat', code: '/tmp/global-code' },
         projects: { [projectPath]: ['code'], [pinnedProjectPath]: ['code'] },
         navigation: { chat: { projectId: null }, code: { projectId: projectPath } },
         sessions: [

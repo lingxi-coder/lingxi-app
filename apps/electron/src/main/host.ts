@@ -1135,7 +1135,7 @@ export class HostController {
           || !this.settings.conversationSpaces.snapshot().projects[projectId]?.includes(space))) {
           throw new Error('project is not in this conversation space');
         }
-        const project = projectId ?? this.settings.conversationSpaces.globalWorkspace;
+        const project = projectId ?? this.settings.conversationSpaces.globalWorkspaces[space];
         if (model !== undefined && typeof model !== 'string') throw new Error('invalid model');
         const navigationStartedAt = Date.now();
         this.diagnostics.add('info', 'host', diagnosticEvent('session_new_started', {
@@ -1204,9 +1204,8 @@ export class HostController {
         }
         if (linkedMode === undefined) return this.openSessionAndActivateInternal(ref, selected, generation, expectedMode);
         const known = this.settings.conversationSpaces.findBySessionId(sessionId);
-        const source = known ? undefined : await this.resolveSessionSource(ref);
-        const confirmedMode = known?.mode ?? source?.row?.mode ?? this.bridge.get(sessionId)?.sessionMode;
-        if (confirmedMode !== linkedMode) throw new Error('The session belongs to a different conversation space.');
+        if (!known) throw new Error('The session has no authenticated conversation scope.');
+        if (known.mode !== linkedMode) throw new Error('The session belongs to a different conversation space.');
         if (generation !== this.navigationGeneration) return this.bootstrap();
         const previousMode = this.settings.conversationSpaces.snapshot().activeMode;
         this.settings.conversationSpaces.setMode(linkedMode);
@@ -2075,7 +2074,7 @@ export class HostController {
       if (!current()) { this.discardHandoff(requestId); return null; }
       const output = await this.enqueueNavigation(async () => {
         if (!current()) return null;
-        const projectPath = this.settings.conversationSpaces.globalWorkspace;
+        const projectPath = this.settings.conversationSpaces.globalWorkspaces[target];
         const ref = await this.bridge.newSession(projectPath, undefined,
           { mode: target, projectId: null, forceNew: true, activate: current });
         if (!current()) {
@@ -2284,10 +2283,13 @@ export class HostController {
         && !this.settings.isSessionArchived({ projectPath: session.workspace_path ?? projectPath, sessionId: session.uuid }),
       (session) => {
         const owner = this.settings.conversationSpaces.findBySessionId(session.uuid);
-        return JSON.stringify([session.mode, owner ? owner.projectId : projectPath]);
+        return JSON.stringify([session.mode, owner?.projectId]);
       });
+      const unknown = result.sessions.filter((session) => !this.settings.conversationSpaces.findBySessionId(session.uuid));
+      if (unknown.length) this.diagnostics.add('warn', 'host', `Ignored ${unknown.length} session(s) without an authenticated conversation scope.`);
       const state = {
-        sessions: result.sessions.filter((session) => !this.scheduled?.isControllerSession(session.workspace_path ?? projectPath, session.uuid)
+        sessions: result.sessions.filter((session) => this.settings.conversationSpaces.findBySessionId(session.uuid)?.mode === session.mode
+          && !this.scheduled?.isControllerSession(session.workspace_path ?? projectPath, session.uuid)
           && !this.settings.isSessionArchived({ projectPath, sessionId: session.uuid })
           && !this.settings.isSessionArchived({ projectPath: session.workspace_path ?? projectPath, sessionId: session.uuid })).map(({
           empty_session: _emptySession,
@@ -2375,9 +2377,9 @@ export class HostController {
       try { source = canonicalWorkspace(row.workspace_path); }
       catch (error) {
         if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-        // A removed workspace keeps the selected transcript as authority,
-        // while any required runtime uses the existing launch directory.
-        source = project;
+        // Keep the recorded owner and selected transcript when a stale
+        // workspace hint names a directory that no longer exists.
+        source = known?.projectPath ?? project;
       }
     }
     if (this.isProjectClosing(source)) throw new Error('project is closing');
@@ -2408,9 +2410,9 @@ export class HostController {
     const mode = source.ref.mode ?? source.row?.mode ?? runtime?.sessionMode;
     if (!path || (mode !== 'chat' && mode !== 'code')) throw new Error('The metadata source is unavailable.');
     const existing = this.settings.conversationSpaces.findBySessionId(ref.sessionId);
-    if (existing && (existing.mode !== mode || existing.projectPath !== source.ref.projectPath)) throw new Error('The session owner changed. Reopen this action.');
-    const owner: OwnedConversation = existing ?? { ...source.ref, mode,
-      projectId: this.settings.hasProject(ref.projectPath) ? ref.projectPath : null };
+    if (!existing) throw new Error('The session has no authenticated conversation scope.');
+    if (existing.mode !== mode || existing.projectPath !== source.ref.projectPath) throw new Error('The session owner changed. Reopen this action.');
+    const owner = existing;
     const assertOwner = () => {
       const current = this.settings.conversationSpaces.findBySessionId(ref.sessionId);
       if ((!current && existing) || (current && (current.mode !== owner.mode || current.projectPath !== owner.projectPath
@@ -2707,12 +2709,12 @@ export class HostController {
     }
     const known = this.settings.conversationSpaces.find({ projectPath: source, sessionId: ref.sessionId })
       ?? this.settings.conversationSpaces.find(ref) ?? this.settings.conversationSpaces.findBySessionId(ref.sessionId);
-    const ownerMode = known?.mode ?? session?.mode ?? existing?.sessionMode;
-    if (!ownerMode) throw new Error('The session mode is unavailable.');
+    if (!known) throw new Error('The session has no authenticated conversation scope.');
+    const ownerMode = known.mode;
     if ((session && session.mode !== ownerMode) || (expectedMode && expectedMode !== ownerMode)) {
       throw new Error('The session belongs to a different conversation space.');
     }
-    const projectId = known ? known.projectId : (this.settings.hasProject(project) ? project : null);
+    const projectId = known.projectId;
     let releaseCopy: (() => void) | undefined;
     if (selection && existing) {
       const state = existing.connectionState.status === 'connected' ? await existing.getWorkspaceState() : undefined;
@@ -2732,8 +2734,7 @@ export class HostController {
       if (generation !== undefined && (generation !== this.navigationGeneration
         || this.settings.conversationSpaces.snapshot().activeMode !== expectedMode)) return this.bootstrap();
       // The engine must acknowledge the exact copy before persistent ownership moves.
-      if (!known) this.settings.conversationSpaces.register(canonical);
-      else if (known.projectPath !== source) this.settings.conversationSpaces.relocate(known, source);
+      if (known.projectPath !== source) this.settings.conversationSpaces.relocate(known, source);
       if (generation !== undefined) this.bridge.activateSession(canonical);
       // Persist navigation after a matching engine acknowledgement.
       const wasArchived = this.settings.isSessionArchived(canonical) || this.settings.isSessionArchived(ref);
@@ -2791,7 +2792,6 @@ export class HostController {
     const source = captured.source;
     const sourceRef = source.ref;
     const owner = this.archiveOwner(captured);
-    const known = this.settings.conversationSpaces.findBySessionId(ref.sessionId);
     const scope = owner.projectId ?? 'global';
     const runtime = captured.runtime;
     const release = runtime?.beginArchive() ?? (() => {});
@@ -2812,7 +2812,6 @@ export class HostController {
           item.uuid.toLowerCase() === ref.sessionId.toLowerCase() && item.path === source.transcriptPath && item.mode === owner.mode)?.title;
         const title = source.row?.title ?? catalogTitle(sourceRef.projectPath) ?? catalogTitle(ref.projectPath);
         if (runtime?.hasActiveWork) throw new Error('Wait for active work and pending interactions before archiving this chat.');
-        if (!known) this.settings.conversationSpaces.register(owner);
         this.settings.setSessionArchived(sourceRef, true, title);
         const selected = this.settings.conversationSpaces.snapshot().navigation[owner.mode].session;
         if (selected?.sessionId === owner.sessionId) this.settings.conversationSpaces.setNavigation(owner.mode, owner.projectId);
@@ -2965,9 +2964,12 @@ export class HostController {
       && !this.settings.isSessionArchived({ projectPath: session.workspace_path ?? project, sessionId: session.uuid }),
     (session) => {
       const owner = this.settings.conversationSpaces.findBySessionId(session.uuid);
-      return JSON.stringify([session.mode, owner ? owner.projectId : project]);
+      return JSON.stringify([session.mode, owner?.projectId]);
     });
-    catalog.sessions = catalog.sessions.filter((session) => !this.scheduled?.isControllerSession(session.workspace_path ?? project, session.uuid)
+    const unknownCount = catalog.sessions.filter((session) => !this.settings.conversationSpaces.findBySessionId(session.uuid)).length;
+    if (unknownCount) this.diagnostics.add('warn', 'host', `Ignored ${unknownCount} session(s) without an authenticated conversation scope.`);
+    catalog.sessions = catalog.sessions.filter((session) => this.settings.conversationSpaces.findBySessionId(session.uuid)?.mode === session.mode
+      && !this.scheduled?.isControllerSession(session.workspace_path ?? project, session.uuid)
       && !this.settings.isSessionArchived({ projectPath: project, sessionId: session.uuid })
       && !this.settings.isSessionArchived({ projectPath: session.workspace_path ?? project, sessionId: session.uuid }));
     this.catalogs.set(project, {
@@ -2979,7 +2981,10 @@ export class HostController {
       }) => session),
     });
     const mode = this.settings.conversationSpaces.snapshot().activeMode;
-    const first = catalog.sessions.find((session) => session.mode === mode);
+    const first = catalog.sessions.find((session) => {
+      const owner = this.settings.conversationSpaces.findBySessionId(session.uuid);
+      return session.mode === mode && owner?.mode === mode && owner.projectId === project;
+    });
     const ref = first
       ? { projectPath: project, sessionId: first.uuid }
       : await this.bridge.newSession(project, undefined, { mode, projectId: project });

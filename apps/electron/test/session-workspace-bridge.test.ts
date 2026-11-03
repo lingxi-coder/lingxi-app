@@ -540,7 +540,7 @@ function catalogNavigationHarness() {
   const mutation = deferred<unknown>();
   const metadataRequests: Array<{ response: ReturnType<typeof deferred<any>> }> = [];
   const requests: Array<{ projectPath: string; scope: string; response: ReturnType<typeof deferred<any>> }> = [];
-  const initial = { revision: 1, conversationSpaces: { globalWorkspace: '/global', activeMode: 'code', projects: {}, sessions: [], navigation: { chat: { projectId: null }, code: { projectId: '/A' } } }, settings: { projects: ['/A', '/B'] }, activeSession: { projectPath: '/A', sessionId: 'chat-A' },
+  const initial = { revision: 1, conversationSpaces: { globalWorkspaces: { chat: '/global/chat', code: '/global/code' }, activeMode: 'code', projects: {}, sessions: [], navigation: { chat: { projectId: null }, code: { projectId: '/A' } } }, settings: { projects: ['/A', '/B'] }, activeSession: { projectPath: '/A', sessionId: 'chat-A' },
     projectCatalogs: { '/A': { sessions: [{ uuid: 'chat-A' }] }, '/B': { sessions: [] } } };
   let bootstrap: any = null, runtimes = new Map(), deferCatalogUpdates = false;
   const queuedCatalogUpdates: Array<(previous: unknown) => unknown> = [];
@@ -987,7 +987,7 @@ test('the composer keeps a loading-session draft and sends no prompt or local co
 
 test('rapidly changing spaces retains the last click even before React renders', async () => {
   const first = deferred<any>(), second = deferred<any>(), calls: string[] = [], applied: string[] = [];
-  const spaces = { activeMode: 'chat', globalWorkspace: '/global', navigation: { chat: { projectId: null }, code: { projectId: null } } };
+  const spaces = { activeMode: 'chat', globalWorkspaces: { chat: '/global/chat', code: '/global/code' }, navigation: { chat: { projectId: null }, code: { projectId: null } } };
   const context: any = {
     useCallback: (fn: unknown) => fn, bootstrap: { conversationSpaces: spaces },
     host: { switchConversationSpace: (mode: string) => { calls.push(mode); return mode === 'code' ? first.promise : second.promise; } },

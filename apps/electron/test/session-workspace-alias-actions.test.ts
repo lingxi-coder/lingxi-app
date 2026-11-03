@@ -26,6 +26,7 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
   if (options.savedSource !== false) settings.addProject(source);
   const ref = Object.freeze({ projectPath: alias, sessionId });
   const sourceRef = { projectPath: source, sessionId };
+  settings.conversationSpaces.register({ ...sourceRef, mode: 'code', projectId: options.savedSource === false ? alias : source });
   if (options.savedSource !== false) settings.setActiveSession(sourceRef);
   const path = join(store, `${sessionId}.jsonl`), untouchedPath = join(alias, 'unrelated.jsonl');
   const original = `${JSON.stringify({ type: 'user', sessionId, cwd: source, message: { role: 'user', content: 'Saved chat' } })}\n`;
@@ -207,14 +208,14 @@ test('alias archive records B ownership and filters the archived UUID from B and
   assert.deepEqual(f.ref, { projectPath: f.alias, sessionId });
 });
 
-test('cold alias archive registers the exact source without starting a chat runtime', async (t) => {
+test('cold alias archive uses its registered scope and exact source without starting a chat runtime', async (t) => {
   const f = fixture(t, { running: false, savedSource: false });
   await f.invoke(CH_SESSION_ARCHIVE);
   assert.deepEqual(f.calls.find, []);
   assert.deepEqual(f.calls.select, [{ ...f.ref, scope: 'current' }]);
   assert.deepEqual(f.calls.transcriptPaths, []);
-  assert.deepEqual(f.calls.trust, [f.source]);
-  assert.deepEqual(f.calls.events, [`trust:${f.source}`, `scheduled:${f.alias}:list`, `scheduled:${f.alias}:pause`]);
+  assert.deepEqual(f.calls.trust, []);
+  assert.deepEqual(f.calls.events, [`scheduled:${f.alias}:list`, `scheduled:${f.alias}:pause`]);
   assert.deepEqual(f.calls.started, []);
   assert.equal(f.settings.isTrustedWorkspace(f.source), true);
   assert.equal(f.settings.hasProject(f.source), false);
@@ -255,11 +256,11 @@ test('rejecting a selected source leaves archive and preflight data and engines 
   }
 });
 
-test('declining trust for a cold alias leaves the chat and schedules untouched', async (t) => {
+test('a cold alias cannot change the registered source owner while archiving', async (t) => {
   const f = fixture(t, { running: false, savedSource: false });
   const before = readFileSync(f.settings.settingsPath, 'utf8');
-  f.dialogs.trustDirectory = async () => false;
-  await assert.rejects(f.invoke(CH_SESSION_ARCHIVE), /cancelled/);
+  f.setHint(f.alias);
+  await assert.rejects(f.invoke(CH_SESSION_ARCHIVE), /owner changed/i);
   assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
   assert.equal(readFileSync(f.path, 'utf8'), f.original);
   assert.deepEqual(f.calls.events, []); assert.deepEqual(f.calls.started, []);
@@ -311,6 +312,7 @@ test('cold metadata keeps the stored transcript authoritative when the workspace
 test('live metadata follows the exact active copy even when its logical workspace has a different copy', async (t) => {
   const f = fixture(t);
   f.runtime.projectPath = f.alias;
+  f.settings.conversationSpaces.relocate(f.sourceRef, f.alias);
   f.runtime.hasActiveWork = true;
   const otherPath = join(f.alias, `${sessionId}.jsonl`);
   writeFileSync(otherPath, f.original.replace('Saved chat', 'Unselected A chat'));

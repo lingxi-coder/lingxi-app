@@ -34,7 +34,7 @@ export interface ConversationSpacesSnapshot {
   sessions: OwnedConversation[];
   /** Live, unsubmitted drafts, which may include more than one per space. */
   drafts?: OwnedConversation[];
-  globalWorkspace: string;
+  globalWorkspaces: Record<ConversationSpace, string>;
 }
 
 export const CH_CONVERSATION_SPACE = 'lingxi:conversation-space';

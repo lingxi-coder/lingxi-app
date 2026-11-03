@@ -85,18 +85,24 @@ function decode(value: unknown): StoredSpaces {
 
 /** Device-local project visibility and immutable logical conversation ownership. */
 export class ConversationSpaceStore {
-  readonly globalWorkspace: string;
+  readonly globalWorkspaces: Readonly<Record<ConversationSpace, string>>;
   private readonly file: string;
   private value: StoredSpaces;
 
   constructor(userData: string, brandHome = process.env.LINGXI_CONFIG_DIR || join(homedir(), '.lingxi')) {
     this.file = join(userData, 'conversation-spaces.v2.json');
-    const workspace = brandHome;
-    if (!isAbsolute(workspace)) throw new Error('The brand workspace must be an absolute path.');
-    mkdirSync(workspace, { recursive: true, mode: 0o700 });
-    const stat = lstatSync(workspace);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('The general chat workspace must be a real directory.');
-    this.globalWorkspace = realpathSync.native(workspace);
+    if (!isAbsolute(brandHome)) throw new Error('The brand workspace must be an absolute path.');
+    mkdirSync(brandHome, { recursive: true, mode: 0o700 });
+    const container = lstatSync(brandHome);
+    if (!container.isDirectory() || container.isSymbolicLink()) throw new Error('The brand container must be a real directory.');
+    const workspace = (space: ConversationSpace): string => {
+      const directory = join(brandHome, space);
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const stat = lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('The conversation workspace must be a real directory.');
+      return realpathSync.native(directory);
+    };
+    this.globalWorkspaces = { chat: workspace('chat'), code: workspace('code') };
     try { this.value = decode(JSON.parse(readFileSync(this.file, 'utf8'))); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -106,7 +112,7 @@ export class ConversationSpaceStore {
 
   snapshot(): ConversationSpacesSnapshot {
     const { trustedWorkspaces: _trustedWorkspaces, ...publicValue } = structuredClone(this.value);
-    return { ...publicValue, globalWorkspace: this.globalWorkspace };
+    return { ...publicValue, globalWorkspaces: { ...this.globalWorkspaces } };
   }
 
   private update(change: (draft: StoredSpaces) => void): void {

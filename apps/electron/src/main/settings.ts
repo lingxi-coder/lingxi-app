@@ -337,7 +337,7 @@ export class SettingsStore {
   }
 
   private managedWorkspacePaths(projects: readonly string[] = this.settings?.projects ?? []): Set<string> {
-    return new Set([this.scheduledWorkspace, this.conversationSpaces.globalWorkspace, ...this.conversationSpaces.trustedWorkspaces(),
+    return new Set([this.scheduledWorkspace, ...Object.values(this.conversationSpaces.globalWorkspaces), ...this.conversationSpaces.trustedWorkspaces(),
       ...this.conversationSpaces.snapshot().sessions.filter((row) => row.projectId === null || projects.includes(row.projectId))
         .map((row) => row.projectPath),
       ...[...this.scheduledSessionWorkspaces.values()].map(row => row.projectPath)]);

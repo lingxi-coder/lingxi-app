@@ -93,7 +93,7 @@ class WorkspaceRuntime {
   rememberTranscriptSelection(path: string): void { this.transcriptPath = path; }
 }
 
-function hostFixture(t: TestContext) {
+function hostFixture(t: TestContext, options: { registered?: boolean } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-workspace-host-')));
   const source = join(root, 'source'), target = join(root, 'target'), userData = join(root, 'settings');
   mkdirSync(source); mkdirSync(target);
@@ -101,6 +101,7 @@ function hostFixture(t: TestContext) {
   const ref = { projectPath: source, sessionId };
   settings.conversationSpaces.setMode('code');
   settings.addProject(source); settings.activateProject(source); settings.setActiveSession(ref);
+  if (options.registered !== false) settings.conversationSpaces.register({ ...ref, mode: 'code', projectId: source });
   const original = new WorkspaceRuntime(source, sessionId);
   writeFileSync(original.transcriptPath, '{}\n');
   const runtimes = new Map<string, WorkspaceRuntime>([[sessionId, original]]);
@@ -193,6 +194,7 @@ function hostFixture(t: TestContext) {
 
 test('opening a pasted uppercase UUID retains the canonical runtime and persisted owner', async t => {
   const f = hostFixture(t), id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
+  f.settings.conversationSpaces.register({ projectPath: f.source, sessionId: id, projectId: f.source, mode: 'code' });
   f.runtimes.set(id, new WorkspaceRuntime(f.source, id));
   const snapshot = await f.host.openSessionAndActivate({ projectPath: f.source, sessionId: id.toUpperCase() });
   assert.equal(snapshot.activeSession?.sessionId, id);
@@ -237,7 +239,7 @@ test('/cd retains the exact source while remounting its owner in the new cwd', a
 
 for (const { mode, global } of [{ mode: 'code', global: false }, { mode: 'chat', global: true }] as const) {
   test(`/cd cold resume retains the ${global ? 'Global' : 'project'} ${mode} owner and exact source`, async t => {
-    const f = hostFixture(t), selectedPath = f.original.transcriptPath;
+    const f = hostFixture(t, { registered: !global }), selectedPath = f.original.transcriptPath;
     const owner = { ...f.ref, mode, projectId: global ? null : f.source };
     const moved = { ...owner, projectPath: f.target };
     f.original.sessionMode = mode;
@@ -305,6 +307,7 @@ test('a slow startup restore cannot overwrite a newer queued navigation', async 
   const startup = f.host.restoreProjectSession(f.source);
   await new Promise(resolve => setImmediate(resolve));
   const newer = { projectPath: f.target, sessionId: otherId };
+  f.settings.conversationSpaces.register({ ...newer, projectId: f.target, mode: 'code' });
   const selected = f.row(f.target, otherId);
   const navigation = f.host.openSessionAndActivate(newer,
     { scope: 'current', transcriptPath: selected.path });
@@ -330,15 +333,15 @@ test('/cd opens an unsent draft without resuming its computed but unwritten tran
   const snapshot = await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
   assert.equal(existsSync(f.row(f.target).path), false, 'a relocated writer path does not imply that a JSONL file exists');
   assert.deepEqual(f.calls.openArguments, [[moved, true, undefined, true, undefined, undefined]]);
-  assert.deepEqual(f.calls.close, [f.ref]);
+  assert.deepEqual(f.calls.close, [{ ...f.ref, mode: 'code', projectId: f.source }]);
   assert.equal(f.projectRoots.get(sessionId), f.target);
   assert.equal(f.runtimes.get(sessionId)?.initialProjectRoot, f.target);
   assert.equal(f.runtimes.get(sessionId)?.hasConversation, false);
-  assert.deepEqual(snapshot?.activeSession, moved);
+  assert.deepEqual(snapshot?.activeSession, { ...moved, mode: 'code', projectId: f.source });
   assert.deepEqual(snapshot?.projectCatalogs[f.target].sessions, []);
   const restarted = new SettingsStore(f.userData);
   assert.equal(restarted.getPublic().activeSession, undefined, 'cold start must not try to resume an unwritten draft UUID');
-  assert.equal(restarted.getPublic().activeProject, f.target);
+  assert.equal(restarted.getPublic().activeProject, f.source);
 });
 
 test('/cd rolls back the native directory move if the target already owns a draft', async (t) => {
@@ -353,7 +356,7 @@ test('/cd rolls back the native directory move if the target already owns a draf
   assert.strictEqual(f.runtimes.get(sessionId), f.original);
   assert.deepEqual(f.calls.close, []);
   assert.deepEqual(f.calls.open, []);
-  assert.deepEqual(f.settings.getPublic().activeSession, f.ref);
+  assert.deepEqual(f.settings.getPublic().activeSession, { ...f.ref, mode: 'code', projectId: f.source });
 });
 
 test('/cd with history and no catalog row propagates a missing transcript failure instead of silently opening an empty draft', async (t) => {
@@ -393,7 +396,7 @@ test('/cd ignores a same-UUID sibling anchor and resumes the engine source', asy
 });
 
 test('/cd preserves and resumes a durable empty scheduled anchor', async t => {
-  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: null };
+  const f = hostFixture(t, { registered: false }), owner = { ...f.ref, mode: 'code' as const, projectId: null };
   const moved = { ...owner, projectPath: f.target }, source = f.original.transcriptPath;
   f.original.hasConversation = false;
   writeFileSync(source, `${JSON.stringify({ type: 'fixed-session-mode', sessionId, sessionMode: 'code', instructionEpoch: 0 })}\n${JSON.stringify({ type: 'custom-title', sessionId, mobileEmptySession: 1, cwd: f.source })}\n`);
@@ -451,7 +454,7 @@ test('/cd rejects a different live source even before a selection was saved', as
 });
 
 test('/cd never recreates an observed empty anchor that disappeared during the move', async t => {
-  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: null };
+  const f = hostFixture(t, { registered: false }), owner = { ...f.ref, mode: 'code' as const, projectId: null };
   f.original.hasConversation = false;
   f.settings.conversationSpaces.register(owner);
   const before = readFileSync(f.settings.settingsPath, 'utf8');
@@ -587,6 +590,7 @@ test('an engine that asks to trust a folder of the app\'s own data is not asked 
 
 test('a session whose folder lies in the app\'s own data is not added as a project by opening it', async (t) => {
   const f = hostFixture(t), inside = join(f.userData, 'bots', 'someone', 'workspace'), id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
+  f.settings.conversationSpaces.register({ projectPath: f.source, sessionId: id, projectId: f.source, mode: 'code' });
   mkdirSync(inside, { recursive: true });
   const selected = { ...f.row(inside, id), workspace_path: inside };
   f.catalog.find = async () => selected;
@@ -663,9 +667,9 @@ test('failed native rollback stops the engine and reports both the persistence a
   mkdirSync(`${f.settings.settingsPath}.tmp`);
   await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), /engine was stopped.*rollback was rejected/);
   assert.equal(f.runtimes.get(sessionId), undefined);
-  assert.deepEqual(f.calls.close, [f.ref]); assert.deepEqual(f.calls.open, []);
+  assert.deepEqual(f.calls.close, [{ ...f.ref, mode: 'code', projectId: f.source }]); assert.deepEqual(f.calls.open, []);
   assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);
-  assert.deepEqual(f.settings.getPublic().activeSession, f.ref);
+  assert.deepEqual(f.settings.getPublic().activeSession, { ...f.ref, mode: 'code', projectId: f.source });
 });
 
 test('a lost native response still checks the actual cwd and restores a move that already happened', async (t) => {
@@ -685,6 +689,7 @@ test('a lost native response still checks the actual cwd and restores a move tha
 
 test('repository/all discoveries and their failures do not overwrite the current host catalog cache', async (t) => {
   const f = hostFixture(t), internal = f.host as any;
+  f.settings.conversationSpaces.register({ projectPath: f.source, projectId: f.source, sessionId: otherId, mode: 'code' });
   f.catalog.list = async (path, scope = 'current') => {
     if (scope === 'all') throw new Error('expanded catalog temporarily unavailable');
     return { sessions: [{ ...f.row(path, scope === 'repository' ? otherId : sessionId), resume_model: 'private/model' }] };
@@ -770,7 +775,7 @@ test('a disconnected writer can reconnect without consulting unavailable catalog
 });
 
 test('a cold open without a selected source rejects before resolving a UUID copy', async t => {
-  const f = hostFixture(t);
+  const f = hostFixture(t, { registered: false });
   const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
   const other = { ...f.row(f.source), path: join(f.source, 'other-copy', `${sessionId}.jsonl`) };
   f.runtimes.clear();
@@ -1072,6 +1077,7 @@ test('a busy current copy blocks switching to an exact selected copy with the sa
 
 test('an admitted standard audio operation prevents replacing its owner but allows another UUID to open', async t => {
   const f = hostFixture(t), selected = f.row(f.target);
+  f.settings.conversationSpaces.register({ projectPath: f.source, sessionId: otherId, projectId: f.source, mode: 'code' });
   f.catalog.select = async (path, id, selection) => id === sessionId ? selected : f.row(path, id);
   const frame = { url: 'http://127.0.0.1:4242' };
   const sender = { id: 1, mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
@@ -1302,10 +1308,11 @@ test('a failed selected remount leaves the confirmed conversation owner and navi
   assert.equal(reopened.sessions.some((item) => item.projectPath === f.target && item.sessionId === sessionId), false);
 });
 
-test('a failed first mount does not persist a new conversation owner', async t => {
-  const f = hostFixture(t); f.runtimes.clear();
-  f.bridge.openSession = async () => { throw new Error('first mount failed'); };
-  await assert.rejects(f.host.openSessionAndActivate(f.ref, { scope: 'current', transcriptPath: f.row(f.source).path }), /first mount failed/);
+test('an unregistered first mount is rejected before a runtime starts', async t => {
+  const f = hostFixture(t, { registered: false }); f.runtimes.clear();
+  let started = false; f.bridge.openSession = async () => { started = true; throw new Error('must not start'); };
+  await assert.rejects(f.host.openSessionAndActivate(f.ref, { scope: 'current', transcriptPath: f.row(f.source).path }), /no authenticated conversation scope/);
+  assert.equal(started, false);
   assert.equal(new SettingsStore(f.userData).conversationSpaces.find(f.ref), undefined);
 });
 

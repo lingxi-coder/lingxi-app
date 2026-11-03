@@ -1,6 +1,8 @@
 # 品牌 workspace 根目录修正
 
-用户确认：品牌 workspace 根与 Global 默认 cwd 统一为 `~/.<品牌>`。灵犀使用 `~/.lingxi`；移动端 `~` 为 Linux 用户 home，Desktop 为 OS 用户 home。不迁移或删除旧业务目录。
+最新目录约定：`~/.<品牌>` 为品牌容器及配置根；Global Chat 默认 cwd 为其 `chat` 子目录，Global Code 为其 `code` 子目录。灵犀分别为 `~/.lingxi/chat` 和 `~/.lingxi/code`。项目、调度、应用等管理目录继续归于共同容器，显式项目 cwd 不变。移动端 `~` 为 Linux 用户 home，Desktop 为 OS 用户 home；Desktop 显式 `LINGXI_CONFIG_DIR` 覆盖容器根。CLI 继续使用 shell 启动 cwd 和显式 `--cwd` / `--project`。逻辑范围由已认证的 owner 决定，不能由 cwd 推导。不迁移、删除旧业务目录或添加旧根 fallback。
+
+以下为此前单根方案的历史记录；其测试结果仅证明当时源码，不能作为当前按模式目录或重新生成 native 绑定的验收。
 
 本次局部修改（Harness 路径修复已独立提交 `f286ff5cd05c720b82451a66dc01e88bca213ade`；App 依赖 pin 尚未更新）：
 

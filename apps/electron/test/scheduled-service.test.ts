@@ -103,7 +103,7 @@ async function harness(t: TestContext) {
   }) as unknown as SessionRuntime;
   const settings = {
     scheduledWorkspace: global,
-    conversationSpaces: { globalWorkspace: ordinaryGlobal,
+    conversationSpaces: { globalWorkspaces: { chat: ordinaryGlobal, code: ordinaryGlobal },
       findBySessionId: (id: string) => owners.get(id),
       snapshot: () => ({ activeMode: 'code', sessions: [...owners.values()] }),
       register: (owner: OwnedConversation) => { owners.set(owner.sessionId, owner); },

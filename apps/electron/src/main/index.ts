@@ -1062,15 +1062,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     sessionId = sessionId.toLowerCase();
     const owner = settings.conversationSpaces.findBySessionId(sessionId);
     const scheduledOwner = settings.scheduledSessionWorkspace(sessionId);
-    let projectPath = owner?.projectPath ?? scheduledOwner?.projectPath ?? requestedPath;
-    if (!projectPath && requestedKey === 'global') projectPath = settings.conversationSpaces.globalWorkspace;
-    if (!projectPath && requestedKey) projectPath = settings.getPublic().projects.find((path) => {
-      try { return workspaceLinkKey(path) === requestedKey; } catch { return false; }
-    });
+    const projectPath = owner?.projectPath ?? scheduledOwner?.projectPath;
     if (!projectPath || (requestedPath && requestedPath !== projectPath)) return undefined;
-    if (!owner && !scheduledOwner && projectPath !== settings.conversationSpaces.globalWorkspace && !settings.hasProject(projectPath)) return undefined;
-    const workspaceKey = scheduledOwner ? 'scheduled' : owner?.projectId === null || projectPath === settings.conversationSpaces.globalWorkspace
-      ? 'global' : workspaceLinkKey(owner?.projectId ?? projectPath);
+    const workspaceKey = scheduledOwner ? 'scheduled' : owner!.projectId === null
+      ? 'global' : workspaceLinkKey(owner!.projectId);
     if (requestedKey && requestedKey !== workspaceKey) return undefined;
     const mode = owner?.mode ?? bridge?.get(sessionId)?.sessionMode ?? (await sessionCatalog.find(projectPath, sessionId))?.mode;
     return mode ? { projectPath, workspaceKey, mode } : undefined;

@@ -116,6 +116,7 @@ test('cold archive preflight retains the exact source and uses its project sched
   const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-archive-capture-')));
   const settings = new SettingsStore(join(directory, 'settings'));
   settings.addProject(directory);
+  settings.conversationSpaces.register({ projectPath: directory, projectId: directory, sessionId, mode: 'code' });
   const path = join(directory, `${sessionId}.jsonl`);
   const content = '{"type":"user"}\n';
   writeFileSync(path, content);
@@ -224,7 +225,7 @@ test('archive does not copy the title of a same-UUID sibling source', async () =
 test('Global archive uses the Global scheduler and fails closed when it is unavailable', async () => {
   const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-archive-global-')));
   const settings = new SettingsStore(directory);
-  const projectPath = settings.conversationSpaces.globalWorkspace;
+  const projectPath = settings.conversationSpaces.globalWorkspaces.chat;
   const ref = { projectPath, sessionId };
   settings.conversationSpaces.register({ ...ref, projectId: null, mode: 'chat' });
   const path = join(projectPath, `${sessionId}.jsonl`);
@@ -257,6 +258,7 @@ test('opening an archived chat restores it only after the existing session resum
     const settings = new SettingsStore(dir);
     const ref = { projectPath, sessionId };
     settings.addProject(projectPath);
+    settings.conversationSpaces.register({ ...ref, projectId: projectPath, mode: 'code' });
     settings.setSessionArchived(ref, true, 'Saved chat');
     let fail = true;
     const row = { uuid: sessionId, mode: 'code', path: join(projectPath, `${sessionId}.jsonl`), empty_session: false };
@@ -280,6 +282,7 @@ test('failure to create the replacement keeps the durable archive and cleared ac
     const settings = new SettingsStore(dir);
     const ref = { projectPath, sessionId };
     settings.addProject(projectPath);
+    settings.conversationSpaces.register({ ...ref, projectId: projectPath, mode: 'code' });
     settings.setActiveSession(ref);
     settings.conversationSpaces.setMode('code');
     const runtime = { projectPath, sessionMode: 'code', connectionState: { status: 'connected' }, beginArchive: () => () => {}, manageCron: async () => [] };

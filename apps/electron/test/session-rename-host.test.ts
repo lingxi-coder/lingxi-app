@@ -13,6 +13,7 @@ test('rename retains the captured active writer across the dialog and rejects a 
   const settings = new SettingsStore(join(directory, 'settings'));
   settings.addProject(directory);
   const sessionId = '11111111-2222-4333-8444-555555555555';
+  settings.conversationSpaces.register({ projectPath: directory, projectId: directory, sessionId, mode: 'code' });
   const path = join(directory, `${sessionId}.jsonl`);
   const original = `${JSON.stringify({ type: 'user', message: { content: 'Hello' } })}\n`;
   writeFileSync(path, original);
@@ -126,6 +127,7 @@ test('renderer navigation during source capture releases the lease and returns n
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'lingxi-metadata-navigation-')));
   const settings = new SettingsStore(join(directory, 'settings')); settings.addProject(directory);
   const sessionId = '11111111-2222-4333-8444-555555555555';
+  settings.conversationSpaces.register({ projectPath: directory, projectId: directory, sessionId, mode: 'code' });
   const path = join(directory, `${sessionId}.jsonl`); writeFileSync(path, '{}\n');
   let finish!: () => void;
   const pending = new Promise<void>(resolve => { finish = resolve; });
@@ -160,6 +162,7 @@ test('dispose during an internal source capture releases the lease and publishes
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'lingxi-metadata-dispose-')));
   const settings = new SettingsStore(join(directory, 'settings')); settings.addProject(directory);
   const sessionId = '11111111-2222-4333-8444-555555555555';
+  settings.conversationSpaces.register({ projectPath: directory, projectId: directory, sessionId, mode: 'code' });
   const path = join(directory, `${sessionId}.jsonl`); writeFileSync(path, '{}\n');
   let finish!: () => void, entered!: () => void;
   const pending = new Promise<void>(resolve => { finish = resolve; });
@@ -189,6 +192,7 @@ test('metadata release waits for admitted writes and retries the same receipt', 
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'lingxi-metadata-release-')));
   const settings = new SettingsStore(join(directory, 'settings')); settings.addProject(directory);
   const sessionId = '11111111-2222-4333-8444-555555555555';
+  settings.conversationSpaces.register({ projectPath: directory, projectId: directory, sessionId, mode: 'code' });
   const path = join(directory, `${sessionId}.jsonl`); writeFileSync(path, '{}\n');
   let finish!: () => void, entered!: () => void;
   const pending = new Promise<void>(resolve => { finish = resolve; });

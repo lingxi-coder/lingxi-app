@@ -19,6 +19,6 @@ export function fixtureConversationSpaces(options: {
   return {
     activeMode: options.mode,
     projects: Object.fromEntries(options.projects.map((project) => [project, [options.mode]])),
-    navigation, sessions, globalWorkspace: '/fixture/global-space',
+    navigation, sessions, globalWorkspaces: { chat: '/fixture/global-chat', code: '/fixture/global-code' },
   };
 }

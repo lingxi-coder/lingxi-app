@@ -566,7 +566,7 @@ export function useBridge(): UseBridge {
     if (!pendingSessionRef.current) requestedSpaceRef.current = snapshot.conversationSpaces.activeMode;
     latestBootstrapProjectPathsRef.current = new Set(snapshot.settings.projects);
     if (snapshot.scheduledWorkspace) latestBootstrapProjectPathsRef.current.add(snapshot.scheduledWorkspace);
-    latestBootstrapProjectPathsRef.current.add(snapshot.conversationSpaces.globalWorkspace);
+    for (const workspace of Object.values(snapshot.conversationSpaces.globalWorkspaces)) latestBootstrapProjectPathsRef.current.add(workspace);
     const pending = pendingSessionRef.current;
     setRuntimeStates((previous) => {
       const next = new Map(previous);
@@ -2250,8 +2250,8 @@ export function useBridge(): UseBridge {
     if (sessionLoadingRef.current) return;
     if (!host || !bootstrap) return;
     const projectId = requestedProjectPath ?? null;
-    const projectPath = projectId ?? bootstrap.conversationSpaces.globalWorkspace;
     const mode = bootstrap.conversationSpaces.activeMode;
+    const projectPath = projectId ?? bootstrap.conversationSpaces.globalWorkspaces[mode];
     const operationId = beginNavigationOperation();
     // Reserve a local draft while the host creates the real session and starts its engine.
     const target = { projectPath, projectId, mode, sessionId: `pending-new:${operationId}` };
@@ -2293,7 +2293,7 @@ export function useBridge(): UseBridge {
     const operationId = nextOperationId(navigationOperationRef.current);
     navigationOperationRef.current = operationId;
     const target = bootstrap.conversationSpaces.navigation[mode].session ?? {
-      projectPath: bootstrap.conversationSpaces.globalWorkspace, projectId: null, mode,
+      projectPath: bootstrap.conversationSpaces.globalWorkspaces[mode], projectId: null, mode,
       sessionId: `pending-space:${operationId}`,
     };
     pendingSessionRef.current = target;

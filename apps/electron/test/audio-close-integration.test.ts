@@ -54,7 +54,7 @@ const stopped = { type: 'status', status: { recording: false, playing: false } }
 
 function uiOwnerFixture(audio: NativeAudioManager) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-audio-owner-close-')));
-  const settings = new SettingsStore(root), projectPath = settings.conversationSpaces.globalWorkspace;
+  const settings = new SettingsStore(root), projectPath = settings.conversationSpaces.globalWorkspaces.chat;
   const sessionId = '11111111-2222-4333-8444-555555555555';
   const leaseId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   settings.conversationSpaces.register({ projectPath, projectId: null, sessionId, mode: 'chat' });

@@ -38,7 +38,9 @@ jobs:
         run: python3 scripts/checks/check_brand_leaks.py --selftest
       - name: Verify every gate and the trigger chain
         working-directory: .
-        run: python3 scripts/tests/test_gate_triggers.py
+        run: |
+          python3 scripts/tests/test_gate_trigger_output.py
+          python3 scripts/tests/test_gate_triggers.py
 
   unit-tests:
     # All features include statically registered GStreamer plugins. The pinned

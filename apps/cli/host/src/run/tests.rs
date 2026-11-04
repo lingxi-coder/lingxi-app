@@ -16,8 +16,8 @@ fn relative_and_empty_config_homes_are_anchored_to_the_launch_directory() {
         origin
     );
     assert_eq!(
-        absolute_config_home_at(std::path::Path::new(".lingxi-test"), &origin),
-        origin.join(".lingxi-test")
+        absolute_config_home_at(std::path::Path::new(branding::DOT_DIR), &origin),
+        origin.join(branding::DOT_DIR)
     );
     assert_eq!(
         absolute_config_home_at(std::path::Path::new("/tmp/fixed-home"), &origin),

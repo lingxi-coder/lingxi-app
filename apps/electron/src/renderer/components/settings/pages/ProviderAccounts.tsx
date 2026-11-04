@@ -1,6 +1,6 @@
 import { tr } from '../../../i18n/locale';
 import { useI18n } from '../../../i18n/useI18n';
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { ProviderAccountCommand, ProviderAccountHealth, ProviderAccountRouting, ProviderAccountsApi, ProviderAccountSnapshot } from '../../../../shared/providerAccounts';
 import { logicalProviderId, orderedProviderAccounts } from '../../../../shared/providerAccounts';
 import type { ProviderDefinition } from '../../../../shared/providers';
@@ -38,6 +38,13 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
   const form = useRef<HTMLDialogElement>(null);
   const confirmation = useRef<HTMLDialogElement>(null);
   const addButton = useRef<HTMLButtonElement>(null);
+  const closeForm = useCallback(() => {
+    if (busyRef.current) return;
+    setFormOpen(false); setKey(''); setName(''); setReplacementId(undefined); setError(undefined);
+  }, []);
+  const cancelLogin = useCallback(() => {
+    if (activeOperation.current !== undefined) void api.cancel(activeOperation.current).catch(() => setError(tr('provider_accounts_error')));
+  }, [api]);
   useEffect(() => {
     const current = ++generation.current;
     const refresh = () => { if (!busyRef.current) void api.snapshot().then(value => { if (generation.current === current) setSnapshot(value); })
@@ -61,6 +68,26 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
     if (removalId) { if (!confirmation.current?.open) confirmation.current?.showModal(); }
     else confirmation.current?.close();
   }, [removalId]);
+  useEffect(() => {
+    if (!formOpen && !removalId) return undefined;
+    // A disabled form may leave focus outside the dialog. Capture Escape at
+    // the document so Chromium cannot close a pending native modal behind the
+    // controlled React state before its cancel handler can run.
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      const formIsOpen = form.current?.open === true;
+      const confirmationIsOpen = confirmation.current?.open === true;
+      if (!formIsOpen && !confirmationIsOpen) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (formIsOpen) {
+        if (busyRef.current) { if (oauthBusy) cancelLogin(); }
+        else closeForm();
+      } else if (!busyRef.current) setRemovalId(undefined);
+    };
+    document.addEventListener('keydown', onEscape, true);
+    return () => document.removeEventListener('keydown', onEscape, true);
+  }, [formOpen, removalId, oauthBusy, cancelLogin, closeForm]);
   const accounts = snapshot ? orderedProviderAccounts(snapshot, provider.id) : [];
   const locked = busy || running || !snapshot;
   const supportsKey = provider.authMethods.includes('api_key') || provider.authMethods.includes('token');
@@ -94,10 +121,6 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
       if (generation.current === current) { setBusy(false); setOauthBusy(false); setPending(undefined); }
     }
   };
-  const closeForm = () => {
-    if (busy) return;
-    setFormOpen(false); setKey(''); setName(''); setReplacementId(undefined); setError(undefined);
-  };
   const openForm = (accountId?: string) => {
     const existing = accounts.find(account => account.accountId === accountId);
     setReplacementId(accountId); setName(existing?.displayName ?? ''); setKey(''); setError(undefined);
@@ -108,7 +131,6 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
     [ids[from], ids[from + delta]] = [ids[from + delta], ids[from]];
     void perform({ action: 'reorder', providerId: logicalProviderId(provider.id), accountIds: ids });
   };
-  const cancelLogin = () => { if (activeOperation.current !== undefined) void api.cancel(activeOperation.current).catch(() => setError(tr('provider_accounts_error'))); };
   const theme = { '--pa-bg': t.surface, '--pa-text': t.text, '--pa-secondary': t.text3, '--pa-border': t.border, '--pa-accent': t.accent, '--pa-ok': t.ok, '--pa-danger': t.danger } as CSSProperties;
   const menuAction = (button: HTMLButtonElement, action: () => void) => { button.closest('details')?.removeAttribute('open'); action(); };
   return <section className="pa-panel" style={theme} aria-label={tr('provider_accounts_accounts')} aria-busy={busy}>

@@ -536,12 +536,11 @@ test('the sidebar is hidden when the parent says so, and keeps its own state whe
 test('a Bot\'s chat is titled with the Bot, not with a folder path, and offers the way back to the Bot', () => {
   const bridge = { bootstrap: null, sessionLoading: false, desktop: emptyDesktopState(), runtimeCenter: emptyRuntimeCenterState(), activeSession: { projectPath: '/data/bots/a/workspace', sessionId: 's1' } } as unknown as UseBridge;
   const html = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop, bot: { botId: 'scribe-id', name: 'Scribe', onOpen: noop } }));
-  assert.match(html, />Scribe<\/div>/);
-  assert.match(html, />Bot chat<\/div>/);
+  assert.match(html, /class="desktop-topbar-title"[^>]*>Scribe<\/span>/);
   assert.match(html, /aria-label="Open Bot"/);
   assert.ok(!html.includes('/data/bots'), 'the Bot\'s private folder is not shown');
   assert.deepEqual(avatarsOf(html), [agentAvatarIndex('scribe-id')], 'the title wears the Bot\'s own avatar, not a generic robot');
-  assert.match(html, /class="desktop-topbar-project-icon" aria-hidden="true"><img /, 'which is decoration: the name is written beside it');
+  assert.match(html, /aria-label="Open Bot"[^>]*><img [^>]*aria-hidden="true"/, 'the avatar is the Open Bot button\'s face; the button carries the label');
 
   const project = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop }));
   assert.ok(!project.includes('Open Bot'));

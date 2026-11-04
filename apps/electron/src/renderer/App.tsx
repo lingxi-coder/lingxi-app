@@ -25,6 +25,7 @@ import { settingsLinkRequest, runtimeLinkItem, type SettingsLinkRequest, type Sc
 import { SETTINGS_NAV } from './components/settings/nav';
 import { useSideChats } from './bridge/useSideChats';
 import { SideChatPanel } from './components/SideChatPanel';
+import './components/SideChatPanel.css';
 import { conversationPlans } from './bridge/planDocuments';
 import { selectedGitScope } from './bridge/gitScope';
 import {
@@ -558,7 +559,7 @@ export function App() {
                   bot={activeBotId !== undefined ? { botId: activeBotId, name: activeBot?.name ?? '', onOpen: () => openBot(activeBotId) } : undefined}
                   sideChatOpen={sideChats.open && Boolean(sideChats.selected)}
                   sideChatAvailable={sideChats.sides.length > 0}
-                  onToggleSideChat={() => sideChats.setOpen(!sideChats.open)}
+                  onToggleSideChat={() => { const next = !sideChats.open; sideChats.setOpen(next); if (!next) bridge.setRuntimeInspectorOpen(false); }}
                   terminalOpen={terminal.open}
                   terminalAvailable={Boolean(terminalProject && window.lingxi?.terminal)}
                   onToggleTerminal={terminal.toggle}
@@ -696,7 +697,10 @@ export function App() {
           />
 
           </main>
-          {page === 'chat' && !bridge.sessionLoading && (sideChats.open && sideChats.selected ? <SideChatPanel controller={sideChats} /> : <RuntimeCenterInspector bridge={planBridge} />)}
+          {page === 'chat' && !bridge.sessionLoading && <>
+            <RuntimeCenterInspector bridge={planBridge} sideChats={sideChats} />
+            {sideChats.open && sideChats.selected && <SideChatPanel controller={sideChats} />}
+          </>}
           </div>
           <TerminalPanel controller={terminal} />
           </div>

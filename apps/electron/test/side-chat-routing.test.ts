@@ -22,6 +22,27 @@ test('Side Chat slash requests carry validated inline images to runtime admissio
   assert.match(source, /sideCommandInput\(side\.draft, images\)/);
 });
 
+test('Side Chat hydration permits slash listings without admitting host listings', () => {
+  for (const command of [
+    { type: 'list_models' },
+    { type: 'get_conversation_controls' },
+    { type: 'refresh_listings', which: [{ type: 'slash_commands' }] },
+  ]) {
+    const validated = validateClientCommand(submit(command));
+    assert.deepEqual(validated, submit(command));
+    assert.doesNotThrow(() => assertCommandAllowedDuringTurn(validated, true));
+  }
+  for (const which of [
+    [], [{ type: 'settings' }], [{ type: 'mcp' }], [{ type: 'skills' }],
+    [{ type: 'status' }], [{ type: 'doctor' }], [{ type: 'agents' }], [{ type: 'hooks' }],
+    [{ type: 'slash_commands' }, { type: 'settings' }],
+    [{ type: 'slash_commands', extra: true }],
+  ]) {
+    assert.throws(() => validateClientCommand(submit({ type: 'refresh_listings', which })));
+  }
+  assert.throws(() => validateClientCommand(submit({ type: 'refresh_listings', which: [{ type: 'slash_commands' }], extra: true })));
+});
+
 test('side control cannot start authentication, persistence, nested sides or forbidden slash', () => {
   for (const type of ['login', 'logout', 'new_session', 'resume_session', 'update_settings', 'task_message', 'side_chat_create']) {
     assert.throws(() => validateClientCommand(submit({ type })), /not allowed/);

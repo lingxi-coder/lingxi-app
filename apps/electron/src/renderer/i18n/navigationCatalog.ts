@@ -69,6 +69,13 @@ export const navigationCatalog: Record<string, Record<string, string>> = {
     "ja": "サイドチャットを隠す",
     "ko": "사이드 채팅 숨기기"
   },
+  "desktop_navigation_side_temporary": {
+    "zh-Hans": "侧边会话是临时的，关闭应用后便会消失。",
+    "zh-Hant": "側邊對話是暫時的，關閉應用程式後便會消失。",
+    "en": "Side chats are temporary and disappear when you close the app.",
+    "ja": "サイドチャットは一時的なもので、アプリを閉じると消えます。",
+    "ko": "사이드 채팅은 임시 대화이며 앱을 닫으면 사라집니다."
+  },
   "desktop_navigation_side_empty": {
     "zh-Hans": "使用此会话的上下文提问。",
     "zh-Hant": "使用此對話的上下文提問。",

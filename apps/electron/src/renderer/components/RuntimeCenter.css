@@ -30,11 +30,9 @@
 .runtime-summary button:disabled { opacity: .45; cursor: default; }
 @media (prefers-contrast: more) { .runtime-summary { border-width: 1px; } }
 .runtime-inspector { width: 390px; min-width: 390px; flex-shrink: 0; min-height: 0; display: flex; flex-direction: column; }
-.runtime-inspector-header { height: var(--desktop-toolbar-height, 44px); min-height: var(--desktop-toolbar-height, 44px); display: flex; align-items: center; gap: 8px; padding: 0 12px; }
 .runtime-inspector-tabs { min-width: 0; flex: 1; display: flex; align-items: center; gap: 5px; overflow-x: auto; scrollbar-width: thin; }
 /* The strip owns navigation; the inset surface owns the selected content. */
 .runtime-inspector { container: inspector / inline-size; color: var(--inspector-text); }
-.runtime-inspector-header { gap: 4px; padding: 0 8px; }
 .runtime-inspector-tabs { gap: 4px; scrollbar-width: none; }
 .runtime-inspector-tab { display: flex; align-items: center; flex: 0 1 auto; min-width: 88px; max-width: 190px; height: 34px; border-radius: 11px; color: var(--inspector-muted); }
 .runtime-inspector-tab[data-active] { background: var(--inspector-bg); color: var(--inspector-text); box-shadow: 0 1px 3px rgb(0 0 0 / 4%); }
@@ -56,9 +54,9 @@
 .runtime-inspector-resource-grid span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--inspector-text); font-size: 12px; }
 .runtime-inspector-resource-empty { margin: 0; color: var(--inspector-muted); font-size: 12px; line-height: 1.6; }
 .runtime-inspector button { -webkit-app-region: no-drag; }
-.runtime-inspector-header button:hover, .runtime-inspector-tool:hover, .runtime-inspector-resource-grid button:hover { background-color: var(--inspector-active) !important; }
-.runtime-inspector-header button:active, .runtime-inspector-tool:active, .runtime-inspector-resource-grid button:active { opacity: .7; }
-.runtime-inspector-header button:focus-visible, .runtime-inspector-tool:focus-visible, .runtime-inspector-resource-grid button:focus-visible { outline: 2px solid var(--inspector-muted); outline-offset: -2px; }
+.runtime-inspector-tool:hover, .runtime-inspector-resource-grid button:hover { background-color: var(--inspector-active) !important; }
+.runtime-inspector-tool:active, .runtime-inspector-resource-grid button:active { opacity: .7; }
+.runtime-inspector-tool:focus-visible, .runtime-inspector-resource-grid button:focus-visible { outline: 2px solid var(--inspector-muted); outline-offset: -2px; }
 .runtime-inspector-resize { touch-action: none; }
 @container inspector (max-width: 350px) {
   .runtime-inspector-landing { padding: 24px 14px; }
@@ -122,5 +120,13 @@
   .runtime-summary { animation: none; }
 }
 
-.runtime-inspector-topbar-controls { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.runtime-inspector-topbar-controls { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 0 1 auto; max-width: 65%; }
 .runtime-inspector-topbar-controls:empty { display: none; }
+
+.desktop-toolbar-tabs { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.desktop-toolbar-tabs .runtime-inspector-tabs { flex: 0 1 auto; overflow: visible; }
+.desktop-toolbar-tabs .runtime-inspector-tab { height: 32px; min-width: 100px; max-width: 210px; border-radius: 9px; background: var(--topbar-action-focus); }
+.desktop-toolbar-tabs .runtime-inspector-tab[data-active] { background: var(--inspector-bg); }
+.desktop-toolbar-tabs .runtime-inspector-tab-select { height: 32px; font-size: 12px; }
+.desktop-toolbar-tabs button:hover { background-color: var(--inspector-active); }
+.desktop-toolbar-tabs button:focus-visible { outline: 2px solid var(--desktop-accent); outline-offset: -2px; }

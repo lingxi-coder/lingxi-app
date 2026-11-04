@@ -67,12 +67,12 @@ async function main() {
     await waitFor(wc, `getComputedStyle(document.querySelector('.runtime-inspector')).opacity === '1'`);
     assert.equal(await js(`document.querySelector('.runtime-inspector').inert`), false);
     assert.equal(await js(`getComputedStyle(document.querySelector('.runtime-inspector')).opacity`), '1');
-    assert.equal(await js(`getComputedStyle(document.querySelector('.runtime-inspector-header')).getPropertyValue('-webkit-app-region')`), 'no-drag');
+    assert.equal(await js(`getComputedStyle(document.querySelector('[data-runtime-inspector-trigger]')).getPropertyValue('-webkit-app-region')`), 'no-drag');
     for (const width of [900, 1400]) {
       window.setContentSize(width, 900);
       await delay(150);
-      assert.equal(await js(`getComputedStyle(document.querySelector('[aria-label="Toggle right panel"]')).display`), 'none', `${width}px: the open panel owns its only visible toggle`);
-      assert.equal(await js(`document.querySelector('[aria-label="Hide right panel"]').getBoundingClientRect().width > 0`), true);
+      assert.equal(await js(`getComputedStyle(document.querySelector('[aria-label="Toggle right panel"]')).display`), 'grid', `${width}px: the window toolbar keeps its single panel toggle visible`);
+      assert.equal(await js(`document.querySelector('[aria-label="Toggle right panel"]').getBoundingClientRect().width > 0`), true);
     }
     await js(`document.activeElement?.blur()`);
     await capture('tools-light');
@@ -92,7 +92,7 @@ async function main() {
     await js(`window.dispatchEvent(new CustomEvent('fixture-reset', {detail:{theme:'light'}}))`);
     await pointerClick('[aria-label="Close Review"]');
     await pointerClick('[aria-label="Close desktop-reference.png"]');
-    assert.equal(await js(`['Open tools', 'Expand right panel', 'Hide right panel'].every(label => document.querySelector('.desktop-topbar [aria-label="' + label + '"]'))`), true);
+    assert.equal(await js(`['Open tools', 'Expand right panel', 'Toggle right panel'].every(label => document.querySelector('.desktop-topbar [aria-label="' + label + '"]'))`), true);
     assert.equal(await js(`document.querySelectorAll('.runtime-inspector-header button[aria-label="Open tools"], .runtime-inspector-header .runtime-panel-hide').length`), 0);
     await pointerClick('[aria-label="Open pinned summary"]');
     await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview'))`);
@@ -102,7 +102,7 @@ async function main() {
     assert.equal(await js(`document.querySelector('.runtime-inspector').style.width`), '100%');
     await pointerClick('[aria-label="Restore panel size"]');
     assert.equal(await js(`document.querySelector('.runtime-inspector').style.width`), '390px');
-    await pointerClick('[aria-label="Hide right panel"]');
+    await pointerClick('[aria-label="Toggle right panel"]');
     await waitFor(wc, `!document.querySelector('.runtime-inspector')`);
     if (process.argv.includes('--inspector-controls-only')) {
       console.log(JSON.stringify({ controls: ['summary', 'expand', 'restore', 'hide'] }));
@@ -111,7 +111,7 @@ async function main() {
     await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
     await click('[aria-label="Toggle right panel"]');
     assert.equal(await js(`document.querySelector('.runtime-inspector').getAnimations({subtree:true}).length`), 0);
-    await click('[aria-label="Hide right panel"]');
+    await click('[aria-label="Toggle right panel"]');
     assert.equal(await js(`document.querySelector('.runtime-inspector')`), null);
     await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
 
@@ -184,11 +184,11 @@ async function main() {
     await waitFor(wc, `document.querySelector('[data-runtime-inspector-active="true"]')?.textContent.includes('Plan')`);
     await js(`Promise.all(document.querySelector('.runtime-inspector').getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {})))`);
     await capture('details-light');
-    const heights = await js(`({ chat: document.querySelector('.desktop-topbar').getBoundingClientRect().height, detail: document.querySelector('.runtime-inspector-header').getBoundingClientRect().height, panel: document.querySelector('.runtime-inspector').getBoundingClientRect().width })`);
-    assert.deepEqual(heights, { chat: 40, detail: 40, panel: 390 });
+    const heights = await js(`({ chat: document.querySelector('.desktop-topbar').getBoundingClientRect().height, detail: document.querySelector('.runtime-inspector-header')?.getBoundingClientRect().height ?? 0, panel: document.querySelector('.runtime-inspector').getBoundingClientRect().width })`);
+    assert.deepEqual(heights, { chat: 40, detail: 0, panel: 390 });
     checks.push('independent panels tabs and plan todos separation');
 
-    await click('[aria-label="Hide right panel"]');
+    await click('[aria-label="Toggle right panel"]');
     await waitFor(wc, `!document.querySelector('.runtime-inspector')`);
     await waitFor(wc, `document.activeElement?.getAttribute('aria-label') === 'Toggle right panel'`);
     await click('[aria-label="Toggle right panel"]');
@@ -222,7 +222,7 @@ async function main() {
     assert.equal(await js(`getComputedStyle(document.querySelector('.runtime-inspector')).position`), 'absolute');
     assert.equal(await js(`document.documentElement.scrollWidth <= innerWidth`), true);
     await capture('details-narrow');
-    await click('[aria-label="Hide right panel"]');
+    await click('[aria-label="Toggle right panel"]');
     assert.equal(await js(`Boolean(document.querySelector('#runtime-center-overview'))`), true);
     checks.push('dark theme narrow overlay and no overflow');
 
@@ -236,7 +236,7 @@ async function main() {
     assert.equal(await js(`document.querySelector('#runtime-center-overview').textContent.includes('Desktop workspace')`), false);
     await capture('empty-light');
     checks.push('session reset and empty categories stay hidden');
-    await click('[aria-label="Hide right panel"]');
+    await click('[aria-label="Toggle right panel"]');
     await js(`window.dispatchEvent(new CustomEvent('fixture-reset', { detail: { showSides: true } }))`);
     await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview [aria-label="Side chats"]'))`);
     await clickText('#runtime-center-overview [aria-label="Side chats"]', 'Side chat');

@@ -3,7 +3,6 @@
     <string name="local_app_v2_title">アプリ</string>
     <string name="local_app_v2_mine">マイアプリ</string>
     <string name="local_app_v2_market">マーケット</string>
-    <string name="local_app_v2_legacy">旧バージョンのアーカイブ</string>
     <string name="local_app_v2_create">アプリを作成</string>
     <string name="local_app_v2_refresh">更新</string>
     <string name="local_app_v2_search">アプリを検索</string>
@@ -12,8 +11,6 @@
     <string name="local_app_v2_manage">管理</string>
     <string name="local_app_v2_develop">開発を続ける</string>
     <string name="local_app_v2_install">この端末にインストール</string>
-    <string name="local_app_v2_legacy_note">旧バージョンのアプリはアーカイブとして保持されます。インポートすると新しいアプリ ID が作成され、元のファイルとブラウザーデータは保持されます。</string>
-    <string name="local_app_v2_import">インポート</string>
     <string name="local_app_v2_create_note">ソースプロジェクトを作成し、通常の会話でアプリの開発を続けます。</string>
     <string name="local_app_v2_name">アプリ名</string>
     <string name="local_app_v2_create_confirm">作成</string>
@@ -78,4 +75,5 @@
     <string name="local_app_v2_record_active">録音中です。最長 30 秒です。完了すると録音が現在のアプリに返されます。</string>
     <string name="local_app_v2_record_start">録音を開始</string>
     <string name="local_app_v2_record_finish">録音を完了</string>
+    <string name="local_app_v2_market_install_note">この Android デバイスに対応するソース版のみをインストールしてください。実行前にその版の権限を確認する必要があります。</string>
 </resources>

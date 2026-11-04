@@ -144,6 +144,7 @@ final class EngineConversationSource: ConversationSource {
     private var activeRunItemIndex: Int?
     /// Original user spelling for a slash command awaiting dispatch.
     private var pendingSlashRaw: String?
+    private var pendingSlashPrompt: Message?
     private var testCommandSubmitter: ((ClientCommand) async throws -> Void)?
     private var testResumeSubmitter: ((String, String) async throws -> Void)?
     private var testBypassPermissionsConfirmer: (() async throws -> Void)?
@@ -611,10 +612,8 @@ final class EngineConversationSource: ConversationSource {
             // Configuration commands can finish while a different desktop turn
             // still runs. Their output must not settle that turn's run/pointers.
             let id = "remote-command-\(turnID.map(String.init) ?? Self.stableUUID(display.displayText).uuidString)"
-            if !model.items.contains(where: { $0.id == id }) {
-                model.items.append(.commandOutput(ConversationCommandOutput(
-                    id: id, command: "/", text: display.displayText, isError: isError)))
-            }
+            model.commandResult = display.displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil
+                : ConversationCommandOutput(id: id, command: "/", text: display.displayText, isError: isError)
             return
         default: break
         }
@@ -872,6 +871,7 @@ final class EngineConversationSource: ConversationSource {
         model.isCancelling = false
         model.slashCommandPending = false
         model.compactionStatus = nil
+        model.commandResult = nil
         model.turnCompletion = nil
         model.activeTurnToken = nil
         model.isNew = isNew
@@ -918,6 +918,7 @@ final class EngineConversationSource: ConversationSource {
         model.activeTurnToken = nil
         activeRunItemIndex = nil
         pendingSlashRaw = nil
+        pendingSlashPrompt = nil
         model.slashCommandPending = false
     }
 
@@ -939,6 +940,7 @@ final class EngineConversationSource: ConversationSource {
         }
         activeRunItemIndex = nil
         pendingSlashRaw = nil
+        pendingSlashPrompt = nil
         model.slashCommandPending = false
     }
 
@@ -1867,6 +1869,7 @@ final class EngineConversationSource: ConversationSource {
         turnId: UInt64
     ) -> ConversationTurnToken {
         model.notice = nil
+        model.commandResult = nil
         model.streaming = false
         model.isCancelling = false
         model.slashCommandPending = true
@@ -2086,7 +2089,12 @@ final class EngineConversationSource: ConversationSource {
             model.notice = nil
             var prompt = Message(role: .user, text: text, images: uiImages(from: images))
             prompt.sentAtMs = Int64(Date().timeIntervalSince1970 * 1_000)
-            appendMessage(prompt)
+            if SlashMessagePlacement.echoesRequest(trimmed) {
+                appendMessage(prompt)
+                pendingSlashPrompt = nil
+            } else {
+                pendingSlashPrompt = prompt
+            }
             return startSlashCommand(
                 raw: ClientTextDto(codeUnits: rawUnits),
                 displayRaw: trimmed,
@@ -2094,6 +2102,7 @@ final class EngineConversationSource: ConversationSource {
                 turnId: turnId
             )
         }
+        model.commandResult = nil
         let prompt = TurnPrompt(
             sourceCodeUnits: promptSourceCodeUnits,
             promptMode: promptMode,
@@ -3901,8 +3910,10 @@ final class EngineConversationSource: ConversationSource {
             if let currentTurnId {
                 executorOwnedTurnID = currentTurnId
             }
+            if let pendingSlashPrompt { appendMessage(pendingSlashPrompt) }
             model.slashCommandPending = false
             pendingSlashRaw = nil
+            pendingSlashPrompt = nil
             model.streaming = true
             model.updateMainAgent(status: "working", latestActivity: String(localized: "chat_working"))
             model.notice = nil
@@ -3919,7 +3930,8 @@ final class EngineConversationSource: ConversationSource {
             guard let token = activeConversationTurnToken,
                   turnId == nil || turnId == token.clientTurnId
             else { return }
-            let raw = pendingSlashRaw ?? "/"
+            guard let raw = pendingSlashRaw else { return }
+            let inMessages = SlashMessagePlacement.echoesRequest(raw)
             if isError { restoreFailedSideSubmission() }
             else { pendingSideInput = nil }
             if Self.isCompactSlash(raw) {
@@ -3935,12 +3947,20 @@ final class EngineConversationSource: ConversationSource {
                     model.compactionStatus = .failed(detail: displayText)
                 }
             }
-            model.items.append(.commandOutput(ConversationCommandOutput(
-                id: "slash-\(token.sessionEpoch)-\(token.clientTurnId)",
-                command: raw,
-                text: displayText,
-                isError: isError
-            )))
+            let output = ConversationCommandOutput(
+                id: "slash-\(token.sessionEpoch)-\(token.clientTurnId)", command: raw, text: displayText, isError: isError
+            )
+            if inMessages {
+                if raw.split(whereSeparator: \.isWhitespace).first?.lowercased() == "/fusion" {
+                    if !displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        appendMessage(Message(role: .ai, text: displayText))
+                    }
+                } else {
+                    model.items.append(.commandOutput(output))
+                }
+            } else {
+                model.commandResult = displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : output
+            }
             model.streaming = false
             model.slashCommandPending = false
             model.statusLine = nil
@@ -4804,6 +4824,7 @@ final class EngineConversationSource: ConversationSource {
                     model.compactionStatus = nil
                     model.slashCommandPending = false
                     pendingSlashRaw = nil
+                    pendingSlashPrompt = nil
                 }
                 return
             }
@@ -6289,7 +6310,12 @@ final class EngineConversationSource: ConversationSource {
             model.hasUnresolvedTurnRecovery = false
             executorOwnedTurnID = nil
         }
-        model.error = ConversationError(kind: kind, message: message)
+        if let raw = pendingSlashRaw, !SlashMessagePlacement.echoesRequest(raw) {
+            model.commandResult = ConversationCommandOutput(id: "slash-error-\(currentTurnId ?? 0)", command: raw, text: message, isError: true)
+            model.error = nil
+        } else {
+            model.error = ConversationError(kind: kind, message: message)
+        }
         model.streaming = false
         model.statusLine = nil
         publishActiveTurnCompletion(.failed)

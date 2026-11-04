@@ -8,6 +8,7 @@ import {
   reconcileSlashSelectionIndex,
   renderDesktopSlashHelp,
   slashCommandText,
+  slashMessagePlacement,
   slashMenuLabel,
   slashNavigationDirection,
 } from '../src/renderer/bridge/slashCommands';
@@ -111,4 +112,12 @@ test('Desktop help is rendered from the same filtered live catalog as completion
   assert.match(help, /\/help\s+Show help/);
   assert.match(help, /\/tasks\s+Open tasks/);
   assert.doesNotMatch(help, /\/tui/);
+});
+
+test('menu distinguishes task messages, utility results, and commands whose action determines placement', () => {
+  const dto = (name: string, source = 'builtin') => ({ name, source, description: name });
+  for (const name of ['compact', 'goal', 'fusion', 'init', 'security-review']) assert.equal(slashMessagePlacement(dto(name)), 'messages');
+  for (const name of ['status', 'usage', 'cost', 'recap', 'model', 'help', 'permissions']) assert.equal(slashMessagePlacement(dto(name)), 'temporary');
+  for (const name of ['plan', 'btw', 'unknown']) assert.equal(slashMessagePlacement(dto(name)), 'conditional');
+  assert.equal(slashMessagePlacement(dto('status', 'plugin')), 'conditional');
 });

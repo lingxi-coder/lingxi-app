@@ -1,6 +1,6 @@
 import type { SlashCommandDto } from '@lingxi/bridge-client';
 
-import { DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS } from './desktopCommands';
+import { ALL_DESKTOP_COMMANDS, DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS } from './desktopCommands';
 
 export interface ActiveSlashCommand {
   start: number;
@@ -112,4 +112,16 @@ export function slashNavigationDirection(key: string): 'previous' | 'next' | nul
   if (key === 'ArrowDown' || key === 'Down') return 'next';
   if (key === 'ArrowUp' || key === 'Up') return 'previous';
   return null;
+}
+
+/** Menu hints describe known Desktop routes; mixed/extension commands decide at runtime. */
+export function slashMessagePlacement(command: SlashCommandDto): 'messages' | 'temporary' | 'conditional' {
+  if (command.source !== 'builtin') return 'conditional';
+  const name = command.name.replace(/^\/+/, '').toLowerCase();
+  if (['compact', 'goal', 'fusion', 'init', 'insights', 'security-review', 'team-onboarding'].includes(name)) return 'messages';
+  if (ALL_DESKTOP_COMMANDS.some((entry) => entry.name === name || entry.aliases?.includes(name))
+    || ['agents', 'auto-mode-setup', 'autocompact', 'brief', 'context', 'diff', 'doctor', 'export', 'files',
+      'hooks', 'ide', 'keybindings', 'mcp', 'output-style', 'powerup', 'recap', 'release-notes',
+      'reload-skills', 'rename', 'skill-doctor', 'skills', 'status', 'stickers', 'stop', 'usage', 'cost', 'stats', 'workflows'].includes(name)) return 'temporary';
+  return 'conditional';
 }

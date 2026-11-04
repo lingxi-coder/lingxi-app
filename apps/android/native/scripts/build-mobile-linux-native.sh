@@ -43,7 +43,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${ANDROID_DIR}/../../.." && pwd)"
 SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
-BUILD_ROOT="${ANDROID_DIR}/app/build/mobileLinuxNative/${VARIANT}"
 # Both distributions consume one Maven coordinate for the SDK helpers. Build
 # those helpers once per invocation and stage the exact same bytes for each
 # variant; their Rust FFI libraries remain variant-specific below.
@@ -83,7 +82,12 @@ for abi in arm64-v8a x86_64; do
     rm -f "${JNI_ROOT}/${abi}/${name}"
   done
 done
-python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); json.dump({k:d[k] for k in ("source","revision")},sys.stdout)' > "${BUILD_ROOT}/sdk-source.json"
+# Native support and Maven helpers above are shared by both distributions.
+# Publish the same verified source identity beside each refreshed copy.
+SDK_SOURCE_IDENTITY="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); json.dump({k:d[k] for k in ("source","revision")},sys.stdout)')"
+for distribution in play direct; do
+  printf '%s\n' "${SDK_SOURCE_IDENTITY}" > "${ANDROID_DIR}/app/build/mobileLinuxNative/${distribution}/sdk-source.json"
+done
 # --abis narrows only the final JNI validation; SDK helpers and build-jni still
 # build and publish both architectures.
 "${SCRIPT_DIR}/verify-mobile-linux-native.sh" --variant "${VARIANT}" --jni-root "${JNI_ROOT}" --abis "${ABIS}"

@@ -2586,4 +2586,8 @@
     <string name="chat_tool_running_count">%1$d 项运行中</string>
     <string name="chat_tool_calls_unsuccessful">调用未成功</string>
     <string name="chat_tool_group_shell">执行命令</string>
+    <string name="slash_result_temporary">临时结果 · 不加入消息记录</string>
+    <string name="slash_placement_messages">加入消息</string>
+    <string name="slash_placement_temporary">不加入消息</string>
+    <string name="slash_placement_conditional">视具体操作</string>
 </resources>

@@ -1,5 +1,12 @@
 package com.lingxi.code.conversation
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -38,14 +45,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isMetaPressed
-import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -162,6 +165,8 @@ fun Composer(
     promptSuggestion: ClientTextDto? = null,
     promptSuggestionNotice: String? = null,
     slashCommands: List<ConversationSlashCommand> = emptyList(),
+    commandResult: ConversationCommandOutput? = null,
+    onDismissCommandResult: () -> Unit = {},
     suggestionTurnKey: String = "",
     historySessionKey: String = "",
     historyMessages: List<String> = emptyList(),
@@ -205,14 +210,39 @@ fun Composer(
             onTextChange(suggestion.sourceText())
         }
     }
+    var dismissedSlashDraft by rememberSaveable(historySessionKey) { mutableStateOf<String?>(null) }
+    val commandSuggestions = remember(text, slashCommands, enabled, isStreaming, dismissedSlashDraft) {
+        if (enabled && !isStreaming && dismissedSlashDraft != text) slashCommandSuggestions(text, slashCommands) else emptyList()
+    }
+    val dismissCommandSurface = {
+        dismissedSlashDraft = text
+        onDismissCommandResult()
+    }
+    BackHandler(enabled = commandResult != null || commandSuggestions.isNotEmpty()) { dismissCommandSurface() }
+    val commandPanelHeight = (LocalConfiguration.current.screenHeightDp.dp * .3f).coerceIn(100.dp, 260.dp)
     val shape = RoundedCornerShape(16.dp)
 
     Column(
         modifier = modifier
+            .onPreviewKeyEvent { event ->
+                if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && (commandResult != null || commandSuggestions.isNotEmpty())) {
+                    dismissCommandSurface(); true
+                } else false
+            }
             .fillMaxWidth()
             .padding(horizontal = 14.dp)
             .padding(top = 8.dp, bottom = 4.dp),
     ) {
+        if (commandSuggestions.isNotEmpty()) {
+            SlashCommandSuggestionPanel(commandSuggestions, commandPanelHeight, onSelect = { command ->
+                val typed = text.removePrefix("/")
+                val trigger = command.aliases.firstOrNull { it.equals(typed, ignoreCase = true) } ?: command.name
+                onDismissCommandResult()
+                onTextChange("/$trigger ")
+            }, onClose = dismissCommandSurface)
+        } else if (commandResult != null) {
+            SlashCommandResultPanel(commandResult, commandPanelHeight, onClose = onDismissCommandResult)
+        }
         Column(
             modifier = Modifier
                 .clip(shape)
@@ -263,6 +293,8 @@ fun Composer(
                         editorValue = it
                         if (it.text != text) {
                             promptHistory.reset()
+                            dismissedSlashDraft = null
+                            onDismissCommandResult()
                             onTextChange(it.text)
                         }
                     },

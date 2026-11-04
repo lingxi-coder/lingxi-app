@@ -386,9 +386,13 @@ class RemoteControlManagerTest {
                 transition.isCompleted || transitionThread.state == Thread.State.BLOCKED
             })
             release.countDown()
-            withTimeout(5_000) { transition.join() }
-            client.listGate!!.complete(emptyList())
-            withTimeout(5_000) { pending.join() }
+            // Admission/listener jobs run on real threads. A test-scheduler
+            // timeout can expire instantly while those threads are still running.
+            withContext(Dispatchers.Default) {
+                withTimeout(5_000) { transition.join() }
+                client.listGate!!.complete(emptyList())
+                withTimeout(5_000) { pending.join() }
+            }
         } finally {
             release.countDown()
         }

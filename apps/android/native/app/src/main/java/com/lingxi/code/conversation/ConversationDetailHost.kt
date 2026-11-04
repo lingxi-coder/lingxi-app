@@ -23,13 +23,13 @@ import com.lingxi.code.theme.LingXiTheme
 internal val LocalConversationDetail = staticCompositionLocalOf<((String) -> Unit)?> { null }
 
 @Composable
-internal fun ConversationDetailHost(state: ChatState, linkedDetailKey: String? = null, onLinkedDetailHandled: () -> Unit = {}, content: @Composable () -> Unit) {
+internal fun ConversationDetailHost(state: ChatState, linkedDetailKey: String? = null, onLinkedDetailHandled: () -> Unit = {}, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     var selected by rememberSaveable(state.session.id) { mutableStateOf<String?>(null) }
     LaunchedEffect(linkedDetailKey) { if (linkedDetailKey != null) { selected = linkedDetailKey; onLinkedDetailHandled() } }
     val close = { selected = null }
     androidx.activity.compose.BackHandler(enabled = selected != null, onBack = close)
     CompositionLocalProvider(LocalConversationDetail provides { selected = it }) {
-        BoxWithConstraints(Modifier.fillMaxSize()) {
+        BoxWithConstraints(modifier.fillMaxSize()) {
             val wide = maxWidth >= 840.dp
             Row(Modifier.fillMaxSize()) {
                 Box(Modifier.weight(1f).fillMaxHeight()) { content() }

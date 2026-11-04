@@ -1,4 +1,10 @@
 export const chatCatalog: Record<string, Record<string, string>> = {
+  "slash_placement_messages": { "zh-Hans": "加入消息", "zh-Hant": "加入訊息", "en": "In messages", "ja": "メッセージに記録", "ko": "메시지에 기록" },
+  "slash_placement_temporary": { "zh-Hans": "不加入消息", "zh-Hant": "不加入訊息", "en": "No message", "ja": "記録しない", "ko": "메시지에 기록 안 함" },
+  "slash_placement_conditional": { "zh-Hans": "视具体操作", "zh-Hant": "視具體操作", "en": "Depends on action", "ja": "操作によって異なる", "ko": "작업에 따라 다름" },
+  "slash_result_temporary": {
+    "zh-Hans": "临时结果 · 不加入消息记录", "zh-Hant": "暫時結果 · 不加入訊息記錄", "en": "Temporary result · Not saved to messages", "ja": "一時的な結果 · メッセージには保存されません", "ko": "임시 결과 · 메시지에 저장되지 않음"
+  },
   "desktop_chat_drafts": {
     "zh-Hans": "草稿", "zh-Hant": "草稿", "en": "Drafts", "ja": "下書き", "ko": "초안"
   },

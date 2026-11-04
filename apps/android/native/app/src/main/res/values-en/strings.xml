@@ -2586,4 +2586,8 @@
     <string name="chat_tool_running_count">%1$d running</string>
     <string name="chat_tool_calls_unsuccessful">Calls unsuccessful</string>
     <string name="chat_tool_group_shell">Run commands</string>
+    <string name="slash_result_temporary">Temporary result · Not saved to messages</string>
+    <string name="slash_placement_messages">In messages</string>
+    <string name="slash_placement_temporary">No message</string>
+    <string name="slash_placement_conditional">Depends on action</string>
 </resources>

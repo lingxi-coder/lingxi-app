@@ -3284,6 +3284,7 @@ fun RootScreen(
                     onStop = chatViewModel::cancel,
                     onDiscardRecoveredTurn = chatViewModel::discardRecoveredTurn,
                     onDismissError = chatViewModel::dismissError,
+                    onDismissCommandResult = chatViewModel::dismissCommandResult,
                     onDismissCompactRejection = chatViewModel::dismissCompactRejection,
                     showOfflineBanner = shouldShowOfflineBanner(isOnline, dismissedWhileOffline),
                     onDismissOffline = { dismissedWhileOffline = true },

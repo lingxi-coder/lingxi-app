@@ -262,13 +262,14 @@ class ChatViewModelExternalTurnTest {
         runCurrent()
         source.feed.emit(base("old"))
         source.feed.emit(ExternalFeedItem.Event(ClientEvent.SlashCommandResult(17uL, "model selected".toClientTextDto(), false)))
-        assertEquals("model selected", vm.state.value.messages.last().text)
+        assertEquals("model selected", vm.state.value.commandResult?.text)
         source.feed.emit(ExternalFeedItem.Event(ClientEvent.TurnStarted(19uL)))
         source.feed.emit(ExternalFeedItem.Event(ClientEvent.TextDelta("working".toClientTextDto())))
         source.feed.emit(ExternalFeedItem.Event(ClientEvent.SlashCommandResult(20uL, "effort changed".toClientTextDto(), false)))
         assertTrue(vm.state.value.streaming)
         assertEquals("working", vm.state.value.streamingMessage?.text)
-        assertEquals("effort changed", vm.state.value.messages.last().text)
+        assertEquals("effort changed", vm.state.value.commandResult?.text)
+        assertTrue(vm.state.value.messages.none { it.text == "model selected" || it.text == "effort changed" })
     }
 
 }

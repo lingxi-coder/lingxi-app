@@ -35,7 +35,6 @@ class CronNativeRoundtripTest {
                 .change("sessionMode", "code").change("sessionScopeKey", "scheduled")
             val store = buildAndroidCronStore(root.path, File(root, "runtime").path, null)
             val created = try {
-                store.setMigrationDefaults("provider/model", """{"type":"automatic"}""")
                 val task = store.createConfigured("0 9 * * *", "Summarize changes", true, config.json)
                 assertEquals("provider/model", CronAutomation.from(task).model)
                 store.updateAutomation(task.id, config.change("status", "paused").json)

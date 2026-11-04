@@ -859,10 +859,50 @@ class ChatViewModelReducerTest {
         assertTrue(source.commands.none { it is ClientCommand.SendPrompt })
         vm.reduce(ReplyEvent.CommandOutput("Available commands", isError = false, turnId = slashTurnId.toULong()))
 
-        assertEquals("Available commands", vm.state.value.messages.last().text)
+        assertTrue(vm.state.value.messages.isEmpty())
+        assertEquals("/help", vm.state.value.commandResult?.command)
+        assertEquals("Available commands", vm.state.value.commandResult?.text)
         assertFalse(vm.state.value.streaming)
         assertNull(vm.state.value.error)
         assertNull(vm.state.value.agentRun)
+    }
+
+    @Test
+    fun utilityTransportErrorsRemainOutsideHistoryAndTaskCommandsRemainInline() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+        vm.send("/recap")
+        runCurrent()
+        vm.reduce(ReplyEvent.Error("offline"))
+        vm.reduce(ReplyEvent.End)
+        assertNull(vm.state.value.agentRun)
+        assertTrue(vm.state.value.messages.isEmpty())
+        assertEquals("offline", vm.state.value.commandResult?.text)
+        assertEquals(true, vm.state.value.commandResult?.isError)
+        assertFalse(vm.state.value.streaming)
+        vm.dismissCommandResult()
+        assertNull(vm.state.value.commandResult)
+
+        vm.send("/fusion compare approaches")
+        runCurrent()
+        val turn = source.slashRequests.last().second
+        vm.reduce(ReplyEvent.CommandOutput("Fusion started", false, turn.toULong()))
+        assertEquals(listOf("/fusion compare approaches", "Fusion started"), vm.state.value.messages.map { it.text })
+        assertNull(vm.state.value.commandResult)
+    }
+
+    @Test
+    fun slashRequestIsEchoedOnlyOnceWhenEngineStartsATask() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+        vm.send("/review source")
+        runCurrent()
+        assertTrue(vm.state.value.messages.isEmpty())
+        val turn = source.slashRequests.single().second
+        vm.reduceClientEvent(ClientEvent.TurnStarted(turn.toULong()))
+        vm.reduceClientEvent(ClientEvent.TurnStarted(turn.toULong()))
+        assertEquals(listOf("/review source"), vm.state.value.messages.map { it.text })
+        assertNull(vm.state.value.commandResult)
     }
 
     @Test
@@ -899,8 +939,11 @@ class ChatViewModelReducerTest {
         assertTrue(vm.state.value.streaming)
         vm.reduce(ReplyEvent.CommandOutput("Unknown command", isError = true, turnId = slashTurnId.toULong()))
 
-        assertEquals("Unknown command", vm.state.value.messages.last().text)
-        assertEquals("Unknown command", vm.state.value.error?.message)
+        assertTrue(vm.state.value.messages.isEmpty())
+        assertEquals("Unknown command", vm.state.value.commandResult?.text)
+        assertEquals(raw, vm.state.value.commandResult?.command)
+        assertEquals(true, vm.state.value.commandResult?.isError)
+        assertNull(vm.state.value.error)
         assertFalse(vm.state.value.streaming)
     }
 

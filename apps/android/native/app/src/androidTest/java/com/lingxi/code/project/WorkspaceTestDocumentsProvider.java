@@ -15,7 +15,7 @@ import java.io.IOException;
 public class WorkspaceTestDocumentsProvider extends DocumentsProvider {
     private File root() { File root = new File(getContext().getFilesDir(), "workspace-fixtures"); root.mkdirs(); return root; }
     @Override public boolean onCreate() {
-        getContext().grantUriPermission("com.lingxi.code.debug", DocumentsContract.buildTreeDocumentUri("com.lingxi.code.debug.test.filesfixtures", "root"),
+        getContext().grantUriPermission(com.lingxi.code.BuildConfig.APPLICATION_ID, DocumentsContract.buildTreeDocumentUri(getContext().getPackageName() + ".filesfixtures", "root"),
             Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
         return true;
     }
@@ -49,8 +49,8 @@ public class WorkspaceTestDocumentsProvider extends DocumentsProvider {
         validName(name); File target = new File(file(parent), name);
         try { if (target.exists() || !(mime.equals(DocumentsContract.Document.MIME_TYPE_DIR) ? target.mkdir() : target.createNewFile())) throw new FileNotFoundException(name); }
         catch (IOException error) { throw new FileNotFoundException(error.toString()); }
-        if (target.isDirectory()) getContext().grantUriPermission("com.lingxi.code.debug",
-            DocumentsContract.buildTreeDocumentUri("com.lingxi.code.debug.test.filesfixtures", id(target)),
+        if (target.isDirectory()) getContext().grantUriPermission(com.lingxi.code.BuildConfig.APPLICATION_ID,
+            DocumentsContract.buildTreeDocumentUri(getContext().getPackageName() + ".filesfixtures", id(target)),
             Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
         return id(target);
     }

@@ -870,6 +870,7 @@ class LocalAppAgentAcceptanceTest {
         resources.credentialSource = com.lingxi.code.conversation.EngineConversationSource.create(
             context = context,
             workspaceKey = "acceptance.skill-credential.${resources.fixtureProvider.id}",
+            sessionMode = com.lingxi.code.model.SessionMode.Code,
             reuseProcessSource = false,
         ) as? com.lingxi.code.conversation.EngineConversationSource
             ?: error("Could not create an isolated native source for the synthetic fixture credential.")
@@ -1548,6 +1549,7 @@ class LocalAppAgentAcceptanceTest {
             credentialSource = com.lingxi.code.conversation.EngineConversationSource.create(
                 context = context,
                 workspaceKey = "acceptance.skill-credential-recovery.$providerId.${UUID.randomUUID()}",
+                sessionMode = com.lingxi.code.model.SessionMode.Code,
                 reuseProcessSource = false,
             ) as? com.lingxi.code.conversation.EngineConversationSource
                 ?: error("Could not create an isolated native source to remove the interrupted fixture credential.")

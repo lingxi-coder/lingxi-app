@@ -63,6 +63,8 @@ class SlashCommandCatalogTest {
                     aliases = listOf("ship"),
                     argumentHint = "[target] [version]",
                     argumentNames = listOf("target", "version"),
+                    description = "Deploy",
+                    source = "markdown",
                 ),
             ),
             model.state.value.slashCommands,

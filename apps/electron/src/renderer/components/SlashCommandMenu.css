@@ -135,3 +135,6 @@
   .slash-command-icon { box-shadow: inset 0 0 0 1px var(--slash-command-color); }
   .slash-command-menu .slash-command-row[aria-selected='true'] { outline: 2px solid var(--slash-muted); outline-offset: -2px; }
 }
+
+.slash-command-placement { flex: 0 0 auto; color: var(--slash-muted); font-size: 10px; line-height: 1.5; }
+.slash-command-placement[data-placement='messages'] { color: var(--slash-secondary); }

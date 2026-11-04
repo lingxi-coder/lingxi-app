@@ -12,6 +12,7 @@ struct ComposerTextInput: UIViewRepresentable {
     let argumentHint: (String, Int) -> String?
     let onSubmit: () -> Void
     let onAcceptSuggestion: (() -> Void)?
+    var onDismissCommandSurface: (() -> Void)? = nil
     var historySessionKey: String = ""
     var historyMessages: [String] = []
 
@@ -33,6 +34,7 @@ struct ComposerTextInput: UIViewRepresentable {
         view.updateAppearance(font: font, textColor: UIColor(textColor), hintColor: UIColor(hintColor))
         view.placeholderLabel.text = placeholder
         view.textView.acceptSuggestion = onAcceptSuggestion
+        view.textView.dismissCommandSurface = onDismissCommandSurface
         view.textView.configureHistory(sessionKey: historySessionKey, messages: historyMessages)
         view.textView.accessibilityLabel = String(localized: "composer_placeholder")
 
@@ -257,10 +259,16 @@ final class ComposerEditingTextView: UITextView {
     @objc private func recallOlderPrompt() { recallHistory(older: true) }
     @objc private func recallNewerPrompt() { recallHistory(older: false) }
 
+    var dismissCommandSurface: (() -> Void)?
     var onLayout: (() -> Void)?
 
     override var keyCommands: [UIKeyCommand]? {
         var commands = super.keyCommands ?? []
+        if dismissCommandSurface != nil, markedTextRange == nil {
+            let command = UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(closeCommandSurface))
+            command.wantsPriorityOverSystemBehavior = true
+            commands.append(command)
+        }
         commands.append(UIKeyCommand(input: "\r", modifierFlags: .shift, action: #selector(insertLineBreak)))
         if acceptSuggestion != nil {
             for input in ["\t", UIKeyCommand.inputRightArrow] {
@@ -285,6 +293,7 @@ final class ComposerEditingTextView: UITextView {
         onLayout?()
     }
 
+    @objc private func closeCommandSurface() { dismissCommandSurface?() }
     @objc private func useSuggestion() { acceptSuggestion?() }
 
     @objc private func insertLineBreak() {

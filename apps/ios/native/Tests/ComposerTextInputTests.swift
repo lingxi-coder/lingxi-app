@@ -18,6 +18,18 @@ final class ComposerTextInputTests: XCTestCase {
         return view
     }
 
+    func testEscapeDismissesCommandSurfaceWithoutEditingOrTakingFocus() {
+        let view = input(text: "Draft remains editable")
+        XCTAssertFalse(view.textView.keyCommands?.contains { $0.input == UIKeyCommand.inputEscape } ?? false)
+        var dismissed = false
+        view.textView.dismissCommandSurface = { dismissed = true }
+        let command = view.textView.keyCommands?.first { $0.input == UIKeyCommand.inputEscape }
+        XCTAssertNotNil(command)
+        if let command { view.textView.perform(command.action, with: command) }
+        XCTAssertTrue(dismissed)
+        XCTAssertEqual(view.textView.text, "Draft remains editable")
+    }
+
     func testArgumentGhostUsesEndCaretAndTruncatesWithoutChangingDraft() {
         let draft = "/code-review "
         let hint = "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>]"

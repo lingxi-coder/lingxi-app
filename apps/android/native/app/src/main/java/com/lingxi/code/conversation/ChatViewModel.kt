@@ -108,6 +108,9 @@ class ChatViewModel(
     private val backgroundExecution: ConversationBackgroundExecution =
         ConversationBackgroundExecution.None,
 ) : ViewModel() {
+    private data class PendingSlash(val raw: String, val prompt: Message, val turnId: Long, val echoed: Boolean)
+    private var pendingSlash: PendingSlash? = null
+    private var settledSlashToken: Long? = null
     private var selectedModeWrite: Job? = null
     private var pendingReconnectRelease: String? = null
     private val conversationDraftWriter = ConversationDraftWriter(viewModelScope)
@@ -748,8 +751,7 @@ class ChatViewModel(
             val output = event.display.displayText()
             _state.update {
                 it.copy(
-                    messages = it.messages + Message(role = Role.Ai, text = output),
-                    error = if (event.isError) ChatError(output, classifyError(output)) else it.error,
+                    commandResult = output.takeIf { text -> text.isNotBlank() }?.let { text -> ConversationCommandOutput("/", text, event.isError) },
                 )
             }
             return
@@ -793,10 +795,19 @@ class ChatViewModel(
                         aliases = command.aliases.map { it.displayText() },
                         argumentHint = command.argumentHint?.displayText(),
                         argumentNames = command.argumentNames.map { it.displayText() },
+                        description = command.menuDescription ?: command.description.displayText(),
+                        source = command.source,
+                        hidden = command.hidden,
                     )
                 })
             }
             is ClientEvent.TurnStarted -> {
+                pendingSlash?.takeIf { event.turnId == null || event.turnId.toLong() == it.turnId }?.let { pending ->
+                    if (!pending.echoed) {
+                        _state.update { state -> state.copy(messages = state.messages + pending.prompt) }
+                    }
+                    pendingSlash = null // The real model turn now owns the lifecycle.
+                }
                 nativeTurnAdmission.confirm(event.turnId?.toLong())
                 pendingAssistantTranscriptUuids.clear()
                 _state.update { it.copy(promptSuggestion = null, promptSuggestionUuid = null, suggestionTurn = it.suggestionTurn + 1) }
@@ -2692,6 +2703,8 @@ class ChatViewModel(
      * The returned job is still awaited after the real engine receives Cancel.
      */
     private fun abandonLocalTurn(): Job? {
+        pendingSlash = null
+        _state.update { it.copy(commandResult = null) }
         turnToken++
         nativeTurnAdmission.clear()
         recoveredTurnToken = null
@@ -3128,6 +3141,8 @@ class ChatViewModel(
         val turnSource = source
         val slashCommandSource = turnSource as? SlashCommandConversationSource
         val isSlash = !isBashInput && isSlashCommandLine(text) && slashCommandSource != null
+        val echoSlash = isSlash && slashCommandEchoesRequest(text)
+        pendingSlash = if (isSlash) PendingSlash(text, userMessage, submittedTurnId, echoSlash) else null
         val nativePrompt = if (!isSlash && turnSource is NativePromptReceiptSource) {
             NativePromptSubmission(turnSource, submittedTurnId, admission)
         } else null
@@ -3151,7 +3166,8 @@ class ChatViewModel(
                 error = null, // a fresh turn clears the prior turn's error banner
                 streaming = true, // gate the composer immediately, before the first event
                 liveTurnWaitingForUser = false,
-                messages = it.messages + userMessage,
+                messages = if (!isSlash || echoSlash) it.messages + userMessage else it.messages,
+                commandResult = null,
                 visualizationChip = null,
                 streamingMessage = null,
                 agentRun = AgentRunState(turnId = token),
@@ -3350,6 +3366,8 @@ class ChatViewModel(
 
     fun dismissCompactRejection() { _state.update { it.copy(compactRejectionId = null) } }
 
+    fun dismissCommandResult() { _state.update { it.copy(commandResult = null) } }
+
     /** Dismiss the persistent error banner (its × affordance). */
     fun dismissError() {
         _state.update { it.copy(error = null) }
@@ -3416,6 +3434,7 @@ class ChatViewModel(
      */
     internal fun reduce(event: ReplyEvent, token: Long = turnToken) {
         if (token != turnToken) return // stale turn — its session was abandoned
+        if (event is ReplyEvent.End && settledSlashToken == token) return // mapper's trailing End cannot recreate a utility run
         if (assistantIdentityTurnToken != token) {
             assistantIdentityTurnToken = token
             pendingAssistantIdentity = null
@@ -3553,8 +3572,12 @@ class ChatViewModel(
             }
 
             is ReplyEvent.CommandOutput -> {
-                nativeTurnAdmission.clear()
                 if (event.turnId != null && event.turnId != durableTurnId?.toULong()) return
+                val pending = pendingSlash
+                val inMessages = pending?.echoed == true
+                settledSlashToken = token
+                pendingSlash = null
+                nativeTurnAdmission.clear()
                 turnJob = null
                 emitTurnCompletion(
                     token = token,
@@ -3568,14 +3591,11 @@ class ChatViewModel(
                 _state.update { state ->
                     state.copy(
                         streaming = false,
-                        messages = state.messages + Message(role = Role.Ai, text = event.display),
+                        messages = if (inMessages && event.display.isNotBlank()) state.messages + Message(role = Role.Ai, text = event.display) else state.messages,
+                        commandResult = if (!inMessages && event.display.isNotBlank()) ConversationCommandOutput(pending?.raw.orEmpty(), event.display, event.isError) else null,
                         streamingMessage = null,
                         statusLine = null,
-                        error = if (event.isError) {
-                            ChatError(event.display, classifyError(event.display))
-                        } else {
-                            null
-                        },
+                        error = null, // Error output is already visible in its result surface.
                         // Local commands have no model/tool trace to retain.
                         agentRun = null,
                     )
@@ -3712,6 +3732,11 @@ class ChatViewModel(
             is ReplyEvent.DurableTurnReplayAcknowledged -> Unit
 
             is ReplyEvent.Error -> {
+                if (pendingSlash?.echoed == false) {
+                    reduce(ReplyEvent.CommandOutput(display = event.message, isError = true, turnId = durableTurnId?.toULong()), token)
+                    return
+                }
+                pendingSlash = null
                 nativeTurnAdmission.clear()
                 turnJob = null
                 emitTurnCompletion(

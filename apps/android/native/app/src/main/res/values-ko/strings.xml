@@ -2586,4 +2586,8 @@
     <string name="chat_tool_running_count">%1$d 개 실행 중</string>
     <string name="chat_tool_calls_unsuccessful">호출이 성공하지 못함</string>
     <string name="chat_tool_group_shell">명령 실행</string>
+    <string name="slash_result_temporary">임시 결과 · 메시지에 저장되지 않음</string>
+    <string name="slash_placement_messages">메시지에 기록</string>
+    <string name="slash_placement_temporary">메시지에 기록 안 함</string>
+    <string name="slash_placement_conditional">작업에 따라 다름</string>
 </resources>

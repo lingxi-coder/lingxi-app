@@ -42,7 +42,7 @@ class WorkspaceDirectoryUiTest {
                 ),
                 onDismiss = {}, onSelectMode = { selected = it }, onContinueInOtherMode = {},
                 onOpenPermissionSettings = {}, onTogglePinned = {}, onMakeScheduled = {},
-                onOpenTerminal = {}, onArchive = {},
+                onOpenTerminal = {}, onOpenHandoffSource = {}, onArchive = {},
             )
         } }
         rule.onNodeWithTag(UiTags.SESSION_PANEL_MODE).performClick()

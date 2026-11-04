@@ -637,6 +637,8 @@ final class ConversationModel: ObservableObject {
     /// A `RunSlashCommand` has been submitted but has not yet resolved into a
     /// local result or a normal streaming turn.
     @Published var slashCommandPending = false
+    /// Ephemeral utility output shown directly above the input, outside items/messages.
+    @Published var commandResult: ConversationCommandOutput? = nil
     /// Latest manual `/compact` lifecycle; terminal state remains until the next action.
     @Published var compactionStatus: ConversationCompactionStatus? = nil
     @Published var compactRejectionID: UUID? = nil

@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.lifecycle.ViewModelStore
@@ -34,7 +35,7 @@ class SideChatSheetUiTest {
             override fun getFilesDir(): File = root
             override fun getSharedPreferences(name: String, mode: Int) = super.getSharedPreferences("side-sheet-test-$name", mode)
         }
-        val parent = EngineConversationSource.create(context, reuseProcessSource = false)
+        val parent = EngineConversationSource.create(context, sessionMode = com.lingxi.code.model.SessionMode.Code, reuseProcessSource = false)
         assertTrue(parent is EngineConversationSource)
         val store = ViewModelStore()
         lateinit var vm: ChatViewModel
@@ -69,26 +70,47 @@ class SideChatSheetUiTest {
             rule.waitUntil(10_000) {
                 activity.window.decorView.rootWindowInsets?.isVisible(android.view.WindowInsets.Type.ime()) == true
             }
-            val imeTop = activity.windowManager.currentWindowMetrics.bounds.height() -
-                activity.window.decorView.rootWindowInsets.getInsets(android.view.WindowInsets.Type.ime()).bottom
-            val send = rule.onNode(hasTestTag(com.lingxi.code.components.UiTags.COMPOSER_SEND) and
-                hasAnyAncestor(hasTestTag("side-chat.sheet"))).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-            assertTrue("Side-chat send must remain above the keyboard", send.bottom <= imeTop + 1f)
+            val sendNode = rule.onNode(hasTestTag(com.lingxi.code.components.UiTags.COMPOSER_SEND) and
+                hasAnyAncestor(hasTestTag("side-chat.sheet")))
+            // IME visibility changes before the sheet has finished relayout/animation.
+            var geometry = ""
+            try {
+                rule.waitUntil(10_000) {
+                    runCatching {
+                        val node = sendNode.fetchSemanticsNode()
+                        val imeTop = activity.windowManager.currentWindowMetrics.bounds.height() -
+                            activity.window.decorView.rootWindowInsets.getInsets(android.view.WindowInsets.Type.ime()).bottom
+                        geometry = "send=${node.boundsInWindow}; root=${node.boundsInRoot}; sheet=${rule.onNodeWithTag("side-chat.sheet").fetchSemanticsNode().boundsInWindow}; imeTop=$imeTop"
+                        sendNode.assertIsDisplayed()
+                        node.boundsInWindow.bottom <= imeTop + 1f
+                    }.getOrDefault(false)
+                }
+            } catch (failure: Throwable) {
+                val shot = File(target.getExternalFilesDir("side-chat-ui-audit"), "side-composer-failure.png")
+                shot.parentFile?.mkdirs()
+                shot.outputStream().use { rule.onNodeWithTag("side-chat.sheet").captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it) }
+                throw AssertionError("Side-chat keyboard geometry: $geometry", failure)
+            }
+            sendNode.assertIsDisplayed()
             val keyboardShot = File(target.getExternalFilesDir("side-chat-ui-audit"), "side-composer-keyboard.png")
             keyboardShot.parentFile?.mkdirs()
-            keyboardShot.outputStream().use { instrumentation.uiAutomation.takeScreenshot().compress(Bitmap.CompressFormat.PNG, 100, it) }
+            keyboardShot.outputStream().use { rule.onNodeWithTag("side-chat.sheet").captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it) }
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             rule.onNodeWithTag("side-chat.create").performClick()
             rule.waitUntil(15_000) { vm.sideChats.chats.value.size == 2 }
             input.performClick().performTextInput("Second side draft")
             val second = vm.sideChats.selected.value!!
             assertNotEquals(first, second)
+            androidx.test.espresso.Espresso.closeSoftKeyboard()
+            rule.waitUntil(10_000) { rule.onAllNodesWithTag("side-chat.select").fetchSemanticsNodes().isNotEmpty() }
             rule.onNodeWithTag("side-chat.select").performClick()
             rule.onNodeWithText(target.getString(R.string.side_chat_number, 1)).performClick()
             input.assertTextContains("First side draft")
             val screenshot = File(target.getExternalFilesDir("side-chat-ui-audit"), "side-composer.png")
             screenshot.parentFile?.mkdirs()
-            screenshot.outputStream().use { instrumentation.uiAutomation.takeScreenshot().compress(Bitmap.CompressFormat.PNG, 100, it) }
+            screenshot.outputStream().use { rule.onNodeWithTag("side-chat.sheet").captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it) }
+            androidx.test.espresso.Espresso.closeSoftKeyboard()
+            rule.waitUntil(10_000) { rule.onAllNodesWithTag("side-chat.hide").fetchSemanticsNodes().isNotEmpty() }
             rule.onNodeWithTag("side-chat.hide").performClick()
             rule.onNodeWithTag("conversation.side-chats").performClick()
             input.assertIsDisplayed().assertTextContains("First side draft")

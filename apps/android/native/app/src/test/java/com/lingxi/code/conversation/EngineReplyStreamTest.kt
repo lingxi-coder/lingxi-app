@@ -237,6 +237,7 @@ class EngineReplyStreamTest {
                     ),
                 )
                 emit(ClientEvent.TurnStarted(turnId = 7uL))
+                emit(ClientEvent.SlashCommandResult(7uL, "started".toClientTextDto(), false))
                 emit(ClientEvent.TextDelta("expanded prompt reply".toClientTextDto()))
                 emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost))
             },

@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'command-result-electron.mjs');
 
-test('command result dialog preserves full usage details, fits narrow screens, and restores focus', async () => {
+test('command result popover anchors above the composer without blocking input or outside actions', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-command-result-vite-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-command-result-electron-'));
   const vite = await createServer({
@@ -54,18 +54,18 @@ test('command result dialog preserves full usage details, fits narrow screens, a
     const result = await new Promise((resolveResult, rejectResult) => {
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
-        rejectResult(new Error(`Electron compaction fixture timed out\n${errors.join('')}`));
+        rejectResult(new Error(`Electron command result fixture timed out\n${errors.join('')}`));
       }, 20_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {
         clearTimeout(timeout);
         const line = output.join('').trim().split('\n').at(-1);
         if (code !== 0 || !line) {
-          rejectResult(new Error(`Electron compaction fixture exited ${code ?? signal}\n${errors.join('')}`));
+          rejectResult(new Error(`Electron command result fixture exited ${code ?? signal}\n${errors.join('')}`));
           return;
         }
         try { resolveResult(JSON.parse(line)); }
-        catch (error) { rejectResult(new Error(`Invalid Electron compaction fixture output: ${line}`, { cause: error })); }
+        catch (error) { rejectResult(new Error(`Invalid Electron command result fixture output: ${line}`, { cause: error })); }
       });
     });
 
@@ -73,15 +73,19 @@ test('command result dialog preserves full usage details, fits narrow screens, a
       assert.equal(viewport.open, true);
       assert.equal(viewport.overflow, false);
       assert.equal(viewport.truncated, false);
-      assert.equal(viewport.focus, 'Close command result');
+      assert.equal(viewport.focus, 'open');
+      assert.equal(viewport.nonModal, true);
+      assert.equal(viewport.anchored, true);
+      assert.equal(viewport.inputAvailable, true);
       assert.match(viewport.text, /947 lines added/);
       assert.match(viewport.text, /284 lines removed/);
       assert.match(viewport.text, /2.7m cache read/);
       assert.match(viewport.text, /A future metric without a colon/);
       assert.match(viewport.text, /very-long-provider-model-name-over-32-characters/);
     }
-    assert.deepEqual(result.dismissed, { closed: true, focus: 'open' });
+    assert.deepEqual(result.dismissed, { closed: true, focus: 'prompt' });
     assert.equal(result.buttonClosed, true);
+    assert.deepEqual(result.outside, { closed: true, focus: 'outside', acted: true });
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();

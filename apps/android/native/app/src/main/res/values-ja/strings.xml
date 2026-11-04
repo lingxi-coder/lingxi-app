@@ -2586,4 +2586,8 @@
     <string name="chat_tool_running_count">%1$d 件実行中</string>
     <string name="chat_tool_calls_unsuccessful">呼び出し未成功</string>
     <string name="chat_tool_group_shell">コマンドを実行</string>
+    <string name="slash_result_temporary">一時的な結果 · メッセージには保存されません</string>
+    <string name="slash_placement_messages">メッセージに記録</string>
+    <string name="slash_placement_temporary">記録しない</string>
+    <string name="slash_placement_conditional">操作によって異なる</string>
 </resources>

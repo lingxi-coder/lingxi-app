@@ -55,6 +55,8 @@ data class ChatState(
     val reasoning: com.lingxi.code.model.ReasoningControl? = null,
     /** Engine-owned slash metadata, including argument hints for the draft. */
     val slashCommands: List<ConversationSlashCommand> = emptyList(),
+    /** Utility output belongs to the composer, never the persisted transcript. */
+    val commandResult: ConversationCommandOutput? = null,
     /**
      * A transient, user-visible status line (tool activity). `null` hides the
      * row. Mirrors the iOS `ConversationModel.statusLine`. Errors no longer ride

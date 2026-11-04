@@ -48,7 +48,7 @@ export interface DesktopCommandContext {
   showHelp(): void;
   /** Turn Remote Control on or off for the current session (`undefined` toggles) and describe the result. */
   toggleRemoteControl(wanted: boolean | undefined): Promise<{ message: string; isError: boolean }>;
-  /** Push a line of the command's own output into the transcript. */
+  /** Show the command's own utility output above the composer. */
   emit(output: string, isError?: boolean): void;
 }
 

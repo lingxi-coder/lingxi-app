@@ -267,6 +267,7 @@ struct ChatView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 messageList(showsSelectedAgent: false)
+                    .simultaneousGesture(TapGesture().onEnded { convo.commandResult = nil })
                 runtimeFooter
                 if convo.authoringBindingPending && convo.authoringBindingRetryAvailable {
                     Button("common_retry", action: onRetryAuthoringBinding)
@@ -375,6 +376,8 @@ struct ChatView: View {
                          slashCommands: convo.slashCommands,
                          slashCommandsLoaded: convo.slashCommandsLoaded,
                          slashCommandPending: convo.slashCommandPending,
+                         commandResult: convo.sessionTransitionPending ? nil : convo.commandResult,
+                         onDismissCommandResult: { convo.commandResult = nil },
                          streaming: convo.streaming || source.hasActiveRealtimeAudio,
                          showDiscardRecovery: convo.hasInactiveDurableRecovery,
                          isCancelling: convo.isCancelling,

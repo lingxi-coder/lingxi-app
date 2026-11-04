@@ -178,6 +178,7 @@ fun ChatScreen(
     onStop: () -> Unit = {},
     onDiscardRecoveredTurn: () -> Unit = {},
     onDismissError: () -> Unit = {},
+    onDismissCommandResult: () -> Unit = {},
     onDismissCompactRejection: () -> Unit = {},
     /** True to surface the dismissible offline banner above the composer. */
     showOfflineBanner: Boolean = false,
@@ -385,8 +386,8 @@ fun ChatScreen(
         onMessageLinkHandled(index >= 0)
     }
 
-    ConversationDetailHost(state, linkedDetailKey, onLinkedDetailHandled) {
-    Box(modifier = modifier.fillMaxSize().background(t.windowBg)) {
+    ConversationDetailHost(state, linkedDetailKey, onLinkedDetailHandled, modifier = modifier) {
+    Box(modifier = Modifier.fillMaxSize().background(t.windowBg)) {
         Column(modifier = Modifier.fillMaxSize()) {
             val isNewChat = renderItems.any { it is ChatRenderItem.Empty }
             val currentOnVisualizationFollowup by rememberUpdatedState(onVisualizationFollowup)
@@ -437,6 +438,7 @@ fun ChatScreen(
                                     awaitPointerEventScope {
                                         while (true) {
                                             val event = awaitPointerEvent(PointerEventPass.Initial)
+                                            if (event.changes.any { it.pressed && !it.previousPressed }) onDismissCommandResult()
                                             followState = if (event.changes.any { it.pressed }) {
                                                 followState.pointerDown()
                                             } else {
@@ -504,6 +506,8 @@ fun ChatScreen(
                 historyMessages = if (state.sessionTransitioning) emptyList() else state.messages
                     .filter { it.role == com.lingxi.code.model.Role.User }.map { it.text },
                 slashCommands = state.slashCommands,
+                commandResult = state.commandResult.takeUnless { state.sessionTransitioning },
+                onDismissCommandResult = onDismissCommandResult,
                 promptSuggestion = state.promptSuggestion,
                 promptSuggestionNotice = state.promptSuggestionNotice,
                 suggestionTurnKey = "${state.session.id}:${state.promptSuggestionUuid}",

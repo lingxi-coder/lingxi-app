@@ -43,6 +43,34 @@ struct ConversationSlashCommand: Identifiable, Equatable, Hashable {
     }
 }
 
+enum SlashMessagePlacement {
+    case messages, temporary, conditional
+    var label: String {
+        switch self {
+        case .messages: String(localized: "slash_placement_messages")
+        case .temporary: String(localized: "slash_placement_temporary")
+        case .conditional: String(localized: "slash_placement_conditional")
+        }
+    }
+
+    static func echoesRequest(_ raw: String) -> Bool {
+        let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(maxSplits: 1, whereSeparator: \.isWhitespace)
+        guard let name = parts.first?.lowercased() else { return false }
+        let args = parts.dropFirst().first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return ["/compact", "/goal", "/fusion"].contains(name)
+            || (name == "/plan" && !args.isEmpty && !["open", "share"].contains(args))
+    }
+
+    static func forCommand(_ command: ConversationSlashCommand) -> Self {
+        guard command.source == "builtin" else { return .conditional }
+        switch command.name.lowercased() {
+        case "compact", "goal", "fusion", "init", "insights", "security-review", "team-onboarding": return .messages
+        case "help", "status", "usage", "cost", "stats", "recap", "context", "doctor", "model", "permissions", "effort", "fast", "theme", "config", "copy", "clear", "resume", "agents", "mcp", "skills", "tasks", "hooks", "files", "workflows", "export", "rename", "reload-skills", "reload-plugins", "autocompact", "brief", "diff", "output-style", "powerup", "stop": return .temporary
+        default: return .conditional
+        }
+    }
+}
+
 struct SlashCommandSuggestion: Identifiable, Equatable {
     enum MatchTier: Int, Comparable {
         case exactName = 0
@@ -292,6 +320,9 @@ struct SlashCommandSuggestionPanel: View {
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
                     }
+                    Text(SlashMessagePlacement.forCommand(command).label)
+                        .font(.caption2)
+                        .foregroundStyle(isSelected ? .white.opacity(0.82) : t.text3)
                 }
                 Spacer(minLength: 0)
                 if let hint = command.argumentHint,
@@ -324,7 +355,7 @@ struct SlashCommandSuggestionPanel: View {
         let aliases = command.aliases.isEmpty
             ? ""
             : String(localized: "slash_command_aliases") + ": " + command.aliases.joined(separator: ", ")
-        return [command.canonicalTrigger, description, aliases]
+        return [command.canonicalTrigger, description, aliases, SlashMessagePlacement.forCommand(command).label]
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
     }
@@ -378,5 +409,56 @@ struct SlashCommandOutputCard: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("slash_command_output_title")
         .accessibilityIdentifier("conversation.slash-command-output")
+    }
+}
+
+/// A non-modal utility result attached to the composer; it never enters history.
+struct SlashCommandResultPanel: View {
+    @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    let output: ConversationCommandOutput
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text(output.command.isEmpty ? String(localized: "slash_command_output_title") : output.command)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(t.text)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+                Button(action: onClose) {
+                    LXIcon(name: .x, size: 16, color: t.text3)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("common_close")
+            }
+            .padding(.leading, 14).padding(.trailing, 4)
+            ScrollView {
+                Text(output.text)
+                    .font(.footnote)
+                    .foregroundStyle(output.isError ? t.danger : t.text2)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+            }
+            .frame(maxHeight: 180)
+            .fixedSize(horizontal: false, vertical: true)
+            Text(String(localized: "slash_result_temporary"))
+                .font(.caption2).foregroundStyle(t.text3)
+                .padding(14)
+        }
+        .background {
+            let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+            if reduceTransparency || contrast == .increased { shape.fill(t.composerBg) }
+            else { shape.fill(.regularMaterial) }
+        }
+        .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(t.borderStrong, lineWidth: contrast == .increased ? 1 : 0.5) }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("composer.command-result")
+        .accessibilityAction(.escape, onClose)
     }
 }

@@ -739,6 +739,7 @@ fun mapReplyStream(
 ): Flow<ReplyEvent> = flow {
     emit(ReplyEvent.Thinking)
     val frontier = DurableTurnProjectionFrontier(strings = strings)
+    var modelTurnStarted = false
     emitAll(
         events.transformWhile { event ->
             if (event is ClientEvent.TurnEventReplay) {
@@ -754,7 +755,8 @@ fun mapReplyStream(
                 }
                 return@transformWhile true
             }
-            if (event is ClientEvent.SlashCommandResult && !acceptSlashCommandResults) {
+            if (event is ClientEvent.TurnStarted && (expectedTurnId == null || event.turnId == null || event.turnId == expectedTurnId.toULong())) modelTurnStarted = true
+            if (event is ClientEvent.SlashCommandResult && (!acceptSlashCommandResults || modelTurnStarted)) {
                 return@transformWhile true
             }
             val reply = clientEventToReply(event, strings) ?: return@transformWhile true

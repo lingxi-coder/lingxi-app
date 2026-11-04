@@ -1,3 +1,5 @@
+import { CommandResultPanel } from './CommandResultPanel';
+import './CommandResultPanel.css';
 import { providerAccountSummary } from '../../shared/providerAccounts';
 import { providerAccountUnavailableReasons } from '../bridge/credentialRecovery';
 import { reasoningSelectionLabel } from '../model/reasoningLabel';
@@ -68,6 +70,7 @@ import {
   reconcileSlashSelectionIndex,
   renderDesktopSlashHelp,
   slashCommandText,
+  slashMessagePlacement,
   slashMenuLabel,
   slashNavigationDirection,
 } from '../bridge/slashCommands';
@@ -3751,6 +3754,14 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         }}
         style={{ position: 'relative', maxWidth: 'var(--conversation-width)', margin: '0 auto', borderRadius: 20, border: `1px solid ${imageDragActive ? t.accent : t.borderStrong}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: '0 4px 20px rgba(0,0,0,.05), 0 1px 3px rgba(0,0,0,.03)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
       >
+        {!bridge.sessionLoading && bridge.conversation.commandResult && !slashMenuOpen && !fileMenuOpen && !previewPath && !modelOpen && !permissionOpen && (
+          <CommandResultPanel
+            key={`${bridge.conversation.sessionKey}:${bridge.conversation.commandResult.id}`}
+            item={bridge.conversation.commandResult}
+            onClose={() => { bridge.dismissCommandResult(); focusPrompt(); }}
+            onDismiss={bridge.dismissCommandResult}
+          />
+        )}
         {imageAttachments.length > 0 && (
           <div aria-label={tr('desktop_chat_image_attachments')} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>
             {imageAttachments.map((attachment) => (
@@ -3782,7 +3793,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
             data-placeholder={promptSuggestion ? '' : promptPlaceholder}
             data-empty={!hasPrompt ? 'true' : 'false'}
             data-command-decorated={decorateCommand || undefined}
-            onInput={() => { mentionDismissed.current = false; slashDismissed.current = false; setImageNotice(null); syncPromptState(); updateActiveCompletions(); }}
+            onInput={() => { if (bridge.conversation.commandResult) bridge.dismissCommandResult(); mentionDismissed.current = false; slashDismissed.current = false; setImageNotice(null); syncPromptState(); updateActiveCompletions(); }}
             onFocus={() => { slashDismissed.current = false; savePromptSelection(); updateActiveCompletions(); }}
             onBlur={savePromptSelection}
             onKeyUp={keyUp}
@@ -3886,6 +3897,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                         {entry.argument_hint ? <span className="slash-command-argument mono">{entry.argument_hint}</span> : null}
                       </span>
                       <span className="slash-command-description">{description}</span>
+                      <span className="slash-command-placement" data-placement={slashMessagePlacement(entry)}>{tr(`slash_placement_${slashMessagePlacement(entry)}`)}</span>
                     </span>
                     <kbd className="slash-command-complete" aria-hidden="true">↵</kbd>
                   </button>

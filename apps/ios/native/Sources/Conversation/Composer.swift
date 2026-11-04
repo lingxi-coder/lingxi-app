@@ -76,6 +76,8 @@ struct Composer: View {
     var slashCommands: [ConversationSlashCommand] = []
     var slashCommandsLoaded: Bool = false
     var slashCommandPending: Bool = false
+    var commandResult: ConversationCommandOutput? = nil
+    var onDismissCommandResult: () -> Void = {}
 
     // A running turn keeps both controls available: Stop interrupts it, while
     // Send places new text into Rust's canonical pending-message queue.
@@ -168,6 +170,8 @@ struct Composer: View {
         slashCommands: [ConversationSlashCommand] = [],
         slashCommandsLoaded: Bool = false,
         slashCommandPending: Bool = false,
+        commandResult: ConversationCommandOutput? = nil,
+        onDismissCommandResult: @escaping () -> Void = {},
         streaming: Bool = false,
         showDiscardRecovery: Bool = false,
         isCancelling: Bool = false,
@@ -234,6 +238,8 @@ struct Composer: View {
         self.slashCommands = slashCommands
         self.slashCommandsLoaded = slashCommandsLoaded
         self.slashCommandPending = slashCommandPending
+        self.commandResult = commandResult
+        self.onDismissCommandResult = onDismissCommandResult
         self.streaming = streaming
         self.showDiscardRecovery = showDiscardRecovery
         self.isCancelling = isCancelling
@@ -270,6 +276,10 @@ struct Composer: View {
                 .padding(.horizontal, 14)
                 .layoutPriority(1)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if let commandResult {
+                SlashCommandResultPanel(output: commandResult, onClose: onDismissCommandResult)
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             VStack(alignment: .leading, spacing: 6) {
                 // Captured-photo attachment chip (the device-vision analog of how
@@ -296,12 +306,17 @@ struct Composer: View {
                     },
                     onSubmit: send,
                     onAcceptSuggestion: visibleSuggestion == nil ? nil : acceptSuggestion,
+                    onDismissCommandSurface: commandResult != nil || shouldShowSlashPanel ? {
+                        onDismissCommandResult()
+                        dismissedSlashDraft = draft
+                    } : nil,
                     historySessionKey: historySessionKey,
                     historyMessages: historyMessages
                 )
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .onChange(of: Array(draft.utf16)) { _, newDisplayCodeUnits in
                         updateDraftSourceCodeUnits(forDisplayCodeUnits: newDisplayCodeUnits)
+                        onDismissCommandResult()
                         if dismissedSlashDraft != draft {
                             dismissedSlashDraft = nil
                         }

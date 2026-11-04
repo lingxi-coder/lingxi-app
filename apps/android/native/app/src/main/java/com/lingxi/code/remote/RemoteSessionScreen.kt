@@ -391,6 +391,7 @@ internal fun RemoteSessionScreen(
                 },
                 onStop = chat::cancel,
                 onDismissError = chat::dismissError,
+                onDismissCommandResult = chat::dismissCommandResult,
                 onDismissCompactRejection = chat::dismissCompactRejection,
                 onAnswerQuestion = chat::answerQuestion,
                 onCancelQuestion = chat::cancelQuestion,

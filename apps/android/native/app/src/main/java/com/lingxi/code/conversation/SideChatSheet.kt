@@ -10,6 +10,7 @@ import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalConfiguration
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import androidx.compose.ui.Modifier
@@ -22,7 +23,7 @@ import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun SideChatSheet(
     manager: SideChatManager,
@@ -39,10 +40,14 @@ internal fun SideChatSheet(
     val scope = rememberCoroutineScope()
     var controlsOpen by remember(selected) { mutableStateOf(false) }
     if (!visible) return
-    ModalBottomSheet(onDismissRequest = { manager.visible.value = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.fillMaxHeight(0.94f).imePadding().testTag("side-chat.sheet")) {
+    val compactKeyboard = WindowInsets.isImeVisible && LocalConfiguration.current.screenHeightDp < 480
+    ModalBottomSheet(onDismissRequest = { manager.visible.value = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        dragHandle = if (compactKeyboard) null else { { BottomSheetDefaults.DragHandle() } },
+    ) {
+        // Material's sheet consumes IME insets. Short windows reserve the remaining height for editing.
+        Column(Modifier.fillMaxHeight(if (compactKeyboard) 1f else 0.94f).testTag("side-chat.sheet")) {
             var selectorOpen by remember { mutableStateOf(false) }
-            TopAppBar(
+            if (!compactKeyboard) TopAppBar(
                 title = { Text(selected?.let { stringResource(R.string.side_chat_number, chats.indexOf(it) + 1) }
                     ?: stringResource(R.string.side_chats_title), maxLines = 1,
                     style = MaterialTheme.typography.titleMedium) },
@@ -123,6 +128,7 @@ internal fun SideChatSheet(
                         onToggleToolCall = entry.viewModel::toggleToolCall,
                         onTogglePlan = entry.viewModel::togglePlanExpanded,
                         onDismissError = entry.viewModel::dismissError,
+                        onDismissCommandResult = entry.viewModel::dismissCommandResult,
                     onDismissCompactRejection = entry.viewModel::dismissCompactRejection,
                     )
                     PermissionPromptDialog(state = permission,

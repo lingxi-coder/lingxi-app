@@ -435,7 +435,29 @@ import XCTest
             XCTAssertEqual(raw.codeUnits, [0x002f, 0xd800] + Array(" item".utf16))
         }
 
-        func testLocalSlashCommandResultAppendsCommandOutputAndClearsPending() async throws {
+        func testUtilityErrorsStayTemporaryAndFusionRepliesStayInMessages() async throws {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            source.applyForTesting(.slashCommandCatalog(commands: [command(name: "recap", description: "Recap"), command(name: "fusion", description: "Fusion")]))
+            source.setCommandSubmitterForTesting { _ in }
+            let recapSent = await source.send("/recap")
+            let recapToken = try XCTUnwrap(recapSent)
+            await flushTasks()
+            source.applyForTesting(.slashCommandResult(turnId: recapToken.clientTurnId, display: "Unavailable".clientTextDto, isError: true))
+            XCTAssertTrue(source.model.messages.isEmpty)
+            XCTAssertTrue(source.model.items.isEmpty)
+            XCTAssertEqual(source.model.commandResult?.text, "Unavailable")
+            XCTAssertEqual(source.model.commandResult?.isError, true)
+            let fusionSent = await source.send("/fusion compare")
+            let fusionToken = try XCTUnwrap(fusionSent)
+            await flushTasks()
+            XCTAssertNil(source.model.commandResult)
+            source.applyForTesting(.slashCommandResult(turnId: fusionToken.clientTurnId, display: "Fusion started".clientTextDto, isError: false))
+            XCTAssertEqual(source.model.messages.map(\.text), ["/fusion compare", "Fusion started"])
+            XCTAssertNil(source.model.commandResult)
+        }
+
+        func testLocalSlashCommandResultStaysOutsideHistoryAndClearsPending() async throws {
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             source.applyForTesting(.slashCommandCatalog(commands: [
@@ -463,9 +485,9 @@ import XCTest
             XCTAssertEqual(source.model.turnCompletion?.token, token)
             XCTAssertEqual(source.model.turnCompletion?.outcome, .completed)
             XCTAssertEqual(source.model.turnCompletion?.finalAssistantText, "")
-            guard case let .commandOutput(output)? = source.model.items.last else {
-                return XCTFail("expected command output card")
-            }
+            XCTAssertTrue(source.model.messages.isEmpty)
+            XCTAssertTrue(source.model.items.isEmpty)
+            let output = try XCTUnwrap(source.model.commandResult)
             XCTAssertEqual(output.command, "/help")
             XCTAssertEqual(output.text, "Available commands")
             XCTAssertFalse(output.isError)
@@ -595,9 +617,14 @@ import XCTest
             XCTAssertTrue(source.model.slashCommandPending)
             XCTAssertFalse(source.model.streaming)
 
+            XCTAssertTrue(source.model.messages.isEmpty)
             source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
             XCTAssertFalse(source.model.slashCommandPending)
             XCTAssertTrue(source.model.streaming)
+            XCTAssertEqual(source.model.messages.map(\.text), ["/rv staged"])
+            source.applyForTesting(.slashCommandResult(turnId: token.clientTurnId, display: "started".clientTextDto, isError: false))
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertNil(source.model.commandResult)
             source.applyForTesting(.textDelta(text: "review result".clientTextDto))
             source.applyForTesting(.turnEnded(
                 outcome: .endTurn,

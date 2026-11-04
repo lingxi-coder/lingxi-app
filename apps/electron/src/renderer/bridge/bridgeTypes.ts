@@ -339,7 +339,7 @@ export interface UseBridge {
   refresh(): Promise<void>;
   newSession(projectPath?: string, purpose?: import('../../shared/localApps').LocalAppSessionPurpose): Promise<import("../../shared/settings").SessionRef | undefined>;
   resumeSession(sessionId: string): Promise<void>;
-  switchConversationSpace(mode: 'chat' | 'code'): Promise<void>;
+  switchConversationSpace(mode: 'chat' | 'code'): Promise<boolean>;
   readonly handoffPending: boolean;
   readonly handoffRetryAvailable: boolean;
   prepareSessionHandoff(): Promise<void>;

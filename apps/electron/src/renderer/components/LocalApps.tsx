@@ -31,7 +31,7 @@ export function LocalAppsTopBar({ onOpenMarket }: { onOpenMarket: () => void }) 
     </button>
   </header>;
 }
-export function LocalApps({ visible, onCreate, canDevelop }: { visible: boolean; onCreate: () => void; canDevelop: boolean }) {
+export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop }: { visible: boolean; onCreate: () => void; onDevelopmentBlocked: () => void; canDevelop: boolean }) {
   const t = useT();
   const { locale } = useI18n();
   const [publication, setPublication] = useState<DesktopLocalApp>();
@@ -68,7 +68,7 @@ export function LocalApps({ visible, onCreate, canDevelop }: { visible: boolean;
   };
   const requireDevelopment = (): boolean => {
     if (canDevelop) return true;
-    setError(tr('local_app_development_requires_code'));
+    onDevelopmentBlocked();
     return false;
   };
   const filtered = apps.filter(app => `${app.name} ${app.summary}`.toLocaleLowerCase(locale).includes(query.toLocaleLowerCase(locale)));

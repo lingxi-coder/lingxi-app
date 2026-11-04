@@ -94,6 +94,7 @@ export function App() {
   const [localAppDraft, setLocalAppDraft] = useState<LocalAppDraft>();
   const [localAppInstallStatus, setLocalAppInstallStatus] = useState('');
   const [localAppNavigationError, setLocalAppNavigationError] = useState('');
+  const clearLocalAppNavigationError = useCallback(() => setLocalAppNavigationError(''), []);
   const localAppNavigation = useRef(0);
   const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
   const [page, setPage] = useState<AppPage>('chat');
@@ -122,18 +123,17 @@ export function App() {
   const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading || localAppBridge.current.projectCreationOpen, []);
   const openLocalAppChat = useCallback((app?: LocalAppEditRequest) => {
     if (sessionNavigationBlocked()) return;
-    const mode = localAppBridge.current.bootstrap?.conversationSpaces.activeMode;
-    if (mode !== 'code') {
-      setLocalAppNavigationError(tr('local_app_development_requires_code'));
-      return;
-    }
     const nonce = ++localAppNavigation.current;
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
     const navigate = async () => {
+      if (localAppBridge.current.bootstrap?.conversationSpaces.activeMode !== 'code') {
+        const switched = await localAppBridge.current.switchConversationSpace('code');
+        if (!switched || localAppNavigation.current !== nonce) return;
+      }
       const current = localAppBridge.current;
       const target = await localAppChatTarget(app, {
-        mode,
+        mode: 'code',
         requiresCodeMessage: tr('local_app_development_requires_code'),
         hasProject: path => Boolean(current.bootstrap?.settings.projects.includes(path)
           || current.bootstrap?.scheduledWorkspace === path),
@@ -584,9 +584,10 @@ export function App() {
           <div className="desktop-workspace-upper">
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
-          {localAppNavigationError && <div role="alert" className="local-app-error">{localAppNavigationError}</div>}
+          <ErrorBanner bridge={{ error: localAppNavigationError, clearError: clearLocalAppNavigationError }} />
+          <ErrorBanner bridge={bridge} />
           {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} zh={zh} drawer={teamsDrawer} /></Suspense>}
-          <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
+          <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} onDevelopmentBlocked={() => setLocalAppNavigationError(tr('local_app_development_requires_code'))} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}
               onOpenChat={showChat}
@@ -599,7 +600,6 @@ export function App() {
           </div>
           {page === 'changes' && <GitChangesPage />}
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
-          <ErrorBanner bridge={bridge} />
           <div className="desktop-chat-layout" data-runtime-inspector-open={bridge.runtimeCenter.inspectorOpen ? 'true' : undefined}>
             <div className="desktop-message-list-view">
                 {/* The transcript keeps all remaining height; Todos live in Summary. */}

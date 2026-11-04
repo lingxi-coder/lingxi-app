@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -11,7 +12,7 @@ import { createServer } from 'vite';
 
 const electronRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixtureRoot = join(electronRoot, 'test', 'fixtures');
-const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
+const electronBinary = createRequire(import.meta.url)('electron');
 const electronDriver = join(fixtureRoot, 'account-gate-electron.mjs');
 
 test('expired account uses an interactive full-screen sign-in and retains local work', async () => {
@@ -38,7 +39,7 @@ test('expired account uses an interactive full-screen sign-in and retains local 
     const fixtureUrl = `http://127.0.0.1:${address.port}/account-gate-fixture.html`;
     const output = [];
     const errors = [];
-    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
+    child = spawn(electronBinary, [electronDriver, fixtureUrl], {
       cwd: electronRoot,
       env: {
         ...process.env,
@@ -54,7 +55,7 @@ test('expired account uses an interactive full-screen sign-in and retains local 
     const result = await new Promise((resolveResult, rejectResult) => {
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
-        rejectResult(new Error(`Electron account gate fixture timed out\n${errors.join('')}`));
+        rejectResult(new Error(`Electron account gate fixture timed out\nstdout: ${output.join('')}\nstderr: ${errors.join('')}`));
       }, 20_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {

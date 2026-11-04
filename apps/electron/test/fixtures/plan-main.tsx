@@ -27,7 +27,7 @@ function Fixture() {
   return <Theme.Provider value={tokens(dark)}><div style={{ display: 'flex', height: '100vh', fontFamily: 'system-ui', color: dark ? '#eee' : '#222', background: dark ? '#17181b' : 'white' }}>
     <main style={{ flex: 1, padding: 40, display: 'flex', flexDirection: 'column', justifyContent: 'end', gap: 24 }}>
       {scenario === 'history' ? <Stage sessionKey="history" liveItems={history} submittedPlans={narrationPlans(history)} />
-        : scenario === 'restored' ? <Stage sessionKey="restored" liveItems={[{ id: 'exit', type: 'tool', tool: 'ExitPlanMode', status: 'done', view: { label: 'Plan' } as never }]} submittedPlans={restored.calls} />
+        : scenario === 'restored' ? <Stage sessionKey="restored" liveItems={[{ id: 'exit', type: 'tool', tool: 'ExitPlanMode', status: 'done', view: toolHeader }]} submittedPlans={restored.calls} />
         : <><p>计划已准备好，可以打开查看完整内容。</p><PlanPreview content={markdown} onOpen={() => setOpen(true)} /></>}
       <textarea placeholder="Describe your task to generate a plan…" style={{ padding: 24, border: '1px solid #8883', borderRadius: 22, background: 'transparent', color: 'inherit' }} />
     </main>

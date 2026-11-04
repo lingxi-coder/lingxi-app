@@ -20,6 +20,9 @@ pub struct Link {
     pub project: Option<std::path::PathBuf>,
     #[arg(long)]
     pub message: Option<String>,
+    /// Conversation mode; required when linking to an existing session
+    #[arg(long, value_parser = ["code", "chat"])]
+    pub mode: Option<String>,
     /// Draft text for a new conversation, carried in the URL fragment
     #[arg(long)]
     pub prompt: Option<String>,
@@ -50,6 +53,9 @@ pub fn link(args: &Link) -> i32 {
     }
     if let Some(message) = &args.message {
         params.insert("message".into(), message.clone());
+    }
+    if let Some(mode) = &args.mode {
+        params.insert("mode".into(), mode.clone());
     }
     if args.prompt.is_some() && args.target != "new" {
         eprintln!("--prompt requires the new destination");
@@ -162,6 +168,13 @@ pub fn prepare_cli(args: &Open, parsed: &mut crate::argv::Argv) -> Result<(), St
     let id = parts.next();
     if !["session", "project", "new"].contains(&kind) {
         return Err("Use `lingxi open <url>` for this desktop destination".into());
+    }
+    // Public CLI sessions are Code-only. Never silently reopen a Chat link as
+    // a Code session; the default desktop handoff retains either mode.
+    if target.params.get("mode").is_some_and(|mode| mode == "chat") {
+        return Err(
+            "--cli supports only code mode; open this link in the desktop app for chat mode".into(),
+        );
     }
     let home = std::env::var_os(branding::CONFIG_DIR_ENV)
         .map(std::path::PathBuf::from)

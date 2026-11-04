@@ -26,7 +26,12 @@ fn generated_link(args: &[&str]) -> String {
 fn link_session_message_roundtrips_in_both_formats() {
     let route = format!("session/{SESSION}");
     let input_message = MESSAGE.to_ascii_uppercase();
-    for format in ["https", "scheme"] {
+    for (format, mode) in [
+        ("https", "code"),
+        ("https", "chat"),
+        ("scheme", "code"),
+        ("scheme", "chat"),
+    ] {
         let url = generated_link(&[
             "link",
             &route,
@@ -34,6 +39,8 @@ fn link_session_message_roundtrips_in_both_formats() {
             "project.local",
             "--message",
             &input_message,
+            "--mode",
+            mode,
             "--format",
             format,
         ]);
@@ -46,6 +53,7 @@ fn link_session_message_roundtrips_in_both_formats() {
         assert_eq!(target.route, route);
         assert_eq!(target.params["workspace"], "project.local");
         assert_eq!(target.params["message"], MESSAGE);
+        assert_eq!(target.params["mode"], mode);
         assert!(
             url.contains(&format!("message={MESSAGE}")),
             "generated UUID must be canonical lowercase"
@@ -57,12 +65,19 @@ fn link_session_message_roundtrips_in_both_formats() {
 #[test]
 fn link_new_roundtrips_unicode_multiline_draft_in_fragment() {
     let draft = "继续检查 👩🏽‍💻\n  保留缩进 & query=? #片段";
-    let url = generated_link(&["link", "new", "--prompt", draft]);
-    let target = parse(&url).unwrap();
-    assert_eq!(target.route, "new");
-    assert_eq!(target.payload.unwrap()["prompt"], draft);
-    assert!(url.contains("#payload="));
-    assert!(!url.split('#').next().unwrap().contains("prompt"));
+    for mode in [None, Some("code"), Some("chat")] {
+        let mut args = vec!["link", "new", "--prompt", draft];
+        if let Some(mode) = mode {
+            args.extend(["--mode", mode]);
+        }
+        let url = generated_link(&args);
+        let target = parse(&url).unwrap();
+        assert_eq!(target.route, "new");
+        assert_eq!(target.params.get("mode").map(String::as_str), mode);
+        assert_eq!(target.payload.unwrap()["prompt"], draft);
+        assert!(url.contains("#payload="));
+        assert!(!url.split('#').next().unwrap().contains("prompt"));
+    }
 }
 
 #[test]
@@ -86,9 +101,29 @@ fn link_project_uses_canonical_hash_without_disclosing_path() {
 #[test]
 fn link_rejects_draft_on_existing_session_and_invalid_message_identity() {
     let route = format!("session/{SESSION}");
-    for args in [
-        vec!["link", route.as_str(), "--prompt", "must stay a draft"],
-        vec!["link", route.as_str(), "--message", "not-a-uuid"],
+    for (args, expected) in [
+        (
+            vec![
+                "link",
+                route.as_str(),
+                "--mode",
+                "code",
+                "--prompt",
+                "must stay a draft",
+            ],
+            "--prompt requires the new destination",
+        ),
+        (
+            vec![
+                "link",
+                route.as_str(),
+                "--mode",
+                "code",
+                "--message",
+                "not-a-uuid",
+            ],
+            "Invalid message identity",
+        ),
     ] {
         let home = tempfile::tempdir().unwrap();
         Command::cargo_bin("lingxi-cli")
@@ -98,8 +133,43 @@ fn link_rejects_draft_on_existing_session_and_invalid_message_identity() {
             .args(args)
             .assert()
             .code(1)
-            .stdout(predicate::eq(""));
+            .stdout(predicate::eq(""))
+            .stderr(predicate::str::contains(expected));
     }
+}
+
+#[test]
+fn link_requires_explicit_session_mode() {
+    let home = tempfile::tempdir().unwrap();
+    let route = format!("session/{SESSION}");
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .timeout(std::time::Duration::from_secs(10))
+        .env(branding::CONFIG_DIR_ENV, home.path())
+        .args(["link", &route])
+        .assert()
+        .code(1)
+        .stdout(predicate::eq(""))
+        .stderr(predicate::eq("Session mode is required\n"));
+}
+
+#[test]
+fn link_rejects_unknown_mode() {
+    let home = tempfile::tempdir().unwrap();
+    let route = format!("session/{SESSION}");
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .timeout(std::time::Duration::from_secs(10))
+        .env(branding::CONFIG_DIR_ENV, home.path())
+        .args(["link", &route, "--mode", "voice"])
+        .assert()
+        .code(1)
+        .stdout(predicate::eq(""))
+        .stderr(
+            predicate::str::contains("invalid")
+                .and(predicate::str::contains("--mode"))
+                .and(predicate::str::contains("voice")),
+        );
 }
 
 #[test]
@@ -112,7 +182,7 @@ fn open_cli_without_terminal_exits_before_runtime_or_draft_submission() {
     let draft_url = generated_link(&["link", "new", "--prompt", "never submit this draft"]);
     for url in [
         draft_url.as_str(),
-        "lingxi://session/11111111-2222-3333-4444-555555555555",
+        "lingxi://session/11111111-2222-3333-4444-555555555555?mode=code",
         "lingxi://settings/general",
         "not a link",
     ] {
@@ -140,9 +210,10 @@ fn malformed_open_urls_fail_validation_without_becoming_prompts() {
     for (url, expected) in [
         ("https://example.com/open/new", "Unsupported origin"),
         (
-            "lingxi://session/x?message=invalid",
+            "lingxi://session/x?mode=code&message=invalid",
             "Invalid message identity",
         ),
+        ("lingxi://session/x", "Session mode is required"),
         ("lingxi://new?api_key=secret", "Invalid parameter"),
     ] {
         let home = tempfile::tempdir().unwrap();
@@ -191,7 +262,14 @@ fn desktop_handoff_from_custom_store_rejects_local_targets_before_os_opener() {
         branding::CONFIG_DIR_ENV
     );
     for (url, expected) in [
-        (format!("lingxi://session/{SESSION}"), guard.as_str()),
+        (
+            format!("lingxi://session/{SESSION}?mode=code"),
+            guard.as_str(),
+        ),
+        (
+            format!("lingxi://session/{SESSION}?mode=chat"),
+            guard.as_str(),
+        ),
         ("lingxi://project/project.local".into(), guard.as_str()),
         (
             "lingxi://new?workspace=project.local".into(),
@@ -200,7 +278,7 @@ fn desktop_handoff_from_custom_store_rejects_local_targets_before_os_opener() {
         // Validation takes precedence over the custom-store guard even when
         // the malformed URL otherwise points at a local session.
         (
-            format!("lingxi://session/{SESSION}?message=invalid"),
+            format!("lingxi://session/{SESSION}?mode=code&message=invalid"),
             "Invalid message identity\n",
         ),
     ] {
@@ -220,6 +298,96 @@ fn desktop_handoff_from_custom_store_rejects_local_targets_before_os_opener() {
             "custom-store refusal must precede OS handoff"
         );
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn desktop_handoff_preserves_session_mode_and_message() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let marker = home.path().join("opened-url");
+    for name in ["open", "xdg-open"] {
+        let opener = bin.path().join(name);
+        std::fs::write(
+            &opener,
+            "#!/bin/sh\nprintf '%s' \"$1\" > \"$HARNESS_TEST_OPENER_MARKER\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&inherited_path)),
+    )
+    .unwrap();
+    let route = format!("session/{SESSION}");
+    for mode in ["code", "chat"] {
+        for format in ["scheme", "https"] {
+            let url = generated_link(&[
+                "link",
+                &route,
+                "--mode",
+                mode,
+                "--message",
+                MESSAGE,
+                "--format",
+                format,
+            ]);
+            Command::cargo_bin("lingxi-cli")
+                .unwrap()
+                .timeout(std::time::Duration::from_secs(10))
+                .env("HOME", home.path())
+                .env(
+                    branding::CONFIG_DIR_ENV,
+                    home.path().join(branding::DOT_DIR),
+                )
+                .env("HARNESS_TEST_OPENER_MARKER", &marker)
+                .env("PATH", &path)
+                .args(["open", &url])
+                .assert()
+                .success();
+            let delivered = std::fs::read_to_string(&marker).unwrap();
+            let target = parse(&delivered).unwrap();
+            assert!(delivered.starts_with("lingxi://"));
+            assert_eq!(target.route, route);
+            assert_eq!(target.params["mode"], mode);
+            assert_eq!(target.params["message"], MESSAGE);
+            std::fs::remove_file(&marker).unwrap();
+        }
+    }
+}
+
+#[test]
+fn cli_rejects_chat_mode_and_mode_less_sessions_before_runtime() {
+    use cli::argv::Argv;
+    use cli::commands::deep_links::{prepare_cli, Open};
+
+    for url in [
+        format!("lingxi://session/{SESSION}?mode=chat"),
+        "lingxi://new?mode=chat".into(),
+        "lingxi://project/project.local?mode=chat".into(),
+    ] {
+        let mut argv = Argv::from_iter(["lingxi-cli", "open", &url, "--cli"]).unwrap();
+        let error = prepare_cli(&Open { url, cli: true }, &mut argv).unwrap_err();
+        assert_eq!(
+            error,
+            "--cli supports only code mode; open this link in the desktop app for chat mode"
+        );
+        assert!(argv.command.is_some());
+        assert!(!argv.deep_link_origin);
+        assert!(argv.resume.is_none());
+        assert!(argv.prefill.is_none());
+    }
+    let url = format!("lingxi://session/{SESSION}");
+    let mut argv = Argv::from_iter(["lingxi-cli", "open", &url, "--cli"]).unwrap();
+    assert_eq!(
+        prepare_cli(&Open { url, cli: true }, &mut argv).unwrap_err(),
+        "Session mode is required"
+    );
+    assert!(argv.command.is_some());
+    assert!(!argv.deep_link_origin);
 }
 
 #[test]
@@ -277,6 +445,7 @@ fn cli_resolution_requires_existing_local_identity_and_keeps_new_text_as_draft()
         BTreeMap::from([
             ("workspace".into(), workspace.clone()),
             ("message".into(), MESSAGE.to_ascii_uppercase()),
+            ("mode".into(), "code".into()),
         ]),
         None,
     );
@@ -308,7 +477,8 @@ fn cli_resolution_requires_existing_local_identity_and_keeps_new_text_as_draft()
                 &route,
                 BTreeMap::from([
                     ("workspace".into(), workspace.clone()),
-                    ("message".into(), MESSAGE.into())
+                    ("message".into(), MESSAGE.into()),
+                    ("mode".into(), "code".into()),
                 ]),
                 None
             )
@@ -332,6 +502,7 @@ fn cli_resolution_requires_existing_local_identity_and_keeps_new_text_as_draft()
             BTreeMap::from([
                 ("workspace".into(), workspace.clone()),
                 ("message".into(), MESSAGE.into()),
+                ("mode".into(), "code".into()),
             ]),
             None,
         )
@@ -339,14 +510,19 @@ fn cli_resolution_requires_existing_local_identity_and_keeps_new_text_as_draft()
         .unwrap();
     }
 
-    assert!(resolve(&route, BTreeMap::new(), None)
-        .0
-        .unwrap_err()
-        .contains("ambiguous"));
+    assert!(resolve(
+        &route,
+        BTreeMap::from([("mode".into(), "code".into())]),
+        None
+    )
+    .0
+    .unwrap_err()
+    .contains("ambiguous"));
     assert!(resolve(
         &route,
         BTreeMap::from([
             ("workspace".into(), workspace.clone()),
+            ("mode".into(), "code".into()),
             (
                 "message".into(),
                 "00000000-0000-0000-0000-000000000099".into()
@@ -359,7 +535,10 @@ fn cli_resolution_requires_existing_local_identity_and_keeps_new_text_as_draft()
     .contains("Message is unavailable"));
     assert!(resolve(
         &route,
-        BTreeMap::from([("workspace".into(), "project.unknown".into())]),
+        BTreeMap::from([
+            ("workspace".into(), "project.unknown".into()),
+            ("mode".into(), "code".into())
+        ]),
         None
     )
     .0

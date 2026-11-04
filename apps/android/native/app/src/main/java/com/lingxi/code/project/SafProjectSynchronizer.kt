@@ -568,16 +568,17 @@ internal class SafProjectSynchronizer(
         )
     }
 
-    private suspend fun recoverExternalTransactions(treeUri: Uri) {
+    internal suspend fun recoverExternalTransactions(treeUri: Uri) {
         val rootId = DocumentsContract.getTreeDocumentId(treeUri)
         val rootUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId)
-        recoverExternalDirectory(treeUri, rootUri, mutableSetOf(), depth = 0)
+        recoverExternalDirectory(treeUri, rootUri, mutableSetOf(), prefix = "", depth = 0)
     }
 
     private suspend fun recoverExternalDirectory(
         treeUri: Uri,
         directoryUri: Uri,
         visitedDocumentIds: MutableSet<String>,
+        prefix: String,
         depth: Int,
     ) {
         currentCoroutineContext().ensureActive()
@@ -595,8 +596,14 @@ internal class SafProjectSynchronizer(
                 treeUri,
                 DocumentsContract.buildDocumentUriUsingTree(treeUri, directory.documentId),
                 visitedDocumentIds,
+                if (prefix.isEmpty()) directory.displayName else "$prefix/${directory.displayName}",
                 depth + 1,
             )
+        }
+
+        fun isOwnerArtifact(originalName: String): Boolean {
+            val relativePath = if (prefix.isEmpty()) originalName else "$prefix/$originalName"
+            return isLocalSchedulerOwnerState(relativePath, configDirName)
         }
 
         val filesByName = children
@@ -607,6 +614,7 @@ internal class SafProjectSynchronizer(
                 null
             } else {
                 syncArtifactOriginalName(child.displayName, SYNC_BACKUP_MARKER)
+                    ?.takeUnless(::isOwnerArtifact)
                     ?.let { originalName -> originalName to child }
             }
         }.groupBy({ it.first }, { it.second })
@@ -633,7 +641,7 @@ internal class SafProjectSynchronizer(
         }
         for (temp in children.filter {
             it.mimeType != DocumentsContract.Document.MIME_TYPE_DIR &&
-                syncArtifactOriginalName(it.displayName, SYNC_TEMP_MARKER) != null
+                syncArtifactOriginalName(it.displayName, SYNC_TEMP_MARKER)?.let { name -> !isOwnerArtifact(name) } == true
         }) {
             currentCoroutineContext().ensureActive()
             documentBackend.deleteDocument(

@@ -330,14 +330,14 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
                 return exit_codes::ARGV_ERROR;
             }
         }
-        if !raw_betas.is_empty() {
-            if parsed.model.as_deref().is_some_and(|model| {
+        if !raw_betas.is_empty()
+            && parsed.model.as_deref().is_some_and(|model| {
                 let (profile, _) = llm_runtime::split_profile_model(model);
                 profile != "anthropic"
-            }) {
-                eprintln!("lingxi-cli: --betas is only supported by the Anthropic provider.");
-                return exit_codes::RUNTIME_ERROR;
-            }
+            })
+        {
+            eprintln!("lingxi-cli: --betas is only supported by the Anthropic provider.");
+            return exit_codes::RUNTIME_ERROR;
         }
     }
 

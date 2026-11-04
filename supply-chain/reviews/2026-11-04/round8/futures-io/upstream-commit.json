@@ -1,0 +1,35 @@
+{
+  "sha": "d9bba94c239daa1175a5bb2958f37a5c72db3f6a",
+  "node_id": "C_kwDOA0hpjdoAKGQ5YmJhOTRjMjM5ZGFhMTE3NWE1YmIyOTU4ZjM3YTVjNzJkYjNmNmE",
+  "url": "https://api.github.com/repos/rust-lang/futures-rs/git/commits/d9bba94c239daa1175a5bb2958f37a5c72db3f6a",
+  "html_url": "https://github.com/rust-lang/futures-rs/commit/d9bba94c239daa1175a5bb2958f37a5c72db3f6a",
+  "author": {
+    "name": "Taiki Endo",
+    "email": "te316e89@gmail.com",
+    "date": "2026-02-15T13:20:54Z"
+  },
+  "committer": {
+    "name": "Taiki Endo",
+    "email": "te316e89@gmail.com",
+    "date": "2026-02-15T13:33:21Z"
+  },
+  "tree": {
+    "sha": "3b895ace16b630e12aabf16f10a0110036e7abd6",
+    "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/3b895ace16b630e12aabf16f10a0110036e7abd6"
+  },
+  "message": "Release 0.3.32",
+  "parents": [
+    {
+      "sha": "151e0b90dec62103df5239f0612f42467994f406",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/commits/151e0b90dec62103df5239f0612f42467994f406",
+      "html_url": "https://github.com/rust-lang/futures-rs/commit/151e0b90dec62103df5239f0612f42467994f406"
+    }
+  ],
+  "verification": {
+    "verified": false,
+    "reason": "unsigned",
+    "signature": null,
+    "payload": null,
+    "verified_at": null
+  }
+}

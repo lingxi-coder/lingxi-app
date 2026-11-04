@@ -1,0 +1,158 @@
+{
+  "head": "c7832033b0644aedf9b4f521685d5f916a8ce56f",
+  "metadata_command": "cargo +1.94.0 metadata --format-version 1 --all-features --locked --frozen",
+  "metadata_sha256": "1b6360023265b8f201a81405272a0a3091fef294dd3e746fd93a4e4f19e7c032",
+  "package_count": 1052,
+  "package_id": "registry+https://github.com/rust-lang/crates.io-index#futures-io@0.3.32",
+  "resolved_features": [
+    "default",
+    "std"
+  ],
+  "resolved_dependencies": [],
+  "reverse_parents_all_targets": [
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#async-compat@0.2.5",
+      "edge": {
+        "name": "futures_io",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-io@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "a1ba85bc55464dcbf728b56d97e119d673f4cf9062be330a9a26f3acf504a590",
+      "selected_file": "src/lib.rs",
+      "selected_file_sha256": "bc7733408d3867efe3eaca40ca630b6d70045ee481c5d6f3d12d5814444f2fd4",
+      "selected_line": 334,
+      "selected_text": "impl<T: tokio::io::AsyncRead> futures_io::AsyncRead for Compat<T> {"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#async-io@2.6.0",
+      "edge": {
+        "name": "futures_io",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-io@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "456b8a8feb6f42d237746d4b3e9a178494627745c3c56c6ea55d92ba50d026fc",
+      "selected_file": "src/lib.rs",
+      "selected_file_sha256": "8fbcbca068a140c7b3c06d9700031e1bad592ad3db6e58da3d41166bcd7afbbe",
+      "selected_line": 82,
+      "selected_text": "use futures_io::{AsyncRead, AsyncWrite};"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#async-signal@0.2.14",
+      "edge": {
+        "name": "futures_io",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-io@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": "cfg(unix)"
+          }
+        ]
+      },
+      "archive_sha256": "52b5aaafa020cf5053a01f2a60e8ff5dccf550f0f77ec54a4e47285ac2bab485",
+      "selected_file": "src/pipe.rs",
+      "selected_file_sha256": "dcfe1888ca77fda33268588254543a565a64480cf467d457cfecf607026db7e6",
+      "selected_line": 7,
+      "selected_text": "use futures_io::AsyncRead;"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#blocking@1.6.2",
+      "edge": {
+        "name": "futures_io",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-io@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "e83f8d02be6967315521be875afa792a316e28d57b5a2d401897e2a7921b7f21",
+      "selected_file": "src/lib.rs",
+      "selected_file_sha256": "2aed54f8651170f9679078fe2581f7cab639e0a7d2ad5cb1a855ff2817e466b6",
+      "selected_line": 105,
+      "selected_text": "use futures_io::{AsyncRead, AsyncSeek, AsyncWrite};"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures@0.3.32",
+      "edge": {
+        "name": "futures_io",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-io@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d",
+      "selected_file": "src/lib.rs",
+      "selected_file_sha256": "a865c0ac6cd7a7323d206b32dc1b4965bb75f1e7e32c8c718e41a7b252507f79",
+      "selected_line": 115,
+      "selected_text": "pub use futures_io::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures-lite@2.6.1",
+      "edge": {
+        "name": "futures_io",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-io@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "f78e10609fe0e0b3f4157ffab1876319b5b0db102a2c60dc4626306dc46b44ad",
+      "selected_file": "src/io.rs",
+      "selected_file_sha256": "fb5301c11bf40b2b9508942043671ec12cb9c0c0e13adbe2283980d0a7cd852e",
+      "selected_line": 21,
+      "selected_text": "pub use futures_io::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures-util@0.3.32",
+      "edge": {
+        "name": "futures_io",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-io@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6",
+      "selected_file": "src/io/mod.rs",
+      "selected_file_sha256": "dcceaea6783fc2591d27b1d15e826c5b3dc83858f4195621d7c70be1486e0a41",
+      "selected_line": 31,
+      "selected_text": "pub use futures_io::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#piper@0.2.5",
+      "edge": {
+        "name": "futures_io",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-io@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "c835479a4443ded371d6c535cbfd8d31ad92c5d23ae9770a61bc155e4992a3c1",
+      "selected_file": "src/lib.rs",
+      "selected_file_sha256": "e624013c9e062d4c9de1ee2ecf19185fa4436dafb34ad6c4913bc8dc2b47b665",
+      "selected_line": 198,
+      "selected_text": "use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};"
+    }
+  ]
+}

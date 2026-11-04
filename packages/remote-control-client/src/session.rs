@@ -2123,10 +2123,7 @@ impl RemoteClient {
         let client = self.clone();
         tokio::spawn(async move {
             let mut cache = client.inner.models.lock().await;
-            client
-                .inner
-                .models_epoch
-                .fetch_add(1, Ordering::AcqRel);
+            client.inner.models_epoch.fetch_add(1, Ordering::AcqRel);
             *cache = None;
             drop(cache);
             if let Ok(value) = client

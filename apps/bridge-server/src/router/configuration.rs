@@ -462,22 +462,26 @@ struct SkillDigestKey {
     len: u64,
 }
 
-fn skill_digest_cache() -> &'static std::sync::Mutex<std::collections::HashMap<SkillDigestKey, String>>
-{
+fn skill_digest_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<SkillDigestKey, String>> {
     static CACHE: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<SkillDigestKey, String>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-fn skill_digest_cache_lock() -> std::sync::MutexGuard<'static, std::collections::HashMap<SkillDigestKey, String>>
-{
+fn skill_digest_cache_lock(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<SkillDigestKey, String>> {
     skill_digest_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn cached_skill_digest(path: &std::path::Path, mtime: std::time::SystemTime, len: u64) -> Option<String> {
+fn cached_skill_digest(
+    path: &std::path::Path,
+    mtime: std::time::SystemTime,
+    len: u64,
+) -> Option<String> {
     let key = SkillDigestKey {
         path: path.to_path_buf(),
         mtime,
@@ -540,7 +544,10 @@ enum SlashCatalogExtra {
     Ready(Utf16JsonProjection),
 }
 
-fn plugin_skill_catalog_entry(row: &PluginSkillCatalogRow, revision: Option<String>) -> Utf16JsonProjection {
+fn plugin_skill_catalog_entry(
+    row: &PluginSkillCatalogRow,
+    revision: Option<String>,
+) -> Utf16JsonProjection {
     source_object(vec![
         ("id".into(), source_with_prefix("command:", &row.name)),
         ("name".into(), row.name.clone()),

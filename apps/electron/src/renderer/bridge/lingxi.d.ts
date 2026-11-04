@@ -201,7 +201,6 @@ export interface LingxiApi {
     notifications?: unknown;
     modelPickerVisibility?: unknown;
     sidebar?: unknown;
-    sidebar?: unknown;
   }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   pickProjectFolder(purpose?: ProjectCreationPurpose): Promise<ProjectFolderSelection | null>;

@@ -1,10 +1,15 @@
 # Shared Web UI acceptance harness
 
-This harness mounts the production `packages/teams/TeamsPanel.tsx` and its actual
-`MessagesPanel`, `TeamMessaging`, IndexedDB storage and CSS. It uses the production
-`apps/web/src/teams/api.ts` adapter, including its real authenticated HTTP requests
-and Firestore SDK listeners. It contains no copied Teams UI, mock command replies,
-synthetic client messages, approval API or executor capability.
+This harness mounts the Web page's own workspace view,
+`apps/web/src/teams/TeamsWorkspaceView.tsx` (what `TeamsPage` renders after sign-in),
+and through it the shared `packages/teams` workspace: `useTeamsWorkspace`,
+`TeamSidebar` (team switcher and the Channels / Direct messages / Bot DMs lists with
+their New channel, New message and Message a Bot dialogs), `TeamConversationView`
+with its `Composer`, `TeamDetailsDrawer` (Members, Invites and Bots tabs, with
+`BotDirectory`), `BotRunCards`, `TeamMessaging`, IndexedDB storage and CSS. It uses the
+production `apps/web/src/teams/api.ts` adapter, including its real authenticated HTTP
+requests and Firestore SDK listeners. It contains no copied Teams UI, mock command
+replies, synthetic client messages, approval API or executor capability.
 
 The page uses synthetic emulator accounts with Firebase Auth in-memory persistence.
 Product message projections still use their real IndexedDB storage. The harness
@@ -12,7 +17,7 @@ never loads the production Web Firebase configuration or a real account.
 
 ## Start
 
-From `/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app`:
+From the repository root, the `lingxi-app` checkout this directory is in:
 
 ```sh
 sh acceptance/teams-t3-complete-20261029/probes/web/start.sh
@@ -88,20 +93,35 @@ Direct `journey.js` execution covers the eight UI gates below. Use
 `run-journey.mjs` for the additional backend final-reply gate; an answer receipt
 alone does not establish successful model completion.
 
+The journey drives the workspace through its roles, labels and `data-*` attributes
+(`nav` "Teams", the `tw-switcher` menu of radio items, `li.tw-row[data-kind]` rows
+under the three section headings, `dialog` "Message a Bot" / "New message", the
+"Message" box, "Send" and "Ask a Bot (@)" controls, the "Team details" drawer and
+its tabs) and the `.team-bot-question` / `.team-bot-run` cards. A change to those
+names in `packages/teams` is a change to this journey.
+
 ## Journey and evidence
 
 The journey fails on missing gates; it never substitutes mocked UI state:
 
-1. Observer reads the real seeded Bot question and has no answer control.
-2. Human sees Bot cards, owner disclosure and Web's Desktop binding guidance.
-3. Original human answers through the shared UI and sees a confirmed receipt.
-4. Human creates a permitted live Bot DM; a UI send creates exactly one real trigger.
-5. Human creates a group with an explicit participating Bot. Plain `@Bot` text
-   leaves that group's backend trigger count at zero.
-6. Human checks the composer Bot target and sends; the command preserves its Bot
-   key, the real trigger count becomes one, and the live question can be answered.
-7. Human creates an offline-host Bot DM. Real `botState` reports `queued` and the
-   production UI renders `Bot · Queued`.
+1. Observer picks the team in the switcher, opens the seeded conversation, reads
+   the real Bot question and has no answer control.
+2. Human sees the three conversation lists, and the team's details drawer: Members
+   (the account is marked), an Invites tab only for an owner or admin, and the Bots
+   tab with Bot cards, owner disclosure and Web's Desktop binding guidance.
+3. Original human opens the seeded conversation, answers through the shared UI and
+   sees a confirmed receipt.
+4. Human starts a chat from the sidebar's Message a Bot dialog with the permitted live
+   Bot; it is listed once under Bot DMs, and a UI send creates exactly one real trigger.
+5. Human creates a group from the New message dialog with an explicit participating
+   Bot; it is listed under Direct messages. Plain `@Bot` text leaves that group's
+   backend trigger count at zero.
+6. Human picks the Bot with the composer's Ask a Bot (@) control, which shows it as a
+   target chip, and sends; the command preserves its Bot key, the real trigger count
+   becomes one, and the live question can be answered.
+7. Human uses Message Bot on the offline Bot's card in the Bots tab. Real `botStates`
+   (the workspace's batch check of the open conversation's runs) reports `queued` and
+   the production UI renders `Bot · Queued`.
 8. Recorded member requests contain no claim/start/finish/poll/wait/question host
    command, and browser runtime errors fail the run.
 9. The runner observes the three successful UI answers (seeded original-human

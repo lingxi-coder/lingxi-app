@@ -56,7 +56,7 @@ export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onO
       ? <BotCreate api={api} models={models} pickFolder={bridge.pickBotFolder} onCancel={() => setView({ kind: 'list' })}
         onCreated={(bot) => { controller.put(bot); setView({ kind: 'detail', botId: bot.botId }); }} />
       : view.kind === 'detail'
-        ? <BotDetail key={view.botId} botId={view.botId} listed={state.bots.find((bot) => bot.botId === view.botId)} api={api} bots={controller}
+        ? <BotDetail key={view.botId} botId={view.botId} listed={state.bots.find((bot) => bot.botId === view.botId)} api={api} bots={controller} guard={bots.guard}
           activity={activityOf(view.botId)} models={models} pickFolder={bridge.pickBotFolder} visible={visible} sessionLoading={bridge.sessionLoading}
           routines={bridge} onNewRoutine={onNewRoutine} onOpenRoutine={onOpenRoutine} deleteRequest={view.deleteRequest}
           onBack={() => setView({ kind: 'list' })}

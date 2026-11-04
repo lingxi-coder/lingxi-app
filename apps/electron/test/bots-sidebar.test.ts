@@ -89,7 +89,7 @@ async function sidebar(options: {
   const bots = { controller: new BotsController(undefined), state };
   return render(React.createElement(BotsSidebar, {
     bots, sessions, bridge: bridgeStub(options.bridge, options.expanded), query: options.query ?? '', chatVisible: options.chatVisible ?? true,
-    onOpenChat: noop, onOpenBot: noop, onCreateBot: noop,
+    onOpenChat: noop, onLeave: (go: () => void) => go(), onOpenBot: noop, onCreateBot: noop,
   }));
 }
 

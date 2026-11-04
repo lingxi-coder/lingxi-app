@@ -9,7 +9,7 @@ import react from '@vitejs/plugin-react';
 import electronBinary from 'electron';
 import { createServer } from 'vite';
 
-test('the Bots mode of the sidebar works in the whole window: rail, Bots and their chats, menus, View menu, saved mode', async () => {
+test('the Bots mode of the sidebar works in the whole window: rail, Bots and their chats, menus, View menu, saved mode, unsaved edits asked about', async () => {
   const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
   const fixtureRoot = join(root, 'test/fixtures');
   const cacheDir = mkdtempSync(join(tmpdir(), 'lingxi-bots-sidebar-vite-'));
@@ -34,7 +34,7 @@ test('the Bots mode of the sidebar works in the whole window: rail, Bots and the
       child.once('exit', code => { clearTimeout(timeout); code === 0 ? resolveResult() : reject(new Error(`Bots sidebar exited ${code}\n${errors}`)); });
     });
     const result = JSON.parse(output.trim().split('\n').at(-1));
-    for (const name of ['railGroups', 'botsMode', 'chatsListed', 'chatOpens', 'pageKeepsMode', 'viewMenu', 'botPageFromTitle', 'menus', 'deleteAsksFirst', 'homeAgain', 'restored', 'unavailable']) assert.equal(result[name], true, name);
+    for (const name of ['railGroups', 'botsMode', 'chatsListed', 'chatOpens', 'pageKeepsMode', 'viewMenu', 'botPageFromTitle', 'menus', 'deleteAsksFirst', 'homeAgain', 'restored', 'dirtyGuard', 'unavailable']) assert.equal(result[name], true, name);
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();

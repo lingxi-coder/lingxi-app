@@ -165,6 +165,96 @@ try {
   assert.equal((await calls()).filter(call => call[0] === 'updateSettings').length, writesBefore, 'bringing the mode back is not a change to save');
   result.restored = true;
 
+  // Edits that are not saved are asked about before anything in the window takes the owner away from the Bot's page: its chats and the
+  // other Bots in the sidebar, the New Bot button, the rail and the View menu. No leaves the page and the edit as they were.
+  const dialog = '[role="dialog"]';
+  const nameField = '.bots-page .bots-fields input';
+  const edit = value => run(`(() => {
+    const field = document.querySelector(${JSON.stringify(nameField)});
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, ${JSON.stringify(value)});
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  const nameIs = value => `document.querySelector(${JSON.stringify(nameField)})?.value === ${JSON.stringify(value)}`;
+  const unsaved = () => run(`/Unsaved changes/.test(document.querySelector('.bots-save-status')?.textContent ?? '')`);
+  const discardAsked = `document.querySelector('${dialog}')?.getAttribute('aria-label') === 'Discard your changes?'`;
+  const answer = async button => { await click(`${dialog} .desktop-dialog-action--${button}`); await wait(`!document.querySelector('${dialog}')`); };
+  const botMenuItem = async (name, label) => {
+    await rightClick(botRow(name));
+    await wait(`document.querySelector('[role="menu"]')`);
+    await run(`Array.from(document.querySelectorAll('[role="menuitem"]')).find(item => item.textContent.trim() === ${JSON.stringify(label)}).click()`);
+  };
+  const openBotPage = async name => {
+    await botMenuItem(name, 'Bot settings');
+    await wait(`document.querySelector('.bots-page h1')?.textContent === ${JSON.stringify(name)} && ${nameIs(name)}`);
+  };
+  const opened = async () => (await calls()).filter(call => call[0] === 'openSession');
+  const askedAndKept = async (why, leave) => {
+    await leave();
+    await wait(discardAsked);
+    assert.deepEqual(await opened(), [], `${why}: nothing is opened while the question is open`);
+    await answer('cancel');
+    assert.equal(await shown('.bots-page'), true, `${why}: still on the Bot's page`);
+    assert.equal(await run(`document.querySelector('.bots-page h1').textContent`), 'Alpha', why);
+    assert.equal(await run(nameIs('Alpha edited')), true, `${why}: the edit is kept`);
+    assert.equal(await unsaved(), true, why);
+    assert.deepEqual(await marked(), ['Bots'], `${why}: the mode is as it was`);
+    assert.deepEqual(await opened(), [], why);
+  };
+
+  await click(botRow('Alpha'));
+  await wait(`document.querySelectorAll('${sidebar} [data-session-id]').length === 5`);
+  await openBotPage('Alpha');
+  assert.equal(await unsaved(), false);
+  await edit('Alpha edited');
+  await wait(nameIs('Alpha edited'));
+  assert.equal(await unsaved(), true);
+  await askedAndKept('a chat of the Bot', () => click(`${sidebar} [data-session-id="a-2"]`));
+  await askedAndKept('the Bot\'s new chat button', () => click(`${sidebar} [aria-label="New chat with Alpha"]`));
+  await askedAndKept('the Bot\'s new chat menu item', () => botMenuItem('Alpha', 'New chat'));
+  await askedAndKept('another Bot', () => botMenuItem('Beta', 'Bot settings'));
+  await askedAndKept('the New Bot button', () => click(`${sidebar} [aria-label="New Bot"]`));
+  await askedAndKept('the rail\'s Home', () => click(rail('Home')));
+  await askedAndKept('the rail\'s Teams', () => click(rail('Teams')));
+  await askedAndKept('the View menu\'s Home', () => menuAction('home'));
+  await askedAndKept('the View menu\'s Teams', () => menuAction('teams'));
+  // The page the owner is on is not left by asking for it again.
+  await botMenuItem('Alpha', 'Bot settings');
+  await delay(150);
+  assert.equal(await run(`Boolean(document.querySelector('${dialog}'))`), false, 'no question for the Bot that is already open');
+  assert.equal(await run(nameIs('Alpha edited')), true);
+
+  // Giving the edit up goes where the owner was going, once, and the Bot's page no longer has the edit.
+  await click(`${sidebar} [data-session-id="a-2"]`);
+  await wait(discardAsked);
+  assert.deepEqual(await opened(), []);
+  await answer('primary');
+  await wait(`document.querySelector('${sidebar} [data-session-id="a-2"][aria-current="page"]')`);
+  assert.equal(await shown('.bots-page'), false);
+  assert.deepEqual(await opened(), [['openSession', 'alpha', 'a-2']]);
+  await click('[aria-label="Open Bot"]');
+  await wait(`document.querySelector('.bots-page h1')?.textContent === 'Alpha' && ${nameIs('Alpha')}`);
+  assert.equal(await unsaved(), false, 'the edit was given up');
+
+  // The same for another Bot, and for the rail: Beta's page, edited, is left for Home.
+  await edit('Alpha edited again');
+  await wait(nameIs('Alpha edited again'));
+  await botMenuItem('Beta', 'Bot settings');
+  await wait(discardAsked);
+  assert.equal(await run(`document.querySelector('.bots-page h1').textContent`), 'Alpha', 'still on the first Bot while the question is open');
+  await answer('primary');
+  await wait(`document.querySelector('.bots-page h1')?.textContent === 'Beta' && ${nameIs('Beta')}`);
+  assert.equal(await unsaved(), false);
+  await edit('Beta edited');
+  await wait(nameIs('Beta edited'));
+  await click(rail('Home'));
+  await wait(discardAsked);
+  assert.deepEqual(await marked(), ['Bots']);
+  await answer('primary');
+  await wait(`!document.querySelector('${sidebar}') && document.querySelector('.sidebar-new-chat')`);
+  assert.deepEqual(await marked(), ['Home']);
+  assert.equal(await run(`Boolean(document.querySelector('${dialog}'))`), false);
+  result.dirtyGuard = true;
+
   // Where Bots cannot be used the saved mode is not brought back, and the sidebar does not mention them.
   await win.loadURL(`${url}?saved=bots&bots=off`);
   await wait(`document.querySelector('${rail('Home')}[data-active]') && document.querySelector('.sidebar-new-chat')`);

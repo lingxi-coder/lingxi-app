@@ -3,6 +3,7 @@ import type { BotUi, BotsApi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
 import { botDraftProblems, botPeers, hasBotDraftProblems } from '../bridge/botForm';
 import { BotEditorController, botEditorDirty, type BotEditorState } from '../bridge/botEditor';
+import type { BotLeaveGuard } from '../bridge/botLeaveGuard';
 import { BotMemoryController } from '../bridge/botMemory';
 import { BotRoutinesController, routineScopeOf } from '../bridge/botRoutines';
 import { BotSkillsController } from '../bridge/botSkills';
@@ -87,12 +88,14 @@ export function BotDeleteTasksNote({ state }: { state: Pick<BotTasksState, 'view
 /** What of the Scheduled page's data a Bot's routines panel reads. */
 export type BotRoutinesBridge = Pick<UseBridge, 'scheduledScopes' | 'manageScheduled'>;
 
-export function BotDetail({ botId, listed, api, bots, activity, models, pickFolder, visible, sessionLoading, routines: routinesBridge, onBack, onOpenChat, onOpenTaskChat, onNewRoutine, onOpenRoutine, onDelete, deleteRequest }: {
+export function BotDetail({ botId, listed, api, bots, guard, activity, models, pickFolder, visible, sessionLoading, routines: routinesBridge, onBack, onOpenChat, onOpenTaskChat, onNewRoutine, onOpenRoutine, onDelete, deleteRequest }: {
   botId: string;
   /** The Bot as the list has it: its name is there to show before the Bot itself has been read. */
   listed: BotUi | undefined;
   api: BotsApi;
   bots: BotsController;
+  /** Asked before the page lets go of edits that are not saved: by its Back button, and by whatever else takes the owner away from it. */
+  guard: BotLeaveGuard;
   activity: BotActivity;
   models: ModelChoices;
   pickFolder(): Promise<{ path: string } | null>;
@@ -120,13 +123,13 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   const [tasks] = useState(() => new BotTasksController(api.tasks, botId));
   const routineScope = routineScopeOf(routinesBridge.scheduledScopes, botId);
   const state = useObservable(editor);
+  const leaving = useObservable(guard);
   const taskState = useObservable(tasks);
   const known = useObservable(bots);
   const remoteAvailability = botRemoteAvailability(useRemoteControl().status);
   const [tab, setTab] = useState<BotTab>('general');
   const [opening, setOpening] = useState<string | undefined>();
   const [openError, setOpenError] = useState('');
-  const [discarding, setDiscarding] = useState(false);
   const [deleting, setDeleting] = useState<{ busy: boolean; error: string } | undefined>(() => deleteRequest === undefined ? undefined : { busy: false, error: '' });
 
   useEffect(() => { void editor.load(); }, [editor]);
@@ -153,6 +156,9 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   const description = state.bot?.description ?? listed?.description ?? '';
   const peers = botPeers(known.bots, botId);
   const dirty = botEditorDirty(state, peers);
+  // The window is told whether there are edits to lose, so that whatever takes the owner away from this page asks first.
+  useEffect(() => { guard.hold(dirty); }, [guard, dirty]);
+  useEffect(() => () => guard.hold(false), [guard]);
   const problems = botDraftProblems(state.draft, peers);
   // The list is read again whenever the page comes back, so it knows more recent activity than the copy opened here.
   const lastActive = listed?.lastActivityAt ?? state.bot?.lastActivityAt;
@@ -173,7 +179,7 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   };
 
   return <div className="bots-detail">
-    <button type="button" className="bots-back" data-variant="quiet" onClick={() => { if (dirty) setDiscarding(true); else onBack(); }}>← {tr('bots_back')}</button>
+    <button type="button" className="bots-back" data-variant="quiet" onClick={() => guard.leave(onBack)}>← {tr('bots_back')}</button>
     <header className="bots-detail-header">
       <div className="bots-detail-identity">
         <span className="bots-avatar" aria-hidden="true"><AgentAvatar agentId={botId} size={40} /></span>
@@ -215,7 +221,7 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
       </> : null}
       <BotSaveBar state={state} dirty={dirty} problems={hasBotDraftProblems(problems)} onSave={() => void editor.save()} onReload={() => void editor.load()} />
     </> : null}
-    {discarding ? <BotConfirm title={tr('bots_discard_title')} icon="info" danger={false} confirmLabel={tr('bots_discard_confirm')} onCancel={() => setDiscarding(false)} onConfirm={onBack}>
+    {leaving.asking ? <BotConfirm title={tr('bots_discard_title')} icon="info" danger={false} confirmLabel={tr('bots_discard_confirm')} onCancel={() => guard.cancel()} onConfirm={() => guard.confirm()}>
       <p>{tr('bots_discard_body')}</p>
     </BotConfirm> : null}
     {deleting ? <BotConfirm title={tr('bots_delete_title', name)} confirmLabel={tr('bots_delete')} busyLabel={tr('bots_deleting')} busy={deleting.busy} disabled={activity !== 'idle'}

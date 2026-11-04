@@ -243,12 +243,16 @@ export function App() {
   }, [botChat, bridge.sessionLoading, page, sidebarMode, setSidebarMode]);
   // Whether the sidebar is hidden. The View menu toggles it here, and the sidebar's own button reports its change here too.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  /** The rail's Home, Bots and Teams: the sidebar lists what the mode is for, and the main area goes to the page that goes with it. */
-  const selectSidebarMode = useCallback((mode: SidebarMode) => {
+  /** Run `go`, which takes the owner off the Bots page. A Bot there with edits that are not saved is asked about first, with the question of its own Back button; `go` waits for the answer. */
+  const leaveBots = useCallback((go: () => void) => { if (page === 'bots') bots.guard.leave(go); else go(); }, [bots.guard, page]);
+  /** The rail's Home, Bots and Teams: the sidebar lists what the mode is for, and the main area goes to the page that goes with it. `after` runs once it does. */
+  const selectSidebarMode = useCallback((mode: SidebarMode, after?: () => void) => {
     if (sessionNavigationBlocked() || (mode === 'bots' && !bots.available)) return;
-    setSidebarMode(mode);
-    openPage(pageForMode(mode, { page, botChat }));
-  }, [bots.available, botChat, openPage, page, sessionNavigationBlocked, setSidebarMode]);
+    const next = pageForMode(mode, { page, botChat });
+    const go = () => { setSidebarMode(mode); openPage(next); after?.(); };
+    // Staying on the page, or coming to it, leaves nothing behind.
+    if (next === page) go(); else leaveBots(go);
+  }, [bots.available, botChat, leaveBots, openPage, page, sessionNavigationBlocked, setSidebarMode]);
   /** Bring the Teams page forward. The sidebar can list Teams while the main area shows the Apps, say; whatever is pressed in it is about Teams. */
   const showTeams = useCallback(() => { if (page !== 'teams') openPage('teams'); }, [openPage, page]);
   /** The team menu of the sidebar: the details panel beside the conversation, on a tab when one is asked for. */
@@ -259,20 +263,28 @@ export function App() {
     setActivityView(false);
   }, [cancelLocalAppNavigation]);
   const botDeleteRequests = useRef(0);
-  const { available: botsAvailable, setView: setBotsView } = bots;
-  /** Show a Bot's page, from the sidebar or from the title of its chat; with `delete`, the page asks whether to delete the Bot. */
+  const { available: botsAvailable, view: botsView, setView: setBotsView, guard: botsGuard } = bots;
+  /**
+   * Show a Bot's page, from the sidebar or from the title of its chat; with `delete`, the page asks whether to delete the Bot.
+   * The page of the Bot being edited keeps its edits. Another Bot's page replaces it, and them, so that asks about them first.
+   */
   const openBot = useCallback((botId: string, intent?: 'delete') => {
     if (sessionNavigationBlocked() || !botsAvailable) return;
-    setBotsView({ kind: 'detail', botId, ...(intent === 'delete' ? { deleteRequest: ++botDeleteRequests.current } : {}) });
-    setSidebarMode('bots');
-    openPage('bots');
-  }, [botsAvailable, openPage, sessionNavigationBlocked, setBotsView, setSidebarMode]);
+    const go = () => {
+      setBotsView({ kind: 'detail', botId, ...(intent === 'delete' ? { deleteRequest: ++botDeleteRequests.current } : {}) });
+      setSidebarMode('bots');
+      openPage('bots');
+    };
+    if (botsView.kind === 'detail' && botsView.botId === botId) go(); else botsGuard.leave(go);
+  }, [botsAvailable, botsGuard, botsView, openPage, sessionNavigationBlocked, setBotsView, setSidebarMode]);
   const createBot = useCallback(() => {
     if (sessionNavigationBlocked() || !botsAvailable) return;
-    setBotsView({ kind: 'create' });
-    setSidebarMode('bots');
-    openPage('bots');
-  }, [botsAvailable, openPage, sessionNavigationBlocked, setBotsView, setSidebarMode]);
+    botsGuard.leave(() => {
+      setBotsView({ kind: 'create' });
+      setSidebarMode('bots');
+      openPage('bots');
+    });
+  }, [botsAvailable, botsGuard, openPage, sessionNavigationBlocked, setBotsView, setSidebarMode]);
   const sessionPickerProject = (botChat ? undefined : bridge.activeSession?.projectPath) ?? bridge.bootstrap?.settings.activeProject ?? (botChat ? undefined : workspace?.path) ?? bridge.bootstrap?.settings.projects[0];
   const closeSessionPicker = useCallback(() => {
     const request = sessionPickerRequest.current;
@@ -367,9 +379,8 @@ export function App() {
       bridge.setRuntimeCenterOverviewOpen(!activityView);
     } else if ((action === 'home' || action === 'bots' || action === 'teams') && !settingsRoute) {
       // Bots is ignored where Bots cannot run: the menu shows that item dimmed.
-      selectSidebarMode(action);
       // A key brought the person to Teams, so the keyboard comes along: to the open conversation in the sidebar, unless it is in Teams already.
-      if (action === 'teams' && !document.activeElement?.closest('.teams-sidebar, .teams-page')) focusTeamsSidebarSoon();
+      selectSidebarMode(action, action === 'teams' ? () => { if (!document.activeElement?.closest('.teams-sidebar, .teams-page')) focusTeamsSidebarSoon(); } : undefined);
     } else if (action === 'toggle-sidebar' && !settingsRoute) {
       setSidebarCollapsed((collapsed) => !collapsed);
     } else if (action === 'team-details' && !settingsRoute) {
@@ -530,7 +541,7 @@ export function App() {
             onSelectSidebarMode={selectSidebarMode}
             modePanel={(mode, search) => mode === 'bots'
               ? <BotsSidebar bots={bots} sessions={botSessions} bridge={bridge} query={search} chatVisible={page === 'chat'}
-                  onOpenChat={showChat} onOpenBot={openBot} onCreateBot={createBot} />
+                  onOpenChat={showChat} onLeave={leaveBots} onOpenBot={openBot} onCreateBot={createBot} />
               : <TeamsSidebar teams={teams} zh={zh} query={search} initialInvite={teamInvite} onInviteHandled={handledTeamInvite}
                   onShowTeams={showTeams} onOpenSettings={openTeamDetails} />}
             sidebarCollapsed={sidebarCollapsed}

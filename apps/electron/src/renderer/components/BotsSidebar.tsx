@@ -45,6 +45,8 @@ export interface BotsSidebarProps {
   chatVisible: boolean;
   /** Show the chat view, once a chat of a Bot is open in it. */
   onOpenChat(): void;
+  /** Run `go`, which opens a chat and so leaves the Bots page. A Bot's page with edits that are not saved asks about them first, and `go` waits for the answer. */
+  onLeave(go: () => void): void;
   /** Show a Bot's page; with `delete`, asking whether to delete it. */
   onOpenBot(botId: string, intent?: 'delete'): void;
   onCreateBot(): void;
@@ -53,7 +55,7 @@ export interface BotsSidebarProps {
 const titleOf = (session: Pick<SessionRowDto, 'title'>) => session.title.trim() || tr('remote_untitled');
 
 /** The sidebar in Bots mode: each Bot, and under the ones that are open, its chats. */
-export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpenChat, onOpenBot, onCreateBot }: BotsSidebarProps) {
+export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpenChat, onLeave, onOpenBot, onCreateBot }: BotsSidebarProps) {
   const t = useT();
   const { controller, state } = bots;
   const { entries } = useObservable(sessions);
@@ -96,15 +98,17 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
     const listed = new Set(state.bots.map((bot) => bot.botId));
     void bridge.updateSidebarPreferences({ expandedBots: [...next].filter((id) => listed.size === 0 || listed.has(id)) });
   };
-  const openChat = async (botId: string, sessionId?: string) => {
+  const openChat = (botId: string, sessionId?: string) => {
     if (bridge.sessionLoading || opening !== undefined) return;
-    const key = `${botId}\0${sessionId ?? ''}`;
-    setOpening(key);
-    setProblem(undefined);
-    const outcome = await startBotChat(() => bridge.openBotSession(botId, sessionId));
-    setOpening((current) => current === key ? undefined : current);
-    if (outcome.ok) onOpenChat();
-    else setProblem(outcome.message);
+    onLeave(async () => {
+      const key = `${botId}\0${sessionId ?? ''}`;
+      setOpening(key);
+      setProblem(undefined);
+      const outcome = await startBotChat(() => bridge.openBotSession(botId, sessionId));
+      setOpening((current) => current === key ? undefined : current);
+      if (outcome.ok) onOpenChat();
+      else setProblem(outcome.message);
+    });
   };
   const closeMenu = useCallback(() => setMenu(null), []);
   const openMenu = (target: MenuTarget, at: Point, opener: HTMLElement, trigger?: HTMLElement) => setMenu({ target, at, opener, trigger });

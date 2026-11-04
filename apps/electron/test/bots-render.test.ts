@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { BotMemoryEntryUi, BotSkillUi, BotUi, BotsApi } from '../src/shared/bots';
 import { BotMemoryController } from '../src/renderer/bridge/botMemory';
 import { BotSkillsController } from '../src/renderer/bridge/botSkills';
+import { BotLeaveGuard } from '../src/renderer/bridge/botLeaveGuard';
 import { BotsController, type BotsState } from '../src/renderer/bridge/botsStore';
 import { botDraftProblems, emptyBotDraft, permissionModeNeedsConfirmation } from '../src/renderer/bridge/botForm';
 import { emptyDesktopState } from '../src/renderer/bridge/desktopState';
@@ -334,7 +335,7 @@ async function pageBots(view: UseBots['view'], bots: BotUi[]): Promise<UseBots> 
   const api: Pick<BotsApi, 'availability' | 'list'> = { availability: async () => ({ available: true }), list: async () => bots };
   const controller = new BotsController(api);
   await controller.start();
-  return { controller, state: controller.getSnapshot(), available: true, view, setView: noop };
+  return { controller, state: controller.getSnapshot(), available: true, view, setView: noop, guard: new BotLeaveGuard(noop) };
 }
 
 test('the page shows which Bots are working from the chats the host is running', async () => {
@@ -381,6 +382,29 @@ test('a request to delete the Bot comes up as the question whether to, and nothi
 
   const plain = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha' })]);
   assert.ok(!render(React.createElement(Bots, { visible: true, bots: plain, api: {} as BotsApi, bridge, onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop })).includes('role="dialog"'));
+});
+
+test('a way out of unsaved edits comes up as the question whether to give them up, and goes nowhere until it is answered', async () => {
+  const bots = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha' })]);
+  const page = () => render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
+  const gone: string[] = [];
+  assert.ok(!page().includes('role="dialog"'), 'nothing is asked while no one is leaving');
+
+  bots.guard.leave(() => { gone.push('with nothing to lose'); });
+  assert.deepEqual(gone, ['with nothing to lose']);
+  assert.ok(!page().includes('role="dialog"'), 'a way out with no edits to lose is simply taken');
+
+  bots.guard.hold(true);
+  bots.guard.leave(() => { gone.push('with edits'); });
+  const html = page();
+  assert.match(html, /role="dialog"[^>]*aria-label="Discard your changes\?"/);
+  assert.match(html, /This Bot has changes that are not saved\./);
+  assert.match(html, /desktop-dialog-action--primary">Discard changes</, 'to be confirmed, with the words of giving the edits up');
+  assert.deepEqual(gone, ['with nothing to lose'], 'the owner has not answered');
+
+  bots.guard.cancel();
+  assert.ok(!page().includes('role="dialog"'), 'answered no: the question is gone and the page stays');
+  assert.deepEqual(gone, ['with nothing to lose']);
 });
 
 test('while another chat is opening the Bot\'s chats cannot be started', async () => {

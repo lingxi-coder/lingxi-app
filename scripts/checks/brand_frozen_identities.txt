@@ -27,7 +27,6 @@ apps/web/public/api-index.json:.lingxi-plugin/marketplace.json  # Generated Harn
 apps/web/public/api-index.json:LINGXI_ENABLE_TOOL_SEARCH  # Generated Harness SDK summary of the supported tool-search environment ABI; keep the upstream public contract exact.
 
 # R30 reviewed identities: Native reference fixtures and current product/host APIs.
-apps/cli/host/src/headless_oauth.rs:/home/claude/.claude/remote/.oauth_token  # Native remote OAuth handoff file identity, constructed from y/YRe in pinned 2.1.295 at byte 188546247; changing it breaks the remote producer contract.
 apps/cli/host/tests/cli_headless_session.rs:LINGXI_CONFIG_DIR  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
 apps/cli/host/tests/commands_native_cli.rs:LINGXI_CONFIG_DIR  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
 apps/cli/host/tests/commands_native_cli.rs:LINGXI_API_BASE_URL  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
@@ -88,7 +87,6 @@ apps/electron/src/renderer/components/CreateProjectDialog.tsx:@line:const window
 apps/electron/src/renderer/components/DesktopUpdateReminder.tsx:@line:const api = window.lingxi?.desktopUpdates;  # Exact Electron preload bridge use; producer src/preload/index.ts exposes lingxi.
 apps/electron/src/renderer/components/DesktopUpdateReminder.tsx:@line:return <DesktopUpdateNotice state={state} onDownload={() => window.lingxi!.desktopUpdates!.download()} onLater={() => window.lingxi!.desktopUpdates!.remindLater()} />;  # Exact Electron preload bridge use; producer src/preload/index.ts exposes lingxi.
 apps/electron/test/fixtures/changes-navigation-main.tsx:@line:(window as any).lingxi = {  # Exact Electron preload bridge use; producer src/preload/index.ts exposes lingxi.
-apps/electron/test/fixtures/deep-link-preview-main.tsx:@line:window.lingxi = { terminal: {  # Exact Electron preload bridge use; producer src/preload/index.ts exposes lingxi.
 apps/electron/test/fixtures/desktop-updates-main.tsx:@line:(window as any).lingxi = { desktopUpdates: api };  # Exact Electron preload bridge use; producer src/preload/index.ts exposes lingxi.
 apps/electron/test/fixtures/project-creation-main.tsx:@line:(window as any).lingxi = {  # Exact Electron preload bridge use; producer src/preload/index.ts exposes lingxi.
 apps/electron/test/fixtures/runtime-lifecycle-main.tsx:@line:(window as any).lingxi = {  # Exact Electron preload bridge use; producer src/preload/index.ts exposes lingxi.
@@ -173,7 +171,6 @@ apps/ios/native/Sources/Projects/ProjectStore.swift:@line:if environment["LINGXI
 apps/ios/native/Sources/Projects/WorkspaceDirectoryRepository.swift:@line:let staging = target.deletingLastPathComponent().appendingPathComponent(".lingxi-copy-" + UUID().uuidString)  # Copy staging identity verified by WorkspaceFilesTests.swift.
 apps/ios/native/Tests/ProjectScopedPreferencesTests.swift:@line[2]:environment: ["LINGXI_UI_TESTING": "1"], appDefaults: appDefaults, uiTestSuiteName: testSuite  # Fixture supplies UI isolation input consumed by ProjectScopedPreferences.swift.
 apps/ios/native/Tests/ProjectStoreTests.swift:@line[2]:managedRoot: managedRoot.path, environment: ["LINGXI_UI_TESTING": "1"]  # Fixture supplies UI isolation input consumed by ProjectStore.swift.
-apps/ios/native/Tests/WorkspaceDirectoryRepositoryTests.swift:@line:workspace: LXISHGuestPaths.workspaceRoot, projects: LXISHGuestPaths.workspace("projects"), settings: ".lingxi")  # Fixture tests native guest settings path corresponding to branding DOT_DIR.
 apps/ios/native/Tests/WorkspaceFilesTests.swift:@line:XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: external.path).contains { $0.hasPrefix(".lingxi-copy-") })  # Regression verifies staging cleanup prefix used by WorkspaceDirectoryRepository.swift.
 apps/ios/native/UITests/DeepLinkDeliveryUITests.swift:@line:app.launchEnvironment["LINGXI_UI_TESTING"] = "1"  # UI testing input and external URL driver producer in scripts/run-deeplink-delivery-ui.py.
 apps/ios/native/UITests/DeepLinkDeliveryUITests.swift:@line:try XCTSkipUnless(ProcessInfo.processInfo.environment["LINGXI_EXTERNAL_URL_DRIVER"] == "1",  # UI testing input and external URL driver producer in scripts/run-deeplink-delivery-ui.py.
@@ -190,4 +187,3 @@ plugins/desktop-mods/replay-theater/.lingxi-plugin/plugin.json:@line:"displayNam
 plugins/desktop-mods/test/coexistence.test.mjs:@line:const manifest = JSON.parse(await readFile(new URL('.lingxi-plugin/plugin.json', path)));  # Fixture loads actual marketplace and plugin manifest paths using branding PLUGIN_MANIFEST_DIR.
 plugins/desktop-mods/test/coexistence.test.mjs:@line:const marketplace = JSON.parse(await readFile(new URL('.lingxi-plugin/marketplace.json', root)));  # Fixture loads actual marketplace and plugin manifest paths using branding PLUGIN_MANIFEST_DIR.
 plugins/desktop-mods/token-weather/.lingxi-plugin/plugin.json:@line:"displayName": "Token Weather (LingXi)"  # First-party plugin displayName read by plugin catalog.
-apps/ios/native/Tests/ProjectRepositoryTests.swift:@line:projectRoot: project.record.directory, additionalDirectories: [guest], transcriptPath: "/home/lingxi/.lingxi/projects/b/session-one.jsonl"))  # SessionWorkspaceState fixture records the actual mobile guest transcript path and verifies cold project restore.

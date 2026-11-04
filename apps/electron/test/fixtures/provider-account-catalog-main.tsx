@@ -1,3 +1,4 @@
+import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
 import { createRoot } from 'react-dom/client';
 import { useBridge } from '../../src/renderer/bridge/useBridge';
 import { fixtureAccountSnapshot } from './provider-accounts-mock';
@@ -22,7 +23,7 @@ const until = async (ready: () => boolean) => {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
 };
-(window as any).lingxi = {
+(window as any)[DESKTOP_BRIDGE_GLOBAL] = {
   platform: 'darwin', isElectron: true,
   onEvent: (listener: (envelope: any) => void) => { listeners.add(listener); return () => listeners.delete(listener); },
   onConnectionStateChanged: () => () => {}, onPermission: () => () => {}, onComputerAccess: () => () => {},

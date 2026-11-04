@@ -1,3 +1,4 @@
+import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
 import { fixtureAccountSnapshot, providerAccountsMock } from './provider-accounts-mock';
 import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import React, { useState } from 'react';
@@ -60,7 +61,7 @@ const bridge = {
   scheduledContext: async () => ({ models: [], currentModel: null, sessions: [] }),
   configurationOperations: {}, refreshMcpServers: noop, refreshSkills: noop,
 } as any;
-window.lingxi = { providerAccounts: accountApi, terminal: {
+window[DESKTOP_BRIDGE_GLOBAL] = { providerAccounts: accountApi, terminal: {
   list: async () => records.slice(),
   create: async scope => { const tab = { id: 'term-1', scope, title: 'Shell', status: 'running' as const, exitCode: null, output: '', sequence: 0 }; records.push(tab); return tab; },
   input: async (_id, data) => { inputs.push(data); }, resize: noop, acknowledge: noop, close: noop, onEvent: () => () => {},

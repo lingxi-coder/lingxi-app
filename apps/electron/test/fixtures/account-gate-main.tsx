@@ -1,3 +1,4 @@
+import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AccountGate } from '../../src/renderer/components/AccountGate';
@@ -32,7 +33,7 @@ const account: AccountApi = {
     return state;
   },
 };
-(window as any).lingxi = { account };
+(window as any)[DESKTOP_BRIDGE_GLOBAL] = { account };
 (window as any).accountGateFixture = fixture;
 // A still-mounted settings dialog must not steal the sign-in screen's Tab key.
 document.addEventListener('keydown', event => {

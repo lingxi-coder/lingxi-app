@@ -1,3 +1,4 @@
+import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
 import { createRoot } from 'react-dom/client';
 import { App } from '../../src/renderer/App';
 import { fixtureAccountSnapshot } from './provider-accounts-mock';
@@ -42,7 +43,7 @@ const runtime = (session: { projectPath: string; sessionId: string }, botId?: st
   ...session, ...(botId ? { botId } : {}), connection: { status: 'connected' }, turnActive: false, pendingInteractions: 0, pendingAskUserQuestions: 0,
 });
 
-(window as any).lingxi = {
+(window as any)[DESKTOP_BRIDGE_GLOBAL] = {
   platform: 'darwin', isElectron: true,
   onApplicationMenu: (listener: (action: string) => void) => {
     (window as any).applicationMenuAction = listener;

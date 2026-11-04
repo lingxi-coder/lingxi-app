@@ -1,10 +1,11 @@
+import { DESKTOP_BRIDGE_GLOBAL } from '../../shared/desktopBridge';
 import { createContext, useEffect, useState } from 'react';
 import type { AccountApi, AccountState } from '../../shared/account';
 import { tr } from '../i18n/locale';
 
 export const AccountSignInContext = createContext<(() => void) | null>(null);
 
-export function useAccountState(api: AccountApi | undefined = typeof window === 'undefined' ? undefined : window.lingxi?.account) {
+export function useAccountState(api: AccountApi | undefined = typeof window === 'undefined' ? undefined : window[DESKTOP_BRIDGE_GLOBAL]?.account) {
   const [state, setState] = useState<AccountState | null>(null);
   const [readError, setReadError] = useState('');
   useEffect(() => {

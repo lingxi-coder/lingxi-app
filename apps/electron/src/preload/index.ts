@@ -1,3 +1,4 @@
+import { DESKTOP_BRIDGE_GLOBAL } from '../shared/desktopBridge.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import type { ProviderAccountsApi } from '../shared/providerAccounts.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
@@ -661,4 +662,4 @@ const api: LingxiApi = {
   },
 };
 
-contextBridge.exposeInMainWorld('lingxi', api);
+contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, api);

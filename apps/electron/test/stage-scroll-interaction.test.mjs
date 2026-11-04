@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -11,7 +12,7 @@ import { createServer } from 'vite';
 
 const electronRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixtureRoot = join(electronRoot, 'test', 'fixtures');
-const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
+const electronBinary = createRequire(import.meta.url)('electron');
 const electronDriver = join(fixtureRoot, 'stage-scroll-electron.mjs');
 
 test('Stage keeps the actual bottom stable during streaming and respects manual scrolling', async () => {
@@ -38,7 +39,7 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
     const fixtureUrl = `http://127.0.0.1:${address.port}/stage-scroll-fixture.html`;
     const output = [];
     const errors = [];
-    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
+    child = spawn(electronBinary, [electronDriver, fixtureUrl], {
       cwd: electronRoot,
       env: {
         ...process.env,
@@ -81,13 +82,25 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
     for (const layout of result.thinkingLayouts) {
       assert.deepEqual(layout, result.thinkingLayouts[0], 'thinking visibility must preserve tail height and scroll position');
     }
-    for (const layout of result.activityLayouts) {
-      assert.deepEqual(layout, result.activityLayouts[0], 'tool results, grouped tools and streaming reasoning must preserve activity layout');
-      assert.equal(layout.toolHeight, 28, 'ordinary tools retain their compact row height');
+    const activityBaseline = result.activityLayouts[0];
+    for (const [index, layout] of result.activityLayouts.entries()) {
+      if (index === 4) {
+        // The collapsed group displays its active call below the summary.
+        assert.equal(layout.toolHeight, 62, 'a running grouped call keeps its summary and active row visible');
+        assert.equal(layout.scrollHeight - activityBaseline.scrollHeight, 34, 'only the active grouped row adds height');
+        assert.ok(Math.abs(layout.scrollTop - activityBaseline.scrollTop - 34) <= 1, 'the tail follows the active row without a jump');
+      } else {
+        assert.deepEqual(layout, activityBaseline, 'completed results and streamed reasoning preserve activity layout');
+        assert.equal(layout.toolHeight, 28, 'ordinary and completed tool groups retain their compact row height');
+      }
       assert.equal(layout.slotHeight, 40, 'the persistent thinking slot retains its reserved height');
       assert.equal(layout.toolGap, 12, 'the message wrapper must retain compact activity spacing');
       assert.equal(layout.thinkingGap, 12, 'hidden and visible thinking slots have the same activity spacing');
     }
+    assert.equal(result.activityGroups[4].expanded, 'false', 'the active tool group remains collapsed');
+    assert.match(result.activityGroups[4].state, /1 running/, 'the group reports its running call');
+    assert.equal(result.activityGroups[4].visibleCalls, 1, 'the running call is visible even while its group is collapsed');
+    assert.deepEqual(result.activityGroups[5], { expanded: 'false', state: '', visibleCalls: 0 }, 'the completed group returns to one collapsed summary');
 
     for (const offset of [0, 4]) {
       const baseline = result.deliveryLayouts[offset];

@@ -22,7 +22,7 @@ async function main() {
     await settle();
     const metrics = `(() => { const node = document.querySelector('.desktop-stage'); return { top: node.scrollTop, gap: node.scrollHeight - node.clientHeight - node.scrollTop, ancestor: document.querySelector('#scroll-ancestor').scrollTop }; })()`;
     const initial = await run(metrics);
-    assert.equal(await run(`getComputedStyle(document.querySelectorAll('.transcript-row')[1]).marginTop`), '24px', 'messages have comfortable reading space');
+    assert.equal(await run(`getComputedStyle(document.querySelectorAll('.transcript-row')[1]).marginTop`), '16px', 'consecutive assistant messages use the compact spacing');
     const result = { initialGap: initial.gap, ancestorScroll: initial.ancestor };
     await run(`(() => { const node = document.querySelector('.desktop-stage'); node.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true})); node.scrollTop = node.scrollHeight - node.clientHeight - 40; })()`);
     await settle();
@@ -55,6 +55,7 @@ async function main() {
       })()`));
     }
     result.activityLayouts = [];
+    result.activityGroups = [];
     for (const phase of ['running', 'empty-result', 'result', 'reasoning', 'next-tool', 'group-result', 'long-reasoning']) {
       await run(`window.stageScrollFixture.activity(${JSON.stringify(phase)})`);
       await settle();
@@ -67,6 +68,16 @@ async function main() {
           slotHeight: slot.getBoundingClientRect().height, toolHeight: tool.getBoundingClientRect().height,
           toolGap: tool.getBoundingClientRect().top - previous.getBoundingClientRect().bottom,
           thinkingGap: slot.getBoundingClientRect().top - tool.getBoundingClientRect().bottom };
+      })()`));
+      result.activityGroups.push(await run(`(() => {
+        const group = document.querySelector('[data-tool-group-id]');
+        if (!group) return null;
+        return {
+          expanded: group.querySelector('.tool-group-trigger')?.getAttribute('aria-expanded'),
+          state: group.querySelector('.tool-group-state')?.textContent ?? '',
+          visibleCalls: [...group.querySelectorAll('.tool-group-calls .transcript-tool-row')]
+            .filter(row => row.getBoundingClientRect().height > 0).length,
+        };
       })()`));
     }
     await run('window.stageScrollFixture.longList()');
@@ -85,7 +96,7 @@ async function main() {
       for (const status of ['pending', undefined, 'failed', undefined]) {
         await run(`window.stageScrollFixture.delivery(${JSON.stringify(status)}, ${long})`);
         await settle();
-        assert.equal(await run(`getComputedStyle(document.querySelector('[data-message-role="user"] + .transcript-row')).marginTop`), '32px', 'user turns retain a clear boundary');
+        assert.equal(await run(`getComputedStyle(document.querySelector('[data-message-role="user"] + .transcript-row')).marginTop`), '24px', 'user turns retain a clear boundary');
         const alignment = await run(`(() => {
           const bubble = document.querySelector('.user-message-bubble').getBoundingClientRect();
           const row = document.querySelector('.transcript-user-message').getBoundingClientRect();

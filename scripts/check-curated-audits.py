@@ -26,6 +26,12 @@ SNAPSHOT_HASHES = {
     "isrg.toml": "b1da7a859c732a6f59d682db4020087a0666bee7e71736613712f8968f39dd48",
     "zcash.toml": "ae9c4047791a18b1bac77ef8c8d96a9ae2ef020670d39542d99641ad1aab6bf4",
 }
+KNOWN_GIT_FORKS = {
+    "askama_derive", "askama_parser", "git2", "libgit2-sys", "libssh2-sys",
+    "icu_collator", "lingxi-hyper", "lingxi-hyper-rustls", "lingxi-hyper-util",
+    "lingxi-reqwest", "mbedtls-sys", "nix", "platform-pty", "syntect",
+    "webrtc", "xcap",
+}
 RECORD_COUNTS = {"embark-studios.toml": 3, "isrg.toml": 6, "zcash.toml": 4}
 CURATED_IMPORTS = {
     "curated-embark-studios": "embark-studios.toml",
@@ -160,7 +166,7 @@ def safe_criteria(value: object) -> bool:
     return value == "safe-to-deploy" or value == ["safe-to-deploy"]
 
 
-def validate_config(root: Path, anchors: Anchors) -> None:
+def validate_config(root: Path, anchors: Anchors) -> dict:
     require(re.fullmatch(r"[0-9a-f]{40}", anchors.commit) is not None, "snapshot commit must be a full Git SHA")
     config = tomllib.loads(read_file(root / "supply-chain/config.toml").decode("utf-8"))
     require(set(config) <= {"cargo-vet", "imports", "policy", "default-criteria"}, "unsupported config section or exemption")
@@ -186,9 +192,10 @@ def validate_config(root: Path, anchors: Anchors) -> None:
         if "dependency-criteria" in policy:
             criteria = policy["dependency-criteria"]
             require(isinstance(criteria, dict) and all(safe_criteria(v) for v in criteria.values()), f"{name}: dependency criteria cannot be lowered")
+    return policies
 
 
-def validate_lock(root: Path, snapshots: dict[str, Counter]) -> None:
+def validate_lock(root: Path, snapshots: dict[str, Counter], policies: dict) -> None:
     lock = tomllib.loads(read_file(root / "supply-chain/imports.lock").decode("utf-8"))
     peers = lock.get("audits", {})
     require(isinstance(peers, dict), "imports.lock audits must be a table")
@@ -197,6 +204,25 @@ def validate_lock(root: Path, snapshots: dict[str, Counter]) -> None:
     packages = cargo_lock.get("package", [])
     require(isinstance(packages, list), "Cargo.lock package entries must be an array")
     package_names = {package.get("name") for package in packages if isinstance(package, dict)}
+    # These are known third-party forks, not an attempt to classify all future
+    # Git dependencies. Registry versions with the same names are unaffected.
+    for package in packages:
+        if not isinstance(package, dict) or package.get("name") not in KNOWN_GIT_FORKS:
+            continue
+        name = package["name"]
+        source = package.get("source", "")
+        require(isinstance(source, str), f"{name}: invalid Cargo.lock source")
+        if not source.startswith("git+"):
+            continue
+        policy_key = name
+        if name == "nix":
+            version = package.get("version")
+            _repository, separator, revision = source.rpartition("#")
+            require(isinstance(version, str) and bool(version), "nix: missing locked version")
+            require(separator == "#" and re.fullmatch(r"[0-9a-f]{40}", revision) is not None, "nix: expected a full Git commit in Cargo.lock")
+            policy_key = f"nix:{version}@git:{revision}"
+        policy = policies.get(policy_key, {})
+        require(policy.get("audit-as-crates-io") is True, f"{name}: missing audit-as-crates-io policy {policy_key}")
     for alias, name in CURATED_IMPORTS.items():
         peer = name.removesuffix(".toml")
         section = peers.get(alias, {})
@@ -220,8 +246,8 @@ def validate_lock(root: Path, snapshots: dict[str, Counter]) -> None:
 
 def validate(root: Path, anchors: Anchors = DEFAULT_ANCHORS) -> None:
     snapshots = validate_snapshots(root, anchors)
-    validate_config(root, anchors)
-    validate_lock(root, snapshots)
+    policies = validate_config(root, anchors)
+    validate_lock(root, snapshots, policies)
 
 
 def main() -> int:

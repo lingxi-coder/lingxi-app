@@ -146,6 +146,60 @@ class CuratedAuditRejectionTests(unittest.TestCase):
         self.lock.write_text('[[audits.google.wildcard-audits.example]]\ncriteria = "safe-to-deploy"\nuser-id = 42\n')
         self.run_check()
 
+    def test_each_known_git_fork_requires_its_name_policy(self):
+        names = (
+            "askama_derive", "askama_parser", "git2", "libgit2-sys", "libssh2-sys",
+            "icu_collator", "lingxi-hyper", "lingxi-hyper-rustls", "lingxi-hyper-util",
+            "lingxi-reqwest", "mbedtls-sys", "platform-pty", "syntect", "webrtc", "xcap",
+        )
+        original = self.config.read_text()
+        for name in names:
+            with self.subTest(package=name):
+                revision = "a" * 40
+                (self.root / "Cargo.lock").write_text(
+                    f'version = 4\n[[package]]\nname = "{name}"\nversion = "1.0.0"\n'
+                    f'source = "git+https://example.com/fork?rev={revision}#{revision}"\n'
+                )
+                self.config.write_text(original)
+                with self.assertRaisesRegex(checker.ValidationError, "missing audit-as-crates-io policy"):
+                    self.run_check()
+                self.config.write_text(original + f'\n[policy."{name}"]\naudit-as-crates-io = true\n')
+                self.run_check()
+
+    def test_nix_policy_must_match_locked_version_and_full_git_revision(self):
+        old_revision, new_revision = "a" * 40, "b" * 40
+        (self.root / "Cargo.lock").write_text(
+            'version = 4\n[[package]]\nname = "nix"\nversion = "0.31.3"\n'
+            f'source = "git+https://example.com/fork?rev={new_revision}#{new_revision}"\n'
+        )
+        original = self.config.read_text()
+        stale = f'\n[policy."nix:0.31.3@git:{old_revision}"]\naudit-as-crates-io = true\n'
+        self.config.write_text(original + stale + '\n[policy.nix]\naudit-as-crates-io = true\n')
+        with self.assertRaisesRegex(checker.ValidationError, "missing audit-as-crates-io policy"):
+            self.run_check()
+        current = f'\n[policy."nix:0.31.3@git:{new_revision}"]\naudit-as-crates-io = true\n'
+        self.config.write_text(original + stale + current)
+        self.run_check()
+        locked = self.root / "Cargo.lock"
+        locked.write_text(locked.read_text().replace('version = "0.31.3"', 'version = "0.31.4"'))
+        with self.assertRaisesRegex(checker.ValidationError, "missing audit-as-crates-io policy"):
+            self.run_check()
+        (self.root / "Cargo.lock").write_text(
+            'version = 4\n[[package]]\nname = "nix"\nversion = "0.31.3"\n'
+            'source = "git+https://example.com/fork#short"\n'
+        )
+        with self.assertRaisesRegex(checker.ValidationError, "expected a full Git commit"):
+            self.run_check()
+
+    def test_registry_versions_do_not_require_git_fork_policies(self):
+        (self.root / "Cargo.lock").write_text(
+            'version = 4\n[[package]]\nname = "nix"\nversion = "0.29.0"\n'
+            'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+            '[[package]]\nname = "xcap"\nversion = "0.5.2"\n'
+            'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+        )
+        self.run_check()
+
     def test_exemptions_and_weakened_policy_are_rejected(self):
         original = self.config.read_text()
         for extra in ('\n[exemptions.hmac]\nversion = "0.12.1"\ncriteria = "safe-to-deploy"\n', '\n[policy.hmac]\ncriteria = []\n'):

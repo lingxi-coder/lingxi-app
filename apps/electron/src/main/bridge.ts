@@ -2678,13 +2678,19 @@ export class SessionRuntime {
       // A living peer is never replaced for a transport-only disconnect.
       const adoptedPid = this.adoptedPid;
       if (adoptedPid && this.adoptedProcessOwned && this.desiredRunning) {
-        const timer = setTimeout(() => {
-          if (this.disposed || generation !== this.generation || client !== this.client
-            || adoptedPid !== this.adoptedPid || !this.adoptedProcessOwned || this.processIsAlive(adoptedPid)) return;
+        const checkExit = (): void => {
+          if (this.disposed || !this.desiredRunning || generation !== this.generation || client !== this.client
+            || adoptedPid !== this.adoptedPid || !this.adoptedProcessOwned) return;
+          if (this.processIsAlive(adoptedPid)) {
+            const timer = setTimeout(checkExit, 1000);
+            timer.unref();
+            return;
+          }
           this.adoptedPid = null;
           this.adoptedProcessOwned = false;
           this.managedProcessExited(true);
-        }, 250);
+        };
+        const timer = setTimeout(checkExit, 250);
         timer.unref();
       }
     });

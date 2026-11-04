@@ -110,3 +110,22 @@ test('recovery waits for owned history and concurrent start joins it', async (t)
   assert.deepEqual(f.calls, ['stop', 'start', 'restore']);
   await f.runtime.dispose();
 });
+
+test('an owned detached process can exit after its transport closes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  let alive = true;
+  const client = Object.assign(new EventEmitter(), { sendCommand(): void {} });
+  Object.assign(f.internal, { child: null, adoptedPid: 4242, adoptedProcessOwned: true, processIsAlive: () => alive });
+  f.internal.wireClient(client, f.internal.generation);
+  client.emit('close', 1006, 'closing before process exit');
+  t.mock.timers.tick(250);
+  await Promise.resolve();
+  assert.deepEqual(f.calls, []);
+  alive = false;
+  t.mock.timers.tick(1000);
+  t.mock.timers.tick(250);
+  await f.runtime.waitForLifecycle();
+  assert.deepEqual(f.calls, ['stop', 'start', 'restore']);
+  await f.runtime.dispose();
+});

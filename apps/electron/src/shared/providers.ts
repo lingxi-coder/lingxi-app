@@ -191,7 +191,7 @@ export function providersFromCatalog(entries: readonly ProviderModelCatalogEntry
       keyLabel: local?.keyLabel ?? `${entry.provider_label} API key`,
       keyPlaceholder: local?.keyPlaceholder ?? '',
       defaultApiBase: definition.base_url,
-      credentialManagementUrl: local?.credentialManagementUrl ?? '',
+      credentialManagementUrl: local?.credentialManagementUrl ?? (entry.provider_id === 'xai' ? 'https://console.x.ai' : ''),
       defaultModel: `${entry.provider_id}/${definition.default_model_id}`,
       available: true,
       transcriptionCapable: local?.transcriptionCapable ?? false,

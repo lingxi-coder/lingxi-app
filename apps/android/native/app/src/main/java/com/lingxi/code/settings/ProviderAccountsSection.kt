@@ -41,6 +41,7 @@ import java.util.Date
 private fun providerCredentialManagementUrl(providerId: String): String? = when (providerId) {
     "anthropic" -> "https://console.anthropic.com/settings/keys"
     "openai" -> "https://platform.openai.com/api-keys"
+    "xai" -> "https://console.x.ai"
     "deepseek" -> "https://platform.deepseek.com/api_keys"
     "kimi" -> "https://platform.kimi.com/console/api-keys"
     "kimi-code" -> "https://www.kimi.com/code/console"

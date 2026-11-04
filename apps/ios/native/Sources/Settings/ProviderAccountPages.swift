@@ -157,6 +157,7 @@ private func providerCredentialManagementURL(_ providerID: String) -> URL? {
     switch providerID {
     case "anthropic": address = "https://console.anthropic.com/settings/keys"
     case "openai": address = "https://platform.openai.com/api-keys"
+    case "xai": address = "https://console.x.ai"
     case "deepseek": address = "https://platform.deepseek.com/api_keys"
     case "kimi": address = "https://platform.kimi.com/console/api-keys"
     case "kimi-code": address = "https://www.kimi.com/code/console"

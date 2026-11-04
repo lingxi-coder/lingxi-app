@@ -7,15 +7,14 @@
 //! the production turn driver + command router, and the resulting connection is
 //! served by the same `McpEndpoint` the binary uses.
 //!
-//! Two things are asserted end-to-end (no live network for the turn — the config
-//! carries an EMPTY api key, so the bridge rejects the turn before entering the
-//! provider retry path and surfaces one terminal `ClientEvent::Error`):
+//! Two things are asserted end-to-end (no live network for the turn — the
+//! isolated account store is empty, so the bridge reports that no account is
+//! available before making a provider request):
 //!
 //! - the opening `hello` handshake replies with a `ServerHello` (compatible
 //!   versions), proving the served connection is the real F2-07 pump;
-//! - a `SendPrompt` with no credential produces a terminal `Error` event rather
-//!   than hanging — proving env-config → `harness_runtime::desktop::build` → serve is wired
-//!   and the orchestrator's output stream reaches the connection's event sink.
+//! - a `SendPrompt` with no account reports a terminal model error without
+//!   hanging — proving the desktop build, serve path, and event sink are wired.
 
 #![allow(clippy::unwrap_used)]
 
@@ -245,8 +244,7 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
         other => panic!("expected ServerHello response, got {other:?}"),
     }
 
-    // (2) A turn with no credential still runs, and the provider's rejection is
-    //     rendered as upstream's auth copy rather than a port-specific error.
+    // (2) A turn with no configured account reports the routing failure.
     send_frame(
         &mut ws,
         &submit(&ClientCommand::SendPrompt {
@@ -259,8 +257,7 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
     )
     .await;
 
-    // The 2s budget is the real assertion here: a credential rejection must not
-    // enter provider retry backoff. Measured at ~41ms for the whole sequence.
+    // An empty account pool must fail promptly without provider retry backoff.
     let auth_event_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let frame = tokio::time::timeout_at(auth_event_deadline, next_frame(&mut ws))
         .await
@@ -269,54 +266,60 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
         Frame::Event(ClientEvent::TurnStarted { turn_id: None }) => {}
         other => panic!("expected exactly one start for the submitted turn, got {other:?}"),
     }
-    let frame = tokio::time::timeout_at(auth_event_deadline, next_frame(&mut ws))
-        .await
-        .expect("credential rejection must not enter provider retry backoff");
-    let frame = match frame {
-        Frame::Event(ClientEvent::PromptSuggestionState { enabled, notice }) => {
-            assert!(
-                !enabled,
-                "prompt suggestions should be disabled in this fixture"
-            );
-            assert!(
-                notice.is_none(),
-                "initial prompt-suggestion state must not contain a notice"
-            );
-            tokio::time::timeout_at(auth_event_deadline, next_frame(&mut ws))
-                .await
-                .expect("credential rejection must not enter provider retry backoff")
+    let mut saw_routing = false;
+    let mut saw_assistant_row = false;
+    loop {
+        let frame = tokio::time::timeout_at(auth_event_deadline, next_frame(&mut ws))
+            .await
+            .expect("account rejection must not enter provider retry backoff");
+        match frame {
+            Frame::Event(ClientEvent::PromptSuggestionState { enabled, notice }) => {
+                assert!(!enabled, "prompt suggestions are disabled in this fixture");
+                assert!(notice.is_none(), "initial suggestion state has no notice");
+            }
+            Frame::Event(ClientEvent::AssistantTranscriptRowUuids { uuids, .. }) => {
+                assert!(!saw_assistant_row, "only one assistant row is expected");
+                assert_eq!(uuids.len(), 1, "the rejected turn has one assistant row");
+                assert!(uuids[0].is_some(), "the assistant row has an assigned UUID");
+                saw_assistant_row = true;
+            }
+            Frame::Event(ClientEvent::ProviderAccountRouting { event_json }) => {
+                assert!(!saw_routing, "an empty pool must not be retried");
+                let routing: serde_json::Value =
+                    serde_json::from_str(&event_json).expect("provider routing event is JSON");
+                assert_eq!(routing["status"], "all_unavailable");
+                assert_eq!(routing["model"], "claude-sonnet-4-20250514");
+                assert!(routing["selectedAccountId"].is_null());
+                assert_eq!(routing["failedAccounts"], serde_json::json!([]));
+                saw_routing = true;
+            }
+            Frame::Event(ClientEvent::TextDelta { text }) => {
+                let display = text.display();
+                assert!(
+                    saw_routing,
+                    "account failure must include its routing event"
+                );
+                assert!(saw_assistant_row, "the error must have a transcript row");
+                assert!(
+                    display.starts_with("all provider accounts are unavailable: []"),
+                    "the empty pool must produce a truthful error, got {text:?}"
+                );
+                assert!(!display.contains("sk-"), "error must not embed a key");
+                assert!(
+                    !display.contains("api.anthropic.com"),
+                    "error must not expose provider details"
+                );
+                break;
+            }
+            other => panic!("unexpected event before the account error: {other:?}"),
         }
-        frame => frame,
-    };
-    let frame = match frame {
-        Frame::Event(ClientEvent::AssistantTranscriptRowUuids { uuids, .. }) => {
-            assert_eq!(uuids.len(), 1, "the rejected turn has one assistant row");
-            assert!(uuids[0].is_some(), "the assistant row has an assigned UUID");
-            tokio::time::timeout_at(auth_event_deadline, next_frame(&mut ws))
-                .await
-                .expect("credential rejection must not enter provider retry backoff")
-        }
-        frame => frame,
-    };
-    match frame {
-        Frame::Event(ClientEvent::TextDelta { text }) => {
-            let display = text.display();
-            assert!(
-                display.starts_with("Failed to authenticate."),
-                "the turn must carry upstream's auth copy, got {text:?}"
-            );
-            assert!(!display.contains("sk-"), "error must not embed a key");
-            assert!(
-                !display.contains("api.anthropic.com"),
-                "error must not expose provider details"
-            );
-        }
-        other => panic!("expected upstream's auth copy, got {other:?}"),
     }
 
     // The turn ends itself, and ends charged for nothing: `api_calls == 0` is
     // what proves no provider request was issued, let alone retried.
     let mut ended = false;
+    let mut saw_terminal_error = false;
+    let mut saw_zero_cost = false;
     for _ in 0..8 {
         match tokio::time::timeout(Duration::from_secs(2), next_frame(&mut ws))
             .await
@@ -327,9 +330,10 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
                 terminal_reason,
                 stop_reason,
             }) => {
-                assert_eq!(api_error_status, Some(401));
+                assert!(api_error_status.is_none(), "no provider request was made");
                 assert_eq!(terminal_reason, "api_error");
                 assert_eq!(stop_reason, "stop_sequence");
+                saw_terminal_error = true;
             }
             Frame::Event(ClientEvent::CostUpdate {
                 api_calls,
@@ -338,6 +342,7 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
             }) => {
                 assert_eq!(api_calls, 0, "no provider request may be issued");
                 assert_eq!(total_usd, 0.0, "a rejected turn must not be charged");
+                saw_zero_cost = true;
             }
             Frame::Event(ClientEvent::TurnEnded { stop_reason, .. }) => {
                 assert_eq!(stop_reason.as_deref(), Some("model_error"));
@@ -351,6 +356,8 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
         }
     }
     assert!(ended, "the turn must reach TurnEnded");
+    assert!(saw_terminal_error, "the turn must report a terminal error");
+    assert!(saw_zero_cost, "the turn must report its zero cost");
 
     // `TurnEnded` is the protocol's terminal marker. No retry and no second
     // terminal may follow it for this submitted turn.

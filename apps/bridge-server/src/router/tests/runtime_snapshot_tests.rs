@@ -6,7 +6,6 @@ use lingxi_core::host::task_registry::{
 use lingxi_core::host::team_registry::{TeamRegistryHandle, WorkerInfo};
 use std::sync::{Arc, Mutex};
 
-
 #[derive(Default)]
 struct SnapshotTasks {
     records: Mutex<Vec<TaskRecord>>,

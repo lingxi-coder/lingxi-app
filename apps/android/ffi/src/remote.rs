@@ -143,7 +143,9 @@ impl AndroidRemoteControlClient {
         request_json: String,
         credential: Option<String>,
     ) -> Result<String, RemoteFfiError> {
-        self.inner.provider_account_command(request_json, credential).await
+        self.inner
+            .provider_account_command(request_json, credential)
+            .await
     }
 
     /// The push registration of this install, sent with the next handshake so the

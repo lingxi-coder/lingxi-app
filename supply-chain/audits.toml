@@ -61,6 +61,12 @@ criteria = "safe-to-run"
 version = "0.3.4"
 notes = "AI-assisted full source review; evidence: supply-chain/reviews/2026-10-30/doc-comment-0.3.4.md (SHA-256 7f529a618329150e907a2d519a667f2608ca321f784efa33b4941ac64de4b764). Dependencies are reviewed separately; scope is the frozen graph."
 
+[[audits.foreign-types-macros]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.2.3 -> 0.2.4"
+notes = "AI-assisted delta source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/foreign-types-macros-0.2.4.md (SHA-256 d143a979636cc56a6d66b24d30198292f0934ac53ce32107e271265a6d70af25); cross-review: supply-chain/reviews/2026-11-03/batch002-delta-cross-review.md (SHA-256 02bddf3d60309b807e13644718919e34112bcf0d495e125c26c367bfe35147f2). Exact baseline chain verified in configured immutable peer imports; dependencies and limitations reviewed separately."
+
 [[audits.futures-channel]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
@@ -126,6 +132,12 @@ who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
 version = "1.70.2"
 notes = "AI-assisted complete source review; evidence: supply-chain/reviews/2026-10-30/is_terminal_polyfill-1.70.2.md (SHA-256 c56687e70f5fb126885a231c08938b06bef583e0f8a95ab6605cef492fec1716). Dependencies are reviewed separately."
+
+[[audits.litemap]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.8.0 -> 0.8.3"
+notes = "AI-assisted delta source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/litemap-0.8.3.md (SHA-256 a56765b7f43a4a4e66cfd3584bcca2903c3c37e53ef3d93fbd044dfb388e6c47); cross-review: supply-chain/reviews/2026-11-03/batch002-delta-cross-review.md (SHA-256 02bddf3d60309b807e13644718919e34112bcf0d495e125c26c367bfe35147f2). Exact baseline chain verified in configured immutable peer imports; dependencies and limitations reviewed separately."
 
 [[audits.mac]]
 who = "Codex AI-assisted"
@@ -204,6 +216,18 @@ who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
 delta = "1.2.0 -> 1.2.1"
 notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/stable_deref_trait-1.2.1.md (SHA-256 f6ffa86a2ed8dc6b16058774ec624b50d1cd2d2201e654883144fd2f63e8e0e7). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.strum]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.27.1 -> 0.28.0"
+notes = "AI-assisted delta source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/strum-0.28.0.md (SHA-256 928e40f161db3fff1e7bde8b9c6cc6d92057ec19341961d67b7e2b0cd6a6e66b); cross-review: supply-chain/reviews/2026-11-03/batch002-delta-cross-review.md (SHA-256 02bddf3d60309b807e13644718919e34112bcf0d495e125c26c367bfe35147f2). Exact baseline chain verified in configured immutable peer imports; dependencies and limitations reviewed separately."
+
+[[audits.time-core]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.1.8 -> 0.1.9"
+notes = "AI-assisted delta source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/time-core-0.1.9.md (SHA-256 48be4941c06917fd76ee0e9dbd76b753be5f1d187a6b723e1c68ff7dee8443dc); cross-review: supply-chain/reviews/2026-11-03/batch002-delta-cross-review.md (SHA-256 02bddf3d60309b807e13644718919e34112bcf0d495e125c26c367bfe35147f2). Exact baseline chain verified in configured immutable peer imports; dependencies and limitations reviewed separately."
 
 [[audits.tower-service]]
 who = "Codex AI-assisted"

@@ -2,6 +2,7 @@ import { providerAccountEnvelope, type ProviderAccountEnvelope, type ProviderAcc
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, lstatSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { productNamespace } from '../productNamespace.js';
 
 export interface TeamBotTarget {
   ownerUid: string; ownerGeneration: number; hostId: string; botId: string; botRevision: number;
@@ -67,7 +68,7 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
   if (Buffer.byteLength(bootstrap) > 256 * 1024) throw new Error('INVALID_TEAM_SNAPSHOT');
   const child = (options.spawnProcess ?? spawn)(options.executable, [], {
     cwd: options.home, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
-    env: { HOME: options.home, LINGXI_CONFIG_DIR: options.home, TMPDIR: options.tmp,
+    env: { HOME: options.home, [productNamespace.configDirEnv]: options.home, TMPDIR: options.tmp,
       PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C',
       CFFIXED_USER_HOME: options.home, __CF_USER_TEXT_ENCODING: `0x${(process.getuid?.() ?? 0).toString(16).toUpperCase()}:0x8000100:0x0` },
   }) as ChildProcessWithoutNullStreams;

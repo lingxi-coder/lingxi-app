@@ -1,10 +1,11 @@
 import { TeamMessaging } from '../../../../packages/teams/messages';
 import { indexedDbMessageStorage } from '../../../../packages/teams/message-storage';
 import type { TeamsApi } from '../../../../packages/teams';
+import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
 
 declare global { interface Window { runTeamMessageProbe(uid: string): Promise<unknown> } }
 window.runTeamMessageProbe = async uid => {
-  const desktop = window.lingxi!.teams;
+  const desktop = window[DESKTOP_BRIDGE_GLOBAL]!.teams;
   const api = { messages: command => desktop.messages(uid, command), onMessagesChanged: callback => desktop.onMessagesChanged(callback) } as TeamsApi;
   const storage = indexedDbMessageStorage(), scope = { teamId: 'electron-messages', generation: 1 };
   const until = async (condition: () => boolean) => { const deadline = Date.now() + 15000; while (!condition()) { if (Date.now() > deadline) throw new Error('Projection timed out'); await new Promise(resolve => setTimeout(resolve, 20)); } };

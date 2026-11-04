@@ -17,6 +17,7 @@ import { TeamConnector } from '../src/main/teams/connector';
 import { TeamPrivateStore } from '../src/main/teams/privateStore';
 import { runTeamHost, type TeamHostBootstrap } from '../src/main/teams/process';
 import { TeamOwnerApprovalBroker } from '../src/main/remoteControl/teamApprovals';
+import { productNamespace } from '../src/main/productNamespace';
 const { validatePackageOutputRoot } = await import(new URL('../scripts/package-support.mjs', import.meta.url).href);
 const { verifyTeamIdentifier } = await import(new URL('../scripts/credential-broker.mjs', import.meta.url).href);
 
@@ -64,7 +65,7 @@ const runId = `${Date.now().toString(36)}-${process.pid}`;
 const outputRoot = join(productRoot, 'output/teams-t3-runtime');
 mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
 const output = join(outputRoot, runId); mkdirSync(output, { mode: 0o700 });
-const userData = join(output, 'user-data'), home = join(output, 'ordinary-home'), configHome = join(home, '.lingxi');
+const userData = join(output, 'user-data'), home = join(output, 'ordinary-home'), configHome = join(home, productNamespace.dotDir);
 mkdirSync(userData, { mode: 0o700 }); mkdirSync(home, { mode: 0o700 }); mkdirSync(configHome, { mode: 0o700 });
 writeFileSync(join(configHome, 'owner-secret.txt'), 'OWNER_DATA_MUST_NOT_BE_COPIED', { mode: 0o600 });
 const teamId = `t3runtime-${runId}`, scope = { teamId, generation: 1 };
@@ -346,7 +347,7 @@ async function startConnector(): Promise<void> {
   const definitions = { anthropic: { type: 'anthropic', baseUrl: fixtureEndpoint, models: [{ id: MODEL }] } };
   const accountCommand = (request: Record<string, unknown>): ProviderAccountSnapshot => JSON.parse(execFileSync(helper,
     ['--provider-account-command', '--session-config-home', configHome], { encoding: 'utf8', maxBuffer: 2 * 1024 * 1024,
-      env: { HOME: home, PATH: process.env.PATH, LANG: 'C', LINGXI_CONFIG_DIR: configHome },
+      env: { HOME: home, PATH: process.env.PATH, LANG: 'C', [productNamespace.configDirEnv]: configHome },
       input: JSON.stringify({ metadata_only: true, backend: 'desktop-broker', credential_channel: 'development',
         profiles_json: JSON.stringify(definitions), request_json: JSON.stringify(request) }),
     }));
@@ -356,7 +357,7 @@ async function startConnector(): Promise<void> {
   const providerAccount = accountSnapshot.accounts[0]!;
   assert.equal(providerAccount.executionBindingId, 'anthropic');
   const versionPublished = JSON.parse(execFileSync(helper, ['--provider-account-command', '--session-config-home', configHome], {
-    encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, env: { HOME: home, PATH: process.env.PATH, LANG: 'C', LINGXI_CONFIG_DIR: configHome },
+    encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, env: { HOME: home, PATH: process.env.PATH, LANG: 'C', [productNamespace.configDirEnv]: configHome },
     input: JSON.stringify({ metadata_only: true, backend: 'desktop-broker', credential_channel: 'development', request_json: '',
       publish_credential_version: { accountId: providerAccount.accountId, identityGeneration: providerAccount.identityGeneration, credentialRevision: 1 } }),
   }));

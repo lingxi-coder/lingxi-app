@@ -16,19 +16,47 @@ on:
   push:
     branches: [main]
 
-# One in-flight run per ref; a new push to the same PR/branch cancels the old
-# one (matches the cancel-in-progress convention requested for this file).
-concurrency:
-  group: clients-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
+  # Do not let an audit-only push cancel a previous code build. Classification
+  # failures run the full jobs, and PRs always run them. Fetch all history but
+  # sparsely check out only the classifier to keep this job lightweight.
+  classify_clients:
+    runs-on: ubuntu-latest
+    outputs:
+      audit_only: ${{ steps.classify.outputs.audit_only }}
+    steps:
+      - name: Check out complete push history
+        id: checkout
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+
+      - name: Classify client changes
+        id: classify
+        env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+        run: |
+          audit_only=false
+          if [ "$CHECKOUT_OUTCOME" = success ] && python3 scripts/ci/classify_client_changes.py; then
+            audit_only=true
+          fi
+          echo "audit_only=$audit_only" >> "$GITHUB_OUTPUT"
+
   # Mobile Linux is fail-closed. The repository variable stays `0` while the
   # GPL runtime grants are absent; setting it to `1` makes this job require the
   # signed authorization manifest, SBOM, license inventory, executable
   # allowlist, and store-policy scan before either mobile build can proceed.
   mobile-linux-policy:
     runs-on: ubuntu-latest
+    needs: classify_clients
+    if: ${{ !cancelled() && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify_clients.result == 'success' && needs.classify_clients.outputs.audit_only == 'true') }}
+    concurrency:
+      group: clients-${{ github.workflow }}-${{ github.ref }}-mobile-linux-policy-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify_clients.result == 'success' && needs.classify_clients.outputs.audit_only == 'true' && github.run_id || 'build' }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v7
@@ -55,11 +83,19 @@ jobs:
   # ---------------------------------------------------------------------------
   node-clients:
     runs-on: ubuntu-latest
+    needs: classify_clients
+    if: ${{ !cancelled() && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify_clients.result == 'success' && needs.classify_clients.outputs.audit_only == 'true') }}
+    concurrency:
+      group: clients-${{ github.workflow }}-${{ github.ref }}-node-clients-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify_clients.result == 'success' && needs.classify_clients.outputs.audit_only == 'true' && github.run_id || 'build' }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+
+      - name: Test client change classification
+        run: python3 -m unittest discover -s scripts/tests -p test_client_change_classifier.py
 
       - uses: actions/setup-node@v7
         with:
@@ -96,7 +132,11 @@ jobs:
   # ---------------------------------------------------------------------------
   android:
     runs-on: ubuntu-latest
-    needs: mobile-linux-policy
+    needs: [classify_clients, mobile-linux-policy]
+    if: ${{ !cancelled() && needs['mobile-linux-policy'].result == 'success' && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify_clients.result == 'success' && needs.classify_clients.outputs.audit_only == 'true') }}
+    concurrency:
+      group: clients-${{ github.workflow }}-${{ github.ref }}-android-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify_clients.result == 'success' && needs.classify_clients.outputs.audit_only == 'true' && github.run_id || 'build' }}
+      cancel-in-progress: true
     env:
       LINGXI_MOBILE_LINUX_ENABLED: ${{ vars.LINGXI_MOBILE_LINUX_ENABLED || '0' }}
       LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256: ${{ vars.LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256 || '' }}
@@ -198,7 +238,11 @@ jobs:
   # ---------------------------------------------------------------------------
   android-emulator:
     runs-on: ubuntu-latest
-    needs: android
+    needs: [classify_clients, android]
+    if: ${{ !cancelled() && needs.android.result == 'success' && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify_clients.result == 'success' && needs.classify_clients.outputs.audit_only == 'true') }}
+    concurrency:
+      group: clients-${{ github.workflow }}-${{ github.ref }}-android-emulator-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify_clients.result == 'success' && needs.classify_clients.outputs.audit_only == 'true' && github.run_id || 'build' }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v7
@@ -288,7 +332,11 @@ jobs:
     # RunLocalAppAgentIntent conforms to iOS 27 AppIntents protocols, which
     # require the iOS 27 SDK even when the deployment target remains older.
     runs-on: xcode-27
-    needs: mobile-linux-policy
+    needs: [classify_clients, mobile-linux-policy]
+    if: ${{ !cancelled() && needs['mobile-linux-policy'].result == 'success' && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify_clients.result == 'success' && needs.classify_clients.outputs.audit_only == 'true') }}
+    concurrency:
+      group: clients-${{ github.workflow }}-${{ github.ref }}-ios-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify_clients.result == 'success' && needs.classify_clients.outputs.audit_only == 'true' && github.run_id || 'build' }}
+      cancel-in-progress: true
     env:
       LINGXI_MOBILE_LINUX_ENABLED: ${{ vars.LINGXI_MOBILE_LINUX_ENABLED || '0' }}
       LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256: ${{ vars.LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256 || '' }}

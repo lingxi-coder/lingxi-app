@@ -4,7 +4,9 @@
 
 ## 2026-11-03 本地 main 同步
 
-这次任务是把各仓库本地 main 与功能分支合并并回到本地 main，保留其他工作树的未提交内容；未 push。App 合并的双方来源是功能分支 `58eb629b1965435a79fc0278875091ae443cd36d` 和本地 main `46049b8ec3f386cb4e00e206da6ec652e89fca4b`；后者包含新的 Teams workspace、Bots 侧栏和未保存修改确认。开始时本地 main 领先 `origin/main` 的 `1f73edb020e7f35590e03818f43bbe01d31369a8`；回到本地 main 的最终 ref 与保全结果以任务目录 `merge-main-20261103/final-receipt.json` 为准。本地证据文件不随源码提交自动发布。
+这次任务是把各仓库本地 main 与功能分支合并并回到本地 main，保留其他工作树的未提交内容；未 push。App 首次同步的双方来源是功能分支 `58eb629b1965435a79fc0278875091ae443cd36d` 和本地 main `46049b8ec3f386cb4e00e206da6ec652e89fca4b`；后者包含新的 Teams workspace、Bots 侧栏和未保存修改确认。开始时本地 main 领先 `origin/main` 的 `1f73edb020e7f35590e03818f43bbe01d31369a8`；回到本地 main 的最终 ref 与保全结果以任务目录 `merge-main-20261103/final-receipt.json` 为准。本地证据文件不随源码提交自动发布。
+
+合并期间，本地 main 又推进至输入历史提交 `1fc322bd43059f6c46073f94172782e12044f60e`。已在首次合并提交 `264a88644b1ab20fa10a905e9ab2ea8a47e0b3aa` 之上继续纳入该提交；13 个文件自动合并无冲突。新增的真实 Electron 输入历史交互 1/1 和合并后的 web TypeScript 检查均通过，见 `prompt-history-latest-main.log` 与 `electron-web-typecheck-latest-main.log`。并行任务的内容以已提交 main 历史保留；原三项未提交改动继续排除。
 
 Harness SDK 的功能分支和本地 main 已合至 `38ea730f503f318283cd4e26684f1abded10b6ec`，双亲为 `55ddd4cf880ed3de4696319c51b8429dcef80a9e` 和 `e0a8ae09607d361fc0b94d92fe51756238347302`，见[本地快进回执](../../../merge-main-20261103/harness/canonical-main-fast-forward.json)。SDK 合并工作树定向测试 122 pass、1 个 cache performance probe ignored；测试时暂存树与合并提交树均为 `e54249690af5e4c2934c9de2bae2f55c0e4118df`。App 47 处 Harness 引用指向 `38ea`；[locked/offline/all-features 来源证明](../../../merge-main-20261103/app-pin-proof.json)记录 1,052 packages 中 84 个 Harness 包均为 `38ea`、5 个 llm-client 包均为 `3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3`、5 个 Mobile Linux 包均为 `43382a20161e371a0a31526412164b3d35545ab5`。该证明是依赖解析，不能代替产品编译或设备测试。
 

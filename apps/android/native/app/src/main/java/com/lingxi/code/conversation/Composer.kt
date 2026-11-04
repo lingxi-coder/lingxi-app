@@ -163,12 +163,15 @@ fun Composer(
     promptSuggestionNotice: String? = null,
     slashCommands: List<ConversationSlashCommand> = emptyList(),
     suggestionTurnKey: String = "",
+    historySessionKey: String = "",
+    historyMessages: List<String> = emptyList(),
     onSuggestionFeedback: (String) -> Unit = {},
     /** Discards the recovered turn after the host confirms cancellation. */
     onDiscardRecovery: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val hasText = text.trim().isNotEmpty()
+    val promptHistory = remember(historySessionKey) { ComposerPromptHistory() }
     var editorValue by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
     // A programmatic draft replacement (send, voice, or follow-up) moves the
     // caret to its end; ordinary edits retain selection and IME composition.
@@ -258,7 +261,10 @@ fun Composer(
                     value = fieldValue,
                     onValueChange = {
                         editorValue = it
-                        if (it.text != text) onTextChange(it.text)
+                        if (it.text != text) {
+                            promptHistory.reset()
+                            onTextChange(it.text)
+                        }
                     },
                     visualTransformation = slashTransformation,
                     enabled = inputEnabled,
@@ -282,6 +288,16 @@ fun Composer(
                             && !event.isShiftPressed && !event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed
                             && (event.key == Key.Tab || event.key == Key.DirectionRight)) {
                             acceptSuggestion(); true
+                        } else if (event.type == KeyEventType.KeyDown && fieldValue.composition == null
+                            && !event.isShiftPressed && !event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed
+                            && (event.key == Key.DirectionUp || event.key == Key.DirectionDown)) {
+                            val recalled = promptHistory.navigate(historyMessages, fieldValue.text,
+                                fieldValue.selection.start, fieldValue.selection.end, event.key == Key.DirectionUp)
+                            if (recalled == null) false else {
+                                editorValue = TextFieldValue(recalled, TextRange(recalled.length))
+                                onTextChange(recalled)
+                                true
+                            }
                         } else false
                     },
                 )

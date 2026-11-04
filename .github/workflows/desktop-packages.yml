@@ -124,6 +124,7 @@ jobs:
           cache-dependency-path: |
             packages/bridge-client/package-lock.json
             apps/electron/package-lock.json
+            apps/firebase/package-lock.json
 
       - name: Install Mod source compiler
         uses: oven-sh/setup-bun@v2
@@ -141,6 +142,11 @@ jobs:
 
       - name: Install Desktop dependencies
         working-directory: apps/electron
+        run: npm ci
+
+      # Desktop's Teams Firestore tests load the Admin SDK from the backend package.
+      - name: Install Firebase backend dependencies for Desktop tests
+        working-directory: apps/firebase
         run: npm ci
 
       - name: Check and test native Rust host

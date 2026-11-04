@@ -727,13 +727,6 @@ export const runtimeCatalog: Record<string, Record<string, string>> = {
     "ja": "ToDo はまだありません。",
     "ko": "아직 할 일이 없습니다."
   },
-  "desktop_runtime_open_tools": {
-    "en": "Open tools",
-    "zh-Hans": "打开工具",
-    "zh-Hant": "開啟工具",
-    "ja": "ツールを開く",
-    "ko": "도구 열기"
-  },
   "desktop_runtime_restore_panel": {
     "en": "Restore panel size",
     "zh-Hans": "恢复面板大小",

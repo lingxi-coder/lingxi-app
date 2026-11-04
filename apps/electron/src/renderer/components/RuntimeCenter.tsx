@@ -436,7 +436,7 @@ function tabIcon(item: RuntimeCenterItemRef): string {
   return 'file';
 }
 
-function InspectorTabs({ bridge, toolsOpen, inactive = false, onTools, onSelect }: { bridge: UseBridge; toolsOpen: boolean; inactive?: boolean; onTools: () => void; onSelect: () => void }) {
+function InspectorTabs({ bridge, inactive = false, onSelect }: { bridge: UseBridge; inactive?: boolean; onSelect: () => void }) {
   const center = bridge.runtimeCenter;
   const focusTab = (item: RuntimeCenterItemRef) => {
     const key = runtimeCenterItemKey(item);
@@ -461,9 +461,8 @@ function InspectorTabs({ bridge, toolsOpen, inactive = false, onTools, onSelect 
   return (
     <>
     <div className="runtime-inspector-tabs" role="tablist" aria-label={tr('desktop_runtime_inspector_items')}>
-      {toolsOpen && <div className="runtime-inspector-tab runtime-inspector-tools-tab" data-active={!inactive || undefined}><button type="button" role="tab" aria-selected={!inactive} aria-controls="runtime-inspector-panel" className="no-drag runtime-inspector-tab-select" onClick={onTools} onKeyDown={(event) => { if (event.key === 'ArrowRight' && center.tabs[0]) { event.preventDefault(); onSelect(); bridge.openRuntimeItem(center.tabs[0]); focusTab(center.tabs[0]); } }}><Icon name="box" size={16} />{tr('apps_category_tools')}</button></div>}
       {center.tabs.map((item, index) => {
-        const active = !inactive && !toolsOpen && sameRuntimeCenterItem(item, center.activeItem);
+        const active = !inactive && sameRuntimeCenterItem(item, center.activeItem);
         const key = runtimeCenterItemKey(item);
         return (
           <div key={`${item.kind}:${item.id}`} role="presentation" className="runtime-inspector-tab" data-active={active || undefined}>
@@ -564,12 +563,9 @@ export function RuntimeCenterInspector({ bridge, sideChats }: { bridge: UseBridg
   const [topbarControls, setTopbarControls] = useState<HTMLElement | null>(null);
   useEffect(() => { setTopbarControls(document.getElementById('runtime-inspector-topbar-controls')); }, []);
   const resize = (width: number) => { const next = Math.max(320, Math.min(window.innerWidth - 280, width)); setPanelWidth(next); try { localStorage.setItem('lingxi.inspector.width', String(next)); } catch {} };
-  const [toolsOpen, setToolsOpen] = useState(false);
-  useEffect(() => setToolsOpen(false), [center.activeItem, bridge.conversation.sessionKey]);
-  const active = toolsOpen ? null : center.activeItem;
+  const active = center.activeItem;
   const sideOpen = Boolean(sideChats?.open && sideChats.selected);
-  const selectInspector = () => { sideChats?.setOpen(false); bridge.setRuntimeInspectorOpen(true); setToolsOpen(false); };
-  const openTools = () => { sideChats?.setOpen(false); bridge.setRuntimeInspectorOpen(true); setToolsOpen(true); };
+  const selectInspector = () => { sideChats?.setOpen(false); bridge.setRuntimeInspectorOpen(true); };
   const motion = useInspectorMotion(center.inspectorOpen && !sideOpen, active ? runtimeCenterItemKey(active) : 'landing', bridge.conversation.sessionKey);
   const previousItem = useRef(center.activeItem);
   useEffect(() => {
@@ -647,16 +643,15 @@ export function RuntimeCenterInspector({ bridge, sideChats }: { bridge: UseBridg
     <>
       {topbarControls && createPortal(<>
         <div className="desktop-toolbar-tabs" style={{ '--inspector-bg': t.stageBg, '--inspector-text': t.text, '--inspector-muted': t.text3, '--inspector-active': t.surfaceHover } as CSSProperties}>
-          {(center.tabs.length > 0 || (center.inspectorOpen && !sideOpen)) && <InspectorTabs bridge={bridge} toolsOpen={!active} inactive={sideOpen || !center.inspectorOpen} onTools={openTools} onSelect={selectInspector} />}
+          {center.tabs.length > 0 && <InspectorTabs bridge={bridge} inactive={sideOpen || !center.inspectorOpen} onSelect={selectInspector} />}
           {sideChats && <SideChatTabs controller={sideChats} />}
         </div>
-        <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('desktop_runtime_open_tools')} title={tr('desktop_runtime_open_tools')} onClick={openTools}><DesktopIcon name="box" size={18} /></button>
         {center.inspectorOpen && !sideOpen && <button type="button" aria-label={expanded ? tr('desktop_runtime_restore_panel') : tr('desktop_runtime_expand_panel')} className="no-drag desktop-topbar-action" onClick={() => setExpanded(!expanded)} title={expanded ? tr('desktop_runtime_restore_panel') : tr('desktop_runtime_expand_panel')} aria-pressed={expanded}><DesktopIcon name={expanded ? 'collapse' : 'expand'} size={17} /></button>}
       </>, topbarControls)}
     {motion.present && <aside ref={motion.ref} aria-hidden={!center.inspectorOpen || undefined} id="runtime-inspector" className="runtime-inspector" aria-label={tr('desktop_runtime_inspector')} style={{ display: sideOpen ? 'none' : undefined, position: expanded ? 'absolute' : undefined, inset: expanded ? '0 0 0 0' : undefined, zIndex: expanded ? 46 : undefined, width: expanded ? '100%' : panelWidth, minWidth: expanded ? 0 : Math.min(panelWidth, 320), '--inspector-bg': t.dark ? t.windowBg : t.sidebarPanelBg, '--inspector-surface': t.surface, '--inspector-active': t.surfaceActive, '--inspector-text': t.text, '--inspector-muted': t.text3, '--inspector-border': t.border, background: t.sidebarBg, borderLeft: `0.5px solid ${t.border}` } as CSSProperties}>
       {!expanded && <div className="no-drag runtime-inspector-resize" role="separator" aria-label={tr('desktop_runtime_resize_panel')} aria-orientation="vertical" aria-valuenow={panelWidth} aria-valuemin={320} aria-valuemax={960} tabIndex={0} onKeyDown={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); resize(panelWidth + (e.key === 'ArrowLeft' ? 24 : -24)); } }} onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) resize(window.innerWidth - e.clientX); }} onPointerUp={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); }} />}
       <div id="runtime-inspector-panel" className="runtime-inspector-content" role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : tr('session_details_button')} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
-        {!active && <InspectorTools bridge={bridge} onSelect={() => setToolsOpen(false)} /> }
+        {!active && <InspectorTools bridge={bridge} /> }
         {active?.kind === 'turn-review' && <TurnFileReview key={`${active.id}:${active.path ?? ''}`} files={active.files} path={active.path} />}
         {active?.kind === 'section' && <SectionDetail section={active.id} bridge={bridge} />}
         {active?.kind === 'task' && <TaskDetail task={task} bridge={bridge} />}
@@ -670,7 +665,7 @@ export function RuntimeCenterInspector({ bridge, sideChats }: { bridge: UseBridg
   );
 }
 
-function InspectorTools({ bridge, onSelect }: { bridge: UseBridge; onSelect: () => void }) {
+function InspectorTools({ bridge }: { bridge: UseBridge }) {
   const tools = [
     { id: 'review', icon: 'file', detail: tr('desktop_runtime_tool_review_description') },
     { id: 'agents', icon: 'subagent', detail: tr('desktop_runtime_tool_agents_description') },
@@ -678,12 +673,11 @@ function InspectorTools({ bridge, onSelect }: { bridge: UseBridge; onSelect: () 
     { id: 'resources', icon: 'resources', detail: tr('desktop_runtime_tool_resources_description') },
     { id: 'plan', icon: 'file', detail: tr('desktop_runtime_tool_plan_description') },
   ] as const;
-  const open = (item: RuntimeCenterItemRef) => { onSelect(); bridge.openRuntimeItem(item); };
   return <div className="runtime-inspector-landing">
     <section aria-labelledby="inspector-tools-heading">
       <h2 id="inspector-tools-heading">{tr('apps_category_tools')}</h2>
       <div className="runtime-inspector-tool-grid">
-        {tools.map(({ id, icon, detail }) => <button key={id} type="button" className="runtime-inspector-tool" onClick={() => open({ kind: 'section', id })}>
+        {tools.map(({ id, icon, detail }) => <button key={id} type="button" className="runtime-inspector-tool" onClick={() => bridge.openRuntimeItem({ kind: 'section', id })}>
           <Icon name={icon} size={20} /><span><strong>{sectionLabel(id)}</strong><small>{detail}</small></span>
         </button>)}
         <button type="button" className="runtime-inspector-tool" aria-label={tr('desktop_runtime_open_summary')} onClick={() => bridge.setRuntimeCenterOverviewOpen(true)}><Icon name="summary-list" size={20} /><span><strong>{tr('desktop_runtime_summary')}</strong><small>{tr('desktop_runtime_summary_description')}</small></span></button>
@@ -691,7 +685,7 @@ function InspectorTools({ bridge, onSelect }: { bridge: UseBridge; onSelect: () 
     </section>
     <section aria-labelledby="inspector-resources-heading">
       <h2 id="inspector-resources-heading">{tr('desktop_runtime_session_resources')}</h2>
-      {bridge.runtimeCenter.resources.length ? <div className="runtime-inspector-resource-grid">{bridge.runtimeCenter.resources.slice(0, 6).map(resource => <button type="button" key={resource.id} title={resource.path ?? resource.name} onClick={() => open({ kind: 'resource', id: resource.id })}><Icon name={resource.kind === 'image' ? 'image' : 'file'} size={24} /><span>{resource.name}</span></button>)}</div> : <p className="runtime-inspector-resource-empty">{tr('desktop_runtime_resources_empty')}</p>}
+      {bridge.runtimeCenter.resources.length ? <div className="runtime-inspector-resource-grid">{bridge.runtimeCenter.resources.slice(0, 6).map(resource => <button type="button" key={resource.id} title={resource.path ?? resource.name} onClick={() => bridge.openRuntimeItem({ kind: 'resource', id: resource.id })}><Icon name={resource.kind === 'image' ? 'image' : 'file'} size={24} /><span>{resource.name}</span></button>)}</div> : <p className="runtime-inspector-resource-empty">{tr('desktop_runtime_resources_empty')}</p>}
     </section>
   </div>;
 }

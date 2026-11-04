@@ -13,11 +13,23 @@ criteria = "safe-to-deploy"
 version = "0.2.4"
 notes = "AI-assisted full source review and independent root cross-review; evidence: supply-chain/reviews/2026-11-03/batch002-lane-a.md (SHA-256 a0282f61bee7952f4b57d9d87f14bd5ca4cfd43612abd2a79845195c8325d47f). Scope: exact crates.io source and documented API use; dependencies reviewed separately. Explicit RNG limits recorded in evidence."
 
+[[audits.by_address]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.2.1"
+notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/by_address-1.2.1.md (SHA-256 bf38e8f0fce77333dfd693bba92075cd5b54b6422ea2ab4ea2a1988410f30a3a); independent review: supply-chain/reviews/2026-11-03/batch002-lane-b-cross-1.md (SHA-256 c8d5660bcde576172e6069013ba2997f6394473e6b00224421a9b18d7db15036). Exact crates.io version; documented API and disclosure limits in reports; dependencies reviewed separately."
+
 [[audits.cfg-if]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
 delta = "1.0.0 -> 1.0.4"
 notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/cfg-if-1.0.4.md (SHA-256 db9e3067f57f9142816f099b347efa639589cffb8d1d9c8a9dac58e7855137fa). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.cfg_aliases]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.1.1"
+notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/cfg_aliases-0.1.1.md (SHA-256 0b59ea24f0d7c7e413d250b08b9d5094c326c67b4165096383b2d177592ff3c6); independent review: supply-chain/reviews/2026-11-03/batch002-lane-b-cross-2.md (SHA-256 e04bf0397878fbc8f34ae4dc36755604dd62f4d270f4c82524e7fb2616455713). Exact crates.io version; documented API and disclosure limits in reports; dependencies reviewed separately."
 
 [[audits.ciborium-io]]
 who = "Codex AI-assisted"
@@ -97,6 +109,18 @@ criteria = "safe-to-deploy"
 version = "1.70.2"
 notes = "AI-assisted complete source review; evidence: supply-chain/reviews/2026-10-30/is_terminal_polyfill-1.70.2.md (SHA-256 c56687e70f5fb126885a231c08938b06bef583e0f8a95ab6605cef492fec1716). Dependencies are reviewed separately."
 
+[[audits.mac]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.1.1"
+notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/mac-0.1.1.md (SHA-256 1c084d1e19844bfbe41f93befdd9c1305cda832f53d294653652d11f7c28b797); independent review: supply-chain/reviews/2026-11-03/batch002-lane-b-cross-1.md (SHA-256 c8d5660bcde576172e6069013ba2997f6394473e6b00224421a9b18d7db15036). Exact crates.io version; documented API and disclosure limits in reports; dependencies reviewed separately."
+
+[[audits.memmem]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.1.1"
+notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/memmem-0.1.1.md (SHA-256 98ac1ebca85ab781f8a35274b179c1d5e31d8e3140fb83909af1e94a8b2f1862); independent review: supply-chain/reviews/2026-11-03/batch002-lane-b-cross-3.md (SHA-256 3ae895feedbf790e9f6b0be20649e310d39fd10951c1702ec0e0a5e8e5df09fe). Exact crates.io version; documented API and disclosure limits in reports; dependencies reviewed separately."
+
 [[audits.new_debug_unreachable]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
@@ -163,11 +187,23 @@ criteria = "safe-to-deploy"
 delta = "1.2.0 -> 1.2.1"
 notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/stable_deref_trait-1.2.1.md (SHA-256 f6ffa86a2ed8dc6b16058774ec624b50d1cd2d2201e654883144fd2f63e8e0e7). Dependencies are reviewed separately; scope is the frozen graph."
 
+[[audits.tower-service]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.3.3"
+notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/tower-service-0.3.3.md (SHA-256 032c52780b33dd4dd8c9f75898cd9b311bd19964bfd95a008ca2f0db8dac0d6e); independent review: supply-chain/reviews/2026-11-03/batch002-lane-b-cross-1.md (SHA-256 c8d5660bcde576172e6069013ba2997f6394473e6b00224421a9b18d7db15036). Exact crates.io version; documented API and disclosure limits in reports; dependencies reviewed separately."
+
 [[audits.url]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
 delta = "2.5.7 -> 2.5.8"
 notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/url-2.5.8.md (SHA-256 aa8ab54f2cbe421e1bbe3987b7d8959e396b210fecb86d13ab2dfdbc6febc36f). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.urlencoding]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "2.1.3"
+notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/urlencoding-2.1.3.md (SHA-256 4a489b4761ce759c56ee5f9d3a1404f2832963269615abf125e2fc116d8fe8a6); independent review: supply-chain/reviews/2026-11-03/batch002-lane-b-cross-2.md (SHA-256 e04bf0397878fbc8f34ae4dc36755604dd62f4d270f4c82524e7fb2616455713). Exact crates.io version; documented API and disclosure limits in reports; dependencies reviewed separately."
 
 [[audits.version_check]]
 who = "Codex AI-assisted"

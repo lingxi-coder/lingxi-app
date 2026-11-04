@@ -1,0 +1,19 @@
+
+running 3 tests
+test debug_formatting ... ok
+test debug_formatting_many_generics ... ok
+test debug_formatting_generic ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T//opaque-debug-audit.6SgNeQ/opaque-debug-0.3.1/src/lib.rs - (line 12) ... ok
+test /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T//opaque-debug-audit.6SgNeQ/opaque-debug-0.3.1/src/lib.rs - (line 24) ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+plain=Plain { ... }
+generic=Generic<opaque_debug_probe::PanicOnDebug> { ... }
+const_type=Generic<opaque_debug_probe::Marker<42>> { ... }
+failing writer propagated; caller write! shadowing reproduced

@@ -1,0 +1,78 @@
+{
+  "archive_sha256": "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801",
+  "commit": "3510ca6abea34cbbc702509a4e50ea9709925eda",
+  "tree": "b6bc463d3377bd0d3288ae4d66878803f2ac6bb5",
+  "verified_git_tree_count": 5,
+  "files": [
+    {
+      "path": ".cargo_vcs_info.json",
+      "sha256": "65840ba044457862e25b2d7d53f4a2de232adf933bd31aba8f2bd6a1f51a6881",
+      "git_blob_or_note": "Cargo generated/normalized"
+    },
+    {
+      "path": ".github/dependabot.yml",
+      "sha256": "828e3ecefdc555a5210a5bdffd5621ef3625ceb35c7fc91a0b4faef6f9921b75",
+      "git_blob_or_note": "36e4ff06363a3224304913175080b881f861f60e"
+    },
+    {
+      "path": ".github/workflows/main.yaml",
+      "sha256": "6612a51b1f1479eabac7d3bd14aa609811d4afd2df2d454b9a1f6d6f3748f5b2",
+      "git_blob_or_note": "7288a62d2535389307ab9b29b2607053bc431433"
+    },
+    {
+      "path": ".github/workflows/publish.yaml",
+      "sha256": "1417805078704eecbaeea8611c5a44df575bfe1908d6969d909224a6e5e26ca8",
+      "git_blob_or_note": "248e3ccdd9ad6e5487331f3bb39e3db7eb4d9af7"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "f9b1ca6ae27d1c18215265024629a8960c31379f206d9ed20f64e0b2dcf79805",
+      "git_blob_or_note": "a9d37c560c6ab8d4afbf47eda643e8c42e857716"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "08ba7340057565b338afaa29b36bd2a1c46f5495b043bc49d12230a6a82d5f76",
+      "git_blob_or_note": "55b54ece74c2e9ab1263becc5eef1833315144e2"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "26922b9384045e5a3d496f21ec7c355da585d0caa1d13b887b634527d36fc450",
+      "git_blob_or_note": "Cargo generated/normalized"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "281d508beb1fe3927cf03d3f2f8c9a5117b1e4fe97ae21b9026cf318e8c35273",
+      "git_blob_or_note": "Cargo generated/normalized"
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "sha256": "5a17ee17da78f5179373b8324a1180e71efe2bcf3e3c9ca18c1bdb1e3faa9792",
+      "git_blob_or_note": "6a98924eaea247f15cde362682433fe27c305497"
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "git_blob_or_note": "16fe87b06e802f094b3fbb0894b137bca2b16ef1"
+    },
+    {
+      "path": "LICENSE-MIT",
+      "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
+      "git_blob_or_note": "39e0ed6602151f235148e6c08413aa7eda5b9038"
+    },
+    {
+      "path": "README.md",
+      "sha256": "cd565d563a2c70d197bb6fee1678e122214e22af7bdb046b80f52c1d953cd72f",
+      "git_blob_or_note": "d174b6eda69c5da25708c685a3f968002312cddb"
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "c09723e0890d15810374009e96b20bf0eb2f65f383006516f34db36240835c85",
+      "git_blob_or_note": "2c7414eb81c1ea4b803b84e87ad890e6cade886a"
+    },
+    {
+      "path": "tests/xcrate.rs",
+      "sha256": "bcec148e69db81b1a618bdd6f96a25d9a0442e6ecc692fe28f1206d9bffc006a",
+      "git_blob_or_note": "454e90f0dc891a738e0aa29ca28c1204707dc9eb"
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
 import { createRoot } from 'react-dom/client';
 import { App } from '../../src/renderer/App';
 import { fixtureAccountSnapshot } from './provider-accounts-mock';
@@ -121,7 +122,7 @@ let links = 0;
   for (const listener of [...linkListeners]) listener();
 };
 
-(window as any).lingxi = {
+(window as any)[DESKTOP_BRIDGE_GLOBAL] = {
   platform: 'darwin', isElectron: true,
   onApplicationMenu: (listener: (action: string) => void) => {
     (window as any).applicationMenuAction = listener;

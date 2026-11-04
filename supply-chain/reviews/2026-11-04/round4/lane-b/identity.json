@@ -1,0 +1,54 @@
+{
+  "archive_sha256": "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381",
+  "commit": "dd4adddf8b716bb51eb8ccb8c73e47bff1e358aa",
+  "upstream_root_tree": "ab61d531224b65dbca816ae817c4e424035f27fb",
+  "upstream_package_tree": "e8dd1ea835919c7962d2ff5a51fec90f237571d2",
+  "verified_git_tree_count": 39,
+  "files": [
+    {
+      "path": ".cargo_vcs_info.json",
+      "sha256": "a3d5157118010a825147da61c1e5fd38852ce895892643bec3be0ae0dfc93690",
+      "upstream_git_blob": "Cargo-generated"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "7e5dd993bee8261a72365e15130268e08b29de1807cc4a64b78bc3b0c0a7d236",
+      "upstream_git_blob": "99224fdb456f47f41731edfa4ed7396fe1c687d3"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "46a7591d66aa79dc1c079380c5eee88a2f2d2292fa0682adbcc6c7cd111bfdf7",
+      "upstream_git_blob": "Cargo-normalized"
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "sha256": "b3afad46710d7a13dd34dbbcd69580d8a64ec79e2e6337500cd78fcffc97b0d5",
+      "upstream_git_blob": "6faca837d4fb2c4b0826234f704f76f2f5ad1e90"
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+      "upstream_git_blob": "78173fa2e753d614bb0aa5ad125ddbbe70b282c4"
+    },
+    {
+      "path": "LICENSE-MIT",
+      "sha256": "f59f5a78193597e04fd932ee9af86254d14d08be5c9d0e003ab888feccce2161",
+      "upstream_git_blob": "1aef8daab9a25cd66ede7d9822634bc938a12f9c"
+    },
+    {
+      "path": "README.md",
+      "sha256": "9ce70d6a6c2f34a48de32d60c6ef70eadee98d930c042430654128951328873e",
+      "upstream_git_blob": "4ec6a1efb227517703017eeea00c129c6fff94c9"
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "14c4ed5ab5488b22b7f3c0f4d2aeb7eb7ac96113950ac5fc805d23454effa79e",
+      "upstream_git_blob": "9e63634364fe2984730e732898b04a9dbf79a167"
+    },
+    {
+      "path": "tests/mod.rs",
+      "sha256": "ecd2606bd54cf448f128759d0b2aea4bf657601fec1b6e8528c936abc754a725",
+      "upstream_git_blob": "9def4c93ef75c3b830c138356edebe654f669bd0"
+    }
+  ]
+}

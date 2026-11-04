@@ -157,7 +157,7 @@ struct ModelsSettingsPage: View {
                     Text(state.profile.name).font(.body).foregroundStyle(Color.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(state.profile.enabled ? ProviderAccountRepository.shared.configurationDescription(
-                        providerId: repository.logicalProviderID(for: state.profile)) : String(localized: "Disabled"))
+                        providerId: repository.logicalProviderID(for: state.profile)) : String(localized: "provider_account_disabled"))
                         .font(.subheadline).foregroundStyle(Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

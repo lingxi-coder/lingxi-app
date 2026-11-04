@@ -1,3 +1,4 @@
+import { DESKTOP_BRIDGE_GLOBAL } from '../../shared/desktopBridge';
 import { useMemo } from 'react';
 import type { DesktopTeamsApi, TeamsApi } from '../../../../../packages/teams';
 import { useTeamsWorkspace, type UseTeams } from '../../../../../packages/teams/useTeamsWorkspace';
@@ -18,7 +19,7 @@ export function desktopTeamsApi(desktop: DesktopTeamsApi, uid: string): TeamsApi
 /** The Teams workspace of the signed-in LingXi account on this Desktop. */
 export function useTeams(options: TeamsWorkspaceOptions = {}): UseTeams {
   const { state } = useAccountState();
-  const desktop = typeof window === 'undefined' ? undefined : window.lingxi?.teams;
+  const desktop = typeof window === 'undefined' ? undefined : window[DESKTOP_BRIDGE_GLOBAL]?.teams;
   const uid = state?.user?.uid;
   const api = useMemo(() => desktop && uid ? desktopTeamsApi(desktop, uid) : undefined, [desktop, uid]);
   return useTeamsWorkspace(api, uid, options);

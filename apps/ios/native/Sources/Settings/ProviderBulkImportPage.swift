@@ -94,7 +94,7 @@ struct ProviderBulkImportPage: View {
                 TextField(String(localized: "settings_parity_api_key_env"), text: string(entry.id, field: "apiKeyEnv")).textInputAutocapitalization(.never).autocorrectionDisabled()
                 SecureField(String(localized: "settings_provider_api_key"), text: string(entry.id, field: "credential")).textInputAutocapitalization(.never).autocorrectionDisabled()
                 if bindingIDs(entry).count > 1 {
-                    Picker("Connection", selection: Binding(
+                    Picker("provider_account_scope_connection", selection: Binding(
                         get: { accountBindings[entry.id] ?? bindingIDs(entry)[0] },
                         set: { accountBindings[entry.id] = $0 }
                     )) {

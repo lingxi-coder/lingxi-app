@@ -1,0 +1,112 @@
+{
+  "crate": "cfg-if",
+  "version": "1.0.4",
+  "registry": "registry+https://github.com/rust-lang/crates.io-index",
+  "archive_sha256": "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801",
+  "official_download_url": "https://static.crates.io/crates/cfg-if/cfg-if-1.0.4.crate",
+  "direct_https_download_sha256": "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801",
+  "direct_https_verification": "curl --fail --location via explicitly permitted read-only network; streamed to sha256 on 2026-11-04",
+  "cargo_lock_sha256": "8107432e39037dbd710de6b78bdb706d8aebdb63ab0d4175a94d487ee3e153c6",
+  "vcs_declared_commit": "3510ca6abea34cbbc702509a4e50ea9709925eda",
+  "extraction_comparison_extra_files": [],
+  "files": [
+    {
+      "path": ".cargo_vcs_info.json",
+      "size": 94,
+      "mode": "0o644",
+      "sha256": "65840ba044457862e25b2d7d53f4a2de232adf933bd31aba8f2bd6a1f51a6881",
+      "matches_extracted": true
+    },
+    {
+      "path": ".github/dependabot.yml",
+      "size": 284,
+      "mode": "0o644",
+      "sha256": "828e3ecefdc555a5210a5bdffd5621ef3625ceb35c7fc91a0b4faef6f9921b75",
+      "matches_extracted": true
+    },
+    {
+      "path": ".github/workflows/main.yaml",
+      "size": 1186,
+      "mode": "0o644",
+      "sha256": "6612a51b1f1479eabac7d3bd14aa609811d4afd2df2d454b9a1f6d6f3748f5b2",
+      "matches_extracted": true
+    },
+    {
+      "path": ".github/workflows/publish.yaml",
+      "size": 620,
+      "mode": "0o644",
+      "sha256": "1417805078704eecbaeea8611c5a44df575bfe1908d6969d909224a6e5e26ca8",
+      "matches_extracted": true
+    },
+    {
+      "path": ".gitignore",
+      "size": 18,
+      "mode": "0o644",
+      "sha256": "f9b1ca6ae27d1c18215265024629a8960c31379f206d9ed20f64e0b2dcf79805",
+      "matches_extracted": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "size": 1140,
+      "mode": "0o644",
+      "sha256": "08ba7340057565b338afaa29b36bd2a1c46f5495b043bc49d12230a6a82d5f76",
+      "matches_extracted": true
+    },
+    {
+      "path": "Cargo.lock",
+      "size": 556,
+      "mode": "0o644",
+      "sha256": "26922b9384045e5a3d496f21ec7c355da585d0caa1d13b887b634527d36fc450",
+      "matches_extracted": true
+    },
+    {
+      "path": "Cargo.toml",
+      "size": 1239,
+      "mode": "0o644",
+      "sha256": "281d508beb1fe3927cf03d3f2f8c9a5117b1e4fe97ae21b9026cf318e8c35273",
+      "matches_extracted": true
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "size": 580,
+      "mode": "0o644",
+      "sha256": "5a17ee17da78f5179373b8324a1180e71efe2bcf3e3c9ca18c1bdb1e3faa9792",
+      "matches_extracted": true
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "size": 10847,
+      "mode": "0o644",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "matches_extracted": true
+    },
+    {
+      "path": "LICENSE-MIT",
+      "size": 1057,
+      "mode": "0o644",
+      "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
+      "matches_extracted": true
+    },
+    {
+      "path": "README.md",
+      "size": 1436,
+      "mode": "0o644",
+      "sha256": "cd565d563a2c70d197bb6fee1678e122214e22af7bdb046b80f52c1d953cd72f",
+      "matches_extracted": true
+    },
+    {
+      "path": "src/lib.rs",
+      "size": 6368,
+      "mode": "0o644",
+      "sha256": "c09723e0890d15810374009e96b20bf0eb2f65f383006516f34db36240835c85",
+      "matches_extracted": true
+    },
+    {
+      "path": "tests/xcrate.rs",
+      "size": 296,
+      "mode": "0o644",
+      "sha256": "bcec148e69db81b1a618bdd6f96a25d9a0442e6ecc692fe28f1206d9bffc006a",
+      "matches_extracted": true
+    }
+  ]
+}

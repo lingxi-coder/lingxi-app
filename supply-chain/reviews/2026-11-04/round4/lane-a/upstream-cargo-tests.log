@@ -1,0 +1,25 @@
+    Updating crates.io index
+   Compiling cfg-if v1.0.4 (/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/cfg-if-1.0.4)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.45s
+     Running unittests src/lib.rs (/private/tmp/cfg-if-cargo.90ISLP/target/debug/deps/cfg_if-a438960a5750c1b5)
+
+running 2 tests
+test tests::it_works ... ok
+test tests::test_usage_within_a_function ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/xcrate.rs (/private/tmp/cfg-if-cargo.90ISLP/target/debug/deps/xcrate-a57ad7e319f37138)
+
+running 1 test
+test smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cfg_if
+
+running 1 test
+test src/lib.rs - (line 12) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.37s
+

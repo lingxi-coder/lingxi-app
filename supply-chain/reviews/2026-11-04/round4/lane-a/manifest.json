@@ -1,0 +1,46 @@
+{
+  "all-features-node.json": {
+    "sha256": "c688426552ec0cdcd6b660cd1e5c768bde2cd420a17649d15ba3832372bd1d6a",
+    "bytes": 454
+  },
+  "cfg-if-probe.rs": {
+    "sha256": "3cf801fd4e9d9a244efbb2f82cf0c58ed0d21f3e4d694ec7ce31c1e4a04e95d1",
+    "bytes": 2068
+  },
+  "identity-inventory.json": {
+    "sha256": "abda16a9ac5d9e4f635f36d0728fb67f302deedf66e57c6ffa9f861c2979cb44",
+    "bytes": 3616
+  },
+  "negative-control.log": {
+    "sha256": "1068ff58c9effd5cfa82c2910ff417d2a11d3fb7834feba5ddf092f52ff078d8",
+    "bytes": 180
+  },
+  "negative-control.py": {
+    "sha256": "3ad246b31161c311340cd68946cec3fc8512ce3e893e7b852f630f0a7a4a5768",
+    "bytes": 1649
+  },
+  "probe-results.log": {
+    "sha256": "0bb05038481e3bc2596bd7a4f46e6fb24ef9fd52e18ff5354db41814d9a2a79f",
+    "bytes": 5583
+  },
+  "resolved-identity.json": {
+    "sha256": "2115355bd205e8e9c1c379c60e803508266b7fe72ad5fb44d0b6f0f8784f4b1b",
+    "bytes": 14156
+  },
+  "review.md": {
+    "sha256": "df4dcf530c75a39faab7c3fd636c3afcbfcf97f08c2514d1cccfbcce9df76c08",
+    "bytes": 9096
+  },
+  "run-cfg-if-probes.py": {
+    "sha256": "1f09d1a97e96bd2a325e7ef0e24b6cc4adb2f2152ff70841f32a5ab37511f008",
+    "bytes": 1924
+  },
+  "upstream-cargo-offline-attempt.log": {
+    "sha256": "847a2b4c3f6dea95790de56939307e54b22c8f66be1929cb274c6a1fc877e8a0",
+    "bytes": 499
+  },
+  "upstream-cargo-tests.log": {
+    "sha256": "277f43fd8ac940118b24a788e7389975c2dcc672f61389e0850928000d69c9ce",
+    "bytes": 1009
+  }
+}

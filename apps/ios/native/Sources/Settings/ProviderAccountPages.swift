@@ -24,7 +24,7 @@ struct ProviderAccountsPage: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(account.displayName)
-                            Text(account.authKind == "oauth" ? "ChatGPT subscription" : "API key").font(.caption).foregroundStyle(.secondary)
+                            Text(account.authKind == "oauth" ? String(localized: "provider_account_auth_chatgpt") : String(localized: "provider_account_auth_api_key")).font(.caption).foregroundStyle(.secondary)
                             Text(accountStatus(account)).font(.caption).foregroundStyle(.secondary)
                             if repository.wasLastUsed(account) {
                                 Text("Last used").font(.caption).foregroundStyle(.secondary)
@@ -68,7 +68,7 @@ struct ProviderAccountsPage: View {
             }
         }
         .confirmationDialog("Allow subscription fallback to metered API", isPresented: $confirmMetered, titleVisibility: .visible) {
-            Button("Allow API charges") {
+            Button("provider_account_allow_api_charges") {
                 Task { await repository.perform(.init(action: "set_policy", providerId: providerId,
                     allowSubscriptionToMetered: true)) }
             }
@@ -105,7 +105,7 @@ struct ProviderAccountsPage: View {
     }
 
     private func accountStatus(_ account: ProviderAccount) -> String {
-        if !account.enabled { return String(localized: "Disabled") }
+        if !account.enabled { return String(localized: "provider_account_disabled") }
         if let health = repository.health(for: account) {
             let reason = health.displayReason.map { " · \($0)" } ?? ""
             return "\(account.authKind == "oauth" ? "OAuth" : "API key") · \(health.displayStatus)\(reason)"
@@ -194,7 +194,7 @@ private struct ProviderAccountAddPage: View {
         Form {
             Section {
                 if !usesOAuth && executionBindingIds.count > 1 {
-                    Picker("Connection", selection: $selectedBinding) {
+                    Picker("provider_account_scope_connection", selection: $selectedBinding) {
                         ForEach(executionBindingIds, id: \.self) { Text($0).tag($0) }
                     }.disabled(createdAccountID != nil)
                 }
@@ -212,7 +212,7 @@ private struct ProviderAccountAddPage: View {
                         .accessibilityIdentifier("provider.account.api-key")
                         .disabled(createdAccountID != nil)
                     if let url = providerCredentialManagementURL(selectedBinding.isEmpty ? executionBindingId : selectedBinding) {
-                        Link("Get or manage API key ↗", destination: url)
+                        Link("provider_account_manage_api_key", destination: url)
                             .accessibilityIdentifier("provider.account.manage-api-key")
                     }
                 }
@@ -232,7 +232,7 @@ private struct ProviderAccountAddPage: View {
                 }
                 .accessibilityIdentifier("provider.account.options")
                 if showAccountOptions {
-                    TextField("Account name (optional)", text: $name, prompt: Text(defaultAccountName))
+                    TextField("provider_account_optional_name", text: $name, prompt: Text(defaultAccountName))
                         .accessibilityIdentifier("provider.account.name")
                         .disabled(createdAccountID != nil)
                 }
@@ -378,7 +378,7 @@ private struct ProviderAccountDetailPage: View {
                         SecureField("Replacement API key", text: $secret)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
                         if let url = providerCredentialManagementURL(account.executionBindingId) {
-                            Link("Get or manage API key ↗", destination: url)
+                            Link("provider_account_manage_api_key", destination: url)
                         }
                         Button("Replace API key") {
                             Task {
@@ -393,7 +393,7 @@ private struct ProviderAccountDetailPage: View {
                     Section("Temporary unavailability") {
                         ForEach(repository.scopedHealth(for: account)) { health in
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(health.scopeKind == "model" ? String(localized: "Model") : String(localized: "Connection"))
+                                Text(health.scopeKind == "model" ? String(localized: "session_details_model") : String(localized: "provider_account_scope_connection"))
                                     .font(.caption).foregroundStyle(.secondary)
                                 Text(health.scopeId)
                                 Text(health.reason.replacingOccurrences(of: "_", with: " "))

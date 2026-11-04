@@ -185,6 +185,26 @@ class AndroidHandwrittenResourceTests(unittest.TestCase):
             check_i18n_pairing._android_companion_names(self.repo)
         self.assertIn("invalid Android resources file", output.getvalue())
 
+    def test_duplicate_strings_are_reported_per_locale_and_within_a_file(self):
+        (self.res / "values-ja" / "strings.xml").write_text(
+            '<resources><string name="item_0">x</string>'
+            '<item type="string" name="item_0">y</item></resources>',
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            check_i18n_pairing._android_duplicate_string_names(self.repo),
+            {"ja": {"item_0": ["files.xml", "strings.xml", "strings.xml"]}},
+        )
+        problems = check_i18n_pairing.compare(
+            {"totalKeys": 0, "androidIllegalUnpaired": 0, "empty": {loc: 0 for loc in check_i18n_pairing.LOCALES},
+             "identicalToBase": {loc: 0 for loc in check_i18n_pairing.LOCALES}},
+            {"totalKeys": 0, "androidIllegalUnpaired": 0, "empty": {loc: 0 for loc in check_i18n_pairing.LOCALES},
+             "identicalToBase": {loc: 0 for loc in check_i18n_pairing.LOCALES}, "iosSourceOrphans": 0,
+             "androidSourceOrphans": 0, "androidCompanionLocaleGapsTotal": 0,
+             "androidDuplicateStrings": {"ja": {"item_0": ["files.xml", "strings.xml"]}}},
+        )
+        self.assertTrue(any("ja:item_0" in problem for problem in problems))
+
 
 class SwiftUILocalizedStringReferenceTests(unittest.TestCase):
     def setUp(self):

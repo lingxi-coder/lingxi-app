@@ -81,6 +81,19 @@ BASE_LOCALE = "zh-Hans"
 # Reviewed labels and format-only strings can legitimately match zh-Hans.
 # Keep each exception exact: locale, key, and both values must all match.
 INTENTIONAL_IDENTICAL_TO_BASE = {
+    # These are standard labels shared across languages, or count formats
+    # whose unit is identical in both Chinese variants. Keep the exact values
+    # so an untranslated replacement still fails the ordinary comparison.
+    ("en", "provider_account_auth_api_key"): "API key",
+    ("ja", "provider_account_edit"): "管理",
+    ("zh-Hant", "provider_account_ready"): "可用",
+    ("zh-Hant", "provider_account_edit"): "管理",
+    ("zh-Hant", "provider_account_up"): "上移",
+    ("zh-Hant", "provider_account_down"): "下移",
+    ("zh-Hant", "provider_account_disabled"): "已停用",
+    ("zh-Hant", "provider_account_scope_model"): "模型",
+    ("zh-Hant", "chat_tool_calls_count_fmt"): "%1$d 次",
+    ("zh-Hant", "chat_tool_calls_count %lld"): "%1$lld 次",
     ("en", "drawer_tab_chats"): "Chat",
     ("en", "drawer_tab_crons"): "Cron",
     ("en", "drawer_tab_projects"): "Code",
@@ -374,6 +387,33 @@ def _android_string_resource_names(path):
             if element.get("name")}
 
 
+def _android_duplicate_string_names(repo_root):
+    """Find collisions within each Android values qualifier, including in one file."""
+    root = Path(repo_root) / ANDROID_RES_ROOT
+    duplicates = {}
+    for locale, directory in ANDROID_LOCALE_DIR.items():
+        sources = {}
+        for path in sorted((root / directory).glob("*.xml")):
+            try:
+                resources = ET.parse(path).getroot()
+            except (OSError, ET.ParseError) as exc:
+                fail("invalid Android resources file %s: %s" % (path, exc))
+            if resources.tag != "resources":
+                fail("invalid Android resources root in %s" % path)
+            for element in resources:
+                if element.tag != "string" and not (
+                    element.tag == "item" and element.get("type") == "string"
+                ):
+                    continue
+                name = element.get("name")
+                if name:
+                    sources.setdefault(name, []).append(path.name)
+        collisions = {name: files for name, files in sorted(sources.items()) if len(files) > 1}
+        if collisions:
+            duplicates[locale] = collisions
+    return duplicates
+
+
 def _verified_google_services_resource_names(repo_root):
     """Return only generated resources proven by the app's current config.
 
@@ -538,11 +578,20 @@ def measure(locales, repo_root):
     m["iosSourceOrphanKeys"] = ios_orphans
     m["androidSourceOrphanKeys"] = android_orphans
     m["androidCompanionLocaleGaps"] = companion_gaps
+    m["androidDuplicateStrings"] = _android_duplicate_string_names(repo_root)
     return m
 
 
 def compare(base, now):
     problems = []
+    duplicates = now.get("androidDuplicateStrings", {})
+    if duplicates:
+        details = [
+            "%s:%s (%s)" % (locale, name, ", ".join(files))
+            for locale, names in sorted(duplicates.items())
+            for name, files in names.items()
+        ]
+        problems.append("duplicate Android string resources in the same locale: " + "; ".join(details))
     if now["totalKeys"] != base["totalKeys"]:
         # key 数变化本身不是错——加文案就会变。它只是必须被看见。
         print("I18N-GATE NOTE: key count moved %d -> %d" % (base["totalKeys"], now["totalKeys"]))

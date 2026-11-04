@@ -1,3 +1,4 @@
+import { DESKTOP_BRIDGE_GLOBAL } from '../../shared/desktopBridge';
 import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { AccountSignInContext, useAccountState } from '../bridge/useAccountState';
 import { tr } from '../i18n/locale';
@@ -10,7 +11,7 @@ export function AccountGate({ children }: { children: ReactNode }) {
   const { state } = useAccountState();
   const [requested, setRequested] = useState(false);
   const requestSignIn = useCallback(() => setRequested(true), []);
-  const available = typeof window !== 'undefined' && Boolean(window.lingxi?.account);
+  const available = typeof window !== 'undefined' && Boolean(window[DESKTOP_BRIDGE_GLOBAL]?.account);
   const blocked = available && (!state || (!state.user && (requested || state.sessionExpired === true)));
   const screen = useRef<HTMLElement>(null);
   useLayoutEffect(() => {

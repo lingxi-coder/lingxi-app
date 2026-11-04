@@ -1,0 +1,3391 @@
+{
+  "sha": "d9bba94c239daa1175a5bb2958f37a5c72db3f6a",
+  "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/d9bba94c239daa1175a5bb2958f37a5c72db3f6a",
+  "tree": [
+    {
+      "path": ".editorconfig",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "79a8d7d53f531ccd40396f4f5dad0dde9f5a362a",
+      "size": 105,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/79a8d7d53f531ccd40396f4f5dad0dde9f5a362a"
+    },
+    {
+      "path": ".github",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6865e68cb8c68b455b20d405ef485fcc397d4807",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/6865e68cb8c68b455b20d405ef485fcc397d4807"
+    },
+    {
+      "path": ".github/workflows",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "fe10f5a64129c8035861f4dc9ac106c8b483c6e1",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/fe10f5a64129c8035861f4dc9ac106c8b483c6e1"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eacb94a08e47b7953cd5dab55697d7cfdf551f51",
+      "size": 12852,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/eacb94a08e47b7953cd5dab55697d7cfdf551f51"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d56fcdddc3e80f09cf6cd2406864145a07e7cb8d",
+      "size": 412,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d56fcdddc3e80f09cf6cd2406864145a07e7cb8d"
+    },
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "de02da3f967797e298f025a096d2771f2dbd1052",
+      "size": 63,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/de02da3f967797e298f025a096d2771f2dbd1052"
+    },
+    {
+      "path": ".rustfmt.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2a79d9274a76864d887dd8a3036b0cbc4e778434",
+      "size": 46,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2a79d9274a76864d887dd8a3036b0cbc4e778434"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d0aaef01c010f270486665ea47fffc499fc5e3b6",
+      "size": 41067,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d0aaef01c010f270486665ea47fffc499fc5e3b6"
+    },
+    {
+      "path": "Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1a90362f31119deb1530cf12eb21cd494b71e51e",
+      "size": 571,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1a90362f31119deb1530cf12eb21cd494b71e51e"
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9eb0b097f5d0b5e147323e043b3adf35949b9f5a",
+      "size": 10874,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/9eb0b097f5d0b5e147323e043b3adf35949b9f5a"
+    },
+    {
+      "path": "LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8ad082ec4f93b748959a7634b12d25da2000c59e",
+      "size": 1094,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8ad082ec4f93b748959a7634b12d25da2000c59e"
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0a1d5a3565e3f3a50489886f7e68d3d6cd2e7032",
+      "size": 1851,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0a1d5a3565e3f3a50489886f7e68d3d6cd2e7032"
+    },
+    {
+      "path": "ci",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "8df9316722577c8c575fe2f858267a886f0086c0",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/8df9316722577c8c575fe2f858267a886f0086c0"
+    },
+    {
+      "path": "ci/publish.sh",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "cf898ba4918e09cb8f0d560722bd090533e74e93",
+      "size": 483,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/cf898ba4918e09cb8f0d560722bd090533e74e93"
+    },
+    {
+      "path": "examples",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "9c5c74cc13f07148987feb9645e24a6119dbfb2f",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/9c5c74cc13f07148987feb9645e24a6119dbfb2f"
+    },
+    {
+      "path": "examples/functional",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "31fe1e51824c81eef3f58f52ca2e0185578cf697",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/31fe1e51824c81eef3f58f52ca2e0185578cf697"
+    },
+    {
+      "path": "examples/functional/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bb95a6f6a3e16ffa6e13b0a6b4b647b9b65031d1",
+      "size": 204,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/bb95a6f6a3e16ffa6e13b0a6b4b647b9b65031d1"
+    },
+    {
+      "path": "examples/functional/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "8809bb32275fbb70e54c49db3bf76e18751eb1eb",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/8809bb32275fbb70e54c49db3bf76e18751eb1eb"
+    },
+    {
+      "path": "examples/functional/src/main.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d535a61b451f70b326a01878fb2a12b9cbdf7648",
+      "size": 1929,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d535a61b451f70b326a01878fb2a12b9cbdf7648"
+    },
+    {
+      "path": "examples/imperative",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e3a5c0d1447dce1f451316211d1f22d56dd4bd62",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/e3a5c0d1447dce1f451316211d1f22d56dd4bd62"
+    },
+    {
+      "path": "examples/imperative/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "afd7a204286d9b0a1853d701c5a0f3584ba93f64",
+      "size": 204,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/afd7a204286d9b0a1853d701c5a0f3584ba93f64"
+    },
+    {
+      "path": "examples/imperative/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "f2e3c36eea37197c98bea98c8355559569e188a6",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/f2e3c36eea37197c98bea98c8355559569e188a6"
+    },
+    {
+      "path": "examples/imperative/src/main.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1c952537bf63d2f1576db7355ebdee42aa580f87",
+      "size": 1945,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1c952537bf63d2f1576db7355ebdee42aa580f87"
+    },
+    {
+      "path": "futures-channel",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "f395ae0638de50d57815e23c21a9dbcb48539fae",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/f395ae0638de50d57815e23c21a9dbcb48539fae"
+    },
+    {
+      "path": "futures-channel/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3d699c8f5003b8f15f20fd35c9fdb7c2c4916610",
+      "size": 1113,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/3d699c8f5003b8f15f20fd35c9fdb7c2c4916610"
+    },
+    {
+      "path": "futures-channel/LICENSE-APACHE",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "965b606f331b51d566b46025f9ff311a7aad0c12",
+      "size": 17,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/965b606f331b51d566b46025f9ff311a7aad0c12"
+    },
+    {
+      "path": "futures-channel/LICENSE-MIT",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "76219eb72e8524f15c21ec93b9b2592da49b5460",
+      "size": 14,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/76219eb72e8524f15c21ec93b9b2592da49b5460"
+    },
+    {
+      "path": "futures-channel/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "22926528603d3fb6b3dc388822f7d58f938180cc",
+      "size": 591,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/22926528603d3fb6b3dc388822f7d58f938180cc"
+    },
+    {
+      "path": "futures-channel/benches",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "783e7a8443766601c5593ab7e84fe0430b904675",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/783e7a8443766601c5593ab7e84fe0430b904675"
+    },
+    {
+      "path": "futures-channel/benches/sync_mpsc.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7c3c3d3a8039bc56661293cbb90b472b87989c44",
+      "size": 3907,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/7c3c3d3a8039bc56661293cbb90b472b87989c44"
+    },
+    {
+      "path": "futures-channel/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "75a8fd6045a38d51b098562c6b996eefed71de3d",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/75a8fd6045a38d51b098562c6b996eefed71de3d"
+    },
+    {
+      "path": "futures-channel/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "09d6a1e2de1fc7321add0165547d923264306e18",
+      "size": 1264,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/09d6a1e2de1fc7321add0165547d923264306e18"
+    },
+    {
+      "path": "futures-channel/src/lock.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b328d0f7dd9de9aab9937a12902e970c2eafff63",
+      "size": 3148,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b328d0f7dd9de9aab9937a12902e970c2eafff63"
+    },
+    {
+      "path": "futures-channel/src/mpsc",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "0577632bd97fd5d15e7a54dfc1fbf284bbb57bb4",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/0577632bd97fd5d15e7a54dfc1fbf284bbb57bb4"
+    },
+    {
+      "path": "futures-channel/src/mpsc/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fd0eace49f727b8aa94e2c318a869915a5807a46",
+      "size": 49844,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/fd0eace49f727b8aa94e2c318a869915a5807a46"
+    },
+    {
+      "path": "futures-channel/src/mpsc/queue.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "78cbdce6ec1ff83a6c22b2f5f55138944b354ec6",
+      "size": 6821,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/78cbdce6ec1ff83a6c22b2f5f55138944b354ec6"
+    },
+    {
+      "path": "futures-channel/src/mpsc/sink_impl.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1be20162c2ef1ce5f00f0646d27c73020937be25",
+      "size": 2315,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1be20162c2ef1ce5f00f0646d27c73020937be25"
+    },
+    {
+      "path": "futures-channel/src/oneshot.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fe5b115a337705528d8f291667631bc11a60977f",
+      "size": 17843,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/fe5b115a337705528d8f291667631bc11a60977f"
+    },
+    {
+      "path": "futures-channel/tests",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "279b7fd5a7b5a1fd7fe1b9a52b4b607007b8e51d",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/279b7fd5a7b5a1fd7fe1b9a52b4b607007b8e51d"
+    },
+    {
+      "path": "futures-channel/tests/channel.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5f01a8ef4c1ca1c6494ca7aeeaf290843c336070",
+      "size": 1566,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/5f01a8ef4c1ca1c6494ca7aeeaf290843c336070"
+    },
+    {
+      "path": "futures-channel/tests/mpsc-close.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "be5d08c32265319e930b3a070a17aea714a35f74",
+      "size": 11296,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/be5d08c32265319e930b3a070a17aea714a35f74"
+    },
+    {
+      "path": "futures-channel/tests/mpsc-size_hint.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3c06eec1ab404791f6c7d34b62202668ccb99ece",
+      "size": 1241,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/3c06eec1ab404791f6c7d34b62202668ccb99ece"
+    },
+    {
+      "path": "futures-channel/tests/mpsc.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "08f39eb160bdec2e88901480ba5c49003f751817",
+      "size": 18771,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/08f39eb160bdec2e88901480ba5c49003f751817"
+    },
+    {
+      "path": "futures-channel/tests/oneshot.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6b48376dc0eddf7190e3bd5c8df1ef09fa1c47c9",
+      "size": 7205,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6b48376dc0eddf7190e3bd5c8df1ef09fa1c47c9"
+    },
+    {
+      "path": "futures-core",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "bfdb286f4a6528413bc418ed7c1b2ce7e0d1c6d1",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/bfdb286f4a6528413bc418ed7c1b2ce7e0d1c6d1"
+    },
+    {
+      "path": "futures-core/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "273665b63712fa0ab2ce8eb626dabee7299236d2",
+      "size": 862,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/273665b63712fa0ab2ce8eb626dabee7299236d2"
+    },
+    {
+      "path": "futures-core/LICENSE-APACHE",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "965b606f331b51d566b46025f9ff311a7aad0c12",
+      "size": 17,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/965b606f331b51d566b46025f9ff311a7aad0c12"
+    },
+    {
+      "path": "futures-core/LICENSE-MIT",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "76219eb72e8524f15c21ec93b9b2592da49b5460",
+      "size": 14,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/76219eb72e8524f15c21ec93b9b2592da49b5460"
+    },
+    {
+      "path": "futures-core/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "96e0e064bcc3ed2711fceafec07c1982b8bb42cb",
+      "size": 580,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/96e0e064bcc3ed2711fceafec07c1982b8bb42cb"
+    },
+    {
+      "path": "futures-core/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "00fa70a9063ebfa2afb6ecedc462769be2062648",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/00fa70a9063ebfa2afb6ecedc462769be2062648"
+    },
+    {
+      "path": "futures-core/src/future.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "30c0323a6bd47494db431bd52cc37c6c862bb26e",
+      "size": 3696,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/30c0323a6bd47494db431bd52cc37c6c862bb26e"
+    },
+    {
+      "path": "futures-core/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6ff6b974b15654b2d795499dc2d5b05d7c4d122b",
+      "size": 653,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6ff6b974b15654b2d795499dc2d5b05d7c4d122b"
+    },
+    {
+      "path": "futures-core/src/stream.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "dd07d5aa014da22dea2576a9440159a4d40cd134",
+      "size": 8751,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/dd07d5aa014da22dea2576a9440159a4d40cd134"
+    },
+    {
+      "path": "futures-core/src/task",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6e0e4687eedfa7f90bde2d7432a0292859f958d3",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/6e0e4687eedfa7f90bde2d7432a0292859f958d3"
+    },
+    {
+      "path": "futures-core/src/task/__internal",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "00272605591bcee05ece7abbf21a976caedbabdd",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/00272605591bcee05ece7abbf21a976caedbabdd"
+    },
+    {
+      "path": "futures-core/src/task/__internal/atomic_waker.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e87943be0c9f173980dfb2c38310db0fb5e91857",
+      "size": 17282,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e87943be0c9f173980dfb2c38310db0fb5e91857"
+    },
+    {
+      "path": "futures-core/src/task/__internal/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c2487422800b64ab490a02e98d9a77caa0704807",
+      "size": 265,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c2487422800b64ab490a02e98d9a77caa0704807"
+    },
+    {
+      "path": "futures-core/src/task/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "19e4eaecdd6b8340c079ca20aae459600fa8b8d0",
+      "size": 172,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/19e4eaecdd6b8340c079ca20aae459600fa8b8d0"
+    },
+    {
+      "path": "futures-core/src/task/poll.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bde0f8a5fe602231d882689dfb1ee744e2575941",
+      "size": 496,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/bde0f8a5fe602231d882689dfb1ee744e2575941"
+    },
+    {
+      "path": "futures-executor",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "514086b38fdafcaf8c5e406227e6163178f1d81d",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/514086b38fdafcaf8c5e406227e6163178f1d81d"
+    },
+    {
+      "path": "futures-executor/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c4a3921ca7c41229a3fe8f85bb525a8187fe09db",
+      "size": 1006,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c4a3921ca7c41229a3fe8f85bb525a8187fe09db"
+    },
+    {
+      "path": "futures-executor/LICENSE-APACHE",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "965b606f331b51d566b46025f9ff311a7aad0c12",
+      "size": 17,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/965b606f331b51d566b46025f9ff311a7aad0c12"
+    },
+    {
+      "path": "futures-executor/LICENSE-MIT",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "76219eb72e8524f15c21ec93b9b2592da49b5460",
+      "size": 14,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/76219eb72e8524f15c21ec93b9b2592da49b5460"
+    },
+    {
+      "path": "futures-executor/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b7e1d8bdbfcd928d060bc74160c3c8da7f77ea97",
+      "size": 602,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b7e1d8bdbfcd928d060bc74160c3c8da7f77ea97"
+    },
+    {
+      "path": "futures-executor/benches",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "2f2248b315054c156642202b0dbdcd95e93a833f",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/2f2248b315054c156642202b0dbdcd95e93a833f"
+    },
+    {
+      "path": "futures-executor/benches/thread_notify.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "88d0447cf68bf7765e6e6ce128893097598e9965",
+      "size": 2312,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/88d0447cf68bf7765e6e6ce128893097598e9965"
+    },
+    {
+      "path": "futures-executor/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "a0a309f08ba5b489628dc6e210bf15992c91e5ec",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/a0a309f08ba5b489628dc6e210bf15992c91e5ec"
+    },
+    {
+      "path": "futures-executor/src/enter.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "46e1bd147e99ef52361c841f65b218f9c13a2f3f",
+      "size": 1911,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/46e1bd147e99ef52361c841f65b218f9c13a2f3f"
+    },
+    {
+      "path": "futures-executor/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a0dc49d7ba8cb7e5521b73dbcaf640637ea802a2",
+      "size": 2753,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/a0dc49d7ba8cb7e5521b73dbcaf640637ea802a2"
+    },
+    {
+      "path": "futures-executor/src/local_pool.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fb55343953689832b97fd8283d973484e9480771",
+      "size": 13554,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/fb55343953689832b97fd8283d973484e9480771"
+    },
+    {
+      "path": "futures-executor/src/thread_pool.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "774ab53ca225dcff9fdc324cb80676ee46382c70",
+      "size": 11826,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/774ab53ca225dcff9fdc324cb80676ee46382c70"
+    },
+    {
+      "path": "futures-executor/src/unpark_mutex.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f45164be9d8e2008412f411f01c98652ec267c74",
+      "size": 5470,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/f45164be9d8e2008412f411f01c98652ec267c74"
+    },
+    {
+      "path": "futures-executor/tests",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "88fecadc3f4e639a45c88bd5e509ccf164f52907",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/88fecadc3f4e639a45c88bd5e509ccf164f52907"
+    },
+    {
+      "path": "futures-executor/tests/local_pool.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d9b2e9d797afe8b01fafbc974ed8bc69a30b98d6",
+      "size": 12276,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d9b2e9d797afe8b01fafbc974ed8bc69a30b98d6"
+    },
+    {
+      "path": "futures-io",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "1e8124ac4ddd43abaa87cfe9d224e527cbb10c14",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/1e8124ac4ddd43abaa87cfe9d224e527cbb10c14"
+    },
+    {
+      "path": "futures-io/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1db5798776c9686058ced71c41c0a6f0e13649b0",
+      "size": 772,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1db5798776c9686058ced71c41c0a6f0e13649b0"
+    },
+    {
+      "path": "futures-io/LICENSE-APACHE",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "965b606f331b51d566b46025f9ff311a7aad0c12",
+      "size": 17,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/965b606f331b51d566b46025f9ff311a7aad0c12"
+    },
+    {
+      "path": "futures-io/LICENSE-MIT",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "76219eb72e8524f15c21ec93b9b2592da49b5460",
+      "size": 14,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/76219eb72e8524f15c21ec93b9b2592da49b5460"
+    },
+    {
+      "path": "futures-io/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "da6eec28bac110ebfea59cf34030053be80eb009",
+      "size": 616,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/da6eec28bac110ebfea59cf34030053be80eb009"
+    },
+    {
+      "path": "futures-io/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "67304aea2c89348f2a8c0e4cd4e6108d77b474bf",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/67304aea2c89348f2a8c0e4cd4e6108d77b474bf"
+    },
+    {
+      "path": "futures-io/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9c2fa056ad763ab9f147b0a1b1e49a053904bf32",
+      "size": 20733,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/9c2fa056ad763ab9f147b0a1b1e49a053904bf32"
+    },
+    {
+      "path": "futures-macro",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e08f8687db512d025181a02403a341aa34047fba",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/e08f8687db512d025181a02403a341aa34047fba"
+    },
+    {
+      "path": "futures-macro/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7d9e33e18a6d65a6842c8a86eb86f6adaab2588e",
+      "size": 556,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/7d9e33e18a6d65a6842c8a86eb86f6adaab2588e"
+    },
+    {
+      "path": "futures-macro/LICENSE-APACHE",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "965b606f331b51d566b46025f9ff311a7aad0c12",
+      "size": 17,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/965b606f331b51d566b46025f9ff311a7aad0c12"
+    },
+    {
+      "path": "futures-macro/LICENSE-MIT",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "76219eb72e8524f15c21ec93b9b2592da49b5460",
+      "size": 14,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/76219eb72e8524f15c21ec93b9b2592da49b5460"
+    },
+    {
+      "path": "futures-macro/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "754300bc73ab649267aba1c826adc9a01221b35a",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/754300bc73ab649267aba1c826adc9a01221b35a"
+    },
+    {
+      "path": "futures-macro/src/executor.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7f1d0a93f46ee25f245d277f6b521496f2d6ce75",
+      "size": 1809,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/7f1d0a93f46ee25f245d277f6b521496f2d6ce75"
+    },
+    {
+      "path": "futures-macro/src/join.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0e891b3aad3073aad8a577e7df76c22d2405e24a",
+      "size": 4721,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0e891b3aad3073aad8a577e7df76c22d2405e24a"
+    },
+    {
+      "path": "futures-macro/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c1b94785e8a6a7486c26f4f69711a5122b349959",
+      "size": 1398,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c1b94785e8a6a7486c26f4f69711a5122b349959"
+    },
+    {
+      "path": "futures-macro/src/select.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "30f7008bc55fa383c10020a253bd157af87ef9d3",
+      "size": 11599,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/30f7008bc55fa383c10020a253bd157af87ef9d3"
+    },
+    {
+      "path": "futures-macro/src/stream_select.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9927b5307348dc2302060481a2993078df984bc6",
+      "size": 5286,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/9927b5307348dc2302060481a2993078df984bc6"
+    },
+    {
+      "path": "futures-sink",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "5054af98dcaf584a045961ced0e0929ae2d5773b",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/5054af98dcaf584a045961ced0e0929ae2d5773b"
+    },
+    {
+      "path": "futures-sink/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3613f0bb67ad0d03c83a69576492695742b02173",
+      "size": 545,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/3613f0bb67ad0d03c83a69576492695742b02173"
+    },
+    {
+      "path": "futures-sink/LICENSE-APACHE",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "965b606f331b51d566b46025f9ff311a7aad0c12",
+      "size": 17,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/965b606f331b51d566b46025f9ff311a7aad0c12"
+    },
+    {
+      "path": "futures-sink/LICENSE-MIT",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "76219eb72e8524f15c21ec93b9b2592da49b5460",
+      "size": 14,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/76219eb72e8524f15c21ec93b9b2592da49b5460"
+    },
+    {
+      "path": "futures-sink/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1d683e95b56e1b114886b41189bc97aa318fe0ef",
+      "size": 582,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1d683e95b56e1b114886b41189bc97aa318fe0ef"
+    },
+    {
+      "path": "futures-sink/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "1ee40e108969f98182c5eeb4daa4415d8cecf9f2",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/1ee40e108969f98182c5eeb4daa4415d8cecf9f2"
+    },
+    {
+      "path": "futures-sink/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "52394e8c2af5e38d74c59070ddb4ed73a4d6289a",
+      "size": 9125,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/52394e8c2af5e38d74c59070ddb4ed73a4d6289a"
+    },
+    {
+      "path": "futures-task",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "5a42afe88bd1068340746a63191b37f063fa0c33",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/5a42afe88bd1068340746a63191b37f063fa0c33"
+    },
+    {
+      "path": "futures-task/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "80d963320e64007225493d8ea9d20a32f8e3d8f6",
+      "size": 692,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/80d963320e64007225493d8ea9d20a32f8e3d8f6"
+    },
+    {
+      "path": "futures-task/LICENSE-APACHE",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "965b606f331b51d566b46025f9ff311a7aad0c12",
+      "size": 17,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/965b606f331b51d566b46025f9ff311a7aad0c12"
+    },
+    {
+      "path": "futures-task/LICENSE-MIT",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "76219eb72e8524f15c21ec93b9b2592da49b5460",
+      "size": 14,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/76219eb72e8524f15c21ec93b9b2592da49b5460"
+    },
+    {
+      "path": "futures-task/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "64d582a22d64e31fbe154ede53982fd88a493906",
+      "size": 554,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/64d582a22d64e31fbe154ede53982fd88a493906"
+    },
+    {
+      "path": "futures-task/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "4de2ee818feb021d555a82bbef24ef056dd009d4",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/4de2ee818feb021d555a82bbef24ef056dd009d4"
+    },
+    {
+      "path": "futures-task/src/arc_wake.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "aa6de0fc437781d0c7c82f84cac2d829d1c93806",
+      "size": 1924,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/aa6de0fc437781d0c7c82f84cac2d829d1c93806"
+    },
+    {
+      "path": "futures-task/src/future_obj.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a611382193206d1e94ac64faa06b21e9e8358120",
+      "size": 10693,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/a611382193206d1e94ac64faa06b21e9e8358120"
+    },
+    {
+      "path": "futures-task/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c119b6b1e46b5844cf3b1a03cee58204d9245845",
+      "size": 1403,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c119b6b1e46b5844cf3b1a03cee58204d9245845"
+    },
+    {
+      "path": "futures-task/src/noop_waker.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f76a8a2e95d8e2502a9a53d910dfba54643b298a",
+      "size": 1647,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/f76a8a2e95d8e2502a9a53d910dfba54643b298a"
+    },
+    {
+      "path": "futures-task/src/spawn.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4a9a45a44668d2171e1382efcff85ddd68874897",
+      "size": 5868,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/4a9a45a44668d2171e1382efcff85ddd68874897"
+    },
+    {
+      "path": "futures-task/src/waker.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ce90aa83d9a20122c67a86778a35b825f2f3fb2c",
+      "size": 2031,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ce90aa83d9a20122c67a86778a35b825f2f3fb2c"
+    },
+    {
+      "path": "futures-task/src/waker_ref.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5957b4d46afc8aea39c087fa9bc5f4e637c888bf",
+      "size": 2060,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/5957b4d46afc8aea39c087fa9bc5f4e637c888bf"
+    },
+    {
+      "path": "futures-test",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "3818d0260ce6b59feb5b4fea1a41bb92f5f2bf8f",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/3818d0260ce6b59feb5b4fea1a41bb92f5f2bf8f"
+    },
+    {
+      "path": "futures-test/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "dc891fa94696d000b5773aeda64424a42613ce64",
+      "size": 1422,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/dc891fa94696d000b5773aeda64424a42613ce64"
+    },
+    {
+      "path": "futures-test/LICENSE-APACHE",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "965b606f331b51d566b46025f9ff311a7aad0c12",
+      "size": 17,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/965b606f331b51d566b46025f9ff311a7aad0c12"
+    },
+    {
+      "path": "futures-test/LICENSE-MIT",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "76219eb72e8524f15c21ec93b9b2592da49b5460",
+      "size": 14,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/76219eb72e8524f15c21ec93b9b2592da49b5460"
+    },
+    {
+      "path": "futures-test/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "035010f5e92da47a4e57ef5be8533858f679f91c",
+      "size": 586,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/035010f5e92da47a4e57ef5be8533858f679f91c"
+    },
+    {
+      "path": "futures-test/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "9f0a41d1d9f0e51e16bd80c77d3664a95535f893",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/9f0a41d1d9f0e51e16bd80c77d3664a95535f893"
+    },
+    {
+      "path": "futures-test/src/assert.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "16037aee49682816df12587cd4735d5e5e7467b5",
+      "size": 4219,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/16037aee49682816df12587cd4735d5e5e7467b5"
+    },
+    {
+      "path": "futures-test/src/assert_unmoved.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "baeaeb59ab9da8022cbcf4ecd96bfa7197c0a5cb",
+      "size": 6679,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/baeaeb59ab9da8022cbcf4ecd96bfa7197c0a5cb"
+    },
+    {
+      "path": "futures-test/src/future",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "43cfb8e8b45c350ffaab25f2e89adbba21f44720",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/43cfb8e8b45c350ffaab25f2e89adbba21f44720"
+    },
+    {
+      "path": "futures-test/src/future/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b066443ae4c6d57e8366820a4c076b8a6c6f8377",
+      "size": 3316,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b066443ae4c6d57e8366820a4c076b8a6c6f8377"
+    },
+    {
+      "path": "futures-test/src/future/pending_once.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0fc3ef0b3438b22a63560230d2b4a8f434776dad",
+      "size": 1238,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0fc3ef0b3438b22a63560230d2b4a8f434776dad"
+    },
+    {
+      "path": "futures-test/src/interleave_pending.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "91640778b2e404111ca3a6a7a61429e2bd290944",
+      "size": 5547,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/91640778b2e404111ca3a6a7a61429e2bd290944"
+    },
+    {
+      "path": "futures-test/src/io",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "d169f0113073964cf2a2309baa61b1b20f5ab7fe",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/d169f0113073964cf2a2309baa61b1b20f5ab7fe"
+    },
+    {
+      "path": "futures-test/src/io/limited.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "34b72a530e8f273f824c1a59e962f73943e11c6b",
+      "size": 2498,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/34b72a530e8f273f824c1a59e962f73943e11c6b"
+    },
+    {
+      "path": "futures-test/src/io/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "03827845e41fd060e949236dbe432eda3df61422",
+      "size": 160,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/03827845e41fd060e949236dbe432eda3df61422"
+    },
+    {
+      "path": "futures-test/src/io/read",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "4a2b155567ac9c1ee4c555163f5529fb3b4e0955",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/4a2b155567ac9c1ee4c555163f5529fb3b4e0955"
+    },
+    {
+      "path": "futures-test/src/io/read/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "28a25f5a9f4e511cf1a6b3b25bcabfdefa3aeafb",
+      "size": 4505,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/28a25f5a9f4e511cf1a6b3b25bcabfdefa3aeafb"
+    },
+    {
+      "path": "futures-test/src/io/write",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "5cb945c3f84145cad8cc730cda67775ad06b0a6a",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/5cb945c3f84145cad8cc730cda67775ad06b0a6a"
+    },
+    {
+      "path": "futures-test/src/io/write/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3c1b96eb8add9c737cbe5f890ed909a064ef1559",
+      "size": 5091,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/3c1b96eb8add9c737cbe5f890ed909a064ef1559"
+    },
+    {
+      "path": "futures-test/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4e420eac880729f0ba23cdadbd429fb1def45746",
+      "size": 1723,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/4e420eac880729f0ba23cdadbd429fb1def45746"
+    },
+    {
+      "path": "futures-test/src/sink",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "971648d2a5e1d18f61edb9ca3c6a2c31900716c9",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/971648d2a5e1d18f61edb9ca3c6a2c31900716c9"
+    },
+    {
+      "path": "futures-test/src/sink/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eb5a6efa844f08d5ff94fc17633a4420896c40ee",
+      "size": 2675,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/eb5a6efa844f08d5ff94fc17633a4420896c40ee"
+    },
+    {
+      "path": "futures-test/src/stream",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "96479a32c05db3b5093f481405de56ceedac69ac",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/96479a32c05db3b5093f481405de56ceedac69ac"
+    },
+    {
+      "path": "futures-test/src/stream/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "904f802875d27275fec46bcbc8a697428b6d747c",
+      "size": 1987,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/904f802875d27275fec46bcbc8a697428b6d747c"
+    },
+    {
+      "path": "futures-test/src/task",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "ab1ad7792fc7a1d1a48f17bd8be41a9e2bf84736",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/ab1ad7792fc7a1d1a48f17bd8be41a9e2bf84736"
+    },
+    {
+      "path": "futures-test/src/task/context.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "408dfdfef77f50eeb9f8fc0bf6403f7820b9de13",
+      "size": 985,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/408dfdfef77f50eeb9f8fc0bf6403f7820b9de13"
+    },
+    {
+      "path": "futures-test/src/task/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e10ecbb875aa3a62eb1ded2f460b0fdb9c5cc143",
+      "size": 2570,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e10ecbb875aa3a62eb1ded2f460b0fdb9c5cc143"
+    },
+    {
+      "path": "futures-test/src/task/noop_spawner.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8967f91ec46c6ece08b7279927efa884503c821a",
+      "size": 1116,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8967f91ec46c6ece08b7279927efa884503c821a"
+    },
+    {
+      "path": "futures-test/src/task/panic_spawner.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e29463df6d14d8625bf5b92aa36a99172ff057b9",
+      "size": 1256,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e29463df6d14d8625bf5b92aa36a99172ff057b9"
+    },
+    {
+      "path": "futures-test/src/task/panic_waker.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "38e24431562351c7e9aacf85477ad4e2c40405d2",
+      "size": 1994,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/38e24431562351c7e9aacf85477ad4e2c40405d2"
+    },
+    {
+      "path": "futures-test/src/task/record_spawner.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "59539fa217ee629cf7b55ef6e03fc40d4e74ae86",
+      "size": 1040,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/59539fa217ee629cf7b55ef6e03fc40d4e74ae86"
+    },
+    {
+      "path": "futures-test/src/task/wake_counter.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "52c63e1cc9cb87aab20f2a9493a75a8359250301",
+      "size": 1302,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/52c63e1cc9cb87aab20f2a9493a75a8359250301"
+    },
+    {
+      "path": "futures-test/src/track_closed.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "be883b1491a1a64aba4447535e12c77830c80075",
+      "size": 4183,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/be883b1491a1a64aba4447535e12c77830c80075"
+    },
+    {
+      "path": "futures-util",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "3481f78c0d6e379e2ae5a31c5dfdf53e4b5180cb",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/3481f78c0d6e379e2ae5a31c5dfdf53e4b5180cb"
+    },
+    {
+      "path": "futures-util/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7915dfa12033847cc87300e1476090548cbcead8",
+      "size": 2637,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/7915dfa12033847cc87300e1476090548cbcead8"
+    },
+    {
+      "path": "futures-util/LICENSE-APACHE",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "965b606f331b51d566b46025f9ff311a7aad0c12",
+      "size": 17,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/965b606f331b51d566b46025f9ff311a7aad0c12"
+    },
+    {
+      "path": "futures-util/LICENSE-MIT",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "76219eb72e8524f15c21ec93b9b2592da49b5460",
+      "size": 14,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/76219eb72e8524f15c21ec93b9b2592da49b5460"
+    },
+    {
+      "path": "futures-util/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "91d98c8f898c08fb94f9bec16bf3223f87fcad08",
+      "size": 590,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/91d98c8f898c08fb94f9bec16bf3223f87fcad08"
+    },
+    {
+      "path": "futures-util/benches",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "27a902f066ae4c6ec30dd71773bf890fe877f0bc",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/27a902f066ae4c6ec30dd71773bf890fe877f0bc"
+    },
+    {
+      "path": "futures-util/benches/bilock.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "013f3351e43df521dc5637ec72266bce8b3ab512",
+      "size": 1506,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/013f3351e43df521dc5637ec72266bce8b3ab512"
+    },
+    {
+      "path": "futures-util/benches/flatten_unordered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "517b2816c3ded7b570f5d5d38f9ad81cb9ff071e",
+      "size": 1582,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/517b2816c3ded7b570f5d5d38f9ad81cb9ff071e"
+    },
+    {
+      "path": "futures-util/benches/futures_unordered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d5fe7a59deff25d4085d6f00297bf9bff4f88df8",
+      "size": 1000,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d5fe7a59deff25d4085d6f00297bf9bff4f88df8"
+    },
+    {
+      "path": "futures-util/benches/select.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5410a952997072dab30e910831cc367d591512eb",
+      "size": 1019,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/5410a952997072dab30e910831cc367d591512eb"
+    },
+    {
+      "path": "futures-util/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "4652e893f2d2db3880f36512576f8469ceed4e8a",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/4652e893f2d2db3880f36512576f8469ceed4e8a"
+    },
+    {
+      "path": "futures-util/src/abortable.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e1e79e371db6d23213207d3a64149f191be70c7a",
+      "size": 6960,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e1e79e371db6d23213207d3a64149f191be70c7a"
+    },
+    {
+      "path": "futures-util/src/async_await",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "522afca28aafcbe4555526d7a1ecc15a034d8ef8",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/522afca28aafcbe4555526d7a1ecc15a034d8ef8"
+    },
+    {
+      "path": "futures-util/src/async_await/join_mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "28f3b232e77e4505bf5d05e4407fa999a84afb6d",
+      "size": 3551,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/28f3b232e77e4505bf5d05e4407fa999a84afb6d"
+    },
+    {
+      "path": "futures-util/src/async_await/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7e3f12c99fe5d2e89530f6050ddd266270db8f5d",
+      "size": 1714,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/7e3f12c99fe5d2e89530f6050ddd266270db8f5d"
+    },
+    {
+      "path": "futures-util/src/async_await/pending.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5d7a431811feff8bc257c22e26c8989c68f4eb81",
+      "size": 1255,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/5d7a431811feff8bc257c22e26c8989c68f4eb81"
+    },
+    {
+      "path": "futures-util/src/async_await/poll.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b62f45a943cc892dd73193caba136af07e90790a",
+      "size": 1176,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b62f45a943cc892dd73193caba136af07e90790a"
+    },
+    {
+      "path": "futures-util/src/async_await/random.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2ac2f78a87dd3a2465c781d5c32356553979990d",
+      "size": 1371,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2ac2f78a87dd3a2465c781d5c32356553979990d"
+    },
+    {
+      "path": "futures-util/src/async_await/select_mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a554a696e67d5c47da6db3b3ed5cdf4bd11afd2b",
+      "size": 13542,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/a554a696e67d5c47da6db3b3ed5cdf4bd11afd2b"
+    },
+    {
+      "path": "futures-util/src/async_await/stream_select_mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c3e4f0052c38274aa980ad64249070809903c84e",
+      "size": 1308,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c3e4f0052c38274aa980ad64249070809903c84e"
+    },
+    {
+      "path": "futures-util/src/compat",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "577d5aee9c3188313bac5a3277ee0cd8e71a23ad",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/577d5aee9c3188313bac5a3277ee0cd8e71a23ad"
+    },
+    {
+      "path": "futures-util/src/compat/compat01as03.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0de2d53301f36d7d3073e0f58e82963b186961ba",
+      "size": 15223,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0de2d53301f36d7d3073e0f58e82963b186961ba"
+    },
+    {
+      "path": "futures-util/src/compat/compat03as01.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3c5bb77b49c9274048a014516268ab9212c1ed57",
+      "size": 8551,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/3c5bb77b49c9274048a014516268ab9212c1ed57"
+    },
+    {
+      "path": "futures-util/src/compat/executor.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ea0c67a0ae52cd02e2ae3e64b7c127d2ef3c34e6",
+      "size": 2885,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ea0c67a0ae52cd02e2ae3e64b7c127d2ef3c34e6"
+    },
+    {
+      "path": "futures-util/src/compat/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4812803eb6d306ef759b018ca9c767f0f1df0d4f",
+      "size": 802,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/4812803eb6d306ef759b018ca9c767f0f1df0d4f"
+    },
+    {
+      "path": "futures-util/src/fns.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fc3096a5da373d10aa66319a16e766ab82b4179f",
+      "size": 8712,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/fc3096a5da373d10aa66319a16e766ab82b4179f"
+    },
+    {
+      "path": "futures-util/src/future",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "c0d661fca72b848967011e29d10b6510e47c73df",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/c0d661fca72b848967011e29d10b6510e47c73df"
+    },
+    {
+      "path": "futures-util/src/future/abortable.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d017ab7340c1d395fb7d1540092e2d0736a062e8",
+      "size": 745,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d017ab7340c1d395fb7d1540092e2d0736a062e8"
+    },
+    {
+      "path": "futures-util/src/future/always_ready.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "422268857a5c30f5d0123b900970d5465fc6d543",
+      "size": 1725,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/422268857a5c30f5d0123b900970d5465fc6d543"
+    },
+    {
+      "path": "futures-util/src/future/either.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "018e51e72fdc01f7b7b864a251029d1416b51fb4",
+      "size": 9285,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/018e51e72fdc01f7b7b864a251029d1416b51fb4"
+    },
+    {
+      "path": "futures-util/src/future/future",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "da1f899b2dd226f822e33e3f84f161ee504ae145",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/da1f899b2dd226f822e33e3f84f161ee504ae145"
+    },
+    {
+      "path": "futures-util/src/future/future/catch_unwind.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ed49e314d2c8a1b30a6e1da626b1e3003e7f044b",
+      "size": 972,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ed49e314d2c8a1b30a6e1da626b1e3003e7f044b"
+    },
+    {
+      "path": "futures-util/src/future/future/flatten.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bd767af344b4e3a313424b96f51cb1bf1acabead",
+      "size": 4449,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/bd767af344b4e3a313424b96f51cb1bf1acabead"
+    },
+    {
+      "path": "futures-util/src/future/future/fuse.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "100e910776fc67a934351b19742eb782545f19a9",
+      "size": 2771,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/100e910776fc67a934351b19742eb782545f19a9"
+    },
+    {
+      "path": "futures-util/src/future/future/map.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6991a35022824f73a9bb509471cfb957a19bea90",
+      "size": 1714,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6991a35022824f73a9bb509471cfb957a19bea90"
+    },
+    {
+      "path": "futures-util/src/future/future/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a3237b1a1ce81b3e41b5e141a0c5c909ed9f5bf6",
+      "size": 19794,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/a3237b1a1ce81b3e41b5e141a0c5c909ed9f5bf6"
+    },
+    {
+      "path": "futures-util/src/future/future/remote_handle.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4aacd2d6be582259bd20cad2cf2bac273fe9535f",
+      "size": 4244,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/4aacd2d6be582259bd20cad2cf2bac273fe9535f"
+    },
+    {
+      "path": "futures-util/src/future/future/shared.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ed8fceab3e56fc0eb392c3def3aa7d46b9609e33",
+      "size": 13000,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ed8fceab3e56fc0eb392c3def3aa7d46b9609e33"
+    },
+    {
+      "path": "futures-util/src/future/join.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "740ffbc98802b09dec0b50d0755f991a85bae824",
+      "size": 5494,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/740ffbc98802b09dec0b50d0755f991a85bae824"
+    },
+    {
+      "path": "futures-util/src/future/join_all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "79eee8dffc1b53ddeed1eb6bf7d1bfe99c90c6d1",
+      "size": 5211,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/79eee8dffc1b53ddeed1eb6bf7d1bfe99c90c6d1"
+    },
+    {
+      "path": "futures-util/src/future/lazy.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e9a8cf2fa9ca3d322a2fa65ab40ae2fb93dc0978",
+      "size": 1353,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e9a8cf2fa9ca3d322a2fa65ab40ae2fb93dc0978"
+    },
+    {
+      "path": "futures-util/src/future/maybe_done.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fa8787a87445b0ad870cedc4260a79c0a29433d7",
+      "size": 3160,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/fa8787a87445b0ad870cedc4260a79c0a29433d7"
+    },
+    {
+      "path": "futures-util/src/future/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6913c928c5d41b9fa4286a1b314dd3b25b51f0f3",
+      "size": 3698,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6913c928c5d41b9fa4286a1b314dd3b25b51f0f3"
+    },
+    {
+      "path": "futures-util/src/future/option.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0bc377758a4e8563bd949ce73f2ed0a180dc84dc",
+      "size": 1662,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0bc377758a4e8563bd949ce73f2ed0a180dc84dc"
+    },
+    {
+      "path": "futures-util/src/future/pending.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b8e28686e1dff0c62f88501f5cc1865d26ae1b0d",
+      "size": 1233,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b8e28686e1dff0c62f88501f5cc1865d26ae1b0d"
+    },
+    {
+      "path": "futures-util/src/future/poll_fn.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "19311570b5fc9356f65bb16ffd2f73f696c3a008",
+      "size": 1389,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/19311570b5fc9356f65bb16ffd2f73f696c3a008"
+    },
+    {
+      "path": "futures-util/src/future/poll_immediate.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "82470113752961b0a43fd25dd2089420eb1d4105",
+      "size": 4077,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/82470113752961b0a43fd25dd2089420eb1d4105"
+    },
+    {
+      "path": "futures-util/src/future/ready.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e3d791b3cf25c16131d12169fb34655cb7b5b46d",
+      "size": 1836,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e3d791b3cf25c16131d12169fb34655cb7b5b46d"
+    },
+    {
+      "path": "futures-util/src/future/select.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4aa539e8ab0809b3ff561e6b813d1daa149cfd16",
+      "size": 4017,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/4aa539e8ab0809b3ff561e6b813d1daa149cfd16"
+    },
+    {
+      "path": "futures-util/src/future/select_all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0a51d0da6c8ddacffd8ea461c4658e5e5872aba9",
+      "size": 2469,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0a51d0da6c8ddacffd8ea461c4658e5e5872aba9"
+    },
+    {
+      "path": "futures-util/src/future/select_ok.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5d5579930bf02c01d84de54e97929cac9d7a82b9",
+      "size": 3063,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/5d5579930bf02c01d84de54e97929cac9d7a82b9"
+    },
+    {
+      "path": "futures-util/src/future/try_future",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "ef5e4b5a6320608161e538b6bd473fff15d843fc",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/ef5e4b5a6320608161e538b6bd473fff15d843fc"
+    },
+    {
+      "path": "futures-util/src/future/try_future/into_future.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9f093d0e2e1c77278b62a479dfc1971b24f36c79",
+      "size": 939,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/9f093d0e2e1c77278b62a479dfc1971b24f36c79"
+    },
+    {
+      "path": "futures-util/src/future/try_future/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e5bc700714ce829edfbf03581cdbf07f2ee0b52b",
+      "size": 21805,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e5bc700714ce829edfbf03581cdbf07f2ee0b52b"
+    },
+    {
+      "path": "futures-util/src/future/try_future/try_flatten.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1ce4559ac2fa31d493d6654a0df20b49962f4cc9",
+      "size": 5045,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1ce4559ac2fa31d493d6654a0df20b49962f4cc9"
+    },
+    {
+      "path": "futures-util/src/future/try_future/try_flatten_err.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "39b7d9f5f60c1f4ff13a47dd8e5f643c7df4587d",
+      "size": 1756,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/39b7d9f5f60c1f4ff13a47dd8e5f643c7df4587d"
+    },
+    {
+      "path": "futures-util/src/future/try_join.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6af1f0ccbfc9907d4c03eee2b754394c15e34e66",
+      "size": 7444,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6af1f0ccbfc9907d4c03eee2b754394c15e34e66"
+    },
+    {
+      "path": "futures-util/src/future/try_join_all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2d6a2a02cb6245ccd9b7150cd04da8272d45089a",
+      "size": 6371,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2d6a2a02cb6245ccd9b7150cd04da8272d45089a"
+    },
+    {
+      "path": "futures-util/src/future/try_maybe_done.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "97af6ad437a8d9e147d20673789576396f9ae176",
+      "size": 3049,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/97af6ad437a8d9e147d20673789576396f9ae176"
+    },
+    {
+      "path": "futures-util/src/future/try_select.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bc282f7db16e00b92b09a7f207944f8488efdb39",
+      "size": 3209,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/bc282f7db16e00b92b09a7f207944f8488efdb39"
+    },
+    {
+      "path": "futures-util/src/io",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "1ff6adfaf01044c44cd22976ac46465d99a62fe3",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/1ff6adfaf01044c44cd22976ac46465d99a62fe3"
+    },
+    {
+      "path": "futures-util/src/io/allow_std.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "96133cbc6f1af7d3466913b304b665529971753a",
+      "size": 5379,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/96133cbc6f1af7d3466913b304b665529971753a"
+    },
+    {
+      "path": "futures-util/src/io/buf_reader.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9a919f7183f749701d78238cde1b12e1efcd91b4",
+      "size": 10292,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/9a919f7183f749701d78238cde1b12e1efcd91b4"
+    },
+    {
+      "path": "futures-util/src/io/buf_writer.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ddcf5e1b4db6d4557f9c35ea0e3c8fa8abb57274",
+      "size": 7619,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ddcf5e1b4db6d4557f9c35ea0e3c8fa8abb57274"
+    },
+    {
+      "path": "futures-util/src/io/chain.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "728a3d2dc0dbb7d2a55786bc407cb8256b7fe551",
+      "size": 3886,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/728a3d2dc0dbb7d2a55786bc407cb8256b7fe551"
+    },
+    {
+      "path": "futures-util/src/io/close.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b94459279a862dcadad1682a964acddfa102a94a",
+      "size": 779,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b94459279a862dcadad1682a964acddfa102a94a"
+    },
+    {
+      "path": "futures-util/src/io/copy.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c80add271b07932df45a28df7833604f8d55b104",
+      "size": 1760,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c80add271b07932df45a28df7833604f8d55b104"
+    },
+    {
+      "path": "futures-util/src/io/copy_buf.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "50f7abdca9def6de519e1e5ae2962198e92af3e9",
+      "size": 2333,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/50f7abdca9def6de519e1e5ae2962198e92af3e9"
+    },
+    {
+      "path": "futures-util/src/io/copy_buf_abortable.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ed22d6233886203899f70b671dfa7da0ee39a193",
+      "size": 4124,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ed22d6233886203899f70b671dfa7da0ee39a193"
+    },
+    {
+      "path": "futures-util/src/io/cursor.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "01c8e5f4dc0f52097def60761b952067b566ebf3",
+      "size": 6523,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/01c8e5f4dc0f52097def60761b952067b566ebf3"
+    },
+    {
+      "path": "futures-util/src/io/empty.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "02f6103f5438f3a1dbdaea48a75210c5480a1716",
+      "size": 1422,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/02f6103f5438f3a1dbdaea48a75210c5480a1716"
+    },
+    {
+      "path": "futures-util/src/io/fill_buf.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "45862b8e29e5cff0d21afb0015d773d41d5b04de",
+      "size": 1555,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/45862b8e29e5cff0d21afb0015d773d41d5b04de"
+    },
+    {
+      "path": "futures-util/src/io/flush.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b75d14c5d3c447d889d8c02bffc09a818f71043d",
+      "size": 792,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b75d14c5d3c447d889d8c02bffc09a818f71043d"
+    },
+    {
+      "path": "futures-util/src/io/into_sink.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6a41ee22696c1506ce3899dcbc5475843bdec9ee",
+      "size": 2671,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6a41ee22696c1506ce3899dcbc5475843bdec9ee"
+    },
+    {
+      "path": "futures-util/src/io/line_writer.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "de1bb539248ffc1efff8608ae92369a75dc64a40",
+      "size": 5234,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/de1bb539248ffc1efff8608ae92369a75dc64a40"
+    },
+    {
+      "path": "futures-util/src/io/lines.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0a1abf4bf63559151acd254907c53a57a9ba5ced",
+      "size": 1391,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0a1abf4bf63559151acd254907c53a57a9ba5ced"
+    },
+    {
+      "path": "futures-util/src/io/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "923109cce50617745e7d205931112a37f172ce71",
+      "size": 27126,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/923109cce50617745e7d205931112a37f172ce71"
+    },
+    {
+      "path": "futures-util/src/io/read.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "677ba818d903161c8b9578ddf2b4841caafa6f83",
+      "size": 857,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/677ba818d903161c8b9578ddf2b4841caafa6f83"
+    },
+    {
+      "path": "futures-util/src/io/read_exact.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cd0b20e59721f35c4a753e67a2b4927408fd5a4a",
+      "size": 1273,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/cd0b20e59721f35c4a753e67a2b4927408fd5a4a"
+    },
+    {
+      "path": "futures-util/src/io/read_line.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "43942add5442f6ec7e8551b5f0a731922c481bd9",
+      "size": 2558,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/43942add5442f6ec7e8551b5f0a731922c481bd9"
+    },
+    {
+      "path": "futures-util/src/io/read_to_end.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "82a36d2164a26c7338668c8b4a3f2fae49b4fa4e",
+      "size": 2986,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/82a36d2164a26c7338668c8b4a3f2fae49b4fa4e"
+    },
+    {
+      "path": "futures-util/src/io/read_to_string.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a075ca2662bc785565c2ee1f19e23effddc1a143",
+      "size": 1921,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/a075ca2662bc785565c2ee1f19e23effddc1a143"
+    },
+    {
+      "path": "futures-util/src/io/read_until.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "adc359db51f38672686857ac984f4cdabc9aefdc",
+      "size": 1805,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/adc359db51f38672686857ac984f4cdabc9aefdc"
+    },
+    {
+      "path": "futures-util/src/io/read_vectored.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4e22df57e9402b82f59294478a808901f1689130",
+      "size": 964,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/4e22df57e9402b82f59294478a808901f1689130"
+    },
+    {
+      "path": "futures-util/src/io/repeat.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2828bf01142c13757809ce4962f24eeadcd49811",
+      "size": 1648,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2828bf01142c13757809ce4962f24eeadcd49811"
+    },
+    {
+      "path": "futures-util/src/io/seek.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0aa2371393769196246621ff6fb21305b635e968",
+      "size": 855,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0aa2371393769196246621ff6fb21305b635e968"
+    },
+    {
+      "path": "futures-util/src/io/sink.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4a32ca7041feee52dfad0c34b879af81efa1c38c",
+      "size": 1731,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/4a32ca7041feee52dfad0c34b879af81efa1c38c"
+    },
+    {
+      "path": "futures-util/src/io/split.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5b6bc1893740612d0b13bae30de11b878ee44e79",
+      "size": 4246,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/5b6bc1893740612d0b13bae30de11b878ee44e79"
+    },
+    {
+      "path": "futures-util/src/io/take.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2c494804d9d87d858ab022498db2c0375be5ae3d",
+      "size": 3672,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2c494804d9d87d858ab022498db2c0375be5ae3d"
+    },
+    {
+      "path": "futures-util/src/io/window.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d857282383597bd5da4f15567f614e409124510f",
+      "size": 3431,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d857282383597bd5da4f15567f614e409124510f"
+    },
+    {
+      "path": "futures-util/src/io/write.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c47ef9e2ebbfc0cc379f3042504ffe03095f7358",
+      "size": 860,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c47ef9e2ebbfc0cc379f3042504ffe03095f7358"
+    },
+    {
+      "path": "futures-util/src/io/write_all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "08c025f94d80d3041bc349d6dab847f7261ebf0d",
+      "size": 1260,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/08c025f94d80d3041bc349d6dab847f7261ebf0d"
+    },
+    {
+      "path": "futures-util/src/io/write_all_vectored.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "26b3f25d92344e7558af290811366d54de733f7c",
+      "size": 6886,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/26b3f25d92344e7558af290811366d54de733f7c"
+    },
+    {
+      "path": "futures-util/src/io/write_vectored.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "14a01d7302ac2f91827d2ef118832aab2fdaf5b9",
+      "size": 958,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/14a01d7302ac2f91827d2ef118832aab2fdaf5b9"
+    },
+    {
+      "path": "futures-util/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1949e5a63023741edd7375932fa214df38b23c80",
+      "size": 11442,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1949e5a63023741edd7375932fa214df38b23c80"
+    },
+    {
+      "path": "futures-util/src/lock",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "5e3c1c3512303089f3c611633c0dd7c4565f0dc2",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/5e3c1c3512303089f3c611633c0dd7c4565f0dc2"
+    },
+    {
+      "path": "futures-util/src/lock/bilock.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7c740f878f438ee207601a1c62c31489aa02f7f3",
+      "size": 10869,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/7c740f878f438ee207601a1c62c31489aa02f7f3"
+    },
+    {
+      "path": "futures-util/src/lock/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8ca0ff625561cf98aa72d4ccf6871994e275349d",
+      "size": 1145,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8ca0ff625561cf98aa72d4ccf6871994e275349d"
+    },
+    {
+      "path": "futures-util/src/lock/mutex.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "24acb0b727ed05a3a2f82118f365b5b2c01e6d23",
+      "size": 17832,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/24acb0b727ed05a3a2f82118f365b5b2c01e6d23"
+    },
+    {
+      "path": "futures-util/src/macros.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0f5cba99e3f73f2ae20cac45c100fa3750c9208c",
+      "size": 874,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0f5cba99e3f73f2ae20cac45c100fa3750c9208c"
+    },
+    {
+      "path": "futures-util/src/never.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e811f97df721f51db4f656ee01881574339b3e97",
+      "size": 785,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e811f97df721f51db4f656ee01881574339b3e97"
+    },
+    {
+      "path": "futures-util/src/sink",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "05c610118e14a648a27c4a39eaa5dd4498db94f8",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/05c610118e14a648a27c4a39eaa5dd4498db94f8"
+    },
+    {
+      "path": "futures-util/src/sink/buffer.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4aa6c36033b544aa26e7aa273eaf24f88c6521d9",
+      "size": 3068,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/4aa6c36033b544aa26e7aa273eaf24f88c6521d9"
+    },
+    {
+      "path": "futures-util/src/sink/close.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "43eea74b0f02ba71b9ab38ff6e4942ab0b7a0ee2",
+      "size": 1024,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/43eea74b0f02ba71b9ab38ff6e4942ab0b7a0ee2"
+    },
+    {
+      "path": "futures-util/src/sink/drain.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1a5480c0d68289125364d2768b0c849056ed5f35",
+      "size": 1444,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1a5480c0d68289125364d2768b0c849056ed5f35"
+    },
+    {
+      "path": "futures-util/src/sink/err_into.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a64d1337baf21f3cd9ba16cd8fa251a76b5f327c",
+      "size": 1284,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/a64d1337baf21f3cd9ba16cd8fa251a76b5f327c"
+    },
+    {
+      "path": "futures-util/src/sink/fanout.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fe2038f27f5a2a3935d7ffe161e41d76450b3f63",
+      "size": 3444,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/fe2038f27f5a2a3935d7ffe161e41d76450b3f63"
+    },
+    {
+      "path": "futures-util/src/sink/feed.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6701f7a1b42604987f72bac2e084ded610ae69d4",
+      "size": 1326,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6701f7a1b42604987f72bac2e084ded610ae69d4"
+    },
+    {
+      "path": "futures-util/src/sink/flush.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "35a8372de79f0588a75cb04e4e696407a289dded",
+      "size": 1219,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/35a8372de79f0588a75cb04e4e696407a289dded"
+    },
+    {
+      "path": "futures-util/src/sink/map_err.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9d2ab7b24b81853b91025ee1f730543a244af18c",
+      "size": 1945,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/9d2ab7b24b81853b91025ee1f730543a244af18c"
+    },
+    {
+      "path": "futures-util/src/sink/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "147e9adc9385f9f087d45a0ddc040ee4b4683499",
+      "size": 11196,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/147e9adc9385f9f087d45a0ddc040ee4b4683499"
+    },
+    {
+      "path": "futures-util/src/sink/send.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6d21f33fe46d3ad0efa45ed6a1f2c65e6cbe71de",
+      "size": 1253,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6d21f33fe46d3ad0efa45ed6a1f2c65e6cbe71de"
+    },
+    {
+      "path": "futures-util/src/sink/send_all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1302dd2148b0f13b6cc36305d08458fa4ad4a18b",
+      "size": 3082,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1302dd2148b0f13b6cc36305d08458fa4ad4a18b"
+    },
+    {
+      "path": "futures-util/src/sink/unfold.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "008962ebabce2b98aa1a1db6d2247bec8fabe0d9",
+      "size": 2700,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/008962ebabce2b98aa1a1db6d2247bec8fabe0d9"
+    },
+    {
+      "path": "futures-util/src/sink/with.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5a2c8a089f446c595ad46f5a5a43cdced769730d",
+      "size": 3791,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/5a2c8a089f446c595ad46f5a5a43cdced769730d"
+    },
+    {
+      "path": "futures-util/src/sink/with_flat_map.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2ae877a24b38802bbc1356ffe955f9edfe511014",
+      "size": 3750,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2ae877a24b38802bbc1356ffe955f9edfe511014"
+    },
+    {
+      "path": "futures-util/src/stream",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "da9e068e636fdc8fd4d314dc6375329856af0146",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/da9e068e636fdc8fd4d314dc6375329856af0146"
+    },
+    {
+      "path": "futures-util/src/stream/abortable.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1fea89582228ec4243edebd24e57698452d18abc",
+      "size": 697,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1fea89582228ec4243edebd24e57698452d18abc"
+    },
+    {
+      "path": "futures-util/src/stream/empty.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e4fd87326b889f6be0136eaa5b4ced03f7645729",
+      "size": 1009,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e4fd87326b889f6be0136eaa5b4ced03f7645729"
+    },
+    {
+      "path": "futures-util/src/stream/futures_ordered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "460b352676baa8962d339a2f0c60ff35ade727f7",
+      "size": 9343,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/460b352676baa8962d339a2f0c60ff35ade727f7"
+    },
+    {
+      "path": "futures-util/src/stream/futures_unordered",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "21d1a7b37cc1d8d139f39f2a5927d5f892a097c2",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/21d1a7b37cc1d8d139f39f2a5927d5f892a097c2"
+    },
+    {
+      "path": "futures-util/src/stream/futures_unordered/abort.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1a42d243698fc26ddff1463d99a01b6f782890ce",
+      "size": 251,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1a42d243698fc26ddff1463d99a01b6f782890ce"
+    },
+    {
+      "path": "futures-util/src/stream/futures_unordered/iter.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "20248c70fe8f375bd06f0442d8aa971a0fa80114",
+      "size": 5361,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/20248c70fe8f375bd06f0442d8aa971a0fa80114"
+    },
+    {
+      "path": "futures-util/src/stream/futures_unordered/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ca62b10b918aee8c4d620cfd45c2ee5d413c1463",
+      "size": 27749,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ca62b10b918aee8c4d620cfd45c2ee5d413c1463"
+    },
+    {
+      "path": "futures-util/src/stream/futures_unordered/ready_to_run_queue.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e35418dfa5246bf626743ded2043b068f7d1d132",
+      "size": 3706,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e35418dfa5246bf626743ded2043b068f7d1d132"
+    },
+    {
+      "path": "futures-util/src/stream/futures_unordered/task.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2ae4cb7d85c31e35fb10e6e399156c1f2128c222",
+      "size": 7394,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2ae4cb7d85c31e35fb10e6e399156c1f2128c222"
+    },
+    {
+      "path": "futures-util/src/stream/iter.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "48b6519a394b118d6a02a4c3b1064808260d4289",
+      "size": 1664,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/48b6519a394b118d6a02a4c3b1064808260d4289"
+    },
+    {
+      "path": "futures-util/src/stream/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2438e58b62acb7c7a8b352284736a59a86c47126",
+      "size": 4520,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2438e58b62acb7c7a8b352284736a59a86c47126"
+    },
+    {
+      "path": "futures-util/src/stream/once.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ee21c8b594bb27c34140153824a96aa1f4b14589",
+      "size": 1708,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ee21c8b594bb27c34140153824a96aa1f4b14589"
+    },
+    {
+      "path": "futures-util/src/stream/pending.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d7030ff3cc21edec4571cfa39a08c4ebfc2e1c5a",
+      "size": 1026,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d7030ff3cc21edec4571cfa39a08c4ebfc2e1c5a"
+    },
+    {
+      "path": "futures-util/src/stream/poll_fn.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b9bd7d1664a1ca1266c665e08bc1afe44662d709",
+      "size": 1341,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b9bd7d1664a1ca1266c665e08bc1afe44662d709"
+    },
+    {
+      "path": "futures-util/src/stream/poll_immediate.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c7e8a5b3c6817748bcd33e05230c463dfe3fd1ea",
+      "size": 2546,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c7e8a5b3c6817748bcd33e05230c463dfe3fd1ea"
+    },
+    {
+      "path": "futures-util/src/stream/repeat.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e09cfa2e41694f57e160ab0be3ef4e88c98a5641",
+      "size": 1340,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e09cfa2e41694f57e160ab0be3ef4e88c98a5641"
+    },
+    {
+      "path": "futures-util/src/stream/repeat_with.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2190eb9453703c570dc8341b4446411f377eaa53",
+      "size": 2902,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2190eb9453703c570dc8341b4446411f377eaa53"
+    },
+    {
+      "path": "futures-util/src/stream/select.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0c1e3af782fdd2f952c2d0875284612b08d7d9ae",
+      "size": 3537,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0c1e3af782fdd2f952c2d0875284612b08d7d9ae"
+    },
+    {
+      "path": "futures-util/src/stream/select_all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "121b6a0e592cc781f8f6815095b3544f4db624e4",
+      "size": 7508,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/121b6a0e592cc781f8f6815095b3544f4db624e4"
+    },
+    {
+      "path": "futures-util/src/stream/select_with_strategy.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d2b49d588fcb54bc50f390b5c292940c36a9e81f",
+      "size": 9048,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d2b49d588fcb54bc50f390b5c292940c36a9e81f"
+    },
+    {
+      "path": "futures-util/src/stream/stream",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6fac2b1768ea099214c0d7cbe84bcd7477dc476b",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/6fac2b1768ea099214c0d7cbe84bcd7477dc476b"
+    },
+    {
+      "path": "futures-util/src/stream/stream/all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1435c798f285f5c4915291c6a666a3aba552ac3d",
+      "size": 2529,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1435c798f285f5c4915291c6a666a3aba552ac3d"
+    },
+    {
+      "path": "futures-util/src/stream/stream/any.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cc3d695b9d1ea2aa1fe67e60303b93f7d527cc62",
+      "size": 2528,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/cc3d695b9d1ea2aa1fe67e60303b93f7d527cc62"
+    },
+    {
+      "path": "futures-util/src/stream/stream/buffer_unordered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "91b0f6bcce325a3c8829b0f3e3c6dca1e639f291",
+      "size": 3281,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/91b0f6bcce325a3c8829b0f3e3c6dca1e639f291"
+    },
+    {
+      "path": "futures-util/src/stream/stream/buffered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5854eb7ea58c6fe88bcb3d8e2ad9aac1544f2560",
+      "size": 3208,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/5854eb7ea58c6fe88bcb3d8e2ad9aac1544f2560"
+    },
+    {
+      "path": "futures-util/src/stream/stream/catch_unwind.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "dfc388839d99e27c270632967ff91295e6d1f0ce",
+      "size": 1740,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/dfc388839d99e27c270632967ff91295e6d1f0ce"
+    },
+    {
+      "path": "futures-util/src/stream/stream/chain.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "36ff1e533dd4e525a6938c266e3bfb636653f9e3",
+      "size": 2047,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/36ff1e533dd4e525a6938c266e3bfb636653f9e3"
+    },
+    {
+      "path": "futures-util/src/stream/stream/chunks.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2a71ebc6cccdcb76ad10a494cd87671a6ff9eb94",
+      "size": 3091,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2a71ebc6cccdcb76ad10a494cd87671a6ff9eb94"
+    },
+    {
+      "path": "futures-util/src/stream/stream/collect.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "970ac26dbfe0a25bdb238904c72419eb25a3f4d2",
+      "size": 1421,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/970ac26dbfe0a25bdb238904c72419eb25a3f4d2"
+    },
+    {
+      "path": "futures-util/src/stream/stream/concat.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7e058b2315618238fd5a91dbecb23357d84697cd",
+      "size": 1685,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/7e058b2315618238fd5a91dbecb23357d84697cd"
+    },
+    {
+      "path": "futures-util/src/stream/stream/count.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "513cab7b6a49ad43ba106fc22c91c83accaa04e8",
+      "size": 1359,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/513cab7b6a49ad43ba106fc22c91c83accaa04e8"
+    },
+    {
+      "path": "futures-util/src/stream/stream/cycle.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "60fe7453991d1dc7620fdd0c6cc0dd4a29b9c8b1",
+      "size": 1586,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/60fe7453991d1dc7620fdd0c6cc0dd4a29b9c8b1"
+    },
+    {
+      "path": "futures-util/src/stream/stream/enumerate.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1cf9d49aaa30728115690011d361a6716e8d80dd",
+      "size": 1594,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1cf9d49aaa30728115690011d361a6716e8d80dd"
+    },
+    {
+      "path": "futures-util/src/stream/stream/filter.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "997fe9977e25c95ab172cbbe712ec3649fa915eb",
+      "size": 3384,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/997fe9977e25c95ab172cbbe712ec3649fa915eb"
+    },
+    {
+      "path": "futures-util/src/stream/stream/filter_map.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6b7d0070df3c81f096ab46ac22035ff1e1f7be44",
+      "size": 3065,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6b7d0070df3c81f096ab46ac22035ff1e1f7be44"
+    },
+    {
+      "path": "futures-util/src/stream/stream/flatten.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9f6b7a472d5c90967242940256a03fd220ebb943",
+      "size": 1831,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/9f6b7a472d5c90967242940256a03fd220ebb943"
+    },
+    {
+      "path": "futures-util/src/stream/stream/flatten_unordered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c79edbd213ee635de1fe383aa9c0e72915a86488",
+      "size": 18450,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c79edbd213ee635de1fe383aa9c0e72915a86488"
+    },
+    {
+      "path": "futures-util/src/stream/stream/fold.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b8b55ecb678fcf20ffb8e20efb6bd1bd463a4bf5",
+      "size": 2462,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b8b55ecb678fcf20ffb8e20efb6bd1bd463a4bf5"
+    },
+    {
+      "path": "futures-util/src/stream/stream/for_each.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5302b0e034d29f0cc0a1cf18ba38b7c467dd2a76",
+      "size": 1984,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/5302b0e034d29f0cc0a1cf18ba38b7c467dd2a76"
+    },
+    {
+      "path": "futures-util/src/stream/stream/for_each_concurrent.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6c18753eb9a8a13398cbf475f35d4ddb6c412dbd",
+      "size": 3590,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6c18753eb9a8a13398cbf475f35d4ddb6c412dbd"
+    },
+    {
+      "path": "futures-util/src/stream/stream/forward.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1fe24273aafb704127c54ef0cea96bf84bd8b37b",
+      "size": 2309,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/1fe24273aafb704127c54ef0cea96bf84bd8b37b"
+    },
+    {
+      "path": "futures-util/src/stream/stream/fuse.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fe67813e81f2d2093cb18eea164d36c6b731e4f1",
+      "size": 1839,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/fe67813e81f2d2093cb18eea164d36c6b731e4f1"
+    },
+    {
+      "path": "futures-util/src/stream/stream/into_future.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8abfddcccda4948db9e3c37aafbbb2549fc6ed4f",
+      "size": 3468,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8abfddcccda4948db9e3c37aafbbb2549fc6ed4f"
+    },
+    {
+      "path": "futures-util/src/stream/stream/map.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "88bb6129d43e751c4c81d33f3c33449b53121e09",
+      "size": 1721,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/88bb6129d43e751c4c81d33f3c33449b53121e09"
+    },
+    {
+      "path": "futures-util/src/stream/stream/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d365cfe43f38b4028d8a5374a80f3bbfd187de04",
+      "size": 58907,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d365cfe43f38b4028d8a5374a80f3bbfd187de04"
+    },
+    {
+      "path": "futures-util/src/stream/stream/next.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8d8347aa03392d5bc29e726d0769ad8e1265f791",
+      "size": 968,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8d8347aa03392d5bc29e726d0769ad8e1265f791"
+    },
+    {
+      "path": "futures-util/src/stream/stream/peek.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d696acb5f59f5f17b66dc47cab86b84d70d12e6f",
+      "size": 12968,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d696acb5f59f5f17b66dc47cab86b84d70d12e6f"
+    },
+    {
+      "path": "futures-util/src/stream/stream/ready_chunks.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "192054c4aef4a74f72d48588ca98058c3b7fcb47",
+      "size": 2858,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/192054c4aef4a74f72d48588ca98058c3b7fcb47"
+    },
+    {
+      "path": "futures-util/src/stream/stream/scan.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f5cfde9c366af4ddcb759741379cafaa6a908b75",
+      "size": 3414,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/f5cfde9c366af4ddcb759741379cafaa6a908b75"
+    },
+    {
+      "path": "futures-util/src/stream/stream/select_next_some.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3115e14d9a5598ab8cb214a26213e45d568c8b57",
+      "size": 1276,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/3115e14d9a5598ab8cb214a26213e45d568c8b57"
+    },
+    {
+      "path": "futures-util/src/stream/stream/skip.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f4957795212de83de2c96bda7dd95d09374e648e",
+      "size": 1726,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/f4957795212de83de2c96bda7dd95d09374e648e"
+    },
+    {
+      "path": "futures-util/src/stream/stream/skip_while.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "dabd5eefaebde85bb7203d6a482b4fb4a5ac6b3a",
+      "size": 3530,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/dabd5eefaebde85bb7203d6a482b4fb4a5ac6b3a"
+    },
+    {
+      "path": "futures-util/src/stream/stream/split.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e192f8a92db33b87d6efe82c0772809ab6b0b9d4",
+      "size": 7044,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e192f8a92db33b87d6efe82c0772809ab6b0b9d4"
+    },
+    {
+      "path": "futures-util/src/stream/stream/take.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "29d6c39ee3a61bc212d3d22c2c5b6af2ad23e20b",
+      "size": 1987,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/29d6c39ee3a61bc212d3d22c2c5b6af2ad23e20b"
+    },
+    {
+      "path": "futures-util/src/stream/stream/take_until.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d14f9ce100be0730b2f35d5d39c51d8f6000e8b8",
+      "size": 4751,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d14f9ce100be0730b2f35d5d39c51d8f6000e8b8"
+    },
+    {
+      "path": "futures-util/src/stream/stream/take_while.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "92569430105bbe77a34e12ddc162e4d9fca4f48e",
+      "size": 3458,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/92569430105bbe77a34e12ddc162e4d9fca4f48e"
+    },
+    {
+      "path": "futures-util/src/stream/stream/then.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9192c0b0cf3f5ac55b3a1d48c6afcd25df12b7c4",
+      "size": 2587,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/9192c0b0cf3f5ac55b3a1d48c6afcd25df12b7c4"
+    },
+    {
+      "path": "futures-util/src/stream/stream/unzip.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a88cf03266f41464b059f3ad40d541ef78a683b2",
+      "size": 1805,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/a88cf03266f41464b059f3ad40d541ef78a683b2"
+    },
+    {
+      "path": "futures-util/src/stream/stream/zip.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "25a47e96bede74f53879a1bd1952ef5304356319",
+      "size": 4419,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/25a47e96bede74f53879a1bd1952ef5304356319"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "93477045cce76fb06ab35ed619f172a9759d6345",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/93477045cce76fb06ab35ed619f172a9759d6345"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/and_then.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2f8b6f25891236b48fe914f1014cae4d81eb8ffb",
+      "size": 2791,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2f8b6f25891236b48fe914f1014cae4d81eb8ffb"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/into_async_read.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ffbfc7eae994a367f5c8a842db047dd24ec0ed72",
+      "size": 5129,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ffbfc7eae994a367f5c8a842db047dd24ec0ed72"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/into_stream.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2126258af7aa9ccbbf8c0306313d67ccbdce0748",
+      "size": 1309,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2126258af7aa9ccbbf8c0306313d67ccbdce0748"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "311bfb33d0c472ef21aafbcee24a4e17f2067cd3",
+      "size": 46058,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/311bfb33d0c472ef21aafbcee24a4e17f2067cd3"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/or_else.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "53aceb8e64ee3ba01e48ec26695016f7587b4057",
+      "size": 2910,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/53aceb8e64ee3ba01e48ec26695016f7587b4057"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8179f86afcd6cb73a92eb1ade5437723f6b236ae",
+      "size": 2767,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8179f86afcd6cb73a92eb1ade5437723f6b236ae"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_any.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "55e876be0513e6a944696a50e742487395362619",
+      "size": 2766,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/55e876be0513e6a944696a50e742487395362619"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_buffer_unordered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9a899d4ea6d61d99dfef27affeb808b68e9aa8a8",
+      "size": 2583,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/9a899d4ea6d61d99dfef27affeb808b68e9aa8a8"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_buffered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9f48e5c0a704468a4b1f5fd48ba23be6df2ab23f",
+      "size": 2562,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/9f48e5c0a704468a4b1f5fd48ba23be6df2ab23f"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_chunks.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ec53f4bd1148edb6c340c319e7e137cf3d2ffa53",
+      "size": 4276,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ec53f4bd1148edb6c340c319e7e137cf3d2ffa53"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_collect.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3e5963f033f73a37f2de1c6b83e5925c30b372e1",
+      "size": 1382,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/3e5963f033f73a37f2de1c6b83e5925c30b372e1"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_concat.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "58fb6a5413f8473414b5a9d85f4817ee18e29a64",
+      "size": 1406,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/58fb6a5413f8473414b5a9d85f4817ee18e29a64"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_filter.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "11d58243fd19dec8c2b390e4e9ae86bb4820c6fb",
+      "size": 3125,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/11d58243fd19dec8c2b390e4e9ae86bb4820c6fb"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_filter_map.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ed1201732b6c24d3c88b2ac4a05771bd9d2a5cd2",
+      "size": 3054,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ed1201732b6c24d3c88b2ac4a05771bd9d2a5cd2"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_flatten.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4fc04a07bb99148e11248aaf02dfccf5fbffc579",
+      "size": 2161,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/4fc04a07bb99148e11248aaf02dfccf5fbffc579"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_flatten_unordered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a74dfc451db6f9753a7556c0bd5548d8c3782df2",
+      "size": 5567,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/a74dfc451db6f9753a7556c0bd5548d8c3782df2"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_fold.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d344d96e7d0dcae45add32490bfce0843f0311bd",
+      "size": 2774,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d344d96e7d0dcae45add32490bfce0843f0311bd"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_for_each.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6a081d84e74e3a980dcc02b1dcb16f56c86d2612",
+      "size": 1851,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6a081d84e74e3a980dcc02b1dcb16f56c86d2612"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_for_each_concurrent.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "271e03c2ba1fc60f645b837219f6cd104d546d8b",
+      "size": 4273,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/271e03c2ba1fc60f645b837219f6cd104d546d8b"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_next.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "13fcf80caefb8e029bf43d346bf6133b261fd8cc",
+      "size": 1048,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/13fcf80caefb8e029bf43d346bf6133b261fd8cc"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_ready_chunks.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8b1470ea26b330a7f416d702b4a0774521802057",
+      "size": 4132,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8b1470ea26b330a7f416d702b4a0774521802057"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_skip_while.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "52aa2d478b948d87370449364ed0350c67f27c82",
+      "size": 3548,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/52aa2d478b948d87370449364ed0350c67f27c82"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_take_while.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4b5ff1ad38fccab4551bbeeebdaf7c5f60140037",
+      "size": 3685,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/4b5ff1ad38fccab4551bbeeebdaf7c5f60140037"
+    },
+    {
+      "path": "futures-util/src/stream/try_stream/try_unfold.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fd9cdf1d8ca483c02aa72f71a16e28ab3965bdc8",
+      "size": 3919,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/fd9cdf1d8ca483c02aa72f71a16e28ab3965bdc8"
+    },
+    {
+      "path": "futures-util/src/stream/unfold.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2f48cccb44625ec3dec4c9996231699ba596eea3",
+      "size": 3622,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2f48cccb44625ec3dec4c9996231699ba596eea3"
+    },
+    {
+      "path": "futures-util/src/task",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "d9430cbd54064024aa45aa296f89ec526f18c541",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/d9430cbd54064024aa45aa296f89ec526f18c541"
+    },
+    {
+      "path": "futures-util/src/task/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7a9e993e5e5d5957b7be72987f1d4bffbb38294b",
+      "size": 1282,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/7a9e993e5e5d5957b7be72987f1d4bffbb38294b"
+    },
+    {
+      "path": "futures-util/src/task/spawn.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d9e99853097410e37672e0caac149f03001268ff",
+      "size": 6137,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d9e99853097410e37672e0caac149f03001268ff"
+    },
+    {
+      "path": "futures-util/src/unfold_state.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b66956bbd8f9c3504d243f9768b04d6231254bc0",
+      "size": 986,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b66956bbd8f9c3504d243f9768b04d6231254bc0"
+    },
+    {
+      "path": "futures",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "ab15ae087815135e6e5de2ac77835fd15168ff64",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/ab15ae087815135e6e5de2ac77835fd15168ff64"
+    },
+    {
+      "path": "futures/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fcebf0cc76443964acd3d61ec22176623f7d1804",
+      "size": 2843,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/fcebf0cc76443964acd3d61ec22176623f7d1804"
+    },
+    {
+      "path": "futures/LICENSE-APACHE",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "965b606f331b51d566b46025f9ff311a7aad0c12",
+      "size": 17,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/965b606f331b51d566b46025f9ff311a7aad0c12"
+    },
+    {
+      "path": "futures/LICENSE-MIT",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "76219eb72e8524f15c21ec93b9b2592da49b5460",
+      "size": 14,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/76219eb72e8524f15c21ec93b9b2592da49b5460"
+    },
+    {
+      "path": "futures/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "3ff34eedb1967f4ccbb9cb7ae88a7c5ade62a8ff",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/3ff34eedb1967f4ccbb9cb7ae88a7c5ade62a8ff"
+    },
+    {
+      "path": "futures/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "654576fcda5cb0f3066c0736ae07139351487d1f",
+      "size": 9654,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/654576fcda5cb0f3066c0736ae07139351487d1f"
+    },
+    {
+      "path": "futures/tests",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "da1b003758bf33c849055b2c56726de2cfe32dde",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/da1b003758bf33c849055b2c56726de2cfe32dde"
+    },
+    {
+      "path": "futures/tests/_require_features.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8046cc99a41b7f55c62256855a5755c494dcf04d",
+      "size": 354,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8046cc99a41b7f55c62256855a5755c494dcf04d"
+    },
+    {
+      "path": "futures/tests/async_await_macros.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c3e9ae908d08e3d21bfa85e9192d0560646f92cb",
+      "size": 11023,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c3e9ae908d08e3d21bfa85e9192d0560646f92cb"
+    },
+    {
+      "path": "futures/tests/auto_traits.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3385360591ad5f3be3276bbad36d8f9ffadc1479",
+      "size": 89217,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/3385360591ad5f3be3276bbad36d8f9ffadc1479"
+    },
+    {
+      "path": "futures/tests/bilock.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b103487849de7fd5df197246985c6da653041cac",
+      "size": 2700,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b103487849de7fd5df197246985c6da653041cac"
+    },
+    {
+      "path": "futures/tests/compat.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ac04a95ea87b58c1e99721be5bf3f2de6b983d15",
+      "size": 463,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ac04a95ea87b58c1e99721be5bf3f2de6b983d15"
+    },
+    {
+      "path": "futures/tests/eager_drop.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "992507774c57932daaad329508e25fa28f8947d9",
+      "size": 3368,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/992507774c57932daaad329508e25fa28f8947d9"
+    },
+    {
+      "path": "futures/tests/eventual.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "57a49b24173e2e5dc8e652b83a61964460d6a9d4",
+      "size": 5940,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/57a49b24173e2e5dc8e652b83a61964460d6a9d4"
+    },
+    {
+      "path": "futures/tests/future_abortable.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e119f0b719900d99ada3ce9ac64552714f9d5bf7",
+      "size": 1247,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e119f0b719900d99ada3ce9ac64552714f9d5bf7"
+    },
+    {
+      "path": "futures/tests/future_basic_combinators.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "372ab48b7976e4ee4715321d26dbf1a731b60d70",
+      "size": 3071,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/372ab48b7976e4ee4715321d26dbf1a731b60d70"
+    },
+    {
+      "path": "futures/tests/future_fuse.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "83f2c1ce9e1944b76749a51143a8b9dab2e5d40c",
+      "size": 364,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/83f2c1ce9e1944b76749a51143a8b9dab2e5d40c"
+    },
+    {
+      "path": "futures/tests/future_inspect.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eacd1f78a25d929b93c89b9fe4e289a05ca9f894",
+      "size": 306,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/eacd1f78a25d929b93c89b9fe4e289a05ca9f894"
+    },
+    {
+      "path": "futures/tests/future_join.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0556a6e62c73e8b0bf123a17a01dcf0b5142bf2c",
+      "size": 800,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0556a6e62c73e8b0bf123a17a01dcf0b5142bf2c"
+    },
+    {
+      "path": "futures/tests/future_join_all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f981b6553abc6f370d99a7f43e8b410d066fafcb",
+      "size": 1169,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/f981b6553abc6f370d99a7f43e8b410d066fafcb"
+    },
+    {
+      "path": "futures/tests/future_obj.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0e5253464e59743e94ff8b1599e2395f50b3bffe",
+      "size": 680,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0e5253464e59743e94ff8b1599e2395f50b3bffe"
+    },
+    {
+      "path": "futures/tests/future_select_all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "299b4790442376aa4aa3f434dfe09b60c51d5cfa",
+      "size": 598,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/299b4790442376aa4aa3f434dfe09b60c51d5cfa"
+    },
+    {
+      "path": "futures/tests/future_select_ok.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8aec00362d834bd325322ee748d905214e8da5ef",
+      "size": 615,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8aec00362d834bd325322ee748d905214e8da5ef"
+    },
+    {
+      "path": "futures/tests/future_shared.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bd69c1d7c14e40f2c918f124cdec999bf1743c36",
+      "size": 7481,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/bd69c1d7c14e40f2c918f124cdec999bf1743c36"
+    },
+    {
+      "path": "futures/tests/future_try_flatten_stream.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "82ae1baf2caeead7e142dfcd807410275f951654",
+      "size": 2597,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/82ae1baf2caeead7e142dfcd807410275f951654"
+    },
+    {
+      "path": "futures/tests/future_try_join_all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "52dd117381f3589c5f9cf03dc55333588857fa06",
+      "size": 1345,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/52dd117381f3589c5f9cf03dc55333588857fa06"
+    },
+    {
+      "path": "futures/tests/io_buf_reader.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7861d6d46e93edcdd03fc6845649d25472dbe4db",
+      "size": 13835,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/7861d6d46e93edcdd03fc6845649d25472dbe4db"
+    },
+    {
+      "path": "futures/tests/io_buf_writer.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b264cd54c2c03fd6e57cefdd2dd0a0c353413d8e",
+      "size": 7617,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b264cd54c2c03fd6e57cefdd2dd0a0c353413d8e"
+    },
+    {
+      "path": "futures/tests/io_cursor.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "435ea5a1559374f10af6b4312726863626937c7d",
+      "size": 1293,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/435ea5a1559374f10af6b4312726863626937c7d"
+    },
+    {
+      "path": "futures/tests/io_line_writer.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b483e0ff77dfc641786834e3480a51c08506eefb",
+      "size": 2107,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/b483e0ff77dfc641786834e3480a51c08506eefb"
+    },
+    {
+      "path": "futures/tests/io_lines.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "62afef326af7fe9f1dfdef775749c0c202e4849d",
+      "size": 2269,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/62afef326af7fe9f1dfdef775749c0c202e4849d"
+    },
+    {
+      "path": "futures/tests/io_read.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d39a6ea7903f054447566ebd04b53b8963e90dbc",
+      "size": 1841,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d39a6ea7903f054447566ebd04b53b8963e90dbc"
+    },
+    {
+      "path": "futures/tests/io_read_exact.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6582e50b80aaf4e3c750592272eaac6be93cf1fd",
+      "size": 493,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6582e50b80aaf4e3c750592272eaac6be93cf1fd"
+    },
+    {
+      "path": "futures/tests/io_read_line.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c7559c593b72d2ac501dd3e0860c3878e47ff59e",
+      "size": 2847,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c7559c593b72d2ac501dd3e0860c3878e47ff59e"
+    },
+    {
+      "path": "futures/tests/io_read_to_end.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0441b3bc4f2af6b0781ca89b2b8d45811dab25c0",
+      "size": 1472,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0441b3bc4f2af6b0781ca89b2b8d45811dab25c0"
+    },
+    {
+      "path": "futures/tests/io_read_to_string.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ae6aaa21d8281bfe6acd387818de6c612fd89c49",
+      "size": 1284,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ae6aaa21d8281bfe6acd387818de6c612fd89c49"
+    },
+    {
+      "path": "futures/tests/io_read_until.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "71f857f4b0018ad8617bf3e9c4d5244c890f8ea4",
+      "size": 1811,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/71f857f4b0018ad8617bf3e9c4d5244c890f8ea4"
+    },
+    {
+      "path": "futures/tests/io_window.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f0d48bc940ba9b2b6c8602453dca417f0e9dc1f",
+      "size": 685,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8f0d48bc940ba9b2b6c8602453dca417f0e9dc1f"
+    },
+    {
+      "path": "futures/tests/io_write.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6af27553cb7f1313c4e04bfd8f363bfb16443b75",
+      "size": 1919,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6af27553cb7f1313c4e04bfd8f363bfb16443b75"
+    },
+    {
+      "path": "futures/tests/lock_mutex.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c15e76bd84dd8fad4423632a5942fcd3aa91047e",
+      "size": 2022,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c15e76bd84dd8fad4423632a5942fcd3aa91047e"
+    },
+    {
+      "path": "futures/tests/macro-reexport",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "72dfef84aa56f044ab87826cd7b7c00a33b925d8",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/72dfef84aa56f044ab87826cd7b7c00a33b925d8"
+    },
+    {
+      "path": "futures/tests/macro-reexport/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2ddd1587a06c9ce90d3cc1d5eb77f86758efe2ab",
+      "size": 179,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2ddd1587a06c9ce90d3cc1d5eb77f86758efe2ab"
+    },
+    {
+      "path": "futures/tests/macro-reexport/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "31e78ac6084311b4b2bdd5dee8e859303a333f7d",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/31e78ac6084311b4b2bdd5dee8e859303a333f7d"
+    },
+    {
+      "path": "futures/tests/macro-reexport/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "82f939b34349f2203ed1ff7f7155125e655059a3",
+      "size": 219,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/82f939b34349f2203ed1ff7f7155125e655059a3"
+    },
+    {
+      "path": "futures/tests/macro-tests",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "37190be1aeaa6019ac118af6bf8d4c7057e1b28f",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/37190be1aeaa6019ac118af6bf8d4c7057e1b28f"
+    },
+    {
+      "path": "futures/tests/macro-tests/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "db72bd41b25eeeab1d97b69ce2ebfbd698b8e94e",
+      "size": 224,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/db72bd41b25eeeab1d97b69ce2ebfbd698b8e94e"
+    },
+    {
+      "path": "futures/tests/macro-tests/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "ee1ee7871c3ada06e9765c1f09b41c92a5c670a1",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/ee1ee7871c3ada06e9765c1f09b41c92a5c670a1"
+    },
+    {
+      "path": "futures/tests/macro-tests/src/main.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c654e0c92c17c2de89180f9d5628c31748518c9b",
+      "size": 2068,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c654e0c92c17c2de89180f9d5628c31748518c9b"
+    },
+    {
+      "path": "futures/tests/macro_comma_support.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "85871e98be8befea010f49b2a618112acaca6327",
+      "size": 722,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/85871e98be8befea010f49b2a618112acaca6327"
+    },
+    {
+      "path": "futures/tests/no-std",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6702b42049fa5fcc10a9144396c8a179ae544990",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/6702b42049fa5fcc10a9144396c8a179ae544990"
+    },
+    {
+      "path": "futures/tests/no-std/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ec7d4c7871e108d750a7db88c39ce91f8ac17135",
+      "size": 899,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ec7d4c7871e108d750a7db88c39ce91f8ac17135"
+    },
+    {
+      "path": "futures/tests/no-std/build.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ba79f203f2e25265f5583da35eacf7beacb72849",
+      "size": 461,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/ba79f203f2e25265f5583da35eacf7beacb72849"
+    },
+    {
+      "path": "futures/tests/no-std/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "a523494667e6c8b2496d6b460c0ecd692326a689",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/a523494667e6c8b2496d6b460c0ecd692326a689"
+    },
+    {
+      "path": "futures/tests/no-std/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7209e7f6a1804c9c66772a3d4ff9c235adbb834f",
+      "size": 939,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/7209e7f6a1804c9c66772a3d4ff9c235adbb834f"
+    },
+    {
+      "path": "futures/tests/object_safety.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "30c892f5e6b493177c3fca4a7d6ca2695da27554",
+      "size": 1518,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/30c892f5e6b493177c3fca4a7d6ca2695da27554"
+    },
+    {
+      "path": "futures/tests/oneshot.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bc005f0688740b93bef9d96b75f13c06d93e2754",
+      "size": 2161,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/bc005f0688740b93bef9d96b75f13c06d93e2754"
+    },
+    {
+      "path": "futures/tests/ready_queue.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c19d62593c6064ec6e27f15f3c1dcc4b2cef1def",
+      "size": 4253,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/c19d62593c6064ec6e27f15f3c1dcc4b2cef1def"
+    },
+    {
+      "path": "futures/tests/recurse.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d81753c9d7083cb4ab7c56de35caea4b2edc96a1",
+      "size": 789,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/d81753c9d7083cb4ab7c56de35caea4b2edc96a1"
+    },
+    {
+      "path": "futures/tests/sink.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8fa716f1de1945b200e4eaba8d2568b57c4ff4b9",
+      "size": 16286,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8fa716f1de1945b200e4eaba8d2568b57c4ff4b9"
+    },
+    {
+      "path": "futures/tests/sink_fanout.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e57b2d8c7b8a3590f5b5c7172c7520f4f4a1a2f0",
+      "size": 677,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e57b2d8c7b8a3590f5b5c7172c7520f4f4a1a2f0"
+    },
+    {
+      "path": "futures/tests/stream.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3122b587d081c89bd3ce04953c6d76e6a2872d85",
+      "size": 16830,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/3122b587d081c89bd3ce04953c6d76e6a2872d85"
+    },
+    {
+      "path": "futures/tests/stream_abortable.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2339dd05224156d0e3a44b7fa45141a76647e2a0",
+      "size": 1324,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/2339dd05224156d0e3a44b7fa45141a76647e2a0"
+    },
+    {
+      "path": "futures/tests/stream_buffer_unordered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9a2ee174ed01e26d993ef54d7b705603e3170424",
+      "size": 2029,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/9a2ee174ed01e26d993ef54d7b705603e3170424"
+    },
+    {
+      "path": "futures/tests/stream_catch_unwind.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8b23a0a7efb30cc4372fc7837ffc2a0e550d9b34",
+      "size": 829,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8b23a0a7efb30cc4372fc7837ffc2a0e550d9b34"
+    },
+    {
+      "path": "futures/tests/stream_futures_ordered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f06ce263eb5ff4eaad25c310a79b10c2bb5f93b0",
+      "size": 5375,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/f06ce263eb5ff4eaad25c310a79b10c2bb5f93b0"
+    },
+    {
+      "path": "futures/tests/stream_futures_unordered.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e25e755cdeeb6d1980f7a9586904e7df1f648603",
+      "size": 12959,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e25e755cdeeb6d1980f7a9586904e7df1f648603"
+    },
+    {
+      "path": "futures/tests/stream_into_async_read.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "60188d3e58ea875a519b046df07b0251b11c97d3",
+      "size": 2681,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/60188d3e58ea875a519b046df07b0251b11c97d3"
+    },
+    {
+      "path": "futures/tests/stream_peekable.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "06668f444d4448d343d61fde1186146b12eb655f",
+      "size": 2092,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/06668f444d4448d343d61fde1186146b12eb655f"
+    },
+    {
+      "path": "futures/tests/stream_select_all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4ae0735762cad32b3a9691984b779197f2a1c761",
+      "size": 5848,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/4ae0735762cad32b3a9691984b779197f2a1c761"
+    },
+    {
+      "path": "futures/tests/stream_select_next_some.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8252ad7b543c6321c826c868eba3b489d2354d84",
+      "size": 2945,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/8252ad7b543c6321c826c868eba3b489d2354d84"
+    },
+    {
+      "path": "futures/tests/stream_split.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "694c151807b8929d2b453379880854cffe51d15a",
+      "size": 1744,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/694c151807b8929d2b453379880854cffe51d15a"
+    },
+    {
+      "path": "futures/tests/stream_try_stream.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "57bdd4f3f3fdab0f2a05d6143c733d6c2a357ac9",
+      "size": 5272,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/57bdd4f3f3fdab0f2a05d6143c733d6c2a357ac9"
+    },
+    {
+      "path": "futures/tests/stream_unfold.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "16b10813b131483afe1042b0be624c672522faff",
+      "size": 859,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/16b10813b131483afe1042b0be624c672522faff"
+    },
+    {
+      "path": "futures/tests/task_arc_wake.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "aedc15bcb82f7c90886d32fb718dc98f2be9623f",
+      "size": 1776,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/aedc15bcb82f7c90886d32fb718dc98f2be9623f"
+    },
+    {
+      "path": "futures/tests/task_atomic_waker.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cec3db2876517d7f2584ed494119f84eb8bada86",
+      "size": 1320,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/cec3db2876517d7f2584ed494119f84eb8bada86"
+    },
+    {
+      "path": "futures/tests/test_macro.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6adf51d8bb55ee5c0f483d73a652cce03403b45f",
+      "size": 359,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/6adf51d8bb55ee5c0f483d73a652cce03403b45f"
+    },
+    {
+      "path": "futures/tests/try_join.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0281ab897d4ba1b82910d1ceb9858cdd416123b3",
+      "size": 947,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/0281ab897d4ba1b82910d1ceb9858cdd416123b3"
+    },
+    {
+      "path": "futures/tests_disabled",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "9e40b26f917839e869c69f948d82705ee3600db6",
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/trees/9e40b26f917839e869c69f948d82705ee3600db6"
+    },
+    {
+      "path": "futures/tests_disabled/all.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a7a571040a3fa2b89ea651d0670abfd1914add64",
+      "size": 12803,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/a7a571040a3fa2b89ea651d0670abfd1914add64"
+    },
+    {
+      "path": "futures/tests_disabled/stream.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a4eec2c7aa4fec1db4f35a0319668e6512af1228",
+      "size": 10301,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/a4eec2c7aa4fec1db4f35a0319668e6512af1228"
+    },
+    {
+      "path": "triagebot.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e4e7a2d7853237957c7d7f3df7ca1998ca4f11d2",
+      "size": 40,
+      "url": "https://api.github.com/repos/rust-lang/futures-rs/git/blobs/e4e7a2d7853237957c7d7f3df7ca1998ca4f11d2"
+    }
+  ],
+  "truncated": false
+}

@@ -1,0 +1,22 @@
+{
+  "checked_utc": "2026-11-04T14:22:27.587461+00:00",
+  "origin": "git@github.com-lingxi-coder:lingxi-coder/lingxi-app.git",
+  "command": "git ls-remote --heads origin main",
+  "remote_output": "c7832033b0644aedf9b4f521685d5f916a8ce56f\trefs/heads/main",
+  "head": "c7832033b0644aedf9b4f521685d5f916a8ce56f",
+  "head_matches_remote_at_capture": true,
+  "input_sha256": {
+    "Cargo.toml": "64b16f7acf3b9cb45f25564ce0c1143eefbbc6fa5fe67d11ff69abac3c39194e",
+    "Cargo.lock": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+    "supply-chain/config.toml": "8e1b2dc287f3a81dc84dda3de41984d17f2fed4d115347b6d3d85f979a93d5f2",
+    "supply-chain/audits.toml": "6e6eef2b5ad086de4357c3b27f00695f6a5a49588d3a0965594623e96ccece41",
+    "supply-chain/imports.lock": "38691e1bfc73d11d3fb1b46a820afff4bf5344d67d5852c7a1697d58e4dfb536"
+  },
+  "package": {
+    "name": "futures-io",
+    "version": "0.3.32",
+    "source": "registry+https://github.com/rust-lang/crates.io-index",
+    "checksum": "cecba35d7ad927e23624b22ad55235f2239cfa44fd10428eecbeba6d6a717718"
+  },
+  "local_package_audits": []
+}

@@ -31,8 +31,38 @@ audit-as-crates-io = true
 [policy.git2]
 audit-as-crates-io = true
 
+[policy.icu_collator]
+audit-as-crates-io = true
+
 [policy.libgit2-sys]
 audit-as-crates-io = true
 
 [policy.libssh2-sys]
+audit-as-crates-io = true
+
+[policy.lingxi-hyper]
+audit-as-crates-io = true
+
+[policy.lingxi-hyper-rustls]
+audit-as-crates-io = true
+
+[policy.lingxi-hyper-util]
+audit-as-crates-io = true
+
+[policy.lingxi-reqwest]
+audit-as-crates-io = true
+
+[policy.mbedtls-sys]
+audit-as-crates-io = true
+
+[policy."nix:0.31.3@git:e59c7ed9720edd2cbae866c193c8757948aec490"]
+audit-as-crates-io = true
+
+[policy.platform-pty]
+audit-as-crates-io = true
+
+[policy.syntect]
+audit-as-crates-io = true
+
+[policy.webrtc]
 audit-as-crates-io = true

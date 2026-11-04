@@ -102,7 +102,7 @@ fn independent_background_snapshot(
         .instruction_epoch
         .max(copied_epoch)
         .checked_add(1)
-        .filter(|epoch| *epoch <= (1_u64 << 53) - 1)
+        .filter(|epoch| *epoch < (1_u64 << 53))
         .ok_or_else(|| BgForkError::Snapshot("instruction epoch is exhausted".into()))?;
     Ok(snapshot)
 }

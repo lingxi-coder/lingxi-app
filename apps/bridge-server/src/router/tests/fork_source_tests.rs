@@ -191,9 +191,11 @@ async fn fork_source_and_hot_resume_reject_unterminated_complete_record() {
     let fixture = Fixture::new(ConversationMode::Code);
     let content = fixture.content.strip_suffix('\n').unwrap();
     std::fs::write(&fixture.source, content).unwrap();
-    let error = super::replay_pinned_catalog_source(&fixture.home, &fixture.source, fixture.id)
-        .err()
-        .expect("hot resume must reject an unterminated record");
+    let Err(error) =
+        super::replay_pinned_catalog_source(&fixture.home, &fixture.source, fixture.id)
+    else {
+        panic!("hot resume must reject an unterminated record");
+    };
     assert!(error.contains("incomplete final record"), "{error}");
     let error = fixture
         .router

@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 /// Capture a source under its writer claim, validate that it has no unfinished
 /// recovery, then atomically publish a separate profile and transcript.
+#[cfg(test)]
 pub(crate) async fn create_independent_cli_branch(
     home: &std::path::Path,
     target_cwd: &str,
@@ -712,7 +713,7 @@ pub(super) async fn mount_resumed_tui_inner(
         return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
     }
     if let Some(launch) = shell_launch {
-        if PathBuf::from(&launch.cwd) != resume_cwd {
+        if std::path::Path::new(&launch.cwd) != resume_cwd.as_path() {
             eprintln!("lingxi-cli: background resume workspace changed after approval");
             return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
         }
@@ -2339,10 +2340,7 @@ pub(crate) fn map_resume_rows(rows: &[SessionMetadata]) -> Vec<tui::resume::Resu
 /// Returns an empty list on any load error (the picker then shows its
 /// empty-state screen), so a scan failure never blocks the mount.
 pub(crate) async fn load_resume_catalog_for_cwd(cwd: &std::path::Path) -> Vec<SessionMetadata> {
-    match load_resume_rows_for_cwd(cwd).await {
-        Ok(rows) => rows,
-        Err(_) => Vec::new(),
-    }
+    load_resume_rows_for_cwd(cwd).await.unwrap_or_default()
 }
 
 /// Reload deferred transcript entries from the already selected source.

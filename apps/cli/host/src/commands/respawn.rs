@@ -7,7 +7,7 @@
 //! durable job state.  No second supervisor or process protocol is introduced.
 
 use clap::Args;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub(crate) const PHASE_CREATING: &str = "creating";
 pub(crate) const PHASE_QUEUED: &str = "queued";

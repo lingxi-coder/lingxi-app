@@ -905,6 +905,7 @@ private fun EmptyState(compact: Boolean, modifier: Modifier = Modifier) {
 @Composable
 private fun CompactionProgressRow(progress: CompactionProgressUi) {
     val t = LingXiTheme.palette
+    val completed = progress.status == CompactionProgressStatus.Completed
     val startedAt = progress.startedAtMillis
     var elapsedMs by remember(startedAt, progress.phaseStartedAtMillis, progress.status) {
         mutableLongStateOf(startedAt?.let { (compactionClockMillis() - it).coerceAtLeast(0L) } ?: 0L)
@@ -942,7 +943,7 @@ private fun CompactionProgressRow(progress: CompactionProgressUi) {
         )
         CompactionProgressStatus.Completed -> if (progress.messagesBefore == null ||
             progress.messagesAfter == null || progress.bytesSaved == null
-        ) "100%" else "100% · " + stringResource(
+        ) "" else stringResource(
             R.string.chat_compaction_status,
             progress.messagesBefore ?: 0,
             progress.messagesAfter ?: 0,
@@ -954,26 +955,38 @@ private fun CompactionProgressRow(progress: CompactionProgressUi) {
 
     Row(
         verticalAlignment = Alignment.Top,
-        horizontalArrangement = Arrangement.spacedBy(9.dp),
+        horizontalArrangement = Arrangement.spacedBy(11.dp),
         modifier = Modifier
+            .widthIn(max = 560.dp)
             .fillMaxWidth()
             .testTag("conversation.compaction-status")
             .padding(horizontal = 14.dp, vertical = 6.dp)
+            .then(if (completed) Modifier
+                .background(t.surfaceActive.copy(alpha = 0.32f), RoundedCornerShape(12.dp))
+                .border(1.dp, t.border.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                .padding(12.dp) else Modifier)
             .semantics { contentDescription = "$title. $detail" },
     ) {
-        LXIcon(
-            name = when (progress.status) {
-                CompactionProgressStatus.Running -> LXIconName.Book
-                CompactionProgressStatus.Completed, CompactionProgressStatus.Skipped -> LXIconName.Check
-                CompactionProgressStatus.Failed -> LXIconName.X
-            },
-            size = 17.dp,
-            color = color,
-        )
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.size(22.dp).then(
+                if (completed) Modifier.background(t.ok.copy(alpha = 0.12f), CircleShape) else Modifier,
+            ),
+        ) {
+            LXIcon(
+                name = when (progress.status) {
+                    CompactionProgressStatus.Running -> LXIconName.Book
+                    CompactionProgressStatus.Completed, CompactionProgressStatus.Skipped -> LXIconName.Check
+                    CompactionProgressStatus.Failed -> LXIconName.X
+                },
+                size = if (completed) 13.dp else 17.dp,
+                color = color,
+            )
+        }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
-            Text(title, color = color, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+            Text(title, color = if (completed) t.text else color, style = MaterialTheme.typography.bodySmall, fontWeight = if (completed) FontWeight.SemiBold else FontWeight.Medium)
             if (detail.isNotEmpty()) {
-                Text(detail, color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(detail, color = t.text3, style = MaterialTheme.typography.labelSmall, maxLines = if (completed) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis)
             }
             if (progress.status == CompactionProgressStatus.Running && percent != null) {
                 LinearProgressIndicator(

@@ -52,7 +52,8 @@ export const CompactionStatus = memo(function CompactionStatus({ item }: { item:
     '--compact-muted': t.text3,
     '--compact-track': t.surfaceActive,
     '--compact-progress': t.accent,
-    '--compact-accent': t.accent,
+    '--compact-success': t.ok,
+    '--compact-title': t.text,
     '--compact-surface': t.surface,
     '--compact-border': t.border,
     '--sweep-base': t.text3,
@@ -68,7 +69,7 @@ export const CompactionStatus = memo(function CompactionStatus({ item }: { item:
       style={style}
     >
       <span className="compact-status-icon" aria-hidden="true">
-        <Icon name={item.status === 'error' || item.status === 'cancelled' ? 'x' : 'compact'} size={17} stroke={1.75} />
+        <Icon name={item.status === 'complete' ? 'check' : item.status === 'error' || item.status === 'cancelled' ? 'x' : 'compact'} size={item.status === 'complete' ? 13 : 17} stroke={item.status === 'complete' ? 2.25 : 1.75} />
       </span>
       <div className="compact-status-content">
         <div className={running ? 'compact-status-title running-sweep' : 'compact-status-title'}>{title}</div>

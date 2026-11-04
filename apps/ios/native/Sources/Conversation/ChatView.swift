@@ -1312,10 +1312,11 @@ private struct CompactionRuntimeFooter: View {
                     messagesBefore: messagesBefore,
                     messagesAfter: messagesAfter,
                     bytesSaved: bytesSaved
-                ).map { "100% · " + $0 } ?? "100%",
+                ),
                 icon: .check,
                 color: t.ok,
-                progress: nil
+                progress: nil,
+                completed: true
             )
         case .skipped:
             row(title: String(localized: "chat_compaction_skipped"), detail: nil, icon: .check, color: t.ok, progress: nil)
@@ -1351,24 +1352,29 @@ private struct CompactionRuntimeFooter: View {
         icon: LXIconName,
         color: Color,
         progress: Int?,
-        preparing: Bool = false
+        preparing: Bool = false,
+        completed: Bool = false
     ) -> some View {
-        HStack(alignment: .top, spacing: 9) {
+        HStack(alignment: .top, spacing: 11) {
             LXIcon(
                 name: icon,
-                size: 16,
+                size: completed ? 13 : 16,
                 color: color,
-                stroke: 1.75
+                stroke: completed ? 2.25 : 1.75
             )
+            .frame(width: 22, height: 22)
+            .background(completed ? t.ok.opacity(0.12) : .clear, in: Circle())
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(color)
+                    .font(.subheadline.weight(completed ? .semibold : .medium))
+                    .foregroundStyle(completed ? t.text : color)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let detail, !detail.isEmpty {
                     Text(detail)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(t.text4)
-                        .lineLimit(2)
+                        .font(.caption)
+                        .foregroundStyle(t.text3)
+                        .lineLimit(completed ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let progress {
                     ProgressView(value: Double(progress), total: 100)
@@ -1380,6 +1386,15 @@ private struct CompactionRuntimeFooter: View {
             }
             Spacer(minLength: 0)
         }
+        .padding(completed ? 12 : 0)
+        .background(completed ? t.surfaceActive.opacity(0.32) : .clear, in: .rect(cornerRadius: 12))
+        .overlay {
+            if completed {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(t.border.opacity(0.4), lineWidth: 1)
+            }
+        }
+        .frame(maxWidth: 560, alignment: .leading)
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
         .accessibilityElement(children: .combine)

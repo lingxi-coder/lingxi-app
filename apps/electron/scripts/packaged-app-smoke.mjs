@@ -697,6 +697,16 @@ async function setupSmokeCollectors(page, sessionId = null) {
 }
 
 async function assertBundledSidecar(page, appPath, tempRoot) {
+  await setupSmokeCollectors(page);
+  const sessionBootstrap = await evaluate(page, `(async () => {
+    const current = await window.lingxi.bootstrap();
+    return await window.lingxi.newSession(current.workspace.path);
+  })()`);
+  const sessionId = sessionBootstrap?.activeSession?.sessionId;
+  assert.equal(typeof sessionId, 'string', 'packaged smoke must create an active session before dispatching commands');
+  const encodedSessionId = JSON.stringify(sessionId);
+  await evaluate(page, `window.lingxi.command(${encodedSessionId}, { type: 'list_models' })`);
+
   const bootstrap = await waitFor(
     async () => {
       const value = await evaluate(page, `window.lingxi.bootstrap()`);
@@ -715,15 +725,6 @@ async function assertBundledSidecar(page, appPath, tempRoot) {
   assert.deepEqual(fileSearch.files, ['src/smoke-context.ts'], 'workspace file search must return relative source paths and skip dependencies');
   assert.equal(fileSearch.truncated, false, 'small workspace file search should not be truncated');
 
-  await setupSmokeCollectors(page);
-  const sessionBootstrap = await evaluate(page, `(async () => {
-    const current = await window.lingxi.bootstrap();
-    return await window.lingxi.newSession(current.workspace.path);
-  })()`);
-  const sessionId = sessionBootstrap?.activeSession?.sessionId;
-  assert.equal(typeof sessionId, 'string', 'packaged smoke must create an active session before dispatching commands');
-  const encodedSessionId = JSON.stringify(sessionId);
-  await evaluate(page, `window.lingxi.command(${encodedSessionId}, { type: 'list_models' })`);
   await evaluate(page, `window.lingxi.command(${encodedSessionId}, { type: 'list_sessions', limit: 5 })`);
   await evaluate(page, `window.lingxi.command(${encodedSessionId}, { type: 'set_permission_mode', mode: 'acceptEdits' })`);
   // bypassPermissions now requires explicit, persisted acceptance (security #34).

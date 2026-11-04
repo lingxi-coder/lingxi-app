@@ -1,0 +1,13 @@
+# Exact public audit imports — 2026-11-03
+
+This batch accepts twelve named, exact full/delta attestations from Embark Studios, ISRG/libprio-rs and Zcash. It preserves the original authors; it does not represent a new Codex source or cryptography audit. Independent source/field review is retained in `supply-chain/curated-imports/2026-11-03/cross-review.md`, with immutable upstream commit/blob provenance in the adjacent JSON.
+
+Three reduced snapshots are published at App commit `f5ab635ad9b093ded46f53b744ea71bf695b21dc`. Only those immutable HTTPS snapshots are imported; they contain twelve positive records plus the original `epaint <0.20.0` violation, and no wildcard, publisher trust, exemption or custom criterion. Ariel's litrs record remains excluded pending clarification.
+
+Official cargo-vet 0.10.3 online `regenerate imports` ran in an isolated store configured with only these three new sources and the exact main graph. Its twelve positive records matched the fetched source fields exactly. These tool-produced namespaces were added without altering any existing Google, Mozilla or Bytecode Alliance namespace, publisher field, original policy, or local audit. This is targeted import regeneration, not a full six-source online refresh. Official formatting and a full locked/frozen check then ran on the combined store.
+
+On the current main graph, frozen vetting changed **822 to 813 missing rows**, with nine successfully explained full/delta paths and no new missing row. Both checks still exit 255 (`fail (vetting)`); the complete source audit is not passing. This count differs from the separate larger integration graph.
+
+The absent epaint package causes cargo-vet to prune its violation from imports.lock; the immutable snapshot retains it. The new guard rejects a lock missing that violation whenever epaint enters Cargo.lock, so graph changes must regenerate the import. The guard pins snapshot/provenance hashes, exact records and HTTPS commit URLs. Its tests reject wildcard/trust insertion, forged records, moving URLs and lost applicable violations. It is limited to the new curated sources; existing three-source wildcard/publisher mechanisms are unchanged.
+
+The existing main Git dependency pins still require separate publication/integration work. Metadata checks here use their exact cached local objects; these audit results do not establish remote pin availability, platform builds, live TLS, or overall CI success. Local command/results evidence is in `validation/gates-fix-20261030/integration/vet-curated-formal-20261103` and the root's independent `integration/curated-imports-main-20261103` run.

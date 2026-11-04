@@ -2535,13 +2535,26 @@ impl CommandRouter for EngineCommandRouter {
                 self.dispatch_mod_ui_client_operation_result(request_id, operation, sink.as_ref())
                     .await;
             }
-            ClientCommand::SideChatRestore { side_id, checkpoint_json, events_json } => {
+            ClientCommand::SideChatRestore {
+                side_id,
+                checkpoint_json,
+                events_json,
+            } => {
                 let result = match self.side_chat_manager(sink.clone()).await {
-                    Ok(manager) => manager.restore(&side_id, &checkpoint_json, events_json).await,
+                    Ok(manager) => {
+                        manager
+                            .restore(&side_id, &checkpoint_json, events_json)
+                            .await
+                    }
                     Err(error) => Err(error),
                 };
                 if let Err(message) = result {
-                    sink.emit(ClientEvent::SideChatError { request_id: None, side_id: Some(side_id), message }).await;
+                    sink.emit(ClientEvent::SideChatError {
+                        request_id: None,
+                        side_id: Some(side_id),
+                        message,
+                    })
+                    .await;
                 }
             }
             ClientCommand::SideChatCreate {

@@ -45,21 +45,27 @@ fn stdio_resume_rejects_chat_without_mutating_the_transcript() {
     let cwd = root.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let session_id = uuid::Uuid::new_v4();
-    let path = session::jsonl::path::session_path(&home, &cwd.to_string_lossy(), &session_id.to_string());
+    let path =
+        session::jsonl::path::session_path(&home, &cwd.to_string_lossy(), &session_id.to_string());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let rows = [
         serde_json::json!({"type":"fixed-session-mode", "sessionId":session_id, "sessionMode":"chat", "instructionEpoch":2}),
         serde_json::json!({"type":"user", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
             "sessionId":session_id, "cwd":cwd, "message":{"role":"user","content":"hello"}}),
     ];
-    let original = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+    let original = rows
+        .iter()
+        .map(|row| format!("{row}\n"))
+        .collect::<String>();
     std::fs::write(&path, &original).unwrap();
-    Command::cargo_bin("lingxi-cli").unwrap()
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
         .env("LINGXI_CONFIG_DIR", &home)
         .current_dir(&cwd)
         .args(["--no-tui", "--resume", &session_id.to_string()])
-        .assert().code(1)
+        .assert()
+        .code(1)
         .stderr(predicate::str::contains("session_mode_mismatch"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     assert!(!home.join("sessions").exists());

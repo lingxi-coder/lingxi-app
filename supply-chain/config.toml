@@ -7,6 +7,15 @@ version = "0.10"
 [imports.bytecode-alliance]
 url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
 
+[imports.curated-embark-studios]
+url = "https://raw.githubusercontent.com/lingxi-coder/lingxi-app/f5ab635ad9b093ded46f53b744ea71bf695b21dc/supply-chain/curated-imports/2026-11-03/embark-studios.toml"
+
+[imports.curated-isrg]
+url = "https://raw.githubusercontent.com/lingxi-coder/lingxi-app/f5ab635ad9b093ded46f53b744ea71bf695b21dc/supply-chain/curated-imports/2026-11-03/isrg.toml"
+
+[imports.curated-zcash]
+url = "https://raw.githubusercontent.com/lingxi-coder/lingxi-app/f5ab635ad9b093ded46f53b744ea71bf695b21dc/supply-chain/curated-imports/2026-11-03/zcash.toml"
+
 [imports.google]
 url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
 

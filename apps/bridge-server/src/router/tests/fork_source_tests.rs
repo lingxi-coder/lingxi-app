@@ -306,11 +306,14 @@ async fn fork_source_first_resume_keeps_published_target_identity() {
     let mut changed = target_content.clone();
     changed.push(b' ');
     std::fs::write(&target_path, &changed).unwrap();
-    assert!(fixture
-        .router
-        .replay_resume_source(&fixture.home, target)
-        .await
-        .is_err(), "same-inode content changes must also reject");
+    assert!(
+        fixture
+            .router
+            .replay_resume_source(&fixture.home, target)
+            .await
+            .is_err(),
+        "same-inode content changes must also reject"
+    );
     std::fs::write(&target_path, &target_content).unwrap();
     // This fixture's orchestrator rejects resume; the original receipt must
     // remain available after a failed mount, not only after a failed preflight.

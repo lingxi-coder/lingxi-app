@@ -37,6 +37,18 @@ criteria = "safe-to-deploy"
 version = "0.1.7"
 notes = "AI-assisted full source review and independent root cross-review; evidence: supply-chain/reviews/2026-11-03/batch002-lane-a.md (SHA-256 a0282f61bee7952f4b57d9d87f14bd5ca4cfd43612abd2a79845195c8325d47f). Scope: exact crates.io source and documented API use; dependencies reviewed separately. Explicit RNG limits recorded in evidence."
 
+[[audits.diff]]
+who = "Codex AI-assisted"
+criteria = "safe-to-run"
+version = "0.1.13"
+notes = "AI-assisted full exact-version source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/diff-0.1.13.md (SHA-256 4266434dd83b15fe427c892214b3bd9a2ee7cf1a1145967552354eeb7a1ef4c9); cross-review: supply-chain/reviews/2026-11-03/diff-gethostname-cross-review.md (SHA-256 40963ae12dc46429d6d9bc22eaf2dedb6af492cd41e81d295557170295b1683a). Caller-controlled input can require O(m*n) memory/time; packaged tests may write their fixtures on read failure. No safe-to-deploy claim."
+
+[[audits.gethostname]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.1.0"
+notes = "AI-assisted full exact-version source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/gethostname-1.1.0.md (SHA-256 74956558b70b797324841f51472a10c2e2e0a94890ce96d5b559fde91b4f70f1); cross-review: supply-chain/reviews/2026-11-03/diff-gethostname-cross-review.md (SHA-256 40963ae12dc46429d6d9bc22eaf2dedb6af492cd41e81d295557170295b1683a). Windows API errors or a hostname-change race can panic. Caller owns hostname privacy and semantics; rustix/windows-link are separate dependency audits."
+
 [[audits.idna_adapter]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"

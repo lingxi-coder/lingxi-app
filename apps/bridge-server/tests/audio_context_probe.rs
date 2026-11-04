@@ -31,7 +31,6 @@ impl ClientEventSink for CapturingSink {
     }
 }
 
-
 struct MockTaskRegistry {
     rows: Vec<TaskRecord>,
 }

@@ -1,0 +1,247 @@
+{
+  "selection": "12 exact full/delta attestations and one retained violation; no wildcard/publisher trust",
+  "files": {
+    "embark-studios.toml": {
+      "sha256": "bce8784ffdf4a50724f040acfb6bac8b2149a6c106bb0f2e2bc516beaf13ca11",
+      "records": 3
+    },
+    "isrg.toml": {
+      "sha256": "b1da7a859c732a6f59d682db4020087a0666bee7e71736613712f8968f39dd48",
+      "records": 6
+    },
+    "zcash.toml": {
+      "sha256": "ae9c4047791a18b1bac77ef8c8d96a9ae2ef020670d39542d99641ad1aab6bf4",
+      "records": 4
+    }
+  },
+  "records": [
+    {
+      "peer": "embark-studios",
+      "crate": "epaint",
+      "record": {
+        "who": "Johan Andersson <opensource@embark-studios.com>",
+        "criteria": "safe-to-deploy",
+        "violation": "<0.20.0",
+        "notes": "Specified crate license does not include licenses of embedded fonts if using default features or the `default_fonts` feature. Tracked in: https://github.com/emilk/egui/issues/2321"
+      },
+      "source_commit": "bc9f6c527108a8b79b74d44121aed574e7b5e526",
+      "source_git_blob": "bbfef9f9fd75a9e1c0955863b4ba327468e28371",
+      "source_sha256": "c8d3cd352b3b8528e131054be3701357ec26495b1db7148896503a1c42ab9418",
+      "source_line": 650,
+      "source_url": "https://github.com/EmbarkStudios/rust-ecosystem/blob/bc9f6c527108a8b79b74d44121aed574e7b5e526/audits.toml#L650"
+    },
+    {
+      "peer": "embark-studios",
+      "crate": "tap",
+      "record": {
+        "who": "Johan Andersson <opensource@embark-studios.com>",
+        "criteria": "safe-to-deploy",
+        "version": "1.0.1",
+        "notes": "No unsafe usage or ambient capabilities"
+      },
+      "source_commit": "bc9f6c527108a8b79b74d44121aed574e7b5e526",
+      "source_git_blob": "bbfef9f9fd75a9e1c0955863b4ba327468e28371",
+      "source_sha256": "c8d3cd352b3b8528e131054be3701357ec26495b1db7148896503a1c42ab9418",
+      "source_line": 725,
+      "source_url": "https://github.com/EmbarkStudios/rust-ecosystem/blob/bc9f6c527108a8b79b74d44121aed574e7b5e526/audits.toml#L725"
+    },
+    {
+      "peer": "embark-studios",
+      "crate": "valuable",
+      "record": {
+        "who": "Johan Andersson <opensource@embark-studios.com>",
+        "criteria": "safe-to-deploy",
+        "version": "0.1.0",
+        "notes": "No unsafe usage or ambient capabilities, sane build script"
+      },
+      "source_commit": "bc9f6c527108a8b79b74d44121aed574e7b5e526",
+      "source_git_blob": "bbfef9f9fd75a9e1c0955863b4ba327468e28371",
+      "source_sha256": "c8d3cd352b3b8528e131054be3701357ec26495b1db7148896503a1c42ab9418",
+      "source_line": 855,
+      "source_url": "https://github.com/EmbarkStudios/rust-ecosystem/blob/bc9f6c527108a8b79b74d44121aed574e7b5e526/audits.toml#L855"
+    },
+    {
+      "peer": "isrg",
+      "crate": "hmac",
+      "record": {
+        "who": "David Cook <dcook@divviup.org>",
+        "criteria": "safe-to-deploy",
+        "version": "0.12.1"
+      },
+      "source_commit": "2e6282207930d439bf54bfaa79d841ef24c0d212",
+      "source_git_blob": "6bf08be3f87ed3a6c8342f0f0522a216341592f2",
+      "source_sha256": "c57a1843c5b22c0a1ab12eb25944e3c2a4b5f98beecb529ed3c6fd3f0bd40fc9",
+      "source_line": 530,
+      "source_url": "https://github.com/divviup/libprio-rs/blob/2e6282207930d439bf54bfaa79d841ef24c0d212/supply-chain/audits.toml#L530"
+    },
+    {
+      "peer": "isrg",
+      "crate": "inout",
+      "record": {
+        "who": "David Cook <dcook@divviup.org>",
+        "criteria": "safe-to-deploy",
+        "delta": "0.1.4 -> 0.2.2"
+      },
+      "source_commit": "2e6282207930d439bf54bfaa79d841ef24c0d212",
+      "source_git_blob": "6bf08be3f87ed3a6c8342f0f0522a216341592f2",
+      "source_sha256": "c57a1843c5b22c0a1ab12eb25944e3c2a4b5f98beecb529ed3c6fd3f0bd40fc9",
+      "source_line": 535,
+      "source_url": "https://github.com/divviup/libprio-rs/blob/2e6282207930d439bf54bfaa79d841ef24c0d212/supply-chain/audits.toml#L535"
+    },
+    {
+      "peer": "isrg",
+      "crate": "rand_chacha",
+      "record": {
+        "who": "David Cook <dcook@divviup.org>",
+        "criteria": "safe-to-deploy",
+        "version": "0.3.1"
+      },
+      "source_commit": "2e6282207930d439bf54bfaa79d841ef24c0d212",
+      "source_git_blob": "6bf08be3f87ed3a6c8342f0f0522a216341592f2",
+      "source_sha256": "c57a1843c5b22c0a1ab12eb25944e3c2a4b5f98beecb529ed3c6fd3f0bd40fc9",
+      "source_line": 823,
+      "source_url": "https://github.com/divviup/libprio-rs/blob/2e6282207930d439bf54bfaa79d841ef24c0d212/supply-chain/audits.toml#L823"
+    },
+    {
+      "peer": "isrg",
+      "crate": "rand_chacha",
+      "record": {
+        "who": "David Cook <dcook@divviup.org>",
+        "criteria": "safe-to-deploy",
+        "delta": "0.3.1 -> 0.9.0"
+      },
+      "source_commit": "2e6282207930d439bf54bfaa79d841ef24c0d212",
+      "source_git_blob": "6bf08be3f87ed3a6c8342f0f0522a216341592f2",
+      "source_sha256": "c57a1843c5b22c0a1ab12eb25944e3c2a4b5f98beecb529ed3c6fd3f0bd40fc9",
+      "source_line": 833,
+      "source_url": "https://github.com/divviup/libprio-rs/blob/2e6282207930d439bf54bfaa79d841ef24c0d212/supply-chain/audits.toml#L833"
+    },
+    {
+      "peer": "isrg",
+      "crate": "rayon-core",
+      "record": {
+        "who": "Ameer Ghani <inahga@divviup.org>",
+        "criteria": "safe-to-deploy",
+        "version": "1.12.1"
+      },
+      "source_commit": "2e6282207930d439bf54bfaa79d841ef24c0d212",
+      "source_git_blob": "6bf08be3f87ed3a6c8342f0f0522a216341592f2",
+      "source_sha256": "c57a1843c5b22c0a1ab12eb25944e3c2a4b5f98beecb529ed3c6fd3f0bd40fc9",
+      "source_line": 917,
+      "source_url": "https://github.com/divviup/libprio-rs/blob/2e6282207930d439bf54bfaa79d841ef24c0d212/supply-chain/audits.toml#L917"
+    },
+    {
+      "peer": "isrg",
+      "crate": "rayon-core",
+      "record": {
+        "who": "David Cook <dcook@divviup.org>",
+        "criteria": "safe-to-deploy",
+        "delta": "1.12.1 -> 1.13.0"
+      },
+      "source_commit": "2e6282207930d439bf54bfaa79d841ef24c0d212",
+      "source_git_blob": "6bf08be3f87ed3a6c8342f0f0522a216341592f2",
+      "source_sha256": "c57a1843c5b22c0a1ab12eb25944e3c2a4b5f98beecb529ed3c6fd3f0bd40fc9",
+      "source_line": 937,
+      "source_url": "https://github.com/divviup/libprio-rs/blob/2e6282207930d439bf54bfaa79d841ef24c0d212/supply-chain/audits.toml#L937"
+    },
+    {
+      "peer": "zcash",
+      "crate": "dunce",
+      "record": {
+        "who": "Jack Grigg <jack@electriccoin.co>",
+        "criteria": "safe-to-deploy",
+        "version": "1.0.5",
+        "notes": "Does what it says on the tin. No `unsafe`, and the only IO is `std::fs::canonicalize`.\nPath and string handling looks plausibly correct.\n",
+        "aggregated-from": "https://raw.githubusercontent.com/zcash/librustzcash/main/supply-chain/audits.toml"
+      },
+      "source_commit": "ce132d7abdd52f2b3b0d55ed5dc9f152331535c2",
+      "source_git_blob": "d94538e9957149b53b261a0c62af4c607ef1b021",
+      "source_sha256": "f7e0db3983d4553588d1c96d95b59f4eb9acf04d076ceb1a31eaa543e3afa6c6",
+      "source_line": 1673,
+      "source_url": "https://github.com/zcash/rust-ecosystem/blob/ce132d7abdd52f2b3b0d55ed5dc9f152331535c2/supply-chain/audits.toml#L1673",
+      "origin_verification": {
+        "repo": "zcash/librustzcash",
+        "commit": "a551fac8a233f54799ca1920ef78ef098cfda929",
+        "git_blob": "f8a3ffc7c5142ba53ec3d445397d7e1c95bf988e",
+        "sha256": "4a467ceccbe7d8264542e9a93eda8f61549f42811bf8d4b61dd92844da60beec",
+        "line": 249,
+        "url": "https://github.com/zcash/librustzcash/blob/a551fac8a233f54799ca1920ef78ef098cfda929/supply-chain/audits.toml#L249",
+        "all_other_fields_identical": true
+      }
+    },
+    {
+      "peer": "zcash",
+      "crate": "inout",
+      "record": {
+        "who": "Daira Hopwood <daira@jacaranda.org>",
+        "criteria": "safe-to-deploy",
+        "version": "0.1.3",
+        "notes": "Reviewed in full.",
+        "aggregated-from": "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"
+      },
+      "source_commit": "ce132d7abdd52f2b3b0d55ed5dc9f152331535c2",
+      "source_git_blob": "d94538e9957149b53b261a0c62af4c607ef1b021",
+      "source_sha256": "f7e0db3983d4553588d1c96d95b59f4eb9acf04d076ceb1a31eaa543e3afa6c6",
+      "source_line": 2514,
+      "source_url": "https://github.com/zcash/rust-ecosystem/blob/ce132d7abdd52f2b3b0d55ed5dc9f152331535c2/supply-chain/audits.toml#L2514",
+      "origin_verification": {
+        "repo": "zcash/zcash",
+        "commit": "558f686599586f55def3db86955d74d3be44605e",
+        "git_blob": "21f93d0b18afec74ae6c3d0476ac6fb9801a0323",
+        "sha256": "79affaae5462205ded23cbe70d3df2305ee54a5eff3a4bd6ff97cf21c1b52a62",
+        "line": 1468,
+        "url": "https://github.com/zcash/zcash/blob/558f686599586f55def3db86955d74d3be44605e/qa/supply-chain/audits.toml#L1468",
+        "all_other_fields_identical": true
+      }
+    },
+    {
+      "peer": "zcash",
+      "crate": "inout",
+      "record": {
+        "who": "Jack Grigg <jack@electriccoin.co>",
+        "criteria": "safe-to-deploy",
+        "delta": "0.1.3 -> 0.1.4",
+        "aggregated-from": "https://raw.githubusercontent.com/zcash/wallet/main/supply-chain/audits.toml"
+      },
+      "source_commit": "ce132d7abdd52f2b3b0d55ed5dc9f152331535c2",
+      "source_git_blob": "d94538e9957149b53b261a0c62af4c607ef1b021",
+      "source_sha256": "f7e0db3983d4553588d1c96d95b59f4eb9acf04d076ceb1a31eaa543e3afa6c6",
+      "source_line": 2521,
+      "source_url": "https://github.com/zcash/rust-ecosystem/blob/ce132d7abdd52f2b3b0d55ed5dc9f152331535c2/supply-chain/audits.toml#L2521",
+      "origin_verification": {
+        "repo": "zcash/zallet",
+        "commit": "b0034a0925fc0c12eb4cd619114c3287b160093f",
+        "git_blob": "b5062fc4d83cd72fd2128eaae86708d34f320df0",
+        "sha256": "37e7a7dfe9fa1a99bcf3f43341b0452f760ab58cf338c567d6eb469eac9b2a2f",
+        "line": 289,
+        "url": "https://github.com/zcash/zallet/blob/b0034a0925fc0c12eb4cd619114c3287b160093f/supply-chain/audits.toml#L289",
+        "all_other_fields_identical": true
+      }
+    },
+    {
+      "peer": "zcash",
+      "crate": "valuable",
+      "record": {
+        "who": "Jack Grigg <jack@electriccoin.co>",
+        "criteria": "safe-to-deploy",
+        "delta": "0.1.0 -> 0.1.1",
+        "notes": "Build script changes are for linting.",
+        "aggregated-from": "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"
+      },
+      "source_commit": "ce132d7abdd52f2b3b0d55ed5dc9f152331535c2",
+      "source_git_blob": "d94538e9957149b53b261a0c62af4c607ef1b021",
+      "source_sha256": "f7e0db3983d4553588d1c96d95b59f4eb9acf04d076ceb1a31eaa543e3afa6c6",
+      "source_line": 6321,
+      "source_url": "https://github.com/zcash/rust-ecosystem/blob/ce132d7abdd52f2b3b0d55ed5dc9f152331535c2/supply-chain/audits.toml#L6321",
+      "origin_verification": {
+        "repo": "zcash/zcash",
+        "commit": "558f686599586f55def3db86955d74d3be44605e",
+        "git_blob": "21f93d0b18afec74ae6c3d0476ac6fb9801a0323",
+        "sha256": "79affaae5462205ded23cbe70d3df2305ee54a5eff3a4bd6ff97cf21c1b52a62",
+        "line": 3138,
+        "url": "https://github.com/zcash/zcash/blob/558f686599586f55def3db86955d74d3be44605e/qa/supply-chain/audits.toml#L3138",
+        "all_other_fields_identical": true
+      }
+    }
+  ]
+}

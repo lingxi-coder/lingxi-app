@@ -515,7 +515,11 @@ fn seed_session_file_with_ids(
     });
     std::fs::write(
         project_dir.join(format!("{uuid}.jsonl")),
-        format!("{}\n{}\n", fixed_header(&uuid, "code"), serde_json::to_string(&line).unwrap()),
+        format!(
+            "{}\n{}\n",
+            fixed_header(&uuid, "code"),
+            serde_json::to_string(&line).unwrap()
+        ),
     )
     .unwrap();
     uuid
@@ -615,7 +619,10 @@ fn seed_replay_session(root: &std::path::Path) -> String {
     });
     std::fs::write(
         project_dir.join(format!("{session_id}.jsonl")),
-        format!("{}\n{pre_user}\n{pre_assistant}\n{boundary}\n{user}\n{assistant}\n", fixed_header(&session_id, "code")),
+        format!(
+            "{}\n{pre_user}\n{pre_assistant}\n{boundary}\n{user}\n{assistant}\n",
+            fixed_header(&session_id, "code")
+        ),
     )
     .unwrap();
     session_id
@@ -695,7 +702,10 @@ fn seed_plan_replay_session(root: &std::path::Path) -> String {
     });
     std::fs::write(
         project_dir.join(format!("{session_id}.jsonl")),
-        format!("{}\n{boundary}\n{summary}\n{assistant}\n{user}\n", fixed_header(&session_id, "code")),
+        format!(
+            "{}\n{boundary}\n{summary}\n{assistant}\n{user}\n",
+            fixed_header(&session_id, "code")
+        ),
     )
     .unwrap();
     session_id
@@ -2270,12 +2280,10 @@ async fn new_session_clears_applies_model_and_emits_started() {
     );
     assert_eq!(
         sink.events().await,
-        vec![
-            ClientEvent::SessionStarted {
-                session_id: expected_id.clone(),
-                mode: SessionModeDto::Code,
-            },
-        ]
+        vec![ClientEvent::SessionStarted {
+            session_id: expected_id.clone(),
+            mode: SessionModeDto::Code,
+        },]
     );
 }
 
@@ -4339,15 +4347,28 @@ fn bridge_source<T: serde::Serialize>(
 #[tokio::test]
 async fn context_manifest_reports_fixed_session_mode() {
     let handle = Arc::new(ResumingHandle::new());
-    let router = EngineCommandRouter::new(handle, Arc::new(MockAuth), Arc::new(MockTaskRegistry { rows: vec![] }), None, None);
+    let router = EngineCommandRouter::new(
+        handle,
+        Arc::new(MockAuth),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+        None,
+        None,
+    );
     router.set_turn_active(true);
     let sink = CapturingSink::arc();
-    router.route(ClientCommand::GetContextManifest, sink.clone()).await;
+    router
+        .route(ClientCommand::GetContextManifest, sink.clone())
+        .await;
     let events = sink.events().await;
-    let manifest = events.iter().find_map(|event| match event {
-        ClientEvent::ContextManifest { manifest_json } => Some(serde_json::from_str::<serde_json::Value>(manifest_json).unwrap()),
-        _ => None,
-    }).unwrap();
+    let manifest = events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::ContextManifest { manifest_json } => {
+                Some(serde_json::from_str::<serde_json::Value>(manifest_json).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
     assert_eq!(manifest["session"]["mode"], "code");
 }
 
@@ -4486,9 +4507,33 @@ async fn hot_resume_rejects_a_different_session_mode_before_adoption() {
 #[tokio::test]
 async fn session_started_reports_the_fixed_mode() {
     let handle = Arc::new(ResumingHandle::new());
-    let router = EngineCommandRouter::new(handle, Arc::new(MockAuth), Arc::new(MockTaskRegistry { rows: vec![] }), None, None);
+    let router = EngineCommandRouter::new(
+        handle,
+        Arc::new(MockAuth),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+        None,
+        None,
+    );
     let sink = CapturingSink::arc();
-    router.route(ClientCommand::NewSession { cwd: None, model: None, mode: SessionModeDto::Code }, sink.clone()).await;
+    router
+        .route(
+            ClientCommand::NewSession {
+                cwd: None,
+                model: None,
+                mode: SessionModeDto::Code,
+            },
+            sink.clone(),
+        )
+        .await;
     let events = sink.events().await;
-    assert!(matches!(events.first(), Some(ClientEvent::SessionStarted { mode: SessionModeDto::Code, .. })), "{events:?}");
+    assert!(
+        matches!(
+            events.first(),
+            Some(ClientEvent::SessionStarted {
+                mode: SessionModeDto::Code,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
 }

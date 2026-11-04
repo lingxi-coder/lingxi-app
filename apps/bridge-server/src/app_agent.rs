@@ -1571,7 +1571,9 @@ fn project_team_model_routes(
                 serde_json::to_value(model).map_err(|_| "catalog_serialization_failed")?;
             value["canSelect"] = json!(can_select);
             if let Some(route) = route {
-                route.validate_accounts().map_err(|_| "catalog_route_invalid")?;
+                route
+                    .validate_accounts()
+                    .map_err(|_| "catalog_route_invalid")?;
                 value["team_route"] =
                     serde_json::to_value(route).map_err(|_| "catalog_serialization_failed")?;
             }
@@ -1603,7 +1605,8 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
         migrations::global_config::global_config_path()
             .unwrap_or_else(|| PathBuf::from("/dev/null"))
     });
-    let mut selected_mcp = mcp::load_mcp_servers(&request.cwd.join(".mcp.json"), &global, &request.cwd);
+    let mut selected_mcp =
+        mcp::load_mcp_servers(&request.cwd.join(".mcp.json"), &global, &request.cwd);
     mcp::local_apps::append(&mut selected_mcp, &request.config_home);
     let cancel = CancellationToken::new();
     let sink = Arc::new(EventSink::new(
@@ -2824,7 +2827,8 @@ mod tests {
             ..Default::default()
         }];
         let mut account_route = route.clone();
-        account_route.model_profile.auth = serde_json::from_value(json!("chat_gpt_o_auth")).unwrap();
+        account_route.model_profile.auth =
+            serde_json::from_value(json!("chat_gpt_o_auth")).unwrap();
         account_route.model_endpoint = "https://chatgpt.com/backend-api/codex".into();
         account_route.model_profile.base_url = account_route.model_endpoint.clone();
         assert!(account_route.validate().is_err());
@@ -2832,9 +2836,13 @@ mod tests {
             models.clone(),
             BTreeMap::from([(("openai".into(), "gpt-fixture".into()), account_route)]),
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(account_rows[0]["canSelect"], false);
-        assert_eq!(account_rows[0]["team_route"]["model_profile"]["auth"], "chat_gpt_o_auth");
+        assert_eq!(
+            account_rows[0]["team_route"]["model_profile"]["auth"],
+            "chat_gpt_o_auth"
+        );
         let rows = project_team_model_routes(
             models,
             BTreeMap::from([(("openai".into(), "gpt-fixture".into()), route)]),

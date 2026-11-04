@@ -1,0 +1,50 @@
++ cargo +1.94.0 test --manifest-path /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/once_cell_polyfill-1.70.2/Cargo.toml --target-dir /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/target --locked --frozen --all-features
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling once_cell_polyfill v1.70.2 (/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/once_cell_polyfill-1.70.2)
+    Finished `test` profile [unoptimized] target(s) in 0.17s
+     Running unittests src/lib.rs (/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/target/debug/deps/once_cell_polyfill-7781b5f3515b642b)
+   Doc-tests once_cell_polyfill
++ cargo +1.94.0 check --manifest-path /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/once_cell_polyfill-1.70.2/Cargo.toml --target-dir /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/target --locked --frozen --all-features --target x86_64-pc-windows-gnu
+    Checking once_cell_polyfill v1.70.2 (/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/once_cell_polyfill-1.70.2)
+    Finished `dev` profile [unoptimized] target(s) in 0.13s
++ cargo +1.94.0 build --manifest-path /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/once_cell_polyfill-1.70.2/Cargo.toml --target-dir /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/target --locked --frozen --all-features
+    Finished `dev` profile [unoptimized] target(s) in 0.00s
++ rustc +1.94.0 --edition=2021 -C debuginfo=0 /Users/luolingfeng/lingxi/worktrees/media-round5-audit-b-20261104/supply-chain/reviews/2026-11-04/round5/lane-b/once_cell_polyfill/probe.rs --extern once_cell_polyfill=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/target/debug/libonce_cell_polyfill.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/probe
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/probe
+all OnceLock wrapper probes passed
+
+thread 'main' (7953722) panicked at /Users/luolingfeng/lingxi/worktrees/media-round5-audit-b-20261104/supply-chain/reviews/2026-11-04/round5/lane-b/once_cell_polyfill/probe.rs:27:39:
+EXPECTED_INITIALIZER_PANIC
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
++ cargo +1.94.0 build --manifest-path /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/once_cell_polyfill-1.70.2/Cargo.toml --target-dir /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/target --locked --frozen --all-features
+   Compiling once_cell_polyfill v1.70.2 (/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/once_cell_polyfill-1.70.2)
+    Finished `dev` profile [unoptimized] target(s) in 0.03s
++ rustc +1.94.0 --edition=2021 -C debuginfo=0 /Users/luolingfeng/lingxi/worktrees/media-round5-audit-b-20261104/supply-chain/reviews/2026-11-04/round5/lane-b/once_cell_polyfill/probe.rs --extern once_cell_polyfill=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/target/debug/libonce_cell_polyfill.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/probe
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/probe
+
+thread 'main' (7953935) panicked at /Users/luolingfeng/lingxi/worktrees/media-round5-audit-b-20261104/supply-chain/reviews/2026-11-04/round5/lane-b/once_cell_polyfill/probe.rs:13:5:
+assertion `left == right` failed: GET_VALUE
+  left: None
+ right: Some(10)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+negative control caught: GET_VALUE
++ cargo +1.94.0 build --manifest-path /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/once_cell_polyfill-1.70.2/Cargo.toml --target-dir /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/target --locked --frozen --all-features
+   Compiling once_cell_polyfill v1.70.2 (/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/once_cell_polyfill-1.70.2)
+    Finished `dev` profile [unoptimized] target(s) in 0.04s
++ rustc +1.94.0 --edition=2021 -C debuginfo=0 /Users/luolingfeng/lingxi/worktrees/media-round5-audit-b-20261104/supply-chain/reviews/2026-11-04/round5/lane-b/once_cell_polyfill/probe.rs --extern once_cell_polyfill=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/target/debug/libonce_cell_polyfill.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/probe
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-once-cell-probes-_jta0q8i/probe
+
+thread 'main' (7954118) panicked at /Users/luolingfeng/lingxi/worktrees/media-round5-audit-b-20261104/supply-chain/reviews/2026-11-04/round5/lane-b/once_cell_polyfill/probe.rs:12:5:
+INITIAL_SET
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+negative control caught: INITIAL_SET
+exact package host probes, Windows target check, and both controls passed

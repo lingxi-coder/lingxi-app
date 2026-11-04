@@ -8,7 +8,7 @@
 //! output stays line-identical to the pre-split renderer.
 
 use tui_core::message::SystemLevel;
-use tui_core::render::StyledLine;
+use tui_core::render::{SpanStyle, StyledLine, StyledSpan};
 use tui_core::theme::Theme;
 
 use super::{colored_lines, StyledCell};
@@ -63,11 +63,38 @@ pub(crate) fn compact_boundary_lines(
     verbose: bool,
     theme: &Theme,
 ) -> Vec<StyledLine> {
-    if !verbose || summary.trim().is_empty() {
-        return colored_lines("✻ Conversation compacted (ctrl+o for history)", theme.dim);
+    let expanded = verbose && !summary.trim().is_empty();
+    let mut heading = StyledLine {
+        spans: vec![
+            StyledSpan::styled(
+                "✓ ",
+                SpanStyle {
+                    fg: theme.success,
+                    ..SpanStyle::default()
+                },
+            ),
+            StyledSpan::styled(
+                "Conversation compacted",
+                SpanStyle {
+                    fg: theme.text,
+                    bold: true,
+                    ..SpanStyle::default()
+                },
+            ),
+        ],
+    };
+    if !expanded {
+        heading.spans.push(StyledSpan::styled(
+            " · ctrl+o for history",
+            SpanStyle {
+                fg: theme.dim,
+                ..SpanStyle::default()
+            },
+        ));
+        return vec![heading];
     }
 
-    let mut lines = colored_lines("✻ Conversation compacted", theme.dim);
+    let mut lines = vec![heading];
     lines.push(StyledLine::plain(String::new()));
     lines.extend(colored_lines(summary, theme.dim));
     lines
@@ -306,9 +333,9 @@ mod tests {
         let cell = CompactBoundaryCell::new("Summary:\nkept context".to_string());
         assert_eq!(
             plain(&cell),
-            vec!["✻ Conversation compacted (ctrl+o for history)".to_string()]
+            vec!["✓ Conversation compacted · ctrl+o for history".to_string()]
         );
-        assert_eq!(first_fg(&cell), Some(rata(Theme::dark().dim)));
+        assert_eq!(first_fg(&cell), Some(rata(Theme::dark().success)));
 
         let expanded = cell
             .display_lines(
@@ -322,7 +349,7 @@ mod tests {
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>();
-        assert_eq!(expanded[0], "✻ Conversation compacted");
+        assert_eq!(expanded[0], "✓ Conversation compacted");
         assert!(expanded.join("\n").contains("Summary:\nkept context"));
     }
 }

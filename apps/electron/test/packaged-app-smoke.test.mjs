@@ -15,6 +15,7 @@ import {
   confirmPackagedLocalAppSourceTrust,
   enterPackagedProjectName,
   createPackagedSettings,
+  createPackagedConversationSpaces,
   isExpectedBootstrapPromptPlaceholder,
   isSafeProviderAccountSnapshot,
   runtimePathsForHome,
@@ -24,8 +25,26 @@ import {
   workspaceTrustFingerprint,
 } from '../scripts/packaged-app-smoke.mjs';
 import { workspaceFingerprint as hostWorkspaceFingerprint } from '../src/main/host-utils.ts';
+import { ConversationSpaceStore } from '../src/main/conversationSpaceStore.ts';
 
 const temporaryDirectories = [];
+
+test('packaged profile maps the fixture workspace into the current Code space', () => {
+  const home = temporaryDirectory();
+  const workspace = join(home, 'workspace');
+  mkdirSync(workspace);
+  const canonical = realpathSync(workspace);
+  const paths = runtimePathsForHome(home);
+  mkdirSync(paths.userDataDir, { recursive: true });
+  writeFileSync(join(paths.userDataDir, 'conversation-spaces.v2.json'), JSON.stringify(createPackagedConversationSpaces({ workspace })));
+  const store = new ConversationSpaceStore(paths.userDataDir, join(home, '.lingxi'));
+  const snapshot = store.snapshot();
+  assert.equal(snapshot.activeMode, 'code');
+  assert.deepEqual(snapshot.projects[canonical], ['code']);
+  assert.equal(snapshot.navigation.code.projectId, canonical);
+  assert.deepEqual(store.trustedWorkspaces(), [canonical]);
+  assert.deepEqual(snapshot.sessions, []);
+});
 
 test('packaged debugger waits for the real document commit before enabling Runtime', async () => {
   const rendererUrl = 'file:///tmp/LingXi%20Code.app/Contents/Resources/app.asar/out/renderer/index.html';

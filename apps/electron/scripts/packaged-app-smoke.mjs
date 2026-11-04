@@ -178,6 +178,23 @@ export function createPackagedSettings({ workspace, theme = 'dark', now = new Da
   };
 }
 
+export function createPackagedConversationSpaces({ workspace }) {
+  const canonical = canonicalWorkspace(workspace);
+  return {
+    version: 2,
+    activeMode: 'code',
+    projects: { [canonical]: ['code'] },
+    trustedWorkspaces: [canonical],
+    navigation: { chat: { projectId: null }, code: { projectId: canonical } },
+    sessions: [],
+  };
+}
+
+function writePackagedProfile(paths, workspace) {
+  writeJson(paths.settingsPath, createPackagedSettings({ workspace }));
+  writeJson(join(paths.userDataDir, 'conversation-spaces.v2.json'), createPackagedConversationSpaces({ workspace }));
+}
+
 export function runtimePathsForHome(homeDir) {
   const userDataDir = join(homeDir, APP_USER_DATA_SUBPATH);
   return {
@@ -1455,7 +1472,7 @@ export async function runPackagedCredentialStability(appPath) {
   mkdirSync(home, { recursive: true, mode: 0o700 });
   mkdirSync(temporary, { recursive: true, mode: 0o700 });
   const runtime = runtimePathsForHome(home);
-  writeJson(runtime.settingsPath, createPackagedSettings({ workspace: createAdversarialWorkspace(tempRoot) }));
+  writePackagedProfile(runtime, createAdversarialWorkspace(tempRoot));
   const env = sanitizePackagedAppEnvironment(process.env, {
     HOME: home, CFFIXED_USER_HOME: home, TMPDIR: temporary, LINGXI_CONFIG_DIR: join(home, '.lingxi'),
   });
@@ -1577,7 +1594,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   mkdirSync(tempTmp, { recursive: true, mode: 0o700 });
   const workspace = createAdversarialWorkspace(tempRoot);
   const runtimePaths = runtimePathsForHome(tempHome);
-  writeJson(runtimePaths.settingsPath, createPackagedSettings({ workspace }));
+  writePackagedProfile(runtimePaths, workspace);
   let copiedAppPath;
   try {
     copiedAppPath = realpathSync.native(copyPackagedApp(appPath, join(tempRoot, 'app-copy')));

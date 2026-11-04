@@ -13,12 +13,27 @@ setLanguagePreference('en');
 
 let persistencePending = false;
 let resolvePersistence: ((value: unknown) => void) | undefined;
+let rejectPersistence: ((reason: Error) => void) | undefined;
+let removalPending = false;
+let releaseRemoval: (() => void) | undefined;
+const persistedCredentials: Array<{ providerId: string; credential: string }> = [];
 let restartCalls = 0;
 let closeCalls = 0;
 let activeSessionId = 'session-a';
 let activeWork = false;
 let connectionTestCalls = 0;
 
+const accounts = providerAccountsMock({
+  initial: [{ accountId: '11111111-1111-4111-8111-111111111111', providerId: 'anthropic', executionBindingId: 'anthropic', displayName: 'Test account', authKind: 'api_key', enabled: true, userPriority: 0, configRevision: 0, identityGeneration: 1, credentialRef: { storeScope: 'renderer-fixture', secretRef: 'acct.11111111-1111-4111-8111-111111111111' } }],
+  write: async (providerId, credential) => {
+    persistencePending = true;
+    try {
+      await new Promise((resolve, reject) => { resolvePersistence = resolve; rejectPersistence = reject; });
+      persistedCredentials.push({ providerId, credential });
+    } finally { persistencePending = false; }
+  },
+  probe: async () => { connectionTestCalls++; throw new Error('test credential rejected'); },
+});
 const bridge = {
   activeSession: { projectPath: '/test/project', sessionId: activeSessionId },
   bootstrap: {
@@ -49,11 +64,17 @@ const bridge = {
   },
   refreshSettingsSnapshot: async () => undefined,
   refreshDiagnostics: async () => [],
-  providerAccounts: providerAccountsMock({
-    initial: [{ accountId: '11111111-1111-4111-8111-111111111111', providerId: 'anthropic', executionBindingId: 'anthropic', displayName: 'Test account', authKind: 'api_key', enabled: true, userPriority: 0, configRevision: 0, identityGeneration: 1, credentialRef: { storeScope: 'renderer-fixture', secretRef: 'acct.11111111-1111-4111-8111-111111111111' } }],
-    write: async () => { persistencePending = true; await new Promise(resolve => { resolvePersistence = resolve; }); },
-    probe: async () => { connectionTestCalls++; throw new Error('test credential rejected'); },
-  }),
+  providerAccounts: {
+    ...accounts,
+    command: async (...args: Parameters<typeof accounts.command>) => {
+      if (args[0].action === 'remove') {
+        removalPending = true;
+        try { await new Promise<void>(resolve => { releaseRemoval = resolve; }); }
+        finally { removalPending = false; }
+      }
+      return accounts.command(...args);
+    },
+  },
   restartBridge: async () => { restartCalls += 1; },
   refreshModelPicker: async () => undefined,
   setModel: async () => undefined,
@@ -68,17 +89,24 @@ function Fixture() {
 
   useEffect(() => {
     window.__settingsTransactionTest = {
-      startSave: () => {
-        const input = document.querySelector<HTMLInputElement>('input[type="password"]');
+      setCredential: (value: string) => {
+        const input = document.querySelector<HTMLInputElement>('dialog[open] input[type="password"]');
+        if (!input) throw new Error('Account credential form is not open');
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-        setter?.call(input, 'sk-pending-save');
-        input?.dispatchEvent(new Event('input', { bubbles: true }));
-        setTimeout(() => [...document.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Add API key')?.click(), 0);
+        setter?.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
       },
-      resolvePersistence: () => {
-        resolvePersistence?.(undefined);
+      settlePersistence: (fail: boolean) => {
+        if (!resolvePersistence || !rejectPersistence) throw new Error('No credential write is pending');
+        if (fail) rejectPersistence(new Error('test credential storage failed'));
+        else resolvePersistence(undefined);
         resolvePersistence = undefined;
-        persistencePending = false;
+        rejectPersistence = undefined;
+      },
+      releaseRemoval: () => {
+        if (!releaseRemoval) throw new Error('No account removal is pending');
+        releaseRemoval();
+        releaseRemoval = undefined;
       },
       switchSessionAndStartWork: () => {
         activeSessionId = 'session-b';
@@ -99,16 +127,12 @@ function Fixture() {
         return {
           exists: Boolean(button),
           disabled: button?.disabled ?? true,
-          providerCredentialField: Boolean(document.querySelector('input[aria-label="API key"]')),
+          accountCount: document.querySelectorAll('.pa-account').length,
         };
       },
       connectionTestCalls: () => connectionTestCalls,
-      clearStoredCredential: () => {
-        const remove = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Remove');
-        remove?.click();
-      },
       connectionTestErrorVisible: () => document.body.innerText.includes('test credential rejected'),
-      state: () => ({ persistencePending, restartCalls, closeCalls, activeSessionId, activeWork }),
+      state: () => ({ persistencePending, removalPending, restartCalls, closeCalls, activeSessionId, activeWork, persistedCredentials: [...persistedCredentials] }),
     };
     return () => { delete window.__settingsTransactionTest; };
   }, []);
@@ -134,15 +158,15 @@ function Fixture() {
 declare global {
   interface Window {
     __settingsTransactionTest?: {
-      startSave(): void;
-      resolvePersistence(): void;
+      setCredential(value: string): void;
+      settlePersistence(fail: boolean): void;
+      releaseRemoval(): void;
       switchSessionAndStartWork(): void;
       startConnectionTest(): void;
-      connectionTestButtonState(): { exists: boolean; disabled: boolean; providerCredentialField: boolean };
+      connectionTestButtonState(): { exists: boolean; disabled: boolean; accountCount: number };
       connectionTestCalls(): number;
-      clearStoredCredential(): void;
       connectionTestErrorVisible(): boolean;
-      state(): { persistencePending: boolean; restartCalls: number; closeCalls: number; activeSessionId: string; activeWork: boolean };
+      state(): { persistencePending: boolean; removalPending: boolean; restartCalls: number; closeCalls: number; activeSessionId: string; activeWork: boolean; persistedCredentials: Array<{ providerId: string; credential: string }> };
     };
   }
 }

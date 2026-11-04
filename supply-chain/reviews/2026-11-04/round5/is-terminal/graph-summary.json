@@ -1,0 +1,43 @@
+{
+  "command": "cargo metadata --format-version 1 --all-features --locked --frozen",
+  "metadata_sha256": "9bfe2b4bb4eec815ef7d6b17db6f031134e92c551ef24a6a052c90e8cf57d2ee",
+  "package_count": 1052,
+  "package_id": "registry+https://github.com/rust-lang/crates.io-index#is_terminal_polyfill@1.70.2",
+  "features_declared": {
+    "default": []
+  },
+  "features_resolved": [
+    "default"
+  ],
+  "dependencies": [],
+  "resolved_deps": [],
+  "targets": [
+    {
+      "kind": [
+        "lib"
+      ],
+      "crate_types": [
+        "lib"
+      ],
+      "name": "is_terminal_polyfill",
+      "edition": "2021"
+    }
+  ],
+  "reverse_parents": [
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#anstream@0.6.21",
+      "edge": [
+        {
+          "name": "is_terminal_polyfill",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#is_terminal_polyfill@1.70.2",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

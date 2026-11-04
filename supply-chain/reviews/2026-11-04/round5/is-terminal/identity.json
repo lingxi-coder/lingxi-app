@@ -1,0 +1,61 @@
+{
+  "archive_files": {
+    ".cargo_vcs_info.json": {
+      "git_blob": "75e49782f64a71306d371d68a0e28f348a16b4e2",
+      "mode": "0o644",
+      "sha256": "a5e01a158e17e7b13f6a8e5f39e3a94642dd0e9da3ee52788fee90dab25d6509",
+      "size": 94
+    },
+    "Cargo.lock": {
+      "git_blob": "bce7672120bd2e426b0bd9989fbceec7d2491217",
+      "mode": "0o644",
+      "sha256": "61ab4a67146678355fe4abd415a33d25dd9290dc305320b6c4a3cd33a64b4d7d",
+      "size": 165
+    },
+    "Cargo.toml": {
+      "git_blob": "f9329f861cf7c93db4cd64a8c673cc0e89dfc810",
+      "mode": "0o644",
+      "sha256": "2aaf3bc62750cad372b84b8fb6a8413a6af7c97c2aff3e1ee01124095291ed06",
+      "size": 3922
+    },
+    "Cargo.toml.orig": {
+      "git_blob": "61999e34a6f9d4123192d02fcb51e0fbb9b7699e",
+      "mode": "0o644",
+      "sha256": "ec98a3ee971f135622d61ddcf72bb9ab1af094795ff8754e1b47d2ef0343a384",
+      "size": 3091
+    },
+    "LICENSE-APACHE": {
+      "git_blob": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "mode": "0o644",
+      "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
+      "size": 11358
+    },
+    "LICENSE-MIT": {
+      "git_blob": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "mode": "0o644",
+      "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
+      "size": 1062
+    },
+    "README.md": {
+      "git_blob": "7a33e83e5d0e7f7d800f6824a2aa9ab5daddab37",
+      "mode": "0o644",
+      "sha256": "edcbd294340511763ef2f1d7b96434e822afa48fcb6dd712aaf9498afe06ea3f",
+      "size": 951
+    },
+    "src/lib.rs": {
+      "git_blob": "bfe84b19cbb24ee096a5db5f6973fecfe3b9dd50",
+      "mode": "0o644",
+      "sha256": "044427e96cbad88731e590da30c5c1ce376f4cc8d676f434c0c59c731ed121f2",
+      "size": 1575
+    }
+  },
+  "archive_sha256": "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695",
+  "cache_checked": true,
+  "commit_object_verified": true,
+  "index_yanked_at_capture": false,
+  "lock_sha256": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+  "tree_objects_checked": 4,
+  "upstream_blob_files_checked": 6,
+  "upstream_commit": "9ed4c24ea4e9202cb38a6564368252ed35197a08",
+  "upstream_root_tree": "a051059a89eaee3df42072cd9e440f8c17ddc12c"
+}

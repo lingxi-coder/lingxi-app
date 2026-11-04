@@ -1,0 +1,22 @@
+{
+  "captured_utc": "2026-11-04T10:44:45.190236+00:00",
+  "head": "ba4f9905485159c652786772ee964cb0fbab2169",
+  "cargo_version": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+  "rustc_version": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "cargo_vet_version": "0.10.3",
+  "cargo_vet_release_api": "https://api.github.com/repos/mozilla/cargo-vet/releases/tags/v0.10.3",
+  "cargo_vet_archive_url": "https://github.com/mozilla/cargo-vet/releases/download/v0.10.3/cargo-vet-aarch64-apple-darwin.tar.xz",
+  "cargo_vet_archive_sha256": "a83f7d6f48a069890743ba61f7637660c8577f263efd64fee47e673632f0e423",
+  "cargo_vet_executable_sha256": "bc8d963023f8a8a9102d2261922a817d59ceeabf41c55f1c9d7fa8ee8382ea82",
+  "command": "cargo vet check --locked --frozen --no-minimize-exemptions --no-registry-suggestions --cache-dir <fresh temp> --output-format json",
+  "exit_code": 255,
+  "failure_count": 819,
+  "input_sha256": {
+    "Cargo.toml": "64b16f7acf3b9cb45f25564ce0c1143eefbbc6fa5fe67d11ff69abac3c39194e",
+    "Cargo.lock": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+    "supply-chain/config.toml": "8e1b2dc287f3a81dc84dda3de41984d17f2fed4d115347b6d3d85f979a93d5f2",
+    "supply-chain/audits.toml": "a26c7e0aa97d7f606d71bc738e5f290782d5f7c6301e7eef185a8dcec0671a08",
+    "supply-chain/imports.lock": "38691e1bfc73d11d3fb1b46a820afff4bf5344d67d5852c7a1697d58e4dfb536"
+  },
+  "output_sha256": "96ed809fd0bb97d827bfc1a97489d226c3b2a2d23a728740917041223b82ce2c"
+}

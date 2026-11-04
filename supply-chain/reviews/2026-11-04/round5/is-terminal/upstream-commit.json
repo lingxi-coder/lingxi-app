@@ -1,0 +1,35 @@
+{
+  "sha": "9ed4c24ea4e9202cb38a6564368252ed35197a08",
+  "node_id": "C_kwDOL2UNNNoAKDllZDRjMjRlYTRlOTIwMmNiMzhhNjU2NDM2ODI1MmVkMzUxOTdhMDg",
+  "url": "https://api.github.com/repos/polyfill-rs/is_terminal_polyfill/git/commits/9ed4c24ea4e9202cb38a6564368252ed35197a08",
+  "html_url": "https://github.com/polyfill-rs/is_terminal_polyfill/commit/9ed4c24ea4e9202cb38a6564368252ed35197a08",
+  "author": {
+    "name": "Ed Page",
+    "email": "eopage@gmail.com",
+    "date": "2025-10-21T17:00:13Z"
+  },
+  "committer": {
+    "name": "Ed Page",
+    "email": "eopage@gmail.com",
+    "date": "2025-10-21T17:00:13Z"
+  },
+  "tree": {
+    "sha": "a051059a89eaee3df42072cd9e440f8c17ddc12c",
+    "url": "https://api.github.com/repos/polyfill-rs/is_terminal_polyfill/git/trees/a051059a89eaee3df42072cd9e440f8c17ddc12c"
+  },
+  "message": "chore: Release is_terminal_polyfill version 1.70.2",
+  "parents": [
+    {
+      "sha": "7d103ebd797e2da0e6a054e90390acfc66b5a5d5",
+      "url": "https://api.github.com/repos/polyfill-rs/is_terminal_polyfill/git/commits/7d103ebd797e2da0e6a054e90390acfc66b5a5d5",
+      "html_url": "https://github.com/polyfill-rs/is_terminal_polyfill/commit/7d103ebd797e2da0e6a054e90390acfc66b5a5d5"
+    }
+  ],
+  "verification": {
+    "verified": false,
+    "reason": "unsigned",
+    "signature": null,
+    "payload": null,
+    "verified_at": null
+  }
+}

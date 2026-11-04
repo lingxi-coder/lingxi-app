@@ -1,0 +1,1 @@
+{"error": {"message": "cargo vet panicked","severity": "error","causes": ["Cargo failed to set $CARGO, how?"],"help": "at src/main.rs:374:50","labels": [],"related": []}}

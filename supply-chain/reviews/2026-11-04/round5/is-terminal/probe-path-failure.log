@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/Users/luolingfeng/lingxi/worktrees/media-round5-source-audit-20261104/supply-chain/reviews/2026-11-04/round5/is-terminal/run-probes.py", line 76, in <module>
+    main()
+    ~~~~^^
+  File "/Users/luolingfeng/lingxi/worktrees/media-round5-source-audit-20261104/supply-chain/reviews/2026-11-04/round5/is-terminal/run-probes.py", line 28, in main
+    assert target.resolve().is_relative_to(temp)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+AssertionError

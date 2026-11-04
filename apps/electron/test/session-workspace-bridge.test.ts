@@ -1006,26 +1006,55 @@ test('the composer keeps a loading-session draft and sends no prompt or local co
 });
 
 test('rapidly changing spaces retains the last click even before React renders', async () => {
-  const first = deferred<any>(), second = deferred<any>(), calls: string[] = [], applied: string[] = [];
-  const spaces = { activeMode: 'chat', globalWorkspaces: { chat: '/global/chat', code: '/global/code' }, navigation: { chat: { projectId: null }, code: { projectId: null } } };
-  const context: any = {
-    useCallback: (fn: unknown) => fn, bootstrap: { conversationSpaces: spaces },
-    host: { switchConversationSpace: (mode: string) => { calls.push(mode); return mode === 'code' ? first.promise : second.promise; } },
-    requestedSpaceRef: { current: 'chat' }, navigationOperationRef: { current: 0 },
-    pendingSessionRef: { current: null }, sessionLoadingRef: { current: false }, nextOperationId,
-    isCurrentNavigationOperation: (id: number) => id === context.navigationOperationRef.current,
-    setPendingSession() {}, setSessionReady() {}, patchBootstrap() {}, capture(error: unknown) { throw error; },
-    applyBootstrap: (snapshot: { mode: string }) => applied.push(snapshot.mode),
-  };
-  evaluate('globalThis.switchSpace = ' + initializer(bridgeSource, 'switchConversationSpace'), context);
-  const code = context.switchSpace('code');
-  const chat = context.switchSpace('chat');
-  assert.deepEqual(calls, ['code', 'chat']);
-  first.resolve({ mode: 'code' }); await code;
-  assert.deepEqual(applied, []);
-  second.resolve({ mode: 'chat' }); await chat;
-  assert.deepEqual(applied, ['chat']);
-  assert.equal(context.sessionLoadingRef.current, false);
+  for (const initial of ['chat', 'code'] as const) {
+    for (const lastResponseFirst of [false, true]) {
+      const first = deferred<any>(), second = deferred<any>(), calls: string[] = [], applied: string[] = [], patched: string[] = [];
+      const next = initial === 'chat' ? 'code' : 'chat';
+      const spaces = { activeMode: initial, globalWorkspaces: { chat: '/global/chat', code: '/global/code' }, navigation: { chat: { projectId: null }, code: { projectId: null } } };
+      const snapshot = (mode: string) => ({ conversationSpaces: { ...spaces, activeMode: mode } });
+      const context: any = {
+        useCallback: (fn: unknown) => fn, bootstrap: { conversationSpaces: spaces },
+        host: { switchConversationSpace: (mode: string) => { calls.push(mode); return mode === next ? first.promise : second.promise; } },
+        requestedSpaceRef: { current: initial }, confirmedSpaceRef: { current: initial }, navigationOperationRef: { current: 0 },
+        pendingSessionRef: { current: null }, sessionLoadingRef: { current: false }, nextOperationId,
+        isCurrentNavigationOperation: (id: number) => id === context.navigationOperationRef.current,
+        setPendingSession() {}, setSessionReady() {},
+        patchBootstrap: (patch: { conversationSpaces: { activeMode: string } }) => patched.push(patch.conversationSpaces.activeMode),
+        capture(error: unknown) { throw error; },
+        applyBootstrap: (state: { conversationSpaces: { activeMode: string } }) => {
+          const mode = state.conversationSpaces.activeMode;
+          applied.push(mode);
+          context.confirmedSpaceRef.current = mode;
+          if (!context.pendingSessionRef.current) context.requestedSpaceRef.current = mode;
+        },
+      };
+      evaluate('globalThis.switchSpace = ' + initializer(bridgeSource, 'switchConversationSpace'), context);
+      const firstSwitch = context.switchSpace(next);
+      const lastSwitch = context.switchSpace(initial);
+      assert.deepEqual(calls, [next, initial]);
+      assert.deepEqual(patched, [next, initial]);
+      assert.equal(await context.switchSpace(initial), false, 'a pending repeat is not a confirmed switch');
+      assert.deepEqual(calls, [next, initial], 'a pending repeat does not issue another host request');
+      if (lastResponseFirst) {
+        second.resolve(snapshot(initial));
+        assert.equal(await lastSwitch, true);
+        first.resolve(snapshot(next));
+        assert.equal(await firstSwitch, false);
+      } else {
+        first.resolve(snapshot(next));
+        assert.equal(await firstSwitch, false);
+        assert.deepEqual(applied, []);
+        assert.equal(context.sessionLoadingRef.current, true);
+        second.resolve(snapshot(initial));
+        assert.equal(await lastSwitch, true);
+      }
+      assert.deepEqual(applied, [initial]);
+      assert.equal(context.requestedSpaceRef.current, initial);
+      assert.equal(context.confirmedSpaceRef.current, initial);
+      assert.equal(context.pendingSessionRef.current, null);
+      assert.equal(context.sessionLoadingRef.current, false);
+    }
+  }
 });
 
 test('handoff backlink follows the current source workspace and respects later navigation', async () => {

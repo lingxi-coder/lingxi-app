@@ -85,6 +85,12 @@ criteria = "safe-to-deploy"
 version = "0.1.1"
 notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/memmem-0.1.1.md (SHA-256 98ac1ebca85ab781f8a35274b179c1d5e31d8e3140fb83909af1e94a8b2f1862); independent review: supply-chain/reviews/2026-11-03/batch002-lane-b-cross-3.md (SHA-256 3ae895feedbf790e9f6b0be20649e310d39fd10951c1702ec0e0a5e8e5df09fe). Exact crates.io version; documented API and disclosure limits in reports; dependencies reviewed separately."
 
+[[audits.once_cell_polyfill]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.70.2"
+notes = "AI-assisted full exact-version source review and independent root cross-review. Evidence: supply-chain/reviews/2026-11-04/round5/lane-b/once_cell_polyfill/review.md (SHA-256 16eb43801527b79a908ea5d16dbf136d73005f7507ba400570125db518bbed9a); cross-review: supply-chain/reviews/2026-11-04/round5/lane-b/once_cell_polyfill/root-cross-review.md (SHA-256 e7e2032724158de08d689db166a6e9473990a7b04cd47f78f3853e16185979f9). Scope is this exact package; consumer Windows FFI, compiler, standard library and other dependencies remain separate."
+
 [[audits.opaque-debug]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"

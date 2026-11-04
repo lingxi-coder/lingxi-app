@@ -1,0 +1,20 @@
+{
+  "before_failures": 818,
+  "after_failures": 817,
+  "removed": [
+    {
+      "name": "once_cell_polyfill",
+      "version": "1.70.2",
+      "missing_criteria": [
+        "safe-to-deploy"
+      ]
+    }
+  ],
+  "added": [],
+  "before_output_sha256": "195efd6be79b093cf10bee918e1c998625a7038cbc40e783e4c5bd77836bf378",
+  "after_output_sha256": "6d7e0c2174590936559e04fe056f9f488a2dd090150f2bc7894df1ad8f743535",
+  "after_audits_sha256": "6fda0c5cc8cefa2aac65653008ecb3948df529dfd9ffc7d47b690423c5aaae12",
+  "other_inputs_unchanged": true,
+  "only_audits_toml_change": "once_cell_polyfill 1.70.2 exact full record",
+  "overall_conclusion": "fail (vetting)"
+}

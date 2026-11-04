@@ -596,10 +596,10 @@ test('setup stays out of the transcript while project and provider controls rema
   // `SettingsScreen`. The regression this test guards against — provider
   // controls disappearing along with `SetupCard` — is checked at their
   // current address instead of their old one.
-  assert.match(
-    readFileSync(join(process.cwd(), 'src/renderer/components/settings/pages/ProviderCredentials.tsx'), 'utf8'),
-    /<Card title=\{tr\('model_detail_provider'\)\}>/,
-  );
+  const providerSource = readFileSync(join(process.cwd(), 'src/renderer/components/settings/pages/ProviderCredentials.tsx'), 'utf8');
+  assert.match(providerSource, /<h2>\{tr\('model_detail_provider'\)\}<\/h2>/);
+  assert.match(providerSource, /<ProviderAccounts\b/);
+  assert.match(readFileSync(join(process.cwd(), 'src/renderer/components/settings/SettingsScreen.tsx'), 'utf8'), /ProviderCredentials/);
 });
 
 test('session interaction prompts are scoped to the main panel instead of covering global navigation', () => {

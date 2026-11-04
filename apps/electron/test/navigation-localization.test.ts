@@ -14,7 +14,7 @@ import { tokens } from '../src/renderer/theme/tokens';
 const cssHook = registerHooks({ load(url, context, nextLoad) {
   return url.endsWith('.css') ? { format: 'module', source: 'export {};', shortCircuit: true } : nextLoad(url, context);
 } });
-const { SideChatPanel } = await import('../src/renderer/components/SideChatPanel');
+const { SideChatPanel, SideChatTabs } = await import('../src/renderer/components/SideChatPanel');
 const { DateTimePicker } = await import('../src/renderer/components/ui/DateTimePicker');
 cssHook.deregister();
 const noop = () => {};
@@ -33,8 +33,10 @@ test('side chat and reference surfaces translate controls without changing user 
   const side: any = { id: 'side-1', draft: 'User draft', images: [], permissions: [], questions: [],
     desktop: { models: [], currentModel: 'user-model', conversationControls: undefined }, conversation: { items: [], running: false }, closing: false };
   for (const locale of DESKTOP_LOCALES) {
-    const sideHtml = renderInLocale(locale, React.createElement(SideChatPanel, { controller: { open: true, selected: side, sides: [side] } as any }));
-    assert.ok(sideHtml.includes(escaped(translate('desktop_navigation_side_number', locale, 1))), locale);
+    const controller = { open: true, selected: side, sides: [side] } as any;
+    const sideHtml = renderInLocale(locale, React.createElement(SideChatPanel, { controller }));
+    const tabsHtml = renderInLocale(locale, React.createElement(SideChatTabs, { controller }));
+    assert.ok(tabsHtml.includes(escaped(translate('desktop_navigation_side_number', locale, 1))), locale);
     assert.ok(sideHtml.includes(escaped(translate('desktop_navigation_parent_context', locale))), locale);
     assert.ok(sideHtml.includes('User draft'));
     const mentions = renderInLocale(locale, React.createElement(MentionMenu, {
@@ -50,7 +52,7 @@ test('side chat and reference surfaces translate controls without changing user 
     const preview = renderInLocale(locale, React.createElement(FileMentionPreview, { path: '/tmp/User file.md', bridge: {} as any, onClose: noop }));
     assert.ok(preview.includes(escaped(translate('desktop_navigation_loading_preview', locale))), locale);
     assert.ok(preview.includes('/tmp/User file.md'));
-    for (const html of [sideHtml, mentions, preview]) assert.doesNotMatch(html, /desktop_navigation_|%\d+\$[sd]/);
+    for (const html of [sideHtml, tabsHtml, mentions, preview]) assert.doesNotMatch(html, /desktop_navigation_|%\d+\$[sd]/);
   }
 });
 

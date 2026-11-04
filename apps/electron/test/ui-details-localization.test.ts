@@ -66,8 +66,14 @@ test('file and tool summaries translate counts, truncation, and accessible label
       group: { type: 'tool-group', id: 'group', tools: [tool, { ...tool, id: 'failed', status: 'error' }] },
       open: true, toolOpen: () => false, onSetOpen() {},
     }));
-    contains(group, locale, 'desktop_ui_failed_count', 1);
-    contains(group, locale, 'chat_tool_batch_count %lld', 2);
+    assert.doesNotMatch(group, /class="tool-group-state"/, locale);
+    contains(group, locale, 'desktop_ui_tool_call_count', 2);
+    const unsuccessful = render(locale, React.createElement(ToolGroup, {
+      group: { type: 'tool-group', id: 'failed-group', tools: [{ ...tool, id: 'failed-1', status: 'error' }, { ...tool, id: 'failed-2', status: 'error' }] },
+      open: true, toolOpen: () => false, onSetOpen() {},
+    }));
+    contains(unsuccessful, locale, 'desktop_ui_tool_calls_unsuccessful');
+    contains(unsuccessful, locale, 'desktop_ui_tool_call_count', 2);
   }
 });
 

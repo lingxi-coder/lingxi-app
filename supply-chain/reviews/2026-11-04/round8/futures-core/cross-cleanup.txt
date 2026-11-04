@@ -1,0 +1,4 @@
+Owned temporary directory: /private/tmp/futures-core-cross-66aatu6a
+File count: 15
+Total bytes: 79970
+Directory removed: True

@@ -1,0 +1,44 @@
+rustc: rustc 1.94.0 (4a4ef493e 2026-03-02)
+command: rustc --crate-name futures_core --crate-type lib --edition 2018 --cfg 'feature="std"' --cfg 'feature="alloc"' -C panic=unwind --emit=mir=futures_core.mir src/lib.rs
+source: extracted futures-core-0.3.32.crate, sha256 7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d
+selected original MIR blocks from AtomicWaker::register (MIR is compiler/version/flags-specific):
+
+    bb7: {
+        _16 = <Waker as Clone>::clone(copy _2) -> [return: bb10, unwind continue];
+    }
+
+    bb10: {
+        _53 = const true;
+        _15 = Option::<Waker>::Some(move _16);
+        _18 = &((*_1).1: core::cell::UnsafeCell<core::option::Option<core::task::Waker>>);
+        _17 = UnsafeCell::<Option<Waker>>::get(move _18) -> [return: bb11, unwind: bb32];
+    }
+
+    bb11: {
+        drop((*_17)) -> [return: bb12, unwind: bb13];
+    }
+
+    bb13 (cleanup): {
+        _53 = const false;
+        _59 = copy _17 as *const () (PtrToPtr);
+        _60 = copy _59 as usize (Transmute);
+        _61 = Sub(const <core::option::Option<core::task::Waker> as core::mem::SizedTypeProperties>::ALIGN, const 1_usize);
+        _62 = BitAnd(copy _60, copy _61);
+        _63 = Eq(copy _62, const 0_usize);
+        assert(copy _63, "misaligned pointer dereference: address must be a multiple of {} but is {}", const <core::option::Option<core::task::Waker> as core::mem::SizedTypeProperties>::ALIGN, copy _60) -> [success: bb34, unwind unreachable];
+    }
+
+    bb34 (cleanup): {
+        _85 = copy _17 as *const () (PtrToPtr);
+        _86 = copy _85 as usize (Transmute);
+        _87 = Ne(const <core::option::Option<core::task::Waker> as core::mem::SizedTypeProperties>::SIZE, const 0_usize);
+        _88 = Eq(copy _86, const 0_usize);
+        _89 = BitAnd(copy _88, copy _87);
+        _90 = Not(copy _89);
+        assert(copy _90, "null pointer dereference occurred") -> [success: bb39, unwind unreachable];
+    }
+
+    bb39 (cleanup): {
+        (*_17) = move _15;
+        goto -> bb32;
+    }

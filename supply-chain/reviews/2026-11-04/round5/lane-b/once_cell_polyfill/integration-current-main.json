@@ -1,0 +1,21 @@
+{
+  "base": "0976c3585714ad76f20fbe8010d884425a7379bd",
+  "before_failures": 817,
+  "after_failures": 816,
+  "removed": [
+    [
+      "once_cell_polyfill",
+      "1.70.2",
+      [
+        "safe-to-deploy"
+      ]
+    ]
+  ],
+  "added": [],
+  "exact_audit_insertion_only": true,
+  "other_lock_manifest_and_store_inputs_identical": true,
+  "before_sha256": "c5b76818a95bab71b38543221fd52e18ab1e2069a9ac03e0d3e099362dc5a4e3",
+  "after_sha256": "162b3b328a77b3501683de72dc7dda2f821435ea14080d849c6c8ba433d9a73a",
+  "overall": "fail (vetting)",
+  "command": "cargo +1.94.0 vet check --locked --frozen --no-minimize-exemptions --no-registry-suggestions --cache-dir <fresh> --output-format json"
+}

@@ -23,7 +23,6 @@ lines.on('close', () => {
 lines.on('line', raw => {
  const message=JSON.parse(raw);
  if(message.type==='catalog') {
-  if(mode==='record_global_config') fs.writeFileSync('catalog.json',JSON.stringify(message));
   const marker=message.configHome+'/.config.json';
   if(mode==='initializes_config' && !fs.existsSync(marker)) fs.writeFileSync(marker,'{"initialized":true}');
   if(mode==='changes_config') fs.writeFileSync(marker,JSON.stringify({updated:Date.now(),pid:process.pid}));
@@ -253,13 +252,26 @@ test('catalog caches native model eligibility but observes configuration edits b
 });
 
 test('catalog and execution use the native global config path, and its edits invalidate the catalog', async t => {
- const {root,executor,execution,children}=await fixture(t,'record_global_config');
+ const launched: ReturnType<typeof spawn>[]=[];
+ const frames: Array<Record<string, unknown>>=[];
+ const spawnProcess=((_bin:unknown,_args:unknown,opts:unknown)=>{
+  const child=spawn(process.execPath,['-e',CHILD,'success'],opts as Parameters<typeof spawn>[2]);
+  launched.push(child);
+  const write=child.stdin.write.bind(child.stdin);
+  child.stdin.write=((chunk:unknown,...args:unknown[])=>{
+   frames.push(JSON.parse(String(chunk)));
+   return (write as (...values:unknown[])=>boolean)(chunk,...args);
+  }) as typeof child.stdin.write;
+  return child;
+ }) as typeof spawn;
+ t.after(()=>{for(const child of launched) if(child.exitCode===null && child.signalCode===null) child.kill('SIGKILL');});
+ const {root,executor,execution}=await fixture(t,'success',{spawnProcess});
  const globalConfigPath=join(root,'global-config.json');
  await executor.catalog();
- assert.equal(JSON.parse(await fs.readFile(join(root,'catalog/catalog.json'),'utf8')).globalConfigPath,globalConfigPath);
- await executor.catalog(); assert.equal(children.length,1);
+ assert.equal(frames.find(frame=>frame.type==='catalog')?.globalConfigPath,globalConfigPath);
+ await executor.catalog(); assert.equal(launched.length,1);
  await fs.writeFile(globalConfigPath,'{"mcpServers":{}}');
- await executor.catalog(); assert.equal(children.length,2);
+ await executor.catalog(); assert.equal(launched.length,2);
  await executor.execute(execution);
  const start=JSON.parse(await fs.readFile(join(taskCwd(root,execution),'start.json'),'utf8'));
  assert.equal(start.globalConfigPath,globalConfigPath);

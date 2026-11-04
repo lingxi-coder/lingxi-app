@@ -1751,6 +1751,7 @@ export class SessionRuntime {
   }
 
   restart(beforeRestart?: () => void | Promise<void>): Promise<void> {
+    this.recoveryAttempts.length = 0;
     this.desiredRunning = true;
     this.cancelAutomaticRecovery();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
@@ -1786,11 +1787,11 @@ export class SessionRuntime {
   }
 
   stop(): Promise<void> {
-    this.desiredRunning = false;
     this.cancelAutomaticRecovery();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) return;
       this.assertNoLiveSideChats();
+      this.desiredRunning = false;
       await this.stopBridge();
       this.setState({ status: 'idle' });
     });

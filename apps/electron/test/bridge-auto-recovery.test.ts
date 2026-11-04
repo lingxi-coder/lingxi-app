@@ -129,3 +129,25 @@ test('an owned detached process can exit after its transport closes', async (t) 
   assert.deepEqual(f.calls, ['stop', 'start', 'restore']);
   await f.runtime.dispose();
 });
+
+
+test('a refused stop with a live Side Chat preserves automatic recovery', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  f.internal.liveSideChats.add('side-1');
+  await assert.rejects(f.runtime.stop(), /End all Side Chats/);
+  f.internal.managedChildExited(f.child, 1, null, true);
+  t.mock.timers.tick(250);
+  await f.runtime.waitForLifecycle();
+  assert.deepEqual(f.calls, ['stop', 'start', 'restore']);
+  await f.runtime.dispose();
+});
+
+test('an explicit restart resets the automatic recovery retry budget', async () => {
+  const f = fixture();
+  f.internal.recoveryAttempts.push(Date.now(), Date.now(), Date.now());
+  f.internal.startInternal = async (): Promise<void> => { f.calls.push('start'); };
+  await f.runtime.restart();
+  assert.equal(f.internal.recoveryAttempts.length, 0);
+  await f.runtime.dispose();
+});

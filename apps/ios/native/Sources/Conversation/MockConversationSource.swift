@@ -89,7 +89,7 @@ final class MockConversationSource: ConversationSource {
                 source.model.engineSessionsLoaded = true
                 return source
             }
-            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_IMAGE_PREVIEW"] == "1" {
+            if ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("UI_TEST_IMAGE_PREVIEW")] == "1" {
                 let format = UIGraphicsImageRendererFormat()
                 format.scale = 1
                 let data = UIGraphicsImageRenderer(size: CGSize(width: 780, height: 1688), format: format).pngData { context in

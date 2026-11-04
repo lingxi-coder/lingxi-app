@@ -4,8 +4,8 @@ import XCTest
 final class RemoteBotsDeviceAcceptanceUITests: XCTestCase {
     func testRealBotConversationSurvivesBackAndColdLaunch() throws {
         let environment = ProcessInfo.processInfo.environment
-        let hostID = environment["LINGXI_BOT_ACCEPTANCE_HOST_ID"] ?? ""
-        let botID = environment["LINGXI_BOT_ACCEPTANCE_BOT_ID"] ?? ""
+        let hostID = environment[ProductNamespace.environmentKey("BOT_ACCEPTANCE_HOST_ID")] ?? ""
+        let botID = environment[ProductNamespace.environmentKey("BOT_ACCEPTANCE_BOT_ID")] ?? ""
         try XCTSkipUnless(!hostID.isEmpty && !botID.isEmpty,
                           "Pass the host and Bot IDs of an isolated acceptance Desktop")
         try XCTSkipUnless(environment["SIMULATOR_DEVICE_NAME"] == nil,

@@ -78,4 +78,5 @@
     <string name="local_app_v2_record_active">녹음 중입니다. 최대 30초까지 녹음할 수 있습니다. 완료하면 녹음이 현재 앱으로 전달됩니다.</string>
     <string name="local_app_v2_record_start">녹음 시작</string>
     <string name="local_app_v2_record_finish">녹음 완료</string>
+    <string name="local_app_v2_market_install_note">이 Android 기기에 맞는 소스 버전만 설치하세요. 실행하기 전에 해당 버전의 권한을 확인해야 합니다.</string>
 </resources>

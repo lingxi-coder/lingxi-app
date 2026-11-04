@@ -354,7 +354,7 @@ enum ModelDisplay {
             return (available + unavailable).map { section in
                 let name: String
                 switch section.providerId {
-                case "openai-chatgpt": name = "OpenAI · " + String(localized: "ChatGPT subscription")
+                case "openai-chatgpt": name = "OpenAI · " + String(localized: "provider_account_auth_chatgpt")
                 case "openai": name = "OpenAI · " + String(localized: "API key")
                 default: name = section.name
                 }

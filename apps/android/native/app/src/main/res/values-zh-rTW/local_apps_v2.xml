@@ -78,4 +78,5 @@
     <string name="local_app_v2_record_active">正在錄音，最長 30 秒。完成後會將錄音傳回目前的應用程式。</string>
     <string name="local_app_v2_record_start">開始錄音</string>
     <string name="local_app_v2_record_finish">完成錄音</string>
+    <string name="local_app_v2_market_install_note">只安裝適用於此 Android 裝置的原始碼版本。執行前仍需確認該版本的權限。</string>
 </resources>

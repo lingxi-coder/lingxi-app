@@ -1357,6 +1357,15 @@ async function assertColdSessionOpen(page, sessionId) {
   log('cold saved session: handshake-time metadata, transcript/model restore, renderer and Remote Control IPC passed');
 }
 
+async function openPackagedProjectDraft(page, projectPath) {
+  const label = `Edit ${projectPath.split('/').at(-1)}`;
+  await evaluate(page, `(() => {
+    const button = Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === ${JSON.stringify(label)});
+    if (!button || button.disabled) throw new Error('The Code project must expose its draft action');
+    button.click();
+  })()`);
+}
+
 async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, configHome) {
   const sourceSession = await createPackagedLocalAppSourceSession(page, creatorSessionId, configHome);
   const sessionId = sourceSession.sessionId;
@@ -1393,7 +1402,7 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
   try { assert.equal(await evaluate(reopenedGuest, `localStorage.getItem('progress')`), '7'); }
   finally { await reopenedGuest.close(); }
   await evaluate(page, `window.lingxi.localApps.stop(${JSON.stringify(created.id)})`);
-  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat')?.click()`);
+  await openPackagedProjectDraft(page, sourceSession.projectPath);
   const otherSession = await waitFor(async () => {
     const current = await evaluate(page, 'window.lingxi.bootstrap()');
     return current.activeSession?.projectPath === sourceSession.projectPath
@@ -1422,9 +1431,8 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
     modify.click();
   })()`);
   await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId === '${sessionId}' && document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'Modify restores the dedicated authoring Code session, transcript and app draft' });
-  // These fixture sessions are not persisted in the sidebar catalog. Navigate
-  // through the real New chat action and verify the composer follows that chat.
-  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat')?.click()`);
+  // Open the current Code project draft and verify its composer is isolated.
+  await openPackagedProjectDraft(page, sourceSession.projectPath);
   await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId !== '${sessionId}' && !document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && !document.querySelector('.local-app-chat-card'))`), { label: 'new unrelated source-project chat has its own transcript and draft' });
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('[aria-label="Prompt"][contenteditable="true"]')) && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'unrelated chat renderer admission before returning to Apps' });
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === 'Apps')?.click()`);

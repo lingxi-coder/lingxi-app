@@ -298,3 +298,12 @@ lto = "thin"
 askama_derive = { git = "https://github.com/askama-rs/askama", rev = "d47daf8767805c0c4dfb456145fc857bfd9c1d2c" }
 webrtc = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "ae5a65b1f4816cd26a06d462573ebc9841f14f96" }
 nix = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "ae5a65b1f4816cd26a06d462573ebc9841f14f96" }
+
+# A/B experiment: keep Harness fixed while replacing all packages from its
+# pinned LLM Git source with one newer immutable revision.
+[patch."https://github.com/lingxi-coder/llm-client.git"]
+lingxi-llm-client = { git = "https://www.github.com/lingxi-coder/llm-client.git", rev = "079581ef1e438b38ceb394fc0da9160e056e718e" }
+lingxi-reqwest = { git = "https://www.github.com/lingxi-coder/llm-client.git", rev = "079581ef1e438b38ceb394fc0da9160e056e718e" }
+lingxi-hyper = { git = "https://www.github.com/lingxi-coder/llm-client.git", rev = "079581ef1e438b38ceb394fc0da9160e056e718e" }
+lingxi-hyper-util = { git = "https://www.github.com/lingxi-coder/llm-client.git", rev = "079581ef1e438b38ceb394fc0da9160e056e718e" }
+lingxi-hyper-rustls = { git = "https://www.github.com/lingxi-coder/llm-client.git", rev = "079581ef1e438b38ceb394fc0da9160e056e718e" }

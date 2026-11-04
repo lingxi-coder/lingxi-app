@@ -150,3 +150,9 @@ who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
 version = "0.9.5"
 notes = "AI-assisted full exact package source review and independent cross-review. Primary: supply-chain/reviews/2026-11-03/round3/lane-a/review.md (SHA-256 d77a65649ed69b6e72a9d852398fb5c65eaeb3f2b04ca44a4ac3ea922aa9c309); cross-review: supply-chain/reviews/2026-11-03/round3/lane-b/cross-lane-a/review.md (SHA-256 a82135ef07f1e8a0c288923b315864b252076ef54076c0044f0a72e01c24667b). Trust RUSTC/PATH and compiler output; fixed direct version subprocess has no shell. Nonzero-exit and permissive date/channel parsing limits recorded. Dependencies and downstream build decisions reviewed separately."
+
+[[audits.wasm-bindgen-futures]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.4.72"
+notes = "AI-assisted full exact-version source review and independent root cross-review. Evidence: supply-chain/reviews/2026-11-04/round6/wasm-bindgen-futures/review.md (SHA-256 9dc0ce4c3e96388c45bf50bdb3e93b8041da6290afdb73b9f6119ac80035fb37); cross-review: supply-chain/reviews/2026-11-04/round6/wasm-bindgen-futures/root-cross-review.md (SHA-256 4e51b9cadda7ae9ae95bba7273c7e386061703de0abcb1a28838e7023c5c003c). Scope is this exact re-export package; js-sys, wasm-bindgen, their macros and consumers require separate audits."

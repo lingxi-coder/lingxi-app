@@ -1,0 +1,26 @@
+{
+  "checked_utc": "2026-11-04T13:01:16.564624+00:00",
+  "remote": "origin owner SSH alias",
+  "fetched_ref": "origin/main",
+  "commit": "5ce972b8c1a547f54808114681327cb731155fcf",
+  "input_sha256": {
+    "Cargo.toml": "64b16f7acf3b9cb45f25564ce0c1143eefbbc6fa5fe67d11ff69abac3c39194e",
+    "Cargo.lock": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+    "supply-chain/config.toml": "8e1b2dc287f3a81dc84dda3de41984d17f2fed4d115347b6d3d85f979a93d5f2",
+    "supply-chain/audits.toml": "3978b088faef3a8dea5f308a3ffb1c8ac79811a73171496313b1016fe97c3318",
+    "supply-chain/imports.lock": "38691e1bfc73d11d3fb1b46a820afff4bf5344d67d5852c7a1697d58e4dfb536"
+  },
+  "package": {
+    "name": "wasm-bindgen-futures",
+    "version": "0.4.72",
+    "source": "registry+https://github.com/rust-lang/crates.io-index",
+    "checksum": "9473dbd2991ae90b6291c3c32c30c6187ac49aa32f9905d1cce280ec1e110b0f",
+    "dependencies": [
+      "js-sys",
+      "wasm-bindgen"
+    ]
+  },
+  "matching_local_audits": [],
+  "matching_import_audits": {},
+  "matches_frozen_baseline_inputs": true
+}

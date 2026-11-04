@@ -1,0 +1,20 @@
+{
+  "before_failures": 816,
+  "after_failures": 815,
+  "removed": [
+    {
+      "name": "wasm-bindgen-futures",
+      "version": "0.4.72",
+      "missing_criteria": [
+        "safe-to-deploy"
+      ]
+    }
+  ],
+  "added": [],
+  "before_output_sha256": "162b3b328a77b3501683de72dc7dda2f821435ea14080d849c6c8ba433d9a73a",
+  "after_output_sha256": "417cb2cf1d2c7dccab03d56fa3675a6617294da55106bced837f3305311ba7dd",
+  "after_audits_sha256": "6e6eef2b5ad086de4357c3b27f00695f6a5a49588d3a0965594623e96ccece41",
+  "other_inputs_unchanged": true,
+  "only_audits_toml_change": "wasm-bindgen-futures 0.4.72 exact full record",
+  "overall_conclusion": "fail (vetting)"
+}

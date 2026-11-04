@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -11,7 +12,7 @@ import { createServer } from 'vite';
 
 const electronRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixtureRoot = join(electronRoot, 'test', 'fixtures');
-const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
+const electronBinary = createRequire(import.meta.url)('electron');
 const electronDriver = join(fixtureRoot, 'plan-electron.mjs');
 
 test('Plan preview opens full Markdown, copies content, and adapts to theme', async () => {
@@ -38,7 +39,7 @@ test('Plan preview opens full Markdown, copies content, and adapts to theme', as
     const fixtureUrl = `http://127.0.0.1:${address.port}/plan-fixture.html`;
     const output = [];
     const errors = [];
-    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
+    child = spawn(electronBinary, [electronDriver, fixtureUrl], {
       cwd: electronRoot,
       env: {
         ...process.env,

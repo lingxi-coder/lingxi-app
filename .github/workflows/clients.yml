@@ -61,6 +61,10 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Electron namespace generation resolves the immutable Harness source
+      # through locked Cargo metadata; this step does not compile Rust.
+      - uses: dtolnay/rust-toolchain@1.94.0
+
       - uses: actions/setup-node@v7
         with:
           node-version: "24"

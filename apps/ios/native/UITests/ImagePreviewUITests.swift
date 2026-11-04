@@ -8,8 +8,8 @@ final class ImagePreviewUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         app = XCUIApplication()
         app.launchArguments = ["-AppleLanguages", "(en)"]
-        app.launchEnvironment["LINGXI_UI_TESTING"] = "1"
-        app.launchEnvironment["LINGXI_UI_TEST_IMAGE_PREVIEW"] = "1"
+        app.launchEnvironment[ProductNamespace.environmentKey("UI_TESTING")] = "1"
+        app.launchEnvironment[ProductNamespace.environmentKey("UI_TEST_IMAGE_PREVIEW")] = "1"
         app.launch()
         let open = app.buttons["image-preview.open"].firstMatch
         XCTAssertTrue(open.waitForExistence(timeout: 15), app.debugDescription)

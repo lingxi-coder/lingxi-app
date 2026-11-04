@@ -525,6 +525,7 @@ test('JSONL pipe binds delayed tokens to epoch and clears ambient environment', 
     spawnProcess: (executable, args, options) => {
       assert.deepEqual(args, []); assert.equal(executable, '/fixed/host');
       assert.deepEqual(Object.keys(options!.env!).sort(), ['CFFIXED_USER_HOME', 'HOME', 'LANG', 'LC_ALL', 'LINGXI_CONFIG_DIR', 'PATH', 'TMPDIR', '__CF_USER_TEXT_ENCODING'].sort());
+      assert.equal(options!.env!['LINGXI_CONFIG_DIR'], template.home);
       return child;
     } });
   child.stdout.write('{"version":1,"type":"credential","id":"credential-1"}\n'); await tick();

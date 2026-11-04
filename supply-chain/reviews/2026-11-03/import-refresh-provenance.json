@@ -1,0 +1,63 @@
+{
+  "decision": "Promote four reviewed deltas and verified current peer records; overall vet remains failing. Accept loss of upstream-removed utf8_iter wildcard; do not add new wildcard or held cfg_aliases delta.",
+  "source_records_independently_rechecked": 266,
+  "sources": {
+    "bytecode-alliance": {
+      "configured_url": "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml",
+      "effective_url": "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml",
+      "api_url": "https://api.github.com/repos/bytecodealliance/wasmtime/commits/main",
+      "api_effective_url": "https://api.github.com/repos/bytecodealliance/wasmtime/commits/main",
+      "resolved_repository": "bytecodealliance/wasmtime",
+      "commit": "9959c2c6e2d9a5c42be8b5adaea88b072089502f",
+      "commit_url": "https://github.com/bytecodealliance/wasmtime/commit/9959c2c6e2d9a5c42be8b5adaea88b072089502f",
+      "commit_time": "2026-11-03T23:23:44Z",
+      "immutable_url": "https://raw.githubusercontent.com/bytecodealliance/wasmtime/9959c2c6e2d9a5c42be8b5adaea88b072089502f/supply-chain/audits.toml",
+      "immutable_effective_url": "https://raw.githubusercontent.com/bytecodealliance/wasmtime/9959c2c6e2d9a5c42be8b5adaea88b072089502f/supply-chain/audits.toml",
+      "main_sha256": "2eef9862fa9182294a6b6f43b2779317614f751c557b22cc3e459d8d311276c3",
+      "immutable_sha256": "2eef9862fa9182294a6b6f43b2779317614f751c557b22cc3e459d8d311276c3",
+      "bytes": 240458,
+      "matches_immutable": true
+    },
+    "google": {
+      "configured_url": "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml",
+      "effective_url": "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml",
+      "api_url": "https://api.github.com/repos/google/supply-chain/commits/main",
+      "api_effective_url": "https://api.github.com/repositories/618110846/commits/main",
+      "resolved_repository": "google/rust-crate-audits",
+      "commit": "8cec794c38751495cf7a6c083220c207af1303d6",
+      "commit_url": "https://github.com/google/rust-crate-audits/commit/8cec794c38751495cf7a6c083220c207af1303d6",
+      "commit_time": "2026-10-20T09:19:30Z",
+      "immutable_url": "https://raw.githubusercontent.com/google/rust-crate-audits/8cec794c38751495cf7a6c083220c207af1303d6/audits.toml",
+      "immutable_effective_url": "https://raw.githubusercontent.com/google/rust-crate-audits/8cec794c38751495cf7a6c083220c207af1303d6/audits.toml",
+      "main_sha256": "eb1c1bf1ee616471bfb56965eea325815ee41b5e3fcf5d12537dff2791160bbd",
+      "immutable_sha256": "eb1c1bf1ee616471bfb56965eea325815ee41b5e3fcf5d12537dff2791160bbd",
+      "bytes": 712412,
+      "matches_immutable": true
+    },
+    "mozilla": {
+      "configured_url": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml",
+      "effective_url": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml",
+      "api_url": "https://api.github.com/repos/mozilla/supply-chain/commits/main",
+      "api_effective_url": "https://api.github.com/repos/mozilla/supply-chain/commits/main",
+      "resolved_repository": "mozilla/supply-chain",
+      "commit": "4716047f88d72d0685224af330bf21d0c2435b69",
+      "commit_url": "https://github.com/mozilla/supply-chain/commit/4716047f88d72d0685224af330bf21d0c2435b69",
+      "commit_time": "2026-11-03T08:07:22Z",
+      "immutable_url": "https://raw.githubusercontent.com/mozilla/supply-chain/4716047f88d72d0685224af330bf21d0c2435b69/audits.toml",
+      "immutable_effective_url": "https://raw.githubusercontent.com/mozilla/supply-chain/4716047f88d72d0685224af330bf21d0c2435b69/audits.toml",
+      "main_sha256": "77617e6e8d24664ed21af86b9e112489e37740280fafc293bc3a417449e87a4b",
+      "immutable_sha256": "77617e6e8d24664ed21af86b9e112489e37740280fafc293bc3a417449e87a4b",
+      "bytes": 520880,
+      "matches_immutable": true
+    }
+  },
+  "imports_sha256": "214ea7639fb95cfe9f41c6245a49b9cad467bbb7389adbce918085bf9404bc3f",
+  "baseline_missing": 762,
+  "candidate_missing": 759,
+  "held": [
+    "cfg_aliases 0.2.1",
+    "utf8_iter 1.0.4 source review pending"
+  ],
+  "criteria_changed": false,
+  "new_wildcard_trust_publisher": false
+}

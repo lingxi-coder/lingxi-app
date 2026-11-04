@@ -84,6 +84,7 @@
     "libgit2-sys",
     "libssh2-sys",
     "mbedtls-sys",
-    "syntect"
+    "syntect",
+    "xcap"
   ]
 }

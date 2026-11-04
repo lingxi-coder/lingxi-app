@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { runInNewContext } from 'node:vm';
+import { constants as vmConstants, runInNewContext } from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { build } from 'esbuild';
 import { LocalAppStore } from './fixtures/local-app-store.ts';
@@ -50,8 +50,13 @@ class TestWindow extends EventEmitter {
 async function loadHost(mockElectron: unknown): Promise<any> {
   const result = await bundledHost;
   const module = { exports: {} };
-  runInNewContext(result.outputFiles[0]!.text, { module, exports: module.exports, require: (id: string) => id === 'electron' ? mockElectron : require(id),
-    Buffer, process, console, structuredClone, URL, Response, Headers, fetch, AbortController, setTimeout, clearTimeout });
+  const context = { module, exports: module.exports, require: (id: string) => id === 'electron' ? mockElectron : require(id),
+    Buffer, process, console, structuredClone, URL, URLSearchParams, Request, Response, Headers, fetch,
+    AbortController, AbortSignal, Event, EventTarget, DOMException, TextEncoder, TextDecoder,
+    ReadableStream, WritableStream, TransformStream, setTimeout, clearTimeout, setInterval, clearInterval };
+  // Match Node's global alias and built-in module loader while keeping Electron mocked.
+  Object.assign(context, { global: context });
+  runInNewContext(result.outputFiles[0]!.text, context, { importModuleDynamically: vmConstants.USE_MAIN_CONTEXT_DEFAULT_LOADER });
   return (module.exports as any).LocalAppHost;
 }
 async function fixture(t: { after(fn: () => Promise<void>): void }) {

@@ -1411,6 +1411,7 @@ impl NativeRemoteMediaSession {
                 MediaSessionState::Ended
             }
             webrtc::peer_connection::RTCPeerConnectionState::Closed => MediaSessionState::Failed,
+            _ => MediaSessionState::Failed,
         };
         self.set_state(mapped);
     }

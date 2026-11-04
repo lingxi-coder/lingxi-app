@@ -26,12 +26,12 @@ struct ProviderAccountHealth: Codable, Equatable {
 
     var displayStatus: String {
         switch status {
-        case "ready": return String(localized: "Ready")
+        case "ready": return String(localized: "provider_account_ready")
         case "needs_auth": return String(localized: "Sign-in required")
         case "cooling_down": return String(localized: "Cooling down")
         case "quota_exhausted": return String(localized: "Quota exhausted")
         case "storage_unavailable": return String(localized: "Secure storage unavailable")
-        case "disabled": return String(localized: "Disabled")
+        case "disabled": return String(localized: "provider_account_disabled")
         default: return status
         }
     }
@@ -282,20 +282,20 @@ final class ProviderAccountRepository {
     }
 
     func configurationDescription(providerId: String) -> String {
-        if snapshotReadFailed { return String(localized: "Unable to read account status") }
-        if snapshot.storeScope.isEmpty { return String(localized: "Loading accounts…") }
+        if snapshotReadFailed { return String(localized: "provider_accounts_status_read_failed") }
+        if snapshot.storeScope.isEmpty { return String(localized: "provider_accounts_loading_status") }
         let logicalID = providerId == "openai-chatgpt" ? "openai" : providerId
         let rows = accounts(providerId: logicalID)
         if rows.isEmpty { return String(localized: "settings_provider_unconfigured") }
         let enabled = rows.filter(\.enabled)
         let statuses = enabled.compactMap { health(for: $0)?.status }
         let label: String
-        if enabled.isEmpty { label = String(localized: "Disabled") }
+        if enabled.isEmpty { label = String(localized: "provider_account_disabled") }
         else if statuses.contains("ready") { label = String(localized: "settings_provider_status_configured") }
         else if statuses.contains("storage_unavailable") { label = String(localized: "Secure storage unavailable") }
-        else if statuses.contains("cooling_down") || statuses.contains("quota_exhausted") { label = String(localized: "Temporarily unavailable") }
+        else if statuses.contains("cooling_down") || statuses.contains("quota_exhausted") { label = String(localized: "provider_account_temporarily_unavailable") }
         else if statuses.contains("needs_auth") { label = String(localized: "Sign-in required") }
-        else { label = String(localized: "Status unverified") }
+        else { label = String(localized: "provider_account_status_unverified") }
         return "\(label) · \(enabled.count)/\(rows.count)"
     }
 
@@ -495,7 +495,7 @@ final class ProviderAccountRepository {
 
     func modelAccessDescription(bindingId: String, modelId: String) -> String {
         guard let row = modelAvailability(bindingId: bindingId, modelId: modelId) else {
-            return String(localized: "Status unverified")
+            return String(localized: "provider_account_status_unverified")
         }
         if row.eligibleAccountIds.isEmpty && row.confirmedAccountIds.isEmpty
             && row.unverifiedAccountIds.isEmpty && row.forbiddenAccountIds.isEmpty {

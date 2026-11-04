@@ -22,14 +22,14 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
     private var targetFixtureIdentityVerified = false
 
     private func stagedAppID() throws -> String {
-        let id = ProcessInfo.processInfo.environment["LINGXI_AGENT_BROWSER_APP_ID"] ?? ""
+        let id = ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("AGENT_BROWSER_APP_ID")] ?? ""
         try XCTSkipUnless(id.range(of: #"^a[0-9a-f]{32}$"#, options: .regularExpression) != nil,
-                          "Stage an isolated Local App and pass LINGXI_AGENT_BROWSER_APP_ID")
+                          "Stage an isolated Local App and pass \(ProductNamespace.environmentKey("AGENT_BROWSER_APP_ID"))")
         try XCTSkipUnless(ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] == nil,
                           "Requires an iOS 26 physical device")
-        let revisionText = ProcessInfo.processInfo.environment["LINGXI_AGENT_BROWSER_REVISION"] ?? "1"
+        let revisionText = ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("AGENT_BROWSER_REVISION")] ?? "1"
         guard let revision = Int(revisionText), revision > 0 else {
-            throw XCTSkip("LINGXI_AGENT_BROWSER_REVISION must be a positive integer")
+            throw XCTSkip("\(ProductNamespace.environmentKey("AGENT_BROWSER_REVISION")) must be a positive integer")
         }
         targetFixtureAppID = id
         targetFixtureRevision = revision
@@ -51,7 +51,7 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
     }
 
     private func selectedBrowserBundleID() throws -> String {
-        let bundleID = ProcessInfo.processInfo.environment["LINGXI_SYSTEM_BROWSER_BUNDLE_ID"] ?? ""
+        let bundleID = ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("SYSTEM_BROWSER_BUNDLE_ID")] ?? ""
         try XCTSkipUnless(!bundleID.isEmpty && bundleID.contains("."),
                           "Pass the bundle ID observed for the iOS system-selected browser.")
         return bundleID
@@ -809,9 +809,9 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             return false
         }
         attachScreen("browser-lingxi-open-prompt-\(source)")
-        print("IOS_AGUI_LINGXI_OPEN_PROMPT_MATCHED source=\(source) buttons=exact-open-cancel")
+        print("IOS_AGUI_\(ProductNamespace.environmentKey("OPEN_PROMPT_MATCHED")) source=\(source) buttons=exact-open-cancel")
         open.tap()
-        print("IOS_AGUI_LINGXI_WAKE_OPEN_CONFIRMED source=\(source)")
+        print("IOS_AGUI_\(ProductNamespace.environmentKey("WAKE_OPEN_CONFIRMED")) source=\(source)")
         return true
     }
 

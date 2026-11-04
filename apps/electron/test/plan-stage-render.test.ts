@@ -8,8 +8,9 @@ import {Theme} from '../src/renderer/theme/ThemeContext';
 import {tokens} from '../src/renderer/theme/tokens';
 import type {RunItem} from '../src/renderer/model/runItem';
 (globalThis as {React?:typeof React}).React=React;
+const planView = {verb:'generic' as const,label:'ExitPlanMode',title:'ExitPlanMode'};
 test('real Stage shows a plan card outside collapsed tool summaries',()=>{
- const liveItems:RunItem[]=[{id:'plan',type:'tool',tool:'ExitPlanMode',status:'done',view:{label:'ExitPlanMode'} as never}];
+ const liveItems:RunItem[]=[{id:'plan',type:'tool',tool:'ExitPlanMode',status:'done',view:planView}];
  const html=renderToStaticMarkup(React.createElement(Theme.Provider,{value:tokens(false)},React.createElement(Stage,{liveItems,sessionKey:'one',submittedPlans:[{id:'plan',content:'# Actual proposal\n\nKeep data.',status:'approved'}],onOpenPlan:()=>{}})));
  assert.match(html,/Open full plan/);
  assert.match(html,/aria-label="Copy plan"/);
@@ -25,7 +26,7 @@ test('ordinary assistant Markdown remains normal narration',()=>{
 });
 
 test('completed ExitPlanMode without a document does not keep preparing or open an empty plan',()=>{
- const liveItems:RunItem[]=[{id:'plan',type:'tool',tool:'ExitPlanMode',status:'done',view:{label:'ExitPlanMode'} as never}];
+ const liveItems:RunItem[]=[{id:'plan',type:'tool',tool:'ExitPlanMode',status:'done',view:planView}];
  const state=reduceSubmittedPlanMessages(emptySubmittedPlanState(),[{blocks:[
   {type:'tool_use',id:'plan',tool:'ExitPlanMode',input_json:'{}'},
   // The payload the engine actually emits for an approved, document-less exit,
@@ -43,7 +44,7 @@ test('completed ExitPlanMode without a document does not keep preparing or open 
 
 for (const [status,label] of [['pending','Waiting for plan approval'],['rejected','Plan rejected'],['failed','Plan submission failed']] as const) {
  test(`empty ${status} plan displays its actual status`,()=>{
-  const liveItems:RunItem[]=[{id:'plan',type:'tool',tool:'ExitPlanMode',status:status==='pending'?'running':'error',view:{label:'ExitPlanMode'} as never}];
+  const liveItems:RunItem[]=[{id:'plan',type:'tool',tool:'ExitPlanMode',status:status==='pending'?'running':'error',view:planView}];
   const html=renderToStaticMarkup(React.createElement(Theme.Provider,{value:tokens(false)},React.createElement(Stage,{liveItems,sessionKey:status,submittedPlans:[{id:'plan',content:'  ',status}],onOpenPlan:()=>{}})));
   assert.match(html,new RegExp(label));
   assert.doesNotMatch(html,/Preparing plan|Writing plan|Open full plan|Copy plan/);
@@ -52,7 +53,7 @@ for (const [status,label] of [['pending','Waiting for plan approval'],['rejected
 
 for (const [status,label] of [['rejected','Plan rejected'],['failed','Plan submission failed']] as const) {
  test(`a ${status} plan keeps its submitted document available`,()=>{
-  const liveItems:RunItem[]=[{id:'plan',type:'tool',tool:'ExitPlanMode',status:'error',view:{label:'ExitPlanMode'} as never}];
+  const liveItems:RunItem[]=[{id:'plan',type:'tool',tool:'ExitPlanMode',status:'error',view:planView}];
   const html=renderToStaticMarkup(React.createElement(Theme.Provider,{value:tokens(false)},React.createElement(Stage,{liveItems,sessionKey:status,submittedPlans:[{id:'plan',content:'# Original proposal',status}],onOpenPlan:()=>{}})));
   assert.match(html,new RegExp(label));
   assert.match(html,/Original proposal/);

@@ -10,7 +10,7 @@ import {
 } from '../src/renderer/bridge/runtimeCenterState';
 import { beginSideQuestion, finishSideQuestion } from '../src/renderer/bridge/sideQuestion';
 import type { UseBridge } from '../src/renderer/bridge/bridgeTypes.js';
-import { RuntimeCenterInspector } from '../src/renderer/components/RuntimeCenter';
+import { InspectorTabs, RuntimeCenterInspector } from '../src/renderer/components/RuntimeCenter';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import { installTestLocale } from './test-locale';
@@ -30,8 +30,13 @@ function renderInspector(runtimeCenter: RuntimeCenterState): string {
     desktop: emptyDesktopState(),
     conversation: { sessionKey: SESSION_ID, plan: [] },
   } as unknown as UseBridge;
+  // The toolbar receives the tabs through a client-side portal. Render the
+  // same component separately here because server rendering has no portal host.
   return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) },
-    React.createElement(RuntimeCenterInspector, { bridge }),
+    React.createElement(React.Fragment, null,
+      React.createElement(InspectorTabs, { bridge, toolsOpen: !runtimeCenter.activeItem, onTools: () => {}, onSelect: () => {} }),
+      React.createElement(RuntimeCenterInspector, { bridge }),
+    ),
   ));
 }
 

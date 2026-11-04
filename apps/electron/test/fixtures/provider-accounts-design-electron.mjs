@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { configureFixtureWindow } from './electron-test-environment.mjs';
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 app.commandLine.appendSwitch('disable-gpu');
 async function main() {
@@ -8,6 +9,7 @@ async function main() {
   const window = new BrowserWindow({ show: false, width: 1024, height: 900, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(process.argv.find(value => value.startsWith('http://')));
+    await configureFixtureWindow(window);
     const js = source => window.webContents.executeJavaScript(source);
     const deadline = Date.now() + 10000;
     while (!await js('window.accountDesign?.ready()')) { if (Date.now() > deadline) throw new Error('Fixture not ready'); await new Promise(resolve => setTimeout(resolve, 20)); }
@@ -22,7 +24,11 @@ async function main() {
       await js('window.accountDesign.show(false, true)'); await capture('providers');
       await js('window.accountDesign.show(false)');
     }
-    process.stdout.write(`${JSON.stringify(await js('window.accountDesign.run()'))}\n`);
+    const operationId = await js('window.accountDesign.startOAuthForEscape()');
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ESC' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'ESC' });
+    const oauthEscape = await js(`window.accountDesign.finishOAuthEscape(${operationId})`);
+    process.stdout.write(`${JSON.stringify({ ...await js('window.accountDesign.run()'), oauthEscape })}\n`);
   } finally { window.destroy(); }
 }
 main().then(() => app.quit(), error => { process.stderr.write(`${error.stack}\n`); app.exit(1); });

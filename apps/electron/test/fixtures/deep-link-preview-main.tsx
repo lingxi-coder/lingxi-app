@@ -13,6 +13,7 @@ import { tokens } from '../../src/renderer/theme/tokens';
 import { settingsLinkRequest } from '../../src/renderer/deepLinkRoutes';
 import type { TerminalSnapshot } from '../../src/shared/terminal';
 import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
+import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
 
 setLanguagePreference('en');
 const calls: { domain: string; command: any }[] = [];
@@ -37,6 +38,7 @@ const scheduledRuns = [{ id: 'run-1', status: 'succeeded', scheduledAt: 17000000
 const accountApi = providerAccountsMock();
 const bridge = {
   providerAccounts: accountApi,
+  providerSettings: { providers: {}, routing: {} },
   activeSession: { projectPath: '/test/project', sessionId: 'session-a' }, connected: true, sessionLoading: false,
   bootstrap: { workspace: { path: '/test/project', trusted: true }, settings: { projects: ['/test/project'] }, providerAccountSnapshot: fixtureAccountSnapshot([]), projectCatalogs: {} },
   settingsSnapshotEvent: { effective_json: '{}', provenance_json: '{}', layers_json: '{"user":{},"project":{},"local":{}}' },
@@ -47,7 +49,7 @@ const bridge = {
   mcpAdmin: async command => { calls.push({ domain: 'mcp', command }); },
   skillAdmin: async command => { calls.push({ domain: 'skill', command }); },
   pluginAdmin: async command => { calls.push({ domain: 'plugin', command }); return { details_json: 'Ready for confirmation' }; },
-  updateProviderSettings: async (scope, patch) => { calls.push({ domain: 'provider', command: { scope, patch } }); },
+  updateProviderSettings: async patch => { calls.push({ domain: 'provider', command: { patch } }); },
   desktop: { providerModelCatalog: [], modelDetails: [] },
   scheduledScopes: [{ id: 'global', label: 'None' }],
   manageScheduled: async (scope, command) => { calls.push({ domain: 'cron', command }); return [scheduledJob]; },
@@ -55,7 +57,7 @@ const bridge = {
   scheduledContext: async () => ({ models: [], currentModel: null, sessions: [] }),
   configurationOperations: {}, refreshMcpServers: noop, refreshSkills: noop,
 } as any;
-window.lingxi = { providerAccounts: accountApi, terminal: {
+window[DESKTOP_BRIDGE_GLOBAL] = { providerAccounts: accountApi, terminal: {
   list: async () => records.slice(),
   create: async scope => { const tab = { id: 'term-1', scope, title: 'Shell', status: 'running' as const, exitCode: null, output: '', sequence: 0 }; records.push(tab); return tab; },
   input: async (_id, data) => { inputs.push(data); }, resize: noop, acknowledge: noop, close: noop, onEvent: () => () => {},

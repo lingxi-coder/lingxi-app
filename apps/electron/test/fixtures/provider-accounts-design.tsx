@@ -16,11 +16,12 @@ state.accounts[0].displayName = '日常使用'; state.accounts[1].displayName = 
 state.modelEntitlements = [{ accountId: state.accounts[0].accountId, identityGeneration: 1, modelId: 'gpt-5', status: 'confirmed', observedAtMs: 0 }, { accountId: state.accounts[1].accountId, identityGeneration: 1, modelId: 'gpt-5', status: 'forbidden', observedAtMs: 0 }];
 let pending: { request: ProviderAccountCommand; resolve: () => void; reject: (error: Error) => void } | undefined;
 let calls: ProviderAccountCommand[] = [];
+const cancellations: number[] = [];
 let lastCredential: string | undefined;
 let failSnapshot = false;
 const api: ProviderAccountsApi = {
   snapshot: async () => { if (failSnapshot) throw new Error('Synthetic status failure'); return structuredClone(state); },
-  cancel: async () => { pending?.reject(new Error('已取消登录')); pending = undefined; },
+  cancel: async operationId => { cancellations.push(operationId); pending?.reject(new Error('已取消登录')); pending = undefined; },
   command: async (request, credential) => {
     calls.push(request); lastCredential = credential;
     if (request.action === 'add' || request.action === 'reconnect' || request.action === 'test') await new Promise<void>((resolve, reject) => { pending = { request, resolve, reject }; });
@@ -49,6 +50,21 @@ const click = (selector: string) => { const element = document.querySelector<HTM
   ready: () => document.querySelectorAll('.pa-account').length === 2,
   show: async (dark: boolean, directory = false) => { show(dark, directory); await new Promise(resolve => setTimeout(resolve, 80)); },
   open: async () => { click('.pa-toolbar .pa-primary'); await until(() => Boolean(document.querySelector('dialog[open]'))); },
+  startOAuthForEscape: async () => {
+    click('.pa-toolbar .pa-primary');
+    await until(() => Boolean(document.querySelector('dialog[open]')));
+    click('dialog[open] button[type=submit]');
+    await until(() => Boolean(pending && document.querySelector('.pa-progress')));
+    if (pending?.request.authKind !== 'oauth' || pending.request.operationId === undefined) throw new Error('OAuth operation was not started');
+    return pending.request.operationId;
+  },
+  finishOAuthEscape: async (operationId: number) => {
+    await until(() => !pending && !document.querySelector('.pa-progress'));
+    if (!cancellations.includes(operationId) || !document.querySelector('dialog[open] [role=alert]')) throw new Error('Escape did not cancel the active OAuth operation in its open dialog');
+    click('dialog[open] footer button[type=button]');
+    await until(() => !document.querySelector('dialog[open]'));
+    return true;
+  },
   run: async () => {
     const assert = (value: unknown, message: string) => { if (!value) throw new Error(message); };
     click('.pa-toolbar .pa-primary');

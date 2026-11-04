@@ -18,8 +18,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { MessageTransport, RtdbClient, type RtdbEvent } from '@lingxi/bridge-client/remote';
 import { PeerHost } from '../../src/main/remoteControl/peerHost';
 import { createRtcWindow } from '../../src/main/remoteControl/rtcWindow';
+import { productEnvironmentKey } from '../../src/main/productNamespace';
 
-const root = process.env['LINGXI_TEST_ROOT']!;
+const root = process.env[productEnvironmentKey('TEST_ROOT')]!;
 const trace = (message: string): void => { process.stderr.write(`remote-rtc fixture: ${message}\n`); };
 process.on('uncaughtException', (error) => { process.stderr.write(`Uncaught: ${error.stack}\n`); app.exit(1); });
 process.on('unhandledRejection', (error) => { process.stderr.write(`Unhandled: ${String(error)}\n`); app.exit(1); });
@@ -28,7 +29,7 @@ app.setPath('userData', join(root, 'profile'));
 // without relying on global mDNS or loopback flags.
 app.on('window-all-closed', () => undefined);
 
-const SIZE = Number(process.env['LINGXI_TEST_BYTES'] ?? 2 * 1024 * 1024);
+const SIZE = Number(process.env[productEnvironmentKey('TEST_BYTES')] ?? 2 * 1024 * 1024);
 const pattern = (seed: string, length: number): string => seed.repeat(Math.ceil(length / seed.length)).slice(0, length);
 const CONN_ONE = 'AAAAAAAAAAAAAAAAAAAAA1';
 const CONN_TWO = 'AAAAAAAAAAAAAAAAAAAAA2';

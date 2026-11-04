@@ -1431,6 +1431,7 @@ impl RemoteHostMediaSession {
             Peer::New | Peer::Connecting | Peer::Disconnected | Peer::Unspecified => {
                 MediaSessionState::Preparing
             }
+            _ => MediaSessionState::Failed,
         };
         self.set_state(mapped);
     }

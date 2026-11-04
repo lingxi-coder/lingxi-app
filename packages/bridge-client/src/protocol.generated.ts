@@ -2,7 +2,7 @@
 // Do not edit. Run scripts/checks/generate-client-protocol.py after updating the pin.
 // Nested DTOs and semantic validation remain in protocol.ts and validation.ts.
 
-// Custom Serde fingerprints (review changes): command=af4073569e8ac93f event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=97999b148e4a9b02 event_source=736675594350ceb1
+// Custom Serde fingerprints (review changes): command=af4073569e8ac93f event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=9682d2056b11bfd5 event_source=736675594350ceb1
 
 import type {
   AgentDto,

@@ -13,9 +13,13 @@ import test from 'node:test';
 import { LocalAppRemoteGateway } from '../src/main/local-apps/remoteGateway.ts';
 import { REMOTE_LOCAL_APP_SDK } from '../src/preload/localAppSdk.ts';
 import { withFakeChatCheckpoint } from './fixtures/local-app-chat-checkpoint.ts';
+import { productNamespace } from '../scripts/product-namespace.mjs';
 
 // Opt in with an installed Playwright module. The test uses only a loopback gateway and test identities.
-const playwrightModule = process.env.LINGXI_TEST_PLAYWRIGHT_MODULE;
+const testNamespace = productNamespace();
+const testEnvironmentKey = suffix => `${testNamespace.envPrefix}${suffix}`;
+const playwrightModuleEnv = testEnvironmentKey('TEST_PLAYWRIGHT_MODULE');
+const playwrightModule = process.env[playwrightModuleEnv];
 const appId = `a${'1'.repeat(32)}`;
 const otherId = `a${'2'.repeat(32)}`;
 const owner = { accountUid: 'test-account', deviceId: 'test-device', hostId: 'test-host' };
@@ -38,7 +42,7 @@ async function loadSourceHost() {
       builder.onResolve({ filter: /^@lingxi\/bridge-client(?:\/|$)/ }, args => ({ path: fileURLToPath(import.meta.resolve(args.path)) }));
     } }],
   });
-  if (process.env.LINGXI_TEST_ARTIFACT_DIR) await writeFile(join(process.env.LINGXI_TEST_ARTIFACT_DIR, 'source-host-inputs.json'), JSON.stringify({
+  if (process.env[testEnvironmentKey('TEST_ARTIFACT_DIR')]) await writeFile(join(process.env[testEnvironmentKey('TEST_ARTIFACT_DIR')], 'source-host-inputs.json'), JSON.stringify({
     bridgeClientEntry: import.meta.resolve('@lingxi/bridge-client'), inputs: Object.keys(bundled.metafile.inputs),
   }, null, 2));
   const require = createRequire(import.meta.url);
@@ -55,7 +59,7 @@ async function loadSourceHost() {
   return module.exports;
 }
 
-test('real browser: remote gateway bootstrap, SDK, app cookies, isolation and revocation', { skip: !playwrightModule && 'Set LINGXI_TEST_PLAYWRIGHT_MODULE to an installed Playwright entry point', timeout: 60_000 }, async () => {
+test('real browser: remote gateway bootstrap, SDK, app cookies, isolation and revocation', { skip: !playwrightModule && `Set ${playwrightModuleEnv} to an installed Playwright entry point`, timeout: 60_000 }, async () => {
   const { chromium } = await import(pathToFileURL(playwrightModule).href);
   const port = await freePort();
   const gateway = new LocalAppRemoteGateway(`http://{appId}-{sessionId}.localhost:${port}`, port, {
@@ -84,7 +88,7 @@ test('real browser: remote gateway bootstrap, SDK, app cookies, isolation and re
     const ticket = new URL(opened.url).hash.slice(1);
     const origin = new URL(opened.url).origin;
     assert.match(new URL(origin).hostname, new RegExp(`^${appId}-[a-f0-9]{20}\\.localhost$`));
-    browser = await chromium.launch({ headless: true, ...(process.env.LINGXI_TEST_CHROME ? { executablePath: process.env.LINGXI_TEST_CHROME } : {}) });
+    browser = await chromium.launch({ headless: true, ...(process.env[testEnvironmentKey('TEST_CHROME')] ? { executablePath: process.env[testEnvironmentKey('TEST_CHROME')] } : {}) });
     const context = await browser.newContext();
     const page = await context.newPage();
     // Do not allow a navigation failure to print the one-use fragment ticket.
@@ -176,7 +180,7 @@ test('real browser: remote gateway bootstrap, SDK, app cookies, isolation and re
   }
 });
 
-test('real browser: HTTPS proxy accepts secure host-only cookies and isolates reopened sessions', { skip: !playwrightModule && 'Set LINGXI_TEST_PLAYWRIGHT_MODULE to an installed Playwright entry point', timeout: 60_000 }, async () => {
+test('real browser: HTTPS proxy accepts secure host-only cookies and isolates reopened sessions', { skip: !playwrightModule && `Set ${playwrightModuleEnv} to an installed Playwright entry point`, timeout: 60_000 }, async () => {
   const { chromium } = await import(pathToFileURL(playwrightModule).href);
   const directory = await mkdtemp(join(tmpdir(), 'lingxi-gateway-tls-'));
   let gateway, browser, proxy;
@@ -209,7 +213,7 @@ test('real browser: HTTPS proxy accepts secure host-only cookies and isolates re
     });
     const opened = await gateway.open(run, owner);
     const origin = new URL(opened.url).origin;
-    browser = await chromium.launch({ headless: true, ...(process.env.LINGXI_TEST_CHROME ? { executablePath: process.env.LINGXI_TEST_CHROME } : {}) });
+    browser = await chromium.launch({ headless: true, ...(process.env[testEnvironmentKey('TEST_CHROME')] ? { executablePath: process.env[testEnvironmentKey('TEST_CHROME')] } : {}) });
     const context = await browser.newContext({ ignoreHTTPSErrors: true });
     const page = await context.newPage();
     const bootstrapResponse = page.waitForResponse(response => response.url() === `${origin}/__lingxi_remote_bootstrap` && response.request().method() === 'POST');
@@ -260,7 +264,7 @@ test('real browser: HTTPS proxy accepts secure host-only cookies and isolates re
   }
 });
 
-test('real browser: HTTPS Agent Chat recovery and revocation use source Host and durable Broker', { skip: !playwrightModule && 'Set LINGXI_TEST_PLAYWRIGHT_MODULE to an installed Playwright entry point', timeout: 60_000 }, async () => {
+test('real browser: HTTPS Agent Chat recovery and revocation use source Host and durable Broker', { skip: !playwrightModule && `Set ${playwrightModuleEnv} to an installed Playwright entry point`, timeout: 60_000 }, async () => {
   const { chromium } = await import(pathToFileURL(playwrightModule).href);
   const directory = await mkdtemp(join(tmpdir(), 'lingxi-remote-agent-browser-'));
   let gateway, host, broker, browser, proxy;
@@ -340,7 +344,7 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
     await host.setRemoteAccess(appId, true);
     const opened = await host.remoteOpen(appId, owner);
     const origin = new URL(opened.url).origin;
-    browser = await chromium.launch({ headless: true, ...(process.env.LINGXI_TEST_CHROME ? { executablePath: process.env.LINGXI_TEST_CHROME } : {}) });
+    browser = await chromium.launch({ headless: true, ...(process.env[testEnvironmentKey('TEST_CHROME')] ? { executablePath: process.env[testEnvironmentKey('TEST_CHROME')] } : {}) });
     const context = await browser.newContext({ ignoreHTTPSErrors: true });
     const page = await context.newPage();
     const ready = async (target, launch) => {
@@ -428,7 +432,7 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
       const reader = (await fetch('/stream')).body.getReader(); await reader.read(); window.streamOutcome = 'pending';
       reader.read().then(value => { window.streamOutcome = value.done ? 'closed' : 'unexpected'; }, () => { window.streamOutcome = 'closed'; });
     });
-    if (process.env.LINGXI_TEST_ARTIFACT_DIR) await reopenedPage.screenshot({ path: join(process.env.LINGXI_TEST_ARTIFACT_DIR, 'remote-agent-tls.png') });
+    if (process.env[testEnvironmentKey('TEST_ARTIFACT_DIR')]) await reopenedPage.screenshot({ path: join(process.env[testEnvironmentKey('TEST_ARTIFACT_DIR')], 'remote-agent-tls.png') });
     host.remoteRevokeOwner(owner);
     await page.waitForFunction(() => window.streamOutcome === 'closed', null, { timeout: 5000 });
     await reopenedPage.waitForFunction(async () => (await window.localApp.agent.tasks.get('first-session-active')).state === 'cancelled', null, { timeout: 5000 });

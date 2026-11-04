@@ -188,14 +188,49 @@ async function main() {
     await delay(80);
     const staleOperationIgnoredWithoutFault = await run(`!document.querySelector('.mod-ui-client-fallback') && window.__modUiClientFixture.calls.filter((call) => call.kind === 'control' && call.request.subtype === 'ui_client_fault').length === 0`);
 
-    await run(`window.__modUiClientFixture.holdNextFrameOperation(); window.__modUiClientFixture.updateParentProps('Updated from props')`);
-    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'setProps' && call.request.props.title === 'Updated from props')`);
-    await run(`window.__modUiClientFixture.emitNewerAsyncFrame()`);
-    await wait(`document.querySelector('.mod-ui-client-surface')?.textContent.includes('Newest asynchronous frame')`);
-    await run(`window.__modUiClientFixture.releaseHeldFrameOperations()`);
-    await delay(80);
+    await run(`window.__modUiClientFixture.holdNextFrameOperation('runtime-status'); window.__modUiClientFixture.updateParentProps('Updated from props')`);
+    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'setProps'
+      && call.request.runtimeId === 'runtime-status' && call.request.props.title === 'Updated from props'
+      && call.frameHeld === true && call.frameReleased !== true)`);
+    const heldStatusFrame = await run(`window.__modUiClientFixture.calls.find((call) => call.kind === 'operation' && call.request.type === 'setProps'
+      && call.request.runtimeId === 'runtime-status' && call.request.props.title === 'Updated from props' && call.frameHeld === true)`);
+    const newerAsyncFrame = await run(`(() => {
+      window.__modUiClientFixture.holdSubsequentFrameOperations('runtime-status');
+      return window.__modUiClientFixture.emitNewerAsyncFrame();
+    })()`);
+    assert.equal(newerAsyncFrame.renderRevision, heldStatusFrame.request.render_revision);
+    assert.ok(newerAsyncFrame.frameSequence > heldStatusFrame.returnedFrameSequence, 'async frame must be newer than the held status RPC');
+    await wait(`document.querySelector('[data-client="status"] .mod-ui-client-surface')?.textContent.includes('Newest asynchronous frame')`);
+    const staleRpcBeforeRelease = await run(`window.__modUiClientFixture.debugSnapshot()`);
+    const previousStatusWidth = await run(`(() => {
+      const status = document.querySelector('[data-client="status"]');
+      const width = status.getBoundingClientRect().width;
+      if (width < 2) throw new Error('status client has no measurable width');
+      window.__modUiClientFixture.observeStatusCommits();
+      const previous = status.style.width;
+      status.style.width = Math.floor(width / 2) + 'px';
+      return previous;
+    })()`);
+    await run(`window.__modUiClientFixture.releaseHeldSetProps('runtime-status')`);
+    // The per-runtime queue cannot enter a subsequent held frame operation
+    // until it has delivered the preceding setProps response to the client.
+    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && ['resize', 'render', 'setProps'].includes(call.request.type)
+      && call.request.runtimeId === 'runtime-status' && call.request.render_revision === ${heldStatusFrame.request.render_revision}
+      && call.frameHeld === true && call.frameReleased !== true)`);
+    // The probe's layout effect observes committed DOM while later frames are held.
+    const commitToken = await run(`window.__modUiClientFixture.requestStatusCommitProbe()`);
+    await wait(`window.__modUiClientFixture.statusCommitProbe(${commitToken}) !== null`);
     const parentPropsUpdateRendered = await run(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'setProps' && call.request.props.title === 'Updated from props')`);
-    const staleRpcFrameIgnored = await run(`document.querySelector('.mod-ui-client-surface')?.textContent.includes('Newest asynchronous frame') && !document.querySelector('.mod-ui-client-surface')?.textContent.includes('Updated from props')`);
+    const staleRpcCommit = await run(`window.__modUiClientFixture.statusCommitProbe(${commitToken})`);
+    const staleRpcFrameIgnored = staleRpcCommit.text.includes('Newest asynchronous frame')
+      && !staleRpcCommit.text.includes('Updated from props')
+      && staleRpcCommit.observedTexts.every((text) => !text.includes('Updated from props'));
+    const staleRpcAfterRelease = await run(`window.__modUiClientFixture.debugSnapshot()`);
+    await run(`(() => {
+      window.__modUiClientFixture.stopStatusCommitObservation();
+      document.querySelector('[data-client="status"]').style.width = ${JSON.stringify(previousStatusWidth)};
+      window.__modUiClientFixture.releaseHeldSubsequentFrameOperations('runtime-status');
+    })()`);
 
     await run(`window.__modUiClientFixture.emitStaleFrame()`);
     await delay(80);
@@ -564,7 +599,7 @@ async function main() {
     await run(`window.__modUiClientFixture.emitRapidExternalValue('external-after-stale')`);
     await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === 'external-after-stale'`, 'external props apply after a stale dispatch');
 
-    process.stdout.write(`${JSON.stringify({ parentElementsRendered, parentButtonRequest, parentInputChangeRequest, parentInputSubmitRequest, parentSelectRequest, parentMarkdownRequest, parentControlRequestsMatchNativeBodies, clientIdentitySnapshot, clientIdentityPropagationMatchesAttach, buttonPressHandled, buttonUsesCurrentHandle, inputUsesHookReachedValue, inputSubmitUsesHookReachedValue, inputRunHeldEvents, selectUsesHookReachedValue, selectRunHeldEvents, markdownExternalLinkUsesNormalNavigation, markdownOpenLinkUsesNormalNavigation, markdownLinksDoNotDispatchClientCallbacks, contextMentionHref, contextMentionClickPreventedNavigation, contextMentionOpenEvents, ordinaryMentionClickPreventedNavigation, ordinaryMentionOpenEvents, preRegistrationFrameReplayed, staleOperationIgnoredWithoutFault, parentPropsUpdateRendered, staleRpcFrameIgnored, staleFrameIgnored, workerFaultRenderedWithoutDuplicateReport, workerFaultDiagnostics, workerFaultLeavesSiblingVisible, workerFaultNotClearedByParentRevision, workerFaultRecoveredFromEnvironmentRemount, asyncWorkerFaultRenderedWithoutDuplicateReport, bufferedAsyncWorkerFaultIsLeafLocal, statusReadyAfterAsyncClientRemoval, statusReadinessTimeline, adapterFaultReportedAsRun, faultLeavesSiblingVisible, adapterRunFaultSurvivedPassiveFrames, adapterRunFaultSurvivedNewRevisionSameIdentity, adapterRunFaultSurvivedSameIdentityPropsUpdate, adapterRunFaultRecoveredAfterStateTokenChange, adapterRunFaultRecoveredAfterClientRemount, pluginUnloadInvalidationRendered, emptyNoHostIsQuietAndCleansUp, runtimeLifecycleSnapshot, unmountReleasedRuntimeAndDrawIdentity, staleRenderCleanupPreservedNewerFrame, lateInitialRenderCleanedUp, rapidBeforeRelease: rapidBeforeRelease, rapidAfterFirstAck, rapidInputRegression, focusDiagnostics: { beforeActivation: documentFocusedBeforeActivation, afterActivation: documentFocusedAfterActivation } })}\n`);
+    process.stdout.write(`${JSON.stringify({ parentElementsRendered, parentButtonRequest, parentInputChangeRequest, parentInputSubmitRequest, parentSelectRequest, parentMarkdownRequest, parentControlRequestsMatchNativeBodies, clientIdentitySnapshot, clientIdentityPropagationMatchesAttach, buttonPressHandled, buttonUsesCurrentHandle, inputUsesHookReachedValue, inputSubmitUsesHookReachedValue, inputRunHeldEvents, selectUsesHookReachedValue, selectRunHeldEvents, markdownExternalLinkUsesNormalNavigation, markdownOpenLinkUsesNormalNavigation, markdownLinksDoNotDispatchClientCallbacks, contextMentionHref, contextMentionClickPreventedNavigation, contextMentionOpenEvents, ordinaryMentionClickPreventedNavigation, ordinaryMentionOpenEvents, preRegistrationFrameReplayed, staleOperationIgnoredWithoutFault, parentPropsUpdateRendered, staleRpcFrameIgnored, staleRpcBeforeRelease, staleRpcAfterRelease, staleFrameIgnored, workerFaultRenderedWithoutDuplicateReport, workerFaultDiagnostics, workerFaultLeavesSiblingVisible, workerFaultNotClearedByParentRevision, workerFaultRecoveredFromEnvironmentRemount, asyncWorkerFaultRenderedWithoutDuplicateReport, bufferedAsyncWorkerFaultIsLeafLocal, statusReadyAfterAsyncClientRemoval, statusReadinessTimeline, adapterFaultReportedAsRun, faultLeavesSiblingVisible, adapterRunFaultSurvivedPassiveFrames, adapterRunFaultSurvivedNewRevisionSameIdentity, adapterRunFaultSurvivedSameIdentityPropsUpdate, adapterRunFaultRecoveredAfterStateTokenChange, adapterRunFaultRecoveredAfterClientRemount, pluginUnloadInvalidationRendered, emptyNoHostIsQuietAndCleansUp, runtimeLifecycleSnapshot, unmountReleasedRuntimeAndDrawIdentity, staleRenderCleanupPreservedNewerFrame, lateInitialRenderCleanedUp, rapidBeforeRelease: rapidBeforeRelease, rapidAfterFirstAck, rapidInputRegression, focusDiagnostics: { beforeActivation: documentFocusedBeforeActivation, afterActivation: documentFocusedAfterActivation } })}\n`);
   } finally {
     window.destroy();
     app.quit();

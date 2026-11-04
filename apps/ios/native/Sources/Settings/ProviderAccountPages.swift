@@ -23,7 +23,7 @@ struct ProviderAccountsPage: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(account.displayName)
-                            Text(account.authKind == "oauth" ? "ChatGPT subscription" : "API key").font(.caption).foregroundStyle(.secondary)
+                            Text(account.authKind == "oauth" ? String(localized: "provider_account_auth_chatgpt") : String(localized: "provider_account_auth_api_key")).font(.caption).foregroundStyle(.secondary)
                             Text(accountStatus(account)).font(.caption).foregroundStyle(.secondary)
                             if repository.wasLastUsed(account) {
                                 Text("Last used").font(.caption).foregroundStyle(.secondary)
@@ -65,7 +65,7 @@ struct ProviderAccountsPage: View {
             }
         }
         .confirmationDialog("Allow subscription fallback to metered API", isPresented: $confirmMetered, titleVisibility: .visible) {
-            Button("Allow API charges") {
+            Button("provider_account_allow_api_charges") {
                 Task { await repository.perform(.init(action: "set_policy", providerId: providerId,
                     allowSubscriptionToMetered: true)) }
             }
@@ -102,7 +102,7 @@ struct ProviderAccountsPage: View {
     }
 
     private func accountStatus(_ account: ProviderAccount) -> String {
-        if !account.enabled { return String(localized: "Disabled") }
+        if !account.enabled { return String(localized: "provider_account_disabled") }
         if let health = repository.health(for: account) {
             let reason = health.displayReason.map { " · \($0)" } ?? ""
             return "\(account.authKind == "oauth" ? "OAuth" : "API key") · \(health.displayStatus)\(reason)"
@@ -173,7 +173,7 @@ private struct ProviderAccountAddPage: View {
                     .accessibilityIdentifier("provider.account.name")
                     .disabled(createdAccountID != nil)
                 if !usesOAuth && executionBindingIds.count > 1 {
-                    Picker("Connection", selection: $selectedBinding) {
+                    Picker("provider_account_scope_connection", selection: $selectedBinding) {
                         ForEach(executionBindingIds, id: \.self) { Text($0).tag($0) }
                     }.disabled(createdAccountID != nil)
                 }
@@ -196,7 +196,7 @@ private struct ProviderAccountAddPage: View {
         .navigationTitle("Add account")
         .toolbar {
             #if DEBUG
-            if ProcessInfo.processInfo.environment["LINGXI_PROVIDER_ACCOUNT_COMPONENT_TEST"] == "1" {
+            if ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("PROVIDER_ACCOUNT_COMPONENT_TEST")] == "1" {
                 ToolbarItem(placement: .bottomBar) {
                     Button("Release fixture request") { ProviderAccountFixtureGate.release() }
                         .accessibilityIdentifier("provider.account.fixture.release")
@@ -338,7 +338,7 @@ private struct ProviderAccountDetailPage: View {
                     Section("Temporary unavailability") {
                         ForEach(repository.scopedHealth(for: account)) { health in
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(health.scopeKind == "model" ? String(localized: "Model") : String(localized: "Connection"))
+                                Text(health.scopeKind == "model" ? String(localized: "session_details_model") : String(localized: "provider_account_scope_connection"))
                                     .font(.caption).foregroundStyle(.secondary)
                                 Text(health.scopeId)
                                 Text(health.reason.replacingOccurrences(of: "_", with: " "))
@@ -430,7 +430,7 @@ struct ProviderAccountComponentTestFixture: View {
                     }
                     beginAttempts += 1
                     if beginAttempts == 1 {
-                        if ProcessInfo.processInfo.environment["LINGXI_PROVIDER_ACCOUNT_IDENTITY_CHANGE"] == "1" { identityGeneration = 2 }
+                        if ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("PROVIDER_ACCOUNT_IDENTITY_CHANGE")] == "1" { identityGeneration = 2 }
                         throw NSError(domain: "fixture", code: 3, userInfo: [NSLocalizedDescriptionKey: "Synthetic authorization failure"])
                     }
                     return try json(["mode": "device_code", "flow_id": "fixture-flow", "account_id": accountID!,

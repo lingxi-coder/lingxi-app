@@ -8,13 +8,13 @@ import { test } from 'node:test';
 
 import react from '@vitejs/plugin-react';
 import { createServer } from 'vite';
+import electronBinary from 'electron';
 
 const electronRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixtureRoot = join(electronRoot, 'test', 'fixtures');
-const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'settings-transaction-electron.mjs');
 
-test('Settings can close during pending credential persistence and ignores the late result', async () => {
+test('credential modal protects pending writes and recovers from failure before closing Settings', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-settings-transaction-vite-'));
   const vite = await createServer({
     root: fixtureRoot,
@@ -35,7 +35,7 @@ test('Settings can close during pending credential persistence and ignores the l
     const address = vite.httpServer?.address();
     assert.ok(address && typeof address === 'object' && address.port, 'Vite fixture server did not bind a port');
     const fixtureUrl = `http://127.0.0.1:${address.port}/settings-transaction-fixture.html`;
-    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
+    child = spawn(electronBinary, [electronDriver, fixtureUrl], {
       cwd: electronRoot,
       env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0', ELECTRON_IS_DEV: '0', LINGXI_TEST_USER_DATA: temporaryUserData },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -63,12 +63,24 @@ test('Settings can close during pending credential persistence and ignores the l
 
     assert.equal(result.connectionTestErrorBeforeDelete, true);
     assert.equal(result.connectionTestErrorAfterDelete, false);
+    const idle = { persistencePending: false, removalPending: false, restartCalls: 0, closeCalls: 0, activeSessionId: 'session-a', activeWork: false, persistedCredentials: [] };
+    assert.deepEqual(result.pendingRemoval, { modalOpen: true, accountCount: 1, state: { ...idle, removalPending: true } });
     assert.deepEqual(result.busyState, {
-      closeDisabled: false,
-      state: { persistencePending: true, restartCalls: 0, closeCalls: 0, activeSessionId: 'session-a', activeWork: false },
+      modalOpen: true,
+      cancelDisabled: true,
+      settingsOpen: true,
+      state: { ...idle, persistencePending: true },
     });
-    assert.deepEqual(result.afterClose, { persistencePending: true, restartCalls: 0, closeCalls: 1, activeSessionId: 'session-a', activeWork: false });
-    assert.deepEqual(result.afterLateResult, { persistencePending: false, restartCalls: 0, closeCalls: 1, activeSessionId: 'session-b', activeWork: true });
+    assert.deepEqual(result.afterFailure, { accountCount: 0, state: idle });
+    assert.deepEqual(result.afterIdleEscape, idle, 'Escape closes only the idle account dialog');
+    const saved = [{ providerId: 'anthropic', credential: 'sk-successful-save' }];
+    assert.deepEqual(result.afterSuccess, {
+      accountCount: 1,
+      successVisible: true,
+      state: { ...idle, persistedCredentials: saved },
+    });
+    assert.deepEqual(result.afterClose, { ...idle, closeCalls: 1, persistedCredentials: saved });
+    assert.deepEqual(result.afterSessionSwitch, { ...idle, closeCalls: 1, activeSessionId: 'session-b', activeWork: true, persistedCredentials: saved });
   } finally {
     if (child && child.exitCode === null) {
       child.kill('SIGTERM');

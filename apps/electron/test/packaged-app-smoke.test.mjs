@@ -24,6 +24,7 @@ import {
   workspaceTrustFingerprint,
 } from '../scripts/packaged-app-smoke.mjs';
 import { workspaceFingerprint as hostWorkspaceFingerprint } from '../src/main/host-utils.ts';
+import { productNamespace } from '../scripts/product-namespace.mjs';
 
 const temporaryDirectories = [];
 
@@ -146,7 +147,7 @@ test('packaged Local App creation waits for the default folder selection before 
 });
 
 test('packaged Local App smoke confirms only its exact generated source folder', async () => {
-  const expected = '/tmp/isolated-home/.lingxi/.apps/Smoke App';
+  const expected = join('/tmp/isolated-home', productNamespace().dotDir, '.apps', 'Smoke App');
   const makePage = (actual, clicked) => {
     const calls = [];
     return { calls, send: async (method, { expression }) => {

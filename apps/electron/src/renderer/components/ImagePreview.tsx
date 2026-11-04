@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 import { createPortal } from 'react-dom';
 import { useI18n } from '../i18n/useI18n';
 import { Icon } from './Icon';
+import { DESKTOP_BRIDGE_GLOBAL } from '../../shared/desktopBridge';
 
 interface ImagePreviewProps {
   src: string;
@@ -147,7 +148,7 @@ function ImageViewer({ src, alt, onClose }: { src: string; alt: string; onClose(
     }}>
     <div className="image-viewer-actions">
       <button type="button" className="image-viewer-control" disabled={saving || !ready} aria-busy={saving}
-        onClick={async () => { setSaving(true); setSaveFailed(false); try { await window.lingxi!.saveImage({ dataUrl: src, suggestedName: downloadName(src, alt) }); } catch { setSaveFailed(true); } finally { setSaving(false); } }}
+        onClick={async () => { setSaving(true); setSaveFailed(false); try { await window[DESKTOP_BRIDGE_GLOBAL]!.saveImage({ dataUrl: src, suggestedName: downloadName(src, alt) }); } catch { setSaveFailed(true); } finally { setSaving(false); } }}
         aria-label={tr('desktop_image_download')} title={tr('desktop_image_download')}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" /></svg>
       </button>

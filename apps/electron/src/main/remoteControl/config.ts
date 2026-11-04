@@ -6,6 +6,7 @@
  */
 
 import { DEFAULT_RTDB_URL, DEFAULT_STUN_URLS } from '@lingxi/bridge-client/remote';
+import { productEnvironmentKey } from '../productNamespace.js';
 
 export interface RemoteControlConfig {
   rtdbUrl: string;
@@ -34,6 +35,14 @@ export const DEFAULT_PUSH_API_URL = 'https://us-central1-lingxi-5e4b2.cloudfunct
 const STUN_URL = /^stuns?:[A-Za-z0-9._:%[\]-]{1,250}$/;
 const NAMESPACE = /^[A-Za-z0-9._-]{1,128}$/;
 const MAX_STUN_URLS = 8;
+export const REMOTE_CONTROL_ENV = {
+  forceTunnel: productEnvironmentKey('REMOTE_FORCE_TUNNEL'),
+  forceEnabled: productEnvironmentKey('REMOTE_CONTROL'),
+  rtdbUrl: productEnvironmentKey('REMOTE_RTDB_URL'),
+  rtdbNamespace: productEnvironmentKey('REMOTE_RTDB_NAMESPACE'),
+  pushUrl: productEnvironmentKey('REMOTE_PUSH_URL'),
+  stun: productEnvironmentKey('REMOTE_STUN'),
+} as const;
 
 function databaseUrl(raw: string): string | undefined {
   let url: URL;
@@ -67,36 +76,36 @@ export function remoteControlConfig(env: Env, packaged: boolean): RemoteControlC
     rtdbUrl: DEFAULT_RTDB_URL,
     stunUrls: [...DEFAULT_STUN_URLS],
     pushApiUrl: DEFAULT_PUSH_API_URL,
-    forceTunnel: env['LINGXI_REMOTE_FORCE_TUNNEL'] === '1',
-    forceEnabled: !packaged && env['LINGXI_REMOTE_CONTROL'] === '1',
+    forceTunnel: env[REMOTE_CONTROL_ENV.forceTunnel] === '1',
+    forceEnabled: !packaged && env[REMOTE_CONTROL_ENV.forceEnabled] === '1',
     warnings,
   };
 
-  const rawUrl = env['LINGXI_REMOTE_RTDB_URL']?.trim();
+  const rawUrl = env[REMOTE_CONTROL_ENV.rtdbUrl]?.trim();
   if (rawUrl) {
     const url = databaseUrl(rawUrl);
     if (url) config.rtdbUrl = url;
-    else warnings.push('LINGXI_REMOTE_RTDB_URL ignored: it must be an https URL (http only for localhost) without credentials, path or query');
+    else warnings.push(`${REMOTE_CONTROL_ENV.rtdbUrl} ignored: it must be an https URL (http only for localhost) without credentials, path or query`);
   }
 
-  const namespace = env['LINGXI_REMOTE_RTDB_NAMESPACE']?.trim();
+  const namespace = env[REMOTE_CONTROL_ENV.rtdbNamespace]?.trim();
   if (namespace) {
     if (NAMESPACE.test(namespace)) config.rtdbNamespace = namespace;
-    else warnings.push('LINGXI_REMOTE_RTDB_NAMESPACE ignored: it must be letters, digits, dots, dashes or underscores');
+    else warnings.push(`${REMOTE_CONTROL_ENV.rtdbNamespace} ignored: it must be letters, digits, dots, dashes or underscores`);
   }
 
-  const rawPush = env['LINGXI_REMOTE_PUSH_URL']?.trim();
+  const rawPush = env[REMOTE_CONTROL_ENV.pushUrl]?.trim();
   if (rawPush) {
     const url = pushApiUrl(rawPush);
     if (url) config.pushApiUrl = url;
-    else warnings.push('LINGXI_REMOTE_PUSH_URL ignored: it must be an https URL (http only for localhost) without credentials, query or fragment');
+    else warnings.push(`${REMOTE_CONTROL_ENV.pushUrl} ignored: it must be an https URL (http only for localhost) without credentials, query or fragment`);
   }
 
-  const rawStun = env['LINGXI_REMOTE_STUN']?.trim();
+  const rawStun = env[REMOTE_CONTROL_ENV.stun]?.trim();
   if (rawStun) {
     const urls = rawStun.split(',').map((url) => url.trim()).filter(Boolean);
     const valid = urls.filter((url) => STUN_URL.test(url)).slice(0, MAX_STUN_URLS);
-    if (valid.length < urls.length) warnings.push('LINGXI_REMOTE_STUN: entries that are not stun:/stuns: URLs were ignored');
+    if (valid.length < urls.length) warnings.push(`${REMOTE_CONTROL_ENV.stun}: entries that are not stun:/stuns: URLs were ignored`);
     if (valid.length > 0) config.stunUrls = valid;
   }
 

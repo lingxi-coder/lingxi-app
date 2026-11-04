@@ -42,6 +42,7 @@ import {
 } from './credential-broker.mjs';
 import { verifyModBun } from './mod-bun.mjs';
 import { verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { packagedProductNamespace } from './product-namespace.mjs';
 import { TEAM_BINARIES } from './team-runtime.mjs';
 
 function requirePath(path, kind = 'path') {
@@ -122,6 +123,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     join(resources, 'INTERNAL_BETA.md'),
     join(extractedApp, 'package.json'),
     join(extractedApp, 'out', 'main', 'index.js'),
+    join(extractedApp, 'out', 'main', 'product-namespace.json'),
     join(extractedApp, 'out', 'preload', 'index.cjs'),
     join(extractedApp, 'out', 'preload', 'localApp.cjs'),
     join(extractedApp, 'out', 'preload', 'remoteRtc.cjs'),
@@ -132,6 +134,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   ];
   try {
   for (const path of expected) requirePath(path);
+  packagedProductNamespace(paths.appPath);
   assertSandboxedPreloadBundle(readFileSync(join(extractedApp, 'out', 'preload', 'index.cjs'), 'utf8'));
   assertSandboxedPreloadBundle(readFileSync(join(extractedApp, 'out', 'preload', 'localApp.cjs'), 'utf8'));
   assertSandboxedPreloadBundle(readFileSync(join(extractedApp, 'out', 'preload', 'remoteRtc.cjs'), 'utf8'));

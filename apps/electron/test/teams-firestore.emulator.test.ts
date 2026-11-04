@@ -5,11 +5,14 @@ import { getApps } from 'firebase/app';
 import { openTeamsFirestoreSession, type TeamsFirestoreOptions } from '../src/main/teams/firestore.js';
 
 const backend = createRequire(new URL('../../firebase/package.json', import.meta.url));
-const { initializeApp, deleteApp } = backend('firebase-admin/app');
-const { getAuth } = backend('firebase-admin/auth');
-const { getFirestore } = backend('firebase-admin/firestore');
-const projectId = 'demo-lingxi-teams-t0';
 const enabled = !!process.env.FIRESTORE_EMULATOR_HOST && !!process.env.FIREBASE_AUTH_EMULATOR_HOST;
+// The two non-emulator tests below need only the client SDK. Require admin
+// dependencies when emulator tests are enabled so their absence still fails
+// an explicitly requested emulator run.
+const { initializeApp, deleteApp } = enabled ? backend('firebase-admin/app') : {};
+const { getAuth } = enabled ? backend('firebase-admin/auth') : {};
+const { getFirestore } = enabled ? backend('firebase-admin/firestore') : {};
+const projectId = 'demo-lingxi-teams-t0';
 const testOptions = { skip: !enabled, timeout: 30_000 };
 let app: ReturnType<typeof initializeApp>;
 let admin: ReturnType<typeof getFirestore>;

@@ -2,10 +2,11 @@ import { TeamsPanel } from '../../../../../packages/teams/TeamsPanel';
 import { useAccountState } from '../bridge/useAccountState';
 import { useMemo } from 'react';
 import type { TeamsApi } from '../../../../../packages/teams';
+import { DESKTOP_BRIDGE_GLOBAL } from '../../shared/desktopBridge';
 
 export function Teams({ zh, initialInvite, onInviteHandled }: { zh: boolean; initialInvite?: string; onInviteHandled: () => void }) {
   const { state } = useAccountState();
-  const desktop = window.lingxi?.teams, uid = state?.user?.uid;
+  const desktop = window[DESKTOP_BRIDGE_GLOBAL]?.teams, uid = state?.user?.uid;
   const api = useMemo<TeamsApi | undefined>(() => desktop && uid ? {
     localBots: () => desktop.localBots(uid), bindLocalBot: input => desktop.bindLocalBot(uid, input),
     list: () => desktop.list(uid), detail: teamId => desktop.detail(uid, teamId), execute: command => desktop.execute(uid, command),

@@ -7,7 +7,7 @@ import UIKit
 final class ProviderAccountsNativeUITests: XCTestCase {
     func testSyntheticAccountCreateUpdateRestartAndDelete() throws {
         let app = XCUIApplication()
-        app.launchEnvironment["LINGXI_UI_TESTING"] = "0"
+        app.launchEnvironment[ProductNamespace.environmentKey("UI_TESTING")] = "0"
         app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         let name = "Native account UI \(UUID().uuidString.prefix(8))"
         app.launch()
@@ -66,7 +66,7 @@ final class ProviderAccountsNativeUITests: XCTestCase {
 
     func testOAuthFailureRetryAndDeviceCodeHandoff() {
         let app = XCUIApplication()
-        app.launchEnvironment["LINGXI_PROVIDER_ACCOUNT_COMPONENT_TEST"] = "1"
+        app.launchEnvironment[ProductNamespace.environmentKey("PROVIDER_ACCOUNT_COMPONENT_TEST")] = "1"
         app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
         let add = app.buttons["provider.account.add"]
@@ -102,8 +102,8 @@ final class ProviderAccountsNativeUITests: XCTestCase {
 
     func testRetryRejectsChangedAccountIdentity() {
         let app = XCUIApplication()
-        app.launchEnvironment["LINGXI_PROVIDER_ACCOUNT_COMPONENT_TEST"] = "1"
-        app.launchEnvironment["LINGXI_PROVIDER_ACCOUNT_IDENTITY_CHANGE"] = "1"
+        app.launchEnvironment[ProductNamespace.environmentKey("PROVIDER_ACCOUNT_COMPONENT_TEST")] = "1"
+        app.launchEnvironment[ProductNamespace.environmentKey("PROVIDER_ACCOUNT_IDENTITY_CHANGE")] = "1"
         app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
         let add = app.buttons["provider.account.add"]
@@ -134,9 +134,9 @@ final class ProviderAccountsNativeUITests: XCTestCase {
     /// Explicitly enabled only for the authorized physical-device acceptance run.
     /// Never reads, prints, or screenshots the live device code.
     func testPhysicalChatGPTOAuthHandoff() throws {
-        try XCTSkipUnless(ProcessInfo.processInfo.environment["LINGXI_PHYSICAL_OAUTH_TEST"] == "1", "Physical authorization test is opt-in")
+        try XCTSkipUnless(ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("PHYSICAL_OAUTH_TEST")] == "1", "Physical authorization test is opt-in")
         let app = XCUIApplication()
-        app.launchEnvironment["LINGXI_UI_TESTING"] = "0"
+        app.launchEnvironment[ProductNamespace.environmentKey("UI_TESTING")] = "0"
         app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
         openAccounts(app, presetID: "openai-chatgpt")

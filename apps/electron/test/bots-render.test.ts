@@ -463,10 +463,14 @@ test('with the Bots page open the sidebar marks it, and Home is not marked', () 
 test('a Bot\'s chat is titled with the Bot, not with a folder path, and offers the way back to the Bot', () => {
   const bridge = { bootstrap: null, sessionLoading: false, desktop: emptyDesktopState(), runtimeCenter: emptyRuntimeCenterState(), activeSession: { projectPath: '/data/bots/a/workspace', sessionId: 's1' } } as unknown as UseBridge;
   const html = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop, bot: { name: 'Scribe', onOpen: noop } }));
-  assert.match(html, />Scribe<\/div>/);
-  assert.match(html, />Bot chat<\/div>/);
+  assert.match(html, />Scribe<\/span>/);
+  assert.match(html, />Bot chat<\/span>/);
   assert.match(html, /aria-label="Open Bot"/);
   assert.ok(!html.includes('/data/bots'), 'the Bot\'s private folder is not shown');
+
+  const unnamed = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop, bot: { name: '', onOpen: noop } }));
+  assert.match(unnamed, />Bot chat<\/span>/);
+  assert.ok(!unnamed.includes('/data/bots'), 'an unnamed Bot does not expose its private folder');
 
   const project = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop }));
   assert.ok(!project.includes('Open Bot'));

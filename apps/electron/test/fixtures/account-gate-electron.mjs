@@ -1,12 +1,16 @@
 import { app, BrowserWindow } from 'electron';
+import { configureFixtureWindow } from './electron-test-environment.mjs';
 const url = process.argv.find(value => value.startsWith('http://'));
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const progress = step => process.stderr.write(`account gate fixture: ${step}\n`);
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: false, width: 1100, height: 800, webPreferences: { sandbox: true } });
+  const window = new BrowserWindow({ show: false, width: 1100, height: 800, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(url);
+    await configureFixtureWindow(window);
+    progress('loaded');
     const run = script => window.webContents.executeJavaScript(script);
     const wait = async expression => {
       const deadline = Date.now() + 6000;
@@ -22,8 +26,10 @@ async function main() {
       window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
     };
     await wait(`window.accountGateFixture && ${draft}`);
+    progress('workspace ready');
     await run('window.accountGateFixture.expire()');
     await wait(`${google} && !${google}.disabled`);
+    progress('sign-in ready');
     const result = {};
     result.fullScreen = await run(`(() => { const r = ${login}.getBoundingClientRect(); return r.x === 0 && r.y === 0 && r.width === innerWidth && r.height === innerHeight; })()`);
     result.backgroundHidden = await run(`${draft}.getClientRects().length === 0 && document.querySelector('[aria-label="Workspace"]').getClientRects().length === 0`);
@@ -35,21 +41,25 @@ async function main() {
     result.keyboardNavigation = await run(`document.activeElement?.getAttribute('aria-label') === 'Email' && window.accountGateFixture.backgroundTabs === 0`);
     await click(google);
     await wait('window.accountGateFixture.oauthCalls === 1');
+    progress('first sign-in started');
     result.nativeClick = true;
     await run('window.accountGateFixture.timeout()');
     await wait(`!${google}.disabled`);
     await click(google);
     await wait('window.accountGateFixture.oauthCalls === 2');
+    progress('retry started');
     result.retryAfterTimeout = true;
     await run('window.accountGateFixture.finishOldReply()');
     await delay(50);
     result.lateReplyIgnored = await run(`${google}.disabled && !document.body.innerText.includes('Stale timeout')`);
     await run('window.accountGateFixture.succeed()');
     await wait(`!${login} && ${draft}.getClientRects().length > 0`);
+    progress('workspace restored');
     result.draftPreserved = await run(`${draft}.value === 'Retain this local draft'`);
     await run('window.accountGateFixture.signOut()');
     await click(`document.querySelector('[aria-label="Workspace"] button')`);
     await wait(`${google} && !${google}.disabled`);
+    progress('manual sign-in ready');
     result.manualSignInFullScreen = await run(`${draft}.getClientRects().length === 0`);
     console.log(JSON.stringify(result));
   } catch (error) { console.error(error); process.exitCode = 1; }

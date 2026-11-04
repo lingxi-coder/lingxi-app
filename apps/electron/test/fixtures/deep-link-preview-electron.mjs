@@ -47,6 +47,7 @@ async function main() {
     assert.ok(await run('document.body.innerText.includes("Import JSON")'));
     await button('Import 1 providers');
     await wait('window.linkPreviewFixture.state().calls.some(call => call.domain === "provider")');
+    assert.equal((await state()).calls.find(call => call.domain === 'provider').command.patch.providers.linked.baseUrl, 'https://example.com/v1');
     await show('extensions/plugin/known-plugin');
     await wait('Boolean(document.querySelector(".extension-plugin-page"))');
     assert.ok(await run('document.body.innerText.includes("known-plugin")'));

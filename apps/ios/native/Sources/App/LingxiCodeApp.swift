@@ -51,7 +51,7 @@ struct LingxiCodeApp: App {
         WindowGroup {
             Group {
                 #if DEBUG
-                if ProcessInfo.processInfo.environment["LINGXI_PROVIDER_ACCOUNT_COMPONENT_TEST"] == "1" {
+                if ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("PROVIDER_ACCOUNT_COMPONENT_TEST")] == "1" {
                     ProviderAccountComponentTestFixture()
                 } else {
                     normalRoot

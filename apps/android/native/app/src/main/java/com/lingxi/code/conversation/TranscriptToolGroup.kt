@@ -145,10 +145,10 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             LXIcon(toolIconName(first.header?.verb, first.tool), size = 18.dp, color = t.text3)
-            Text(label + " · " + stringResource(R.string.chat_tool_calls_count, group.calls.size),
+            Text(label + " · " + stringResource(R.string.chat_tool_calls_count_fmt, group.calls.size),
                 modifier = Modifier.weight(1f), color = if (focused || hovered) t.text else t.text3,
                 fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (group.running) Text(stringResource(R.string.chat_tool_running_count, group.calls.count { it.status == AgentToolStatus.Running }), color = t.text3, fontSize = 12.sp)
+            if (group.running) Text(stringResource(R.string.chat_tool_running_count_fmt, group.calls.count { it.status == AgentToolStatus.Running }), color = t.text3, fontSize = 12.sp)
             else if (group.calls.all { it.status == AgentToolStatus.Failed }) Text(stringResource(R.string.chat_tool_calls_unsuccessful), color = t.text3, fontSize = 12.sp)
             LXIcon(if (open) LXIconName.Chevron else LXIconName.ChevronR,
                 modifier = Modifier.alpha(if (open || focused || hovered) 1f else 0f), size = 12.dp, color = t.text4)

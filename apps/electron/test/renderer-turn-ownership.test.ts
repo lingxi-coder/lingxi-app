@@ -142,7 +142,7 @@ function composerHarness() {
   let images: any[] = [];
   const editor = { innerHTML: 'First prompt', replaceChildren() { this.innerHTML = ''; } };
   const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() }, ready: true, flowModeRef: { current: false }, voiceState: 'idle', text: 'First prompt', selectedFiles: [], imageAttachments: images,
-    draftSessionId: { current: 'A' }, draftsBySession: { current: new Map() }, imageDraftGeneration: { current: 1 }, composerDraftRevision: { current: 0 }, imageAttachmentsRef: { current: images },
+    draftSessionId: { current: 'A' }, draftsBySession: { current: new Map() }, imageDraftGeneration: { current: 1 }, composerDraftRevision: { current: 0 }, imageAttachmentsRef: { current: images }, promptHistory: { current: null },
     input: { current: editor }, richPromptSnapshot: () => ({ text: editor.innerHTML, files: [] }), promptWithFileMentions: (text: string) => text,
     sideCreationInput, onCreateSide: undefined,
     bridge: { running: false, desktop: { slashCommands: [] }, sendTrackedPrompt: () => ({ token: { sessionId: 'A', clientTurnId: 'A:1' }, queued: queued.promise }) },
@@ -240,6 +240,7 @@ test('a delayed dispatch ACK preserves later text and attachment edits', async (
 test('unchanged submitted draft clears, while navigation and failed sends retain the original owner', async () => {
   const unchanged = composerHarness(), sent = unchanged.context.submit(); unchanged.queued.resolve(); await sent;
   assert.equal(unchanged.editor.innerHTML, '');
+  assert.deepEqual(unchanged.notices, [null]);
   const moved = composerHarness(), failed = moved.context.submit();
   moved.context.draftSessionId.current = 'B'; moved.context.imageDraftGeneration.current += 1; moved.editor.innerHTML = 'Private B';
   moved.queued.reject(new Error('A dispatch failed')); await failed;

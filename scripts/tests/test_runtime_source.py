@@ -50,10 +50,10 @@ class RuntimeSourceTests(unittest.TestCase):
         self.assertEqual(result["root"], str(Path("/tmp/locked-harness").resolve()))
         self.assertEqual(result["revision"], self.revision)
 
-    def test_current_inventory_rejects_device_and_rooted_fs_source_drift(self):
+    def test_current_inventory_rejects_platform_and_vendor_source_drift(self):
         inventory_path = Path(__file__).resolve().parents[1] / "lib" / "harness-runtime-packages.json"
         inventory = json.loads(inventory_path.read_text())
-        for name in ("device-api", "rooted-fs"):
+        for name in ("device-api", "rooted-fs", "xcap"):
             with self.subTest(package=name):
                 metadata = copy.deepcopy(self.metadata)
                 package = {

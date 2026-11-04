@@ -5,6 +5,7 @@ import { LingxiAccount } from '../../src/renderer/components/settings/pages/Ling
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import type { AccountApi, AccountState } from '../../src/shared/account';
+import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
 import '../../src/renderer/global.css';
 
 const user = { uid: 'fixture-owner', displayName: 'Fixture owner', email: null, emailVerified: true };
@@ -32,7 +33,7 @@ const account: AccountApi = {
     return state;
   },
 };
-(window as any).lingxi = { account };
+(window as any)[DESKTOP_BRIDGE_GLOBAL] = { account };
 (window as any).accountGateFixture = fixture;
 // A still-mounted settings dialog must not steal the sign-in screen's Tab key.
 document.addEventListener('keydown', event => {

@@ -115,12 +115,10 @@ test('the layer switcher appears only on layered pages', async () => {
   const { permissions, diagnostics, mcp, customProviders } = await runScenario('layer-switcher');
   assert.equal(permissions.hasLayerSwitcher, true, 'permissions is layered and must offer user/project/local');
   assert.equal(diagnostics.hasLayerSwitcher, false, 'diagnostics is client-owned and must not show a layer switcher');
-  // `permissions` (编码, layered) vs `diagnostics` (高级, not layered) alone
-  // cannot fail a regression that keys the switcher off `group === '编码'`
-  // instead of `page.layered` — both pages agree on both properties. These
-  // three are the ones that actually separate the two rules.
+  // MCP is inside 编码 but has its own scopes. Provider configuration is
+  // Host-wide, so it also has no engine-layer switcher.
   assert.equal(mcp.hasLayerSwitcher, false, 'mcp is inside 编码 but NOT layered — its own three-scope storage, no layer switcher');
-  assert.equal(customProviders.hasLayerSwitcher, true, 'custom-providers is outside 编码 but IS layered');
+  assert.equal(customProviders.hasLayerSwitcher, false, 'custom providers are Host-wide, not engine-layer settings');
 });
 
 test('settings preserves content and scroll track insets while scrolling and switching pages', async () => {
@@ -164,14 +162,15 @@ test('the four configuration managers render without horizontal dialog overflow'
   assert.equal(result.layout.plugins.manifestPluginEditor, true, 'plugins must render manifest-driven configuration fields');
 });
 
-test('custom providers import, save credentials, preserve edits and isolate layers', async () => {
+test('custom providers import, save credentials and preserve Host-wide edits', async () => {
   const result = await runScenario('custom-providers');
-  assert.equal(result.locked.projectDisabled, true, 'cannot switch destination during save');
-  assert.equal(result.saved.lastEngineSettingsPatch.destination, 'user');
+  assert.deepEqual(result.locked, { editorDisabled: true, hasLayerSwitcher: false });
+  assert.equal(result.visibleWithoutProject, true, 'Host provider remains visible without a project');
   assert.deepEqual(result.saved.credentialWrites, ['customlab']);
-  assert.equal(JSON.stringify(result.saved.lastEngineSettingsPatch).includes('test-only-secret'), false);
+  assert.equal(JSON.stringify(result.saved.lastProviderSettingsPatch).includes('test-only-secret'), false);
+  assert.equal(result.saved.lastEngineSettingsPatch, null, 'provider writes do not target an engine settings layer');
   assert.equal(result.fixedId, true);
-  const edited = result.edited.lastEngineSettingsPatch.patch.providers;
+  const edited = result.edited.lastProviderSettingsPatch.providers;
   assert.deepEqual(Object.keys(edited), ['customlab']);
   assert.deepEqual(edited.customlab.models[0].aliases, ['fast']);
   assert.deepEqual(edited.customlab.models[0].capabilities, { reasoning: true });
@@ -183,7 +182,7 @@ test('custom providers import, save credentials, preserve edits and isolate laye
   assert.ok(result.invalidText);
   assert.equal(result.invalidText.includes('test-only-secret'), false);
   assert.equal(result.conflictSkipped, true);
-  const imported = result.partial.lastEngineSettingsPatch.patch.providers;
+  const imported = result.partial.lastProviderSettingsPatch.providers;
   assert.deepEqual(Object.keys(imported).sort(), ['customlab', 'imported']);
   assert.equal(imported.customlab.baseUrl, 'https://changed.example/v1');
   assert.equal(imported.imported.type, 'anthropic');
@@ -202,7 +201,7 @@ test('provider drafts and pending credential writes do not survive switching ses
   const result = await runScenario('provider-session-isolation');
   assert.equal(result.draftCleared, true);
   assert.deepEqual(result.state.credentialWrites, []);
-  assert.equal(result.state.userDisabled, false, 'an interrupted save releases its layer lock');
+  assert.equal(result.addEnabled, true, 'the new session can start a provider draft after the old save finishes');
 });
 
 test('project and local tabs are disabled with no project open, with the reason shown as visible text', async () => {
@@ -398,13 +397,14 @@ test('the layer switcher names the project the ENGINE reported, and switching it
 });
 
 
-test('provider region saves a layer and applies only through reconnect', async () => {
+test('provider region saves Host-wide settings and re-enables after persistence', async () => {
   const result = await runScenario('provider-region');
   assert.equal(result.initial, true);
-  assert.equal(result.saved.destination, 'user');
-  assert.deepEqual(result.saved.patch, { providerRegion: 'china_mainland' });
   assert.equal(result.pending, true);
-  assert.equal(result.restarted, true);
+  assert.deepEqual(result.state.lastProviderSettingsPatch, { providerRegion: 'china_mainland' });
+  assert.equal(result.state.providerSettings.providerRegion, 'china_mainland');
+  assert.equal(result.state.lastEngineSettingsPatch, null);
+  assert.equal(result.state.navCalls.includes('restart'), false);
 });
 
 test('Plugins, MCP and Skills share settings chrome while preserving catalogs, drafts and responsive layout', async () => {

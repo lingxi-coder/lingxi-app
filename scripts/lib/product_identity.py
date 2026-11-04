@@ -31,7 +31,7 @@ def native_id(value, label):
 
 @lru_cache(maxsize=1)
 def android_package():
-    source = (HOST / "apps/android/native/app/build.gradle.kts").read_text()
+    source = (HOST / "apps/android/native/app/build.gradle.kts").read_text(encoding="utf-8")
     namespace = literal(r'^\s*namespace = "([^"\n]+)"\s*$', source, "Android namespace")
     application = literal(r'^\s*applicationId = "([^"\n]+)"\s*$', source, "Android applicationId")
     if namespace != application:
@@ -41,7 +41,7 @@ def android_package():
 
 @lru_cache(maxsize=1)
 def ios_bundle_id():
-    source = (HOST / "apps/ios/native/project.yml").read_text()
+    source = (HOST / "apps/ios/native/project.yml").read_text(encoding="utf-8")
     # Read only the main application's settings.base, excluding flavor,
     # widget and test identities. These anchors intentionally require the
     # checked-in XcodeGen block/scalar shape instead of guessing YAML values.
@@ -63,16 +63,21 @@ def locked_branding_source():
     return Path(resolved["packages"]["branding"]).parent / "src/lib.rs"
 
 
-def branding_constant(name, resolved=None):
-    source = (Path(resolved["packages"]["branding"]).parent / "src/lib.rs"
-              if resolved is not None else locked_branding_source())
-    value = literal(r"^pub const " + re.escape(name) + r': &str = ("[^"\n]*");$',
-                    source.read_text(), f"branding::{name}")
-    return json.loads(value)
+def parse_branding_constant(name, source):
+    """Parse one branding constant from a caller-owned immutable source snapshot."""
+    value = literal(r"^pub const " + re.escape(name) + r': &str = (r?"[^"\n]*");$',
+                    source, f"branding::{name}")
+    # Rust's raw string keeps Windows path separators literal; normal strings
+    # use the JSON-compatible escape syntax used by the branding constants.
+    return value[2:-1] if value.startswith('r"') else json.loads(value)
+
+
+def branding_constant(name):
+    return parse_branding_constant(name, locked_branding_source().read_text(encoding="utf-8"))
 
 
 @lru_cache(maxsize=1)
 def authorization_enabled_env():
     return literal(r'^enabled="\$\{([A-Z][A-Z0-9_]*):-0\}"$',
-                   (HOST / "scripts/mobile-linux/check-authorizations.sh").read_text(),
+                   (HOST / "scripts/mobile-linux/check-authorizations.sh").read_text(encoding="utf-8"),
                    "authorization enabled environment key")

@@ -22,21 +22,21 @@ async function waitFor(webContents, expression, timeout = 8000) {
 
 async function runProviderRegionScenario(window, webContents) {
   const run = (expression) => webContents.executeJavaScript(expression);
-  await run('window.__settingsScreenTest.setLayeredSnapshot({user:{},project:{},local:{}},{providerRegion:"international"})');
+  await run('window.__settingsScreenTest.setProviderSettings({providerRegion:"international"})');
   await run('window.__settingsScreenTest.selectPage("custom-providers")');
   await waitFor(webContents, `Boolean(document.querySelector('[aria-label="模型区域"]'))`);
-  const initial = await run('document.body.textContent.includes("当前运行：国际") && !document.body.textContent.includes("应用并重连")');
+  const initial = await run('document.querySelector(\'[aria-label="模型区域"]\').value === "international"');
+  await run('window.__settingsScreenTest.holdSettingsWrite()');
   await run(`(() => { const select=document.querySelector('[aria-label="模型区域"]'); select.value='china_mainland'; select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
-  await waitFor(webContents, 'window.__settingsScreenTest.state().lastEngineSettingsPatch?.patch.providerRegion === "china_mainland"');
-  const saved = await run('window.__settingsScreenTest.state().lastEngineSettingsPatch');
-  await run('window.__settingsScreenTest.setLayeredSnapshot({user:{providerRegion:"china_mainland"},project:{},local:{}},{providerRegion:"international"})');
-  await waitFor(webContents, 'document.body.textContent.includes("应用并重连")');
-  const pending = await run('document.body.textContent.includes("当前运行：国际")');
+  await waitFor(webContents, 'document.querySelector(\'[aria-label="模型区域"]\').disabled');
+  const pending = await run('window.__settingsScreenTest.state().lastProviderSettingsPatch === null');
+  await run('window.__settingsScreenTest.releaseSettingsWrite()');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().lastProviderSettingsPatch?.providerRegion === "china_mainland"');
+  await waitFor(webContents, 'document.querySelector(\'[aria-label="模型区域"]\').value === "china_mainland" && !document.querySelector(\'[aria-label="模型区域"]\').disabled');
+  const state = await run('window.__settingsScreenTest.state()');
   const folder=process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
   if(folder){window.showInactive(); await delay(350); mkdirSync(folder,{recursive:true});writeFileSync(join(folder,'provider-region.png'),(await window.capturePage()).toPNG()); window.hide();}
-  await run(`[...document.querySelectorAll('button')].find(b=>b.textContent==='应用并重连').click()`);
-  await waitFor(webContents, 'window.__settingsScreenTest.state().navCalls.includes("restart")');
-  return {initial,saved,pending,restarted:true};
+  return {initial,pending,state};
 }
 
 async function runLayerSwitcherScenario(webContents) {
@@ -44,12 +44,8 @@ async function runLayerSwitcherScenario(webContents) {
   const permissions = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("diagnostics")');
   const diagnostics = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  // The pair above (编码/layered vs 高级/not-layered) cannot fail a
-  // regression that reads `group === '编码'` instead of `page.layered` —
-  // both pages agree on group AND layered. These three are the ones that
-  // actually separate the two rules (see `nav.ts`'s own exception comments):
-  // `mcp` is IN 编码 but not layered; `custom-providers` is
-  // OUTSIDE 编码 but layered.
+  // MCP is inside 编码 but owns its own scopes, so the shell must not
+  // infer the layer switcher from the navigation group.
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("mcp")');
   const mcp = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("custom-providers")');
@@ -588,6 +584,7 @@ async function runCustomProvidersScenario(window, webContents) {
   };
   await run('window.__settingsScreenTest.setHasProject(true)');
   await run('window.__settingsScreenTest.setLayeredSnapshot({ user: {}, project: {}, local: {} })');
+  await run('window.__settingsScreenTest.setProviderSettings({})');
   await run('window.__settingsScreenTest.selectPage("custom-providers")');
   await delay(70);
   await capture('empty');
@@ -599,18 +596,21 @@ async function runCustomProvidersScenario(window, webContents) {
   await capture('editor');
   await run('window.__settingsScreenTest.holdSettingsWrite()');
   await click('保存 Provider');
-  const locked = await run('window.__settingsScreenTest.state()');
-  await run('window.__settingsScreenTest.clickLayerTab("project")');
+  const locked = await run('({editorDisabled: document.querySelector("fieldset")?.disabled, hasLayerSwitcher: window.__settingsScreenTest.state().hasLayerSwitcher})');
   await run('window.__settingsScreenTest.releaseSettingsWrite()');
   await waitFor(webContents, 'window.__settingsScreenTest.state().credentialWrites.length === 1');
   const saved = await run('window.__settingsScreenTest.state()');
 
   // Edit an existing entry with fields the simple editor does not expose.
-  await run(`window.__settingsScreenTest.setLayeredSnapshot({ user: { providers: { customlab: {
+  await run('window.__settingsScreenTest.setHasProject(false)');
+  await delay(35);
+  const visibleWithoutProject = await run('document.body.textContent.includes("customlab")');
+  await run('window.__settingsScreenTest.setHasProject(true)');
+  await run(`window.__settingsScreenTest.setProviderSettings({ providers: { customlab: {
     type: 'openai', baseUrl: 'https://example.com/v1', supportsWebsockets: false,
     models: [{ id: 'model-a', aliases: ['fast'], capabilities: { reasoning: true }, metadata: { display_name: 'Model A' } }, { id: 'remove-me' }],
     pricing: { 'model-a': { inputPerMtok: 1, outputPerMtok: 2 }, 'remove-me': { inputPerMtok: 3, outputPerMtok: 4 } }
-  } } }, project: { providers: { other: {type:'openai',baseUrl:'https://other.example',apiKeyEnv:'OTHER_KEY',models:[{id:'other'}]} } }, local:{} })`);
+  } } })`);
   await delay(50);
   await click('编辑');
   const fixedId = await run('document.querySelector(\'[aria-label="Profile 名称"]\').readOnly');
@@ -619,7 +619,7 @@ async function runCustomProvidersScenario(window, webContents) {
   await run('document.querySelector(\'[aria-label="移除模型 2"]\').click()');
   await delay(35);
   await click('保存 Provider');
-  await waitFor(webContents, 'window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers.customlab.baseUrl === "https://changed.example/v1"');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().lastProviderSettingsPatch?.providers?.customlab?.baseUrl === "https://changed.example/v1"');
   const edited = await run('window.__settingsScreenTest.state()');
   await delay(50);
   await capture('list');
@@ -649,7 +649,7 @@ async function runCustomProvidersScenario(window, webContents) {
 
   await click('导入 JSON');
   await fill('JSON 配置', '{"provider":{}}');
-  await run('window.__settingsScreenTest.clickLayerTab("project")');
+  await run('window.__settingsScreenTest.setActiveSession("session-import-switch")');
   await delay(50);
   const clearedOnSwitch = await run('!document.querySelector(\'[aria-label="JSON 配置"]\')');
   await click('编辑');
@@ -661,9 +661,9 @@ async function runCustomProvidersScenario(window, webContents) {
   await fill('maxAttempts', '1.5');
   await click('保存');
   const retryError = await run('document.querySelector(\'[role="alert"]\')?.textContent');
-  await run('window.__settingsScreenTest.clickLayerTab("user")');
+  await run('window.__settingsScreenTest.setActiveSession("session-malformed")');
   await delay(35);
-  await run('window.__settingsScreenTest.setLayeredSnapshot({ user:{ providers:{ broken:null } }, project:{}, local:{} })');
+  await run('window.__settingsScreenTest.setProviderSettings({ providers:{ broken:null } })');
   await delay(35);
   const malformedRowSurvives = await run('document.body.textContent.includes("broken") && Boolean(document.querySelector(\'[role="dialog"]\'))');
   await click('导入 JSON');
@@ -686,9 +686,9 @@ async function runCustomProvidersScenario(window, webContents) {
   await delay(35);
   await fill('模型 ID 1', 'final-model');
   await click('确认导入 1 个 Provider');
-  await waitFor(webContents, 'window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers?.priced');
-  const toggledPricing = await run('window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers.priced.pricing');
-  return { pricingTargetProtected, toggledPricing, malformedRowSurvives, dualAuth, retryError, locked, saved, fixedId, edited, invalidText, conflictSkipped, partial, retried, clearedOnSwitch, overflow };
+  await waitFor(webContents, 'window.__settingsScreenTest.state().lastProviderSettingsPatch?.providers?.priced');
+  const toggledPricing = await run('window.__settingsScreenTest.state().lastProviderSettingsPatch.providers.priced.pricing');
+  return { pricingTargetProtected, toggledPricing, malformedRowSurvives, dualAuth, retryError, locked, saved, visibleWithoutProject, fixedId, edited, invalidText, conflictSkipped, partial, retried, clearedOnSwitch, overflow };
 }
 
 async function runProviderSessionIsolation(webContents) {
@@ -720,7 +720,8 @@ async function runProviderSessionIsolation(webContents) {
   await delay(50);
   await run('window.__settingsScreenTest.releaseSettingsWrite()');
   await delay(80);
-  return { draftCleared, state: await run('window.__settingsScreenTest.state()') };
+  const addEnabled = await run(`(() => { const b = [...document.querySelectorAll('button')].find(e => e.textContent.includes('新增 Provider')); return Boolean(b && !b.disabled); })()`);
+  return { draftCleared, addEnabled, state: await run('window.__settingsScreenTest.state()') };
 }
 
 async function runConfigurationNavigation(window, webContents) {

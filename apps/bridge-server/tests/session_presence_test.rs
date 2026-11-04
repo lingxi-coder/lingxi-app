@@ -289,7 +289,13 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
     std::fs::write(
         &resume_path,
         format!(
-            "{}\n",
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "fixed-session-mode",
+                "sessionId": session_c_text,
+                "sessionMode": "code",
+                "instructionEpoch": 0
+            }),
             serde_json::json!({
                 "type": "user",
                 "uuid": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",

@@ -314,13 +314,25 @@ async fn weather_usage_is_refreshed_after_turn_resume_and_clear() {
         observations["result"]["readings"][1]["context"]["tokens"], 1,
         "{observations}"
     );
+    let resumed_session_id = lingxi_core::types::SessionId::new();
+    let fixed_mode = Json::parse(
+        &serde_json::json!({
+            "type": "fixed-session-mode",
+            "sessionId": resumed_session_id.as_uuid().to_string(),
+            "sessionMode": "code",
+            "instructionEpoch": 0
+        })
+        .to_string(),
+    )
+    .unwrap();
     rt.orchestrator
         .resume_session(
-            lingxi_core::types::SessionId::new(),
+            resumed_session_id,
             vec![],
             None,
             None,
             lingxi_core::host::ResumeRuntimeSnapshot {
+                transcript_metadata: Some(vec![fixed_mode]),
                 current_usage: Some(lingxi_core::host::CurrentUsageSnapshot {
                     input_tokens: 800,
                     cache_read_input_tokens: 23200,

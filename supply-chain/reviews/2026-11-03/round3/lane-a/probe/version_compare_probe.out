@@ -1,0 +1,7 @@
+compare("1.0.0-1", "1.0.0-alpha") = Ok(Eq)
+compare("1.2.1", "1.alpha.1") = Ok(Eq)
+compare("1.alpha.1", "1.3.1") = Ok(Eq)
+compare("1.2.1", "1.3.1") = Ok(Lt)
+compare("1.0.0+build.1", "1.0.0") = Ok(Lt)
+upper-bound witness: compare("2", "1") = Ok(Gt); equals Ge = false
+mixed-manifest: lhs == rhs: true; rhs == lhs: false

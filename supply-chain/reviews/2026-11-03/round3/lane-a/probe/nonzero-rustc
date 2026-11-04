@@ -1,0 +1,3 @@
+#!/bin/sh
+printf 'rustc 1.99.7\nrelease: 1.99.7\ncommit-date: 2026-11-03\n'
+exit 7

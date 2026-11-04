@@ -1,0 +1,15 @@
+
+running 10 tests
+test date::tests::display ... ok
+test tests::test_parse_current ... ok
+test tests::test_stable_compatibility ... ok
+test tests::test_verbose_version_parse ... ok
+test tests::test_version_parse ... ok
+test version::tests::display ... ok
+test version::tests::test_comparisons ... ok
+test version::tests::test_from_mmp ... ok
+test version::tests::test_malformed ... ok
+test version::tests::test_str_to_mmp ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+

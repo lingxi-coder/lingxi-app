@@ -1,0 +1,44 @@
+[
+  {
+    "name": "version_check",
+    "version": "0.9.5",
+    "sha256": "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a",
+    "files": {
+      ".cargo_vcs_info.json": "fd4d36271280b7893e595f97096f6ff1c9de41d7567c6aa4a684fe7e29e2ce69",
+      ".github/workflows/ci.yml": "0d3ec0059cdc483d7d6d2aaeac4958e95b1a03ad1652f42a38d44cbfac5dcbca",
+      ".gitignore": "f9b1ca6ae27d1c18215265024629a8960c31379f206d9ed20f64e0b2dcf79805",
+      ".travis.yml": "d504e08178faaa3a096b0e94981846e9cc0eaf1926c47ef28a4096ae084ddb39",
+      "Cargo.toml": "399ea74400a173c02eabe91cb9487d0cf351117857a5d2ebc6231f0efde67681",
+      "Cargo.toml.orig": "be3876ab29038ad4ef2ec2d5c625e3b499a9a7bc7b6485fbc57f64e213331ea2",
+      "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "LICENSE-MIT": "b7e650f3fce5c53249d1cdc608b54df156a97edd636cf9d23498d0cfe7aec63e",
+      "README.md": "ac2a0a360812436bd5798f5fe2affe7d6ed9eb7f15d6e4d73931e95b437560f2",
+      "src/channel.rs": "bb3eae79aaf224591f1e9dddedcabbea3fc01bc6c06eafedcd87d7b770a35aca",
+      "src/date.rs": "09580a0a2008fad2ccbc43fb42a88f42221b98b01692702022a296dc9c86bf37",
+      "src/lib.rs": "01bb86088ba281d511ae002aa939bb30b747f47ace5ea13a46de554a3117806e",
+      "src/version.rs": "dba18a25983ec6e37b952f4cdc5219c9e5abba2c3a76cef87465e1fba6f8ac89"
+    }
+  },
+  {
+    "name": "version-compare",
+    "version": "0.2.1",
+    "sha256": "03c2856837ef78f57382f06b2b8563a2f512f7185d732608fd9176cb3b8edf0e",
+    "files": {
+      ".cargo_vcs_info.json": "e8ec2573d26db8e4b2183d1d21d4cc837d91b9709618b585aaf8eba658c49a9c",
+      "Cargo.lock": "7a475c14a7801d9e7fd63572ee3ca479bc8da935d9da7677beb8e82f76cadf3a",
+      "Cargo.toml": "2f85f557b31c4fa3a232317843adda223d603662217f19401278b74924370b1f",
+      "Cargo.toml.orig": "575ad573a69b4016d4c88a44a26e221d513403710ff965dcd9a7e9660d0001c9",
+      "LICENSE": "cedfcc7ace1639adb054bd4a19b6f8585ccb2429a60b4bf51bfeb0601058c22c",
+      "README.md": "99df5a8ffc5b6c5638e137ae173b7d807e56ab2d728b9828b9ef2a1081205c24",
+      "examples/example.rs": "a0c7d43849dc57cb85cf7ae5914704f789323761decef94f2884c691cdd7d1fd",
+      "examples/minimal.rs": "aa86eae9d778d966d1fbd49f7c3005693e9229b299b0e4eac2ec427628b68a75",
+      "src/cmp.rs": "aa01ba92a7505117e209a236d2f0e0d52186bd5abcf96022c3dbc4930b7c8b8e",
+      "src/compare.rs": "7694f20fe090f3952f4b2274a14c411dba01e6050ce3b225041eee62516f04d2",
+      "src/lib.rs": "75cbc287dff38cc28a9ee9ce4e7c3010805df64ba0354f7fd28641d4918ac42d",
+      "src/manifest.rs": "e82a6fa192ad953235f8c223131015d4243a00141313eed0d37bbb15e20300f0",
+      "src/part.rs": "f6b453cb8f166744ad9a793c66df8e9011443319d1bbd6b5786c586bb49d9322",
+      "src/test.rs": "903800360e1fe190018d75a831ea0db3cee07cca3c6a1e12a1e48e0328231f08",
+      "src/version.rs": "6f0744b47071c1adc91424c8a08d3bbc327341170d93bdcdb952200c99990824"
+    }
+  }
+]

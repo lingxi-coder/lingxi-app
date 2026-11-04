@@ -1,0 +1,348 @@
+{
+  "input_sha256": {
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs": "4736941fa6c790367158082cb55e5fc89aba7c7f0a85405aada8271fbb5c87ad",
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/untrusted-0.9.0/src/lib.rs": "860cdbec448f82196aa2242ad52945dfc60f29fcfbc28d244877fca0c0331fcc",
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/untrusted-0.9.0/tests/tests.rs": "cefcc4543e3d49e1af0e6e6efebebbdfb61cad131d0ea2d69c14ed11f398cca5",
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round3-20261103/lane-b/stable-reference.rs": "dca14536f6a43098f6a980bef94e7c412670a6db340f4623ef07e680dbfe20be",
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round3-20261103/lane-b/untrusted-reference.rs": "720f19ccaa56f7950c5134f2df9916f5ea18c48a878f0633b05811c9aa28fc0b",
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round3-20261103/lane-b/untrusted-invariant-probe.rs": "51d8816e5062bd88c8d34699e4a242a54b14d0346e2fadfc799528062c705dd0"
+  },
+  "steps": [
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--version",
+        "--verbose"
+      ],
+      "exit": 0,
+      "seconds": 0.053,
+      "stdout": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: aarch64-apple-darwin\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2015",
+        "--crate-name",
+        "stable_deref_trait",
+        "--crate-type=rlib",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs",
+        "-o",
+        "libstable_core.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.061,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2015",
+        "--crate-name",
+        "stable_deref_trait",
+        "--crate-type=rlib",
+        "--cfg",
+        "feature=\"alloc\"",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs",
+        "-o",
+        "libstable_alloc.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.067,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2015",
+        "--crate-name",
+        "stable_deref_trait",
+        "--crate-type=rlib",
+        "--cfg",
+        "feature=\"alloc\"",
+        "--cfg",
+        "feature=\"std\"",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs",
+        "-o",
+        "libstable_std.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.075,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2018",
+        "--test",
+        "stable-reference.rs",
+        "--extern",
+        "stable_deref_trait=libstable_std.rlib",
+        "-o",
+        "stable-reference"
+      ],
+      "exit": 0,
+      "seconds": 0.212,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "./stable-reference"
+      ],
+      "exit": 0,
+      "seconds": 0.262,
+      "stdout": "\nrunning 2 tests\ntest borrow_and_lock_guards_keep_targets_stable_when_moved ... ok\ntest owned_borrowed_and_shared_targets_survive_moves_and_clones ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustdoc",
+        "+1.94.0",
+        "--edition=2015",
+        "--test",
+        "--crate-name",
+        "stable_deref_trait",
+        "--cfg",
+        "feature=\"alloc\"",
+        "--cfg",
+        "feature=\"std\"",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs"
+      ],
+      "exit": 0,
+      "seconds": 0.747,
+      "stdout": "\nrunning 6 tests\ntest /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs - StableDeref (line 79) ... ok\ntest /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs - StableDeref (line 89) ... ok\ntest /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs - StableDeref (line 104) ... ok\ntest /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs - StableDeref (line 61) ... ok\ntest /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs - StableDeref (line 49) ... ok\ntest /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs - StableDeref (line 38) ... ok\n\ntest result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s\n\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2018",
+        "--crate-name",
+        "untrusted",
+        "--crate-type=rlib",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/untrusted-0.9.0/src/lib.rs",
+        "-o",
+        "libuntrusted.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.079,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2018",
+        "--test",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/untrusted-0.9.0/tests/tests.rs",
+        "--extern",
+        "untrusted=libuntrusted.rlib",
+        "-o",
+        "untrusted-packaged-tests"
+      ],
+      "exit": 0,
+      "seconds": 0.246,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "./untrusted-packaged-tests"
+      ],
+      "exit": 0,
+      "seconds": 0.744,
+      "stdout": "\nrunning 13 tests\ntest const_fn ... ok\ntest size_assumptions ... ok\ntest test_debug ... ok\ntest test_from_slice ... ok\ntest test_input_as_slice_less_safe ... ok\ntest test_input_from ... ok\ntest test_input_clone_and_copy ... ok\ntest test_input_is_empty ... ok\ntest test_input_len ... ok\ntest test_input_read_all ... ok\ntest test_input_read_all_unconsume ... ok\ntest test_vec_into ... ok\ntest using_reader_after_skip_and_get_error_returns_error_must_not_panic ... ok\n\ntest result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2018",
+        "--test",
+        "untrusted-reference.rs",
+        "--extern",
+        "untrusted=libuntrusted.rlib",
+        "-o",
+        "untrusted-reference"
+      ],
+      "exit": 0,
+      "seconds": 0.282,
+      "stdout": "",
+      "stderr": "warning: panic message contains unused formatting placeholders\n  --> untrusted-reference.rs:26:58\n   |\n26 |                         _ => panic!(\"reference mismatch: {len}/{start}/{count}\"),\n   |                                                          ^^^^^ ^^^^^^^ ^^^^^^^\n   |\n   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2021/panic-macro-consistency.html>\n   = note: this message is not used as a format string when given without arguments, but will be in Rust 2021\n   = note: `#[warn(non_fmt_panics)]` (part of `#[warn(rust_2021_compatibility)]`) on by default\nhelp: add the missing arguments\n   |\n26 |                         _ => panic!(\"reference mismatch: {len}/{start}/{count}\", ...),\n   |                                                                                +++++\nhelp: or add a \"{}\" format string to use the message literally\n   |\n26 |                         _ => panic!(\"{}\", \"reference mismatch: {len}/{start}/{count}\"),\n   |                                     +++++\n\nwarning: 1 warning emitted\n\n"
+    },
+    {
+      "argv": [
+        "./untrusted-reference"
+      ],
+      "exit": 0,
+      "seconds": 0.257,
+      "stdout": "\nrunning 2 tests\ntest full_and_partial_reads_enforce_consumption_without_cursor_replacement ... ok\ntest bounded_inputs_match_slice_cursor_reference ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2018",
+        "--test",
+        "untrusted-invariant-probe.rs",
+        "--extern",
+        "untrusted=libuntrusted.rlib",
+        "-o",
+        "untrusted-invariant-probe"
+      ],
+      "exit": 0,
+      "seconds": 0.242,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "./untrusted-invariant-probe",
+        "--nocapture"
+      ],
+      "exit": 0,
+      "seconds": 0.607,
+      "stdout": "\nrunning 2 tests\ntest replacing_the_public_reader_can_defeat_the_outer_full_input_check ... ok\ntest replacing_the_public_reader_can_invalidate_read_partial_range ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": "\nthread 'replacing_the_public_reader_can_invalidate_read_partial_range' (4193079) panicked at /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/untrusted-0.9.0/src/reader.rs:117:61:\ncalled `Option::unwrap()` on a `None` value\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2015",
+        "--crate-name",
+        "stable_deref_trait",
+        "--crate-type=rlib",
+        "--target",
+        "aarch64-apple-ios",
+        "--cfg",
+        "feature=\"alloc\"",
+        "--cfg",
+        "feature=\"std\"",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs",
+        "-o",
+        "libstable-aarch64-apple-ios.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.066,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2018",
+        "--crate-name",
+        "untrusted",
+        "--crate-type=rlib",
+        "--target",
+        "aarch64-apple-ios",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/untrusted-0.9.0/src/lib.rs",
+        "-o",
+        "libuntrusted-aarch64-apple-ios.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.134,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2015",
+        "--crate-name",
+        "stable_deref_trait",
+        "--crate-type=rlib",
+        "--target",
+        "aarch64-linux-android",
+        "--cfg",
+        "feature=\"alloc\"",
+        "--cfg",
+        "feature=\"std\"",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs",
+        "-o",
+        "libstable-aarch64-linux-android.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.113,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2018",
+        "--crate-name",
+        "untrusted",
+        "--crate-type=rlib",
+        "--target",
+        "aarch64-linux-android",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/untrusted-0.9.0/src/lib.rs",
+        "-o",
+        "libuntrusted-aarch64-linux-android.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.107,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2015",
+        "--crate-name",
+        "stable_deref_trait",
+        "--crate-type=rlib",
+        "--target",
+        "x86_64-pc-windows-gnu",
+        "--cfg",
+        "feature=\"alloc\"",
+        "--cfg",
+        "feature=\"std\"",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/stable_deref_trait-1.2.1/src/lib.rs",
+        "-o",
+        "libstable-x86_64-pc-windows-gnu.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.165,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2018",
+        "--crate-name",
+        "untrusted",
+        "--crate-type=rlib",
+        "--target",
+        "x86_64-pc-windows-gnu",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/untrusted-0.9.0/src/lib.rs",
+        "-o",
+        "libuntrusted-x86_64-pc-windows-gnu.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.161,
+      "stdout": "",
+      "stderr": ""
+    }
+  ]
+}

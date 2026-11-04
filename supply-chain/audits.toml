@@ -79,11 +79,23 @@ criteria = "safe-to-deploy"
 version = "0.4.0"
 notes = "AI-assisted full source review and independent root cross-review; evidence: supply-chain/reviews/2026-11-03/batch002-lane-a.md (SHA-256 a0282f61bee7952f4b57d9d87f14bd5ca4cfd43612abd2a79845195c8325d47f). Scope: exact crates.io source and documented API use; dependencies reviewed separately. Explicit RNG limits recorded in evidence."
 
+[[audits.stable_deref_trait]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.2.1"
+notes = "AI-assisted full exact package source review and independent cross-review. Primary: supply-chain/reviews/2026-11-03/round3/lane-b/review.md (SHA-256 81f9752102d7bc822e3783ae770bb3c1d045426062e108685cfb8fcb20783867); cross-review: supply-chain/reviews/2026-11-03/round3/lane-a/cross-lane-b.md (SHA-256 223935f928dc70f0bfafb659e8eafb783596db8c4e390f1f0ffcf20cdbea7d90). All 23 shipped unsafe marker implementations and feature gates reviewed under documented aliasing, lifetime and mutation contracts; downstream unsafe implementations and consumers require separate review."
+
 [[audits.tower-service]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
 version = "0.3.3"
 notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/tower-service-0.3.3.md (SHA-256 032c52780b33dd4dd8c9f75898cd9b311bd19964bfd95a008ca2f0db8dac0d6e); independent review: supply-chain/reviews/2026-11-03/batch002-lane-b-cross-1.md (SHA-256 c8d5660bcde576172e6069013ba2997f6394473e6b00224421a9b18d7db15036). Exact crates.io version; documented API and disclosure limits in reports; dependencies reviewed separately."
+
+[[audits.untrusted]]
+who = "Codex AI-assisted"
+criteria = "safe-to-run"
+version = "0.9.0"
+notes = "AI-assisted full exact package source review and independent cross-review. Primary: supply-chain/reviews/2026-11-03/round3/lane-b/review.md (SHA-256 81f9752102d7bc822e3783ae770bb3c1d045426062e108685cfb8fcb20783867); cross-review: supply-chain/reviews/2026-11-03/round3/lane-a/cross-lane-b.md (SHA-256 223935f928dc70f0bfafb659e8eafb783596db8c4e390f1f0ffcf20cdbea7d90). Only controlled ordinary Cargo builds/tests. Deployment criterion remains HOLD: caller callbacks that explicitly replace Reader reproduce panic and incomplete-consumption acceptance; current product exploit not established. Optional administrative helper scripts and timing/caller boundaries are detailed in evidence."
 
 [[audits.urlencoding]]
 who = "Codex AI-assisted"
@@ -96,3 +108,15 @@ who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
 version = "1.0.4"
 notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/utf8_iter-1.0.4.md (SHA-256 c6598a1492052e8091ea8518a8731867134de303357466d640943e13c80d4509); cross-review: supply-chain/reviews/2026-11-03/utf8_iter-1.0.4-cross-review.md (SHA-256 53b9788dc88e1e55a66b7887bbf26763c791f1ce006d629e3284acc58d23c66d). Exact crates.io version, with bounded scalar/iteration checks and a documented offset semantics limitation; consuming ICU/IDNA packages are reviewed separately."
+
+[[audits.version-compare]]
+who = "Codex AI-assisted"
+criteria = "safe-to-run"
+version = "0.2.1"
+notes = "AI-assisted full exact package source review and independent cross-review. Primary: supply-chain/reviews/2026-11-03/round3/lane-a/review.md (SHA-256 d77a65649ed69b6e72a9d852398fb5c65eaeb3f2b04ca44a4ac3ea922aa9c309); cross-review: supply-chain/reviews/2026-11-03/round3/lane-b/cross-lane-a/review.md (SHA-256 a82135ef07f1e8a0c288923b315864b252076ef54076c0044f0a72e01c24667b). Deployment criterion remains HOLD: reproduced Number/Text comparison errors and nontransitive equality. Separate system-deps internal-build upper-bound issue is not a demonstrated product exploit. Only controlled ordinary Cargo builds/tests certified."
+
+[[audits.version_check]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.9.5"
+notes = "AI-assisted full exact package source review and independent cross-review. Primary: supply-chain/reviews/2026-11-03/round3/lane-a/review.md (SHA-256 d77a65649ed69b6e72a9d852398fb5c65eaeb3f2b04ca44a4ac3ea922aa9c309); cross-review: supply-chain/reviews/2026-11-03/round3/lane-b/cross-lane-a/review.md (SHA-256 a82135ef07f1e8a0c288923b315864b252076ef54076c0044f0a72e01c24667b). Trust RUSTC/PATH and compiler output; fixed direct version subprocess has no shell. Nonzero-exit and permissive date/channel parsing limits recorded. Dependencies and downstream build decisions reviewed separately."

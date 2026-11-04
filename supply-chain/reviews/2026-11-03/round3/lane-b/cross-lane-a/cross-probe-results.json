@@ -1,0 +1,156 @@
+{
+  "inputs": {
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/version_check-0.9.5/src/lib.rs": "01bb86088ba281d511ae002aa939bb30b747f47ace5ea13a46de554a3117806e",
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/version-compare-0.2.1/src/lib.rs": "75cbc287dff38cc28a9ee9ce4e7c3010805df64ba0354f7fd28641d4918ac42d",
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round3-20261103/lane-a/probe/version_check_probe.rs": "8eddce495d72f03c21442cb64c7f4bb44081e7fb7e7b835b5866291f451e3fea",
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round3-20261103/lane-a/probe/version_compare_probe.rs": "f331629e0a175a3f489b003718254e947f77cdae4d82001fb7d47e249bc744ea",
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round3-20261103/lane-a/probe/nonzero-rustc": "e4432797f0855a75ee302e37ac8905ef65d3d5c0189f054e53ec2b355aa8402d"
+  },
+  "steps": [
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--version",
+        "--verbose"
+      ],
+      "exit": 0,
+      "seconds": 0.065,
+      "stdout": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: aarch64-apple-darwin\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2015",
+        "--crate-name",
+        "version_check",
+        "--crate-type=rlib",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/version_check-0.9.5/src/lib.rs",
+        "-o",
+        "libversion_check.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.187,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2021",
+        "--crate-name",
+        "version_compare",
+        "--crate-type=rlib",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/version-compare-0.2.1/src/lib.rs",
+        "-o",
+        "libversion_compare.rlib"
+      ],
+      "exit": 0,
+      "seconds": 0.157,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2015",
+        "--test",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/version_check-0.9.5/src/lib.rs",
+        "-o",
+        "version_check_tests"
+      ],
+      "exit": 0,
+      "seconds": 0.557,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "./version_check_tests"
+      ],
+      "exit": 0,
+      "seconds": 0.875,
+      "stdout": "\nrunning 10 tests\ntest date::tests::display ... ok\ntest version::tests::test_comparisons ... ok\ntest version::tests::test_from_mmp ... ok\ntest version::tests::display ... ok\ntest version::tests::test_malformed ... ok\ntest version::tests::test_str_to_mmp ... ok\ntest tests::test_stable_compatibility ... ok\ntest tests::test_version_parse ... ok\ntest tests::test_verbose_version_parse ... ok\ntest tests::test_parse_current ... ok\n\ntest result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s\n\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2021",
+        "--test",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/version-compare-0.2.1/src/lib.rs",
+        "-o",
+        "version_compare_tests"
+      ],
+      "exit": 0,
+      "seconds": 0.389,
+      "stdout": "",
+      "stderr": "warning: hiding a lifetime that's elided elsewhere is confusing\n  --> /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/version-compare-0.2.1/src/test.rs:70:21\n   |\n70 |     pub fn versions(&self) -> (crate::Version, crate::Version) {\n   |                     ^^^^^      ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^ the same lifetime is hidden here\n   |                     |          |\n   |                     |          the same lifetime is hidden here\n   |                     the lifetime is elided here\n   |\n   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing\n   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default\nhelp: use `'_` for type paths\n   |\n70 |     pub fn versions(&self) -> (crate::Version<'_>, crate::Version<'_>) {\n   |                                              ++++                ++++\n\nwarning: 1 warning emitted\n\n"
+    },
+    {
+      "argv": [
+        "./version_compare_tests"
+      ],
+      "exit": 0,
+      "seconds": 0.257,
+      "stdout": "\nrunning 30 tests\ntest cmp::tests::flip ... ok\ntest cmp::tests::factor ... ok\ntest cmp::tests::from_ord ... ok\ntest cmp::tests::from_sign ... ok\ntest cmp::tests::invert ... ok\ntest cmp::tests::from_name ... ok\ntest cmp::tests::sign ... ok\ntest cmp::tests::opposite ... ok\ntest cmp::tests::ord ... ok\ntest cmp::tests::name ... ok\ntest manifest::tests::has_max_depth ... ok\ntest part::tests::display ... ok\ntest compare::tests::compare_to ... ok\ntest version::tests::as_str ... ok\ntest compare::tests::compare ... ok\ntest version::tests::compare_to ... ok\ntest version::tests::display ... ok\ntest version::tests::debug ... ok\ntest version::tests::has_manifest ... ok\ntest version::tests::from ... ok\ntest version::tests::compare ... ok\ntest version::tests::manifest ... ok\ntest version::tests::part ... ok\ntest version::tests::partial_cmp ... ok\ntest version::tests::from_manifest ... ok\ntest version::tests::partial_eq ... ok\ntest version::tests::parts_ignore_text ... ok\ntest version::tests::parts ... ok\ntest version::tests::set_manifest ... ok\ntest version::tests::parts_max_depth ... ok\n\ntest result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2015",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round3-20261103/lane-a/probe/version_check_probe.rs",
+        "--extern",
+        "version_check=libversion_check.rlib",
+        "-o",
+        "version_check_probe"
+      ],
+      "exit": 0,
+      "seconds": 0.261,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "./version_check_probe",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round3-20261103/lane-a/probe/nonzero-rustc"
+      ],
+      "exit": 0,
+      "seconds": 0.724,
+      "stdout": "out-of-calendar date accepted: true\nunrecognized channel string classified stable: true\nnonzero fake compiler still reported version: Some((1, 99, 7))\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "+1.94.0",
+        "--edition=2021",
+        "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round3-20261103/lane-a/probe/version_compare_probe.rs",
+        "--extern",
+        "version_compare=libversion_compare.rlib",
+        "-o",
+        "version_compare_probe"
+      ],
+      "exit": 0,
+      "seconds": 0.211,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "./version_compare_probe"
+      ],
+      "exit": 0,
+      "seconds": 0.314,
+      "stdout": "compare(\"1.0.0-1\", \"1.0.0-alpha\") = Ok(Eq)\ncompare(\"1.2.1\", \"1.alpha.1\") = Ok(Eq)\ncompare(\"1.alpha.1\", \"1.3.1\") = Ok(Eq)\ncompare(\"1.2.1\", \"1.3.1\") = Ok(Lt)\ncompare(\"1.0.0+build.1\", \"1.0.0\") = Ok(Lt)\nupper-bound witness: compare(\"2\", \"1\") = Ok(Gt); equals Ge = false\nmixed-manifest: lhs == rhs: true; rhs == lhs: false\n",
+      "stderr": ""
+    }
+  ]
+}

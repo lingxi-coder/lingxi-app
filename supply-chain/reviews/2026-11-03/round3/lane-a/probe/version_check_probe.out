@@ -1,0 +1,3 @@
+out-of-calendar date accepted: true
+unrecognized channel string classified stable: true
+nonzero fake compiler still reported version: Some((1, 99, 7))

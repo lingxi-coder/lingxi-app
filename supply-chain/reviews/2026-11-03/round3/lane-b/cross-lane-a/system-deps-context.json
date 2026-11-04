@@ -1,0 +1,17 @@
+[
+  {
+    "version": "6.2.2",
+    "archive_sha256": "a3e535eb8dded36d55ec13eddacd30dec501792ff23a0b1682c38601b8cf2349",
+    "src_lib_sha256": "d5a9a6a4533cf06e732404103897b45682c859686b9a93bc923f618b9f0ee03f"
+  },
+  {
+    "version": "7.0.8",
+    "archive_sha256": "396a35feb67335377e0251fcbc1092fc85c484bd4e3a7a54319399da127796e7",
+    "src_lib_sha256": "fd5b96ecef139966952035ad4f1f12d6d58abbf46be2ae0bb2fa39769121a4c0"
+  },
+  {
+    "version": "9.0.0",
+    "archive_sha256": "8a0dae2cbca1f0ff93795713cfe0a4c02f760e3c0b8ae2ab4ec4045808ff429f",
+    "src_lib_sha256": "bf944c07d60422d314c26a3258e3c69b1946c5ff86f2e653c3b43db5502898a7"
+  }
+]

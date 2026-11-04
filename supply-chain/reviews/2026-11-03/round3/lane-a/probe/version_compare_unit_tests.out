@@ -1,0 +1,35 @@
+
+running 30 tests
+test cmp::tests::factor ... ok
+test cmp::tests::flip ... ok
+test cmp::tests::from_name ... ok
+test cmp::tests::from_ord ... ok
+test cmp::tests::from_sign ... ok
+test cmp::tests::invert ... ok
+test cmp::tests::name ... ok
+test cmp::tests::opposite ... ok
+test cmp::tests::ord ... ok
+test cmp::tests::sign ... ok
+test compare::tests::compare ... ok
+test compare::tests::compare_to ... ok
+test manifest::tests::has_max_depth ... ok
+test part::tests::display ... ok
+test version::tests::as_str ... ok
+test version::tests::compare ... ok
+test version::tests::compare_to ... ok
+test version::tests::debug ... ok
+test version::tests::display ... ok
+test version::tests::from ... ok
+test version::tests::from_manifest ... ok
+test version::tests::has_manifest ... ok
+test version::tests::manifest ... ok
+test version::tests::part ... ok
+test version::tests::partial_cmp ... ok
+test version::tests::partial_eq ... ok
+test version::tests::parts ... ok
+test version::tests::parts_ignore_text ... ok
+test version::tests::parts_max_depth ... ok
+test version::tests::set_manifest ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

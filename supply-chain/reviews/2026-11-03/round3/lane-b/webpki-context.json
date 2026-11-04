@@ -1,0 +1,9 @@
+{
+  "package": "rustls-webpki-0.103.16",
+  "archive_sha256": "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281",
+  "context_files": {
+    "src/signed_data.rs": "9edbc160fd6ec158bbcc67e408c2bc09078142c4feee3ce6e8dae6b7da806fe0",
+    "src/der.rs": "ed693c0410cb8e89e586de76682841156dc3825f9a4181ac7f425232d8640da0"
+  },
+  "note": "Only the selected consumer call chain was inspected; no full consumer audit or exploit proof."
+}

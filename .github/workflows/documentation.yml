@@ -6,6 +6,9 @@ on:
       # The web build compiles the Remote Control core and the Electron reducer chain from source.
       - 'packages/bridge-client/src/**'
       - 'packages/bridge-client/package*.json'
+      # The Teams web tests import the Firebase backend modules directly.
+      - 'apps/firebase/src/**'
+      - 'apps/firebase/package*.json'
       - 'apps/electron/src/renderer/**'
       - 'apps/electron/src/shared/**'
       - 'docs/technical/**'
@@ -17,6 +20,8 @@ on:
       # The web build compiles the Remote Control core and the Electron reducer chain from source.
       - 'packages/bridge-client/src/**'
       - 'packages/bridge-client/package*.json'
+      - 'apps/firebase/src/**'
+      - 'apps/firebase/package*.json'
       - 'apps/electron/src/renderer/**'
       - 'apps/electron/src/shared/**'
       - 'docs/technical/**'
@@ -36,6 +41,7 @@ jobs:
           cache-dependency-path: |
             apps/web/package-lock.json
             packages/bridge-client/package-lock.json
+            apps/firebase/package-lock.json
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -43,6 +49,9 @@ jobs:
       # Shared source imports resolve dependencies from their own package directory.
       - name: Install shared Bridge client dependencies
         working-directory: packages/bridge-client
+        run: npm ci
+      - name: Install Firebase backend dependencies for Teams tests
+        working-directory: apps/firebase
         run: npm ci
       - name: Check saved bilingual content and generated consumers
         run: npm run docs:check:content

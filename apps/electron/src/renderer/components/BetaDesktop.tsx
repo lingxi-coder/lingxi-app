@@ -1436,7 +1436,8 @@ export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCent
     <header className="drag-region desktop-topbar" style={{ '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
       <div className="desktop-topbar-project" title={bot?.name ?? projectPath}>
         {bot ? <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('bots_chat_open_bot')} title={tr('bots_chat_open_bot')} onClick={bot.onOpen} style={topbarActionTokens}><Icon name="bot" size={18} /></button> : <span className="desktop-topbar-project-icon" aria-hidden="true"><DesktopIcon name="folder" size={17} /></span>}
-        <span className="desktop-topbar-title" style={{ color: t.text }}>{bot?.name || sessionTitle || basename(projectPath)}</span>
+        <span className="desktop-topbar-title" style={{ color: t.text }}>{bot ? (bot.name || tr('bots_chat_badge')) : sessionTitle || basename(projectPath)}</span>
+        {bot?.name && <span style={{ color: t.text4, fontSize: 10, whiteSpace: 'nowrap' }}>{tr('bots_chat_badge')}</span>}
       </div>
       {remote && (
         <span className="no-drag desktop-topbar-remote" role="status" data-remote-viewers={remote.viewers}

@@ -436,7 +436,7 @@ function tabIcon(item: RuntimeCenterItemRef): string {
   return 'file';
 }
 
-function InspectorTabs({ bridge, toolsOpen, inactive = false, onTools, onSelect }: { bridge: UseBridge; toolsOpen: boolean; inactive?: boolean; onTools: () => void; onSelect: () => void }) {
+export function InspectorTabs({ bridge, toolsOpen, inactive = false, onTools, onSelect }: { bridge: UseBridge; toolsOpen: boolean; inactive?: boolean; onTools: () => void; onSelect: () => void }) {
   const center = bridge.runtimeCenter;
   const focusTab = (item: RuntimeCenterItemRef) => {
     const key = runtimeCenterItemKey(item);

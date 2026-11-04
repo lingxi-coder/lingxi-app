@@ -5,7 +5,7 @@ import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { AgentAvatar, agentAvatarIndex } from '../src/renderer/components/AgentAvatar';
 import { TranscriptAgents } from '../src/renderer/components/TranscriptAgents';
-import { RuntimeCenterInspector } from '../src/renderer/components/RuntimeCenter';
+import { InspectorTabs, RuntimeCenterInspector } from '../src/renderer/components/RuntimeCenter';
 import { emptyRuntimeCenterState } from '../src/renderer/bridge/runtimeCenterState';
 import { emptyDesktopState } from '../src/renderer/bridge/desktopState';
 import { Theme } from '../src/renderer/theme/ThemeContext';
@@ -40,12 +40,18 @@ test('agent identity survives renames and terminal status and matches inspector 
     const row = { ...agent, name: `Renamed ${status}`, status };
     assert.deepEqual(identities(render(React.createElement(TranscriptAgents, { agents: [row] }))), expected);
   }
-  for (const kind of ['section', 'agent'] as const) {
-    const active = { kind, id: kind === 'section' ? 'agents' : agent.agent_id };
-    const bridge = {
-      runtimeCenter: { ...emptyRuntimeCenterState(), inspectorOpen: true, activeItem: active, tabs: [active], agents: { [agent.agent_id]: agent } },
-      desktop: emptyDesktopState(), conversation: { plan: [] },
-    };
-    assert.deepEqual(identities(render(React.createElement(RuntimeCenterInspector, { bridge: bridge as never }))), expected);
-  }
+  const active = { kind: 'section', id: 'agents' } as const;
+  const bridge = {
+    runtimeCenter: { ...emptyRuntimeCenterState(), inspectorOpen: true, activeItem: active, tabs: [active], agents: { [agent.agent_id]: agent } },
+    desktop: emptyDesktopState(), conversation: { plan: [] },
+  };
+  assert.deepEqual(identities(render(React.createElement(RuntimeCenterInspector, { bridge: bridge as never }))), expected);
+
+  // Inspector tabs are mounted in a toolbar portal after the client layout
+  // effect; static rendering the whole inspector cannot include that portal.
+  const agentTab = { kind: 'agent', id: agent.agent_id } as const;
+  const tabBridge = { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, activeItem: agentTab, tabs: [agentTab] } };
+  const tabs = render(React.createElement(InspectorTabs, { bridge: tabBridge as never, toolsOpen: false, onTools: () => {}, onSelect: () => {} }));
+  assert.deepEqual(identities(tabs), expected);
+  assert.match(tabs, /aria-selected="true"/);
 });

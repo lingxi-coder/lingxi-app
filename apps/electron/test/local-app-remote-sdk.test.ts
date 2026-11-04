@@ -26,7 +26,7 @@ function remotePage(options: {
   const origin = options.origin ?? remoteOrigin;
   const calls: Array<{ method: string; args: any }> = [];
   const sandbox: Record<string, any> = {
-    Request, Response, Headers, URL, File, ArrayBuffer, TextEncoder, TextDecoder, AbortController,
+    Request, Response, Headers, URL, File, ArrayBuffer, TextEncoder, TextDecoder, AbortController, AbortSignal,
     crypto: webcrypto, btoa: globalThis.btoa, setTimeout, clearTimeout,
     indexedDB: options.db ?? chatCreationIndexedDb(),
     location: new URL(origin), navigator: {}, document: {},
@@ -115,7 +115,7 @@ test('remote service socket URLs reject paths that escape their service prefix',
 test('remote bridge forwards the complete Chat creation contract without dropping uncertainty', async () => {
   const calls: Array<{ method: string; args: unknown }> = [];
   const unavailable = { chats: [], hasUncertainChats: true, unavailableChats: [{ chatId: creation.requestId, code: 'chat_storage_uncertain' }], nextCursor: 'opaque-next' };
-  const sandbox: any = { Request, Response, Headers, URL, navigator: {}, document: {}, location: new URL(remoteOrigin) };
+  const sandbox: any = { Request, Response, Headers, URL, AbortSignal, navigator: {}, document: {}, location: new URL(remoteOrigin) };
   sandbox.window = sandbox; sandbox.top = sandbox;
   sandbox.fetch = async (_input: unknown, init: RequestInit) => {
     const { method, args } = JSON.parse(String(init.body));

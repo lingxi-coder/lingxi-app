@@ -178,6 +178,7 @@ async fn session_agent_idle_and_resume_observations_win_over_lagging_task_snapsh
     let live = observer(session_id);
     live.on_event(allocation(id)).await;
     live.on_event(SubagentObservation::Completed {
+        handback: None,
         agent_id: id,
         content: Utf16JsonProjection::from("done"),
         usage: Default::default(),

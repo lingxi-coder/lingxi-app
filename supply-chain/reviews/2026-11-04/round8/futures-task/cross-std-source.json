@@ -1,0 +1,26 @@
+[
+  {
+    "rust_toolchain": "1.94.0",
+    "source_path": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/sync.rs",
+    "sha256": "ce15d00d92133cf1f55cd1905d7fe6b4e23e62090dabff6c68fae2d7fe78fe8f",
+    "bytes": 175646
+  },
+  {
+    "rust_toolchain": "1.94.0",
+    "source_path": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/task.rs",
+    "sha256": "923eb7d2dc6b44e5692b6ffd61475134fb92902dbc0f8d38c4db2b99792b5a18",
+    "bytes": 14786
+  },
+  {
+    "rust_toolchain": "1.94.0",
+    "source_path": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/task/wake.rs",
+    "sha256": "48756307918b0dccf871b259c4065c1a1a6422ced107bd9c1c2fe4788cd34048",
+    "bytes": 39391
+  },
+  {
+    "rust_toolchain": "1.82.0",
+    "source_path": "/Users/luolingfeng/.rustup/toolchains/1.82.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/task/wake.rs",
+    "sha256": "b0d0a8b0a89f650df5f00eed1c94150d1f6da1aeed7e71c4fbfc0cde5e6f8e92",
+    "bytes": 35736
+  }
+]

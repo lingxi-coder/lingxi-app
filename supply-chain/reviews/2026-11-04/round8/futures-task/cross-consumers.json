@@ -1,0 +1,22 @@
+{
+  "harness_files": {
+    "crates/llm-runtime/src/auth/external_aws.rs": "f9705a8474cc9e74dcf93617b476d85622c6ae71c24be067bb86598e0c3b8742",
+    "crates/llm-runtime/src/auth/mod.rs": "05fbafa37ed3d4a64672a0346c95d194107c646c5250acbc40d97c41cf4702dd"
+  },
+  "harness_revision": "ae5a65b1f4816cd26a06d462573ebc9841f14f96",
+  "registry": {
+    "futures-executor-0.3.32": {
+      "archive_sha256": "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d",
+      "files_sha256": {
+        "src/local_pool.rs": "eea2419bda86cb6c6e117d599859e29cde7e07bdfebbbcd2d0565cfa5246023b"
+      }
+    },
+    "futures-util-0.3.32": {
+      "archive_sha256": "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6",
+      "files_sha256": {
+        "src/future/future/shared.rs": "bb281d9e3868a3e1f02dd61a60c357721fb804a01543606af625000c789fd8d8",
+        "src/task/mod.rs": "781f6d7d2484d6bd88ef9533d5c4729eeb8d4ee9bb8b9f4bad7049a78e190c32"
+      }
+    }
+  }
+}

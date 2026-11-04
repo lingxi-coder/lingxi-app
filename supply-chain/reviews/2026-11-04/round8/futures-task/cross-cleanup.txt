@@ -1,0 +1,4 @@
+Owned temporary directory: /private/tmp/futures-task-cross-khqskr_c
+File count: 14
+Total bytes: 40426
+Directory removed: True

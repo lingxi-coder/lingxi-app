@@ -128,12 +128,21 @@ class SafProjectSynchronizerInstrumentedTest {
 
     @Test
     fun onlyTheLocalSchedulerLedgerAndItsTransactionLockAreExcluded() {
-        assertTrue(isLocalSchedulerOwnerState(".lingxi/scheduled_owner_reservations.jsonl"))
-        assertTrue(isLocalSchedulerOwnerState(".lingxi/scheduled_tasks.lock"))
-        assertFalse(isLocalSchedulerOwnerState(".lingxi/scheduled_tasks.json"))
-        assertFalse(isLocalSchedulerOwnerState(".lingxi/session-cron/scheduled_tasks.lock"))
-        assertFalse(isLocalSchedulerOwnerState("project/.lingxi/scheduled_owner_reservations.jsonl"))
-        assertFalse(isLocalSchedulerOwnerState(".lingxi/notes.md"))
+        assertTrue(isLocalSchedulerOwnerState(".lingxi/scheduled_owner_reservations.jsonl", ".lingxi"))
+        assertTrue(isLocalSchedulerOwnerState(".lingxi/scheduled_tasks.lock", ".lingxi"))
+        assertFalse(isLocalSchedulerOwnerState(".lingxi/scheduled_tasks.json", ".lingxi"))
+        assertFalse(isLocalSchedulerOwnerState(".lingxi/session-cron/scheduled_tasks.lock", ".lingxi"))
+        assertFalse(isLocalSchedulerOwnerState("project/.lingxi/scheduled_owner_reservations.jsonl", ".lingxi"))
+        assertFalse(isLocalSchedulerOwnerState(".lingxi/notes.md", ".lingxi"))
+    }
+
+    @Test
+    fun schedulerOwnerExclusionsUseTheRuntimeBrandDirectory() {
+        assertTrue(isLocalSchedulerOwnerState(".atlas/scheduled_owner_reservations.jsonl", ".atlas"))
+        assertTrue(isLocalSchedulerOwnerState(".atlas/scheduled_tasks.lock", ".atlas"))
+        assertFalse(isLocalSchedulerOwnerState(".atlas/scheduled_tasks.json", ".atlas"))
+        assertFalse(isLocalSchedulerOwnerState("project/.atlas/scheduled_tasks.lock", ".atlas"))
+        assertFalse(isLocalSchedulerOwnerState(".lingxi/scheduled_tasks.lock", ".atlas"))
     }
 
     @Test

@@ -91,6 +91,37 @@ final class ProjectSynchronizerTests: XCTestCase {
                        "updated configuration")
     }
 
+    func testSyncExcludesOwnershipFilesInTheRuntimeBrandDirectory() throws {
+        let ledger = ".atlas/scheduled_owner_reservations.jsonl"
+        let lock = ".atlas/scheduled_tasks.lock"
+        let ordinary = ".lingxi/scheduled_tasks.lock"
+        try writeExternal(ledger, "external ledger")
+        try writeExternal(lock, "external lock")
+        try writeExternal(ordinary, "ordinary file")
+        let repository = ProjectRepository(projectsRoot: root)
+        let resolver = TestBookmarkResolver()
+        let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
+        let synchronizer = ProjectWorkspaceSynchronizer(repository: repository, configDirName: ".atlas",
+            bookmarkResolver: resolver, coordinator: PassthroughCoordinator(), availableCapacity: { _ in Int64.max })
+
+        _ = try synchronizer.importInitial(projectId: project.record.id)
+        let localLedger = project.sourceWorkspace.hostURL.appendingPathComponent(ledger)
+        let localLock = project.sourceWorkspace.hostURL.appendingPathComponent(lock)
+        let localOrdinary = project.sourceWorkspace.hostURL.appendingPathComponent(ordinary)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: localLedger.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: localLock.path))
+        XCTAssertEqual(try String(contentsOf: localOrdinary, encoding: .utf8), "ordinary file")
+
+        try FileManager.default.createDirectory(at: localLedger.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("local ledger".utf8).write(to: localLedger)
+        try Data("local lock".utf8).write(to: localLock)
+        try Data("updated file".utf8).write(to: localOrdinary)
+        _ = try synchronizer.export(projectId: project.record.id)
+        XCTAssertEqual(try String(contentsOf: externalRoot.appendingPathComponent(ledger), encoding: .utf8), "external ledger")
+        XCTAssertEqual(try String(contentsOf: externalRoot.appendingPathComponent(lock), encoding: .utf8), "external lock")
+        XCTAssertEqual(try String(contentsOf: externalRoot.appendingPathComponent(ordinary), encoding: .utf8), "updated file")
+    }
+
     func testInsufficientCapacityLeavesTheExternalSourceUntouched() throws {
         try writeExternal("notes.txt", "original")
         let repository = ProjectRepository(projectsRoot: root)

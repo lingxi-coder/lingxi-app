@@ -54,7 +54,7 @@ lines.on('line', raw => {
 async function fixture(t: { after(fn: () => Promise<void>): void }, mode='success', overrides: Partial<LocalAppAgentExecutorOptions>={}) {
  const root=await fs.mkdtemp(join(tmpdir(),'lingxi-agent-executor-'));
  const children: ReturnType<typeof spawn>[]=[];
- const options: LocalAppAgentExecutorOptions={configHome:root,root,serverBin:'test-bridge',
+ const options: LocalAppAgentExecutorOptions={configHome:root,globalConfigPath:join(root,'global-config.json'),root,serverBin:'test-bridge',
   credentials:async()=>accountEnvelope(),permission:async()=>false,question:async()=>null,
   spawnProcess:((_bin:unknown,_args:unknown,opts:unknown)=>{
    const child=spawn(process.execPath,['-e',CHILD,mode],opts as Parameters<typeof spawn>[2]);children.push(child);return child;
@@ -249,6 +249,32 @@ test('catalog caches native model eligibility but observes configuration edits b
  await fs.writeFile(join(root, 'settings.json'), '{"model":"updated"}');
  await executor.catalog(); assert.equal(children.length, 2, 'a settings mutation invalidates the private catalog immediately');
  executor.invalidateCatalog(); await executor.catalog(); assert.equal(children.length, 3);
+});
+
+test('catalog and execution use the native global config path, and its edits invalidate the catalog', async t => {
+ const launched: ReturnType<typeof spawn>[]=[];
+ const frames: Array<Record<string, unknown>>=[];
+ const spawnProcess=((_bin:unknown,_args:unknown,opts:unknown)=>{
+  const child=spawn(process.execPath,['-e',CHILD,'success'],opts as Parameters<typeof spawn>[2]);
+  launched.push(child);
+  const write=child.stdin.write.bind(child.stdin);
+  child.stdin.write=((chunk:unknown,...args:unknown[])=>{
+   frames.push(JSON.parse(String(chunk)));
+   return (write as (...values:unknown[])=>boolean)(chunk,...args);
+  }) as typeof child.stdin.write;
+  return child;
+ }) as typeof spawn;
+ t.after(()=>{for(const child of launched) if(child.exitCode===null && child.signalCode===null) child.kill('SIGKILL');});
+ const {root,executor,execution}=await fixture(t,'success',{spawnProcess});
+ const globalConfigPath=join(root,'global-config.json');
+ await executor.catalog();
+ assert.equal(frames.find(frame=>frame.type==='catalog')?.globalConfigPath,globalConfigPath);
+ await executor.catalog(); assert.equal(launched.length,1);
+ await fs.writeFile(globalConfigPath,'{"mcpServers":{}}');
+ await executor.catalog(); assert.equal(launched.length,2);
+ await executor.execute(execution);
+ const start=JSON.parse(await fs.readFile(join(taskCwd(root,execution),'start.json'),'utf8'));
+ assert.equal(start.globalConfigPath,globalConfigPath);
 });
 
 test('fresh host configuration initialization is re-read before publishing the catalog', async t => {

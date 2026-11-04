@@ -64,22 +64,25 @@ test('exact selections pass their path to separate catalog queries without a UUI
 
 test('product paths use native product discovery without merging workspace settings', async () => {
   const brandHome = join(tmpdir(), '.another-product');
+  const globalConfigPath = join(tmpdir(), 'another-product-config.json');
   let flags: readonly string[] | undefined;
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
     spawnProcess: ((_bin: string, args: readonly string[]) => {
       flags = args;
-      return fakeChild(JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') }));
+      return fakeChild(JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps'), global_config_path: globalConfigPath }));
     }) as any });
-  assert.deepEqual(await catalog.productPaths(), { brandHome, appProjectsRoot: join(brandHome, '.apps') });
+  assert.deepEqual(await catalog.productPaths(), { brandHome, appProjectsRoot: join(brandHome, '.apps'), globalConfigPath });
   assert.deepEqual(flags, ['--product-paths-json']);
 });
 
 test('product directory discovery rejects malformed and nonabsolute native paths', async () => {
   const brandHome = join(tmpdir(), '.another-product');
-  const valid = { version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') };
+  const valid = { version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps'), global_config_path: null };
   for (const response of ['{', JSON.stringify({ ...valid, version: 2 }),
     JSON.stringify({ ...valid, brand_home: 'relative' }), JSON.stringify({ ...valid, app_projects_root: 'relative' }),
-    JSON.stringify({ ...valid, brand_home: brandHome + '\0' })]) {
+    JSON.stringify({ ...valid, brand_home: brandHome + '\0' }),
+    JSON.stringify({ ...valid, global_config_path: 'relative' }), JSON.stringify({ ...valid, global_config_path: undefined }),
+    JSON.stringify({ ...valid, global_config_path: brandHome + '\0' })]) {
     const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
       spawnProcess: (() => fakeChild(response)) as any });
     await assert.rejects(catalog.productPaths(), /invalid product paths response/);
@@ -385,7 +388,7 @@ test('a catalog of another configuration home reads that home in every mode, and
     environments.push(options.env);
     const configHome = options.env?.['LINGXI_CONFIG_DIR'] ?? '/owner/.lingxi';
     return fakeChild(args.includes('--product-paths-json')
-      ? JSON.stringify({ version: 1, brand_home: configHome, app_projects_root: join(configHome, '.apps') })
+      ? JSON.stringify({ version: 1, brand_home: configHome, app_projects_root: join(configHome, '.apps'), global_config_path: null })
       : args.includes('--workspace-environment-json')
         ? JSON.stringify({ version: 1, environment: {}, config_home: configHome, global_config_path: join(configHome, '.lingxi.json') })
         : JSON.stringify({ version: 1, sessions: [] }));
@@ -496,7 +499,7 @@ test('native brand paths share discovery across concurrent Host services and sur
   const brandHome = join(tmpdir(), '.configured-brand');
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => {
     calls++;
-    return fakeChild(JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') }));
+    return fakeChild(JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps'), global_config_path: null }));
   }) as any });
   const rows = await Promise.all(Array.from({ length: 12 }, () => catalog.productPaths()));
   assert.equal(calls, 1, 'concurrent consumers must not launch competing native discovery processes');
@@ -510,7 +513,7 @@ test('a failed native brand discovery is not retained by later Host operations',
   const brandHome = join(tmpdir(), '.configured-brand');
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => {
     calls++;
-    return fakeChild(calls === 1 ? '{' : JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') }));
+    return fakeChild(calls === 1 ? '{' : JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps'), global_config_path: null }));
   }) as any });
   await assert.rejects(catalog.productPaths(), /invalid product paths response/);
   assert.equal((await catalog.productPaths()).brandHome, brandHome);

@@ -1,0 +1,35 @@
+{
+  "sha": "a97fc91d318cd1142d158e7a7ea251b989280aaf",
+  "node_id": "C_kwDOOuNDhtoAKGE5N2ZjOTFkMzE4Y2QxMTQyZDE1OGU3YTdlYTI1MWI5ODkyODBhYWY",
+  "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/commits/a97fc91d318cd1142d158e7a7ea251b989280aaf",
+  "html_url": "https://github.com/polyfill-rs/once_cell_polyfill/commit/a97fc91d318cd1142d158e7a7ea251b989280aaf",
+  "author": {
+    "name": "Ed Page",
+    "email": "eopage@gmail.com",
+    "date": "2025-10-21T16:41:11Z"
+  },
+  "committer": {
+    "name": "Ed Page",
+    "email": "eopage@gmail.com",
+    "date": "2025-10-21T16:41:11Z"
+  },
+  "tree": {
+    "sha": "5c147105038ead0cbc59e32d8f1cfd61b736b14b",
+    "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/trees/5c147105038ead0cbc59e32d8f1cfd61b736b14b"
+  },
+  "message": "chore: Release once_cell_polyfill version 1.70.2",
+  "parents": [
+    {
+      "sha": "47c5d61da3168d359622dc938532f88460a775aa",
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/commits/47c5d61da3168d359622dc938532f88460a775aa",
+      "html_url": "https://github.com/polyfill-rs/once_cell_polyfill/commit/47c5d61da3168d359622dc938532f88460a775aa"
+    }
+  ],
+  "verification": {
+    "verified": false,
+    "reason": "unsigned",
+    "signature": null,
+    "payload": null,
+    "verified_at": null
+  }
+}

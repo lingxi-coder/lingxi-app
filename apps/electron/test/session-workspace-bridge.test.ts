@@ -245,7 +245,7 @@ test('App page, settings, local app and picker navigation use the latest loading
 
 test('sidebar capture and direct session or project callbacks cannot navigate during a resume', () => {
   const calls: unknown[] = [];
-  const context: any = { useCallback: (fn: unknown) => fn,
+  const context: any = { useCallback: (fn: unknown) => fn, Element: class Element {},
     bridge: { sessionLoading: true, openSession: () => calls.push('open'), newSession: () => calls.push('new') },
     onOpenChat: () => calls.push('chat'), setOpeningSessionKey: () => calls.push('opening'),
     setExpandedProjects: () => calls.push('expand'), setEditingProject: () => calls.push('editing'),
@@ -278,11 +278,11 @@ test('sidebar navigation groups become inert during resume without locking the c
     asideRef: ref('sidebar'), railRef: ref('rail'), toolbarRef: ref('toolbar') };
   evaluate('globalThis.lockNavigation = ' + effect.getText(composerSource), context);
   context.lockNavigation();
-  assert.deepEqual([...flags], [['sidebar', true], ['rail', true], ['toolbar', true]]);
+  assert.deepEqual([...flags], [['sidebar', true], ['rail', true]]);
   context.bridge.sessionLoading = false; context.lockNavigation();
-  assert.deepEqual([...flags], [['sidebar', false], ['rail', false], ['toolbar', false]]);
+  assert.deepEqual([...flags], [['sidebar', false], ['rail', false]]);
   context.sidebarCollapsed = true; context.lockNavigation();
-  assert.deepEqual([...flags], [['sidebar', true], ['rail', false], ['toolbar', false]]);
+  assert.deepEqual([...flags], [['sidebar', true], ['rail', false]]);
 });
 
 test('a deep link fetched before resume admission cannot navigate after the target becomes pending', async () => {
@@ -386,6 +386,26 @@ test('useBridge transports a picker selection while retaining the standard openS
   assert.deepEqual(calls, [['/current', 'A', selection], ['/current', 'B']]);
   assert.deepEqual(snapshots.map((value: any) => value.activeSession.sessionId), ['A', 'B']);
   assert.equal(await context.open('/current', 'unrelated'), false, 'a different acknowledged UUID cannot become an authoring target');
+});
+
+test('Local App open retains the displayed owner until the host confirms its source', async () => {
+  const gate = deferred<any>(), calls: unknown[] = [], pending: unknown[] = [], snapshots: unknown[] = [];
+  const current = { projectPath: '/original', sessionId: 'A' };
+  const appId = `a${'1'.repeat(32)}`;
+  const context: any = {
+    useCallback: (fn: unknown) => fn, bootstrapRef: { current: { activeSession: current, settings: {} } },
+    host: { openSession: (...args: unknown[]) => { calls.push(args); return gate.promise; } },
+    beginNavigationOperation: () => 1, pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
+    removedRuntimeIds: { current: new Set() }, setSessionReady() {}, setPendingSession: (value: unknown) => pending.push(value), setError() {},
+    isCurrentNavigationOperation: () => true, applyBootstrap: (value: unknown) => snapshots.push(value), capture(error: unknown) { throw error; },
+  };
+  evaluate('globalThis.open = ' + initializer(bridgeSource, 'openSession'), context);
+  const opening = context.open('/app/source', 'B', undefined, 'code', appId, 7);
+  assert.deepEqual(pending[0], current, 'the unverified target is not displayed');
+  assert.deepEqual(calls, [['/app/source', 'B', undefined, 'code', appId, 7]]);
+  gate.resolve({ revision: 2, activeSession: { projectPath: '/app/source', sessionId: 'B' } });
+  assert.equal((await opening).sessionId, 'B');
+  assert.equal(snapshots.length, 1);
 });
 
 test('the ordinary sidebar opens the exact transcript from its displayed Current catalog', async () => {
@@ -540,7 +560,7 @@ function catalogNavigationHarness() {
   const mutation = deferred<unknown>();
   const metadataRequests: Array<{ response: ReturnType<typeof deferred<any>> }> = [];
   const requests: Array<{ projectPath: string; scope: string; response: ReturnType<typeof deferred<any>> }> = [];
-  const initial = { revision: 1, settings: { projects: ['/A', '/B'] }, activeSession: { projectPath: '/A', sessionId: 'chat-A' },
+  const initial = { revision: 1, conversationSpaces: { globalWorkspaces: { chat: '/global/chat', code: '/global/code' }, activeMode: 'code', projects: {}, sessions: [], navigation: { chat: { projectId: null }, code: { projectId: '/A' } } }, settings: { projects: ['/A', '/B'] }, activeSession: { projectPath: '/A', sessionId: 'chat-A' },
     projectCatalogs: { '/A': { sessions: [{ uuid: 'chat-A' }] }, '/B': { sessions: [] } } };
   let bootstrap: any = null, runtimes = new Map(), deferCatalogUpdates = false;
   const queuedCatalogUpdates: Array<(previous: unknown) => unknown> = [];
@@ -558,7 +578,8 @@ function catalogNavigationHarness() {
     shouldApplyBootstrapSnapshot, pruneRuntimeMaps, beginProjectCatalogRequest, isLatestProjectCatalogRequest, nextOperationId,
     messageFrom: (cause: Error) => cause.message,
     latestBootstrapRevisionRef: { current: null }, latestBootstrapProjectPathsRef: { current: new Set() },
-    pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
+    pendingSessionRef: { current: null }, sessionLoadingRef: { current: false }, requestedSpaceRef: { current: null },
+    confirmedSpaceRef: { current: null },
     activeSessionIdRef: { current: 'chat-A' }, navigationOperationRef: { current: 0 },
     catalogRequestGenerations: { current: new Map() }, removedRuntimeIds: { current: new Set() },
     pendingCatalogMutations: { current: new Map() }, setCatalogMutationRevision() {},
@@ -635,7 +656,7 @@ for (const action of ['touchSession', 'renameSession']) {
     const pending = h.context[action]('/A', 'chat-A', 'Renamed');
     h.metadataRequests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Old A' }] });
     await pending;
-    const authoritative = { revision: 2, settings: { projects: ['/B'] }, projectCatalogs: { '/B': { sessions: [] } } };
+    const authoritative = { ...h.initial, revision: 2, settings: { projects: ['/B'] }, projectCatalogs: { '/B': { sessions: [] } } };
     h.context.applyBootstrap(authoritative);
     h.flushCatalogUpdates();
     h.context.reconcileCatalogMutations();
@@ -674,7 +695,7 @@ for (const action of ['touchSession', 'renameSession']) {
     const h = catalogNavigationHarness();
     const pending = h.context[action]('/A', 'chat-A', 'Renamed');
     const oldRead = h.context.listProjectSessions('/A');
-    const authoritative = { revision: 2, settings: { projects: ['/B'] }, projectCatalogs: { '/B': { sessions: [] } } };
+    const authoritative = { ...h.initial, revision: 2, settings: { projects: ['/B'] }, projectCatalogs: { '/B': { sessions: [] } } };
     h.context.applyBootstrap(authoritative);
     h.metadataRequests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Old A' }] });
     await pending;
@@ -814,7 +835,7 @@ test('queued Current catalog results and failures cannot overwrite a newer reque
 test('an old catalog failure cannot re-add a directory after an authoritative bootstrap', async () => {
   const h = catalogNavigationHarness();
   const old = h.context.listProjectSessions('/A');
-  const authoritative = { revision: 2, settings: { projects: ['/B'] }, projectCatalogs: { '/B': { sessions: [] } } };
+  const authoritative = { ...h.initial, revision: 2, settings: { projects: ['/B'] }, projectCatalogs: { '/B': { sessions: [] } } };
   h.context.applyBootstrap(authoritative);
   h.requests[0]!.response.reject(new Error('removed directory'));
   await assert.rejects(old, /removed directory/);
@@ -829,7 +850,7 @@ for (const action of ['cd', 'remove-project']) {
     const navigation = action === 'cd'
       ? h.context.updateSessionWorkspace('chat-A', { action: 'cd', path: '/B' })
       : h.context.removeProject('/A');
-    const authoritative = { revision: 2, settings: { projects: action === 'cd' ? ['/A', '/B'] : ['/B'] },
+    const authoritative = { ...h.initial, revision: 2, settings: { projects: action === 'cd' ? ['/A', '/B'] : ['/B'] },
       activeSession: { projectPath: '/B', sessionId: action === 'cd' ? 'chat-A' : 'chat-B' },
       projectCatalogs: { '/B': { sessions: [{ uuid: 'authoritative-B' }] } } };
     h.mutation.resolve(authoritative); await navigation;
@@ -872,7 +893,7 @@ test('a queued React catalog updater cannot merge old rows after an accepted boo
   const current = h.context.listProjectSessions('/A');
   h.requests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'old-A' }] });
   assert.equal((await current).sessions[0].uuid, 'old-A');
-  const authoritative = { revision: 2, settings: { projects: ['/B'] }, projectCatalogs: { '/B': { sessions: [{ uuid: 'new-B' }] } } };
+  const authoritative = { ...h.initial, revision: 2, settings: { projects: ['/B'] }, projectCatalogs: { '/B': { sessions: [{ uuid: 'new-B' }] } } };
   h.context.applyBootstrap(authoritative);
   h.flushCatalogUpdates();
   assert.equal(h.bootstrap(), authoritative);
@@ -981,5 +1002,48 @@ test('the composer keeps a loading-session draft and sends no prompt or local co
     await context.submit();
     assert.equal(context.text, text);
     assert.deepEqual(calls, []);
+  }
+});
+
+test('rapidly changing spaces retains the last click even before React renders', async () => {
+  const first = deferred<any>(), second = deferred<any>(), calls: string[] = [], applied: string[] = [];
+  const spaces = { activeMode: 'chat', globalWorkspaces: { chat: '/global/chat', code: '/global/code' }, navigation: { chat: { projectId: null }, code: { projectId: null } } };
+  const context: any = {
+    useCallback: (fn: unknown) => fn, bootstrap: { conversationSpaces: spaces },
+    host: { switchConversationSpace: (mode: string) => { calls.push(mode); return mode === 'code' ? first.promise : second.promise; } },
+    requestedSpaceRef: { current: 'chat' }, navigationOperationRef: { current: 0 },
+    pendingSessionRef: { current: null }, sessionLoadingRef: { current: false }, nextOperationId,
+    isCurrentNavigationOperation: (id: number) => id === context.navigationOperationRef.current,
+    setPendingSession() {}, setSessionReady() {}, patchBootstrap() {}, capture(error: unknown) { throw error; },
+    applyBootstrap: (snapshot: { mode: string }) => applied.push(snapshot.mode),
+  };
+  evaluate('globalThis.switchSpace = ' + initializer(bridgeSource, 'switchConversationSpace'), context);
+  const code = context.switchSpace('code');
+  const chat = context.switchSpace('chat');
+  assert.deepEqual(calls, ['code', 'chat']);
+  first.resolve({ mode: 'code' }); await code;
+  assert.deepEqual(applied, []);
+  second.resolve({ mode: 'chat' }); await chat;
+  assert.deepEqual(applied, ['chat']);
+  assert.equal(context.sessionLoadingRef.current, false);
+});
+
+test('handoff backlink follows the current source workspace and respects later navigation', async () => {
+  for (const stale of [false, true]) {
+    const gate = deferred<any>(), opened: unknown[] = [], applied: unknown[] = [];
+    const context: any = { useCallback: (fn: unknown) => fn,
+      host: { switchConversationSpace: () => gate.promise, openSession: async (...args: unknown[]) => { opened.push(args); return { active: true }; } },
+      bootstrapRef: { current: { conversationSpaces: { sessions: [{ sessionId: 'source', mode: 'chat', projectPath: '/moved' }] } } },
+      sessionLoadingRef: { current: false }, pendingSessionRef: { current: null }, navigationOperationRef: { current: 0 },
+      beginNavigationOperation: () => ++context.navigationOperationRef.current,
+      isCurrentNavigationOperation: (operation: number) => operation === context.navigationOperationRef.current,
+      setPendingSession() {}, setSessionReady() {}, applyBootstrap: (value: unknown) => applied.push(value), capture(error: unknown) { throw error; },
+    };
+    evaluate('globalThis.openSource = ' + initializer(bridgeSource, 'openHandoffSource'), context);
+    const pending = context.openSource({ sourceSessionId: 'source', sourceProjectPath: '/old', sourceMode: 'chat' });
+    if (stale) context.navigationOperationRef.current++;
+    gate.resolve({}); await pending;
+    assert.deepEqual(opened, stale ? [] : [['/moved', 'source']]);
+    assert.equal(applied.length, stale ? 0 : 1);
   }
 });

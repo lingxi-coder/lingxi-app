@@ -36,6 +36,7 @@ import { standaloneJsonForDisplay } from '../markdown';
 import type { ToolRunItem } from '../model/runItem';
 import { toolDisplayHeader, toolHasBody, toolTruncationNotice } from '../model/runItem';
 import { nativeToolResultProps, nativeToolUseProps } from './nativeUiSiteProps';
+import { localAppToolRequiresCode } from '../bridge/localAppErrors';
 import { useT } from '../theme/ThemeContext';
 import { ltrAnchored } from './bidi';
 import { CodeBlock } from './CodeBlock';
@@ -172,8 +173,9 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
     )
     : <span>{view.title}</span>;
 
-  const headline = result?.headline;
-  const body = result?.body;
+  const requiresCode = localAppToolRequiresCode(item.tool, item.status, result?.headline, result?.body);
+  const headline = requiresCode ? tr('local_app_development_requires_code') : result?.headline;
+  const body = requiresCode ? tr('local_app_development_requires_code') : result?.body;
   const jsonBody = body === undefined ? undefined : standaloneJsonForDisplay(body);
   const diff = result?.diff;
 
@@ -192,7 +194,9 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
   const permissionStatusText = headline ?? '';
   const permissionStatusInBody = permissionRequest && expandable && Boolean(permissionStatusText);
   const compactError = item.status === 'error' && expandable && !permissionRequest;
-  const summaryResponse = compactError
+  const summaryResponse = requiresCode
+    ? response
+    : compactError
     ? tr('desktop_ui_tool_attempt_unsuccessful')
     : item.tool === 'WebSearch' && item.status === 'done' && expandable
     ? `${tr('desktop_ui_search_completed')}${truncationNotice ? ` ${tr('desktop_ui_truncated_suffix')}` : ''}`
@@ -213,7 +217,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
   const showResponse = !(presentation && item.status === 'done' && body !== undefined);
   const diffStats = item.status === 'done' && !permissionRequest && diff && ['update', 'create'].includes(view.verb) ? diff : undefined;
   const summary = (
-    <span className="tool-call-summary">
+    <span className="tool-call-summary" style={requiresCode ? { flexWrap: 'wrap', overflow: 'visible' } : undefined}>
       <ToolGlyph item={item} permissionRequest={permissionRequest} />
       <span
         className="tool-row-title"
@@ -235,7 +239,8 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       {diffStats && <span className="tool-row-diff-stats" aria-label={tr('desktop_ui_edit_counts', diffStats.additions, diffStats.removals)}>+{diffStats.additions} −{diffStats.removals}</span>}
       {(item.status === 'running' || (item.status === 'done' && diffStats && diffStats.additions + diffStats.removals > 0)) &&
         <span className="tool-row-state-dot" role={item.status === 'running' ? 'status' : undefined} aria-label={item.status === 'running' ? tr("remote_status_running") : tr("desktop_ui_file_changed")} />}
-      {showResponse && !diffStats && summaryResponse && <span className={compactError ? 'tool-row-status' : 'tool-row-response'}>{summaryResponse}</span>}
+      {showResponse && !diffStats && summaryResponse && <span className={compactError ? 'tool-row-status' : 'tool-row-response'}
+        style={requiresCode ? { flex: '1 0 100%', whiteSpace: 'normal', overflowWrap: 'anywhere' } : undefined}>{summaryResponse}</span>}
     </span>
   );
 

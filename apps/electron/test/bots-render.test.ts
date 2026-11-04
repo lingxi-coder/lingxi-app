@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { BotMemoryEntryUi, BotSkillUi, BotUi, BotsApi } from '../src/shared/bots';
 import { BotMemoryController } from '../src/renderer/bridge/botMemory';
 import { BotSkillsController } from '../src/renderer/bridge/botSkills';
+import { BotLeaveGuard } from '../src/renderer/bridge/botLeaveGuard';
 import { BotsController, type BotsState } from '../src/renderer/bridge/botsStore';
 import { botDraftProblems, emptyBotDraft, permissionModeNeedsConfirmation } from '../src/renderer/bridge/botForm';
 import { emptyDesktopState } from '../src/renderer/bridge/desktopState';
@@ -13,9 +16,10 @@ import { emptyRuntimeCenterState } from '../src/renderer/bridge/runtimeCenterSta
 import type { UseBridge } from '../src/renderer/bridge/bridgeTypes.js';
 import type { UseBots } from '../src/renderer/bridge/useBots';
 import { tr } from '../src/renderer/i18n/locale';
+import { agentAvatarIndex } from '../src/renderer/components/AgentAvatar';
 import { BotSaveBar } from '../src/renderer/components/BotDetail';
 import { BotFoldersField, BotGeneralFields, BotPermissionField, BotPersonaField } from '../src/renderer/components/BotFields';
-import { BotChatsPanel, BotMemoryPanel, BotSkillsPanel } from '../src/renderer/components/BotPanels';
+import { BotMemoryPanel, BotSkillsPanel } from '../src/renderer/components/BotPanels';
 import { BotCreate, BotList, Bots, shownProblems } from '../src/renderer/components/Bots';
 import { BetaSidebar, BetaTopBar } from '../src/renderer/components/BetaDesktop';
 import { Theme } from '../src/renderer/theme/ThemeContext';
@@ -39,6 +43,9 @@ function render(element: React.ReactElement): string {
     console.error = error;
   }
 }
+
+/** The avatars drawn in some markup, as the indexes `AgentAvatar` marks them with, in order. */
+const avatarsOf = (html: string) => [...html.matchAll(/data-agent-avatar="(\d+)"/g)].map((match) => Number(match[1]));
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
   return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: Date.now() - 60 * MINUTES, updatedAt: Date.now(), revision: 1, workspaces: [], ...overrides };
@@ -89,6 +96,9 @@ test('each Bot shows its name, description, whether it is working, and when it w
   assert.match(html, /Active 5 minutes ago/);
   assert.match(html, /No chats yet/);
   assert.ok(!html.includes('No Bots yet'));
+  assert.deepEqual(avatarsOf(html), ['b', 'c', 'a'].map(agentAvatarIndex), 'each card wears the avatar of its Bot\'s id, as in the sidebar and the Teams views');
+  assert.ok(!/class="bots-avatar"[^>]*>[^<]/.test(html), 'and no letter stands in for it');
+  assert.equal([...html.matchAll(/class="bots-avatar" aria-hidden="true"/g)].length, 3, 'the name beside it is what is read out');
 });
 
 // ---- Making a Bot ----
@@ -181,33 +191,6 @@ test('the save bar says what saving came to, and is enabled only for a change th
   assert.match(bar({ kind: 'saved' }, false), /Saved\./);
   assert.match(bar({ kind: 'saving' }, true), /disabled=""[^>]*>Saving…/);
   assert.match(bar({ kind: 'failed', message: 'The disk is full.' }, true), /role="alert"[^>]*>Could not save: The disk is full\./);
-});
-
-// ---- Chats ----
-
-test('the chats of a Bot are listed with when they were last used, and a chat that is being opened says so', () => {
-  const sessions = [
-    { uuid: 's1', title: 'Plan the launch', modified_rfc3339: new Date(Date.now() - 5.5 * MINUTES).toISOString(), message_count: 4, mode: 'code', path: '' },
-    { uuid: 's2', title: '  ', modified_rfc3339: new Date(Date.now() - 3.5 * 3_600_000).toISOString(), message_count: 1, mode: 'code', path: '' },
-  ];
-  const html = render(React.createElement(BotChatsPanel, { chats: { status: 'ready', sessions }, opening: undefined, disabled: false, onOpen: noop, onRetry: noop }));
-  assert.match(html, /Plan the launch/);
-  assert.match(html, /5 minutes ago · 4 messages/);
-  assert.ok(html.includes(tr('remote_untitled')), 'a chat without a title is still a row');
-
-  const opening = render(React.createElement(BotChatsPanel, { chats: { status: 'ready', sessions }, opening: 's1', disabled: true, onOpen: noop, onRetry: noop }));
-  assert.match(opening, /aria-busy="true"/);
-  assert.match(opening, /Opening…/);
-  assert.match(opening, /disabled=""/);
-});
-
-test('a Bot without chats, and chats that cannot be read, are each said in words', () => {
-  const empty = render(React.createElement(BotChatsPanel, { chats: { status: 'ready', sessions: [] }, opening: undefined, disabled: false, onOpen: noop, onRetry: noop }));
-  assert.match(empty, /No chats with this Bot yet\./);
-  const failed = render(React.createElement(BotChatsPanel, { chats: { status: 'failed', message: 'The Bot folder is missing.' }, opening: undefined, disabled: false, onOpen: noop, onRetry: noop }));
-  assert.match(failed, /role="alert"[^>]*>Chats could not be loaded: The Bot folder is missing\./);
-  assert.match(failed, />Retry</);
-  assert.match(render(React.createElement(BotChatsPanel, { chats: { status: 'loading' }, opening: undefined, disabled: false, onOpen: noop, onRetry: noop })), /Loading chats…/);
 });
 
 // ---- Memory ----
@@ -352,7 +335,7 @@ async function pageBots(view: UseBots['view'], bots: BotUi[]): Promise<UseBots> 
   const api: Pick<BotsApi, 'availability' | 'list'> = { availability: async () => ({ available: true }), list: async () => bots };
   const controller = new BotsController(api);
   await controller.start();
-  return { controller, state: controller.getSnapshot(), available: true, view, setView: noop };
+  return { controller, state: controller.getSnapshot(), available: true, view, setView: noop, guard: new BotLeaveGuard(noop) };
 }
 
 test('the page shows which Bots are working from the chats the host is running', async () => {
@@ -371,18 +354,57 @@ test('the page shows which Bots are working from the chats the host is running',
   assert.match(html, /Gamma[\s\S]*?data-state="idle">Idle</);
 });
 
-test('a Bot opens to its chats first, with the sections of its settings, and a chat can be started or the Bot deleted', async () => {
+test('a Bot opens to its general settings, with the routines and tasks listed first, and a chat can be started or the Bot deleted; its chats are in the sidebar', async () => {
   const bots = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha', description: 'First helper' })]);
   const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
   assert.match(html, /<h1>Alpha<\/h1>/);
+  assert.match(html, /<div class="bots-detail-identity"><span class="bots-avatar" aria-hidden="true"><img [^>]*data-agent-avatar="\d+"[^>]*\/><\/span><div class="bots-detail-title"><h1>Alpha<\/h1>/, 'its avatar stands beside the name');
+  assert.deepEqual(avatarsOf(html), [agentAvatarIndex('a')], 'the one the list shows for it');
   assert.match(html, /First helper/);
-  for (const tab of ['Chats', 'Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
-  assert.ok(html.indexOf('>Chats</button>') < html.indexOf('>Routines</button>') && html.indexOf('>Routines</button>') < html.indexOf('>Tasks</button>') && html.indexOf('>Tasks</button>') < html.indexOf('>General</button>'), 'the routines and the tasks come after the chats');
-  assert.match(html, /aria-current="page">Chats</);
+  for (const tab of ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
+  assert.ok(html.indexOf('>Routines</button>') < html.indexOf('>Tasks</button>') && html.indexOf('>Tasks</button>') < html.indexOf('>General</button>'), 'the routines and the tasks come before the settings');
+  assert.match(html, /aria-current="page">General</);
+  assert.ok(!html.includes('>Chats</button>'), 'the chats of a Bot are listed under it in the sidebar, not here');
+  assert.ok(!html.includes('Loading chats'));
   assert.match(html, />New chat</);
   assert.match(html, />Delete Bot</);
-  assert.match(html, /Loading chats…/);
   assert.ok(!html.includes('role="dialog"'), 'nothing is asked until deletion is started');
+});
+
+test('a request to delete the Bot comes up as the question whether to, and nothing is deleted until it is answered', async () => {
+  const deleted: string[] = [];
+  const bridge = bridgeStub([], { deleteBot: async (botId: string) => { deleted.push(botId); } });
+  const bots = await pageBots({ kind: 'detail', botId: 'a', deleteRequest: 1 }, [bot({ botId: 'a', name: 'Alpha' })]);
+  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge, onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
+  assert.match(html, /role="dialog"[^>]*aria-label="Delete “Alpha”\?"/);
+  assert.match(html, /desktop-dialog-action--primary">Delete Bot</, 'to be confirmed, with the words of the page\'s own button');
+  assert.deepEqual(deleted, []);
+
+  const plain = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha' })]);
+  assert.ok(!render(React.createElement(Bots, { visible: true, bots: plain, api: {} as BotsApi, bridge, onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop })).includes('role="dialog"'));
+});
+
+test('a way out of unsaved edits comes up as the question whether to give them up, and goes nowhere until it is answered', async () => {
+  const bots = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha' })]);
+  const page = () => render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
+  const gone: string[] = [];
+  assert.ok(!page().includes('role="dialog"'), 'nothing is asked while no one is leaving');
+
+  bots.guard.leave(() => { gone.push('with nothing to lose'); });
+  assert.deepEqual(gone, ['with nothing to lose']);
+  assert.ok(!page().includes('role="dialog"'), 'a way out with no edits to lose is simply taken');
+
+  bots.guard.hold(true);
+  bots.guard.leave(() => { gone.push('with edits'); });
+  const html = page();
+  assert.match(html, /role="dialog"[^>]*aria-label="Discard your changes\?"/);
+  assert.match(html, /This Bot has changes that are not saved\./);
+  assert.match(html, /desktop-dialog-action--primary">Discard changes</, 'to be confirmed, with the words of giving the edits up');
+  assert.deepEqual(gone, ['with nothing to lose'], 'the owner has not answered');
+
+  bots.guard.cancel();
+  assert.ok(!page().includes('role="dialog"'), 'answered no: the question is gone and the page stays');
+  assert.deepEqual(gone, ['with nothing to lose']);
 });
 
 test('while another chat is opening the Bot\'s chats cannot be started', async () => {
@@ -436,7 +458,11 @@ function sidebarBridge(overrides: Record<string, unknown> = {}) {
   return { bootstrap: null, sessionLoading: false, desktop: emptyDesktopState(), activeSession: undefined, activeBotId: undefined, ...overrides } as unknown as UseBridge;
 }
 
-test('the sidebar offers Bots only where the host said they can be used', () => {
+const railOf = (html: string) => /<nav[^>]*desktop-nav-rail[\s\S]*?<\/nav>/.exec(html)?.[0] ?? '';
+const buttonLabels = (html: string) => [...html.matchAll(/<button[^>]*aria-label="([^"]+)"/g)].map((match) => match[1]);
+const markedLabels = (html: string) => [...railOf(html).matchAll(/data-active="true" aria-label="([^"]+)"/g)].map((match) => match[1]);
+
+test('the sidebar offers Bots only where the host said they can be used, and only once', () => {
   const without = render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop }));
   assert.ok(!without.includes('aria-label="Bots"'));
   assert.ok(!without.includes('>Bots<'));
@@ -445,30 +471,80 @@ test('the sidebar offers Bots only where the host said they can be used', () => 
 
   const offered = render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true }));
   assert.match(offered, /class="desktop-rail-button" aria-label="Bots" title="Bots"/);
-  assert.match(offered, /<span>Bots<\/span>/);
+  assert.ok(!offered.includes('<span>Bots</span>') && !offered.includes('<span>Teams</span>'), 'Home does not repeat the rail\'s buttons');
 });
 
-test('with the Bots page open the sidebar marks it, and Home is not marked', () => {
-  const home = tr('desktop_home');
-  const closed = render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true }));
-  assert.match(closed, new RegExp(`data-active="true" aria-label="${home}"`));
-  assert.ok(!/aria-current="page"[^>]*><svg[^>]*><rect x="4" y="8"/.test(closed));
+test('the rail has the modes Home, Bots and Teams, then a divider, then the pages', () => {
+  const rail = railOf(render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true })));
+  const divider = rail.indexOf('desktop-rail-divider');
+  assert.ok(divider > 0);
+  assert.deepEqual(buttonLabels(rail.slice(0, divider)), ['Home', 'Bots', 'Teams']);
+  assert.deepEqual(buttonLabels(rail.slice(divider)), ['Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
 
-  const open = render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true, bots: true }));
-  assert.ok(!new RegExp(`data-active="true" aria-label="${home}"`).test(open), 'Home is not the page');
-  assert.match(open, /data-active="true" aria-label="Bots"/);
-  assert.match(open, /aria-current="page"[^>]*><svg[^>]*><rect x="4" y="8"/);
+  const noBots = railOf(render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop })));
+  assert.deepEqual(buttonLabels(noBots.slice(0, noBots.indexOf('desktop-rail-divider'))), ['Home', 'Teams']);
+});
+
+test('the sidebar mode marks Home, Bots or Teams, Home when none was given, and a page marks itself without taking the mark off the mode', () => {
+  const sidebar = (props: Record<string, unknown> = {}) => render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true, ...props }));
+  assert.deepEqual(markedLabels(sidebar()), ['Home']);
+  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'home' })), ['Home']);
+  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'bots' })), ['Bots']);
+  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'teams' })), ['Teams']);
+
+  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'bots', apps: true })), ['Bots', 'Apps']);
+  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'teams', scheduled: true })), ['Teams', 'Scheduled tasks']);
+  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'home', apps: true })), ['Home', 'Apps']);
+});
+
+test('the rail buttons of the modes ask for their mode, and Home still opens the chat for a sidebar with no one to keep the mode', () => {
+  const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
+  for (const mode of ['home', 'bots', 'teams']) assert.match(source, new RegExp(`onClick=\\{\\(\\) => selectMode\\('${mode}'\\)\\}`), mode);
+  assert.match(source, /if \(onSelectSidebarMode\) onSelectSidebarMode\(mode\);\s+else if \(mode === 'home'\) onOpenChat\?\.\(\);/);
+});
+
+test('outside Home the sidebar lists what the mode is for, in place of the projects and the actions that go with them', () => {
+  const seen: unknown[][] = [];
+  const modePanel = (mode: string, search: string) => { seen.push([mode, search]); return React.createElement('div', { id: 'mode-panel' }, `panel for ${mode}`); };
+  const sidebar = (sidebarMode: string) => render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true, sidebarMode, modePanel } as never));
+
+  const home = sidebar('home');
+  assert.deepEqual(seen, [], 'Home keeps its own list');
+  assert.ok(!home.includes('mode-panel'));
+  assert.match(home, /sidebar-new-chat/);
+  assert.match(home, new RegExp(`aria-label="${tr('desktop_projects_sessions')}"`));
+
+  for (const mode of ['bots', 'teams']) {
+    const html = sidebar(mode);
+    assert.match(html, new RegExp(`<div id="mode-panel">panel for ${mode}</div>`));
+    assert.ok(!html.includes('sidebar-new-chat'), `${mode}: the actions of Home are not repeated`);
+    assert.ok(!html.includes(`aria-label="${tr('desktop_projects_sessions')}"`), `${mode}: nor its projects`);
+  }
+  assert.deepEqual(seen, [['bots', ''], ['teams', '']], 'told the mode, and what the search box holds');
+});
+
+test('the sidebar is hidden when the parent says so, and keeps its own state when the parent says nothing', () => {
+  const sidebar = (props: Record<string, unknown> = {}) => render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, ...props }));
+  assert.ok(!sidebar().includes('data-collapsed'));
+  assert.ok(!sidebar({ sidebarCollapsed: false }).includes('data-collapsed'));
+  const hidden = sidebar({ sidebarCollapsed: true });
+  assert.match(hidden, /class="desktop-navigation" data-collapsed="true"/);
+  assert.match(hidden, /aria-label="Show sidebar"[^>]*aria-expanded="false"/);
+  assert.match(sidebar({ sidebarCollapsed: false }), /aria-label="Hide sidebar"[^>]*aria-expanded="true"/);
 });
 
 test('a Bot\'s chat is titled with the Bot, not with a folder path, and offers the way back to the Bot', () => {
   const bridge = { bootstrap: null, sessionLoading: false, desktop: emptyDesktopState(), runtimeCenter: emptyRuntimeCenterState(), activeSession: { projectPath: '/data/bots/a/workspace', sessionId: 's1' } } as unknown as UseBridge;
-  const html = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop, bot: { name: 'Scribe', onOpen: noop } }));
-  assert.match(html, />Scribe<\/div>/);
-  assert.match(html, />Bot chat<\/div>/);
+  const html = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop, bot: { botId: 'scribe-id', name: 'Scribe', onOpen: noop } }));
+  assert.match(html, /class="desktop-topbar-title"[^>]*>Scribe<\/span>/);
   assert.match(html, /aria-label="Open Bot"/);
   assert.ok(!html.includes('/data/bots'), 'the Bot\'s private folder is not shown');
+  assert.deepEqual(avatarsOf(html), [agentAvatarIndex('scribe-id')], 'the title wears the Bot\'s own avatar, not a generic robot');
+  assert.match(html, /aria-label="Open Bot"[^>]*><img [^>]*aria-hidden="true"/, 'the avatar is the Open Bot button\'s face; the button carries the label');
 
-  const project = render(React.createElement(BetaTopBar, { bridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop }));
+  const projectBridge = { ...bridge, activeSession: { ...bridge.activeSession!, projectId: '/data/bots/a/workspace', mode: 'code' as const } };
+  const project = render(React.createElement(BetaTopBar, { bridge: projectBridge, runtimeCenterOpen: false, onToggleRuntimeCenter: noop }));
   assert.ok(!project.includes('Open Bot'));
+  assert.deepEqual(avatarsOf(project), [], 'a project\'s chat has its folder, no avatar');
   assert.match(project, /\/data\/bots\/a\/workspace/, 'a project chat still shows its folder');
 });

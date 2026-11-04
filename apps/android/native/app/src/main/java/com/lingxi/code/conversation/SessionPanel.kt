@@ -1,6 +1,7 @@
 package com.lingxi.code.conversation
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -8,6 +9,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.remember
@@ -17,11 +20,14 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
+import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.modeColor
@@ -37,6 +43,7 @@ import com.lingxi.code.theme.LingXiTheme
 internal data class SessionPanelModel(
     val title: String,
     val mode: SessionMode,
+    val canSwitchMode: Boolean = true,
     val workspaceName: String,
     val modelName: String,
     /** The effort the engine reports for the model, already localized; null when unknown. */
@@ -46,12 +53,14 @@ internal data class SessionPanelModel(
     val pinned: Boolean,
     /** False for scheduled-task run sessions, which are managed from the task page. */
     val canArchive: Boolean = true,
+    val handoffSourceMode: SessionMode? = null,
+    val handoffSourceId: String? = null,
 )
 
 /**
  * ONE panel for the open conversation's settings, opened by tapping the top
- * bar's title. Replaces the scattered per-session controls: mode (changing it
- * forks the conversation), model, permission, pin, make-scheduled, terminal,
+ * bar's title. Replaces the scattered per-session controls: mode, model,
+ * permission, pin, make-scheduled, terminal,
  * archive.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -59,7 +68,9 @@ internal data class SessionPanelModel(
 internal fun SessionPanel(
     model: SessionPanelModel,
     onDismiss: () -> Unit,
+    onSelectMode: (SessionMode) -> Unit,
     onContinueInOtherMode: () -> Unit,
+    onOpenHandoffSource: () -> Unit,
     onOpenPermissionSettings: () -> Unit,
     onTogglePinned: () -> Unit,
     onMakeScheduled: () -> Unit,
@@ -68,6 +79,7 @@ internal fun SessionPanel(
 ) {
     val t = LingXiTheme.palette
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val modeMenuOpen = remember { mutableStateOf(false) }
     val otherMode = when (model.mode) {
         SessionMode.Chat -> SessionMode.Code
         SessionMode.Code -> SessionMode.Chat
@@ -102,40 +114,58 @@ internal fun SessionPanel(
             )
 
             SettingsSection {
-                SettingsRow(
-                    label = stringResource(R.string.cron_mode_label),
-                    sub = stringResource(R.string.session_panel_mode_hint),
-                    value = sessionModeLabel(model.mode),
-                    valueColor = t.modeColor(model.mode),
-                    onTap = onContinueInOtherMode,
-                    modifier = Modifier.testTag(UiTags.SESSION_PANEL_MODE),
-                )
-                // A Chat session has no file permissions to ask about (same as iOS).
-                val showsPermission = model.mode == SessionMode.Code
+                Box {
+                    SettingsRow(
+                        label = stringResource(R.string.cron_mode_label),
+                        sub = sessionModeDescription(model.mode),
+                        value = sessionModeLabel(model.mode),
+                        valueColor = t.modeColor(model.mode),
+                        onTap = { if (model.canSwitchMode) modeMenuOpen.value = true },
+                        modifier = Modifier.testTag(UiTags.SESSION_PANEL_MODE),
+                    )
+                    DropdownMenu(expanded = modeMenuOpen.value, onDismissRequest = { modeMenuOpen.value = false }) {
+                        NewChatModes.forEach { candidate ->
+                            val isSelected = candidate == model.mode
+                            DropdownMenuItem(
+                                text = { Text("${sessionModeLabel(candidate)} — ${sessionModeDescription(candidate)}") },
+                                onClick = { modeMenuOpen.value = false; onSelectMode(candidate) },
+                                trailingIcon = if (isSelected) {{ LXIcon(LXIconName.Check, size = 16.dp, color = t.text2) }} else null,
+                                modifier = Modifier.testTag(UiTags.sessionPanelModeOption(candidate.wireValue))
+                                    .semantics { selected = isSelected },
+                            )
+                        }
+                    }
+                }
                 SettingsRow(
                     label = stringResource(R.string.session_details_model),
                     value = model.modelName,
                     chevron = false,
-                    isLast = !showsPermission && model.effortLabel == null,
+                    isLast = false,
                 )
                 model.effortLabel?.let { effort ->
                     SettingsRow(
                         label = stringResource(R.string.composer_effort),
                         value = effort,
                         chevron = false,
-                        isLast = !showsPermission,
+                        isLast = false,
                     )
                 }
-                if (showsPermission) {
-                    SettingsRow(
-                        label = stringResource(R.string.settings_parity_permissions),
-                        value = model.permissionLabel,
-                        isLast = true,
-                        onTap = onOpenPermissionSettings,
-                    )
-                }
+                SettingsRow(
+                    label = stringResource(R.string.settings_parity_permissions),
+                    value = model.permissionLabel,
+                    isLast = true,
+                    onTap = onOpenPermissionSettings,
+                )
             }
             SettingsSection {
+                model.handoffSourceMode?.let { sourceMode ->
+                    SettingsRow(
+                        label = stringResource(R.string.session_handoff_open_source, sessionModeLabel(sourceMode)),
+                        sub = model.handoffSourceId?.take(8),
+                        icon = LXIconName.Share,
+                        onTap = onOpenHandoffSource,
+                    )
+                }
                 SettingsRow(
                     label = stringResource(
                         if (model.pinned) R.string.drawer_session_unpin else R.string.drawer_session_pin,

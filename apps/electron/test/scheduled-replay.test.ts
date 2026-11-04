@@ -19,7 +19,8 @@ function task(patch: Partial<CronAutomationDto> = {}): CronJobDto {
     recurring: true, durable: true, permanent: false, created_at: 1,
     automation: {
       version: 2, status: 'active', model: 'openai/test-model', reasoning: { type: 'automatic' },
-      runMode: 'new_session', notificationPolicy: 'all', ...patch,
+      runMode: 'new_session', notificationPolicy: 'all', sessionMode: 'code', sessionScopeKey: '/project-a',
+      ...(patch.runMode === 'selected_session' ? { targetSessionTranscriptPath: `/project-a/${patch.targetSessionId}.jsonl`, targetSessionMode: 'code', targetSessionScopeKey: '/project-a' } : {}), ...patch,
     },
   };
 }
@@ -75,9 +76,10 @@ function harness(t: TestContext) {
   let execute = async (_ref: SessionRef, _runId: string, _task: CronJobDto) => 'Completed summary';
   let openRuntime = async (ref: SessionRef) => runtime(ref);
   let beforeBinding = async () => undefined;
-  let listCatalog = async (_path: string) => ({ sessions: [{ uuid: targetSessionId }] });
+  let listCatalog = async (_path: string) => ({ sessions: [{ uuid: targetSessionId, mode: 'code' as const }] });
   const runtime = (ref: SessionRef) => ({
-    projectPath: ref.projectPath,
+    projectPath: ref.projectPath, sessionMode: ref.mode ?? 'code',
+    getWorkspaceState: async () => ({ transcript_path: `${ref.projectPath}/${ref.sessionId}.jsonl` }),
     markCronRunStarted: async (runId: string, sessionId: string) => {
       bindings.push({ projectPath: ref.projectPath, runId, sessionId });
     },
@@ -90,12 +92,19 @@ function harness(t: TestContext) {
   }) as unknown as SessionRuntime;
   const settings = {
     scheduledWorkspace: '/global',
+    conversationSpaces: { snapshot: () => ({ activeMode: 'code', sessions: [] }), findBySessionId: () => undefined, register() {} },
     getPublic: () => ({ projects: [...projects], model: 'openai/default' }),
     hasProject: (path: string) => projects.has(path),
     isTrustedWorkspace: (path: string) => projects.has(path),
     isSessionArchived: () => false,
   } as unknown as SettingsStore;
   const manager = {
+    get: () => undefined,
+    requireSavedSessionSource: async (ref: SessionRef) => {
+      const row = (await listCatalog(ref.projectPath)).sessions.find(item => item.uuid === ref.sessionId);
+      if (!row) throw new Error('The target chat is unavailable.');
+      return { path: `${ref.projectPath}/${ref.sessionId}.jsonl`, mode: row.mode };
+    },
     withBackgroundSession: async <T>(ref: SessionRef, _empty: boolean, _model: string | undefined, operation: (target: SessionRuntime) => Promise<T>) => {
       background.push(ref);
       return operation(await openRuntime(ref));
@@ -396,14 +405,14 @@ test('the same run ID in different projects executes independently', async (t) =
   const h = harness(t);
   const secondSource = h.sourceFor('/project-b');
   const first = runClaim(h, h.source, 'shared-run-id', task());
-  const second = runClaim(h, secondSource, 'shared-run-id', task());
+  const second = runClaim(h, secondSource, 'shared-run-id', task({ sessionScopeKey: '/project-b' }));
   assert.notStrictEqual(second, first);
   const [a, b] = await Promise.all([first, second]);
   assert.notEqual(a.sessionId, b.sessionId);
   assert.deepEqual(h.background.map((ref) => ref.projectPath).sort(), ['/project-a', '/project-b']);
   assert.equal(h.notifications.length, 2);
   assert.strictEqual(runClaim(h, h.source, 'shared-run-id', task()), first);
-  assert.strictEqual(runClaim(h, secondSource, 'shared-run-id', task()), second);
+  assert.strictEqual(runClaim(h, secondSource, 'shared-run-id', task({ sessionScopeKey: '/project-b' })), second);
 });
 
 test('disposed service rejects and replays first-time admission without opening a runtime', async (t) => {
@@ -442,13 +451,13 @@ test('shutdown prevents a selected-session run from starting after its queue dra
 test('shutdown during target validation does not acquire an execution runtime', async (t) => {
   const h = harness(t);
   const entered = deferred();
-  const finish = deferred<{ sessions: { uuid: string }[] }>();
+  const finish = deferred<{ sessions: { uuid: string; mode: 'code' }[] }>();
   h.setListCatalog(async () => { entered.resolve(); return finish.promise; });
   const run = runClaim(h, h.source, 'validating', task({ runMode: 'selected_session', targetSessionId: targetSessionId }));
   const rejected = assert.rejects(run, /^Error: cancelled:/);
   await entered.promise;
   h.service.dispose();
-  finish.resolve({ sessions: [{ uuid: targetSessionId }] });
+  finish.resolve({ sessions: [{ uuid: targetSessionId, mode: 'code' }] });
   await rejected;
   assert.equal(h.background.length, 0);
   assert.equal(h.bindings.length, 0);
@@ -458,18 +467,18 @@ test('shutdown during target validation does not acquire an execution runtime', 
 test('shutdown during queued target revalidation does not acquire an execution runtime', async (t) => {
   const h = harness(t);
   const entered = deferred();
-  const finish = deferred<{ sessions: { uuid: string }[] }>();
+  const finish = deferred<{ sessions: { uuid: string; mode: 'code' }[] }>();
   let validations = 0;
   h.setListCatalog(async () => {
     validations += 1;
     if (validations === 2) { entered.resolve(); return finish.promise; }
-    return { sessions: [{ uuid: targetSessionId }] };
+    return { sessions: [{ uuid: targetSessionId, mode: 'code' }] };
   });
   const run = runClaim(h, h.source, 'revalidating', task({ runMode: 'selected_session', targetSessionId: targetSessionId }));
   const rejected = assert.rejects(run, /^Error: cancelled:/);
   await entered.promise;
   h.service.dispose();
-  finish.resolve({ sessions: [{ uuid: targetSessionId }] });
+  finish.resolve({ sessions: [{ uuid: targetSessionId, mode: 'code' }] });
   await rejected;
   assert.equal(validations, 2);
   assert.equal(h.background.length, 0);

@@ -18,6 +18,7 @@ function runtime(store: SettingsStore, ref = defaultRef) {
   } });
   const instance = new SessionRuntime({
     ...ref,
+    expectedSessionMode: 'code',
     launchConfig: () => ({ workspace: '/workspace', trusted: true, model: store.getPublic().model }),
     onModelSelected: model => store.setSessionModel(ref, model),
     getSavedModel: () => store.getSessionModel(ref),
@@ -94,7 +95,7 @@ test('resume reapplies the last selection over an old snapshot even without a su
     const store = new SettingsStore(dir);
     const { instance, client, commands } = runtime(store);
     const resumed = instance.resumeOwnedSession();
-    client.emit('event', { type: 'session_resumed', session_id: instance.sessionId, mode: 'default', messages: [] });
+    client.emit('event', { type: 'session_resumed', session_id: instance.sessionId, mode: 'code', messages: [] });
     client.emit('event', { type: 'model_changed', model: 'historical-model' });
     await tick();
     const preferenceCommands = modelPreferenceCommands(commands);
@@ -113,7 +114,7 @@ test('a now-unavailable saved model reports restore failure without breaking res
     const events: unknown[] = [];
     (instance as any).broadcastClientEvent = (event: unknown) => events.push(event);
     const resumed = instance.resumeOwnedSession();
-    client.emit('event', { type: 'session_resumed', session_id: instance.sessionId, mode: 'default', messages: [] });
+    client.emit('event', { type: 'session_resumed', session_id: instance.sessionId, mode: 'code', messages: [] });
     client.emit('event', { type: 'model_changed', model: 'historical-model' });
     await tick();
     client.emit('event', { type: 'error', kind: { type: 'rejected' }, message: 'unknown model' });
@@ -131,19 +132,19 @@ test('explicit /model persists only on confirmation, including reselecting the c
     const events: any[] = [];
     (instance as any).broadcastClientEvent = (event: unknown) => events.push(event);
     client.emit('event', { type: 'model_changed', model: 'current-model' });
-    const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model current-model ', images: [] });
+    const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model current-model ', images: [], turn_id: 123 });
     await tick();
-    assert.deepEqual(modelPreferenceCommands(commands), [{ type: 'run_slash_command', raw: '/model current-model ', images: [] }]);
+    assert.deepEqual(modelPreferenceCommands(commands), [{ type: 'run_slash_command', raw: '/model current-model ', images: [], turn_id: 123 }]);
     assert.equal(store.getPublic().model, 'old-model');
     assert.ok(!events.some(event => event.type === 'slash_command_result'));
     await assert.rejects(instance.dispatchCommand({ type: 'run_slash_command', raw: '/model', images: [] }), /already in progress/);
-    client.emit('event', { type: 'slash_command_result', display: 'Switched', is_error: false });
+    client.emit('event', { type: 'slash_command_result', turn_id: 123, display: 'Switched', is_error: false });
     client.emit('event', { type: 'model_list', current: 'provider/current-model', models: ['provider/current-model'] });
     await selecting;
     assert.equal(new SettingsStore(dir).getPublic().model, 'provider/current-model');
     assert.ok(events.some(event => event.type === 'slash_command_result' && !event.is_error));
-    await instance.dispatchCommand({ type: 'run_slash_command', raw: '/model', images: [] });
-    assert.deepEqual(commands.at(-1), { type: 'run_slash_command', raw: '/model', images: [] });
+    await instance.dispatchCommand({ type: 'run_slash_command', raw: '/model', images: [], turn_id: 124 });
+    assert.deepEqual(commands.at(-1), { type: 'run_slash_command', raw: '/model', images: [], turn_id: 124 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test('a late side-question reply cannot complete or reject a pending slash model switch', async () => {
@@ -192,9 +193,9 @@ test('rejected explicit /model never saves or reports success', async () => {
     const { instance, client } = runtime(store);
     const events: any[] = [];
     (instance as any).broadcastClientEvent = (event: unknown) => events.push(event);
-    const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model forbidden-model', images: [] });
+    const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model forbidden-model', images: [], turn_id: 125 });
     await tick();
-    client.emit('event', { type: 'slash_command_result', display: 'Could not switch model: blocked by hook', is_error: false });
+    client.emit('event', { type: 'slash_command_result', turn_id: 125, display: 'Could not switch model: blocked by hook', is_error: false });
     client.emit('event', { type: 'model_list', current: 'old-model', models: ['old-model'] });
     await assert.rejects(selecting, /not confirmed/);
     assert.equal(new SettingsStore(dir).getPublic().model, 'old-model');
@@ -222,7 +223,7 @@ test('session model selections remain isolated across resume and settings reload
     for (const saved of [store, reloaded]) {
       const b = runtime(saved, refB);
       const resumed = b.instance.resumeOwnedSession();
-      b.client.emit('event', { type: 'session_resumed', session_id: refB.sessionId, mode: 'default', messages: [] });
+      b.client.emit('event', { type: 'session_resumed', session_id: refB.sessionId, mode: 'code', messages: [] });
       b.client.emit('event', { type: 'model_changed', model: 'old-model-b' });
       await tick();
       assert.deepEqual(modelPreferenceCommands(b.commands)[1], { type: 'set_model', model: 'model-b' });
@@ -231,7 +232,7 @@ test('session model selections remain isolated across resume and settings reload
     }
     const legacy = runtime(reloaded, { ...refB, sessionId: '11111111-2222-4333-8444-555555555557' });
     const resumed = legacy.instance.resumeOwnedSession();
-    legacy.client.emit('event', { type: 'session_resumed', session_id: legacy.instance.sessionId, mode: 'default', messages: [] });
+    legacy.client.emit('event', { type: 'session_resumed', session_id: legacy.instance.sessionId, mode: 'code', messages: [] });
     legacy.client.emit('event', { type: 'model_changed', model: 'historical-model' });
     await resumed;
     assert.deepEqual(modelPreferenceCommands(legacy.commands).map(command => command.type), ['resume_session']);

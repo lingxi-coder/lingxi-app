@@ -71,12 +71,24 @@ export interface DesktopLocalApp {
   mcp?: LocalAppMcpStatus[];
 }
 export interface LocalAppLog { sequence: number; time: number; runId: string; process: string; stream: 'stdout' | 'stderr' | 'host'; text: string }
+export interface PendingLocalAppPublication { requestId: string; appId?: string; sourceDirectory?: string; expectedRevision: number }
+export interface PendingLocalAppSourceCopy { requestId: string; appId: string; revision: number; purpose: 'restoreSource' | 'remix' }
+export interface LocalAppNewSessionIntent { name: string; appId?: string; setCurrent: boolean; sourceRequestId?: string }
+export type LocalAppSessionPurpose = { kind: 'local-app'; intent: LocalAppNewSessionIntent } | { kind: 'recover-local-app'; requestId: string };
+export interface PendingLocalAppSession { requestId: string; appId?: string; name: string }
 export interface LocalAppEditRequest {
   id: string;
   name: string;
   authoring?: DesktopAuthoringRef | DesktopAuthoringSourceRef;
   authoringSourceMissing?: boolean;
   authoringAction?: 'sourceMissing' | 'rebindRequired' | 'resumeSession' | 'createSession';
+  authoringSetCurrent?: boolean;
+  /** Host-owned durable source operation, if this edit follows a source copy. */
+  authoringRequestId?: string;
+  /** Opaque host generation for an in-progress authoring navigation. */
+  authoringVersion?: number;
+  /** Opaque ID of a Host-owned pending Code session creation. */
+  authoringSessionIntentId?: string;
 }
 export interface DesktopAuthoringSourceRef { sourceDirectory: string }
 export type DesktopAuthoringProjectRef = { kind: 'desktopPath'; path: string };
@@ -112,9 +124,15 @@ export interface LocalAppsApi {
   setBackground(id: string, enabled: boolean): Promise<void>;
   revoke(id: string): Promise<void>;
   edit(id: string): Promise<void>;
-  bindAuthoring(id: string, session: { projectPath: string; sessionId: string }): Promise<DesktopAuthoringRef>;
+  bindAuthoring(id: string, session: { projectPath: string; sessionId: string }, setCurrent: boolean, sourceRequestId?: string): Promise<DesktopAuthoringRef>;
   /** Persist a host-verified, ownerless source binding before a new app draft is shown. */
   prepareAuthoring(session: { projectPath: string; sessionId: string }): Promise<DesktopAuthoringRef>;
+  pendingPublications(): Promise<PendingLocalAppPublication[]>;
+  resumePublication(requestId: string): Promise<DesktopLocalApp>;
+  pendingSourceCopies(): Promise<PendingLocalAppSourceCopy[]>;
+  resumeSourceCopy(requestId: string): Promise<void>;
+  pendingAuthoringSessions(): Promise<PendingLocalAppSession[]>;
+  resumeAuthoringSession(requestId: string): Promise<void>;
   marketBrowse(): Promise<void>;
   marketInstallLink(remoteId: string): Promise<DesktopLocalApp | null>;
   marketInstall(remoteId: string, id?: string, expectedRevision?: number): Promise<DesktopLocalApp>;

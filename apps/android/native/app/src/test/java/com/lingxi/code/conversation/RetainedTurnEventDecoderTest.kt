@@ -52,11 +52,8 @@ class RetainedTurnEventDecoderTest {
     }
 
     @Test
-    fun legacyBareStringOutcomeStillDecodes() {
-        assertEquals(
-            ReplyEvent.End,
-            retainedTurnEventToReply("""{"type":"turn_ended","outcome":"end_turn"}"""),
-        )
+    fun bareStringOutcomeIsRejected() {
+        assertNull(retainedTurnEventToReply("""{"type":"turn_ended","outcome":"end_turn"}"""))
     }
 
     @Test

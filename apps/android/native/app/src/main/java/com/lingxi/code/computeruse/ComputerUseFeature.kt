@@ -106,4 +106,8 @@ interface ComputerUseFeature {
     fun openAccessibilitySettings(context: Context)
 
     fun engineHost(): AndroidComputerUseHost?
+
+    fun engineHost(ownerKey: String): AndroidComputerUseHost? = engineHost()
+
+    fun activeEngineOwners(): Set<String> = emptySet()
 }

@@ -366,4 +366,28 @@ class EngineReplyStreamTest {
             stream.toList(),
         )
     }
+
+    @Test
+    fun anotherTurnsReplayEnvelopeCannotAdvanceTheCurrentCursor() = runTest {
+        val stream = mapReplyStream(kotlinx.coroutines.flow.flowOf(
+            ClientEvent.TextDelta("live".toClientTextDto()),
+            ClientEvent.TurnEventReplay("session-a", 8u, 50u, """{"type":"text_delta","text":"old"}"""),
+            ClientEvent.TurnEventReplay("session-a", 9u, 1u, """{"type":"text_delta","text":"live"}"""),
+            ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost),
+        ), expectedTurnId = 9L)
+        assertEquals(listOf(ReplyEvent.Thinking, ReplyEvent.Delta("live"),
+            ReplyEvent.DurableTurnReplayAcknowledged(9L, 1L), ReplyEvent.End), stream.toList())
+    }
+
+    @Test
+    fun anotherSessionsReplayEnvelopeCannotAdvanceTheCurrentCursor() = runTest {
+        val stream = mapReplyStream(flowOf(
+            ClientEvent.TextDelta("live".toClientTextDto()),
+            ClientEvent.TurnEventReplay("session-b", 9u, 1u, """{"type":"text_delta","text":"old"}"""),
+            ClientEvent.TurnEventReplay("session-a", 9u, 1u, """{"type":"text_delta","text":"live"}"""),
+            ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost),
+        ), expectedTurnId = 9L, expectedSessionId = "session-a")
+        assertEquals(listOf(ReplyEvent.Thinking, ReplyEvent.Delta("live"),
+            ReplyEvent.DurableTurnReplayAcknowledged(9L, 1L), ReplyEvent.End), stream.toList())
+    }
 }

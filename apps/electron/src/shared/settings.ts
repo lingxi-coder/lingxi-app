@@ -25,20 +25,23 @@ import type { VoicePreferences } from './voicePreferences.js';
 export type { VoicePreferences } from './voicePreferences.js';
 import type { NotificationPreferences } from './notificationPreferences.js';
 export type { NotificationPreferences } from './notificationPreferences.js';
+import type { ConversationSpace } from './conversationSpaces.js';
 
 /** Schema version of the persisted device settings file. */
 export const SETTINGS_VERSION = 1 as const;
 
 /** A session identified by the project it belongs to. */
 export interface SessionRef {
+  /** The engine's real workspace, independent of logical project ownership. */
   projectPath: string;
   sessionId: string;
+  /** Desktop-owned conversations carry their fixed logical owner explicitly. */
+  projectId?: string | null;
+  mode?: ConversationSpace;
 }
 
 /** A session the user pinned, as persisted (the pin time is assigned by the main process). */
-export interface PinnedSessionRecord {
-  projectPath: string;
-  sessionId: string;
+export interface PinnedSessionRecord extends SessionRef {
   title: string;
   pinnedAt: string;
 }
@@ -53,12 +56,21 @@ export interface ProviderModelPickerVisibility {
 
 export type ModelPickerVisibilitySettings = Record<string, ProviderModelPickerVisibility>;
 
+/** What the desktop sidebar lists; the left rail's Home, Bots and Teams buttons switch it. */
+export type SidebarMode = 'home' | 'bots' | 'teams';
+
 /** Preferences that govern how project chats are organized in the desktop sidebar. */
 export interface SidebarPreferences {
   organization: 'project' | 'list';
   chatSort: 'priority' | 'updated' | 'manual';
   /** Session IDs in user-defined order, keyed by their canonical project path. */
   manualSessionOrder: Record<string, string[]>;
+  /** The mode the owner last chose: Home until they first switch it. */
+  mode: SidebarMode;
+  /** The Bots whose chats the Bots sidebar lists open. Omitted until the owner first opens or closes one. */
+  expandedBots?: string[];
+  /** The width, in CSS pixels, the owner gave the Teams details panel. Omitted until they first resize it. */
+  teamsDrawerWidth?: number;
 }
 
 /**

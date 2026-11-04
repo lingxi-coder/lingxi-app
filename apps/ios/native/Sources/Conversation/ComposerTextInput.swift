@@ -12,6 +12,8 @@ struct ComposerTextInput: UIViewRepresentable {
     let argumentHint: (String, Int) -> String?
     let onSubmit: () -> Void
     let onAcceptSuggestion: (() -> Void)?
+    var historySessionKey: String = ""
+    var historyMessages: [String] = []
 
     func makeUIView(context: Context) -> ComposerInputView {
         let view = ComposerInputView()
@@ -31,6 +33,7 @@ struct ComposerTextInput: UIViewRepresentable {
         view.updateAppearance(font: font, textColor: UIColor(textColor), hintColor: UIColor(hintColor))
         view.placeholderLabel.text = placeholder
         view.textView.acceptSuggestion = onAcceptSuggestion
+        view.textView.configureHistory(sessionKey: historySessionKey, messages: historyMessages)
         view.textView.accessibilityLabel = String(localized: "composer_placeholder")
 
         if view.textView.text != text {
@@ -108,6 +111,9 @@ struct ComposerTextInput: UIViewRepresentable {
 
         func textViewDidChange(_ textView: UITextView) {
             guard !updating else { return }
+            if let editor = textView as? ComposerEditingTextView, !editor.recallingHistory {
+                editor.promptHistory.reset()
+            }
             parent.text = textView.text
             refreshHint()
             view?.invalidateIntrinsicContentSize()
@@ -217,6 +223,40 @@ final class ComposerInputView: UIView {
 
 final class ComposerEditingTextView: UITextView {
     var acceptSuggestion: (() -> Void)?
+    var promptHistory = ComposerPromptHistory()
+    private var historySessionKey = ""
+    private var historyMessages: [String] = []
+    private(set) var recallingHistory = false
+
+    func configureHistory(sessionKey: String, messages: [String]) {
+        if historySessionKey != sessionKey {
+            promptHistory.reset()
+            historySessionKey = sessionKey
+        }
+        historyMessages = messages
+    }
+
+    private func canRecallHistory(older: Bool) -> Bool {
+        guard markedTextRange == nil, selectedRange.length == 0 else { return false }
+        return promptHistory.canNavigate(text: text ?? "", cursor: selectedRange.location,
+                                         older: older, hasMessages: historyMessages.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+    }
+
+    func recallHistory(older: Bool) {
+        guard canRecallHistory(older: older),
+              let recalled = promptHistory.navigate(messages: historyMessages, text: text ?? "",
+                                                    cursor: selectedRange.location, older: older) else { return }
+        recallingHistory = true
+        text = recalled
+        selectedRange = NSRange(location: recalled.utf16.count, length: 0)
+        delegate?.textViewDidChange?(self)
+        recallingHistory = false
+        scrollRangeToVisible(selectedRange)
+    }
+
+    @objc private func recallOlderPrompt() { recallHistory(older: true) }
+    @objc private func recallNewerPrompt() { recallHistory(older: false) }
+
     var onLayout: (() -> Void)?
 
     override var keyCommands: [UIKeyCommand]? {
@@ -225,6 +265,14 @@ final class ComposerEditingTextView: UITextView {
         if acceptSuggestion != nil {
             for input in ["\t", UIKeyCommand.inputRightArrow] {
                 let command = UIKeyCommand(input: input, modifierFlags: [], action: #selector(useSuggestion))
+                command.wantsPriorityOverSystemBehavior = true
+                commands.append(command)
+            }
+        }
+        for (input, older) in [(UIKeyCommand.inputUpArrow, true), (UIKeyCommand.inputDownArrow, false)] {
+            if canRecallHistory(older: older) {
+                let command = UIKeyCommand(input: input, modifierFlags: [],
+                    action: older ? #selector(recallOlderPrompt) : #selector(recallNewerPrompt))
                 command.wantsPriorityOverSystemBehavior = true
                 commands.append(command)
             }
@@ -243,5 +291,42 @@ final class ComposerEditingTextView: UITextView {
         guard let selectedTextRange else { return }
         replace(selectedTextRange, withText: "\n")
         delegate?.textViewDidChange?(self)
+    }
+}
+
+/// Matches the composer recall contract without depending on UIKit cursor geometry.
+struct ComposerPromptHistory {
+    private var entries: [String] = []
+    private var index: Int?
+    private var recalledText: String?
+
+    mutating func reset() {
+        entries = []
+        index = nil
+        recalledText = nil
+    }
+
+    func canNavigate(text: String, cursor: Int, older: Bool, hasMessages: Bool) -> Bool {
+        if text.isEmpty { return older && hasMessages }
+        return index != nil && text == recalledText && (cursor == 0 || cursor == text.utf16.count)
+    }
+
+    mutating func navigate(messages: [String], text: String, cursor: Int, older: Bool) -> String? {
+        guard canNavigate(text: text, cursor: cursor, older: older, hasMessages: messages.contains {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) else { return nil }
+        if index == nil || text != recalledText {
+            entries = messages.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            index = entries.count
+        }
+        guard let index else { return nil }
+        let next = min(entries.count, max(0, index + (older ? -1 : 1)))
+        if next == entries.count {
+            reset()
+            return ""
+        }
+        self.index = next
+        recalledText = entries[next]
+        return entries[next]
     }
 }

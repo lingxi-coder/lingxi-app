@@ -109,6 +109,8 @@ export interface BridgeManagerOptions {
   sessionResumeTimeoutMs?: number;
   /** Exact catalog selection retained when an idle runtime is recreated. */
   resumeTranscriptPath?: string;
+  /** Immutable owner checked by the engine before it claims a resumed transcript. */
+  expectedSessionMode?: RuntimeSessionMode;
   /** Ephemeral same-UUID controls used only during a directory remount. */
   remountControls?: string;
   stopTimeoutMs?: number;
@@ -155,6 +157,10 @@ export interface BridgeManagerOptions {
   onActivityChanged?: () => void;
   /** Invalidate Electron-main launch material after a credential/config mutation. */
   onFirstPromptSent?: () => boolean | void;
+  /** A user prompt crossed the authenticated bridge boundary. */
+  onPromptAdmitted?: () => void;
+  /** A new scheduled turn has crossed the bridge boundary. */
+  onDurableSessionActivity?: () => void;
   /** SECURITY: consulted before a `set_permission_mode: bypassPermissions`
    * command is forwarded to the engine. Must show a blocking acceptance dialog
    * (once — persisted) and resolve `true` only on explicit consent. When absent,
@@ -166,6 +172,8 @@ export interface BridgeManagerOptions {
 export interface SessionRef {
   projectPath: string;
   sessionId: string;
+  projectId?: string | null;
+  mode?: RuntimeSessionMode;
 }
 
 export type RuntimeSessionMode = 'code' | 'chat';
@@ -191,7 +199,7 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onPromptAdmitted' | 'onDurableSessionActivity' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
   /** What a session of a working directory is launched with; it is told which session, for settings that belong to the one. */
   workspaceSettings?: (projectPath: string, ref: SessionRef) => Promise<WorkspaceLaunchSettings>;
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
@@ -204,7 +212,12 @@ export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions,
   onPermissionModeSelected?: (ref: SessionRef, mode: PermissionModeId) => void;
   getSavedFastMode?: (ref: SessionRef) => boolean | undefined;
   onFastModeSelected?: (ref: SessionRef, enabled: boolean) => void;
-  onFirstPromptSent?: (ref: SessionRef) => boolean | void;
+  resolveSessionMode?: (ref: SessionRef) => Promise<RuntimeSessionMode | undefined>;
+  /** Revalidate a previously selected transcript before a cold runtime opens it. */
+  resolveSavedTranscript?: (ref: SessionRef) => Promise<{ path: string; mode: RuntimeSessionMode } | undefined>;
+  captureSessionSource?: (ref: SessionRef, runtime: SessionRuntime, scheduled: boolean) => Promise<string | undefined>;
+  onFirstPromptSent?: (ref: SessionRef, isActive: boolean) => boolean | void;
+  onPromptAdmitted?: (ref: SessionRef) => void;
   /** Maximum retained runtimes when enough idle sessions are evictable. */
   maxCachedRuntimes?: number;
 }
@@ -220,6 +233,12 @@ export interface PromptSource {
   deviceName?: string;
   /** The sending Bot when `origin` is `bot`. */
   fromBotName?: string;
+}
+
+/** Recheck remote prompt ownership and attachment admission before the bridge send. */
+export interface PromptAdmission {
+  requireIdleFor?: 'images' | 'files';
+  authorize?: () => void;
 }
 
 /** How {@link SessionRuntime.runHostTurn} is asked to run a turn. */
@@ -286,6 +305,8 @@ export type RemoteObserver = (observation: RemoteObservation) => void;
  */
 export interface RemoteRuntimeView {
   sessionId: string;
+  /** Confirmed creation mode, including drafts with no transcript base. */
+  sessionMode?: RuntimeSessionMode;
   /** Names this instance of the runtime, so that a recreated runtime never reuses an epoch. */
   runtimeId: string;
   /** `runtimeId` plus the sequence of the current base event: a new base is a new epoch. */

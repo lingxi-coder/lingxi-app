@@ -59,6 +59,7 @@ test('a started session stays visible until the file-backed catalog catches up',
   const started = reduceDesktopEvent(emptyDesktopState(), {
     type: 'session_started',
     session_id: 'fresh-session',
+    mode: 'code',
   });
 
   assert.equal(started.activeSessionId, 'fresh-session');
@@ -229,6 +230,16 @@ test('authoritative controls restore the displayed permission after runtime stat
     assert.equal(restored.permissionMode, effective);
     assert.equal(restored.conversationControls, controls);
   }
+});
+
+test('session mode follows the started or resumed owner', () => {
+  const original = { ...emptyDesktopState(), currentModel: 'provider/model', permissionMode: 'plan' as const };
+  const resumed = reduceDesktopEvent(original, { type: 'session_resumed', session_id: 's1', mode: 'code', messages: [] });
+  assert.deepEqual(resumed.sessionMode, { sessionId: 's1', active: 'code' });
+  assert.equal(resumed.currentModel, original.currentModel);
+  assert.equal(resumed.permissionMode, original.permissionMode);
+  const nextSession = reduceDesktopEvent(resumed, { type: 'session_resumed', session_id: 's2', mode: 'chat', messages: [] });
+  assert.deepEqual(nextSession.sessionMode, { sessionId: 's2', active: 'chat' });
 });
 
 test('an unknown effective mode in a controls snapshot does not replace the displayed mode', () => {

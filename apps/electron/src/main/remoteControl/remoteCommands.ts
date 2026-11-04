@@ -178,8 +178,8 @@ export class RemoteCommands {
     const action = request.action;
     if (['begin_oauth', 'complete_oauth', 'cancel_oauth', 'reconnect'].includes(String(action)) || (action === 'add' && request.authKind === 'oauth'))
       throw new RemoteRpcError('forbidden', 'OAuth browser authorization must be completed on the execution Host.');
-    if (!['list', 'add', 'update', 'reorder', 'set_enabled', 'set_credential', 'remove', 'logout', 'test', 'set_policy'].includes(String(action))) throw invalid('Unsupported provider account operation.');
-    const normalized = { ...request, action: action === 'set_enabled' ? 'enable' : action === 'set_credential' ? 'reconnect' : action } as unknown as ProviderAccountCommand;
+    if (!['list', 'add', 'update', 'reorder', 'set_enabled', 'set_credential', 'clear_credential', 'remove', 'logout', 'test', 'set_policy'].includes(String(action))) throw invalid('Unsupported provider account operation.');
+    const normalized = { ...request, action: action === 'set_enabled' ? 'enable' : action === 'set_credential' ? 'reconnect' : action === 'clear_credential' ? 'logout' : action } as unknown as ProviderAccountCommand;
     if (normalized.action === 'add' && normalized.authKind !== 'api_key') throw invalid('Unsupported account authentication method.');
     if (action === 'set_credential') {
       const snapshot = await this.deps.providerAccounts.snapshot();
@@ -203,7 +203,7 @@ export class RemoteCommands {
   // ───────────────────────────────────────────────────────────────────────────
 
   /** `prompt.send`. A retry with the same `client_request_id` from the same device gets the first answer instead of a second turn. */
-  promptSend(runtime: RemoteRuntime, viewer: RemoteViewer, value: unknown, prepare?: { resolve(input: Json): Promise<Json>; authorize(): void }): Promise<PromptSendResult> {
+  promptSend(runtime: RemoteRuntime, viewer: RemoteViewer, value: unknown, prepare?: { resolve(input: Json): Promise<Json>; authorize(): void; authorizeOwner(): void }, authorizeOwner?: () => void): Promise<PromptSendResult> {
     const input = params(value);
     const clientRequestId = boundedString(input['client_request_id'], 'client_request_id', MAX_ID_CHARS);
     const key = `${viewer.device_id}\0${runtime.sessionId}\0${clientRequestId}`;
@@ -215,9 +215,9 @@ export class RemoteCommands {
     const result = prepare
       ? Promise.resolve().then(() => { prepare.authorize(); return prepare.resolve(input); }).then(prepared => {
           prepare.authorize();
-          return this.sendPrompt(runtime, viewer, prepared);
+          return this.sendPrompt(runtime, viewer, prepared, prepare.authorizeOwner);
         })
-      : this.sendPrompt(runtime, viewer, input);
+      : this.sendPrompt(runtime, viewer, input, authorizeOwner);
     this.sent.set(key, { at: now, result });
     // A prompt that was refused or failed may be sent again.
     result.catch(() => { if (this.sent.get(key)?.result === result) this.sent.delete(key); });
@@ -230,7 +230,7 @@ export class RemoteCommands {
     }
   }
 
-  private async sendPrompt(runtime: RemoteRuntime, viewer: RemoteViewer, input: Json): Promise<PromptSendResult> {
+  private async sendPrompt(runtime: RemoteRuntime, viewer: RemoteViewer, input: Json, authorizeOwner?: () => void): Promise<PromptSendResult> {
     const text = input['text'];
     const rawImages = input['images'];
     if (typeof text !== 'string') throw invalid('invalid text');
@@ -250,7 +250,7 @@ export class RemoteCommands {
       if (rawImages !== undefined && rawImages.length > 0) throw invalid('a slash command takes no images');
       const raw = text.trim();
       try {
-        await runtime.dispatchCommand({ type: 'run_slash_command', raw, images: [], turn_id: turnId }, source);
+        await runtime.dispatchCommand({ type: 'run_slash_command', raw, images: [], turn_id: turnId }, source, authorizeOwner);
       } catch (error) {
         throw refused(error);
       }
@@ -266,10 +266,15 @@ export class RemoteCommands {
     } catch (error) {
       throw refused(error);
     }
-    // While a turn runs the desktop takes plain text only; so does a viewer.
+    // File references are resolved into text before submission. Keep the
+    // original references when enforcing the plain-text-only steering rule.
+    const hasFiles = Array.isArray(input['file_refs']) && input['file_refs'].length > 0;
     if (runtime.turnActive && images.length > 0) throw invalid('images cannot be sent while a turn is running');
+    if (runtime.turnActive && hasFiles) throw invalid('files cannot be sent while a turn is running');
+    const requireIdleFor = hasFiles ? 'files' : images.length > 0 ? 'images' : undefined;
     try {
-      await runtime.sendPrompt(prompt, images, turnId, undefined, source);
+      await runtime.sendPrompt(prompt, images, turnId, undefined, source,
+        requireIdleFor || authorizeOwner ? { requireIdleFor, authorize: authorizeOwner } : undefined);
     } catch (error) {
       throw refused(error);
     }

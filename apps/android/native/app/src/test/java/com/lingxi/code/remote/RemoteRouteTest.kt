@@ -38,7 +38,7 @@ class RemoteRouteTest {
 
     @Test fun otherRoutesAreNotRemoteSessions() {
         assertNull(RemoteRoute.fromLink(DeepLink.parse("lingxi://new")!!))
-        assertNull(RemoteRoute.fromLink(DeepLink.parse("lingxi://session/abc")!!))
+        assertNull(RemoteRoute.fromLink(DeepLink.parse("lingxi://session/abc?mode=code")!!))
     }
 
     @Test fun malformedRemoteLinksDoNotParse() {
@@ -96,6 +96,14 @@ class RemoteRouteTest {
         val link = PushRoute.link("remote/$host/$session")!!
         assertEquals("lingxi://remote/$host/$session", link)
         assertEquals(RemoteRoute.Session(host, session), RemoteRoute.fromLink(DeepLink.parse(link)!!))
+    }
+
+    @Test fun pushRoutePreservesTeamApprovalCapability() {
+        val capability = "team-approval:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
+        val link = PushRoute.link("remote/$host/$capability")!!
+        val route = RemoteRoute.fromLink(DeepLink.parse(link)!!)!!
+        assertEquals(RemoteRoute.Session(host, capability), route)
+        assertEquals(route, RemoteRoute.decode(route.encode()))
     }
 
     @Test fun pushRouteOnlyOpensRemoteSessions() {

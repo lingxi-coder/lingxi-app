@@ -318,7 +318,6 @@ internal fun FlowModeOverlay(
     visible: Boolean,
     assistantName: String,
     inputDialog: Boolean,
-    streaming: Boolean,
     assistantText: String,
     onSend: (String) -> Unit,
     onCancel: () -> Unit,
@@ -338,10 +337,9 @@ internal fun FlowModeOverlay(
         exit = fadeOut(tween(300)),
         modifier = modifier,
     ) {
-        FlowModeContent(
+        if (visible) FlowModeContent(
             assistantName,
             inputDialog,
-            streaming,
             assistantText,
             onSend,
             onCancel,
@@ -356,7 +354,6 @@ internal fun FlowModeOverlay(
 private fun FlowModeContent(
     assistantName: String,
     inputDialog: Boolean,
-    streaming: Boolean,
     assistantText: String,
     onSend: (String) -> Unit,
     onCancel: () -> Unit,
@@ -370,8 +367,7 @@ private fun FlowModeContent(
 
     // The plain controller owns the pinned listen/reply cycle. Compose only reports
     // conversation state and forwards user actions.
-    LaunchedEffect(controller) { controller.listen(onSend, onCancel) }
-    LaunchedEffect(assistantText, streaming) { controller.updateReply(assistantText, streaming) }
+    LaunchedEffect(controller) { controller.ensureListening(onSend, onCancel) }
 
     // The live caption: the user's recognized text while thinking, the streaming
     // assistant reply while speaking.

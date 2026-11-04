@@ -17,10 +17,34 @@ import com.lingxi.code.runtimeintegration.NativeEngineFactory
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onSubscription
+
+/** Supplies the exact transcript that must be checkpointed before a durable turn. */
+interface DurableTranscriptSource {
+    suspend fun awaitTurnTranscriptPath(): String
+}
+
+/** Supplies the exact source session and direct native result of a prompt submission. */
+interface NativePromptReceiptSource {
+    fun submitForComposer(
+        text: String, images: List<ImageRefDto>, turnId: Long,
+        visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, onNotAdmitted: () -> Unit,
+        tryBeginNative: () -> Boolean = { true },
+        bindNativeIdentity: (NativePromptIdentity) -> Boolean = { true },
+        onNativeResult: (Result<Unit>) -> Unit = {},
+    ): Flow<ReplyEvent>
+
+    suspend fun currentNativePromptIdentity(): NativePromptIdentity?
+    suspend fun clearNotAdmitted(identity: NativePromptIdentity, turnId: Long): Boolean
+}
+
+enum class ColdAuthoringRecoveryState { NotNeeded, Preparing, Failed, Ready }
 
 /**
  * The seam between the [ChatViewModel] and whatever produces turns. The
@@ -41,7 +65,10 @@ import kotlinx.coroutines.flow.flow
  * fail-closed unavailable state when the engine can't build.
  */
 interface ConversationSource {
-
+    /** False while a newly created Local App owner is awaiting its durable binding. */
+    val turnAdmissionReady: Boolean get() = true
+    val coldAuthoringRecoveryState: StateFlow<ColdAuthoringRecoveryState>? get() = null
+    suspend fun retryColdAuthoringRecovery() { error("No pending authoring recovery") }
     /** Process-redelivery context for the engine this source owns. */
     val recoverySpec: ConversationRecoverySpec?
         get() = null
@@ -55,6 +82,17 @@ interface ConversationSource {
      */
     val clientEvents: Flow<ClientEvent>
         get() = emptyFlow()
+
+    /** Signal only once a shared event stream has registered its subscriber. */
+    suspend fun collectClientEvents(onSubscribed: () -> Unit, onEvent: suspend (ClientEvent) -> Unit) {
+        when (val stream = clientEvents) {
+            is SharedFlow<ClientEvent> -> stream.onSubscription { onSubscribed() }.collect { onEvent(it) }
+            else -> {
+                onSubscribed()
+                stream.collect { onEvent(it) }
+            }
+        }
+    }
 
     /** Structured workflow/subagent updates, pushed directly by the engine. */
     val workflowProgress: Flow<WorkflowProgressUpdate>
@@ -73,6 +111,9 @@ interface ConversationSource {
 
     /** Attach the durable active turn when a new UI owner binds this source. */
     suspend fun attachDurableTurnForUi(afterSequence: Long = 0L) {}
+
+    /** Preserve the current UI's history when the process source outlives it. */
+    fun retainUiTranscript(snapshot: RetainedConversationTranscript) {}
 
     /** Apply the persisted permission-mode preference to the live engine. */
     suspend fun setPermissionMode(mode: String) {
@@ -223,16 +264,8 @@ interface ConversationSource {
      */
     suspend fun resumeSession(uuid: String) {}
 
-    /**
-     * Resume a confirmed zero-message session while preserving its UUID.
-     *
-     * This separate proof is required only for mobile upgrades whose Project
-     * index predates the engine's empty-session JSONL anchor. Implementations
-     * without that migration concern fall back to the normal resume path.
-     */
-    suspend fun resumeEmptySession(uuid: String, title: String) {
-        resumeSession(uuid)
-    }
+    /** Attach an in-process UI projection to an already confirmed owner. */
+    fun retainedUiActivation(activation: ActivatedSession): ActivatedSession = activation
 
     /**
      * The engine's REAL MCP server listing (out-of-band, sibling of [modelState]).
@@ -262,7 +295,7 @@ interface ConversationSource {
      */
     suspend fun newSession() {}
     suspend fun newSession(cwd: String) {
-        submitClientCommand(ClientCommand.NewSession(cwd = cwd, model = null))
+        error("This conversation source cannot create a session in a directory")
     }
 
     /** Release native handles and event pumps owned by this source. Idempotent. */

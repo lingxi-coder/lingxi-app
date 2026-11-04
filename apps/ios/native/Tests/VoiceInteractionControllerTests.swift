@@ -85,6 +85,85 @@ final class VoiceInteractionControllerTests: XCTestCase {
         XCTAssertEqual(second.transcribeCalls, 1)
     }
 
+    func testContextNavigationDoesNotCancelSubmittedFlowTurn() async {
+        let capture = ControllerVoiceSession(transcript: "continue work", automaticallyFinishesWhenEndpointingEnabled: true)
+        let source = ControllerConversationSource()
+        let controller = makeController(sessions: [capture])
+        controller.startFlow(source: source)
+        await settle()
+        XCTAssertTrue(source.model.streaming)
+        controller.handleContextChange()
+        await settle()
+        XCTAssertEqual(source.cancelCalls, 0)
+        XCTAssertTrue(source.model.streaming)
+    }
+
+    func testHiddenFlowKeepsItsOwnerAndFinishesSpeechBeforeAnotherOwnerCaptures() async throws {
+        let ownership = VoiceInteractionOwnership()
+        let capture = ControllerVoiceSession(transcript: "continue work", automaticallyFinishesWhenEndpointingEnabled: true)
+        let laterCapture = ControllerVoiceSession(transcript: "another owner")
+        let player = RecordingStreamingSpeechPlayer()
+        let first = ControllerConversationSource()
+        let second = ControllerConversationSource()
+        let attachmentA = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: "11111111-1111-4111-8111-111111111111", generation: 1))
+        let attachmentB = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: "22222222-2222-4222-8222-222222222222", generation: 1))
+        let ownerA = IOSAudioOwner.attached(attachment: attachmentA, logicalOwner: .session(sessionID: "A"))
+        first.voiceAudioOwner = ownerA
+        let voiceA = makeController(sessions: [capture], player: player, ownership: ownership)
+        let voiceB = makeController(sessions: [laterCapture], player: player, ownership: ownership)
+        let host = SessionHost { voiceA }
+        _ = try host.retain(source: first, scope: .global, mode: .code,
+                            sessionID: "A", workspace: "/a", draft: "")
+
+        voiceA.startFlow(source: first)
+        await settle()
+        let token = try XCTUnwrap(first.lastToken)
+        let pinned = voiceA.capability.configurationSnapshot
+        voiceA.handleContextChange()
+        first.voiceAudioOwner = .attached(attachment: attachmentB, logicalOwner: .session(sessionID: "B"))
+        voiceB.startFlow(source: second)
+        await settle()
+        XCTAssertEqual(laterCapture.transcribeCalls, 0)
+        XCTAssertEqual(voiceB.phase, .failed)
+        XCTAssertTrue(first.model.streaming)
+        XCTAssertEqual(first.cancelCalls, 0)
+
+        first.model.turnSpeechUpdates.send(.init(token: token, sequence: 1, delta: "Reply from A!"))
+        let openDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while player.configurations.isEmpty && ContinuousClock.now < openDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let speechConfiguration = try XCTUnwrap(player.configurations.first)
+        XCTAssertEqual(speechConfiguration.audioOwner, ownerA)
+        XCTAssertEqual(speechConfiguration.configurationSnapshot, pinned)
+        first.complete(token: token, text: "Reply from A!")
+        await settle(50)
+        XCTAssertFalse(voiceA.isPresented)
+        XCTAssertFalse(voiceA.hasOwnedAudio)
+
+        voiceB.retry()
+        await settle(30)
+        XCTAssertEqual(laterCapture.transcribeCalls, 1)
+        voiceB.close()
+        withExtendedLifetime(host) {}
+    }
+
+    func testNavigationPreservesRejectedCapturedSpeechForOriginalDraft() async {
+        let capture = ControllerVoiceSession(transcript: "do not lose this")
+        let source = ControllerConversationSource()
+        let controller = makeController(sessions: [capture])
+        var originalDraft = ""
+        controller.startFlow(source: source, onRejectedTranscript: { originalDraft = $0 })
+        await settle()
+        controller.handleContextChange()
+        source.model.streaming = true
+        controller.finishListening()
+        await settle(30)
+        XCTAssertEqual(originalDraft, "do not lose this")
+        XCTAssertTrue(source.sentTexts.isEmpty)
+        XCTAssertFalse(controller.isPresented)
+    }
+
     func testFlowPinsAudioConfigurationThroughReplyAndUsesLatestRevisionOnNextListen() async {
         let first = ControllerVoiceSession(
             transcript: "pinned turn",
@@ -580,6 +659,203 @@ final class VoiceInteractionControllerTests: XCTestCase {
         controller.close()
     }
 
+    func testNavigationDuringDictationPermissionDeliversToOriginalDraft() async throws {
+        let capture = ControllerVoiceSession(transcript: "original draft")
+        let readiness = MutableVoiceReadiness(.permissionUndetermined)
+        let gate = VoiceStartupGate()
+        let controller = makeController(sessions: [capture], readinessProvider: { readiness.value },
+                                        permissionRequester: { await gate.wait() })
+        let attachment = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: UUID().uuidString.lowercased(), generation: 1))
+        let owner = IOSAudioOwner.attached(attachment: attachment, logicalOwner: .session(sessionID: "original"))
+        let originalSnapshot = controller.capability.configurationSnapshot
+        var originalDraft = ""
+        controller.startDictation(audioOwner: owner) { originalDraft = $0 }
+        await settle()
+        XCTAssertTrue(gate.started)
+        XCTAssertTrue(controller.hasOwnedAudio)
+        controller.handleContextChange()
+        controller.capability.setSpeed(1.5)
+        readiness.value = .ready
+        gate.release()
+        await settle(30)
+        XCTAssertEqual(capture.transcribeCalls, 1)
+        XCTAssertEqual(capture.audioOwners, [owner])
+        XCTAssertEqual(capture.configurationSnapshots.first, originalSnapshot)
+        controller.finishListening()
+        await settle(30)
+        XCTAssertEqual(originalDraft, "original draft")
+        XCTAssertFalse(controller.isPresented)
+    }
+
+    func testNavigationDuringFlowPermissionSubmitsToOriginalOwner() async throws {
+        let capture = ControllerVoiceSession(transcript: "original owner")
+        let source = ControllerConversationSource()
+        let attachment = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: UUID().uuidString.lowercased(), generation: 1))
+        let owner = IOSAudioOwner.attached(attachment: attachment, logicalOwner: .session(sessionID: "original"))
+        source.voiceAudioOwner = owner
+        let readiness = MutableVoiceReadiness(.permissionUndetermined)
+        let gate = VoiceStartupGate()
+        let controller = makeController(sessions: [capture], readinessProvider: { readiness.value },
+                                        permissionRequester: { await gate.wait() })
+        controller.startFlow(source: source)
+        let originalSnapshot = controller.capability.configurationSnapshot
+        await settle()
+        XCTAssertTrue(gate.started)
+        XCTAssertTrue(controller.hasOwnedAudio)
+        controller.handleContextChange()
+        source.voiceAudioOwner = nil
+        controller.capability.setSpeed(1.5)
+        readiness.value = .ready
+        gate.release()
+        await settle(30)
+        XCTAssertEqual(capture.transcribeCalls, 1)
+        XCTAssertEqual(capture.audioOwners, [owner])
+        XCTAssertEqual(capture.configurationSnapshots.first, originalSnapshot)
+        controller.finishListening()
+        await settle(30)
+        XCTAssertEqual(source.sentTexts, ["original owner"])
+        let token = try XCTUnwrap(source.lastToken)
+        source.complete(token: token, text: "finished")
+        controller.handleTurnCompletion(try XCTUnwrap(source.model.turnCompletion))
+        await settle(30)
+        XCTAssertFalse(controller.isPresented)
+    }
+
+    func testNavigationDuringFlowAdmissionRetainsTheOriginalOwner() async throws {
+        let capture = ControllerVoiceSession(transcript: "admitted text", automaticallyFinishesWhenEndpointingEnabled: true)
+        let source = ControllerConversationSource()
+        let gate = VoiceStartupGate()
+        source.sendGate = gate
+        let controller = makeController(sessions: [capture])
+        controller.startFlow(source: source)
+        await settle(30)
+        XCTAssertTrue(gate.started)
+        controller.handleContextChange()
+        XCTAssertTrue(controller.hasOwnedAudio)
+        XCTAssertTrue(controller.isPresented)
+        gate.release()
+        await settle(30)
+        XCTAssertEqual(source.sentTexts, ["admitted text"])
+        let token = try XCTUnwrap(source.lastToken)
+        source.complete(token: token, text: "finished")
+        controller.handleTurnCompletion(try XCTUnwrap(source.model.turnCompletion))
+        await settle(30)
+        XCTAssertFalse(controller.isPresented)
+    }
+
+    func testExplicitStopDuringFlowAdmissionDoesNotSendLater() async {
+        let capture = ControllerVoiceSession(transcript: "cancelled text", automaticallyFinishesWhenEndpointingEnabled: true)
+        let source = ControllerConversationSource()
+        let gate = VoiceStartupGate()
+        source.sendGate = gate
+        let controller = makeController(sessions: [capture])
+        controller.startFlow(source: source)
+        await settle(30)
+        XCTAssertTrue(gate.started)
+        controller.close()
+        gate.release()
+        await settle(30)
+        XCTAssertTrue(source.sentTexts.isEmpty)
+        XCTAssertFalse(controller.isPresented)
+    }
+
+    func testExplicitStopDuringPermissionCannotStartCaptureLater() async {
+        let capture = ControllerVoiceSession(transcript: "must not be delivered")
+        let readiness = MutableVoiceReadiness(.permissionUndetermined)
+        let gate = VoiceStartupGate()
+        let controller = makeController(sessions: [capture], readinessProvider: { readiness.value },
+                                        permissionRequester: { await gate.wait() })
+        var delivered = false
+        controller.startDictation { _ in delivered = true }
+        await settle()
+        XCTAssertTrue(gate.started)
+        controller.close()
+        readiness.value = .ready
+        gate.release()
+        await settle(30)
+        XCTAssertEqual(capture.transcribeCalls, 0)
+        XCTAssertFalse(delivered)
+        XCTAssertFalse(controller.isPresented)
+        XCTAssertFalse(controller.hasOwnedAudio)
+    }
+
+    func testNavigationThenPermissionFailureReleasesTheHiddenOwner() async {
+        let readiness = MutableVoiceReadiness(.permissionUndetermined)
+        let gate = VoiceStartupGate()
+        let controller = makeController(sessions: [], readinessProvider: { readiness.value },
+                                        permissionRequester: { await gate.wait() })
+        controller.startDictation { _ in XCTFail("Denied permission cannot produce a transcript") }
+        await settle()
+        XCTAssertTrue(gate.started)
+        controller.handleContextChange()
+        readiness.value = .notReady
+        gate.release()
+        await settle(30)
+        XCTAssertFalse(controller.isPresented)
+        XCTAssertFalse(controller.hasOwnedAudio)
+    }
+
+    func testNavigationClosesUnconfiguredIdleVoicePanel() async {
+        let controller = makeController(sessions: [], readiness: .notReady)
+        controller.startDictation { _ in XCTFail("No capture was admitted") }
+        XCTAssertEqual(controller.phase, .configurationRequired)
+        controller.handleContextChange()
+        await settle(30)
+        XCTAssertFalse(controller.isPresented)
+        XCTAssertFalse(controller.hasOwnedAudio)
+    }
+
+    func testNavigationRetainsRealtimeStartupUntilItsOwnerCanDrain() async {
+        let realtime = ControlledRealtimeSession()
+        let source = ControllerConversationSource()
+        let controller = makeController(sessions: [], realtimeSession: realtime)
+        controller.startFlow(source: source)
+        controller.handleContextChange() // before the scheduled start task runs
+        XCTAssertTrue(controller.isPresented)
+        XCTAssertTrue(controller.hasOwnedAudio)
+        await settle()
+        XCTAssertTrue(realtime.startGate.started)
+        XCTAssertEqual(realtime.startCalls, 1)
+        XCTAssertEqual(realtime.finishCalls, 0)
+        realtime.startGate.release()
+        await settle(30)
+        XCTAssertEqual(realtime.finishCalls, 1)
+        XCTAssertFalse(controller.isPresented)
+        XCTAssertFalse(controller.hasOwnedAudio)
+    }
+
+    func testExplicitStopDuringRealtimeStartupDoesNotResumeIt() async {
+        let realtime = ControlledRealtimeSession()
+        let source = ControllerConversationSource()
+        let controller = makeController(sessions: [], realtimeSession: realtime)
+        controller.startFlow(source: source)
+        await settle()
+        XCTAssertTrue(realtime.startGate.started)
+        controller.close()
+        realtime.startGate.release()
+        await settle(30)
+        XCTAssertEqual(realtime.finishCalls, 0)
+        XCTAssertEqual(realtime.stopCalls, 1)
+        XCTAssertFalse(controller.isPresented)
+        XCTAssertFalse(controller.hasOwnedAudio)
+    }
+
+    func testReturningDuringRealtimeStartupKeepsTheReattachedOwner() async {
+        let realtime = ControlledRealtimeSession()
+        let controller = makeController(sessions: [], realtimeSession: realtime)
+        controller.startFlow(source: ControllerConversationSource())
+        controller.handleContextChange()
+        await settle()
+        XCTAssertTrue(realtime.startGate.started)
+        controller.handleContextRestored()
+        realtime.startGate.release()
+        await settle(30)
+        XCTAssertEqual(realtime.finishCalls, 0)
+        XCTAssertTrue(controller.isPresented)
+        XCTAssertEqual(controller.phase, .listening)
+        controller.close()
+    }
+
     func testBackgroundCancelsCaptureAndLateResultCannotResumeFlow() async {
         let session = ControllerVoiceSession(transcript: "late", ignoresCancellation: true)
         let source = ControllerConversationSource()
@@ -718,6 +994,37 @@ final class VoiceInteractionControllerTests: XCTestCase {
         XCTAssertEqual(controller.phase, .listening)
     }
 
+    func testNavigationDuringOwnedFlowCleanupKeepsTheOriginalStart() async throws {
+        let firstCapture = ControllerVoiceSession(transcript: "first", automaticallyFinishesWhenEndpointingEnabled: true)
+        let nextCapture = ControllerVoiceSession(transcript: "after cleanup")
+        let player = BlockingStopStreamingSpeechPlayer()
+        let barge = ControllerBargeInRecognizer(sessions: [ControllerBargeInSession(), ControllerBargeInSession()])
+        let first = ControllerConversationSource()
+        let original = ControllerConversationSource()
+        let controller = makeController(sessions: [firstCapture, nextCapture], player: player, bargeInRecognizer: barge)
+        controller.startFlow(source: first)
+        await settle(30)
+        let firstToken = try XCTUnwrap(first.lastToken)
+        controller.handleTurnSpeechUpdate(.init(token: firstToken, sequence: 1, delta: "开始播报第一句话。"))
+        await settle(30)
+        let stream = try XCTUnwrap(player.session)
+        controller.close()
+        await settle()
+        controller.startFlow(source: original)
+        await settle()
+        XCTAssertTrue(controller.hasOwnedAudio)
+        XCTAssertEqual(nextCapture.transcribeCalls, 0)
+        controller.handleContextChange()
+        stream.releaseStop()
+        await settle(30)
+        XCTAssertEqual(nextCapture.transcribeCalls, 1)
+        controller.finishListening()
+        await settle(30)
+        XCTAssertEqual(original.sentTexts, ["after cleanup"])
+        XCTAssertEqual(barge.startCalls, 2)
+        controller.close()
+    }
+
     func testConfigurationIntentSurvivesSystemSettingsBackgroundRoundTrip() async {
         let session = ControllerVoiceSession(transcript: "configured")
         let source = ControllerConversationSource()
@@ -745,7 +1052,8 @@ final class VoiceInteractionControllerTests: XCTestCase {
         let player = RecordingSpeechPlayer()
         let source = ControllerConversationSource()
         let controller = makeController(sessions: [], player: player, autoPlay: true)
-        let token = try! XCTUnwrap(source.send("ordinary question"))
+        let tokenValue = await source.send("ordinary question")
+        let token = try! XCTUnwrap(tokenValue)
         controller.registerAutomaticPlaybackCandidate(token)
 
         source.complete(token: token, text: "ordinary reply")
@@ -757,11 +1065,188 @@ final class VoiceInteractionControllerTests: XCTestCase {
         XCTAssertEqual(controller.phase, .paused)
     }
 
+    func testNavigationKeepsHiddenOrdinaryTurnEligibleForAutomaticSpeech() async throws {
+        let player = RecordingSpeechPlayer()
+        let source = ControllerConversationSource()
+        let voice = makeController(sessions: [], player: player, autoPlay: true)
+        let host = SessionHost { voice }
+        _ = try host.retain(source: source, scope: .global, mode: .code,
+                            sessionID: "A", workspace: "/a", draft: "")
+        let tokenValue = await source.send("ordinary question")
+        let token = try XCTUnwrap(tokenValue)
+        voice.registerAutomaticPlaybackCandidate(token)
+        voice.handleContextChange()
+        source.complete(token: token, text: "reply from A")
+        await settle(50)
+        XCTAssertEqual(player.requests.map(\.text), ["reply from A"])
+        XCTAssertEqual(source.cancelCalls, 0)
+    }
+
+    func testAutomaticReplyKeepsTheAudioOwnerAndConfigurationCapturedAtAdmission() async throws {
+        let player = RecordingSpeechPlayer()
+        let source = ControllerConversationSource()
+        let voice = makeController(sessions: [], player: player, autoPlay: true)
+        let firstAttachment = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: "11111111-1111-4111-8111-111111111111", generation: 1))
+        let laterAttachment = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: "22222222-2222-4222-8222-222222222222", generation: 1))
+        let firstOwner = IOSAudioOwner.attached(attachment: firstAttachment, logicalOwner: .session(sessionID: "A"))
+        source.voiceAudioOwner = firstOwner
+        let tokenValue = await source.send("A")
+        let token = try XCTUnwrap(tokenValue)
+        let snapshot = voice.capability.configurationSnapshot
+        voice.registerAutomaticPlaybackCandidate(token, audioOwner: source.voiceAudioOwner)
+        voice.handleContextChange()
+        source.voiceAudioOwner = .attached(attachment: laterAttachment, logicalOwner: .session(sessionID: "B"))
+        source.complete(token: token, text: "owner-bound reply")
+        voice.handleTurnCompletion(try XCTUnwrap(source.model.turnCompletion))
+        await settle()
+        XCTAssertEqual(player.requests.first?.audioOwner, firstOwner)
+        XCTAssertEqual(player.requests.first?.configurationSnapshot, snapshot)
+    }
+
+    func testExplicitCaptureWaitsForHiddenAutomaticPlaybackToStop() async throws {
+        let ownership = VoiceInteractionOwnership()
+        let player = GatedAutomaticSpeechPlayer()
+        let capture = ControllerVoiceSession(transcript: "B")
+        let source = ControllerConversationSource()
+        let voiceA = makeController(sessions: [], player: player, autoPlay: true, ownership: ownership)
+        let voiceB = makeController(sessions: [capture], player: player, ownership: ownership)
+        let tokenValue = await source.send("A")
+        let token = try XCTUnwrap(tokenValue)
+        voiceA.registerAutomaticPlaybackCandidate(token)
+        source.complete(token: token, text: "reply from A")
+        voiceA.handleTurnCompletion(try XCTUnwrap(source.model.turnCompletion))
+        await settle()
+        XCTAssertEqual(player.requests.map(\.text), ["reply from A"])
+        voiceA.handleContextChange()
+        XCTAssertEqual(player.stopCalls, 0)
+        XCTAssertFalse(player.stopStarted)
+        voiceB.startDictation { _ in }
+        await settle()
+        XCTAssertTrue(player.stopStarted)
+        XCTAssertEqual(capture.transcribeCalls, 0)
+        XCTAssertEqual(source.cancelCalls, 0)
+        player.finishStop()
+        await settle(50)
+        XCTAssertEqual(capture.transcribeCalls, 1)
+        voiceB.cancelDictation()
+    }
+
+    func testAutomaticReplyWaitsUntilAnotherOwnersCaptureFinishes() async throws {
+        let ownership = VoiceInteractionOwnership()
+        let playerA = RecordingSpeechPlayer()
+        let capture = ControllerVoiceSession(transcript: "B")
+        let source = ControllerConversationSource()
+        let voiceA = makeController(sessions: [], player: playerA, autoPlay: true, ownership: ownership)
+        let voiceB = makeController(sessions: [capture], ownership: ownership)
+        let tokenValue = await source.send("A")
+        let token = try XCTUnwrap(tokenValue)
+        voiceA.registerAutomaticPlaybackCandidate(token)
+        voiceA.handleContextChange()
+        voiceB.startDictation { _ in }
+        await settle()
+        source.complete(token: token, text: "queued reply")
+        voiceA.handleTurnCompletion(try XCTUnwrap(source.model.turnCompletion))
+        await settle()
+        XCTAssertTrue(playerA.requests.isEmpty)
+        voiceB.cancelDictation()
+        await settle(50)
+        XCTAssertEqual(playerA.requests.map(\.text), ["queued reply"])
+        XCTAssertEqual(source.cancelCalls, 0)
+    }
+
+    func testBlockedAutomaticOwnerDoesNotPreventAnotherQueuedReply() async throws {
+        let ownership = VoiceInteractionOwnership()
+        let playerA = RecordingSpeechPlayer(), playerC = RecordingSpeechPlayer()
+        let captureB = ControllerVoiceSession(transcript: "B")
+        let sourceA = ControllerConversationSource(), sourceC = ControllerConversationSource()
+        let voiceA = makeController(sessions: [], player: playerA, autoPlay: true, ownership: ownership)
+        let voiceB = makeController(sessions: [captureB], ownership: ownership)
+        let voiceC = makeController(sessions: [], player: playerC, autoPlay: true, ownership: ownership)
+        let tokenAValue = await sourceA.send("A")
+        let tokenA = try XCTUnwrap(tokenAValue)
+        let tokenCValue = await sourceC.send("C")
+        let tokenC = try XCTUnwrap(tokenCValue)
+        voiceA.registerAutomaticPlaybackCandidate(tokenA)
+        voiceC.registerAutomaticPlaybackCandidate(tokenC)
+        voiceB.startDictation { _ in }
+        await settle()
+        voiceA.startFlow(source: sourceA)
+        XCTAssertEqual(voiceA.phase, .failed)
+        sourceA.complete(token: tokenA, text: "reply A")
+        voiceA.handleTurnCompletion(try XCTUnwrap(sourceA.model.turnCompletion))
+        sourceC.complete(token: tokenC, text: "reply C")
+        voiceC.handleTurnCompletion(try XCTUnwrap(sourceC.model.turnCompletion))
+        voiceB.cancelDictation()
+        await settle(50)
+        XCTAssertTrue(playerA.requests.isEmpty)
+        XCTAssertEqual(playerC.requests.map(\.text), ["reply C"])
+        voiceA.close()
+        await settle(50)
+        XCTAssertEqual(playerA.requests.map(\.text), ["reply A"])
+    }
+
+    func testSameOwnerExplicitCaptureWaitsForItsAutomaticPlaybackCleanup() async throws {
+        let player = GatedAutomaticSpeechPlayer()
+        let capture = ControllerVoiceSession(transcript: "next")
+        let source = ControllerConversationSource()
+        let voice = makeController(sessions: [capture], player: player, autoPlay: true)
+        let tokenValue = await source.send("A")
+        let token = try XCTUnwrap(tokenValue)
+        voice.registerAutomaticPlaybackCandidate(token)
+        source.complete(token: token, text: "automatic reply")
+        voice.handleTurnCompletion(try XCTUnwrap(source.model.turnCompletion))
+        await settle()
+        voice.startDictation { _ in }
+        await settle()
+        XCTAssertTrue(player.stopStarted)
+        XCTAssertEqual(capture.transcribeCalls, 0)
+        player.finishStop()
+        await settle(50)
+        XCTAssertEqual(capture.transcribeCalls, 1)
+        voice.cancelDictation()
+    }
+
+    func testFailedAutomaticPlaybackStopKeepsTheLaneUntilTheOldOperationFinishes() async throws {
+        let ownership = VoiceInteractionOwnership()
+        let player = GatedAutomaticSpeechPlayer(stopSucceeds: false)
+        let capture = ControllerVoiceSession(transcript: "B")
+        let source = ControllerConversationSource()
+        let voiceA = makeController(sessions: [], player: player, autoPlay: true, ownership: ownership)
+        let voiceB = makeController(sessions: [capture], player: player, ownership: ownership)
+        let tokenValue = await source.send("A")
+        let token = try XCTUnwrap(tokenValue)
+        voiceA.registerAutomaticPlaybackCandidate(token)
+        source.complete(token: token, text: "reply from A")
+        voiceA.handleTurnCompletion(try XCTUnwrap(source.model.turnCompletion))
+        await settle()
+        voiceB.startDictation { _ in }
+        await settle()
+        XCTAssertTrue(player.stopStarted)
+        player.finishStop()
+        await settle(30)
+        XCTAssertEqual(voiceB.phase, .failed)
+        XCTAssertEqual(capture.transcribeCalls, 0)
+        XCTAssertTrue(voiceA.hasOwnedAudio)
+        XCTAssertEqual(source.cancelCalls, 0)
+        player.finishPlayback()
+        await settle(30)
+        XCTAssertTrue(voiceA.hasOwnedAudio, "a finished caller is not a native stop receipt")
+        player.allowStop()
+        voiceB.retry()
+        await settle()
+        player.finishStop()
+        await settle(30)
+        XCTAssertEqual(capture.transcribeCalls, 1)
+        XCTAssertFalse(voiceA.hasOwnedAudio)
+        voiceB.cancelDictation()
+    }
+
     func testOrdinaryTurnDoesNotAutoPlayWhenPreferenceIsDisabled() async {
         let player = RecordingSpeechPlayer()
         let source = ControllerConversationSource()
         let controller = makeController(sessions: [], player: player, autoPlay: false)
-        let token = try! XCTUnwrap(source.send("ordinary question"))
+        let tokenValue = await source.send("ordinary question")
+        let token = try! XCTUnwrap(tokenValue)
         controller.registerAutomaticPlaybackCandidate(token)
 
         source.complete(token: token, text: "silent reply")
@@ -813,14 +1298,22 @@ final class VoiceInteractionControllerTests: XCTestCase {
         readiness: VoiceConfigurationReadiness? = nil,
         readinessProvider: (@MainActor () -> VoiceConfigurationReadiness)? = nil,
         permissionRequester: (@MainActor () async -> Void)? = nil,
-        autoPlay: Bool = false
+        realtimeSession: (any VoiceRealtimeControlling)? = nil,
+        autoPlay: Bool = false,
+        ownership: VoiceInteractionOwnership? = nil
     ) -> VoiceInteractionController {
         let factory = ControllerVoiceSessionFactory(sessions: sessions)
         let capture = VoiceCapture(makeSession: { factory.next() })
         let suiteName = "VoiceInteractionControllerTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
-        let capability = VoiceCapabilityModel(defaults: defaults)
+        let store = AudioConfigurationStore(defaults: defaults)
+        if realtimeSession != nil {
+            var configuration = store.configuration
+            configuration.conversation.mode = "realtime"
+            _ = try! store.save(configuration, expectedRevision: store.revision)
+        }
+        let capability = VoiceCapabilityModel(defaults: defaults, store: store)
         capability.setAutoPlay(autoPlay)
         let ready = readiness ?? VoiceConfigurationReadiness(
             speechConfigured: true,
@@ -829,19 +1322,77 @@ final class VoiceInteractionControllerTests: XCTestCase {
             ttsReady: true,
             issues: []
         )
+        let selectedPlayer: any VoiceSpeechPlaying = player ?? RecordingSpeechPlayer()
+        let selectedOwnership = ownership ?? VoiceInteractionOwnership()
+        let selectedReadiness: @MainActor () -> VoiceConfigurationReadiness = readinessProvider ?? { ready }
+        let selectedRealtimeReadiness: (@MainActor () -> Bool)?
+        if realtimeSession != nil {
+            selectedRealtimeReadiness = { true }
+        } else {
+            selectedRealtimeReadiness = nil
+        }
         return VoiceInteractionController(
             voiceCapture: capture,
             capability: capability,
-            speechPlayer: player ?? RecordingSpeechPlayer(),
+            speechPlayer: selectedPlayer,
             bargeInRecognizer: bargeInRecognizer,
-            readinessOverride: readinessProvider ?? { ready },
+            ownership: selectedOwnership,
+            readinessOverride: selectedReadiness,
             permissionRequester: permissionRequester,
+            realtimeSession: realtimeSession,
+            realtimeReadinessOverride: selectedRealtimeReadiness,
             loopDelay: .zero
         )
     }
 
     private func settle(_ count: Int = 12) async {
         for _ in 0..<count { await Task.yield() }
+    }
+}
+
+@MainActor
+private final class VoiceStartupGate {
+    private(set) var started = false
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    func wait() async {
+        started = true
+        guard !released else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() { released = true; continuation?.resume(); continuation = nil }
+}
+
+@MainActor
+private final class ControlledRealtimeSession: VoiceRealtimeControlling {
+    let startGate = VoiceStartupGate()
+    var isActive = false
+    var isAttached = true
+    var onStateChange: ((IOSRealtimeAudioPhase, String, String?) -> Void)?
+    private(set) var startCalls = 0
+    private(set) var stopCalls = 0
+    private(set) var finishCalls = 0
+    func reserveStart(owner: IOSAudioOwner?) -> Bool {
+        guard !isActive else { return false }
+        isActive = true
+        return true
+    }
+    func restoreReservedStart(owner: IOSAudioOwner?) {}
+    func start(snapshot: AudioConfigurationSnapshot) async throws {
+        startCalls += 1
+        isActive = true
+        onStateChange?(.connecting, "", nil)
+        await startGate.wait()
+        try Task.checkCancellation()
+        onStateChange?(.listening, "", nil)
+    }
+    func stop(abort: Bool) async -> Bool { stopCalls += 1; isActive = false; return true }
+    func commitInput() {}
+    func interrupt() async {}
+    func finishCurrentTurnAndClose() {
+        finishCalls += 1
+        isActive = false
+        onStateChange?(.idle, "", nil)
     }
 }
 
@@ -873,6 +1424,7 @@ private final class ControllerVoiceSession: VoiceTranscriptionSession {
     private(set) var cancelCalls = 0
     private(set) var automaticEndpointAfterSilence: Duration?
     private(set) var configurationSnapshots: [AudioConfigurationSnapshot] = []
+    private(set) var audioOwners: [IOSAudioOwner?] = []
 
     init(
         transcript: String,
@@ -908,9 +1460,11 @@ private final class ControllerVoiceSession: VoiceTranscriptionSession {
     func transcribe(
         language: String?,
         automaticEndpointAfterSilence: Duration?,
-        configurationSnapshot: AudioConfigurationSnapshot
+        configurationSnapshot: AudioConfigurationSnapshot,
+        audioOwner: IOSAudioOwner?
     ) async throws -> String {
         configurationSnapshots.append(configurationSnapshot)
+        audioOwners.append(audioOwner)
         return try await transcribe(
             language: language,
             automaticEndpointAfterSilence: automaticEndpointAfterSilence
@@ -986,6 +1540,40 @@ private final class BlockingSpeechPlayer: VoiceSpeechPlaying {
         continuation?.resume()
         continuation = nil
     }
+}
+
+@MainActor
+private final class GatedAutomaticSpeechPlayer: VoiceSpeechPlaying {
+    private(set) var requests: [VoiceSpeechRequest] = []
+    private(set) var stopCalls = 0
+    private(set) var stopStarted = false
+    private var playback: CheckedContinuation<VoiceSpeechPlaybackOutcome, Never>?
+    private var stopGate: CheckedContinuation<Void, Never>?
+    private var stopSucceeds: Bool
+
+    init(stopSucceeds: Bool = true) { self.stopSucceeds = stopSucceeds }
+
+    func speak(_ request: VoiceSpeechRequest) async throws -> VoiceSpeechPlaybackOutcome {
+        requests.append(request)
+        return await withCheckedContinuation { playback = $0 }
+    }
+    func openStream(configuration: VoiceSpeechConfiguration, managesAudioSession: Bool) async throws -> any VoiceSpeechStreamingSession {
+        RecordingStreamingSpeechSession()
+    }
+    func stop() { stopCalls += 1 }
+    func stopAutomaticPlaybackAndWait() async -> Bool {
+        stopStarted = true
+        await withCheckedContinuation { stopGate = $0 }
+        guard stopSucceeds else { return false }
+        finishPlayback()
+        return true
+    }
+    func finishPlayback() {
+        playback?.resume(returning: .interrupted)
+        playback = nil
+    }
+    func allowStop() { stopSucceeds = true }
+    func finishStop() { stopGate?.resume(); stopGate = nil }
 }
 
 @MainActor
@@ -1320,9 +1908,11 @@ private final class ControllerConversationSource: ConversationSource {
 
     let model = ConversationModel()
     let sessionMode: SessionMode = .code
+    var voiceAudioOwner: IOSAudioOwner?
     private(set) var sentTexts: [String] = []
     private(set) var lastToken: ConversationTurnToken?
     private(set) var cancelCalls = 0
+    var sendGate: VoiceStartupGate?
     private var nextTurnID: UInt64 = 1
     private var cancellationFailuresRemaining: Int
 
@@ -1336,7 +1926,9 @@ private final class ControllerConversationSource: ConversationSource {
     }
 
     @discardableResult
-    func send(_ text: String) -> ConversationTurnToken? {
+    func send(_ text: String) async -> ConversationTurnToken? {
+        if let sendGate { await sendGate.wait() }
+        guard !Task.isCancelled else { return nil }
         guard !model.streaming else { return nil }
         let token = ConversationTurnToken(clientTurnId: nextTurnID, sessionEpoch: 1)
         nextTurnID += 1
@@ -1353,8 +1945,8 @@ private final class ControllerConversationSource: ConversationSource {
         sourceCodeUnits: [UInt16]?,
         images: [ImageRefDto],
         selectedSlashCommand: ConversationSlashCommand?
-    ) -> ConversationTurnToken? {
-        send(text)
+    ) async -> ConversationTurnToken? {
+        await send(text)
     }
 
     func complete(token: ConversationTurnToken, text: String) {

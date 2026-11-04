@@ -36,10 +36,6 @@
 use crate::agents_registry::{self, SessionRegistration};
 use crate::background_launch::{BackgroundLaunchKind, BackgroundLaunchSpec};
 use crate::exit_codes;
-#[cfg(unix)]
-use platform_posix::PosixFileSystem as HostFileSystem;
-#[cfg(windows)]
-use platform_windows::WindowsFileSystem as HostFileSystem;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -348,21 +344,8 @@ where
             return exit_codes::SUCCESS;
         }
     };
-    let launch = match crate::background_launch::load_or_migrate_launch_spec(
-        config_home,
-        config_home,
-        short,
-    ) {
-        Ok(Some(launch)) => launch,
-        Ok(None) => {
-            fail_bound_job(
-                config_home,
-                short,
-                bound_identity.as_ref(),
-                "background launch context is missing or incompatible",
-            );
-            return exit_codes::SUCCESS;
-        }
+    let launch = match crate::background_launch::read_launch_spec(config_home, short) {
+        Ok(launch) => launch,
         Err(error) => {
             fail_bound_job(
                 config_home,
@@ -373,6 +356,9 @@ where
             return exit_codes::SUCCESS;
         }
     };
+    // The launch record remains authoritative after a cwd change; preserve
+    // the previous worker-start reconciliation of the visible job row.
+    let _ = crate::background_launch::reconcile_job_cwd_from_launch_spec(config_home, short);
     let spec = JobSpec {
         short: short.to_string(),
         launch,
@@ -755,6 +741,8 @@ pub async fn run_pty_session(cli: &PtySessionCli) -> i32 {
                 Vec::new(),
                 initial_prompt,
                 launch.handoff.clone(),
+                None,
+                Vec::new(),
             )
             .await
         }
@@ -784,6 +772,7 @@ pub async fn run_pty_session(cli: &PtySessionCli) -> i32 {
         outcome,
         Some(session_id),
         registration.clone(),
+        launch.options.preserve_admitted_context,
     )
     .await;
     registration.deregister();
@@ -795,12 +784,29 @@ async fn load_exact_transcript(
     launch: &BackgroundLaunchSpec,
 ) -> Result<Vec<session::jsonl::JsonlMessage>, String> {
     let canonical_path = validate_exact_transcript_path(config_home, launch)?;
-    let cwd = nonempty_path(&launch.cwd)?;
-    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(HostFileSystem::new(cwd));
-    let reader = session::jsonl::JsonlReader::new(canonical_path, fs);
-    let loaded = reader.read_routed().await.map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::parse_str(&launch.session_id).map_err(|error| error.to_string())?;
+    let source = if let Some(receipt) = launch.published_source.as_ref() {
+        receipt
+            .recover(config_home, id, &canonical_path)
+            .map_err(|error| error.to_string())?
+            .content
+    } else {
+        crate::init::read_pinned_cli_resume_source(config_home, &canonical_path)
+            .map_err(|error| error.to_string())?
+            .0
+    };
+    let profile =
+        session::JsonlWriter::fixed_session_profile_from_source(&source, &id.to_string())?;
+    if crate::background_launch::BackgroundSessionProfile::from(profile) != launch.session_profile {
+        return Err("captured session profile changed before resume".into());
+    }
+    let loaded =
+        session::jsonl::loader::route_captured_session_source(&canonical_path, id, &source)
+            .map_err(|error| error.to_string())?;
     let (chain, _) = session::jsonl::build_conversation_chain(&loaded, &launch.session_id);
-    if chain.is_empty() {
+    if chain.is_empty()
+        && !crate::init::is_valid_anchored_empty_source(&canonical_path, id, &source, &loaded)
+    {
         Err("transcript contains no resumable conversation".to_string())
     } else {
         Ok(chain)
@@ -811,28 +817,9 @@ fn validate_exact_transcript_path(
     config_home: &Path,
     launch: &BackgroundLaunchSpec,
 ) -> Result<PathBuf, String> {
-    let path = PathBuf::from(&launch.transcript_path);
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|e| format!("could not inspect transcript {}: {e}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("transcript is not a regular file".to_string());
-    }
-    let canonical_path = std::fs::canonicalize(&path)
-        .map_err(|e| format!("could not resolve transcript {}: {e}", path.display()))?;
-    let projects_root = config_home.join("projects");
-    let canonical_projects = std::fs::canonicalize(&projects_root).map_err(|e| {
-        format!(
-            "could not resolve transcript root {}: {e}",
-            projects_root.display()
-        )
-    })?;
-    let expected_name = format!("{}.jsonl", launch.session_id);
-    if !canonical_path.starts_with(&canonical_projects)
-        || canonical_path.file_name().and_then(|name| name.to_str()) != Some(&expected_name)
-    {
-        return Err("transcript path does not match the recorded session".to_string());
-    }
-    Ok(canonical_path)
+    let id = uuid::Uuid::parse_str(&launch.session_id).map_err(|error| error.to_string())?;
+    crate::init::validate_exact_tui_resume_path(config_home, id, Path::new(&launch.transcript_path))
+        .map_err(|error| format!("transcript path does not match the recorded session: {error}"))
 }
 
 #[cfg(test)]
@@ -892,6 +879,8 @@ mod tests {
                 launch: BackgroundLaunchKind::Fresh,
                 session_id: "11111111-1111-1111-1111-111111111111".to_string(),
                 transcript_path: home.join("session.jsonl").display().to_string(),
+                session_profile: crate::background_launch::BackgroundSessionProfile::fresh_code(),
+                published_source: None,
                 cwd: cwd.clone(),
                 origin_cwd: cwd,
                 worktree_path: None,
@@ -905,6 +894,49 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_resume_accepts_only_valid_anchored_empty_source() {
+        use lingxi_core::host::session_context::ConversationMode;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("config");
+        let cwd = temp.path().join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        seed_job(&home, "face0005", "resume draft");
+        let mut launch = crate::background_launch::read_launch_spec(&home, "face0005").unwrap();
+        let id = uuid::Uuid::parse_str(&launch.session_id).unwrap();
+        let path =
+            crate::init::captured_resume_path_tests::empty_anchor_transcript(&home, &cwd, id);
+        launch.cwd = cwd.display().to_string();
+        launch.transcript_path = path.display().to_string();
+        launch.session_profile = crate::background_launch::BackgroundSessionProfile {
+            mode: ConversationMode::Code,
+            instruction_epoch: 4,
+        };
+        assert!(load_exact_transcript(&home, &launch)
+            .await
+            .unwrap()
+            .is_empty());
+        let source = crate::init::capture_selected_cli_source(
+            &home,
+            id,
+            &path,
+            Some(ConversationMode::Code),
+        )
+        .unwrap();
+        launch.published_source =
+            Some(crate::background_launch::PublishedSourceReceipt::from_source(&source));
+        assert!(load_exact_transcript(&home, &launch)
+            .await
+            .unwrap()
+            .is_empty());
+
+        launch.published_source = None;
+        let header = source.content.lines().next().unwrap();
+        std::fs::write(&path, format!("{header}\n")).unwrap();
+        assert!(load_exact_transcript(&home, &launch).await.is_err());
     }
 
     #[tokio::test]
@@ -932,20 +964,93 @@ mod tests {
             "userType": "external",
             "message": {"role": "user", "content": "resume me"},
         });
-        std::fs::write(&transcript, format!("{line}\n")).unwrap();
+        let header = serde_json::json!({
+            "type":"fixed-session-mode", "sessionId":launch.session_id,
+            "sessionMode":"code", "instructionEpoch":0
+        });
+        std::fs::write(&transcript, format!("{header}\n{line}\n")).unwrap();
         let messages = load_exact_transcript(&home, &launch).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session_id, launch.session_id);
+
+        let root = home.canonicalize().unwrap();
+        let path = transcript.canonicalize().unwrap();
+        let (authority, bytes) = session::jsonl::writer::TranscriptFileAuthority::capture(
+            root.clone(),
+            path.strip_prefix(&root).unwrap().to_path_buf(),
+        )
+        .unwrap();
+        let source = crate::init::PublishedBranchSource {
+            authority,
+            content: String::from_utf8(bytes.clone()).unwrap(),
+        };
+        launch.published_source =
+            Some(crate::background_launch::PublishedSourceReceipt::from_source(&source));
+        let saved = path.with_extension("saved");
+        std::fs::rename(&path, &saved).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(load_exact_transcript(&home, &launch).await.is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(saved, &path).unwrap();
+        assert_eq!(
+            load_exact_transcript(&home, &launch).await.unwrap().len(),
+            1
+        );
+        launch.published_source = None;
 
         // The platform adapter must still enforce the recorded transcript
         // identity; a same-named file outside the private projects tree is refused.
         let outside = cwd.join(format!("{}.jsonl", launch.session_id));
         std::fs::copy(&transcript, &outside).unwrap();
         launch.transcript_path = outside.display().to_string();
-        assert_eq!(
-            load_exact_transcript(&home, &launch).await.unwrap_err(),
-            "transcript path does not match the recorded session",
+        assert!(load_exact_transcript(&home, &launch)
+            .await
+            .unwrap_err()
+            .contains("transcript path does not match the recorded session"));
+    }
+
+    #[tokio::test]
+    async fn background_resume_rejects_changed_captured_profile() {
+        use lingxi_core::host::session_context::ConversationMode;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("config");
+        let cwd = temp.path().join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        seed_job(&home, "face0004", "resume me");
+        let mut launch = crate::background_launch::read_launch_spec(&home, "face0004").unwrap();
+        let id = uuid::Uuid::parse_str(&launch.session_id).unwrap();
+        launch.cwd = cwd.display().to_string();
+        launch.session_profile = crate::background_launch::BackgroundSessionProfile {
+            mode: ConversationMode::Chat,
+            instruction_epoch: 4,
+        };
+        let path = crate::init::captured_resume_path_tests::transcript(
+            &home,
+            &cwd,
+            id,
+            "admitted chat",
+            "2026-10-28T00:00:00.000Z",
+            "chat",
         );
+        launch.transcript_path = path.display().to_string();
+        assert!(!load_exact_transcript(&home, &launch)
+            .await
+            .unwrap()
+            .is_empty());
+        let original = std::fs::read_to_string(&path).unwrap();
+        for changed in [
+            original.replace("\"sessionMode\":\"chat\"", "\"sessionMode\":\"code\""),
+            original.replace("\"instructionEpoch\":4", "\"instructionEpoch\":5"),
+        ] {
+            assert_ne!(changed, original);
+            std::fs::write(&path, &changed).unwrap();
+            assert!(load_exact_transcript(&home, &launch)
+                .await
+                .unwrap_err()
+                .contains("profile changed"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), changed);
+        }
     }
 
     #[test]

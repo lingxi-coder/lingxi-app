@@ -127,6 +127,7 @@ pub(super) fn command_request_to_traits(
             message: "command must not be empty".to_string(),
         });
     }
+    require_explicit_cwd(request.cwd.as_deref())?;
     let mounts = request
         .mounts
         .into_iter()
@@ -330,6 +331,7 @@ pub(super) fn pty_open_request_to_traits(
             message: "pty command must not be empty".to_string(),
         });
     }
+    require_explicit_cwd(request.cwd.as_deref())?;
     let mounts = request
         .mounts
         .into_iter()
@@ -350,6 +352,16 @@ pub(super) fn pty_open_request_to_traits(
         },
         mounts,
     })
+}
+
+#[cfg(feature = "uniffi")]
+fn require_explicit_cwd(cwd: Option<&str>) -> Result<(), MobileLinuxApiErrorFfi> {
+    if cwd.is_none_or(|path| path.trim().is_empty()) {
+        return Err(MobileLinuxApiErrorFfi::InvalidRequest {
+            message: "cwd must be explicitly provided".to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(feature = "uniffi")]
@@ -432,5 +444,56 @@ pub(super) fn mobile_linux_error_to_ffi(
         mobile_linux_api::MobileLinuxError::Timeout => MobileLinuxApiErrorFfi::OperationFailed {
             message: "timeout".to_string(),
         },
+    }
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod explicit_cwd_tests {
+    use super::*;
+
+    #[test]
+    fn command_and_pty_require_explicit_cwd() {
+        let command = MobileLinuxCommandRequestFfi {
+            command: "/bin/sh".into(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            stdin: None,
+            timeout_ms: None,
+            allow_network: false,
+            mounts: Vec::new(),
+        };
+        let pty = MobileLinuxPtyOpenRequestFfi {
+            command: "/bin/sh".into(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            size: super::super::linux_types::MobileLinuxPtySizeFfi { cols: 80, rows: 24 },
+            mounts: Vec::new(),
+        };
+        for cwd in [None, Some(String::new()), Some("  ".into())] {
+            let mut command = command.clone();
+            command.cwd = cwd.clone();
+            assert!(matches!(
+                command_request_to_traits(command),
+                Err(MobileLinuxApiErrorFfi::InvalidRequest { .. })
+            ));
+            let mut pty = pty.clone();
+            pty.cwd = cwd;
+            assert!(matches!(
+                pty_open_request_to_traits(pty),
+                Err(MobileLinuxApiErrorFfi::InvalidRequest { .. })
+            ));
+        }
+        let cwd = "/home/lingxi/.lingxi/chat".to_string();
+        let mut command = command;
+        command.cwd = Some(cwd.clone());
+        assert_eq!(
+            command_request_to_traits(command).unwrap().cwd,
+            Some(cwd.clone())
+        );
+        let mut pty = pty;
+        pty.cwd = Some(cwd.clone());
+        assert_eq!(pty_open_request_to_traits(pty).unwrap().cwd, Some(cwd));
     }
 }

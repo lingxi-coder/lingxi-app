@@ -5,10 +5,22 @@ import com.lingxi.code.drawer.RecentsFilter
 import com.lingxi.code.model.Project
 import com.lingxi.code.model.ProjectSession
 import com.lingxi.code.model.SessionMode
+import com.lingxi.code.conversation.selectedTranscriptPathMatches
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProjectPagesTest {
+    @Test fun selectedProjectRowKeepsItsPathWhenTheCatalogChangesBeforeOpening() {
+        val oldRow = session("same-id", SessionMode.Chat, 1).copy(transcriptPath = "/a/session.jsonl")
+        val selected = projectSessionsFor(project("p", sessions = listOf(oldRow)), RecentsFilter.All).single()
+        val changed = oldRow.copy(mode = SessionMode.Code, transcriptPath = "/b/session.jsonl")
+        assertEquals(SessionMode.Chat, selected.mode)
+        assertEquals("/a/session.jsonl", selected.transcriptPath)
+        assertTrue(selectedTranscriptPathMatches(selected.transcriptPath, oldRow.transcriptPath))
+        assertFalse(selectedTranscriptPathMatches(selected.transcriptPath, changed.transcriptPath))
+    }
 
     private fun session(id: String, mode: SessionMode, updatedAtEpochMillis: Long) = ProjectSession(
         id = id,

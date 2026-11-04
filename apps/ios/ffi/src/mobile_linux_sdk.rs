@@ -428,6 +428,24 @@ fn validate_mount(
         && guest_path_has_prefix(&mount.guest_path, &apps_guest)
         && host_path.starts_with(&apps_host)
         && host_path != apps_host;
+    let config_guest = brand_profile.config_guest_path();
+    let authorized_workspace_source = exact_home_mapping
+        && matches!(mount.purpose, MountPurpose::External)
+        && ["chat", "code", "scheduled"].iter().any(|name| {
+            let guest_root = config_guest.join(name);
+            let host_root = brand_config_home.join(name);
+            match (
+                guest_path.strip_prefix(guest_root),
+                host_path.strip_prefix(host_root),
+            ) {
+                (Ok(guest_relative), Ok(host_relative)) => {
+                    guest_relative == host_relative
+                        && (*name != "scheduled" || !guest_relative.as_os_str().is_empty())
+                        && !path_contains_protected_subtree(guest_relative, &config.config_dir_name)
+                }
+                _ => false,
+            }
+        });
 
     if ["/", "/home"].contains(&mount.guest_path.as_str())
         || (guest_path_has_prefix(&mount.guest_path, &guest_home)
@@ -440,8 +458,24 @@ fn validate_mount(
         ));
     }
 
-    let persistent_workspace =
-        mobile_linux_core::is_persistent_user_workspace(&managed_root, &brand_profile, mount);
+    // Compare the normalized mount with the normalized managed root.  On iOS
+    // `/var` and `/private/var` name the same sandbox; the explicit lexical
+    // check below still rejects an alias inside the managed account.
+    let mut canonical_mount = mount.clone();
+    canonical_mount.host_path = host_path.clone();
+    let persistent_workspace = mobile_linux_core::is_persistent_user_workspace(
+        &managed_root,
+        &brand_profile,
+        &canonical_mount,
+    );
+    let managed_projects_workspace = persistent_workspace
+        && config.stable_workspace_id == "projects"
+        && matches!(mount.purpose, MountPurpose::Workspace)
+        && !mount.read_only
+        && host_path == brand_config_home.join("projects")
+        && (mount.host_path == config.brand_config_home().join("projects")
+            || mount.host_path == host_path)
+        && mount.guest_path == config.workspace_guest_path();
     let exact_persistent_project_mount =
         exact_home_mapping && host_path.starts_with(&user_home_host) && host_path != user_home_host;
     let overlaps_brand_config = host_path == brand_config_home
@@ -453,7 +487,10 @@ fn validate_mount(
             && !persistent_workspace
             && !exact_persistent_project_mount)
         || managed_root.starts_with(&host_path)
-        || (overlaps_brand_config && !authorized_app_source)
+        || (overlaps_brand_config
+            && !authorized_app_source
+            && !authorized_workspace_source
+            && !managed_projects_workspace)
     {
         return Err(MobileLinuxError::InvalidRequest(
             "mount host_path may not target app root, managed_root, or brand config home"
@@ -463,6 +500,8 @@ fn validate_mount(
 
     if path_contains_protected_subtree(&host_path, &config.config_dir_name)
         && !authorized_app_source
+        && !authorized_workspace_source
+        && !managed_projects_workspace
     {
         return Err(MobileLinuxError::InvalidRequest(
             "mount host_path may not target provider/config subtrees".to_string(),
@@ -777,7 +816,7 @@ mod tests {
             normalize_host_path(&config.workspace_host_path, "workspace_host_path")
                 .expect("normalized workspace path")
         );
-        assert_eq!(mount.guest_path, "/home/lingxi/lingxi/default");
+        assert_eq!(mount.guest_path, "/home/lingxi/.lingxi/default");
     }
 
     #[test]
@@ -791,14 +830,14 @@ mod tests {
         config.workspace_host_path = config
             .brand_profile()
             .persistent_home_host_path(&config.managed_root)
-            .join("atlas/projects");
+            .join(".atlas/projects");
         config.stable_workspace_id = "projects".to_string();
         fs::create_dir_all(&config.workspace_host_path).expect("create profile workspace");
         fs::create_dir_all(&config.managed_root).expect("create managed root");
         fs::create_dir_all(config.brand_config_home()).expect("create profile config root");
 
         let workspace = config.default_workspace_mount();
-        assert_eq!(workspace.guest_path, "/home/atlas_guest/atlas/projects");
+        assert_eq!(workspace.guest_path, "/home/atlas_guest/.atlas/projects");
         assert_eq!(
             config
                 .brand_profile()
@@ -810,6 +849,104 @@ mod tests {
             mount.host_path,
             config.workspace_host_path.canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn managed_projects_mount_does_not_expose_config_siblings_or_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(&temp.path().join("app"));
+        config.stable_workspace_id = "projects".into();
+        config.workspace_host_path = config.brand_config_home().join("projects");
+        fs::create_dir_all(&config.workspace_host_path).unwrap();
+        let workspace = config.default_workspace_mount();
+        validate_mount(&workspace, &config).expect("exact projects mount");
+
+        let mut changed = workspace.clone();
+        changed.guest_path = config
+            .brand_profile()
+            .config_guest_path()
+            .join("code")
+            .display()
+            .to_string();
+        assert!(validate_mount(&changed, &config).is_err());
+        changed = workspace.clone();
+        changed.read_only = true;
+        assert!(validate_mount(&changed, &config).is_err());
+        changed = workspace.clone();
+        changed.purpose = MountPurpose::External;
+        assert!(validate_mount(&changed, &config).is_err());
+        for protected in [
+            config.brand_config_home(),
+            config.brand_config_home().join("providers"),
+        ] {
+            fs::create_dir_all(&protected).unwrap();
+            changed = workspace.clone();
+            changed.host_path = protected;
+            assert!(validate_mount(&changed, &config).is_err());
+        }
+        #[cfg(unix)]
+        {
+            let alias = config.brand_config_home().join("projects-alias");
+            std::os::unix::fs::symlink(&config.workspace_host_path, &alias).unwrap();
+            changed = workspace;
+            changed.host_path = alias;
+            assert!(validate_mount(&changed, &config).is_err());
+        }
+    }
+
+    #[test]
+    fn mode_workspace_external_mount_requires_an_exact_project_grant() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(&temp.path().join("app"));
+        fs::create_dir_all(&config.workspace_host_path).unwrap();
+        for name in ["chat", "code", "scheduled"] {
+            let host = config.brand_config_home().join(name).join("registered");
+            fs::create_dir_all(&host).unwrap();
+            if name == "scheduled" {
+                let root_grant = MountSpec {
+                    host_path: host.parent().unwrap().canonicalize().unwrap(),
+                    guest_path: config
+                        .brand_profile()
+                        .config_guest_path()
+                        .join(name)
+                        .display()
+                        .to_string(),
+                    read_only: false,
+                    purpose: MountPurpose::External,
+                };
+                config.project_mount_grants.push(root_grant);
+                assert!(validate_project_mount_grants(&config).is_err());
+                config.project_mount_grants.clear();
+            }
+            let grant = MountSpec {
+                host_path: host.canonicalize().unwrap(),
+                guest_path: config
+                    .brand_profile()
+                    .config_guest_path()
+                    .join(name)
+                    .join("registered")
+                    .display()
+                    .to_string(),
+                read_only: false,
+                purpose: MountPurpose::External,
+            };
+            assert!(validate_mount(&grant, &config).is_err());
+            config.project_mount_grants.push(grant.clone());
+            assert!(validate_project_mount_grants(&config).is_ok());
+            assert!(validate_mount(&grant, &config).is_ok());
+            let mut mismatch = grant.clone();
+            mismatch.guest_path.push_str("-other");
+            assert!(validate_mount(&mismatch, &config).is_err());
+            #[cfg(unix)]
+            {
+                let alias = config.brand_config_home().join(name).join("alias");
+                std::os::unix::fs::symlink(&host, &alias).unwrap();
+                let mut aliased_config = config.clone();
+                aliased_config.project_mount_grants[0].host_path = alias;
+                assert!(validate_project_mount_grants(&aliased_config).is_err());
+            }
+            config.project_mount_grants.clear();
+        }
     }
 
     #[test]

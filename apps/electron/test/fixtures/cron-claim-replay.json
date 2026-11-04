@@ -3,7 +3,7 @@
     "type": "cron_run_requested",
     "run_id": "lingxi-cron-claim-v1:[\"retried-occurrence\",1]",
     "task": {
-      "next_run_at": 1790776680000,
+      "next_run_at": 1793676480000,
       "automation": {
         "version": 2,
         "status": "active",
@@ -12,10 +12,12 @@
           "type": "automatic"
         },
         "runMode": "new_session",
+        "sessionMode": "code",
+        "sessionScopeKey": "/project-a",
         "notificationPolicy": "none",
         "runs": [
           {
-            "ownerPid": 99727,
+            "ownerPid": 3209,
             "claimGeneration": 1,
             "id": "retried-occurrence",
             "taskId": "d00000001",
@@ -46,7 +48,7 @@
     "type": "cron_run_requested",
     "run_id": "lingxi-cron-claim-v1:[\"retried-occurrence\",2]",
     "task": {
-      "next_run_at": 1790776680000,
+      "next_run_at": 1793676480000,
       "automation": {
         "version": 2,
         "status": "active",
@@ -55,10 +57,12 @@
           "type": "automatic"
         },
         "runMode": "new_session",
+        "sessionMode": "code",
+        "sessionScopeKey": "/project-a",
         "notificationPolicy": "none",
         "runs": [
           {
-            "ownerPid": 99727,
+            "ownerPid": 3209,
             "claimGeneration": 2,
             "id": "retried-occurrence",
             "taskId": "d00000001",

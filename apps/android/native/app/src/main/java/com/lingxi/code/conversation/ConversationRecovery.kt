@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 
@@ -40,6 +41,14 @@ internal data class DurableConversationTurnRecord(
     val sessionId: String,
     val turnId: Long,
 )
+
+internal fun recordHandledProcessExit(preferences: SharedPreferences, timestamp: Long, userRequested: Boolean) {
+    val editor = preferences.edit()
+    if (userRequested) {
+        preferences.all.keys.filter { it.startsWith("turn.") }.forEach(editor::remove)
+    }
+    check(editor.putLong("handled_exit_timestamp", timestamp).commit())
+}
 
 /** Minimum non-secret launch context needed for service redelivery recovery. */
 data class ConversationRecoverySpec(
@@ -50,9 +59,14 @@ data class ConversationRecoverySpec(
     val workspaceKey: String? = null,
     val guestPath: String? = null,
     val additionalDirectories: List<String> = emptyList(),
+    /** Exact SDK catalog path, which may be a guest path; never rewrite it. */
+    val transcriptPath: String? = null,
+    /** A new engine generation never inherits another owner's pending actions. */
+    val runtimeGeneration: String = java.util.UUID.randomUUID().toString(),
 ) {
     val scopeKey: String
         get() = "${workspaceKey ?: hostPath ?: "__global__"}#${sessionMode.wireValue}"
+    val ownerKey: String get() = "$scopeKey@$runtimeGeneration"
 
     fun projectWorkspace(): ProjectWorkspace? {
         val path = hostPath ?: return null
@@ -65,86 +79,142 @@ internal class DurableConversationTurnClientStore(
     private val preferences: SharedPreferences,
     private val scope: String,
     latestExit: ApplicationExitInfo? = null,
+    initialSessionId: String? = null,
 ) {
-    init {
-        val handledAt = preferences.getLong("handled_exit_timestamp", 0L)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && latestExit != null && latestExit.timestamp > handledAt) {
-            if (latestExit.reason == ApplicationExitInfo.REASON_USER_REQUESTED) {
-                clearRecord()
+    private var ownerSessionId: String? = initialSessionId?.let(::canonicalSessionId)
+
+    companion object {
+        private val lock = Any()
+        private fun prefix(scope: String): String = "turn." +
+            scope.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it.toInt() and 255) } + "."
+        private fun key(scope: String, sessionId: String, turnId: Long): String =
+            prefix(scope) + canonicalSessionId(sessionId) + "." + turnId
+
+        fun ownerModeForSession(context: Context, workspaceKey: String, sessionId: String?): SessionMode? {
+            val prefs = context.applicationContext.getSharedPreferences("durable_conversation_turn", Context.MODE_PRIVATE)
+            return ownerModeForSession(prefs, workspaceKey, sessionId)
+        }
+
+        internal fun ownerModeForSession(prefs: SharedPreferences, workspaceKey: String, sessionId: String?): SessionMode? = synchronized(lock) {
+            if (sessionId.isNullOrBlank()) return@synchronized null
+            val id = canonicalSessionId(sessionId)
+            val matches = SessionMode.entries.filter { mode ->
+                val scope = "$workspaceKey#${mode.wireValue}"
+                prefs.all.keys.any { it.startsWith(prefix(scope) + id + ".") }
             }
-            preferences.edit().putLong("handled_exit_timestamp", latestExit.timestamp).apply()
+            check(matches.size <= 1) { "Conflicting recovery modes for session $id" }
+            matches.singleOrNull()
         }
     }
 
-    constructor(
-        context: Context,
-        scope: String,
-    ) : this(
-        preferences = context.applicationContext.getSharedPreferences(
-            "durable_conversation_turn",
-            Context.MODE_PRIVATE,
-        ),
+    init {
+        synchronized(lock) {
+            val handledAt = preferences.getLong("handled_exit_timestamp", 0L)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && latestExit != null && latestExit.timestamp > handledAt) {
+                recordHandledProcessExit(preferences, latestExit.timestamp,
+                    latestExit.reason == ApplicationExitInfo.REASON_USER_REQUESTED)
+            }
+        }
+    }
+
+    constructor(context: Context, scope: String, initialSessionId: String? = null) : this(
+        preferences = context.applicationContext.getSharedPreferences("durable_conversation_turn", Context.MODE_PRIVATE),
         scope = scope,
         latestExit = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             context.getSystemService(ActivityManager::class.java)
-                .getHistoricalProcessExitReasons(context.packageName, 0, 1)
-                .firstOrNull()
-        } else {
-            null
-        },
+                .getHistoricalProcessExitReasons(context.packageName, 0, 1).firstOrNull()
+        } else null,
+        initialSessionId = initialSessionId,
     )
 
-    fun begin(sessionId: String, turnId: Long) {
-        if (sessionId.isBlank()) return
-        preferences.edit()
-            .putString("scope", scope)
-            .putString("session_id", sessionId)
-            .putLong("turn_id", turnId)
-            .commit()
+    fun begin(sessionId: String, turnId: Long) = synchronized(lock) {
+        if (sessionId.isBlank()) return@synchronized
+        ownerSessionId = canonicalSessionId(sessionId)
+        // A session has one active main turn. Replace its previous checkpoint
+        // atomically while leaving checkpoints for other sessions untouched.
+        // In particular, a late terminal for the previous turn must not clear
+        // the newly admitted turn.
+        val ownerPrefix = prefix(scope)
+        val editor = preferences.edit()
+        preferences.all.keys.filter { candidate ->
+            candidate.startsWith(ownerPrefix) &&
+                candidate.removePrefix(ownerPrefix).substringBeforeLast('.', "") == ownerSessionId
+        }.forEach(editor::remove)
+        check(editor.putLong(key(scope, sessionId, turnId), turnId).commit())
     }
 
-    fun load(): DurableConversationTurnRecord? {
-        if (preferences.getString("scope", null) != scope) return null
-        val sessionId = preferences.getString("session_id", null)?.takeIf(String::isNotBlank)
-            ?: return null
-        if (!preferences.contains("turn_id")) return null
-        return DurableConversationTurnRecord(
-            scope = scope,
-            sessionId = sessionId,
-            turnId = preferences.getLong("turn_id", 0L),
-        )
-    }
-
-    fun clear(turnId: Long? = null) {
-        val current = load() ?: return
-        if (turnId == null || current.turnId == turnId) {
-            clearRecord()
+    fun load(): DurableConversationTurnRecord? = synchronized(lock) {
+        val owner = ownerSessionId ?: return@synchronized null
+        val candidates = preferences.all.keys.filter { it.startsWith(prefix(scope)) }.mapNotNull { key ->
+            val suffix = key.removePrefix(prefix(scope))
+            val separator = suffix.lastIndexOf('.')
+            if (separator <= 0) null else {
+                val id = suffix.substring(0, separator)
+                val turn = suffix.substring(separator + 1).toLongOrNull()
+                if (turn == null || owner != id) null
+                else DurableConversationTurnRecord(scope, id, turn)
+            }
         }
+        candidates.singleOrNull()
     }
 
-    /**
-     * Clear only the exact session/turn checkpoint that produced a terminal
-     * event.  Turn ids are client supplied, so the session comparison is
-     * required as well: a late terminal event from a previous session must not
-     * erase the checkpoint belonging to the current session.
-     */
-    fun clear(sessionId: String, turnId: Long) {
-        val current = load() ?: return
-        if (
-            current.turnId == turnId &&
-            canonicalSessionId(current.sessionId) == canonicalSessionId(sessionId)
-        ) {
-            clearRecord()
-        }
+    fun clear(turnId: Long? = null) = synchronized(lock) {
+        val record = load() ?: return@synchronized
+        if (turnId == null || record.turnId == turnId) clear(record.sessionId, record.turnId)
     }
 
-    private fun clearRecord() {
-        preferences.edit()
-            .remove("scope")
-            .remove("session_id")
-            .remove("turn_id")
-            .remove("last_sequence")
-            .commit()
+    fun clear(sessionId: String, turnId: Long) = synchronized(lock) {
+        if (ownerSessionId != canonicalSessionId(sessionId)) return@synchronized
+        preferences.edit().remove(key(scope, sessionId, turnId)).commit()
+    }
+
+    /** Clear only the checkpoint proven not admitted by this session's Send. */
+    fun clearNotAdmitted(sessionId: String, turnId: Long): Boolean = synchronized(lock) {
+        if (ownerSessionId != canonicalSessionId(sessionId)) return@synchronized false
+        val recordKey = key(scope, sessionId, turnId)
+        !preferences.contains(recordKey) || preferences.edit().remove(recordKey).commit()
+    }
+}
+
+/** UI-owned history kept only in the live source while its current turn runs. */
+data class RetainedConversationTranscript(
+    val sessionId: String,
+    val turnId: Long?,
+    val state: ChatState,
+    val afterSequence: Long,
+    val turnToken: Long,
+    val turnOrigin: ConversationTurnOrigin,
+    val pendingAssistantIdentity: String?,
+    val optimisticRowsByToken: Map<String, String>,
+    val assistantTranscriptUuidsByIdentity: Map<String, List<String>>,
+    val pendingAssistantTranscriptUuids: Set<String>,
+    val assistantRowsByIdentity: Map<String, String>,
+    val reasoningBeforeResponse: String?,
+    val assistantReasoningByIdentity: Map<String, Pair<String, String>>,
+    val assistantIdentityTurnToken: Long,
+)
+
+internal class RetainedConversationTranscriptStore {
+    @Volatile private var snapshot: RetainedConversationTranscript? = null
+
+    fun save(value: RetainedConversationTranscript) {
+        snapshot = value
+    }
+
+    fun clear() { snapshot = null }
+
+    fun turnRecord(scope: String, sessionId: String?): DurableConversationTurnRecord? {
+        val retained = snapshot ?: return null
+        val turnId = retained.turnId ?: return null
+        if (sessionId == null || canonicalSessionId(retained.sessionId) != canonicalSessionId(sessionId)) return null
+        return DurableConversationTurnRecord(scope, retained.sessionId, turnId)
+    }
+
+    fun activation(current: ActivatedSession): ActivatedSession {
+        val retained = snapshot?.takeIf { canonicalSessionId(it.sessionId) == canonicalSessionId(current.sessionId) }
+            ?: return current
+        return current.copy(transcript = retained.state.messages, transcriptComplete = retained.turnId == null,
+            retainedProjection = retained)
     }
 }
 
@@ -152,6 +222,9 @@ internal class DurableTurnReplayGate {
     private var pendingColdResumeAttachTurnId: Long? = null
     private var suppressingRetainedReplayTurnId: Long? = null
     private var awaitingTerminalConfirmationTurnId: Long? = null
+    // A source can outlive its UI. Keep terminal identities for that source's
+    // lifetime so an arbitrarily delayed callback cannot reopen an ended turn.
+    private val terminalTurns = mutableSetOf<Pair<String, ULong>>()
 
     @Synchronized
     fun noteAttachRequested(
@@ -162,7 +235,7 @@ internal class DurableTurnReplayGate {
         pendingColdResumeAttachTurnId =
             turnId.takeIf {
                 afterSequence <= 0L &&
-                    activation?.kind == SessionActivationKind.Resumed
+                    activation?.kind == SessionActivationKind.Resumed && activation.transcriptComplete
             }
         if (pendingColdResumeAttachTurnId != turnId) {
             clearTurn(turnId)
@@ -175,36 +248,52 @@ internal class DurableTurnReplayGate {
     }
 
     @Synchronized
-    fun shouldForward(event: ClientEvent): Boolean = when (event) {
-        is ClientEvent.TurnRecoveryState -> {
-            val turnId = event.snapshot.turnId.toLong()
-            val terminal = event.snapshot.state in terminalStates
-            when {
-                pendingColdResumeAttachTurnId == turnId -> {
-                    pendingColdResumeAttachTurnId = null
-                    if (terminal) {
-                        suppressingRetainedReplayTurnId = turnId
-                        awaitingTerminalConfirmationTurnId = turnId
-                    } else {
-                        clearTurn(turnId)
-                    }
-                }
-                awaitingTerminalConfirmationTurnId == turnId && terminal -> clearTurn(turnId)
+    fun shouldForward(event: ClientEvent): Boolean {
+        if (event is ClientEvent.TurnRecoveryState) {
+            val snapshot = event.snapshot
+            val key = canonicalSessionId(snapshot.sessionId) to snapshot.turnId
+            if (snapshot.state in terminalStates) {
+                terminalTurns += key
+            } else if (key in terminalTurns) {
+                return false
             }
-            true
         }
-        is ClientEvent.TurnEventReplay ->
-            suppressingRetainedReplayTurnId != event.turnId.toLong()
-        is ClientEvent.Error -> {
-            if (!isCompactTurnRejection(event.message.displayText())) clearAll()
-            true
+        return when (event) {
+            is ClientEvent.TurnRecoveryState -> {
+                val turnId = event.snapshot.turnId.toLong()
+                val terminal = event.snapshot.state in terminalStates
+                when {
+                    pendingColdResumeAttachTurnId == turnId -> {
+                        pendingColdResumeAttachTurnId = null
+                        if (terminal) {
+                            suppressingRetainedReplayTurnId = turnId
+                            awaitingTerminalConfirmationTurnId = turnId
+                        } else {
+                            clearTurn(turnId)
+                        }
+                    }
+                    awaitingTerminalConfirmationTurnId == turnId && terminal -> clearTurn(turnId)
+                }
+                true
+            }
+            is ClientEvent.TurnEventReplay ->
+                suppressingRetainedReplayTurnId != event.turnId.toLong()
+            is ClientEvent.Error -> {
+                if (!isCompactTurnRejection(event.message.displayText())) clearAll()
+                true
+            }
+            is ClientEvent.TurnEnded -> {
+                clearAll()
+                true
+            }
+            else -> true
         }
-        is ClientEvent.TurnEnded -> {
-            clearAll()
-            true
-        }
-        else -> true
     }
+
+    /** Serialize the decision and enqueue, so concurrent callbacks cannot invert them. */
+    @Synchronized
+    fun forward(event: ClientEvent, enqueue: (ClientEvent) -> Boolean): Boolean =
+        shouldForward(event) && enqueue(event)
 
     private fun clearTurn(turnId: Long) {
         if (pendingColdResumeAttachTurnId == turnId) pendingColdResumeAttachTurnId = null
@@ -274,6 +363,11 @@ internal class DurableAttachCoordinator {
     @Synchronized
     fun releaseToHeadless() {
         claimedByUi = false
+        // A later Activity has a new collector, even at the same cursor. It
+        // must receive its own recovery snapshot and replay rather than being
+        // coalesced with the Activity that just released the source.
+        lastOwner = null
+        lastRequest = null
     }
 
     /**
@@ -304,16 +398,44 @@ internal class DurableAttachCoordinator {
 internal class RecoveringConversationSource(
     private val pendingSource: Deferred<ConversationSource?>,
     private val strings: ConversationStrings,
-    override val recoverySpec: ConversationRecoverySpec,
-) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource {
+    recoverySpec: ConversationRecoverySpec,
+    private val releaseClaim: () -> Boolean = { ConversationHeadlessRecovery.releaseUiClaim(recoverySpec.ownerKey) },
+) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource, DurableTranscriptSource, NativePromptReceiptSource {
     private val delegateScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val models = MutableStateFlow(EngineModelState())
     private val sessions = MutableStateFlow(EngineSessionState.loading())
+    private val workspace = MutableStateFlow<com.lingxi.code.project.SessionWorkspaceState?>(null)
     private val activeSession = MutableStateFlow<ActivatedSession?>(null)
     private val permissions = MutableStateFlow<PermissionPromptState?>(null)
     private val mcp = MutableStateFlow(emptyList<MCPServer>())
+    private val coldAuthoringRecovery = MutableStateFlow(ColdAuthoringRecoveryState.NotNeeded)
+    override val coldAuthoringRecoveryState: StateFlow<ColdAuthoringRecoveryState> = coldAuthoringRecovery.asStateFlow()
+    override suspend fun retryColdAuthoringRecovery() {
+        val delegate = pendingSource.await() ?: error("engine is not connected")
+        delegate.retryColdAuthoringRecovery()
+    }
     @Volatile private var retainedSource: ConversationSource? = null
-    @Volatile private var closed = false
+    override val turnAdmissionReady: Boolean get() = retainedSource?.turnAdmissionReady == true
+    internal fun acknowledgeAuthoringBinding(identity: com.lingxi.code.project.AuthoringSourceIdentity, sessionId: String): Boolean =
+        (retainedSource as? EngineConversationSource)?.acknowledgeAuthoringBinding(identity, sessionId) == true
+    internal fun verifiedAuthoringSource(): com.lingxi.code.project.AuthoringSourceIdentity? =
+        (retainedSource as? EngineConversationSource)?.takeIf { it.turnAdmissionReady }?.authoringSourceIdentity
+    internal fun pendingAuthoringSourceIdentity(): com.lingxi.code.project.AuthoringSourceIdentity? =
+        (retainedSource as? EngineConversationSource)?.authoringSourceIdentity
+    internal fun reserveAuthoringSelection(): Boolean =
+        (retainedSource as? EngineConversationSource)?.reserveAuthoringSelection() == true
+    internal fun releaseAuthoringSelection() {
+        (retainedSource as? EngineConversationSource)?.releaseAuthoringSelection()
+    }
+    internal suspend fun authoritativeAuthoringWorkspace(): com.lingxi.code.project.SessionWorkspaceState =
+        (retainedSource as? EngineConversationSource)?.authoritativeAuthoringWorkspace()
+            ?: error("Authoring source is unavailable")
+    private val initialRecoverySpec = recoverySpec
+    override val recoverySpec: ConversationRecoverySpec
+        get() = retainedSource?.recoverySpec ?: initialRecoverySpec
+    private val ownershipLock = Any()
+    private var closed = false
+    private var releasedToRecovery = false
 
     init {
         delegateScope.launch {
@@ -321,17 +443,26 @@ internal class RecoveringConversationSource(
                 delegateScope.cancel()
                 return@launch
             }
-            if (closed) {
-                delegate.close()
+            val abandoned = synchronized(ownershipLock) {
+                if (closed) !releasedToRecovery else {
+                    retainedSource = delegate
+                    null
+                }
+            }
+            if (abandoned != null) {
+                if (abandoned) delegate.close()
                 delegateScope.cancel()
                 return@launch
             }
-            retainedSource = delegate
             launch { delegate.modelState.collect { models.value = it } }
             launch { delegate.sessionState.collect { sessions.value = it } }
+            launch { delegate.workspaceState.collect { workspace.value = it } }
             launch { delegate.activeSessionState.collect { activeSession.value = it } }
             launch { delegate.pendingPermission.collect { permissions.value = it } }
             launch { delegate.mcpServers.collect { mcp.value = it } }
+            delegate.coldAuthoringRecoveryState?.let { state ->
+                launch { state.collect { coldAuthoringRecovery.value = it } }
+            }
         }
     }
 
@@ -339,15 +470,42 @@ internal class RecoveringConversationSource(
         pendingSource.await()?.clientEvents?.let { emitAll(it) }
     }
 
+    override suspend fun collectClientEvents(onSubscribed: () -> Unit, onEvent: suspend (ClientEvent) -> Unit) {
+        val delegate = pendingSource.await()
+        if (delegate == null) onSubscribed() else delegate.collectClientEvents(onSubscribed, onEvent)
+    }
+
     override val workflowProgress: Flow<WorkflowProgressUpdate> = flow {
         pendingSource.await()?.workflowProgress?.let { emitAll(it) }
+    }
+
+    internal fun bindAudioOwner(owner: com.lingxi.code.voice.audio.AudioOwnerKey) {
+        delegateScope.launch { pendingSource.await()?.bindAudioOwner(owner) }
     }
 
     override val pendingPermission: StateFlow<PermissionPromptState?> = permissions.asStateFlow()
     override val modelState: StateFlow<EngineModelState> = models.asStateFlow()
     override val sessionState: StateFlow<EngineSessionState> = sessions.asStateFlow()
+    override val workspaceState: StateFlow<com.lingxi.code.project.SessionWorkspaceState?> = workspace.asStateFlow()
     override val activeSessionState: StateFlow<ActivatedSession?> = activeSession.asStateFlow()
     override val mcpServers: StateFlow<List<MCPServer>> = mcp.asStateFlow()
+
+    override suspend fun awaitTurnTranscriptPath(): String {
+        val expected = initialRecoverySpec.transcriptPath?.takeIf(String::isNotBlank)
+            ?: error("Conversation transcript is unavailable")
+        val delegate = pendingSource.await() ?: error("engine is not connected")
+        val actual = if (delegate is EngineConversationSource) delegate.awaitTurnTranscriptPath() else {
+            val id = delegate.activeSessionState.value?.sessionId ?: error("Conversation session is not ready")
+            kotlinx.coroutines.withTimeoutOrNull(20_000L) {
+                delegate.workspaceState.first { state -> state != null &&
+                    canonicalSessionId(state.sessionId) == canonicalSessionId(id) && state.transcriptPath.isNotBlank() }
+            }?.transcriptPath ?: error("Conversation transcript is unavailable")
+        }
+        check(delegate.recoverySpec?.ownerKey == initialRecoverySpec.ownerKey && actual == expected) {
+            "Conversation recovery source changed"
+        }
+        return actual
+    }
 
     override suspend fun submitClientCommand(command: ClientCommand) {
         pendingSource.await()?.submitClientCommand(command)
@@ -371,8 +529,11 @@ internal class RecoveringConversationSource(
         pendingSource.await()?.resumeSession(uuid)
     }
 
-    override suspend fun resumeEmptySession(uuid: String, title: String) {
-        pendingSource.await()?.resumeEmptySession(uuid, title)
+    override fun retainedUiActivation(activation: ActivatedSession): ActivatedSession =
+        retainedSource?.retainedUiActivation(activation) ?: activation
+
+    override fun retainUiTranscript(snapshot: RetainedConversationTranscript) {
+        retainedSource?.retainUiTranscript(snapshot)
     }
 
     override suspend fun refreshMcpServers() {
@@ -380,7 +541,13 @@ internal class RecoveringConversationSource(
     }
 
     override suspend fun newSession() {
-        pendingSource.await()?.newSession()
+        val delegate = pendingSource.await() ?: error("engine is not connected")
+        delegate.newSession()
+    }
+
+    override suspend fun newSession(cwd: String) {
+        val delegate = pendingSource.await() ?: error("engine is not connected")
+        delegate.newSession(cwd)
     }
 
     override suspend fun setPermissionMode(mode: String) {
@@ -417,28 +584,59 @@ internal class RecoveringConversationSource(
         turnId: Long,
         visualizationContext: VisualizationRef?,
         promptMode: PromptModeDto?,
+    ): Flow<ReplyEvent> = submitForComposer(text, images, turnId, visualizationContext, promptMode, onNotAdmitted = {})
+
+    override fun submitForComposer(
+        text: String, images: List<ImageRefDto>, turnId: Long,
+        visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, onNotAdmitted: () -> Unit,
+        tryBeginNative: () -> Boolean,
+        bindNativeIdentity: (NativePromptIdentity) -> Boolean,
+        onNativeResult: (Result<Unit>) -> Unit,
     ): Flow<ReplyEvent> = flow {
         val delegate = pendingSource.await()
         if (delegate == null) {
+            onNotAdmitted()
             emit(ReplyEvent.Error(strings.resolve(R.string.chat_engine_build_failed, "引擎创建失败")))
             emit(ReplyEvent.End)
             return@flow
         }
-        emitAll(delegate.submit(text, images, turnId, visualizationContext, promptMode))
+        emitAll(if (delegate is NativePromptReceiptSource)
+            delegate.submitForComposer(text, images, turnId, visualizationContext, promptMode, onNotAdmitted, tryBeginNative, bindNativeIdentity, onNativeResult)
+        else {
+            if (!tryBeginNative()) throw kotlinx.coroutines.CancellationException("Turn cancelled before submission")
+            delegate.submit(text, images, turnId, visualizationContext, promptMode)
+        })
     }
+
+    override suspend fun currentNativePromptIdentity(): NativePromptIdentity? =
+        (pendingSource.await() as? NativePromptReceiptSource)?.currentNativePromptIdentity()
+
+    override suspend fun clearNotAdmitted(identity: NativePromptIdentity, turnId: Long): Boolean =
+        (pendingSource.await() as? NativePromptReceiptSource)?.clearNotAdmitted(identity, turnId) == true
 
     override fun submitSlashCommand(
         raw: ClientTextDto,
         images: List<ImageRefDto>,
         turnId: Long,
+    ): Flow<ReplyEvent> = submitSlashForComposer(raw, images, turnId, onNotAdmitted = {})
+
+    internal fun submitSlashForComposer(
+        raw: ClientTextDto, images: List<ImageRefDto>, turnId: Long, onNotAdmitted: () -> Unit,
+        tryBeginNative: () -> Boolean = { true },
     ): Flow<ReplyEvent> = flow {
         val delegate = pendingSource.await() as? SlashCommandConversationSource
         if (delegate == null) {
+            onNotAdmitted()
             emit(ReplyEvent.Error(strings.resolve(R.string.chat_engine_build_failed, "引擎创建失败")))
             emit(ReplyEvent.End)
             return@flow
         }
-        emitAll(delegate.submitSlashCommand(raw, images, turnId))
+        emitAll(if (delegate is EngineConversationSource)
+            delegate.submitSlashForComposer(raw, images, turnId, onNotAdmitted, tryBeginNative)
+        else {
+            if (!tryBeginNative()) throw kotlinx.coroutines.CancellationException("Turn cancelled before submission")
+            delegate.submitSlashCommand(raw, images, turnId)
+        })
     }
 
     override suspend fun cancel(turnId: Long?) {
@@ -450,9 +648,17 @@ internal class RecoveringConversationSource(
     }
 
     override fun close() {
-        closed = true
-        retainedSource?.let {
-            it.close()
+        val (released, delegate) = synchronized(ownershipLock) {
+            closed = true
+            releasedToRecovery = releaseClaim()
+            releasedToRecovery to retainedSource
+        }
+        if (released) {
+            // This wrapper borrowed a source still being built or monitored
+            // by the service. Its cancellation releases only the UI claim.
+            delegateScope.cancel()
+        } else if (delegate != null) {
+            delegate.close()
             delegateScope.cancel()
         }
     }

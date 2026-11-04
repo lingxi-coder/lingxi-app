@@ -61,6 +61,9 @@ enum NativeEngineFactory {
         let providerConfig: IosProviderConfigFfi?
         let mobileLinux: IosMobileLinuxConfigFfi?
         let hostEnvironment: IosHostEnvironmentFfi?
+        var initialSessionId: String? = nil
+        var initialSessionTranscriptPath: String? = nil
+        var schedulerController: Bool = false
     }
 
     /// Configuration is captured on the main actor along with provider and
@@ -69,11 +72,28 @@ enum NativeEngineFactory {
     static func prepare(
         _ scenario: Scenario
     ) throws -> Prepared {
-        let directories = MobileUserStorage.directories()
+        // All launch fields, including a scheduled default cwd, must refer to
+        // the account selected by the runtime configuration.
+        let managedRoot: String?
+        switch scenario {
+        case let .interactive(config, _, _): managedRoot = config.mobileLinux?.managedRoot
+        case let .scheduled(_, _, _, _, runtime): managedRoot = runtime?.managedRoot
+        case .appAgent: managedRoot = nil
+        }
+        let directories = managedRoot.map { MobileUserStorage.directories(managedRoot: $0) }
+            ?? MobileUserStorage.directories()
         let settings: LaunchSettings
         let policy: Policy
         switch scenario {
         case let .interactive(config, listener, permissions):
+            if let id = config.initialSessionId, !id.isEmpty {
+                guard let path = config.initialSessionTranscriptPath, !path.isEmpty,
+                      (path as NSString).isAbsolutePath else {
+                    throw ProjectRepositoryError.missingSessionTranscriptPath
+                }
+            } else if config.initialSessionTranscriptPath != nil {
+                throw ProjectRepositoryError.sessionNotIndexed
+            }
             settings = LaunchSettings(
                 appAgentHost: false,
                 apiBase: config.apiBase,
@@ -90,35 +110,48 @@ enum NativeEngineFactory {
                 mobileLinux: config.mobileLinux.map {
                     mobileLinuxConfiguration($0, appSandboxRoot: config.appSandboxRoot)
                 },
-                hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
+                hostEnvironment: makeIosHostEnvironment(launchMode: .interactive),
+                initialSessionId: config.initialSessionId,
+                initialSessionTranscriptPath: config.initialSessionTranscriptPath
             )
             policy = .interactive(listener: listener, permissions: permissions)
 
         case let .scheduled(appSandboxRoot, scope, task, snapshot, runtime):
+            let mode: SessionMode
+            if let task {
+                guard let fixedMode = task.configuration.runMode == .selectedSession
+                    ? task.configuration.targetSessionMode : task.configuration.sessionMode else {
+                    throw ProjectRepositoryError.conflictingSessionMode
+                }
+                mode = fixedMode
+            } else {
+                mode = .code
+            }
             settings = LaunchSettings(
                 appAgentHost: false,
                 apiBase: "https://api.anthropic.com",
                 // Scheduled execution resolves persisted credentials through
                 // native secure storage, never a scalar Keychain override.
                 model: task?.configuration.model ?? snapshot.defaultModelID ?? "",
-                sessionMode: .code,
+                sessionMode: mode.dto,
                 visionDelegationEnabled: snapshot.visionDelegationEnabled,
                 appSandboxRoot: appSandboxRoot,
-                projectCwd: scope.projectCwd ?? (task == nil ? nil : directories.scheduledCwd),
+                projectCwd: scope.projectCwd ?? directories.scheduledCwd,
                 projectAdditionalDirectories: [],
                 projectMountGrants: [],
                 providerConfig: IosProviderConfigFfi(
                     providerProfilesJson: snapshot.providerProfilesJSON, routingJson: snapshot.routingJSON
                 ),
                 mobileLinux: runtime.map { mobileLinuxConfiguration($0, appSandboxRoot: appSandboxRoot) },
-                hostEnvironment: makeIosHostEnvironment(launchMode: .scheduledHeadless)
+                hostEnvironment: makeIosHostEnvironment(launchMode: .scheduledHeadless),
+                schedulerController: true
             )
             policy = .scheduled
 
         case let .appAgent(appSandboxRoot, snapshot):
             let mobileLinux: IosMobileLinuxConfigFfi?
             #if LINGXI_FULL
-            let metadata = LXISHRuntimeBundleMetadata.current()
+            let metadata = try LXISHRuntimeBundleMetadata.current()
             let workspace = try MobileUserStorage.prepareProjectsDirectory()
             mobileLinux = IosMobileLinuxConfigFfi(
                 mode: .mobileLinux,
@@ -169,6 +202,9 @@ enum NativeEngineFactory {
                 apiBase: settings.apiBase,
                 model: settings.model,
                 sessionMode: settings.sessionMode,
+                initialSessionId: settings.initialSessionId,
+                initialSessionTranscriptPath: settings.initialSessionTranscriptPath,
+                schedulerController: settings.schedulerController,
                 visionDelegationEnabled: settings.visionDelegationEnabled,
                 appSandboxRoot: settings.appSandboxRoot,
                 projectCwd: settings.projectCwd,
@@ -189,7 +225,8 @@ enum NativeEngineFactory {
     static func build(
         _ prepared: Prepared,
         mediaHost: IosNativeMediaHost?,
-        interactiveBuilder: HandleBuilder? = nil
+        interactiveBuilder: HandleBuilder? = nil,
+        onNativeDispatch: @escaping @Sendable () -> Void = {}
     ) async throws -> MobileEngineHandle {
         let listener: IosEventListener
         let permissions: IosPermissionSink
@@ -225,10 +262,12 @@ enum NativeEngineFactory {
                 autoreleasepool {
                     continuation.resume(with: Result {
                         if let interactiveBuilder, case .interactive = prepared.policy {
+                            onNativeDispatch()
                             return try interactiveBuilder(prepared.configuration, listener, mediaHost, permissions)
                         }
                         try prepared.validateMediaHost(mediaHost)
                         let location: IosLocation? = provideLocation ? LocationImpl() : nil
+                        onNativeDispatch()
                         return try buildIosEngineWithConfig(
                             config: prepared.configuration,
                             listener: listener,
@@ -261,7 +300,7 @@ enum NativeEngineFactory {
         appSandboxRoot: String
     ) -> IosMobileLinuxConfigFfi {
         LXISHRuntimeResourceBootstrap.prepare()
-        let directories = MobileUserStorage.directories()
+        let directories = MobileUserStorage.directories(managedRoot: config.managedRoot)
         return IosMobileLinuxConfigFfi(
             mode: config.mode == .legacy ? .legacy : .mobileLinux,
             brandId: directories.brandId,

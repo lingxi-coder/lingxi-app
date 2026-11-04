@@ -114,6 +114,9 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
                 command.is_main_thread()
                     && !command.is_slash_command()
                     && command.priority == msgqueue::QueuePriority::Next
+                    // Composer submissions retain their owner until the next
+                    // outer admission; peer and meta input still fold mid-turn.
+                    && (command.source != msgqueue::QueueSource::PromptInput || command.is_meta)
             })
             .await;
         #[cfg(test)]
@@ -343,10 +346,12 @@ fn slash_model_prompt(
             command,
             body,
             hook_messages,
+            skill,
         } => Some(SlashModelTurn::Batch(skill_prompt_inputs(
             command,
             body,
             hook_messages,
+            skill,
         ))),
         SlashDispatchResult::Handled { display } => {
             let _ = tx.send(tui::TurnEvent::SystemNotice {
@@ -427,8 +432,9 @@ fn skill_prompt_inputs(
     command: lingxi_core::types::utf16_json::Utf16JsonProjection,
     body: lingxi_core::types::utf16_json::Utf16JsonProjection,
     hook_messages: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    skill: Option<lingxi_core::host::SlashSkillIdentity>,
 ) -> Vec<orchestrator::QueuedPromptInput> {
-    orchestrator::skill_prompt_inputs(command, body, hook_messages)
+    orchestrator::skill_prompt_inputs(command, body, hook_messages, skill)
 }
 
 #[async_trait::async_trait]
@@ -437,6 +443,15 @@ trait SourceBatchRunner: Send + Sync {
         &self,
         inputs: Vec<orchestrator::QueuedPromptInput>,
         cancel: CancellationToken,
+        on_admitted: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError>;
+
+    async fn run_composer_prompt(
+        &self,
+        prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        images: Vec<lingxi_core::types::ImageSource>,
+        cancel: CancellationToken,
+        row_token: String,
         on_admitted: Box<dyn FnOnce() + Send + 'static>,
     ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError>;
 }
@@ -452,6 +467,93 @@ impl SourceBatchRunner for orchestrator::ConversationOrchestrator {
         self.run_queued_prompt_batch_with_admission(inputs, cancel, on_admitted)
             .await
     }
+
+    async fn run_composer_prompt(
+        &self,
+        prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        images: Vec<lingxi_core::types::ImageSource>,
+        cancel: CancellationToken,
+        row_token: String,
+        on_admitted: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError> {
+        self.run_turn_streaming_with_cancel_image_sources_and_row_token_and_admission(
+            prompt,
+            images,
+            cancel,
+            row_token,
+            on_admitted,
+        )
+        .await
+    }
+}
+
+fn resolve_composer_admission(
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    row_token: String,
+    admitted: bool,
+) {
+    let _ = tx.send(tui::TurnEvent::PromptAdmissionResolved {
+        row_token,
+        admitted,
+    });
+}
+
+async fn run_composer_prompt(
+    runner: &dyn SourceBatchRunner,
+    prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    image_paths: &[std::path::PathBuf],
+    cancel: CancellationToken,
+    row_token: String,
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    admitted_rows: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError> {
+    if cancel.is_cancelled() {
+        resolve_composer_admission(tx, row_token, false);
+        let _ = tx.send(tui::TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::Cancelled,
+        ));
+        return Ok(orchestrator::conversation::TurnOutcome::Cancelled);
+    }
+    let images = image_paths
+        .iter()
+        .map(|path| orchestrator::image_input::load_image_source(path))
+        .collect::<Result<Vec<_>, _>>();
+    let images = match images {
+        Ok(images) => images,
+        Err(error) => {
+            resolve_composer_admission(tx, row_token, false);
+            return Err(error);
+        }
+    };
+    let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let admission_flag = admitted.clone();
+    let admission_tx = tx.clone();
+    let admission_row = row_token.clone();
+    let result = runner
+        .run_composer_prompt(
+            prompt,
+            images,
+            cancel,
+            row_token.clone(),
+            Box::new(move || {
+                admission_flag.store(true, std::sync::atomic::Ordering::Release);
+                admitted_rows.lock().unwrap().insert(admission_row.clone());
+                resolve_composer_admission(&admission_tx, admission_row, true);
+            }),
+        )
+        .await;
+    if !admitted.load(std::sync::atomic::Ordering::Acquire) {
+        resolve_composer_admission(tx, row_token, false);
+        if matches!(
+            &result,
+            Ok(orchestrator::conversation::TurnOutcome::Cancelled)
+        ) {
+            let _ = tx.send(tui::TurnEvent::TurnEnded(
+                lingxi_core::host::TurnOutcome::Cancelled,
+            ));
+        }
+    }
+    result
 }
 
 /// Attach the TUI's queued image paths to the real user row of a registry
@@ -609,11 +711,14 @@ struct HostSubmissionOrder {
     slashes: std::collections::BTreeSet<u64>,
     enqueuing: std::collections::BTreeSet<u64>,
     queued: std::collections::HashMap<String, u64>,
+    local_operations: usize,
 }
 
 #[derive(Default)]
 struct HostPromptQueueState {
     shutdown: CancellationToken,
+    recovery_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>>,
+    admitted_rows: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     loop_host: std::sync::OnceLock<Arc<crate::loop_wakeup::CliLoopHost>>,
     mod_dispatcher: std::sync::OnceLock<Arc<dyn lingxi_core::host::SlashCommandDispatcher>>,
     mod_commands: std::sync::Mutex<
@@ -749,11 +854,17 @@ impl command_api::ModCommandQueue for TuiModCommandQueue {
         queued.is_meta = true;
         let id = queued.uuid.clone();
         let (settle, receiver) = tokio::sync::oneshot::channel();
-        self.state
-            .mod_commands
-            .lock()
-            .unwrap()
-            .insert(id.clone(), (plugin.to_owned(), settle));
+        {
+            let _admission = self.state.order.lock().unwrap();
+            if self.state.shutdown.is_cancelled() {
+                return Err("session is switching".into());
+            }
+            self.state
+                .mod_commands
+                .lock()
+                .unwrap()
+                .insert(id.clone(), (plugin.to_owned(), settle));
+        }
         self.queue.enqueue(queued).await;
         tokio::select! {
             result = receiver => result.map_err(|_| "the command did not run".to_owned())?,
@@ -778,11 +889,17 @@ impl command_api::ModCommandQueue for TuiModCommandQueue {
         queued.is_meta = !as_user;
         let id = queued.uuid.clone();
         let (settle, receiver) = tokio::sync::oneshot::channel();
-        self.state
-            .mod_prompts
-            .lock()
-            .unwrap()
-            .insert(id.clone(), (plugin.to_owned(), as_user, settle));
+        {
+            let _admission = self.state.order.lock().unwrap();
+            if self.state.shutdown.is_cancelled() {
+                return Err("session is switching".into());
+            }
+            self.state
+                .mod_prompts
+                .lock()
+                .unwrap()
+                .insert(id.clone(), (plugin.to_owned(), as_user, settle));
+        }
         self.queue.enqueue(queued).await;
         tokio::select! {
             result = receiver => {
@@ -829,6 +946,30 @@ impl Drop for PendingSlashReservation {
             .slashes
             .remove(&self.sequence);
         self.state.published.notify_waiters();
+    }
+}
+
+/// Reserve an accepted local command before spawning its asynchronous work.
+/// A session switch must wait through publication of the command's result.
+struct PendingLocalOperation(Arc<HostPromptQueueState>);
+
+impl PendingLocalOperation {
+    fn try_new(state: &Arc<HostPromptQueueState>) -> Option<Self> {
+        let mut order = state.order.lock().unwrap();
+        if state.shutdown.is_cancelled() {
+            return None;
+        }
+        order.local_operations += 1;
+        Some(Self(state.clone()))
+    }
+}
+
+impl Drop for PendingLocalOperation {
+    fn drop(&mut self) {
+        let mut order = self.0.order.lock().unwrap();
+        order.local_operations -= 1;
+        drop(order);
+        self.0.published.notify_waiters();
     }
 }
 
@@ -924,7 +1065,11 @@ async fn retire_cancelled_prompt_ids(
 ) {
     queue.remove(&cancelled, "cancelled prompt owner").await;
     for id in cancelled {
-        state.transcript_row_tokens.lock().unwrap().remove(&id);
+        if let Some(row_token) = state.transcript_row_tokens.lock().unwrap().remove(&id) {
+            if let Some(tx) = state.recovery_tx.get() {
+                resolve_composer_admission(tx, row_token, false);
+            }
+        }
         if let Some((_, _, settle)) = state.mod_prompts.lock().unwrap().remove(&id) {
             let _ = settle.send(Ok(
                 lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
@@ -958,11 +1103,14 @@ async fn dequeue_after_slash_dispatch(
         let cancel =
             owner.map_or_else(|| state.shutdown.child_token(), |owner| owner.child_token());
         if cancel.is_cancelled() {
-            state
+            let row_token = state
                 .transcript_row_tokens
                 .lock()
                 .unwrap()
                 .remove(&command.uuid);
+            if let (Some(row_token), Some(tx)) = (row_token, state.recovery_tx.get()) {
+                resolve_composer_admission(tx, row_token, false);
+            }
             continue;
         }
         return Some((command, cancel));
@@ -985,6 +1133,9 @@ async fn drain_teammate_prompts(
             .unwrap()
             .remove(&command.uuid);
         let Some(text) = command.text_projection().cloned() else {
+            if let Some(row_token) = transcript_row_token {
+                resolve_composer_admission(turn_tx, row_token, false);
+            }
             continue;
         };
         let mod_command = pending_slashes
@@ -998,6 +1149,9 @@ async fn drain_teammate_prompts(
             .unwrap()
             .remove(&command.uuid);
         if cancel.is_cancelled() {
+            if let Some(row_token) = transcript_row_token {
+                resolve_composer_admission(turn_tx, row_token, false);
+            }
             if let Some((_, settle)) = mod_command {
                 let _ = settle.send(Err("the turn was interrupted before the command ran".into()));
             }
@@ -1081,8 +1235,9 @@ async fn drain_teammate_prompts(
                     command,
                     body,
                     hook_messages,
+                    skill,
                 } => {
-                    queued_inputs = Some(skill_prompt_inputs(command, body, hook_messages));
+                    queued_inputs = Some(skill_prompt_inputs(command, body, hook_messages, skill));
                     mod_settle = Some(settle);
                 }
                 lingxi_core::host::SlashDispatchResult::Unknown { display, .. } => {
@@ -1138,6 +1293,9 @@ async fn drain_teammate_prompts(
         {
             Ok(resolved) => resolved.flatten(),
             Err(error) => {
+                if let Some(row_token) = transcript_row_token {
+                    resolve_composer_admission(turn_tx, row_token, false);
+                }
                 let _ = turn_tx.send(tui::TurnEvent::SystemNotice {
                     body: error.to_string().into(),
                     is_error: true,
@@ -1201,21 +1359,29 @@ async fn drain_teammate_prompts(
                     .map(|_| ())
                     .map_err(|error| error.to_string())
                 } else if let Some(row_token) = transcript_row_token {
-                    orchestrator::native_user_message_source::with_source(
-                        native_source,
-                        orchestrator::mod_prompt_origin::with_origin(
-                            origin,
-                            orchestrator.run_queued_turn_streaming_with_row_token(
-                                &text,
-                                cancel,
-                                in_human_turn,
-                                row_token,
+                    if let Some(runner) = source_batch_runner {
+                        orchestrator::native_user_message_source::with_source(
+                            native_source,
+                            orchestrator::mod_prompt_origin::with_origin(
+                                origin,
+                                run_composer_prompt(
+                                    runner,
+                                    text.clone(),
+                                    &[],
+                                    cancel,
+                                    row_token,
+                                    turn_tx,
+                                    pending_slashes.admitted_rows.clone(),
+                                ),
                             ),
-                        ),
-                    )
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                    } else {
+                        resolve_composer_admission(turn_tx, row_token, false);
+                        Err("source-preserving composer runner is unavailable".to_string())
+                    }
                 } else {
                     orchestrator::native_user_message_source::with_source(
                         native_source,
@@ -1261,6 +1427,9 @@ async fn acquire_ordered_host_turn<'a>(
     )
     .await?;
     let guard = unless_cancelled(cancel, gate.lock()).await?;
+    if state.shutdown.is_cancelled() {
+        return None;
+    }
     drain_teammate_prompts(queue, orchestrator, source_batch_runner, tx, state).await;
     if cancel.is_cancelled() {
         return None;
@@ -1268,6 +1437,86 @@ async fn acquire_ordered_host_turn<'a>(
     drop(reservation);
     start_host_turn(queue, tx, cancel).await;
     Some(guard)
+}
+
+type SessionSwitchGuard = Arc<
+    std::sync::Mutex<
+        Option<(
+            tokio::sync::OwnedMutexGuard<()>,
+            tokio::sync::OwnedRwLockWriteGuard<()>,
+        )>,
+    >,
+>;
+
+fn session_switch_fence(
+    gate: Arc<tokio::sync::Mutex<()>>,
+    incoming_gate: Arc<tokio::sync::RwLock<()>>,
+    queue: Arc<msgqueue::MessageQueueManager>,
+    state: Arc<HostPromptQueueState>,
+) -> (
+    Arc<dyn Fn(tui::app::SessionSwitchFenceAction) -> bool + Send + Sync>,
+    SessionSwitchGuard,
+) {
+    use tui::app::SessionSwitchFenceAction;
+    let held: SessionSwitchGuard = Arc::new(std::sync::Mutex::new(None));
+    let fence_held = held.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let callback = Arc::new(move |action| match action {
+        SessionSwitchFenceAction::Acquire => {
+            let Ok(guard) = gate.clone().try_lock_owned() else {
+                return false;
+            };
+            let Ok(incoming) = runtime.block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(750),
+                    incoming_gate.clone().write_owned(),
+                )
+                .await
+            }) else {
+                return false;
+            };
+            let pending = {
+                let order = state.order.lock().unwrap();
+                !order.slashes.is_empty()
+                    || !order.enqueuing.is_empty()
+                    || !order.queued.is_empty()
+                    || order.local_operations != 0
+            };
+            if pending
+                || state.shutdown.is_cancelled()
+                || !state.mod_commands.lock().unwrap().is_empty()
+                || !state.mod_prompts.lock().unwrap().is_empty()
+                || runtime.block_on(queue.has_main_thread_commands())
+            {
+                return false;
+            }
+            *fence_held.lock().unwrap() = Some((guard, incoming));
+            true
+        }
+        SessionSwitchFenceAction::Abort => {
+            fence_held.lock().unwrap().take();
+            true
+        }
+        SessionSwitchFenceAction::Commit => {
+            let queued = runtime.block_on(queue.has_main_thread_commands());
+            let order = state.order.lock().unwrap();
+            if !order.slashes.is_empty()
+                || !order.enqueuing.is_empty()
+                || !order.queued.is_empty()
+                || order.local_operations != 0
+                || !state.mod_commands.lock().unwrap().is_empty()
+                || !state.mod_prompts.lock().unwrap().is_empty()
+                || queued
+            {
+                drop(order);
+                fence_held.lock().unwrap().take();
+                return false;
+            }
+            state.shutdown.cancel();
+            true
+        }
+    });
+    (callback, held)
 }
 
 fn trim_decimal(mut rendered: String) -> String {
@@ -1767,7 +2016,47 @@ pub(crate) fn ensure_live_messaging(
 /// ratatui loop must tear down + rebuild (the JSONL-writer-retarget seam), so we
 /// carry this state IN MEMORY to reproduce the same observable behavior WITHOUT
 /// writing config keys the upstream never had.
+pub(crate) type RemountDraftStore = Arc<
+    std::sync::Mutex<std::collections::HashMap<uuid::Uuid, Vec<tui::chat_widget::SwitchDraft>>>,
+>;
+
+fn save_owner_switch_drafts(
+    store: &RemountDraftStore,
+    owner: uuid::Uuid,
+    mut drafts: Vec<tui::chat_widget::SwitchDraft>,
+    admitted: &std::collections::HashSet<String>,
+) {
+    drafts.retain(|draft| {
+        draft
+            .row_token
+            .as_ref()
+            .is_none_or(|row| !admitted.contains(row))
+    });
+    for draft in &mut drafts {
+        draft.row_token = None;
+    }
+    let mut store = store.lock().unwrap();
+    if drafts.is_empty() {
+        store.remove(&owner);
+    } else {
+        store.insert(owner, drafts);
+    }
+}
+
 pub(crate) struct RemountState {
+    pub draft_store: RemountDraftStore,
+    /// Last admitted session workspace, retained across an empty rewind.
+    pub cwd: std::path::PathBuf,
+    /// The source selected for the outgoing mount, or its current writer path
+    /// after a workspace retarget. Never re-resolve this session by UUID.
+    pub transcript_path: Option<std::path::PathBuf>,
+    /// Physical source already owned by the outgoing writer or read-only mount.
+    pub transcript_authority: Option<session::jsonl::writer::TranscriptFileAuthority>,
+    /// Only a mounted persistent writer may mutate its source on rewind.
+    pub transcript_persistent: bool,
+    /// Fixed ownership of the outgoing runtime, used only for an authenticated
+    /// background worker remounting its originally admitted UUID.
+    pub conversation_mode: lingxi_core::host::session_context::ConversationMode,
     /// Active `(request_model, provider_profile)` — `None` resolves the model
     /// by-id (no profile). Applied via `switch_model`.
     pub model: Option<(String, Option<String>)>,
@@ -1794,11 +2083,12 @@ pub(crate) enum RunOutcome {
     /// The TUI exited normally; carry the process exit code.
     Exit(i32),
     /// The `/resume` picker resolved to this session uuid; the caller re-mounts
-    /// it in-process via [`crate::run::load_resume_session`] +
-    /// [`crate::run::mount_resumed_tui`], carrying the outgoing session's active
-    /// [`RemountModel`].
+    /// it in-process from the selected transcript, carrying the outgoing
+    /// session's active [`RemountModel`].
     SwitchTo {
         target: uuid::Uuid,
+        source_path: Option<std::path::PathBuf>,
+        source_receipt: Option<crate::init::PublishedBranchSource>,
         state: Option<RemountState>,
     },
     /// The agents view selected a session. The switch loop resolves the live
@@ -1850,8 +2140,58 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
         resumed_messages,
         initial_prompt,
         None,
+        None,
+        Vec::new(),
     )
     .await
+}
+
+/// Monitor recovery independently so the TUI can answer its permission requests.
+fn spawn_startup_recovery<F>(
+    future: F,
+    state: Arc<std::sync::atomic::AtomicU8>,
+    errors: Arc<std::sync::Mutex<Option<String>>>,
+) -> (tokio::task::AbortHandle, tokio::task::JoinHandle<()>)
+where
+    F: std::future::Future<Output = Result<(), String>> + Send + 'static,
+{
+    let replay = tokio::spawn(future);
+    let abort = replay.abort_handle();
+    let monitor = tokio::spawn(async move {
+        match replay.await {
+            Ok(Ok(())) => state.store(1, std::sync::atomic::Ordering::Release),
+            result => {
+                let error = match result {
+                    Ok(Err(error)) => error,
+                    Err(error) => format!("recovery task failed: {error}"),
+                    Ok(Ok(())) => unreachable!(),
+                };
+                *errors.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(error);
+                state.store(2, std::sync::atomic::Ordering::Release);
+            }
+        }
+    });
+    (abort, monitor)
+}
+
+/// A selection of the live owner is a no-op only after physical identity is
+/// checked. The live writer may append after this check, so its bytes are not
+/// frozen across a needless shutdown/remount.
+pub(crate) fn selected_current_resume_owner(
+    current_id: uuid::Uuid,
+    selected_id: uuid::Uuid,
+    selected: &session::jsonl::writer::TranscriptFileAuthority,
+    active: Option<&session::jsonl::writer::TranscriptFileAuthority>,
+) -> Result<bool, String> {
+    if current_id != selected_id {
+        return Ok(false);
+    }
+    let active = active.ok_or("The open session's transcript authority is unavailable")?;
+    if !active.same_source(selected) {
+        return Err("This session is already open from another transcript".into());
+    }
+    active.verify_current().map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 /// Mount a TUI while restoring a durable foreground→background boundary.
@@ -1861,7 +2201,26 @@ pub(crate) async fn run_ratatui_with_initial_state(
     resumed_messages: Vec<tui::RenderedMessage>,
     initial_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
+    draft_store: Option<RemountDraftStore>,
+    deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
 ) -> RunOutcome {
+    let draft_store = draft_store.unwrap_or_default();
+    let owner_id = tui_build
+        .runtime
+        .orchestrator
+        .current_session_id()
+        .await
+        .as_uuid();
+    let switch_drafts = draft_store
+        .lock()
+        .unwrap()
+        .get(&owner_id)
+        .cloned()
+        .unwrap_or_default();
+    let switch_drafts_out = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let switch_drafts_output = switch_drafts_out.clone();
+    let resume_transcript_path = tui_build.resume_transcript_path.clone();
+    let resume_transcript_authority = tui_build.resume_transcript_authority.clone();
     let initial_draft = tui_build.initial_draft.clone();
     let message_anchor = tui_build.message_anchor.clone();
     let session_lifecycle = tui_build.runtime.session_lifecycle.clone();
@@ -1870,16 +2229,40 @@ pub(crate) async fn run_ratatui_with_initial_state(
         .runtime
         .policy_helper_semantic_worker_failure
         .clone();
+    // 0 = recovering, 1 = ready, 2 = failed. The TUI pumps real approval
+    // channels during recovery, but cannot admit new work or switch owners.
+    let recovery_state =
+        (!deferred_tools.is_empty()).then(|| Arc::new(std::sync::atomic::AtomicU8::new(0)));
+    let recovery_error = Arc::new(std::sync::Mutex::new(None::<String>));
     let exit_request_probe = {
         let refusal = policy_helper_refusal.clone();
         let semantic_worker_failure = policy_semantic_worker_failure.clone();
-        Arc::new(move || refusal.current().is_some() || semantic_worker_failure.current().is_some())
-            as Arc<dyn Fn() -> bool + Send + Sync>
+        let recovery_state = recovery_state.clone();
+        Arc::new(move || {
+            refusal.current().is_some()
+                || semantic_worker_failure.current().is_some()
+                || recovery_state
+                    .as_ref()
+                    .is_some_and(|state| state.load(std::sync::atomic::Ordering::Acquire) == 2)
+        }) as Arc<dyn Fn() -> bool + Send + Sync>
     };
     let exit_task_registry = tui_build.runtime.task_registry.clone();
     let prompt_queue = Arc::new(msgqueue::MessageQueueManager::new());
     let teammate_turn_gate = Arc::new(tokio::sync::Mutex::new(()));
+    let recovery_guard = if recovery_state.is_some() {
+        Some(teammate_turn_gate.clone().lock_owned().await)
+    } else {
+        None
+    };
+    let incoming_gate = Arc::new(tokio::sync::RwLock::new(()));
     let pending_slashes = Arc::new(HostPromptQueueState::default());
+    let (switch_fence, switch_guard) = session_switch_fence(
+        teammate_turn_gate.clone(),
+        incoming_gate.clone(),
+        prompt_queue.clone(),
+        pending_slashes.clone(),
+    );
+    let tui_admitted_rows = pending_slashes.admitted_rows.clone();
     let leader_mailbox = tui_build
         .runtime
         .coordinator
@@ -1942,6 +2325,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     };
     let workflow_events = tui_build.workflow_events;
     let turn_tx = tui_build.turn_tx;
+    let _ = pending_slashes.recovery_tx.set(turn_tx.clone());
     // (companyAnnouncements) The merged array, moved out before `tui_build` is
     // consumed further below; selected + rendered into the startup banner.
     let company_announcements = tui_build.company_announcements;
@@ -1968,6 +2352,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // (P1-08 runtime `/add-dir`) the live session-cwd cell + MCP registry the
     // `/add-dir` effect widens; cloned before `tui_build.runtime` is consumed.
     let permission_session_cwd = tui_build.runtime.session_cwd.clone();
+    let remount_session_cwd = permission_session_cwd.clone();
     let permission_mcp_registry = tui_build.runtime.mcp_registry.clone();
     let permission_policy_gate = tui_build.runtime.enforcing_permission_gate.clone();
     // Native scrollback must resolve relative attachment paths against the
@@ -2241,14 +2626,45 @@ pub(crate) async fn run_ratatui_with_initial_state(
             let _ = tx.send(tui::TurnEvent::CommandCatalogRefreshed { commands });
         });
     };
-    // (/resume) Preload the recent-session rows for the interactive picker.
-    // This is an ASYNC disk scan (the M5-08 loader), so it MUST run here — the
-    // blocking ratatui loop can't `.await`. The rows go slightly stale as new
-    // sessions are written, exactly like claude-code's snapshot. Kept DISTINCT
-    // from the startup `--resume` picker path (`run_resume_iocraft`): this seeds
-    // the IN-SESSION `/resume` command, which switches the live session by an
-    // in-process re-mount rather than a fresh launch.
-    let resume_rows = crate::run::load_resume_picker_rows().await;
+    // The first in-session picker snapshot belongs to the live runtime cwd;
+    // the /cd effect refreshes it off the render thread after relocation.
+    let resume_catalog_cwd = permission_session_cwd.cwd();
+    let resume_catalog = crate::run::load_resume_catalog_for_cwd(&resume_catalog_cwd).await;
+    let resume_rows = crate::run::map_resume_rows(&resume_catalog);
+    let selected_resume_source = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let selected_resume_slot = selected_resume_source.clone();
+    let resume_home = crate::run::lingxi_home_dir();
+    let capture_orch = orchestrator.clone();
+    let capture_concrete_orch = concrete_orchestrator.clone();
+    let capture_handle = handle.clone();
+    let initial_resume_authority = resume_transcript_authority.clone();
+    let on_capture_resume = move |selection: &tui::resume::ResumeSelection| {
+        let source = crate::init::capture_selected_cli_source(
+            &resume_home,
+            selection.uuid,
+            &selection.transcript_path,
+            Some(lingxi_core::host::session_context::ConversationMode::Code),
+        )
+        .map_err(|error| format!("Could not capture the selected session: {error}"))?;
+        let current = capture_handle
+            .block_on(capture_orch.current_session_id())
+            .as_uuid();
+        let active = match capture_concrete_orch.session_transcript_writer() {
+            Some(writer) => writer.active_transcript_authority(),
+            None if current == owner_id => initial_resume_authority.clone(),
+            None => None,
+        };
+        if selected_current_resume_owner(
+            current,
+            selection.uuid,
+            &source.authority,
+            active.as_ref(),
+        )? {
+            return Ok(tui::app::ResumeDisposition::AlreadyCurrent);
+        }
+        *selected_resume_slot.lock().unwrap() = Some((selection.clone(), source));
+        Ok(tui::app::ResumeDisposition::Switch)
+    };
     let current_model = session
         .models
         .iter()
@@ -2358,6 +2774,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             )
             .await
             else {
+                resolve_composer_admission(&tx, row_token, false);
                 return;
             };
             cancel_reason.reset();
@@ -2372,8 +2789,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
             if let Err(e) =
                 with_cli_composer_native_source(orchestrator::mod_prompt_origin::with_origin(
                     serde_json::json!({"kind":"composer"}),
-                    orch.run_turn_streaming_with_images_and_row_token(
-                        &prompt, &images, cancel, row_token,
+                    run_composer_prompt(
+                        source_batch_runner.as_ref(),
+                        prompt,
+                        &images,
+                        cancel,
+                        row_token,
+                        &tx,
+                        pending_slashes.admitted_rows.clone(),
                     ),
                 ))
                 .await
@@ -2467,9 +2890,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // One consumer preserves picker order across the live switch, persistence,
     // and the UI acknowledgement, without waiting for the running turn.
     let (model_selection_tx, mut model_selection_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
+        tokio::sync::mpsc::unbounded_channel::<(String, Option<String>, PendingLocalOperation)>();
     switch_handle.spawn(async move {
-        while let Some((model, profile)) = model_selection_rx.recv().await {
+        while let Some((model, profile, _reservation)) = model_selection_rx.recv().await {
             match crate::model_selection::apply(
                 switch_orch.as_ref(),
                 &model,
@@ -2490,8 +2913,11 @@ pub(crate) async fn run_ratatui_with_initial_state(
             }
         }
     });
+    let model_pending = pending_slashes.clone();
     let on_switch_model = move |model: String, profile: Option<String>| {
-        let _ = model_selection_tx.send((model, profile));
+        if let Some(reservation) = PendingLocalOperation::try_new(&model_pending) {
+            let _ = model_selection_tx.send((model, profile, reservation));
+        }
     };
     // (/fusion setup async effect) The wizard
     // returns a save, the settings merge happens off the render loop, and the
@@ -2529,9 +2955,17 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // the transport's allow cache in the same settings layer. The result lands in the
     // transcript via `TurnEvent::SystemNotice`, and the shared snapshot slot is
     // refreshed so the next `/permissions` open reflects the edit.
+    let permission_pending = pending_slashes.clone();
     let permission_snapshot_cb = permission_snapshot.clone();
     let permission_paths_cb = permission_paths.clone();
     let on_permission_action = move |action: tui::bottom_pane::PermissionAction| {
+        let refresh_resume = matches!(
+            &action,
+            tui::bottom_pane::PermissionAction::ChangeDirectory { .. }
+        );
+        let Some(reservation) = PendingLocalOperation::try_new(&permission_pending) else {
+            return;
+        };
         let paths = permission_paths_cb.clone();
         let allow_rules = session_allow_rules.clone();
         let tx = permission_turn_tx.clone();
@@ -2544,6 +2978,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let generation = effects.capture();
         let gate = directory_session_gate.clone();
         permission_handle.spawn(async move {
+            let _reservation = reservation;
             // Transcript relocation must finish before clear switches writers.
             let _directory_guard = if matches!(
                 &action,
@@ -2561,14 +2996,25 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 action,
                 paths,
                 allow_rules,
-                tx,
+                tx.clone(),
                 snapshot,
-                session_cwd,
+                session_cwd.clone(),
                 mcp_registry,
                 policy_gate,
                 orch,
             )
             .await;
+            if refresh_resume {
+                let cwd = session_cwd.cwd();
+                let catalog = crate::run::load_resume_catalog_for_cwd(&cwd).await;
+                if session_cwd.cwd() == cwd {
+                    let rows = crate::run::map_resume_rows(&catalog)
+                        .into_iter()
+                        .map(|row| (row.uuid, row.transcript_path, row.title, row.metadata_label))
+                        .collect();
+                    let _ = tx.send(tui::TurnEvent::ResumeCatalogRefreshed { cwd, rows });
+                }
+            }
         });
     };
     // (`!` bash mode) `!command` is submitted synchronously from the blocking
@@ -2576,12 +3022,17 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // captured handle and its captured stdout/stderr fold back into the
     // transcript via `TurnEvent::BashOutput` on the shared `turn_tx` — no LLM
     // turn, 1:1 with claude-code bash mode.
+    let bash_pending = pending_slashes.clone();
     let on_bash = move |command: String| {
+        let Some(reservation) = PendingLocalOperation::try_new(&bash_pending) else {
+            return;
+        };
         let runner = bash_runner.clone();
         let tx = bash_turn_tx.clone();
         let effects = bash_effects.clone();
         let generation = effects.capture();
         bash_handle.spawn(async move {
+            let _reservation = reservation;
             run_tui_bash(runner.as_ref(), &command, &effects, generation, &tx).await;
         });
     };
@@ -2594,12 +3045,17 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // turn or second submission from overlapping this whole-history swap. The
     // summary (or failure) lands in the transcript via `TurnEvent::SystemNotice`
     // on the shared `turn_tx`, mirroring `command_api::builtins::compact`'s display text.
+    let compact_pending = pending_slashes.clone();
     let on_compact = move |args: String, cancel: CancellationToken| {
+        let Some(reservation) = PendingLocalOperation::try_new(&compact_pending) else {
+            return;
+        };
         let orch = compact_orch.clone();
         let tx = compact_turn_tx.clone();
         let effects = compact_effects.clone();
         let generation = effects.capture();
         compact_handle.spawn(async move {
+            let _reservation = reservation;
             let custom = (!args.trim().is_empty())
                 .then(|| lingxi_core::types::utf16_json::Utf16JsonProjection::from(args.clone()));
             let (body, is_error) = match orch
@@ -2639,15 +3095,20 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // ⛔ Deliberately NOT the `AppExit::Rewind` path: that unwinds the app loop
     // and re-mounts against a truncated transcript, and there would be nothing
     // left for the summarizer to read.
+    let summarize_pending = pending_slashes.clone();
     let on_summarize = move |message: uuid::Uuid,
                              direction: lingxi_core::host::SummarizeDirection,
                              context: Option<String>,
                              cancel: CancellationToken| {
+        let Some(reservation) = PendingLocalOperation::try_new(&summarize_pending) else {
+            return;
+        };
         let orch = summarize_orch.clone();
         let tx = summarize_turn_tx.clone();
         let effects = summarize_effects.clone();
         let generation = effects.capture();
         summarize_handle.spawn(async move {
+            let _reservation = reservation;
             let context = context.map(lingxi_core::types::utf16_json::Utf16JsonProjection::from);
             let (body, is_error) = match orch
                 .summarize_at(&message.to_string(), context.as_ref(), direction, cancel)
@@ -2684,7 +3145,11 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // `/rename [name]`: a bare invocation first runs the history-inert,
     // tool-denied `rename_generate_name` side query; either path then persists
     // the custom title off the render thread.
+    let rename_pending = pending_slashes.clone();
     let on_rename = move |requested_name: String| {
+        let Some(reservation) = PendingLocalOperation::try_new(&rename_pending) else {
+            return;
+        };
         let orch = rename_orch.clone();
         let tx = rename_turn_tx.clone();
         let rename_reg = rename_reg.clone();
@@ -2692,6 +3157,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let generation = effects.capture();
         let gate = rename_session_gate.clone();
         rename_handle.spawn(async move {
+            let _reservation = reservation;
             let name = if requested_name.trim().is_empty() {
                 match orch.generate_session_name().await {
                     Ok(Some(name)) => name,
@@ -2776,10 +3242,15 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // read of the current value) runs off the render thread on the captured
     // handle (doctrine: side-effects go off-loop). The applied state is reported
     // via `TurnEvent::SystemNotice`. `None` = toggle; `Some(target)` = set.
+    let fast_pending = pending_slashes.clone();
     let on_fast_mode = move |target: Option<bool>| {
+        let Some(reservation) = PendingLocalOperation::try_new(&fast_pending) else {
+            return;
+        };
         let orch = fast_orch.clone();
         let tx = fast_turn_tx.clone();
         fast_handle.spawn(async move {
+            let _reservation = reservation;
             let desired = match target {
                 Some(v) => v,
                 None => !orch.fast_mode().await,
@@ -2803,10 +3274,15 @@ pub(crate) async fn run_ratatui_with_initial_state(
     };
     // `/plan`: enter plan mode, then reuse the orchestrator's real plan-file
     // path for view/open instead of maintaining a second TUI-only store.
+    let plan_pending = pending_slashes.clone();
     let on_plan_mode = move |args: String| {
+        let Some(reservation) = PendingLocalOperation::try_new(&plan_pending) else {
+            return;
+        };
         let orch = plan_orch.clone();
         let tx = plan_turn_tx.clone();
         plan_handle.spawn(async move {
+            let _reservation = reservation;
             let already_in_plan_mode = orch.plan_mode().await;
             if !already_in_plan_mode {
                 if orch.set_permission_mode("plan").await.is_err()
@@ -2866,12 +3342,17 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // off the render thread, so enforcement follows the bottom-of-composer
     // indicator (the pane already updated its display). On failure — e.g. the
     // bypass killswitch — report via `TurnEvent::SystemNotice`.
+    let set_mode_pending = pending_slashes.clone();
     let on_set_permission_mode = move |mode: String| {
+        let Some(reservation) = PendingLocalOperation::try_new(&set_mode_pending) else {
+            return;
+        };
         let orch = set_mode_orch.clone();
         let tx = set_mode_turn_tx.clone();
         let bypass_available = bypass_available;
         let set_mode_reg = set_mode_reg.clone();
         set_mode_handle.spawn(async move {
+            let _reservation = reservation;
             if let Err(e) = orch.set_permission_mode(&mode).await {
                 let _ = tx.send(tui::TurnEvent::SystemNotice {
                     body: format!("Could not change permission mode: {e}").into(),
@@ -3528,9 +4009,15 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 if !registry.has_pending_task_notifications_for(None).await {
                     continue;
                 }
+                if shutdown.is_cancelled() {
+                    break;
+                }
                 let Ok(_guard) = gate.try_lock() else {
                     continue;
                 };
+                if shutdown.is_cancelled() {
+                    break;
+                }
                 if !registry.has_pending_task_notifications_for(None).await {
                     continue;
                 }
@@ -3570,7 +4057,13 @@ pub(crate) async fn run_ratatui_with_initial_state(
         tokio::spawn(async move {
             loop {
                 tokio::select! { _ = shutdown.cancelled() => break, _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {} }
+                if shutdown.is_cancelled() {
+                    break;
+                }
                 if let Ok(_guard) = gate.try_lock() {
+                    if shutdown.is_cancelled() {
+                        break;
+                    }
                     drain_teammate_prompts(
                         &queue,
                         orch.as_ref(),
@@ -3585,9 +4078,18 @@ pub(crate) async fn run_ratatui_with_initial_state(
     };
     let teammate_prompt_pumps = leader_mailbox.map(|inbox| {
         let incoming_queue = prompt_queue.clone();
+        let incoming_admission = incoming_gate.clone();
+        let incoming_shutdown = pump_shutdown.clone();
         let incoming = tokio::spawn(async move {
             loop {
-                let Some(message) = inbox.wait_for_message(std::time::Duration::from_millis(500)).await else { continue; };
+                let _admission = incoming_admission.read().await;
+                let Some(message) = (tokio::select! {
+                    _ = incoming_shutdown.cancelled() => None,
+                    message = inbox.wait_for_message(std::time::Duration::from_millis(500)) => message,
+                }) else {
+                    if incoming_shutdown.is_cancelled() { break; }
+                    continue;
+                };
                 incoming_queue.enqueue(msgqueue::QueuedCommand {
                     scheduled_task_id: None,
                     scheduled_fire_id: None,
@@ -3611,6 +4113,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let queue = prompt_queue.clone();
         let orch = concrete_orchestrator.clone();
         let source_batch_runner = source_batch_runner.clone();
+        let state = pending_slashes.clone();
         let shutdown = pump_shutdown.clone();
         let drain = tokio::spawn(async move {
             loop {
@@ -3618,13 +4121,15 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     _ = shutdown.cancelled() => break,
                     _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
                 }
+                if shutdown.is_cancelled() { break; }
                 if let Ok(_guard) = teammate_turn_gate.try_lock() {
+                    if shutdown.is_cancelled() { break; }
                     drain_teammate_prompts(
                         &queue,
                         orch.as_ref(),
                         Some(source_batch_runner.as_ref()),
                         &teammate_turn_tx,
-                        &pending_slashes,
+                        &state,
                     )
                     .await;
                 }
@@ -3645,11 +4150,33 @@ pub(crate) async fn run_ratatui_with_initial_state(
             });
         }) as Arc<dyn Fn() + Send + Sync>
     };
+    let recovery_task = recovery_state.as_ref().map(|state| {
+        let orch = concrete_orchestrator.clone();
+        spawn_startup_recovery(
+            async move {
+                let _guard = recovery_guard;
+                orchestrator::replay_deferred_tools_after_resume(&orch, deferred_tools)
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            state.clone(),
+            recovery_error.clone(),
+        )
+    });
+    let tui_recovery_state = recovery_state.clone();
+    let tui_recovery_abort = recovery_task.as_ref().map(|(abort, _)| abort.clone());
+    let tui_recovery_shutdown = recovery_state.as_ref().map(|_| pump_shutdown.clone());
     let run_result = tokio::task::spawn_blocking(move || {
         tui::app::run_app(
             initial,
             initial_prompt,
+            tui_recovery_state,
+            tui_recovery_abort,
+            tui_recovery_shutdown,
             initial_draft,
+            switch_drafts,
+            switch_drafts_output,
+            tui_admitted_rows,
             message_anchor,
             handoff,
             session,
@@ -3663,6 +4190,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             Some(permission_snapshot),
             Some(plugin_snapshot),
             resume_rows,
+            resume_catalog_cwd,
             connect_auth_methods,
             connect_availability,
             Some(shell_expansion),
@@ -3688,6 +4216,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             on_plugin_action,
             on_reload_plugins,
             on_refresh_command_catalog,
+            on_capture_resume,
             on_bash,
             on_compact,
             on_summarize,
@@ -3700,12 +4229,28 @@ pub(crate) async fn run_ratatui_with_initial_state(
             on_task_action,
             on_dispatch_slash,
             on_rewake_peer,
+            Some(switch_fence),
             Some(exit_request_probe),
         )
     })
     .await;
-    session_effects.invalidate();
     pump_shutdown.cancel();
+    if let Some((abort, monitor)) = recovery_task {
+        if recovery_state
+            .as_ref()
+            .is_some_and(|state| state.load(std::sync::atomic::Ordering::Acquire) == 0)
+        {
+            // Once the UI has closed there is no remaining approval consumer.
+            // Cancel and join the replay before tearing down its runtime.
+            abort.abort();
+        }
+        let _ = monitor.await;
+    }
+    session_effects.invalidate();
+    if let Some((incoming, _)) = &teammate_prompt_pumps {
+        incoming.abort();
+    }
+    drop(switch_guard.lock().unwrap().take());
     loop_host.shutdown().await;
     let _ = loop_queue_pump.await;
     let drain_to_join = teammate_prompt_pumps.map(|(incoming, drain)| {
@@ -3769,6 +4314,25 @@ pub(crate) async fn run_ratatui_with_initial_state(
         // the outgoing runtime still owns incomplete shutdown work.
         return RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
     }
+    if let Some(error) = recovery_error
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take()
+    {
+        eprintln!("lingxi-cli: resume deferred tools failed: {error}");
+        return RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+    }
+    if matches!(
+        run_result.as_ref(),
+        Ok(Ok(tui::app::AppExit::SwitchSession(_)
+            | tui::app::AppExit::OpenAgentSession(_)
+            | tui::app::AppExit::BranchSession { .. }
+            | tui::app::AppExit::Rewind { .. }))
+    ) {
+        let admitted = pending_slashes.admitted_rows.lock().unwrap();
+        let drafts = std::mem::take(&mut *switch_drafts_out.lock().unwrap());
+        save_owner_switch_drafts(&draft_store, owner_id, drafts, &admitted);
+    }
     // Resume parity (claude-code `saveCurrentSessionCosts`, fired on process
     // exit): persist this session's accumulated cost to the project config,
     // keyed by (project, session id), so a later `--resume` of THIS session
@@ -3805,6 +4369,13 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // drops it.
     let carried_state = {
         let status = summary_orch.get_status_snapshot().await;
+        let transcript_writer = concrete_orchestrator.session_transcript_writer();
+        let transcript_path = match transcript_writer.as_ref() {
+            Some(writer) => {
+                crate::init::absolute_resolved_tui_resume_path(writer.active_path()).ok()
+            }
+            None => resume_transcript_path,
+        };
         let user_model_setting = {
             let session = concrete_orchestrator.session();
             let session = session.lock().await;
@@ -3814,6 +4385,15 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 .flatten()
         };
         Some(RemountState {
+            draft_store,
+            cwd: remount_session_cwd.cwd(),
+            transcript_path,
+            transcript_authority: transcript_writer
+                .as_ref()
+                .and_then(|writer| writer.active_transcript_authority())
+                .or(resume_transcript_authority),
+            transcript_persistent: transcript_writer.is_some(),
+            conversation_mode: summary_orch.conversation_mode().await.mode,
             model: Some((status.model, status.model_profile)),
             user_model_setting,
             fast_mode: summary_orch.fast_mode().await,
@@ -3839,14 +4419,39 @@ pub(crate) async fn run_ratatui_with_initial_state(
         // caller re-mounts that session in-process. The outgoing session's cost
         // was already persisted above (that block runs for EVERY exit arm), and
         // `summary_orch.request_exit()` above closed the outgoing responses
-        // websocket while `RataApp::run` cancelled the outgoing in-flight turn
-        // before unwinding — so the outgoing session is fully wound down. SUPPRESS
+        // websocket after the idle switch fence, so the outgoing session is
+        // fully wound down. SUPPRESS
         // the "Session saved" tail here: the process continues into the re-mount,
         // so that stdout line would otherwise scroll into the next session.
-        Ok(Ok(tui::app::AppExit::SwitchSession(uuid))) => RunOutcome::SwitchTo {
-            target: uuid,
-            state: carried_state,
-        },
+        Ok(Ok(tui::app::AppExit::SwitchSession(selection))) => {
+            let captured = selected_resume_source
+                .lock()
+                .unwrap()
+                .take()
+                .filter(|(selected, _)| *selected == selection);
+            match captured {
+                Some((_, source)) => RunOutcome::SwitchTo {
+                    target: selection.uuid,
+                    source_path: Some(selection.transcript_path),
+                    source_receipt: Some(source),
+                    state: carried_state,
+                },
+                None => {
+                    let mut state = carried_state;
+                    if let Some(state) = state.as_mut() {
+                        state.notice = Some(
+                            "The selected session source is unavailable. Select it again.".into(),
+                        );
+                    }
+                    RunOutcome::SwitchTo {
+                        target: summary_orch.current_session_id().await.as_uuid(),
+                        source_path: None,
+                        source_receipt: None,
+                        state,
+                    }
+                }
+            }
+        }
         Ok(Ok(tui::app::AppExit::OpenAgentSession(target))) => RunOutcome::OpenAgentSession {
             target,
             state: carried_state,
@@ -5708,10 +6313,15 @@ fn read_status_line_configs(
 /// (claude-code `settings.ts:882-889`; the flag/policy tiers have no Rust
 /// substrate). On any read failure the tier degrades to `false`.
 pub(crate) fn read_skip_dangerous_prompt() -> bool {
+    let (_, project_dir) = settings_dirs();
+    read_skip_dangerous_prompt_at(&project_dir)
+}
+
+fn read_skip_dangerous_prompt_at(project_dir: &std::path::Path) -> bool {
     use migrations::settings_update::{read_settings_map, settings_path, WritableScope};
-    let (lingxi_home, project_dir) = settings_dirs();
+    let (lingxi_home, _) = settings_dirs();
     [WritableScope::User, WritableScope::Local].iter().any(|s| {
-        let p = settings_path(*s, &lingxi_home, &project_dir);
+        let p = settings_path(*s, &lingxi_home, project_dir);
         read_settings_map(&p)
             .ok()
             .and_then(|m| {
@@ -5747,13 +6357,18 @@ pub(crate) fn persist_skip_dangerous_prompt() {
 /// in its owner-only launch spec. The hidden PTY child must consume that bit
 /// rather than mounting setup dialogs on an unattended pseudo-terminal.
 pub(crate) async fn startup_preflight(argv: &Argv) -> bool {
-    if trust_gate().await == TrustGateOutcome::Decline {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    startup_preflight_at(argv, &cwd).await
+}
+
+pub(crate) async fn startup_preflight_at(argv: &Argv, cwd: &std::path::Path) -> bool {
+    if trust_gate(cwd).await == TrustGateOutcome::Decline {
         return false;
     }
-    external_includes_gate(argv).await;
-    let (bypass_mode, _) = crate::resolve_permission_mode(argv);
+    external_includes_gate(argv, cwd).await;
+    let (bypass_mode, _) = crate::permission_settings::resolve_permission_mode_at(argv, cwd);
     let is_bypass = bypass_mode == permission::PermissionMode::BypassPermissions;
-    let skip_set = read_skip_dangerous_prompt();
+    let skip_set = read_skip_dangerous_prompt_at(cwd);
     if !tui::startup_bypass::should_show_bypass_dialog(is_bypass, skip_set) {
         return true;
     }
@@ -5770,20 +6385,19 @@ pub(crate) async fn startup_preflight(argv: &Argv) -> bool {
     }
 }
 
-async fn external_includes_gate(argv: &Argv) {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+async fn external_includes_gate(argv: &Argv, cwd: &std::path::Path) {
     let Some(config_path) = migrations::global_config::global_config_path() else {
         return;
     };
-    if !external_includes_gate_should_prompt(&cwd, &config_path, is_full_tty()) {
+    if !external_includes_gate_should_prompt(cwd, &config_path, is_full_tty()) {
         return;
     }
     let (include_user, include_project) =
         crate::init::setting_source_flags(argv.setting_sources.as_deref());
-    let excludes = crate::init::load_lingxi_md_excludes(include_user, include_project);
+    let excludes = crate::init::load_lingxi_md_excludes_at(cwd, include_user, include_project);
     let excluder = memory::lingxi_md::LingxiMdExcluder::new(&excludes);
     let paths = orchestrator::prompt::memory_block::pending_external_include_paths_with_excluder(
-        &cwd,
+        cwd,
         Some(&excluder),
     );
     if paths.is_empty() {
@@ -5807,7 +6421,7 @@ async fn external_includes_gate(argv: &Argv) {
         };
     if let Err(error) = migrations::global_config::save_lingxi_md_external_includes_decision(
         &config_path,
-        &cwd,
+        cwd,
         approved,
     ) {
         tracing::warn!(
@@ -5873,20 +6487,19 @@ fn trust_gate_should_prompt(cwd: &std::path::Path, config_path: Option<&std::pat
 ///   `hasTrustDialogAccepted` (best-effort) + `Proceed`; Decline/Esc ⇒
 ///   [`TrustGateOutcome::Decline`] (exit 1); a mount I/O error ⇒ `Decline`
 ///   (fail-closed — never silently proceed on a broken prompt).
-async fn trust_gate() -> TrustGateOutcome {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+async fn trust_gate(cwd: &std::path::Path) -> TrustGateOutcome {
     let config_path = migrations::global_config::global_config_path();
-    if !trust_gate_should_prompt(&cwd, config_path.as_deref()) {
+    if !trust_gate_should_prompt(cwd, config_path.as_deref()) {
         return TrustGateOutcome::Proceed;
     }
     // `trust_gate_should_prompt` only returns true with `Some(config_path)`.
     let config_path = config_path.expect("prompt implies a config path");
-    match tui::startup_trust::mount_trust_dialog(&cwd).await {
+    match tui::startup_trust::mount_trust_dialog(cwd).await {
         Ok(tui::startup_trust::TrustDialogOutcome::Accept) => {
             // "Yes, I trust this folder" → record acceptance via the shared
             // accept branch (`TrustDialog.tsx:162,174-177`): SESSION-ONLY
             // in-memory when `cwd == $HOME`, else persisted to disk best-effort.
-            migrations::global_config::record_trust_accept(&config_path, &cwd);
+            migrations::global_config::record_trust_accept(&config_path, cwd);
             TrustGateOutcome::Proceed
         }
         Ok(tui::startup_trust::TrustDialogOutcome::Decline) => TrustGateOutcome::Decline,
@@ -5900,6 +6513,137 @@ async fn trust_gate() -> TrustGateOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn startup_recovery_waits_for_real_permission_and_cancels_on_exit() {
+        use permission::gate::{PermissionDecision, PermissionGate, PermissionResponse};
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+        for choice in ["allow", "deny", "exit"] {
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+            let gate = tui::permission_gate::TuiPermissionGate::new(
+                sender,
+                Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            );
+            let state = Arc::new(AtomicU8::new(0));
+            let errors = Arc::new(std::sync::Mutex::new(None));
+            let dispatched = Arc::new(AtomicBool::new(false));
+            let observed = dispatched.clone();
+            let (abort, monitor) = spawn_startup_recovery(
+                async move {
+                    let input = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                        r#"{"command":"echo approved"}"#,
+                    )
+                    .unwrap();
+                    if gate.check("Bash", &input).await == PermissionDecision::Allow {
+                        observed.store(true, Ordering::Release);
+                    }
+                    Ok(())
+                },
+                state.clone(),
+                errors.clone(),
+            );
+            let exchange = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("recovery must reach the TUI permission channel")
+                .unwrap();
+            assert_eq!(state.load(Ordering::Acquire), 0);
+            assert!(!dispatched.load(Ordering::Acquire));
+            if choice == "exit" {
+                abort.abort();
+                monitor.await.unwrap();
+                assert!(exchange
+                    .resp_tx
+                    .send(PermissionResponse::AllowOnce)
+                    .is_err());
+                assert_eq!(state.load(Ordering::Acquire), 2);
+                assert!(!dispatched.load(Ordering::Acquire));
+                assert!(errors.lock().unwrap().is_some());
+                continue;
+            }
+            exchange
+                .resp_tx
+                .send(if choice == "allow" {
+                    PermissionResponse::AllowOnce
+                } else {
+                    PermissionResponse::Deny
+                })
+                .unwrap();
+            monitor.await.unwrap();
+            assert_eq!(state.load(Ordering::Acquire), 1);
+            assert_eq!(dispatched.load(Ordering::Acquire), choice == "allow");
+            assert!(errors.lock().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn session_switch_fence_refuses_turn_and_queued_admission_then_fences_idle() {
+        use tui::app::SessionSwitchFenceAction as Action;
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let state = Arc::new(HostPromptQueueState::default());
+        let incoming = Arc::new(tokio::sync::RwLock::new(()));
+        let (fence, held) =
+            session_switch_fence(gate.clone(), incoming.clone(), queue.clone(), state.clone());
+        let active = gate.lock().await;
+        let check = fence.clone();
+        assert!(!tokio::task::spawn_blocking(move || check(Action::Acquire))
+            .await
+            .unwrap());
+        drop(active);
+
+        let reservation = PendingSlashReservation::new(&state);
+        let check = fence.clone();
+        assert!(!tokio::task::spawn_blocking(move || check(Action::Acquire))
+            .await
+            .unwrap());
+        drop(reservation);
+
+        // The UI callback registers these before the spawned task can obtain
+        // the mutation gate, generate a title, or finish a shell command.
+        for operation in [
+            "rename generation",
+            "cd gate",
+            "bash output",
+            "slow summarize",
+        ] {
+            let reservation = PendingLocalOperation::try_new(&state).unwrap();
+            let (release, wait) = tokio::sync::oneshot::channel::<()>();
+            let (done, finished) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _reservation = reservation;
+                let _ = wait.await;
+                let _ = done.send(operation);
+            });
+            let check = fence.clone();
+            assert!(!tokio::task::spawn_blocking(move || check(Action::Acquire))
+                .await
+                .unwrap());
+            release.send(()).unwrap();
+            assert_eq!(finished.await.unwrap(), operation);
+            task.await.unwrap();
+        }
+        let publication = incoming.read().await;
+        let check = fence.clone();
+        let attempt = tokio::task::spawn_blocking(move || check(Action::Acquire));
+        queue.enqueue(tui_prompt_command("queued".into())).await;
+        drop(publication);
+        assert!(!attempt.await.unwrap());
+        queue.clear().await;
+
+        let check = fence.clone();
+        assert!(tokio::task::spawn_blocking(move || check(Action::Acquire))
+            .await
+            .unwrap());
+        assert!(gate.try_lock().is_err());
+        let commit = fence.clone();
+        assert!(tokio::task::spawn_blocking(move || commit(Action::Commit))
+            .await
+            .unwrap());
+        assert!(state.shutdown.is_cancelled());
+        drop(held.lock().unwrap().take());
+        assert!(gate.try_lock().is_ok());
+    }
 
     #[tokio::test]
     async fn cli_composer_and_typed_queue_stamp_only_native_human_inputs() {
@@ -6152,6 +6896,47 @@ mod tests {
                 ..Default::default()
             }
         }
+    }
+
+    #[tokio::test]
+    async fn active_local_bash_blocks_session_switch_until_output_is_published() {
+        use tui::app::SessionSwitchFenceAction as Action;
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let state = Arc::new(HostPromptQueueState::default());
+        let (fence, _held) = session_switch_fence(
+            gate,
+            Arc::new(tokio::sync::RwLock::new(())),
+            queue,
+            state.clone(),
+        );
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let runner = DelayedBashRunner {
+            started: std::sync::Mutex::new(Some(started)),
+            release: tokio::sync::Mutex::new(release_rx),
+        };
+        let effects = Arc::new(TuiSessionEffects::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let reservation = PendingLocalOperation::try_new(&state).unwrap();
+        let task = tokio::spawn(async move {
+            let _reservation = reservation;
+            run_tui_bash(&runner, "kept output", &effects, effects.capture(), &tx).await
+        });
+        started_rx.await.unwrap();
+        let check = fence.clone();
+        assert!(!tokio::task::spawn_blocking(move || check(Action::Acquire))
+            .await
+            .unwrap());
+        release.send(()).unwrap();
+        assert!(task.await.unwrap());
+        assert!(
+            matches!(rx.recv().await, Some(tui::TurnEvent::BashOutput { stdout, .. }) if stdout == "kept output")
+        );
+        let check = fence.clone();
+        assert!(tokio::task::spawn_blocking(move || check(Action::Acquire))
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -6727,7 +7512,8 @@ mod tests {
         let state = Arc::new(HostPromptQueueState::default());
         let queue = Arc::new(msgqueue::MessageQueueManager::new());
         let owner = CancellationToken::new();
-        let command = tui_prompt_command("must not run".into());
+        let mut command = tui_prompt_command("must not run".into());
+        command.is_meta = true;
         let id = command.uuid.clone();
         let publication = PendingPromptEnqueue::new(&state, &id, owner.clone());
         queue.enqueue(command).await;
@@ -6819,7 +7605,8 @@ mod tests {
         };
         let owner = CancellationToken::new();
         for text in ["A", "A2"] {
-            let command = tui_prompt_command(text.into());
+            let mut command = tui_prompt_command(text.into());
+            command.is_meta = true;
             let publication = PendingPromptEnqueue::new(&state, &command.uuid, owner.clone());
             queue.enqueue(command).await;
             drop(publication);
@@ -6859,9 +7646,11 @@ mod tests {
         };
         let owner = CancellationToken::new();
         let slash = PendingSlashReservation::new(&state);
-        let first = tui_prompt_command("A".into());
+        let mut first = tui_prompt_command("A".into());
+        first.is_meta = true;
         let first_publication = PendingPromptEnqueue::new(&state, &first.uuid, owner.clone());
-        let second = tui_prompt_command("B".into());
+        let mut second = tui_prompt_command("B".into());
+        second.is_meta = true;
         let second_publication = PendingPromptEnqueue::new(&state, &second.uuid, owner.clone());
         queue.enqueue(second).await;
         drop(second_publication);
@@ -6894,7 +7683,8 @@ mod tests {
         };
         let old = CancellationToken::new();
         for (text, owner) in [("old", old.clone()), ("new", CancellationToken::new())] {
-            let command = tui_prompt_command(text.into());
+            let mut command = tui_prompt_command(text.into());
+            command.is_meta = true;
             let publication = PendingPromptEnqueue::new(&state, &command.uuid, owner);
             queue.enqueue(command).await;
             drop(publication);
@@ -6909,6 +7699,41 @@ mod tests {
             Some("new")
         );
         assert!(state.order.lock().unwrap().queued.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_composer_waits_for_outer_admission_and_recovers_on_cancellation() {
+        use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state.recovery_tx.set(tx).unwrap();
+        let owner = CancellationToken::new();
+        let command = tui_prompt_command("draft".into());
+        let id = command.uuid.clone();
+        state
+            .transcript_row_tokens
+            .lock()
+            .unwrap()
+            .insert(id.clone(), "row".into());
+        let publication = PendingPromptEnqueue::new(&state, &id, owner.clone());
+        queue.enqueue(command).await;
+        drop(publication);
+        let input = TuiMsgQueueInput {
+            queue: queue.clone(),
+            state: state.clone(),
+        };
+        assert!(input.take_mid_turn_batch().await.unwrap().is_none());
+        assert!(queue.peek(|command| command.uuid == id).await.is_some());
+        assert!(rx.try_recv().is_err());
+        owner.cancel();
+        discard_cancelled_queued_prompts(&queue, &state).await;
+        assert!(
+            matches!(rx.recv().await, Some(tui::TurnEvent::PromptAdmissionResolved {
+            row_token, admitted: false
+        }) if row_token == "row")
+        );
+        assert!(queue.peek(|command| command.uuid == id).await.is_none());
     }
 
     #[tokio::test]
@@ -7243,6 +8068,10 @@ mod tests {
                 command: "<command-name>/demo</command-name>".into(),
                 body: "Expanded Skill body".into(),
                 hook_messages: Vec::new(),
+                skill: Some(lingxi_core::host::SlashSkillIdentity {
+                    name: "demo".into(),
+                    path: "/skills/demo".into(),
+                }),
             },
             "/demo".into(),
             &tx,
@@ -7286,6 +8115,10 @@ mod tests {
             "<command-name>/demo</command-name>".into(),
             "Expanded Skill body".into(),
             Vec::new(),
+            Some(lingxi_core::host::SlashSkillIdentity {
+                name: "demo".into(),
+                path: "/skills/demo".into(),
+            }),
         );
         let error = run_slash_prompt_batch_with_images(
             orch.as_ref(),
@@ -7448,6 +8281,150 @@ mod tests {
         observed_images: Arc<std::sync::atomic::AtomicUsize>,
     }
 
+    struct GatedComposerRunner {
+        reached: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl SourceBatchRunner for GatedComposerRunner {
+        async fn run_prompt_batch(
+            &self,
+            _inputs: Vec<orchestrator::QueuedPromptInput>,
+            _cancel: CancellationToken,
+            _on_admitted: Box<dyn FnOnce() + Send + 'static>,
+        ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError>
+        {
+            panic!("not a batch test")
+        }
+
+        async fn run_composer_prompt(
+            &self,
+            _prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _images: Vec<lingxi_core::types::ImageSource>,
+            _cancel: CancellationToken,
+            _row_token: String,
+            on_admitted: Box<dyn FnOnce() + Send + 'static>,
+        ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError>
+        {
+            self.reached.notify_one();
+            self.release.notified().await;
+            on_admitted();
+            Ok(orchestrator::conversation::TurnOutcome::EndTurn)
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_handback_waits_for_late_admission_and_stays_with_original_owner() {
+        let store: RemountDraftStore = Default::default();
+        let owner = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let admitted = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runner = GatedComposerRunner {
+            reached: reached.clone(),
+            release: release.clone(),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = tokio::spawn({
+            let admitted = admitted.clone();
+            async move {
+                run_composer_prompt(
+                    &runner,
+                    "already admitted".into(),
+                    &[],
+                    CancellationToken::new(),
+                    "late-row".into(),
+                    &tx,
+                    admitted,
+                )
+                .await
+                .unwrap();
+            }
+        });
+        reached.notified().await;
+        let exact = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            "draft �".into(),
+            vec![
+                b'd' as u16,
+                b'r' as u16,
+                b'a' as u16,
+                b'f' as u16,
+                b't' as u16,
+                b' ' as u16,
+                0xd800,
+            ],
+        )
+        .unwrap();
+        let drafts = vec![
+            tui::chat_widget::SwitchDraft {
+                row_token: Some("late-row".into()),
+                text: "already admitted".into(),
+                images: vec![],
+            },
+            tui::chat_widget::SwitchDraft {
+                row_token: Some("unadmitted".into()),
+                text: exact.clone(),
+                images: vec!["/tmp/input.png".into()],
+            },
+        ];
+        release.notify_one();
+        handle.await.unwrap();
+        save_owner_switch_drafts(&store, owner, drafts, &admitted.lock().unwrap());
+        assert!(store.lock().unwrap().get(&other).is_none());
+        let reopened = store.lock().unwrap().get(&owner).cloned().unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened[0].text.string_units(""), exact.string_units(""));
+        assert_eq!(
+            reopened[0].images,
+            vec![std::path::PathBuf::from("/tmp/input.png")]
+        );
+        assert!(reopened[0].row_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn composer_ownership_resolves_at_runtime_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("input.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\n").unwrap();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for (admit, fail) in [(false, false), (true, true)] {
+            let runner = AdmissionCallbackBatchRunner {
+                admit,
+                fail_after_admission: fail,
+                observed_images: count.clone(),
+            };
+            let result = run_composer_prompt(
+                &runner,
+                "input".into(),
+                std::slice::from_ref(&image),
+                CancellationToken::new(),
+                "row".into(),
+                &tx,
+                Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            )
+            .await;
+            assert_eq!(result.is_err(), fail);
+            assert!(
+                matches!(rx.recv().await, Some(tui::TurnEvent::PromptAdmissionResolved {
+                row_token, admitted
+            }) if row_token == "row" && admitted == admit)
+            );
+            if !admit {
+                assert!(matches!(
+                    rx.recv().await,
+                    Some(tui::TurnEvent::TurnEnded(
+                        lingxi_core::host::TurnOutcome::Cancelled
+                    ))
+                ));
+            }
+        }
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(rx.try_recv().is_err());
+    }
+
     #[async_trait::async_trait]
     impl SourceBatchRunner for AdmissionCallbackBatchRunner {
         async fn run_prompt_batch(
@@ -7471,6 +8448,29 @@ mod tests {
                 Ok(orchestrator::conversation::TurnOutcome::Cancelled)
             }
         }
+
+        async fn run_composer_prompt(
+            &self,
+            _prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
+            images: Vec<lingxi_core::types::ImageSource>,
+            _cancel: CancellationToken,
+            _row_token: String,
+            on_admitted: Box<dyn FnOnce() + Send + 'static>,
+        ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError>
+        {
+            self.observed_images
+                .store(images.len(), std::sync::atomic::Ordering::SeqCst);
+            if self.admit {
+                on_admitted();
+            }
+            if self.fail_after_admission {
+                Err(orchestrator::OrchestratorError::Internal(
+                    "scripted failure after admission".into(),
+                ))
+            } else {
+                Ok(orchestrator::conversation::TurnOutcome::Cancelled)
+            }
+        }
     }
 
     #[tokio::test]
@@ -7482,6 +8482,10 @@ mod tests {
             "<command-name>/demo</command-name>".into(),
             "Expanded Skill body".into(),
             Vec::new(),
+            Some(lingxi_core::host::SlashSkillIdentity {
+                name: "demo".into(),
+                path: "/skills/demo".into(),
+            }),
         );
         let observed_images = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -7639,6 +8643,10 @@ mod tests {
                 command: "<command-name>/demo</command-name>".into(),
                 body: "Base directory: /skills/demo\n\nExpanded".into(),
                 hook_messages: vec![hook_row.clone()],
+                skill: Some(lingxi_core::host::SlashSkillIdentity {
+                    name: "demo".into(),
+                    path: "/skills/demo".into(),
+                }),
             },
             "/demo".into(),
             &tx,
@@ -8355,6 +9363,19 @@ mod tests {
             !trust_gate_should_prompt(&cwd, Some(config_path.as_path())),
             "after accept the gate must not re-prompt"
         );
+    }
+
+    #[test]
+    fn relocated_workspace_does_not_inherit_launch_directory_trust() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("global.json");
+        let launch = tmp.path().join("launch");
+        let relocated = tmp.path().join("relocated");
+        std::fs::create_dir_all(&launch).unwrap();
+        std::fs::create_dir_all(&relocated).unwrap();
+        migrations::global_config::mark_trust_dialog_accepted(&config, &launch).unwrap();
+        assert!(!trust_gate_should_prompt(&launch, Some(&config)));
+        assert!(trust_gate_should_prompt(&relocated, Some(&config)));
     }
 
     /// A trusted cwd ⇒ NO dialog (straight to the main screen / session).

@@ -158,7 +158,6 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         __desktop_config.permission_mode_preference = None;
         __desktop_config.permission_mode_cli_explicit = false;
         __desktop_config.allow_dangerously_skip_permissions = false;
-        __desktop_config.connect_prompt = None;
         __desktop_config.max_turns = None;
         __desktop_config.plan_mode_instructions = None;
         __desktop_config.plans_directory = None;

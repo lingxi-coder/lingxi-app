@@ -22,12 +22,14 @@ import SwiftUI
 
         private func makeSource(
             permissionModeRepository: PermissionModeConfigurationRepository? = nil,
-            appSandboxRoot: String = NSTemporaryDirectory()
+            appSandboxRoot: String? = nil
         ) -> EngineConversationSource {
+            let sandbox = appSandboxRoot ?? FileManager.default.temporaryDirectory.appendingPathComponent("lingxi-reducer-\(UUID().uuidString)").path
+            if appSandboxRoot == nil { addTeardownBlock { try? FileManager.default.removeItem(atPath: sandbox) } }
             let config = EngineConfig(
                 apiBase: "https://api.anthropic.com",
                 model: "",
-                appSandboxRoot: appSandboxRoot,
+                appSandboxRoot: sandbox,
                 projectCwd: nil,
                 sessionMode: .code,
                 visionDelegationEnabled: true)
@@ -35,6 +37,18 @@ import SwiftUI
                 config: config,
                 permissionModeRepository: permissionModeRepository
             )
+        }
+
+        private func enableResume(_ source: EngineConversationSource, ids: [String],
+                                  submit: @escaping (ClientCommand) async throws -> Void = { _ in }) {
+            source.model.engineSessions = ids.map {
+                EngineSession(id: $0, title: $0, mode: .code, messageCount: 0, modifiedAt: nil,
+                              relativeTime: "", transcriptPath: "/fixture/\($0).jsonl")
+            }
+            source.setResumeSubmitterForTesting { id, path in
+                XCTAssertEqual(path, "/fixture/\(id).jsonl")
+                try await submit(.resumeSession(sessionId: id, cwd: nil, expectedMode: .code))
+            }
         }
 
         func testCompactRefusalLeavesTheActiveTurnAndAutomaticCompactionRunning() {
@@ -60,7 +74,8 @@ import SwiftUI
             source.beginTurnForTesting(turnId: 32, sessionId: "compact-refusal")
             source.applyForTesting(.turnStarted(turnId: 32))
             let before = source.model.messages
-            XCTAssertNil(source.send("/compact preserve decisions", images: []))
+            let refused = await source.send("/compact preserve decisions", images: [])
+            XCTAssertNil(refused)
             try await source.submitEngineCommand(.forceCompact)
             XCTAssertNotNil(source.model.compactRejectionID)
             XCTAssertEqual(source.model.messages, before)
@@ -142,8 +157,11 @@ import SwiftUI
             let source = makeSource()
             var commands: [ClientCommand] = []
             source.setCommandSubmitterForTesting { commands.append($0) }
-            let first = try XCTUnwrap(source.send("same"))
-            XCTAssertNotNil(source.send("same"))
+            source.model.activeSessionId = "test-session"
+            let accepted = await source.send("same")
+            let first = try XCTUnwrap(accepted)
+            let queuedToken = await source.send("same")
+            XCTAssertNotNil(queuedToken)
             for _ in 0..<10 { await Task.yield() }
             let turnIDs = commands.compactMap { command -> UInt64? in
                 if case let .sendPrompt(_, _, _, turnID, _) = command { return turnID }
@@ -784,7 +802,8 @@ import SwiftUI
             source.setCommandSubmitterForTesting { command in submitted.append(command) }
 
             XCTAssertFalse(source.model.slashCommandsLoaded)
-            XCTAssertNil(source.send("  /help  "))
+            let refused = await source.send("  /help  ")
+            XCTAssertNil(refused)
             await flushTasks()
 
             XCTAssertTrue(submitted.isEmpty)
@@ -874,7 +893,7 @@ import SwiftUI
             source.cancel()
             await flushTasks()
 
-            source.send("B prompt")
+            _ = await source.send("B prompt")
             await flushTasks()
 
             XCTAssertTrue(source.model.isCancelling)
@@ -918,7 +937,7 @@ import SwiftUI
             await flushTasks(8)
 
             XCTAssertFalse(source.model.isCancelling)
-            source.send("B prompt")
+            _ = await source.send("B prompt")
             await flushTasks()
 
             XCTAssertEqual(submittedCommands.count, 2, "B should submit exactly once after cancellation returns")
@@ -1114,6 +1133,7 @@ import SwiftUI
             resumedSource.setCommandSubmitterForTesting { command in
                 await MainActor.run { resumedCommands.append(command) }
             }
+            enableResume(resumedSource, ids: ["session-b"]) { command in await MainActor.run { resumedCommands.append(command) } }
             let resumedMessage = Message(role: .user, text: "keep transcript behavior")
             resumedSource.model.messages = [resumedMessage]
             resumedSource.model.items = [.message(resumedMessage)]
@@ -1153,26 +1173,28 @@ import SwiftUI
             XCTAssertEqual(source.model.items, [.message(visibleMessage)])
         }
 
-        func testDurableTurnAttachCursorStaysInMemoryWithinOneSource() throws {
+        func testDurableTurnAttachCursorStaysInMemoryWithinOneSource() async throws {
             let sandboxRoot = try makeSandboxRoot()
             let source = makeSource(appSandboxRoot: sandboxRoot)
 
-            source.beginDurableTurnForTesting(turnId: 700, sessionId: "session-a")
+            try await source.beginDurableTurnForTesting(turnId: 700, sessionId: "session-a")
             source.recordDurableSequenceForTesting(turnId: 700, sequence: 9)
 
-            XCTAssertEqual(source.durableAttachCursorForTesting(), 9)
+            let cursor = try await source.durableAttachCursorForTesting()
+            XCTAssertEqual(cursor, 9)
         }
 
-        func testDurableTurnColdAttachResetsPersistedCursorToReplayFromRetainedEvents() throws {
+        func testDurableTurnColdAttachResetsPersistedCursorToReplayFromRetainedEvents() async throws {
             let sandboxRoot = try makeSandboxRoot()
             let source = makeSource(appSandboxRoot: sandboxRoot)
 
-            source.beginDurableTurnForTesting(turnId: 701, sessionId: "session-a")
+            try await source.beginDurableTurnForTesting(turnId: 701, sessionId: "session-a")
             source.recordDurableSequenceForTesting(turnId: 701, sequence: 11)
 
             let resumedSource = makeSource(appSandboxRoot: sandboxRoot)
+            let cursor = try await resumedSource.durableAttachCursorForTesting()
             XCTAssertEqual(
-                resumedSource.durableAttachCursorForTesting(),
+                cursor,
                 0,
                 "a fresh source must not trust a cursor whose UI projection was never durably persisted"
             )
@@ -1181,7 +1203,7 @@ import SwiftUI
         func testColdRestoreKeepsAuthoritativeTerminalTranscriptWhenRetainedEventsReplay() async throws {
             let sandboxRoot = try makeSandboxRoot()
             let firstSource = makeSource(appSandboxRoot: sandboxRoot)
-            firstSource.beginDurableTurnForTesting(turnId: 702, sessionId: "session-a")
+            try await firstSource.beginDurableTurnForTesting(turnId: 702, sessionId: "session-a")
 
             let source = makeSource(appSandboxRoot: sandboxRoot)
             var submitted: [ClientCommand] = []
@@ -1303,6 +1325,7 @@ import SwiftUI
             source.setCommandSubmitterForTesting { command in
                 await MainActor.run { commands.append(command) }
             }
+            enableResume(source, ids: ["session-a"]) { command in await MainActor.run { commands.append(command) } }
             source.model.activeSessionId = "session-a"
             source.model.isNew = true
 
@@ -1311,7 +1334,7 @@ import SwiftUI
 
             XCTAssertEqual(commands.count, 1)
             guard let command = commands.first else { return }
-            guard case let .resumeSession(sessionId, cwd) = command else {
+            guard case let .resumeSession(sessionId, cwd, _) = command else {
                 return XCTFail("process restoration must still request transcript replay")
             }
             XCTAssertEqual(sessionId, "session-a")
@@ -1584,6 +1607,7 @@ import SwiftUI
                 await MainActor.run { commands.append(command) }
                 if case .cancel = command { throw CancelFailure.rejected }
             }
+            enableResume(source, ids: ["session-b"])
             source.beginTurnForTesting(turnId: 45, sessionId: "session-a")
             source.applyForTesting(.textDelta(text: "still owned".clientTextDto))
             let originalItems = source.model.items
@@ -1633,6 +1657,7 @@ import SwiftUI
                     )))
                 }
             }
+            enableResume(source, ids: ["session-b"]) { command in await MainActor.run { submittedCommands.append(command) } }
             source.beginTurnForTesting(turnId: 17, sessionId: "session-a")
 
             source.resumeSession("session-b")
@@ -1645,7 +1670,7 @@ import SwiftUI
             } else {
                 XCTFail("the old turn must be cancelled first")
             }
-            if case let .resumeSession(sessionId, cwd) = submittedCommands[1] {
+            if case let .resumeSession(sessionId, cwd, _) = submittedCommands[1] {
                 XCTAssertEqual(sessionId, "session-b")
                 XCTAssertNil(cwd)
             } else {
@@ -1676,6 +1701,7 @@ import SwiftUI
                     }
                 }
             }
+            enableResume(source, ids: ["session-b", "session-c"]) { command in await MainActor.run { submittedCommands.append(command) } }
             source.beginTurnForTesting(turnId: 18, sessionId: "session-a")
 
             source.resumeSession("session-b")
@@ -1694,7 +1720,7 @@ import SwiftUI
             } else {
                 XCTFail("the shared cancellation must be submitted first")
             }
-            if case let .resumeSession(sessionId, cwd) = submittedCommands[1] {
+            if case let .resumeSession(sessionId, cwd, _) = submittedCommands[1] {
                 XCTAssertEqual(sessionId, "session-c")
                 XCTAssertNil(cwd)
             } else {
@@ -1731,7 +1757,7 @@ import SwiftUI
             } else {
                 XCTFail("the old turn must be cancelled first")
             }
-            if case let .newSession(cwd, model) = submittedCommands[1] {
+            if case let .newSession(cwd, model, _) = submittedCommands[1] {
                 XCTAssertNil(cwd)
                 XCTAssertNil(model)
             } else {

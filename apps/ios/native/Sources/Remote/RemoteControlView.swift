@@ -302,46 +302,110 @@ private struct RemoteConnectionSection: View {
 }
 
 @MainActor
+private struct RemoteSessionModeLabel: View {
+    @ObservedObject var model: ConversationModel
+
+    var body: some View {
+        if model.sessionModeKnown {
+            VStack(spacing: 2) {
+                Text(model.sessionMode.title)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(8)
+            .accessibilityIdentifier("remote.session-mode")
+        }
+    }
+}
+
+private struct RemoteSessionLoadingError: View {
+    @ObservedObject var model: ConversationModel
+
+    var body: some View {
+        if let error = model.error {
+            Text(error.message).font(.caption).foregroundStyle(.secondary).padding(8)
+        }
+    }
+}
+
 private struct RemoteSessionView: View {
     let title: String
     let manager: RemoteControlManager
     @Environment(\.scenePhase) private var scenePhase
     @State private var source: RemoteConversationSource
-    @State private var draft = ""
+    @State private var draft: RemoteDraftOwner
     @State private var voice = VoiceInteractionController()
 
     init(hostID: String, sessionID: String, title: String, uid: String, manager: RemoteControlManager) {
         self.title = title
         self.manager = manager
-        _source = State(initialValue: RemoteConversationSource(hostID: hostID, sessionID: sessionID, uid: uid, manager: manager))
+        let source = RemoteConversationSource(hostID: hostID, sessionID: sessionID, uid: uid, manager: manager)
+        _source = State(initialValue: source)
+        _draft = State(initialValue: source.draftOwner)
     }
 
     var body: some View {
         VStack(spacing: 0) {
+            if manager.needsSessionReconnect(hostID: source.hostID) {
+                HStack {
+                    Text("remote_err_generic")
+                    Button("common_retry") { Task { await source.start() } }
+                }.font(.caption).padding(8)
+            }
             if source.phase != .live {
                 Text(source.phase == .closed ? "remote_session_closed" : source.phase == .loading ? "remote_session_loading" : "remote_session_offline")
                     .font(.caption).foregroundStyle(.secondary).padding(8)
             }
             if source.hasOmittedContent { Text("remote_omitted_note").font(.caption).padding(8) }
+            RemoteSessionModeLabel(model: source.model)
             if source.computerAccessPending { Text("remote_computer_access_note").font(.caption).padding(8) }
             if source.answeredElsewhere { Text("remote_answered_elsewhere").font(.caption).padding(8) }
             if source.hasOlder {
                 Button(source.loadingOlder ? "remote_loading_older" : "remote_load_older", action: source.loadOlder)
                     .disabled(source.loadingOlder).padding(6)
             }
-            RemoteFilesView(ownerUID: manager.uid, manager: manager, hostID: source.hostID, sessionID: source.sessionID,
-                enabled: source.phase == .live && manager.connection?.transport == .webrtc)
-                .id("\(manager.uid ?? "")/\(source.hostID)/\(source.sessionID)")
-            ChatView(session: SessionRef(id: source.sessionID, title: title), draft: $draft,
-                voiceInteraction: voice, source: source, workspaceName: title,
-                workspaceKey: ConversationScope.remote(hostID: source.hostID, sessionID: source.sessionID).workspaceKey)
-                .disabled(source.phase != .live)
-                .background {
-                    if source.phase == .live {
-                        EnginePermissionPromptHost(model: source.model,
-                            onApprove: source.approvePermission, onDeny: source.denyPermission)
+            if !source.isApprovalCapability {
+                RemoteFilesView(ownerUID: manager.uid, manager: manager, hostID: source.hostID, sessionID: source.sessionID,
+                    enabled: source.model.sessionModeKnown && source.phase == .live && source.hasReadyConnection && manager.connection?.transport == .webrtc)
+                    .id("\(manager.uid ?? "")/\(source.hostID)/\(source.sessionID)")
+            }
+            if !source.model.sessionModeKnown {
+                RemoteSessionLoadingError(model: source.model)
+            }
+            if source.model.sessionModeKnown {
+                let owner = draft
+                ChatView(session: SessionRef(id: source.sessionID, title: title),
+                    draft: Binding(get: { owner.draft.text }, set: { owner.draft.text = $0 }),
+                    voiceInteraction: voice, source: source, draftRevision: { owner.draftRevision },
+                    draftSourceCodeUnits: Binding(get: { owner.draft.sourceCodeUnits }, set: { owner.draft.sourceCodeUnits = $0 }),
+                    attachmentBinding: Binding(get: { owner.draft.attachment }, set: { owner.draft.attachment = $0 }),
+                    sessionMode: source.sessionMode, workspaceName: title,
+                    workspaceKey: ConversationScope.remote(hostID: source.hostID, sessionID: source.sessionID).workspaceKey)
+                    .disabled(source.phase != .live || !source.hasReadyConnection)
+                    .background {
+                        if source.phase == .live && source.hasReadyConnection {
+                            EnginePermissionPromptHost(model: source.model,
+                                onApprove: source.approvePermission, onDeny: source.denyPermission)
+                        }
                     }
-                }
+            }
+            if source.isApprovalCapability {
+                Text("remote_team_approval").padding()
+                    .background {
+                        if source.phase == .live && source.hasReadyConnection {
+                            EnginePermissionPromptHost(model: source.model,
+                                onApprove: source.approvePermission, onDeny: source.denyPermission)
+                        }
+                    }
+            }
+            ForEach(source.unsentPrompts) { prompt in
+                HStack {
+                    Text(prompt.text).lineLimit(2)
+                    Spacer()
+                    Button("remote_restore_unsent") { restoreUnsent(prompt) }
+                        .disabled(!draft.draft.text.isEmpty || draft.draft.sourceCodeUnits != nil || draft.draft.attachment != nil)
+                }.font(.caption).padding(10)
+            }
             ForEach(source.outgoing, id: \.id) { prompt in
                 HStack {
                     Text(prompt.text).lineLimit(2)
@@ -363,6 +427,10 @@ private struct RemoteSessionView: View {
             if phase == .active { source.handleForeground() }
             else if phase == .background { source.handleBackground() }
         }
+    }
+
+    private func restoreUnsent(_ prompt: RemoteUnsentPrompt) {
+        if draft.draft.restore(prompt) { source.removeUnsentPrompt(prompt.id) }
     }
 }
 #endif

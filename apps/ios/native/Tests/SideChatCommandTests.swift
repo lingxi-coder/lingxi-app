@@ -43,12 +43,19 @@ final class SideChatCommandTests: XCTestCase {
 
 #if canImport(harness_runtimeFFI)
 import harness_runtimeFFI
+import UIKit
 
 @MainActor
 final class SideChatConversationSourceTests: XCTestCase {
     private func makeSource(root: URL) -> EngineConversationSource {
         EngineConversationSource(config: EngineConfig(apiBase: "https://api.anthropic.com", model: "",
             appSandboxRoot: root.path, projectCwd: nil, sessionMode: .code, visionDelegationEnabled: true), memoryOnly: true)
+    }
+
+    private func installHelpCommand(on source: EngineConversationSource) {
+        source.applyForTesting(.slashCommandCatalog(commands: [SlashCommandDto(
+            name: "help".clientTextDto, description: "Help".clientTextDto, source: "builtin", aliases: [],
+            argumentHint: nil, argumentNames: [], menuDescription: nil, hidden: false)]))
     }
 
     func testOpeningEmptySheetCreatesOneEditableChildAndReopeningPreservesIt() async {
@@ -146,10 +153,11 @@ final class SideChatConversationSourceTests: XCTestCase {
         child.clearEndedSideChat()
     }
 
-    func testNestedSideRejectsWithoutAppendingOrSubmitting() {
+    func testNestedSideRejectsWithoutAppendingOrSubmitting() async {
         let source = makeSource(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         source.setCommandSubmitterForTesting { _ in XCTFail("must reject before native submission") }
-        XCTAssertNil(source.send("/side nested"))
+        let rejectedToken = await source.send("/side nested")
+        XCTAssertNil(rejectedToken)
         XCTAssertTrue(source.model.messages.isEmpty)
         XCTAssertEqual(source.model.error?.kind, .rejected)
     }
@@ -185,36 +193,77 @@ final class SideChatConversationSourceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("durable-conversation-turn.json").path))
     }
 
-    func testFailedSubmissionRestoresDraftWhileSideViewIsHidden() {
+    func testFailedSlashSubmissionRemainsAvailableWhileSideViewIsHidden() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let source = makeSource(root: root)
+        installHelpCommand(on: source)
         source.setCommandSubmitterForTesting { _ in }
         let entry = SideChatEntry(source: source, id: "hidden-side")
-        let sourceUnits: [UInt16] = [0xD800, 0x78]
-        XCTAssertNotNil(source.send(
-            "\u{FFFD}x",
+        let sourceUnits = Array("/help ".utf16) + [0xD800, 0x78]
+        let acceptedToken = await source.send(
+            "/help \u{FFFD}x",
             sourceCodeUnits: sourceUnits,
             images: [],
             selectedSlashCommand: nil
-        ))
-        source.applyForTesting(.error(kind: .rejected, message: "not admitted".clientTextDto))
-        XCTAssertEqual(entry.draft, "\u{FFFD}x")
+        )
+        let token = try XCTUnwrap(acceptedToken)
+        source.applyForTesting(.slashCommandResult(turnId: token.clientTurnId, display: "failed".clientTextDto, isError: true))
+        let pending = try XCTUnwrap(entry.unsentPrompts.first)
+        XCTAssertTrue(entry.restoreUnsent(pending))
+        XCTAssertEqual(entry.draft, "/help \u{FFFD}x")
         XCTAssertEqual(entry.draftSourceCodeUnits, sourceUnits)
         XCTAssertFalse(source.model.streaming)
     }
 
-    func testEndClearsPendingDraftRecoveryAndRejectsLateCallbacks() {
+    func testFailedSlashInputNeverMixesWithAnEditedDraftOrAttachment() async throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).image { context in
+            UIColor.red.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }
+        let encoded = try XCTUnwrap(image.pngData()).base64EncodedString()
+        let imageRef = ImageRefDto(mediaType: "image/png", base64: encoded)
+        for laterImage in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let source = makeSource(root: root)
+            installHelpCommand(on: source)
+            source.setCommandSubmitterForTesting { _ in }
+            let entry = SideChatEntry(source: source, id: "hidden-side")
+            let units = Array("/help ".utf16) + [0xD800, 0x61]
+            let admitted = await source.send("/help \u{FFFD}a", sourceCodeUnits: units, images: [imageRef], selectedSlashCommand: nil)
+            let token = try XCTUnwrap(admitted)
+            if laterImage {
+                entry.attachment = ComposerAttachment(image: image, width: 2, height: 2, mediaType: "image/png", base64: "new")
+            } else {
+                entry.draft = "new text"
+            }
+            source.applyForTesting(.slashCommandResult(turnId: token.clientTurnId, display: "failed".clientTextDto, isError: true))
+            let pending = try XCTUnwrap(entry.unsentPrompts.first)
+            XCTAssertFalse(entry.restoreUnsent(pending))
+            XCTAssertEqual(entry.draft, laterImage ? "" : "new text")
+            XCTAssertEqual(entry.attachment?.base64, laterImage ? "new" : nil)
+            entry.draft = ""
+            entry.attachment = nil
+            XCTAssertTrue(entry.restoreUnsent(pending))
+            XCTAssertEqual(entry.draft, "/help \u{FFFD}a")
+            XCTAssertEqual(entry.draftSourceCodeUnits, units)
+            XCTAssertEqual(entry.attachment?.base64, encoded)
+        }
+    }
+
+    func testEndClearsPendingDraftRecoveryAndRejectsLateCallbacks() async {
         let source = makeSource(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         source.setCommandSubmitterForTesting { _ in }
         let entry = SideChatEntry(source: source, id: "ended-side")
-        XCTAssertNotNil(source.send("do not restore after End"))
+        let acceptedToken = await source.send("do not restore after End")
+        XCTAssertNotNil(acceptedToken)
         source.clearEndedSideChat()
         source.applyForTesting(.error(kind: .rejected, message: "late failure".clientTextDto))
         XCTAssertTrue(entry.draft.isEmpty)
         XCTAssertTrue(source.model.messages.isEmpty)
         XCTAssertTrue(source.model.messageDetails.isEmpty)
         XCTAssertNil(source.model.error)
-        XCTAssertNil(source.send("late send"))
+        let rejectedToken = await source.send("late send")
+        XCTAssertNil(rejectedToken)
     }
 
     func testSideVoiceCannotEnterFlowOrRealtimeMode() {

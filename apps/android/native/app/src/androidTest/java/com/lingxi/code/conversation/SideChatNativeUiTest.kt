@@ -43,6 +43,7 @@ class SideChatNativeUiTest {
         val parentEvents = CopyOnWriteArrayList<ClientEvent>()
         val engine = requireNotNull(NativeEngineFactory.build(
             context = context, apiBase = "https://invalid.example", model = "",
+            sessionMode = com.lingxi.code.model.SessionMode.Code,
             providerProfilesJson = "{}", routingJson = """{"mobileEnabledProfiles":[]}""",
             visionDelegationEnabled = false,
             scenario = NativeEngineScenario.Interactive(NativeEngineCallbacks(
@@ -50,7 +51,7 @@ class SideChatNativeUiTest {
                 onPermission = { error("No permission expected") },
             )),
         ))
-        val source = SideChatSource(engine)
+        val source = SideChatSource(engine) { true }
         val store = ViewModelStore()
         val visible = mutableStateOf(true)
         try {

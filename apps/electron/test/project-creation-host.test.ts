@@ -10,13 +10,17 @@ import { SettingsStore } from '../src/main/settings';
 import type { ProjectSessionCatalog } from '../src/main/session-catalog';
 import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK } from '../src/shared/projectCreation';
 
-function fixture(t: TestContext, existing = false) {
+function fixture(t: TestContext, existing = false, mode: 'chat' | 'code' = 'chat') {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-create-project-')));
   const path = join(root, 'Source folder'), other = join(root, 'Other folder');
   mkdirSync(path); mkdirSync(other);
   const settings = new SettingsStore(join(root, 'settings'));
-  const previous = { projectPath: other, sessionId: '11111111-2222-4333-8444-555555555555' };
-  if (existing) { settings.addProject(other); settings.activateProject(other); settings.setActiveSession(previous); }
+  const previous = { projectPath: other, sessionId: '11111111-2222-4333-8444-555555555555', mode, projectId: other };
+  if (existing) {
+    settings.addProject(other); settings.activateProject(other); settings.setActiveSession(previous);
+    settings.conversationSpaces.register({ ...previous, mode, projectId: other });
+  }
+  settings.conversationSpaces.setMode(mode);
   const calls: string[] = [];
   const bridge = { registerIpc() {}, registerWindow() {}, isProjectClosing: () => false,
     newSession: async (projectPath: string) => { calls.push(projectPath); return { projectPath, sessionId: previous.sessionId }; } };
@@ -56,7 +60,7 @@ test('confirmation creates the first directory project and its initial draft onl
   await h.create(selection.id);
   assert.deepEqual(h.settings.getPublic().projects, [h.path]);
   assert.equal(h.settings.getPublic().activeProject, h.path);
-  assert.deepEqual(h.settings.getPublic().activeSession, { projectPath: h.path, sessionId: h.previous.sessionId });
+  assert.deepEqual(h.settings.getPublic().activeSession, { projectPath: h.path, projectId: h.path, mode: 'chat', sessionId: h.previous.sessionId });
   assert.deepEqual(h.calls, [h.path]);
   await assert.rejects(h.create(selection.id), /Choose a source folder/);
 });
@@ -99,7 +103,7 @@ test('a removed folder is revalidated before any project or session is created',
 });
 
 test('app projects use the Harness product config directory without creating files while staged', async t => {
-  const h = fixture(t, true), before = h.settings.getPublic();
+  const h = fixture(t, true, 'code'), before = h.settings.getPublic();
   const selection = await h.defaults();
   assert.equal(selection.path, join(h.configHome, '.apps'));
   assert.equal(selection.createDirectory, true);
@@ -115,7 +119,7 @@ test('app projects use the Harness product config directory without creating fil
 });
 
 test('a first app project adds its workspace without spawning a duplicate initial session', async t => {
-  const h = fixture(t), selection = await h.defaults();
+  const h = fixture(t, false, 'code'), selection = await h.defaults();
   const workspace = await h.create(selection.id, h.event, 'First app');
   assert.equal(h.settings.getPublic().activeProject, workspace.path);
   assert.equal(h.settings.getPublic().activeSession, undefined);
@@ -123,7 +127,7 @@ test('a first app project adds its workspace without spawning a duplicate initia
 });
 
 test('new app directory names cannot traverse the product root or overwrite an existing folder', async t => {
-  const h = fixture(t), selection = await h.defaults();
+  const h = fixture(t, false, 'code'), selection = await h.defaults();
   for (const name of ['', '  ', '.', '..', '../escape', 'a/b', 'a\\b', '\0']) {
     await assert.rejects(h.create(selection.id, h.event, name), /project name/);
   }
@@ -137,7 +141,7 @@ test('new app directory names cannot traverse the product root or overwrite an e
 });
 
 test('an app can explicitly select an existing source folder and skip the initial draft', async t => {
-  const h = fixture(t), defaults = await h.defaults();
+  const h = fixture(t, false, 'code'), defaults = await h.defaults();
   let suggested: string | undefined;
   h.dialogs.pickDirectory = async (...args: string[]) => { suggested = args[0]; return h.path; };
   const selection = await h.pick('local-app');
@@ -148,7 +152,7 @@ test('an app can explicitly select an existing source folder and skip the initia
 });
 
 test('an app configuration lookup failure does not fall back to a hardcoded product directory', async t => {
-  const h = fixture(t);
+  const h = fixture(t, false, 'code');
   h.catalog.productPaths = async () => { throw new Error('Product settings unavailable'); };
   await assert.rejects(h.defaults(), /Product settings unavailable/);
   assert.deepEqual(h.settings.getPublic().projects, []);
@@ -156,7 +160,7 @@ test('an app configuration lookup failure does not fall back to a hardcoded prod
 });
 
 test('failed project persistence removes only the newly created empty directory and allows retry', async t => {
-  const h = fixture(t, true), before = h.settings.getPublic(), selection = await h.defaults();
+  const h = fixture(t, true, 'code'), before = h.settings.getPublic(), selection = await h.defaults();
   rmSync(h.settings.settingsPath); mkdirSync(h.settings.settingsPath);
   await assert.rejects(h.create(selection.id, h.event, 'Retry app'));
   assert.deepEqual(h.settings.getPublic(), before);
@@ -168,7 +172,7 @@ test('failed project persistence removes only the newly created empty directory 
 });
 
 test('failed project registration never removes a replacement directory at the same path', async t => {
-  const h = fixture(t, true), selection = await h.defaults();
+  const h = fixture(t, true, 'code'), selection = await h.defaults();
   const path = join(selection.path, 'Concurrent app'), moved = path + '-moved';
   h.settings.addProject = () => {
     renameSync(path, moved);
@@ -182,7 +186,7 @@ test('failed project registration never removes a replacement directory at the s
 });
 
 test('a late default directory lookup cannot replace an explicit source folder', async t => {
-  const h = fixture(t);
+  const h = fixture(t, false, 'code');
   let finish!: (paths: { configHome: string; appProjectsRoot: string }) => void;
   h.catalog.productPaths = () => new Promise(resolve => { finish = resolve; });
   const delayed = h.defaults();
@@ -191,4 +195,42 @@ test('a late default directory lookup cannot replace an explicit source folder',
   assert.equal(await delayed, null);
   const workspace = await h.create(selected.id);
   assert.equal(workspace.path, h.path);
+});
+
+test('Chat rejects Local App folder discovery, selection, and creation before any write', async t => {
+  const h = fixture(t);
+  await assert.rejects(h.defaults(), /local_app_development_requires_code|Code/);
+  await assert.rejects(h.pick('local-app'), /local_app_development_requires_code|Code/);
+  assert.equal(existsSync(h.configHome), false);
+  h.settings.conversationSpaces.setMode('code');
+  const selection = await h.defaults();
+  h.settings.conversationSpaces.setMode('chat');
+  await assert.rejects(h.create(selection.id, h.event, 'App'), /local_app_development_requires_code|Code/);
+  assert.equal(existsSync(h.configHome), false);
+  assert.deepEqual(h.settings.getPublic().projects, []);
+});
+
+test('an optimistic Code tab cannot admit development while the displayed owner is still Chat', async t => {
+  const h = fixture(t, true, 'chat');
+  h.settings.conversationSpaces.setMode('code');
+  assert.equal(h.host.currentConversationMode(), undefined);
+  await assert.rejects(h.defaults(), /Code/);
+  await assert.rejects(h.pick('local-app'), /Code/);
+  assert.equal(existsSync(h.configHome), false);
+});
+
+test('a Code project creation admitted before navigation is recorded only in Code', async t => {
+  const h = fixture(t, false, 'code');
+  const selection = await h.defaults();
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const blocker = (h.host as any).enqueueNavigation(async () => { entered(); await gate; });
+  await waiting;
+  const admitted = h.create(selection.id, h.event, 'Code app');
+  h.settings.conversationSpaces.setMode('chat');
+  release(); await blocker;
+  const workspace = await admitted;
+  assert.deepEqual(h.settings.conversationSpaces.snapshot().projects[workspace.path], ['code']);
+  assert.equal(h.settings.conversationSpaces.snapshot().activeMode, 'chat');
 });

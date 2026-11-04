@@ -15,11 +15,44 @@ import java.util.UUID
 internal class SideChatEntry(val source: SideChatSource, val viewModel: ChatViewModel) {
     val store = ViewModelStore().apply { put("chat", viewModel) }
     val draft = MutableStateFlow("")
-    var lastSubmission: String? = null
     val attachment = MutableStateFlow<ComposerAttachment?>(null)
-    var lastSubmittedAttachment: ComposerAttachment? = null
+    val rejected = MutableStateFlow<List<RejectedComposerDraft>>(emptyList())
+    private var draftRevision = 0L
+    private var attachmentRevision = 0L
+    private var retired = false
+    var pendingRestore: ComposerRestoreGate? = null
     val closing = MutableStateFlow(false)
     var endInFlight = false
+
+    fun updateDraft(value: String) { draftRevision++; draft.value = value }
+    fun updateAttachment(value: ComposerAttachment?) { attachmentRevision++; attachment.value = value }
+    fun submit(text: String, image: ComposerAttachment?, clearImmediately: Boolean = false) {
+        val item = RejectedComposerDraft(text, image, viewModel.state.value.visualizationChip)
+        fun preserve() { if (!retired) rejected.value = rejected.value + item }
+        val gate = ComposerRestoreGate(
+            revision = { Triple(draftRevision, attachmentRevision, viewModel.visualizationDraftRevision()) },
+            preserve = ::preserve,
+            restore = {
+                if (!retired && draft.value.isEmpty() && attachment.value == null && viewModel.state.value.visualizationChip == null) {
+                    updateDraft(item.text)
+                    updateAttachment(item.attachment)
+                    viewModel.restoreVisualizationDraft(item.visualization)
+                } else preserve()
+            },
+        )
+        pendingRestore = gate
+        viewModel.send(text, images = image?.toImageRef()?.let(::listOf).orEmpty(), onNotAdmitted = gate::rejected)
+        if (clearImmediately) { gate.cleared(); pendingRestore = null }
+    }
+    fun restoreRejected() {
+        val item = rejected.value.firstOrNull() ?: return
+        if (draft.value.isNotEmpty() || attachment.value != null || viewModel.state.value.visualizationChip != null) return
+        updateDraft(item.text)
+        updateAttachment(item.attachment)
+        viewModel.restoreVisualizationDraft(item.visualization)
+        rejected.value = rejected.value.drop(1)
+    }
+    fun retire() { retired = true; pendingRestore = null; rejected.value = emptyList() }
 }
 
 internal class SideChatManager(private val scope: CoroutineScope) {
@@ -64,9 +97,8 @@ internal class SideChatManager(private val scope: CoroutineScope) {
                     visible.value = true
                     source.setForeground(foreground.isForeground)
                     if (input.isNotEmpty()) {
-                        entry.lastSubmission = input
-                        if (foreground.maySubmit(foregroundToken)) entry.viewModel.send(input)
-                        else entry.draft.value = input
+                        if (foreground.maySubmit(foregroundToken)) entry.submit(input, null, clearImmediately = true)
+                        else entry.updateDraft(input)
                     }
                 } catch (failure: Throwable) {
                     pendingSource?.close()
@@ -117,10 +149,7 @@ internal class SideChatManager(private val scope: CoroutineScope) {
     }
     private fun retire(entry: SideChatEntry) {
         entry.source.close()
-        entry.draft.value = ""
-        entry.attachment.value = null
-        entry.lastSubmission = null
-        entry.lastSubmittedAttachment = null
+        entry.retire()
         entry.store.clear()
         entries.value = entries.value - entry
         if (selected.value === entry) selected.value = entries.value.lastOrNull()
@@ -139,10 +168,7 @@ internal class SideChatManager(private val scope: CoroutineScope) {
         generation++
         entries.value.forEach { entry ->
             entry.source.close()
-            entry.draft.value = ""
-            entry.attachment.value = null
-            entry.lastSubmission = null
-            entry.lastSubmittedAttachment = null
+            entry.retire()
             entry.store.clear()
             launchCleanup { runCatching { entry.source.end() } }
         }

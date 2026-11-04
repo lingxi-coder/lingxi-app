@@ -31,7 +31,7 @@ object LinuxRuntimeBridge {
     @Volatile
     private var cachedRuntime: Pair<String, AndroidMobileLinuxRuntimeHandle>? = null
     private fun workspaceGuestPath(context: Context): String =
-        com.lingxi.code.project.MobileUserStorage.directories(context).defaultGuestCwd
+        com.lingxi.code.project.MobileUserStorage.directories(context).projectsGuestPath
     // Packaged assets are immutable for the APK lifetime; event polling must
     // not parse the full rootfs inventory on every request.
     @Volatile
@@ -58,7 +58,7 @@ object LinuxRuntimeBridge {
             "Android PRoot workspace is unavailable: $hostPath"
         }
         val selectedAbi = abi()
-        val identity = bundledIdentity(context, selectedAbi)
+        val identity = bundledIdentity(context, selectedAbi, RootfsBrandIdentity(paths.brandId, paths.linuxUser, paths.configDirName))
         return mobileLinuxConfig(
             brandId = paths.brandId,
             linuxUser = paths.linuxUser,
@@ -73,9 +73,9 @@ object LinuxRuntimeBridge {
         )
     }
 
-    private fun bundledIdentity(context: Context, abi: String): RootfsArtifactIdentity {
+    private fun bundledIdentity(context: Context, abi: String, brand: RootfsBrandIdentity): RootfsArtifactIdentity {
         val application = context.applicationContext
-        val cacheKey = "${application.packageName}|${application.applicationInfo.sourceDir}|$abi"
+        val cacheKey = "${application.packageName}|${application.applicationInfo.sourceDir}|$abi|${brand.brandId}|${brand.linuxUser}|${brand.configDirName}"
         cachedBundledIdentity?.takeIf { it.first == cacheKey }?.let {
             return it.second
         }
@@ -93,7 +93,7 @@ object LinuxRuntimeBridge {
         val assetDir = "mobile-linux/rootfs/$abi"
         val manifestJson = assets.open("$assetDir/$ROOTFS_MANIFEST_FILE")
             .bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
-        val identity = bundledRootfsIdentity(pinsJson, manifestJson, abi)
+        val identity = bundledRootfsIdentity(pinsJson, manifestJson, abi, brand)
         check(assets.list(assetDir)?.contains("${identity.filename}.bin") == true) {
             "Bundled rootfs archive ${identity.filename} is missing for ABI $abi"
         }
@@ -216,7 +216,8 @@ object LinuxRuntimeBridge {
             "No pinned rootfs archive exists for ABI ${config.abi}"
         }
         val assetDir = "mobile-linux/rootfs/${config.abi}"
-        val archiveName = bundledIdentity(context, config.abi).filename
+        val archiveName = bundledIdentity(context, config.abi,
+            RootfsBrandIdentity(config.brandId, config.linuxUser, config.configDirName)).filename
         BundledRootfsInstaller.stage(
             managedRoot = File(config.managedRoot).canonicalFile,
             expectedRootfsVersion = config.rootfsVersion,

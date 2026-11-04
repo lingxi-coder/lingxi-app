@@ -3,7 +3,7 @@ import type { HostProviderSettings, ProviderAccountCommand, ProviderAccountSnaps
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute } from 'node:path';
+import { basename, isAbsolute } from 'node:path';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 
 import { buildBridgeArguments, buildBridgeEnvironment } from './host-utils.js';
@@ -81,6 +81,7 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
     || typeof row['modified_rfc3339'] !== 'string'
     || typeof messageCount !== 'number'
     || !Number.isSafeInteger(messageCount)
+    || (row['mode'] !== 'chat' && row['mode'] !== 'code')
     || typeof row['path'] !== 'string'
     || typeof row['empty_session'] !== 'boolean'
     || (resumeTitle !== undefined && (typeof resumeTitle !== 'string' || resumeTitle.includes('\0')))
@@ -98,7 +99,7 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
     title: row['title'],
     modified_rfc3339: row['modified_rfc3339'],
     message_count: messageCount,
-    mode: row['mode'] === 'chat' ? 'chat' : 'code',
+    mode: row['mode'],
     path: row['path'],
     empty_session: row['empty_session'],
     ...(typeof resumeModel === 'string' ? { resume_model: resumeModel } : {}),
@@ -136,6 +137,27 @@ export class ProjectSessionCatalog {
   private generation = 0;
 
   constructor(private readonly options: ProjectSessionCatalogOptions = {}) {}
+
+  async captureMetadataSource(projectPath: string, sessionId: string, transcriptPath: string, sessionMode: 'chat' | 'code'): Promise<string> {
+    if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')) throw new Error('Invalid metadata source.');
+    const result = await this.metadataRequest(projectPath, { action: 'capture', sessionId, transcriptPath, sessionMode });
+    if (typeof result.receipt !== 'string' || !result.receipt || result.receipt.length > 128_000) throw new Error('Invalid metadata source receipt.');
+    return result.receipt;
+  }
+
+  async mutateMetadataSource(projectPath: string, receipt: string, action: 'rename' | 'touch' | 'verify', title?: string): Promise<void> {
+    const result = await this.metadataRequest(projectPath, { action, receipt, ...(title === undefined ? {} : { title }) });
+    if (result.ok !== true) throw new Error('Invalid session metadata result.');
+  }
+
+  private async metadataRequest(projectPath: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const args = ['--session-metadata-json', ...(this.options.configHome ? ['--session-config-home', this.options.configHome] : [])];
+    const output = await this.runOutput(realpathSync.native(projectPath), args, `${JSON.stringify(input)}\n`,
+      input.action !== 'rename' && input.action !== 'touch');
+    const result: unknown = JSON.parse(boundedOutput(output));
+    if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('Invalid session metadata response.');
+    return result as Record<string, unknown>;
+  }
 
   async providerSettings(patch?: Record<string, unknown>, expected?: Record<string, unknown>): Promise<HostProviderSettings> {
     const output = await this.runOutput(realpathSync.native(homedir()), ['--provider-settings-command'], JSON.stringify({ patch, expected }));
@@ -226,13 +248,32 @@ export class ProjectSessionCatalog {
       ...(typeof input.global_config_path === 'string' ? { globalConfigPath: input.global_config_path } : {}) };
   }
 
-  async list(projectPath: string, scope: SessionCatalogScope = 'current'): Promise<ProjectSessionCatalogResult> {
+  async list(
+    projectPath: string,
+    scope: SessionCatalogScope = 'current',
+    include: (session: ProjectSessionCatalogRow) => boolean = () => true,
+    limitKey: (session: ProjectSessionCatalogRow) => string = (session) => session.mode,
+  ): Promise<ProjectSessionCatalogResult> {
     const result = await this.load(projectPath, sessionCatalogScope(scope));
+    const count = new Map<string, number>();
     return {
-      // Never hand callers the cached array itself: restore/archive code filters
-      // its local result and must not mutate the shared project snapshot.
-      sessions: result.sessions.slice(0, scope === 'current' ? MAX_SESSIONS : undefined).map((session) => ({ ...session })),
+      // Exclude hidden/archived rows before applying a separate bound to each
+      // space. A busy Code space must not hide older Chat history (or vice versa).
+      sessions: result.sessions.filter((session) => {
+        if (!include(session)) return false;
+        if (scope !== 'current') return true;
+        const key = limitKey(session), previous = count.get(key) ?? 0;
+        count.set(key, previous + 1);
+        return previous < MAX_SESSIONS;
+      })
+        .map((session) => ({ ...session })),
     };
+  }
+
+  /** Complete authenticated catalog for persistent space membership, before UI truncation. */
+  async listComplete(projectPath: string, scope: SessionCatalogScope = 'current'): Promise<ProjectSessionCatalogResult> {
+    const result = await this.load(projectPath, sessionCatalogScope(scope));
+    return { sessions: result.sessions.map((session) => ({ ...session })) };
   }
 
   /**
@@ -250,9 +291,7 @@ export class ProjectSessionCatalog {
     const cached = this.cache.get(`${canonical}\0current`);
     // Every session open waits on this lookup. Without a fresh catalog, ask
     // for this one row: the full catalog parses every transcript in the
-    // Project, most of a second once one of them is tens of megabytes. A
-    // runtime that predates the narrowed mode ignores the filter and returns
-    // the full catalog, which the search below handles the same way.
+    // Project, most of a second once one of them is tens of megabytes.
     const match = cached && cached.expiresAt > Date.now()
       ? cached.result.sessions.find((candidate) => candidate.uuid === sessionId) : undefined;
     if (match) return { ...match };
@@ -265,8 +304,12 @@ export class ProjectSessionCatalog {
   async select(projectPath: string, sessionId: string, selection: SessionOpenSelection): Promise<ProjectSessionCatalogRow | undefined> {
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
     sessionId = sessionId.toLowerCase();
+    if (selection.transcriptPath !== undefined && (!isAbsolute(selection.transcriptPath)
+      || selection.transcriptPath.includes('\0') || basename(selection.transcriptPath).toLowerCase() !== `${sessionId}.jsonl`)) {
+      throw new Error('invalid selected transcript path');
+    }
     const canonical = realpathSync.native(projectPath);
-    const result = await this.run(canonical, sessionId, sessionCatalogScope(selection.scope));
+    const result = await this.run(canonical, sessionId, sessionCatalogScope(selection.scope), selection.transcriptPath);
     const row = result.sessions.find((candidate) => candidate.uuid === sessionId);
     if (row && selection.transcriptPath !== undefined && row.path !== selection.transcriptPath) {
       throw new Error('This session selection has changed. Refresh the session list and try again.');
@@ -320,19 +363,20 @@ export class ProjectSessionCatalog {
     return operation;
   }
 
-  private run(canonical: string, sessionId?: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogResult> {
+  private run(canonical: string, sessionId?: string, scope?: SessionCatalogScope, transcriptPath?: string): Promise<ProjectSessionCatalogResult> {
     const args = buildBridgeArguments({
       workspace: canonical,
       bridgeDir: '',
       listSessionsJson: true,
       sessionScope: scope,
       ...(sessionId ? { sessionId } : {}),
+      ...(transcriptPath ? { sessionTranscriptPath: transcriptPath } : {}),
       trusted: false,
     });
     return this.runOutput(canonical, args).then((output) => parseCatalog(output));
   }
 
-  private runOutput(canonical: string, args: string[], input?: string): Promise<string> {
+  private runOutput(canonical: string, args: string[], input?: string, killOnTimeout = true): Promise<string> {
     const bin = resolveServerBin({
       serverBin: this.options.serverBin,
       isPackaged: this.options.isPackaged,
@@ -344,6 +388,7 @@ export class ProjectSessionCatalog {
         env: { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) },
         stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        detached: !killOnTimeout,
       });
       if (input !== undefined) {
         child.stdin?.on('error', () => { /* Process close carries the bounded failure. */ });
@@ -357,8 +402,8 @@ export class ProjectSessionCatalog {
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
-        child.kill();
-        reject(new Error('session catalog timed out'));
+        if (killOnTimeout) child.kill(); else child.unref();
+        reject(new Error(killOnTimeout ? 'session catalog timed out' : 'The metadata result is unconfirmed; its writer is still completing.'));
       }, this.options.timeoutMs ?? 15_000);
       timeout.unref();
       child.stdout!.on('data', (chunk: Buffer | string) => {
@@ -368,8 +413,8 @@ export class ProjectSessionCatalog {
         if (stdoutBytes > MAX_OUTPUT_BYTES) {
           settled = true;
           clearTimeout(timeout);
-          child.kill();
-          reject(new Error('session catalog output is too large'));
+          if (killOnTimeout) child.kill(); else child.unref();
+          reject(new Error(killOnTimeout ? 'session catalog output is too large' : 'The metadata result is unconfirmed after oversized output.'));
           return;
         }
         stdout.push(bytes);

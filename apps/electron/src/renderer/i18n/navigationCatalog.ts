@@ -488,5 +488,33 @@ export const navigationCatalog: Record<string, Record<string, string>> = {
     "en": "Goal",
     "ja": "目標",
     "ko": "목표"
+  },
+  "desktop_teams_rail_unread": {
+    "zh-Hans": "团队，%1$d 条未读",
+    "zh-Hant": "團隊，%1$d 則未讀",
+    "en": "Teams, %1$d unread",
+    "ja": "チーム、未読 %1$d 件",
+    "ko": "팀, 읽지 않음 %1$d개"
+  },
+  "desktop_teams_sign_in_title": {
+    "zh-Hans": "登录后使用团队",
+    "zh-Hant": "登入後使用團隊",
+    "en": "Sign in to use Teams",
+    "ja": "サインインしてチームを使う",
+    "ko": "로그인하여 팀 사용하기"
+  },
+  "desktop_teams_sign_in_body": {
+    "zh-Hans": "请登录灵犀账号以使用团队。",
+    "zh-Hant": "請登入靈犀帳號以使用團隊。",
+    "en": "Sign in to your LingXi account to use Teams.",
+    "ja": "チームを使うには LingXi アカウントにサインインしてください。",
+    "ko": "팀을 사용하려면 LingXi 계정에 로그인하세요."
+  },
+  "desktop_teams_loading": {
+    "zh-Hans": "正在加载团队…",
+    "zh-Hant": "正在載入團隊…",
+    "en": "Loading Teams…",
+    "ja": "チームを読み込み中…",
+    "ko": "팀을 불러오는 중…"
   }
 };

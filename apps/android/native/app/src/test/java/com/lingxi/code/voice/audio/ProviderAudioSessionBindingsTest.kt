@@ -47,4 +47,39 @@ class ProviderAudioSessionBindingsTest {
         routes.record("owner", context(), "account.B", "late-scope")
         assertEquals("unbound", routes.context("owner", context()).getString("accountScope"))
     }
+
+    @Test fun retainedOwnerKeepsItsAccountWhenAnotherEngineBecomesVisible() {
+        val routes = OwnerScopedProviderAudioBindings<Any>()
+        val first = Any()
+        val second = Any()
+        val ownerA = AudioOwnerKey.session("session")
+        val ownerB = AudioOwnerKey.session("other")
+        routes.bind(ownerA, first)
+        routes.bind(ownerB, second)
+        val initial = context()
+        routes.context(ownerA, first, initial)
+        routes.record(ownerA, first, initial, "account.B", "scope-B")
+        routes.attach(second)
+        assertEquals("scope-B", routes.context(ownerA, first, context())?.getString("accountScope"))
+        assertEquals("unbound", routes.context(ownerB, second, context(session = "other"))?.getString("accountScope"))
+    }
+
+    @Test fun replacingAnOwnerEngineRejectsLateAccountResults() {
+        data class Engine(val name: String)
+        val routes = OwnerScopedProviderAudioBindings<Engine>()
+        val owner = AudioOwnerKey.session("session")
+        val first = Engine("equal")
+        val replacement = Engine("equal")
+        routes.bind(owner, first)
+        routes.context(owner, first, context())
+        routes.record(owner, first, context(), "old", "old-scope")
+        routes.bind(owner, replacement)
+        routes.record(owner, first, context(), "late", "late-scope")
+        assertNull(routes.context(owner, first, context()))
+        assertEquals("unbound", routes.context(owner, replacement, context())?.getString("accountScope"))
+        routes.releaseIfBound(owner, first)
+        assertSame(replacement, routes.engineFor(owner))
+        routes.detach(replacement)
+        assertNull(routes.engineFor(owner))
+    }
 }

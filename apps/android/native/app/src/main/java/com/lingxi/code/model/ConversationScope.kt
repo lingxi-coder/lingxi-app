@@ -24,14 +24,11 @@ sealed interface ConversationScope {
 enum class SessionMode(val wireValue: String) {
     Chat("chat"),
     Code("code"),
-    ;
-
-    /**
-     * Back-compat alias for persistence helpers that talk in terms of "key"
-     * rather than wire values.
-     */
-    val wireKey: String get() = wireValue
 }
+
+/** A generic new chat has no project and uses the visible conversation mode. */
+internal fun defaultNewChatTarget(activeMode: SessionMode): Pair<ConversationScope, SessionMode> =
+    ConversationScope.Global to activeMode
 
 /**
  * The durable key a scope's state (last-active session, composer draft) is
@@ -44,7 +41,7 @@ fun ConversationScope.persistenceKey(): String = when (this) {
 }
 
 /** Durable key for state kept separately per workspace and session mode. */
-fun ConversationScope.sessionStateKey(mode: SessionMode): String = "${persistenceKey()}#${mode.wireKey}"
+fun ConversationScope.sessionStateKey(mode: SessionMode): String = "${persistenceKey()}#${mode.wireValue}"
 
 /** Inverse of [persistenceKey]; null for an unrecognized key. */
 fun conversationScopeFromKey(key: String?): ConversationScope? = when {

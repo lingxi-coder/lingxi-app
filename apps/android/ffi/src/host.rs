@@ -15,6 +15,8 @@ use super::callbacks::{
 };
 #[cfg(feature = "uniffi")]
 use super::callbacks::{AndroidMediaDevicePorts, AndroidMediaDevicePortsBridge};
+#[cfg(all(feature = "uniffi", target_os = "android"))]
+use super::configuration::android_engine_cwd;
 use super::configuration::AndroidEngineLaunchConfigFfi;
 #[cfg(feature = "uniffi")]
 use super::configuration::{
@@ -35,7 +37,7 @@ use harness_runtime::mobile::{MobileConfig, MobileSessionMode, SessionModeDto};
 use lingxi_core::host::Platform;
 use lingxi_core::host::{AudioService, CameraControl, SharingService};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 #[cfg(feature = "uniffi")]
@@ -58,6 +60,18 @@ pub struct MediaAudioSessionBindingFfi {
     pub attachment_generation: u64,
     pub session_id: String,
     pub generation: u64,
+}
+
+/// Result of observing the app host's already-closing media attachments.
+#[cfg(feature = "uniffi")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AndroidMediaDrainStatus {
+    /// No attachment in the observed host remains Revoking or Unknown.
+    Ready,
+    /// The observation deadline elapsed while an attachment was still Revoking.
+    TimedOut,
+    /// An attachment's drain completed without sufficient shutdown evidence.
+    Unknown,
 }
 
 /// Opaque app-composed Android media host shared with the Agent runtime and
@@ -86,6 +100,7 @@ pub(super) struct AndroidEngineMediaBinding {
     attachment: MediaAttachmentHandle,
     engine_bindings: Weak<Mutex<HashMap<usize, Weak<AndroidEngineMediaBinding>>>>,
     engine_key: AtomicUsize,
+    drain_started: AtomicBool,
     update_gate: tokio::sync::Mutex<()>,
     current: Mutex<Option<MediaAudioSessionBindingFfi>>,
 }
@@ -102,6 +117,7 @@ impl AndroidEngineMediaBinding {
             attachment,
             engine_bindings,
             engine_key: AtomicUsize::new(0),
+            drain_started: AtomicBool::new(false),
             update_gate: tokio::sync::Mutex::new(()),
             current: Mutex::new(None),
         }
@@ -319,6 +335,65 @@ impl AndroidNativeMediaHost {
         Ok(())
     }
 
+    /// Observe already-closing attachments without blocking the UI executor.
+    /// Active attachments belong to other engines and are never closed here.
+    /// This is a readiness observation; attachment creation repeats its own
+    /// atomic admission check because another engine may close concurrently.
+    #[uniffi::method(async_runtime = "tokio")]
+    pub async fn wait_for_attachment_drain(&self, timeout_ms: u32) -> AndroidMediaDrainStatus {
+        use harness_runtime::mobile::MediaAttachmentPhase;
+
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(u64::from(timeout_ms.min(60_000)));
+        loop {
+            let attachments = self.media_attachment_host.attachments();
+            let mut closing = None;
+            for attachment in attachments {
+                match attachment.phase() {
+                    MediaAttachmentPhase::Unknown => return AndroidMediaDrainStatus::Unknown,
+                    MediaAttachmentPhase::Revoking => closing = Some(attachment),
+                    MediaAttachmentPhase::Active | MediaAttachmentPhase::Revoked => {}
+                }
+            }
+            let Some(closing) = closing else {
+                return AndroidMediaDrainStatus::Ready;
+            };
+            match tokio::time::timeout_at(deadline, closing.wait_for_drain_completion()).await {
+                Ok(MediaAttachmentPhase::Revoked) => {}
+                Ok(MediaAttachmentPhase::Unknown | MediaAttachmentPhase::Active) => {
+                    return AndroidMediaDrainStatus::Unknown;
+                }
+                Ok(MediaAttachmentPhase::Revoking) | Err(_) => {
+                    return if self
+                        .media_attachment_host
+                        .attachments()
+                        .iter()
+                        .any(|attachment| attachment.phase() == MediaAttachmentPhase::Unknown)
+                    {
+                        AndroidMediaDrainStatus::Unknown
+                    } else {
+                        AndroidMediaDrainStatus::TimedOut
+                    };
+                }
+            }
+        }
+    }
+
+    /// Close this engine's media admission before its last native reference is
+    /// released. Draining runs on the process-lifetime executor; other engines'
+    /// attachments remain active and repeated calls join the same drain.
+    pub fn begin_engine_attachment_drain(
+        &self,
+        engine: Arc<MobileEngineHandle>,
+    ) -> Result<(), MobileEngineError> {
+        let binding = self.engine_binding(&engine).ok_or_else(|| {
+            MobileEngineError::Internal(
+                "Android engine has no app-owned media binding lifecycle".into(),
+            )
+        })?;
+        self.begin_attachment_drain(binding)
+    }
+
     /// Refresh the trusted provider/profile/account snapshot after the attached
     /// engine changes session or model. The selected credential host stays in
     /// Rust and is pinned by the next media operation.
@@ -433,9 +508,14 @@ impl AndroidNativeMediaHost {
         })
     }
 
-    fn revoke_unbuilt_attachment(&self, binding: Arc<AndroidEngineMediaBinding>) {
-        // A failed engine build must not leave an active, unowned attachment.
+    fn begin_attachment_drain(
+        &self,
+        binding: Arc<AndroidEngineMediaBinding>,
+    ) -> Result<(), MobileEngineError> {
         binding.attachment.begin_revoke();
+        if binding.drain_started.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         let attachment = binding.attachment.clone();
         let on_confirmed = self.attachment_confirmed_callback(&attachment);
         if let Err(error) = harness_runtime::mobile::spawn_mobile_lifecycle_task(async move {
@@ -447,7 +527,7 @@ impl AndroidNativeMediaHost {
                 {
                     // Timeout only ends this observation. Watch the same drain
                     // flight without polling or destroying its executor.
-                    tracing::warn!(%reason, "unbuilt Android media drain is still running");
+                    tracing::warn!(%reason, "Android media drain is still running");
                     if attachment.wait_for_drain_completion().await
                         == harness_runtime::mobile::MediaAttachmentPhase::Revoked
                         && matches!(
@@ -459,12 +539,16 @@ impl AndroidNativeMediaHost {
                     }
                 }
                 MediaAttachmentRevocation::Unknown { reason } => {
-                    tracing::warn!(%reason, "unbuilt Android media attachment remains retained");
+                    tracing::warn!(%reason, "Android media attachment remains retained");
                 }
             }
         }) {
-            tracing::warn!(%error, "could not schedule unbuilt Android media attachment cleanup; admission remains closed");
+            binding.drain_started.store(false, Ordering::Release);
+            return Err(MobileEngineError::Internal(format!(
+                "could not schedule Android media attachment cleanup; admission remains closed: {error}"
+            )));
         }
+        Ok(())
     }
 
     fn engine_key(engine: &Arc<MobileEngineHandle>) -> usize {
@@ -612,17 +696,8 @@ pub fn build_android_cron_store(
 
     let directories = harness_runtime::mobile::mobile_user_directories(managed_root.clone())?;
     directories.prepare()?;
-    let scheduled_cwd;
-    let project_cwd = match project_cwd {
-        Some(path) => Some(path),
-        None => {
-            scheduled_cwd = std::path::PathBuf::from(&directories.scheduled_cwd);
-            std::fs::create_dir_all(&scheduled_cwd)
-                .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-            Some(scheduled_cwd.to_string_lossy().into_owned())
-        }
-    };
-    let cwd = android_project_cwd(&managed_root, project_cwd.as_deref())?;
+    let project_cwd = project_cwd.unwrap_or_else(|| directories.scheduled_cwd.clone());
+    let cwd = android_project_cwd(&managed_root, &project_cwd)?;
     let app_root = std::path::Path::new(&app_files_root)
         .canonicalize()
         .map_err(|error| {
@@ -713,7 +788,11 @@ pub fn build_mobile_engine(
                 .as_deref()
                 .unwrap_or(""),
         )?;
-        let (cwd, logical_cwd) = directories.resolve_cwd(None)?;
+        let default_mode = match cfg.session_mode {
+            MobileSessionMode::Chat => SessionModeDto::Chat,
+            MobileSessionMode::Code => SessionModeDto::Code,
+        };
+        let (cwd, logical_cwd) = directories.resolve_cwd(None, default_mode)?;
         cfg.cwd = cwd;
         cfg.logical_cwd = Some(logical_cwd);
         cfg.lingxi_home = std::path::PathBuf::from(&directories.config_home);
@@ -816,6 +895,9 @@ pub fn build_android_engine(
         api_base,
         model,
         session_mode,
+        initial_session_id,
+        initial_session_transcript_path,
+        scheduler_controller,
         vision_delegation_enabled,
         app_files_root,
         project_cwd,
@@ -837,6 +919,9 @@ pub fn build_android_engine(
         project_cwd,
         device_control,
         session_mode,
+        initial_session_id,
+        initial_session_transcript_path,
+        scheduler_controller,
         vision_delegation_enabled,
         physical_memory_bytes,
         media_host.clone(),
@@ -888,7 +973,12 @@ pub fn build_android_engine(
             linux.workspace_host_path.as_deref().unwrap_or(""),
             linux.stable_workspace_id.as_deref().unwrap_or(""),
         )?;
-        let (cwd, logical_cwd) = directories.resolve_cwd(project_cwd.as_deref())?;
+        let (cwd, logical_cwd) = android_engine_cwd(
+            &directories,
+            project_cwd.as_deref(),
+            session_mode,
+            scheduler_controller,
+        )?;
         let mut cfg = MobileConfig {
             brand_runtime_profile: brand_profile.clone(),
             app_agent_host,
@@ -910,6 +1000,10 @@ pub fn build_android_engine(
                 SessionModeDto::Chat => MobileSessionMode::Chat,
                 SessionModeDto::Code => MobileSessionMode::Code,
             },
+            initial_session_id,
+            initial_session_transcript_path: initial_session_transcript_path
+                .map(std::path::PathBuf::from),
+            scheduler_controller,
             physical_memory_bytes,
             vision_delegation_enabled,
             host_environment: Some(host_environment.map_or_else(
@@ -1098,7 +1192,9 @@ pub fn build_android_engine(
             Ok(engine) => engine,
             Err(error) => {
                 if let Some(binding) = media_binding {
-                    media_host.revoke_unbuilt_attachment(binding);
+                    if let Err(cleanup_error) = media_host.begin_attachment_drain(binding) {
+                        tracing::warn!(%cleanup_error, "unbuilt Android media attachment remains retained");
+                    }
                 }
                 return Err(error);
             }
@@ -1148,6 +1244,7 @@ mod mobile_media_scope_tests {
     use super::*;
     use client::protocol::{audio as audio_dto, media as media_dto};
     use lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE;
+    use media_api::audio::{AudioOperation, AudioOperationContext, AudioOperationId};
     use media_api::{
         MediaOperation, MediaOperationContext, MediaOperationId, MediaOperationKind, MediaOwner,
         MediaResult,
@@ -1217,6 +1314,233 @@ mod mobile_media_scope_tests {
         ) -> AndroidMediaDeviceResponse {
             panic!("this fixture does not open devices")
         }
+    }
+
+    fn test_media_host(audio: Box<dyn AndroidAudioService>) -> Arc<AndroidNativeMediaHost> {
+        let config = r#"{"schemaVersion":4,"recognition":{"source":"automatic","cloud":{"binding":"follow_session"}},"speech":{"source":"automatic","cloud":{"binding":"follow_session"}},"language":"auto","rate":1.0}"#;
+        AndroidNativeMediaHost::new(audio, Box::new(Camera), Box::new(Devices), config.into())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn attachment_drain_waits_for_exact_closing_scope_without_revoking_active_scope() {
+        use harness_runtime::mobile::MediaAttachmentPhase;
+
+        let host = test_media_host(Box::new(Audio));
+        let (closing, _, _) = host.create_engine_media_scope().unwrap();
+        let (active, _, _) = host.create_engine_media_scope().unwrap();
+        assert_eq!(
+            host.wait_for_attachment_drain(100).await,
+            AndroidMediaDrainStatus::Ready
+        );
+
+        let mut fence = closing.retain_for_host_cleanup().unwrap();
+        closing.begin_revoke();
+        assert_eq!(
+            closing.drain_media(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        assert_eq!(closing.phase(), MediaAttachmentPhase::Revoking);
+        assert_eq!(
+            host.wait_for_attachment_drain(5).await,
+            AndroidMediaDrainStatus::TimedOut
+        );
+        assert!(host.create_engine_media_scope().is_err());
+
+        let waiter_host = host.clone();
+        let waiter =
+            tokio::spawn(async move { waiter_host.wait_for_attachment_drain(2_000).await });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        fence.confirm().unwrap();
+        assert_eq!(waiter.await.unwrap(), AndroidMediaDrainStatus::Ready);
+        assert_eq!(closing.phase(), MediaAttachmentPhase::Revoked);
+        assert_eq!(active.phase(), MediaAttachmentPhase::Active);
+        let (replacement, _, _) = host.create_engine_media_scope().unwrap();
+        assert_ne!(replacement.id(), active.id());
+
+        host.attachment_confirmed_callback(&closing)();
+        for attachment in [&active, &replacement] {
+            assert_eq!(
+                attachment.revoke(Duration::from_secs(2)).await,
+                MediaAttachmentRevocation::Confirmed
+            );
+            host.attachment_confirmed_callback(attachment)();
+        }
+    }
+
+    #[test]
+    fn attachment_drain_starts_for_exact_engine_while_native_arc_is_retained() {
+        use harness_runtime::mobile::MediaAttachmentPhase;
+
+        let temp = tempfile::tempdir().unwrap();
+        let host = test_media_host(Box::new(Audio));
+        let (closing, conversation, binding) = host.create_engine_media_scope().unwrap();
+        let on_confirmed = host.attachment_confirmed_callback(&closing);
+        let engine = crate::tests::build_handle_with_config(temp.path(), |cfg| {
+            cfg.media_service = Some(closing.service());
+            cfg.media_attachment_handle = Some(closing.clone());
+            cfg.media_attachment_confirmed_callback = Some(on_confirmed);
+            cfg.media_conversation_attachment = Some(conversation);
+        });
+        let retained_engine = engine.clone();
+        let weak_engine = Arc::downgrade(&engine);
+        let (active, _, _) = host.create_engine_media_scope().unwrap();
+        let foreign_host = test_media_host(Box::new(Audio));
+        let (foreign, _, _) = foreign_host.create_engine_media_scope().unwrap();
+        host.register_engine_binding(&engine, &binding);
+        let mut fence = closing.retain_for_host_cleanup().unwrap();
+
+        // Dropping the foreign-owned handle does not drop the native engine
+        // while an admitted command or another native reference holds its Arc.
+        drop(engine);
+        assert!(weak_engine.upgrade().is_some());
+        assert_eq!(closing.phase(), MediaAttachmentPhase::Active);
+        assert!(foreign_host
+            .begin_engine_attachment_drain(retained_engine.clone())
+            .is_err());
+        assert_eq!(foreign.phase(), MediaAttachmentPhase::Active);
+        host.begin_engine_attachment_drain(retained_engine.clone())
+            .unwrap();
+        host.begin_engine_attachment_drain(retained_engine.clone())
+            .unwrap();
+        assert_eq!(closing.phase(), MediaAttachmentPhase::Revoking);
+        assert_eq!(active.phase(), MediaAttachmentPhase::Active);
+
+        let observer = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        observer.block_on(async {
+            assert_eq!(
+                closing.drain_media(Duration::from_secs(2)).await,
+                MediaAttachmentRevocation::Confirmed
+            );
+            assert_eq!(
+                host.wait_for_attachment_drain(5).await,
+                AndroidMediaDrainStatus::TimedOut
+            );
+            assert!(host.create_engine_media_scope().is_err());
+        });
+        // SDK Drop also begins revocation of this same attachment while the
+        // explicit host drain is still held behind the cleanup fence.
+        drop(retained_engine);
+        assert!(weak_engine.upgrade().is_none());
+        assert_eq!(closing.phase(), MediaAttachmentPhase::Revoking);
+        observer.block_on(async {
+            fence.confirm().unwrap();
+            assert_eq!(
+                host.wait_for_attachment_drain(2_000).await,
+                AndroidMediaDrainStatus::Ready
+            );
+            assert_eq!(closing.phase(), MediaAttachmentPhase::Revoked);
+            assert_eq!(active.phase(), MediaAttachmentPhase::Active);
+            assert_eq!(foreign.phase(), MediaAttachmentPhase::Active);
+            for (owner, attachment) in [(&host, &active), (&foreign_host, &foreign)] {
+                assert_eq!(
+                    attachment.revoke(Duration::from_secs(2)).await,
+                    MediaAttachmentRevocation::Confirmed
+                );
+                owner.attachment_confirmed_callback(attachment)();
+            }
+        });
+    }
+
+    struct FailedOwnerEndAudio;
+    #[async_trait::async_trait]
+    impl AndroidAudioService for FailedOwnerEndAudio {
+        fn capabilities(&self) -> audio_dto::AudioCapabilitySnapshotDto {
+            audio_dto::AudioCapabilitySnapshotDto {
+                service_epoch: 1,
+                support_revision: 1,
+                supported_operations: vec![audio_dto::AudioOperationKindDto::Record],
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            request: audio_dto::AudioOperationRequestDto,
+        ) -> audio_dto::AudioOperationResultDto {
+            match request.operation {
+                audio_dto::AudioOperationDto::StartRecording { .. } => {
+                    audio_dto::AudioOperationResultDto::RecordingStarted {
+                        handle: "recording-1".into(),
+                    }
+                }
+                audio_dto::AudioOperationDto::EndOwner => {
+                    audio_dto::AudioOperationResultDto::FailedWithoutResource {
+                        error: audio_dto::AudioErrorDto {
+                            kind: audio_dto::AudioErrorKindDto::NativeFailure,
+                            message: "owner end unconfirmed".into(),
+                        },
+                    }
+                }
+                audio_dto::AudioOperationDto::Status { .. } => {
+                    audio_dto::AudioOperationResultDto::Status {
+                        status: audio_dto::AudioStatusDto {
+                            recording: true,
+                            playing: false,
+                        },
+                    }
+                }
+                _ => panic!("unexpected audio operation"),
+            }
+        }
+
+        async fn cancel(
+            &self,
+            _: audio_dto::AudioOperationIdDto,
+        ) -> Result<(), AndroidAudioFfiError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn attachment_drain_unknown_fails_closed_and_keeps_the_owner() {
+        use harness_runtime::mobile::MediaAttachmentPhase;
+
+        let temp = tempfile::tempdir().unwrap();
+        let host = test_media_host(Box::new(FailedOwnerEndAudio));
+        let (attachment, conversation, binding) = host.create_engine_media_scope().unwrap();
+        let on_confirmed = host.attachment_confirmed_callback(&attachment);
+        let engine = crate::tests::build_handle_with_config(temp.path(), |cfg| {
+            cfg.media_service = Some(attachment.service());
+            cfg.media_attachment_handle = Some(attachment.clone());
+            cfg.media_attachment_confirmed_callback = Some(on_confirmed);
+            cfg.media_conversation_attachment = Some(conversation);
+        });
+        host.register_engine_binding(&engine, &binding);
+        let audio = attachment.audio_service(host.audio_service()).unwrap();
+        engine.runtime().block_on(async {
+            audio
+                .execute(
+                    AudioOperationContext::new(
+                        AudioOperationId::new(1, 1),
+                        MediaOwner::Session {
+                            session_id: "session-a".into(),
+                        },
+                    ),
+                    AudioOperation::StartRecording {
+                        sample_rate_hz: 24_000,
+                        format: "wav".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            host.begin_engine_attachment_drain(engine.clone()).unwrap();
+            assert_eq!(
+                host.wait_for_attachment_drain(2_000).await,
+                AndroidMediaDrainStatus::Unknown
+            );
+            assert_eq!(attachment.phase(), MediaAttachmentPhase::Unknown);
+            assert!(host.create_engine_media_scope().is_err());
+            assert!(host
+                .media_attachment_host
+                .attachment(attachment.id())
+                .is_some());
+        });
     }
 
     #[tokio::test]

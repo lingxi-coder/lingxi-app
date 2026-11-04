@@ -7,6 +7,7 @@ import { protectBridgeTelemetryEnvironment, resolveDesktopTelemetry, telemetryPr
 import { assertComputerAccessSubset } from './computerAccessApproval.js';
 import {
   BridgeClient,
+  SessionMetadataUnconfirmedError,
   SessionEventCorrelator,
   buildNativeUiControlCommand,
   parseUiFrameEvent,
@@ -103,6 +104,7 @@ import type {
   HostTurnOptions,
   HostTurnResult,
   InteractionRecord,
+  PromptAdmission,
   PromptJournalEntry,
   PromptSource,
   RemoteObservation,
@@ -193,6 +195,14 @@ function randomHostTurnId(): number {
   }
 }
 
+interface PendingSlashCommand {
+  client: BridgeClient;
+  generation: number;
+  fusion: boolean;
+  snapshotInFlight?: boolean;
+  retryTimer?: ReturnType<typeof setTimeout>;
+}
+
 // Mod UI requests share the runtime's ordinary command lane, and a transcript
 // mounts a render site per tool row, so opening a long chat asks for well over
 // a hundred renders at once. The Bridge closes a connection with 64 commands
@@ -229,10 +239,18 @@ export class SessionRuntime {
   private readonly queuedModUiRequests: Array<{ send(): void; reject(error: Error): void }> = [];
   private archiving = false;
   private changingWorkspace = false;
+  private audioOperations = 0;
+  private metadataOperations = 0;
+  private metadataAdmissionBlocked = false;
+  private readonly metadataDrainWaiters = new Set<() => void>();
+  private disposing = false;
+  private disposePromise: Promise<void> | undefined;
   private activeCronExecutions = 0;
   private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
   private readonly pendingScheduledTurns = new Map<string, { resolve: (summary: string) => void; reject: (error: Error) => void }>();
   private activeTurn = false;
+  /** A command owns its session before the engine's first lifecycle event. */
+  private readonly pendingSlashCommands = new Map<number, PendingSlashCommand>();
   private computerAccessInTurn = false;
   private activeTurnGeneration: number | undefined;
   private disconnectedForegroundPending = false;
@@ -278,6 +296,12 @@ export class SessionRuntime {
 
   private pendingPermissionSwitch: {
     mode: PermissionModeId;
+    complete(): void;
+    fail(error: Error): void;
+  } | undefined;
+
+  private pendingDraftModeSnapshot: {
+    generation: number;
     complete(): void;
     fail(error: Error): void;
   } | undefined;
@@ -392,7 +416,7 @@ export class SessionRuntime {
     }
   }
 
-  private switchModel(model: string, persist = true, slashCommand?: Extract<ClientCommand, { type: 'run_slash_command' }>): Promise<void> {
+  private switchModel(model: string, persist = true, slashCommand?: Extract<ClientCommand, { type: 'run_slash_command' }>, authorize?: () => void): Promise<void> {
     if (this.pendingModelSwitch) return Promise.reject(new Error('A model switch is already in progress.'));
     const generation = this.generation;
     const client = this.requireClient();
@@ -428,8 +452,11 @@ export class SessionRuntime {
         if (generation !== this.generation || client !== this.client || this.archiving) {
           throw new Error('Model switch was interrupted.');
         }
+        if (slashCommand) this.assertModeReadyForSlashCommand();
+        authorize?.();
         pending.sent = true;
-        client.sendCommand(slashCommand ?? { type: 'set_model', model });
+        if (slashCommand) this.sendTrackedSlashCommand(client, slashCommand);
+        else client.sendCommand({ type: 'set_model', model });
       } catch (error) {
         pending.fail(error instanceof Error ? error : new Error(String(error)));
       }
@@ -788,10 +815,19 @@ export class SessionRuntime {
     client: BridgeClient; generation: number; requestId: string; done: Promise<void>;
     resolve(): void; received: boolean; controller: AbortController; timer: ReturnType<typeof setTimeout>;
   };
+  private readonly pendingHandoffFailures = new Set<(error: Error) => void>();
   private readonly mediaConnectionRequestListeners = new Set<(request: MediaConnectionRequestDto) => void>();
   private readonly mediaControlRequestListeners = new Set<(request: MediaControlRequestDto) => void>();
 
-  constructor(private readonly opts: BridgeManagerOptions, readonly sessionMode?: RuntimeSessionMode) {
+  sessionMode?: RuntimeSessionMode;
+  /** Drafts have no transcript to resume, so retain their confirmed profile across process starts. */
+  private draftSessionMode?: RuntimeSessionMode;
+  private draftModeRestorationRequired: boolean;
+  constructor(private readonly opts: BridgeManagerOptions, sessionMode?: RuntimeSessionMode,
+    private readonly durableDraftTitle?: string) {
+    this.sessionMode = sessionMode ?? opts.expectedSessionMode;
+    this.draftSessionMode = sessionMode;
+    this.draftModeRestorationRequired = sessionMode !== undefined;
     this.sessionId = opts.sessionId ?? randomUUID();
     this.ownedTranscriptPath = opts.resumeTranscriptPath;
     this.remountControls = opts.remountControls;
@@ -842,6 +878,21 @@ export class SessionRuntime {
     return () => { this.archiving = false; };
   }
 
+  /** Keep an admitted audio operation attached to this runtime incarnation. */
+  retainAudioOperation(): () => void {
+    if (this.disposed || this.state.status !== 'connected' || this.isStarting || this.resumeOperationInProgress || this.ownedSessionResumeRequired
+      || this.archiving || this.changingWorkspace) throw new Error('This chat is changing; audio cannot start yet.');
+    this.audioOperations++;
+    this.notifyActivityChanged();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.audioOperations--;
+      this.notifyActivityChanged();
+    };
+  }
+
   /** Fence prompts, restarts, eviction and other controls throughout host migration. */
   beginWorkspaceChange(): () => void {
     if (this.ownedSessionResumeRequired && !this.resumeOperationInProgress) throw new Error('Resume this chat before changing its directory.');
@@ -890,11 +941,11 @@ export class SessionRuntime {
   }
 
   private readonly pendingRunBindings = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-  markCronRunStarted(runId: string, sessionId: string): Promise<void> {
+  markCronRunStarted(runId: string, sessionId: string, context: { transcriptPath: string; mode: 'chat' | 'code'; scopeKey: string }): Promise<void> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pendingRunBindings.delete(runId); reject(new Error('Scheduled session binding timed out.')); }, 15_000);
       this.pendingRunBindings.set(runId, { resolve, reject, timer });
-      try { this.requireClient().sendCommand({ type: 'cron_run_started', run_id: runId, session_id: sessionId }); }
+      try { this.requireClient().sendCommand({ type: 'cron_run_started', run_id: runId, session_id: sessionId, transcript_path: context.transcriptPath, session_mode: context.mode, session_scope_key: context.scopeKey }); }
       catch (error) { clearTimeout(timer); this.pendingRunBindings.delete(runId); reject(error); }
     });
   }
@@ -963,10 +1014,14 @@ export class SessionRuntime {
         this.pendingScheduledTurns.set(runId, { resolve, reject });
         this.activeTurn = true;
         this.activeTurnGeneration = this.generation;
-        this.sessionHasHistory = true;
         try {
           client.sendCommand({ type: 'scheduled_run_turn', run_id: runId, prompt: task.prompt, model: config.model, reasoning: config.reasoning });
+          this.sessionHasHistory = true;
+          this.sessionIdentityCommitted = true;
+          this.draftSessionMode = undefined;
           this.journalPrompt(task.prompt, [], 0, { origin: 'scheduled' });
+          try { this.opts.onDurableSessionActivity?.(); }
+          catch (error) { this.diagnostics.add('warn', 'bridge', `failed to schedule session source recording: ${sanitizeDiagnostic(error)}`); }
         } catch (error) {
           this.pendingScheduledTurns.delete(runId);
           this.activeTurn = false;
@@ -1100,8 +1155,11 @@ export class SessionRuntime {
     return this.activeTurn || this.pendingPromptHydrations.size > 0 || this.pendingModelSwitch !== undefined;
   }
 
+  get hasActiveAudio(): boolean { return this.audioOperations > 0; }
+  get hasActiveMetadata(): boolean { return this.metadataOperations > 0; }
+
   get hasActiveWork(): boolean {
-    return this.resumeOperationInProgress || this.changingWorkspace || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.hasActiveAgents || this.pendingInteractions > 0;
+    return this.hasActiveAudio || this.metadataOperations > 0 || this.resumeOperationInProgress || this.changingWorkspace || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.pendingSlashCommands.size > 0 || this.hasActiveAgents || this.pendingInteractions > 0;
   }
 
   private currentResumeOwner(): PendingSessionResume | null {
@@ -1265,6 +1323,8 @@ export class SessionRuntime {
     const controlsEvent = this.latestState.get('conversation_controls_changed')?.event;
     return {
       sessionId: this.sessionId,
+      ...(!this.draftModeRestorationRequired && !this.ownedSessionResumeRequired && this.sessionMode
+        ? { sessionMode: this.sessionMode } : {}),
       runtimeId: this.runtimeId,
       epoch: `${this.runtimeId}:${this.remoteBaseSequence}`,
       baseSequence: this.remoteBaseSequence,
@@ -1457,6 +1517,74 @@ export class SessionRuntime {
     this.opts.onActivityChanged?.();
   }
 
+  private sendTrackedSlashCommand(client: BridgeClient, command: Extract<ClientCommand, { type: 'run_slash_command' }>): void {
+    const turnId = command.turn_id;
+    if (turnId == null) throw new Error('Slash command has no turn identity.');
+    if (this.pendingSlashCommands.has(turnId) || this.activeTurnId === turnId) {
+      throw new Error('A command with this turn identity is already active.');
+    }
+    const pending: PendingSlashCommand = {
+      client, generation: this.generation, fusion: /^\/fusion(?:\s|$)/i.test(command.raw.trim()),
+    };
+    this.pendingSlashCommands.set(turnId, pending);
+    this.notifyActivityChanged();
+    try {
+      client.sendCommand(command);
+    } catch (error) {
+      this.finishPendingSlashCommand(turnId, pending);
+      throw error;
+    }
+  }
+
+  private finishPendingSlashCommand(turnId: number, pending: PendingSlashCommand): void {
+    if (this.pendingSlashCommands.get(turnId) !== pending) return;
+    if (pending.retryTimer) clearTimeout(pending.retryTimer);
+    this.pendingSlashCommands.delete(turnId);
+    this.notifyActivityChanged();
+  }
+
+  private clearPendingSlashCommands(beforeGeneration = Infinity): void {
+    for (const [turnId, pending] of this.pendingSlashCommands) {
+      if (pending.generation < beforeGeneration) this.finishPendingSlashCommand(turnId, pending);
+    }
+  }
+
+  /** Fusion can start a background task before its independently sent task event arrives. */
+  private reconcileFusionSlash(turnId: number, pending: PendingSlashCommand): void {
+    if (pending.snapshotInFlight || this.pendingSlashCommands.get(turnId) !== pending) return;
+    pending.snapshotInFlight = true;
+    void (async () => {
+      try {
+        let installed = false;
+        await pending.client.requestRuntimeSnapshot((events) => {
+          if (this.disposed || pending.generation !== this.generation || pending.client !== this.client
+            || this.pendingSlashCommands.get(turnId) !== pending) return;
+          const roster = events.find((event) => event.type === 'session_agent_list');
+          if (roster?.type !== 'session_agent_list' || roster.session_id !== this.sessionId) {
+            throw new Error('Runtime background snapshot belongs to another session.');
+          }
+          this.gitActivity.replaceSnapshot(events);
+          installed = true;
+          this.finishPendingSlashCommand(turnId, pending);
+        });
+        if (!installed && this.pendingSlashCommands.get(turnId) === pending) {
+          throw new Error('Runtime background snapshot was not installed.');
+        }
+      } catch (error) {
+        if (this.pendingSlashCommands.get(turnId) !== pending || this.disposed
+          || pending.generation !== this.generation || pending.client !== this.client) return;
+        this.diagnostics.add('warn', 'bridge', `Fusion task handoff is unconfirmed: ${sanitizeDiagnostic(error)}`);
+        pending.retryTimer = setTimeout(() => {
+          pending.retryTimer = undefined;
+          this.reconcileFusionSlash(turnId, pending);
+        }, 1_000);
+        pending.retryTimer.unref?.();
+      } finally {
+        pending.snapshotInFlight = false;
+      }
+    })();
+  }
+
   /** A foreground terminal cannot settle independent background permission gates. */
   private clearTurnInteractions(all = false): void {
     ++this.foregroundInteractionEpoch;
@@ -1509,7 +1637,7 @@ export class SessionRuntime {
       if (this.permissionScopeChecks.get(id) !== request || generation !== this.generation
         || client !== this.client || this.disposed || this.resolvedPermissionIds.has(id)) return;
       if (!scope) return;
-      if (!scope.background_owned && ((!this.activeTurn && (!resumeOwner || this.currentResumeOwner() !== resumeOwner)) || this.cancellingTurn
+      if (!scope.background_owned && ((!this.activeTurn && this.pendingSlashCommands.size === 0 && (!resumeOwner || this.currentResumeOwner() !== resumeOwner)) || this.cancellingTurn
         || foregroundEpoch !== this.foregroundInteractionEpoch)) {
         this.diagnostics.add('warn', 'bridge', `dropped permission request ${id}: foreground owner ended or is cancelling`);
         return;
@@ -1536,22 +1664,36 @@ export class SessionRuntime {
     }
   }
 
-  async start(): Promise<void> {
+  async start(options?: { reconnectOnly?: boolean; metadataDrain?: boolean }): Promise<void> {
     if (this.disposed) throw new Error('SessionRuntime is disposed');
-    this.desiredRunning = true;
-    if (this.automaticRecovery) return this.automaticRecovery;
-    this.cancelAutomaticRecovery();
-    if (this.startPromise) return this.startPromise;
+    if (this.disposing && !options?.metadataDrain) throw new Error('SessionRuntime is closing');
+    if (!this.disposing) this.desiredRunning = true;
+    const pendingStart = this.automaticRecovery ?? this.startPromise;
+    if (pendingStart) {
+      await pendingStart;
+      if (options?.reconnectOnly && !this.liveConnectionRecovered) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
+      return;
+    }
+    if (this.recoveryTimer && !options?.reconnectOnly && !options?.metadataDrain) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = undefined;
+      await this.beginAutomaticRecovery(this.recoveryEpoch);
+      return;
+    }
+    if (!options?.reconnectOnly && !options?.metadataDrain) this.cancelAutomaticRecovery();
     if (this.state.status === 'connected') return;
     const startedAt = Date.now();
     const starting = this.restartChain.catch(() => undefined).then(async () => {
       try {
         if (this.disposed) throw new Error('SessionRuntime is disposed');
+        if (this.disposing && !options?.metadataDrain) throw new Error('SessionRuntime is closing');
         // Explicit restart/stop operations and automatic connection recovery
         // share one lifecycle queue, so only one sidecar can be started.
         if (this.state.status === 'connected') return;
-        if (this.child || this.client || this.adoptedPid) await this.recoverConnection();
+        if (this.child || this.client || this.adoptedPid) await this.recoverConnection(options?.reconnectOnly);
+        else if (options?.reconnectOnly) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
         else await this.startInternal();
+        if (!this.disposing) await this.restoreDraftSessionModeIfNeeded();
       } catch (error) {
         this.startupDiagnostic('bridge_start_failed', {
           durationMs: Date.now() - startedAt,
@@ -1569,11 +1711,12 @@ export class SessionRuntime {
     return completion;
   }
 
-  private async recoverConnection(): Promise<void> {
+  private async recoverConnection(reconnectOnly = false): Promise<void> {
     this.liveConnectionRecovered = false;
-    const interruptedForeground = this.disconnectedForegroundPending || this.activeTurn || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
+    const interruptedForeground = this.disconnectedForegroundPending || this.activeTurn || this.pendingSlashCommands.size > 0 || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
     const pid = this.child?.pid ?? this.adoptedPid;
     if (!pid || !this.processIsAlive(pid)) {
+      if (reconnectOnly) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
       await this.stopBridge();
       if (this.disposed) throw new Error('SessionRuntime is disposed');
       await this.startInternal();
@@ -1599,7 +1742,15 @@ export class SessionRuntime {
     try {
       await this.connectBridgeClient(lockfilePath, recoveredGeneration, false, false);
       if (this.disposed || recoveredGeneration !== this.generation) throw new Error('bridge connection superseded');
-      const recoveredClient = this.requireClient();
+      // During shutdown the authenticated hello itself is the server's drain
+      // barrier. Do not restore Side Chats, audio, or publish new work merely
+      // to prove that the old metadata writer has finished.
+      if (this.disposing) {
+        this.liveConnectionRecovered = true;
+        this.setState({ status: 'connected' });
+        return;
+      }
+      const recoveredClient = this.requireClient(true);
       await recoveredClient.requestRuntimeSnapshot((events) => {
         // Apply at the response boundary, before later live frames. An old
         // connection response must never overwrite a newer runtime's roster.
@@ -1611,6 +1762,9 @@ export class SessionRuntime {
           throw new Error('Runtime background snapshot belongs to another session.');
         }
         this.gitActivity.replaceSnapshot(events);
+        // The accepted hello and installed roster transfer ownership of any
+        // background work before the previous connection's leases go away.
+        this.clearPendingSlashCommands(recoveredGeneration);
         for (const event of events) this.broadcastClientEvent(event);
         this.notifyActivityChanged();
       });
@@ -1706,34 +1860,44 @@ export class SessionRuntime {
     const delay = 250 * 2 ** this.recoveryAttempts.length;
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = undefined;
-      const operation = this.restartChain.catch(() => undefined).then(async () => {
-        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
-        this.recoveryAttempts.push(Date.now());
-        this.setState({ status: 'restarting' });
-        await this.stopBridge();
-        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
-        await this.startInternal(false);
-        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
-        await this.restoreOwnedSessionIfNeeded();
-        await this.sideChatRecovery.restore((command) => this.requireClient().sendCommand(command));
-        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
-        if (!this.child && !this.adoptedPid) throw new Error('The replacement engine exited during recovery.');
-        this.setState({ status: 'connected' });
-        this.diagnostics.add('info', 'host', diagnosticEvent('bridge_auto_recovered', { sessionId: this.sessionId, generation: this.generation }));
-      });
-      this.automaticRecovery = operation;
-      this.restartChain = operation;
-      void operation.then(() => {
-        this.automaticRecovery = undefined;
-        if (epoch === this.recoveryEpoch && this.state.status === 'disconnected') this.scheduleAutomaticRecovery();
-      }, (error) => {
-        this.automaticRecovery = undefined;
-        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
-        this.diagnostics.add('warn', 'host', `automatic engine recovery failed: ${sanitizeDiagnostic(error)}`);
-        this.scheduleAutomaticRecovery();
-      });
+      void this.beginAutomaticRecovery(epoch);
     }, delay);
     this.recoveryTimer.unref();
+  }
+
+  private beginAutomaticRecovery(epoch: number): Promise<void> {
+    const operation = this.restartChain.catch(() => undefined).then(async () => {
+      if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+      this.recoveryAttempts.push(Date.now());
+      if ((this.sessionHasHistory || this.ownedSessionResumeRequired) && !this.ownedTranscriptPath) {
+        throw new Error('Choose the exact transcript source before recovering this chat.');
+      }
+      this.setState({ status: 'restarting' });
+      await this.stopBridge();
+      if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+      await this.startInternal(false);
+      if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+      await this.restoreOwnedSessionIfNeeded();
+      await this.sideChatRecovery.restore((command) => this.requireClient().sendCommand(command));
+      if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+      await this.restoreDraftSessionModeIfNeeded();
+      if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+      if (!this.child && !this.adoptedPid) throw new Error('The replacement engine exited during recovery.');
+      this.setState({ status: 'connected' });
+      this.diagnostics.add('info', 'host', diagnosticEvent('bridge_auto_recovered', { sessionId: this.sessionId, generation: this.generation }));
+    });
+    this.automaticRecovery = operation;
+    this.restartChain = operation;
+    void operation.then(() => {
+      this.automaticRecovery = undefined;
+      if (epoch === this.recoveryEpoch && this.state.status === 'disconnected') this.scheduleAutomaticRecovery();
+    }, (error) => {
+      this.automaticRecovery = undefined;
+      if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+      this.diagnostics.add('warn', 'host', `automatic engine recovery failed: ${sanitizeDiagnostic(error)}`);
+      this.scheduleAutomaticRecovery();
+    });
+    return operation;
   }
 
   private closeDetachedClient(client: BridgeClient): void {
@@ -1753,9 +1917,6 @@ export class SessionRuntime {
   }
 
   restart(beforeRestart?: () => void | Promise<void>): Promise<void> {
-    this.recoveryAttempts.length = 0;
-    this.desiredRunning = true;
-    this.cancelAutomaticRecovery();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) throw new Error('session runtime is no longer open');
       // This runs after any earlier queued lifecycle work and immediately
@@ -1764,10 +1925,17 @@ export class SessionRuntime {
       this.assertNoLiveSideChats();
       await beforeRestart?.();
       this.assertNoLiveSideChats();
+      if (this.audioOperations > 0) throw new Error('Stop audio before restarting this chat.');
+      if (this.metadataOperations > 0) throw new Error('Wait for the session metadata operation before restarting this chat.');
+      this.recoveryAttempts.length = 0;
+      this.desiredRunning = true;
+      this.cancelAutomaticRecovery();
+      if (this.draftSessionMode !== undefined) this.draftModeRestorationRequired = true;
       this.setState({ status: 'restarting' });
       try {
         await this.stopBridge();
         await this.startInternal();
+        await this.restoreDraftSessionModeIfNeeded();
       } catch (error) {
         if (this.state.status !== 'error') this.fail(error);
         throw error;
@@ -1789,11 +1957,12 @@ export class SessionRuntime {
   }
 
   stop(): Promise<void> {
-    this.cancelAutomaticRecovery();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) return;
       this.assertNoLiveSideChats();
+      if (this.hasActiveMetadata) throw new Error('Wait for the session metadata operation before stopping this chat.');
       this.desiredRunning = false;
+      this.cancelAutomaticRecovery();
       this.sideChatRecovery.clear();
       await this.stopBridge();
       this.setState({ status: 'idle' });
@@ -1808,15 +1977,26 @@ export class SessionRuntime {
     this.cancelAutomaticRecovery();
     try { this.revokeComputerAccess(); }
     catch (error) { this.diagnostics.add('warn', 'host', sanitizeDiagnostic(error)); }
-    this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
-      if (this.disposed) return;
-      try { await this.stopBridge(); }
-      finally { this.setState({ status: 'error', message: 'Computer permissions became unavailable. Restart this chat to continue.' }); }
+    this.metadataAdmissionBlocked = true;
+    // Do not occupy the lifecycle queue while waiting: an unconfirmed write
+    // may need that queue to reconnect to its original process and drain.
+    const drained = this.hasActiveMetadata
+      ? new Promise<void>(resolve => this.metadataDrainWaiters.add(resolve)) : Promise.resolve();
+    return drained.then(() => {
+      this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
+        if (this.disposed) return;
+        try { await this.stopBridge(); }
+        finally {
+          this.setState({ status: 'error', message: 'Computer permissions became unavailable. Restart this chat to continue.' });
+          this.metadataAdmissionBlocked = false;
+        }
+      });
+      return this.restartChain;
     });
-    return this.restartChain;
   }
 
   private async startInternal(publishConnected = true): Promise<void> {
+    if (this.draftSessionMode !== undefined) this.draftModeRestorationRequired = true;
     this.telemetryRevoked = false;
     this.liveConnectionRecovered = false;
     this.configuredCustomProviderIds = [];
@@ -1846,6 +2026,9 @@ export class SessionRuntime {
         reused: Boolean(reusable),
       });
       if (reusable) {
+        if (this.durableDraftTitle && this.draftSessionMode !== undefined) {
+          throw new Error('The new durable draft UUID is already owned.');
+        }
         this.launchDir = reusable.launchDir;
         this.adoptedPid = reusable.pid;
         this.adoptedProcessOwned = reusable.ownedProcess;
@@ -1998,6 +2181,7 @@ export class SessionRuntime {
     const handshakeStartedAt = Date.now();
     const hello = await client.connect();
     assertCurrentConnection();
+    if (this.disposing) return;
     if (this.telemetryRevoked || this.opts.getTelemetryConfig?.().enabled === false) {
       this.telemetryRevoked = true;
       this.telemetry?.disable();
@@ -2018,6 +2202,7 @@ export class SessionRuntime {
     }
     assertCurrentConnection();
     this.requestAudioSessionContext(client, generation);
+    client.sendCommand({ type: 'get_context_manifest' });
     const currentAudioCapabilities = this.opts.audioService?.getCapabilities();
     if (
       currentAudioCapabilities
@@ -2091,6 +2276,10 @@ export class SessionRuntime {
       sessionId: this.sessionId,
       bridgeDir,
       sessionTranscriptPath: this.ownedTranscriptPath,
+      restoreDraft: this.draftSessionMode !== undefined,
+      durableDraftTitle: this.draftSessionMode !== undefined ? this.durableDraftTitle : undefined,
+      initialConversationMode: this.draftSessionMode,
+      expectedConversationMode: this.draftSessionMode === undefined ? this.sessionMode : undefined,
       additionalDirectories: launch.additionalDirectories,
       promptDirectories: launch.promptDirectories,
       initialProjectRoot: launch.initialProjectRoot,
@@ -2436,7 +2625,7 @@ export class SessionRuntime {
         return;
       }
       const resumeOwner = this.currentResumeOwner();
-      if (isTurnOwnedEvent(event) && !this.activeTurn && !resumeOwner && !resumedUsage) {
+      if (isTurnOwnedEvent(event) && !this.activeTurn && this.pendingSlashCommands.size === 0 && !resumeOwner && !resumedUsage) {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
         return;
       }
@@ -2456,6 +2645,7 @@ export class SessionRuntime {
             // The owning chat must no longer be reused as an unsent draft.
             if (pending.creating && !this.sessionIdentityCommitted && this.opts.onFirstPromptSent?.() !== false) {
               this.sessionIdentityCommitted = true;
+              this.draftSessionMode = undefined;
             }
             pending.resolve(event.jobs);
           }
@@ -2485,12 +2675,37 @@ export class SessionRuntime {
           for (const resolve of this.customProviderWaiters.get(providerId) ?? []) resolve();
         }
       }
+      if (event.type === 'context_manifest') {
+        const pending = this.pendingDraftModeSnapshot;
+        if (pending?.generation === generation) {
+          try {
+            const manifest: unknown = JSON.parse(event.manifest_json);
+            const session = manifest && typeof manifest === 'object' && !Array.isArray(manifest)
+              ? (manifest as Record<string, unknown>)['session'] : undefined;
+            if (!session || typeof session !== 'object' || Array.isArray(session)
+              || (session as Record<string, unknown>)['session_id'] !== this.sessionId
+              || (session as Record<string, unknown>)['mode'] !== this.draftSessionMode) {
+              throw new Error('The restored draft conversation mode does not match its owner.');
+            }
+            pending.complete();
+          } catch (error) {
+            pending.fail(error instanceof Error ? error : new Error(String(error)));
+          }
+        }
+        return;
+      }
       if (event.type === 'session_resumed') {
         if (event.session_id !== this.sessionId) {
           this.rejectPendingSessionResume(new Error('engine resumed a different session id'));
           this.fail('engine resumed a different session id');
           return;
         }
+        if (this.sessionMode !== undefined && event.mode !== this.sessionMode) {
+          this.rejectPendingSessionResume(new Error('engine resumed a session in a different mode'));
+          this.fail('engine resumed a session in a different mode');
+          return;
+        }
+        this.sessionMode = event.mode;
         this.requestAudioSessionContext(client, generation);
         this.sessionHasHistory = true;
         this.sessionIdentityCommitted = true;
@@ -2500,8 +2715,18 @@ export class SessionRuntime {
         }
       }
       if (event.type === 'session_started') {
-        if (event.session_id === this.sessionId) this.requestAudioSessionContext(client, generation);
-        else this.invalidateNativeMediaBinding();
+        if (event.session_id !== this.sessionId) {
+          this.pendingDraftModeSnapshot?.fail(new Error('engine started a different session id'));
+          this.fail('engine started a different session id');
+          return;
+        }
+        if (this.sessionMode !== undefined && event.mode !== this.sessionMode) {
+          this.pendingDraftModeSnapshot?.fail(new Error('engine started a session in a different mode'));
+          this.fail('engine started a session in a different mode');
+          return;
+        }
+        this.sessionMode = event.mode;
+        this.requestAudioSessionContext(client, generation);
       }
       if (event.type === 'permission_mode_changed' && event.mode === this.pendingPermissionSwitch?.mode) {
         this.pendingPermissionSwitch.complete();
@@ -2544,6 +2769,15 @@ export class SessionRuntime {
         this.activeTurn = true;
         this.activeTurnGeneration = generation;
         this.activeTurnId = event.turn_id;
+        const pending = event.turn_id === undefined ? undefined : this.pendingSlashCommands.get(event.turn_id);
+        if (pending) this.finishPendingSlashCommand(event.turn_id!, pending);
+      }
+      if (event.type === 'slash_command_result' && event.turn_id !== undefined) {
+        const pending = this.pendingSlashCommands.get(event.turn_id);
+        if (pending) {
+          if (pending.fusion && !event.is_error) this.reconcileFusionSlash(event.turn_id, pending);
+          else this.finishPendingSlashCommand(event.turn_id, pending);
+        }
       }
       if (event.type === 'tool_use_started' && (event.tool === 'computer' || event.tool === 'browser')) this.computerAccessInTurn = true;
       if (event.type === 'turn_ended' || event.type === 'session_ended') {
@@ -2656,7 +2890,7 @@ export class SessionRuntime {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
       // Same reasoning as the permission handler above: the engine is parked on
       // an answer, so a discarded request is a stall, not a no-op.
-      if ((!this.activeTurn && !this.currentResumeOwner()) || this.cancellingTurn) {
+      if ((!this.activeTurn && this.pendingSlashCommands.size === 0 && !this.currentResumeOwner()) || this.cancellingTurn) {
         this.diagnostics.add('warn', 'bridge', `dropped computer access request ${request.request_id}: ${this.cancellingTurn ? 'turn is cancelling' : 'no active turn'}`);
         return;
       }
@@ -2927,12 +3161,14 @@ export class SessionRuntime {
     this.audioCleanupGenerations.delete(generation);
   }
 
-  sendPrompt(text: unknown, images: unknown = [], turnId?: unknown, visualizationContext?: unknown, source?: PromptSource): void | Promise<void> {
+  sendPrompt(text: unknown, images: unknown = [], turnId?: unknown, visualizationContext?: unknown, source?: PromptSource, admission?: PromptAdmission): void | Promise<void> {
     const id = validateOptionalTurnId(turnId);
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
     if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
     if (this.ownedSessionResumeRequired) throw new Error('Resume this chat before sending another prompt.');
+    if (this.draftModeRestorationRequired) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
     if (this.archiving) throw new Error('This chat is being archived.');
+    if (admission?.requireIdleFor && this.turnActive) throw new Error(`${admission.requireIdleFor} cannot be sent while a turn is running`);
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
     const context = visualizationContext === undefined || visualizationContext === null
@@ -2950,14 +3186,14 @@ export class SessionRuntime {
           if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
           if (this.selectedModelReference) await this.ensureModelProviderCredential(this.selectedModelReference);
           if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) throw new Error('Prompt credential loading was interrupted.');
-          this.sendPreparedPrompt(prompt, validatedImages, id, context, source);
+          this.sendPreparedPrompt(prompt, validatedImages, id, context, source, admission, token);
         } finally {
           this.pendingPromptHydrations.delete(token);
           this.notifyActivityChanged();
         }
       })();
     }
-    this.sendPreparedPrompt(prompt, validatedImages, id, context, source);
+    this.sendPreparedPrompt(prompt, validatedImages, id, context, source, admission);
   }
 
   private sendPreparedPrompt(
@@ -2966,7 +3202,18 @@ export class SessionRuntime {
     turnId?: number,
     visualizationContext?: VisualizationReference,
     source?: PromptSource,
+    admission?: PromptAdmission,
+    hydrationToken?: symbol,
   ): void {
+    if (this.draftModeRestorationRequired) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
+    // Credential hydration may yield after the gateway's admission check.
+    // Verify the owner and competing turns immediately before the synchronous
+    // bridge send, excluding only this prompt's own hydration lease.
+    admission?.authorize?.();
+    if (admission?.requireIdleFor && (this.activeTurn || this.pendingModelSwitch !== undefined
+      || [...this.pendingPromptHydrations.keys()].some(token => token !== hydrationToken))) {
+      throw new Error(`${admission.requireIdleFor} cannot be sent while a turn is running`);
+    }
     const needsIdentityCommit = !this.sessionIdentityCommitted;
     const traceContext = this.telemetryRevoked ? undefined : this.telemetry?.beginTurn(turnId);
     try {
@@ -2977,10 +3224,15 @@ export class SessionRuntime {
         ...(visualizationContext !== undefined ? { visualizationContext } : {}),
       });
     } catch (error) { this.telemetry?.endTurn('error', traceContext); throw error; }
+    if (!source || source.origin === 'desktop' || source.origin === 'device') {
+      try { this.opts.onPromptAdmitted?.(); }
+      catch (error) { this.diagnostics.add('warn', 'host', `prompt admission callback: ${sanitizeDiagnostic(error)}`); }
+    }
     this.journalPrompt(prompt, validatedImages, turnId ?? 0, source);
     this.sessionHasHistory = true;
     if (needsIdentityCommit && this.opts.onFirstPromptSent?.() !== false) {
       this.sessionIdentityCommitted = true;
+      this.draftSessionMode = undefined;
     }
     // Claim the local slot as soon as the command crossed the authenticated
     // bridge boundary. `turn_started` may arrive on a later event-loop tick;
@@ -3082,6 +3334,79 @@ export class SessionRuntime {
     this.notifyActivityChanged();
   }
 
+  /** Metadata stays with the captured runtime, socket and writer incarnation. */
+  async captureSessionMetadataOwner(transcriptPath: string, mode: 'chat' | 'code'):
+    Promise<Awaited<ReturnType<BridgeClient['captureSessionMetadataOwner']>>> {
+    const client = this.requireClient();
+    const generation = this.generation;
+    if (this.sessionMode !== mode) throw new Error('The metadata owner mode changed.');
+    const owner = await client.captureSessionMetadataOwner({ sessionId: this.sessionId, transcriptPath, sessionMode: mode });
+    if (this.client !== client || this.generation !== generation || this.disposed || this.sessionMode !== mode) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try { await owner.release(); break; }
+        catch (error) {
+          if (attempt === 2) this.diagnostics.add('warn', 'bridge', `metadata release failed: ${sanitizeDiagnostic(error)}`);
+        }
+      }
+      throw new Error('The metadata capture owner changed.');
+    }
+    return {
+      apply: async (action, title) => {
+        if (this.client !== client || this.generation !== generation || this.disposed || this.sessionMode !== mode) {
+          throw new Error('The metadata runtime owner changed.');
+        }
+        if (this.metadataAdmissionBlocked || this.changingWorkspace || this.isStarting || this.state.status !== 'connected') {
+          throw new Error('The metadata runtime is changing.');
+        }
+        const child = this.child;
+        const pid = child?.pid ?? this.adoptedPid;
+        if (!pid) throw new Error('The metadata writer process is unavailable.');
+        this.metadataOperations++;
+        this.notifyActivityChanged();
+        try {
+          try { await owner.apply(action, title); }
+          catch (error) {
+            if (!(error instanceof SessionMetadataUnconfirmedError)) throw error;
+            // A closed socket does not mean its admitted writer stopped. The
+            // server admits a new hello only after those writes have joined.
+            await this.waitForMetadataDrain(pid, child, generation, client);
+            throw new Error('The metadata result is unknown after the connection changed.', { cause: error });
+          }
+          if (this.client !== client || this.generation !== generation || this.disposed) {
+            throw new Error('The metadata result is unconfirmed after the runtime changed.');
+          }
+        } finally {
+          this.metadataOperations--;
+          if (!this.hasActiveMetadata) {
+            for (const resolve of this.metadataDrainWaiters) resolve();
+            this.metadataDrainWaiters.clear();
+          }
+          this.notifyActivityChanged();
+        }
+      },
+      release: () => owner.release(),
+    };
+  }
+
+  /** Retain this sidecar until its old metadata writes have a drain proof. */
+  private async waitForMetadataDrain(pid: number, child: ChildProcess | null, generation: number, client: BridgeClient): Promise<void> {
+    const alive = () => (child === null || (child.exitCode === null && child.signalCode === null)) && this.processIsAlive(pid);
+    const recovered = () => this.client !== client && this.generation !== generation
+      && this.state.status === 'connected' && this.liveConnectionRecovered;
+    while (!this.disposed && alive()) {
+      const currentPid = this.child?.pid ?? this.adoptedPid;
+      if (currentPid === pid) {
+        if (recovered()) return;
+        if (this.state.status !== 'connected') {
+          try { await this.start({ reconnectOnly: true, metadataDrain: true }); }
+          catch { /* The original process may still be draining. Keep its lease. */ }
+          if (recovered()) return;
+        }
+      }
+      if (!this.disposed && alive()) await new Promise<void>(resolve => setTimeout(resolve, 250));
+    }
+  }
+
   /** Renderer UI control is a narrow typed lane, separate from generic `command()`. */
   async dispatchModUiControl(value: unknown): Promise<UiControlCallResultDto<NativeUiControlResponse>> {
     const request = validateModUiControlRequest(value);
@@ -3154,6 +3479,53 @@ export class SessionRuntime {
     return response;
   }
 
+  private assertModeReadyForSlashCommand(): void {
+    if (this.draftModeRestorationRequired) {
+      throw new Error('Wait for the conversation mode to be ready before sending a command.');
+    }
+  }
+
+  /** Capture one read-only summary from this runtime without interrupting its turn. */
+  prepareSessionHandoff(requestId: string, targetMode: RuntimeSessionMode, signal: AbortSignal, retry = false): Promise<Extract<ClientEvent, { type: 'session_handoff_prepared' }>> {
+    const client = this.requireClient();
+    const generation = this.generation;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error, result?: Extract<ClientEvent, { type: 'session_handoff_prepared' }>) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', cancel);
+        this.pendingHandoffFailures.delete(onInterrupted);
+        client.off('event', onEvent);
+        client.off('close', onClose);
+        if (error) reject(error); else resolve(result!);
+      };
+      const cancel = () => {
+        try { client.sendCommand({ type: 'cancel_session_handoff', request_id: requestId }); } catch { /* already disconnected */ }
+        finish(new Error('Handoff cancelled.'));
+      };
+      const onClose = () => finish(new Error('The source connection closed during handoff.'));
+      const onInterrupted = (error: Error) => finish(error);
+      const onEvent = (event: ClientEvent) => {
+        if (client !== this.client || generation !== this.generation) return;
+        if ((event.type !== 'session_handoff_prepared' && event.type !== 'session_handoff_failed') || event.request_id !== requestId) return;
+        if (event.type === 'session_handoff_failed') finish(new Error(event.message));
+        else if (event.source_session_id !== this.sessionId || event.source_mode !== this.sessionMode || event.target_mode !== targetMode) {
+          finish(new Error('Handoff source or target did not match.'));
+        } else finish(undefined, event);
+      };
+      client.on('event', onEvent);
+      client.on('close', onClose);
+      this.pendingHandoffFailures.add(onInterrupted);
+      signal.addEventListener('abort', cancel, { once: true });
+      if (signal.aborted) { cancel(); return; }
+      void this.dispatchCommand(retry ? { type: 'retry_session_handoff', request_id: requestId }
+        : { type: 'prepare_session_handoff', request_id: requestId, target_mode: targetMode }).catch((error: unknown) => {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
   /**
    * Validate a renderer command and forward it to the engine. SECURITY:
    * `set_permission_mode: bypassPermissions` is gated behind explicit,
@@ -3162,12 +3534,22 @@ export class SessionRuntime {
    * never reaches the engine; the renderer's mode display reads the engine's
    * actual (unchanged) mode, so nothing to revert.
    */
-  async dispatchCommand(command: unknown, source?: PromptSource): Promise<void> {
+  async dispatchCommand(command: unknown, source?: PromptSource, authorize?: () => void): Promise<void> {
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
     if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
     if (this.ownedSessionResumeRequired) throw new Error('Resume this chat before sending another command.');
     if (this.archiving) throw new Error('This chat is being archived.');
-    const validated = validateClientCommand(command, this.activeWorkspace);
+    const input = validateClientCommand(command, this.activeWorkspace);
+    if (input.type === 'run_slash_command' && /^\/(?:clear|reset|new)(?:\s|$)/.test(input.raw)) {
+      throw new Error('Start a new chat using the desktop session controls.');
+    }
+    // A slash result or subsequent turn must identify the command whose cache
+    // lease it settles, including callers that omitted the optional turn id.
+    const validated = input.type === 'run_slash_command' && input.turn_id == null
+      ? { ...input, turn_id: randomHostTurnId() }
+      : input;
+    if (this.draftModeRestorationRequired) throw new Error('Wait for the conversation mode to be ready before sending a command.');
+    if (validated.type === 'run_slash_command') this.assertModeReadyForSlashCommand();
     if (validated.type.startsWith('side_chat_')) {
       const client = this.requireClient();
       if (validated.type === 'side_chat_create') this.pendingSideCreates.add(validated.request_id);
@@ -3227,10 +3609,13 @@ export class SessionRuntime {
           // restarts invalidate ownership; they must never publish into a new one.
           if (this.disposed || this.archiving || !this.pendingPromptHydrations.has(token)
             || generation !== this.generation || client !== this.client) throw cause;
+          this.assertModeReadyForSlashCommand();
           this.recordFusionPreparationFailure(validated, cause, source);
           return;
         }
-        client.sendCommand({ ...validated, raw: pinnedRaw });
+        this.assertModeReadyForSlashCommand();
+        authorize?.();
+        this.sendTrackedSlashCommand(client, { ...validated, raw: pinnedRaw });
         this.commitFusionHistory(validated);
         this.journalSlashCommand(validated, source);
       } finally {
@@ -3242,7 +3627,7 @@ export class SessionRuntime {
     // Preserve slash hook provenance and confirm the actual model before saving.
     if (validated.type === 'run_slash_command' && this.opts.onModelSelected) {
       const model = /^\/model\s+([\s\S]+)$/.exec(validated.raw.trim())?.[1]?.trim();
-      if (model) return this.switchModel(model, true, validated);
+      if (model) return this.switchModel(model, true, validated, authorize);
     }
     if (validated.type === 'set_permission_mode' && validated.mode === 'bypassPermissions') {
       const accepted = (await this.opts.confirmBypassPermissions?.()) ?? false;
@@ -3259,7 +3644,11 @@ export class SessionRuntime {
     if (validated.type === 'set_fast_mode' && (this.opts.getSavedFastMode || this.opts.onFastModeSelected)) {
       return this.applyFastMode(validated.enabled, true);
     }
-    this.requireClient().sendCommand(validated);
+    if (validated.type === 'run_slash_command') this.assertModeReadyForSlashCommand();
+    authorize?.();
+    const client = this.requireClient();
+    if (validated.type === 'run_slash_command') this.sendTrackedSlashCommand(client, validated);
+    else client.sendCommand(validated);
     this.commitFusionHistory(validated);
     this.journalSlashCommand(validated, source);
   }
@@ -3267,7 +3656,10 @@ export class SessionRuntime {
   private commitFusionHistory(command: ClientCommand): void {
     if (command.type !== 'run_slash_command' || !/^\/fusion(?:\s|$)/i.test(command.raw.trim())) return;
     this.sessionHasHistory = true;
-    if (!this.sessionIdentityCommitted && this.opts.onFirstPromptSent?.() !== false) this.sessionIdentityCommitted = true;
+    if (!this.sessionIdentityCommitted && this.opts.onFirstPromptSent?.() !== false) {
+      this.sessionIdentityCommitted = true;
+      this.draftSessionMode = undefined;
+    }
   }
 
   private recordFusionPreparationFailure(command: Extract<ClientCommand, { type: 'run_slash_command' }>, cause: unknown, source?: PromptSource): void {
@@ -3389,7 +3781,8 @@ export class SessionRuntime {
       this.notifyActivityChanged();
       try {
         if (selectedPath) {
-          selectedResponse = client.resumeSessionFromTranscript(this.sessionId, selectedPath, pending.controller.signal);
+          if (!this.sessionMode) throw new Error('The session mode is unavailable.');
+          selectedResponse = client.resumeSessionFromTranscript(this.sessionId, selectedPath, this.sessionMode, pending.controller.signal);
           void selectedResponse.then(() => {
             if (this.currentResumeOwner() !== pending) return;
             pending.responseReceived = true;
@@ -3399,7 +3792,8 @@ export class SessionRuntime {
             this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)), pending);
           });
         } else {
-          client.sendCommand({ type: 'resume_session', session_id: this.sessionId,
+          if (!this.sessionMode) throw new Error('The session mode is unavailable.');
+          client.sendCommand({ type: 'resume_session', session_id: this.sessionId, expected_mode: this.sessionMode,
             cwd: this.projectPath || this.activeWorkspace });
         }
       } catch (error) {
@@ -3441,7 +3835,38 @@ export class SessionRuntime {
   }
 
   async restoreOwnedSessionIfNeeded(): Promise<void> {
-    if (this.sessionHasHistory || this.ownedSessionResumeRequired) await this.resumeOwnedSession();
+    if (this.sessionHasHistory || this.ownedSessionResumeRequired) {
+      if (!this.ownedTranscriptPath) throw new Error('Choose the exact transcript source before recovering this chat.');
+      await this.resumeOwnedSession(this.ownedTranscriptPath);
+    }
+  }
+
+  private async restoreDraftSessionModeIfNeeded(): Promise<void> {
+    if (!this.draftModeRestorationRequired || this.draftSessionMode === undefined) return;
+    // Boot creates or restores the owner under the transcript writer lease.
+    // The confirmation only reads it; a conversation never changes mode.
+    await this.requestDraftModeSnapshot();
+    this.draftModeRestorationRequired = false;
+  }
+
+  private requestDraftModeSnapshot(): Promise<void> {
+    if (this.pendingDraftModeSnapshot) return Promise.reject(new Error('A draft mode check is already in progress.'));
+    const client = this.requireClient();
+    const generation = this.generation;
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => pending.fail(new Error('Timed out restoring the draft conversation mode.')), 10_000);
+      timer.unref();
+      const finish = (error?: Error): void => {
+        if (this.pendingDraftModeSnapshot !== pending) return;
+        this.pendingDraftModeSnapshot = undefined;
+        clearTimeout(timer);
+        if (error) reject(error); else resolve();
+      };
+      const pending = { generation, complete: () => finish(), fail: (error: Error) => finish(error) };
+      this.pendingDraftModeSnapshot = pending;
+      try { client.sendCommand({ type: 'get_context_manifest' }); }
+      catch (error) { pending.fail(error instanceof Error ? error : new Error(String(error))); }
+    });
   }
 
   private resolvePendingSessionResume(pending: PendingSessionResume): void {
@@ -3500,7 +3925,8 @@ export class SessionRuntime {
     return this.client !== null;
   }
 
-  private requireClient(): BridgeClient {
+  private requireClient(allowDisposing = false): BridgeClient {
+    if (this.disposing && !allowDisposing) throw new Error('The session is closing.');
     this.refreshAccessState();
     if (!this.activeWorkspaceTrusted) throw new Error('workspace trust is required before using the engine');
     if (!this.client) throw new Error(`bridge client not connected (state=${this.state.status})`);
@@ -3552,7 +3978,8 @@ export class SessionRuntime {
     this.state = next;
     if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
       this.telemetry?.interrupt(next.status === 'error' ? 'error' : 'interrupted');
-      this.disconnectedForegroundPending ||= this.activeTurn || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
+      this.disconnectedForegroundPending ||= this.activeTurn || this.pendingSlashCommands.size > 0 || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
+      this.pendingDraftModeSnapshot?.fail(new Error('Draft mode restoration was interrupted.'));
       this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
       this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
       this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
@@ -3592,6 +4019,7 @@ export class SessionRuntime {
   }
 
   private clearPendingConnectionOperations(): void {
+    for (const fail of [...this.pendingHandoffFailures]) fail(new Error('Handoff connection interrupted.'));
     for (const queued of this.queuedModUiRequests.splice(0)) queued.reject(new Error('Mod UI request interrupted.'));
     this.pendingModUiRequests.rejectSession(this.sessionId, new Error('Mod UI request interrupted.'));
     for (const pending of this.pendingCron.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled task connection interrupted.')); }
@@ -3601,6 +4029,7 @@ export class SessionRuntime {
     for (const pending of this.pendingRunBindings.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled execution interrupted.')); }
     this.pendingRunBindings.clear();
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
+    this.pendingDraftModeSnapshot?.fail(new Error('Draft mode restoration was interrupted.'));
     this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
     this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
     this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
@@ -3706,6 +4135,7 @@ export class SessionRuntime {
     if (requestedExit) closeClient();
     if (!adoptedPid || adoptedProcessOwned) this.removeLaunchDirectory();
     else this.launchDir = null;
+    this.clearPendingSlashCommands();
   }
 
   private processIsAlive(pid: number): boolean {
@@ -3752,20 +4182,28 @@ export class SessionRuntime {
     catch (error) { this.diagnostics.add('warn', 'bridge', `catalog refresh: ${sanitizeDiagnostic(error)}`); }
   }
 
-  async dispose(options?: { replacing?: boolean }): Promise<void> {
-    if (this.disposed) return;
-    this.disposed = true;
+  dispose(options?: { replacing?: boolean }): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.disposing = true;
     this.sideChatRecovery.clear();
     this.desiredRunning = false;
     this.cancelAutomaticRecovery();
-    await this.restartChain.catch(() => undefined);
-    if (this.opts.envelopeEvents) {
-      this.setState({ status: 'disconnected', reason: options?.replacing ? 'session runtime replaced' : SESSION_RUNTIME_DISPOSED_REASON });
-    }
-    await this.stopBridge();
-    this.unsubscribeAudioService?.();
-    this.targets.clear();
-    this.notifyRemote({ type: 'disposed' });
-    this.remoteObservers.clear();
+    this.metadataAdmissionBlocked = true;
+    const operation = (async () => {
+      if (this.hasActiveMetadata) await new Promise<void>(resolve => this.metadataDrainWaiters.add(resolve));
+      if (this.disposed) return;
+      this.disposed = true;
+      await this.restartChain.catch(() => undefined);
+      if (this.opts.envelopeEvents) {
+        this.setState({ status: 'disconnected', reason: options?.replacing ? 'session runtime replaced' : SESSION_RUNTIME_DISPOSED_REASON });
+      }
+      await this.stopBridge();
+      this.unsubscribeAudioService?.();
+      this.targets.clear();
+      this.notifyRemote({ type: 'disposed' });
+      this.remoteObservers.clear();
+    })();
+    this.disposePromise = operation;
+    return operation;
   }
 }

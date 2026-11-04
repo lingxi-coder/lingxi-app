@@ -10,9 +10,10 @@ struct LocalAppSourceArchive: Sendable {
 }
 
 extension UnifiedLocalApps {
-    func importSource(_ url: URL) async throws -> LocalAppPublishResult {
+    func importSource(_ url: URL, mode: SessionMode) async throws -> LocalAppPublishResult {
+        try LocalAppDevelopmentAdmission.requireCode(mode)
         let isDirectory = try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
-        if isDirectory { return try await client.request(["op": .string("import"), "sourcePath": .string(url.path)]) }
+        if isDirectory { return try await client.request(["op": .string("import"), "sourcePath": .string(url.path)], purpose: .development(mode)) }
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         guard size > 0, size <= 25 * 1024 * 1024 else { throw MarketFailure("UPLOAD_TOO_LARGE") }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("local-app-import-" + UUID().uuidString, isDirectory: true)
@@ -20,7 +21,7 @@ extension UnifiedLocalApps {
         defer { try? FileManager.default.removeItem(at: folder) }
         try await Task.detached(priority: .userInitiated) { try MarketPackageFiles.extract(url, to: folder) }.value
         try Task.checkCancellation()
-        return try await client.request(["op": .string("import"), "sourcePath": .string(folder.path)])
+        return try await client.request(["op": .string("import"), "sourcePath": .string(folder.path)], purpose: .development(mode))
     }
 
     /// The shared library selects the exact public inventory before native ZIP creation.

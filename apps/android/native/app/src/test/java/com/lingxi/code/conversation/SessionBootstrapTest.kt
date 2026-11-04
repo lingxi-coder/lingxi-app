@@ -47,22 +47,27 @@ class SessionBootstrapTest {
         suspend fun emit(event: ClientEvent) {
             // Same listener ordering as EngineConversationSource: retain the
             // owner first, then relay the event to live/recovery collectors.
-            active.update { reduceActivatedSession(it, event, SessionMode.Code) }
+            active.update { sessionActivationFrom(event) ?: it }
             events.emit(event)
         }
     }
 
-    @Test fun earlyOwnerListingIsRetainedUntilTheViewModelSubscribes() = runTest(dispatcher) {
+    @Test fun earlyOwnerListingCannotSupplyAnUnconfirmedMode() = runTest(dispatcher) {
         val source = Source()
         source.emit(ClientEvent.SessionAgentList(owner, emptyList()))
         val vm = ChatViewModel(source)
         runCurrent()
+        assertEquals("new", vm.state.value.session.id)
+        assertNull(source.activeSessionState.value)
+        source.emit(ClientEvent.SessionStarted(owner, SessionModeDto.CHAT))
+        runCurrent()
         assertEquals(owner, vm.state.value.session.id)
+        assertEquals(SessionMode.Chat, vm.state.value.sessionMode)
         assertTrue(vm.state.value.sessionReady)
         assertTrue(vm.state.value.messages.isEmpty())
     }
 
-    @Test fun delayedOwnerListingPreservesTheLiveWidgetAndReplyCollector() = runTest(dispatcher) {
+    @Test fun delayedLifecycleEventPreservesTheLiveWidgetAndReplyCollector() = runTest(dispatcher) {
         val source = Source()
         val vm = ChatViewModel(source)
         vm.send("Draw a bicycle")
@@ -74,7 +79,7 @@ class SessionBootstrapTest {
         assertEquals("new", before.session.id)
         assertTrue(before.streaming)
 
-        source.emit(ClientEvent.SessionAgentList(owner, emptyList()))
+        source.emit(ClientEvent.SessionStarted(owner, SessionModeDto.CODE))
         runCurrent()
 
         assertEquals(owner, vm.state.value.session.id)
@@ -130,12 +135,12 @@ class SessionBootstrapTest {
         assertEquals("saved", vm.state.value.session.id)
     }
 
-    @Test fun bootstrapUsesTheSourcesModeAndRejectsPlaceholderOwners() {
-        val activation = reduceActivatedSession(null, ClientEvent.SessionAgentList(owner, emptyList()), SessionMode.Chat)
+    @Test fun onlyLifecycleReportsProvideOwnerMode() {
+        val activation = sessionActivationFrom(ClientEvent.SessionStarted(owner, SessionModeDto.CHAT))
         assertEquals(SessionMode.Chat, activation?.mode)
-        assertEquals(SessionActivationKind.Bootstrap, activation?.kind)
+        assertEquals(SessionActivationKind.Started, activation?.kind)
         for (id in listOf("", "new")) {
-            assertNull(reduceActivatedSession(null, ClientEvent.SessionAgentList(id, emptyList()), SessionMode.Code))
+            assertNull(sessionActivationFrom(ClientEvent.SessionAgentList(id, emptyList())))
         }
     }
 }

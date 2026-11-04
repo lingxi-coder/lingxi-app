@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'project-creation-electron.mjs');
 
-test('Create project stages a directory, preserves cancellation, and refreshes the real sidebar after confirmation', async () => {
+test('Chat rejects Local App development and recovery without switching; Code project creation preserves its draft flow', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-project-creation-vite-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-project-creation-electron-'));
   const vite = await createServer({
@@ -69,7 +69,7 @@ test('Create project stages a directory, preserves cancellation, and refreshes t
       });
     });
 
-    for (const key of ['opening', 'stagedSelection', 'cancel', 'retry', 'busy', 'sidebarRefresh', 'refreshFailure', 'settingsEntry', 'appProject', 'canceledLookup', 'sourceRecovery', 'startupRecovery', 'nativePaths', 'focusAndEscape', 'narrow']) assert.equal(result[key], true, key);
+    for (const key of ['toolCodeRequired', 'chatRequiresCode', 'chatPendingVisible', 'codeSessionRecovery', 'opening', 'stagedSelection', 'cancel', 'retry', 'busy', 'sidebarRefresh', 'refreshFailure', 'settingsEntry', 'appProject', 'canceledLookup', 'sourceRecovery', 'startupRecovery', 'nativePaths', 'focusAndEscape', 'narrow']) assert.equal(result[key], true, key);
 
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');

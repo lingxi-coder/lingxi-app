@@ -5,9 +5,14 @@ import org.json.JSONObject
 import com.lingxi.code.model.persistenceKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CronAutomationTest {
+    @Test fun unknownOutcomeIsTerminalAndEligibleForFailureNotifications() {
+        assertTrue(CronRunStatus.OutcomeUnknown.isTerminal)
+        assertTrue(shouldNotifyCronRun("failed", CronRunStatus.OutcomeUnknown))
+    }
     @Test
     fun defaultsCaptureQualifiedModelAndAutomaticReasoning() {
         val config = CronAutomation.defaults("provider/model")
@@ -29,14 +34,25 @@ class CronAutomationTest {
 
     @Test
     fun copyingDoesNotContinueTheOriginalSession() {
-        val original = CronAutomation("""{"version":2,"status":"completed","runMode":"task_session","ownedSessionId":"old","targetSessionId":"selected","model":"provider/model","name":"Daily brief"}""")
+        val original = CronAutomation("""{"version":2,"status":"completed","runMode":"task_session","ownedSessionId":"old","ownedSessionTranscriptPath":"/guest/owned","ownedSessionMode":"chat","ownedSessionScopeKey":"global","targetSessionId":"selected","targetSessionTranscriptPath":"/guest/exact","targetSessionMode":"chat","targetSessionScopeKey":"global","model":"provider/model","name":"Daily brief"}""")
         val copy = original.copied()
         assertEquals("active", copy.status)
         assertEquals("new_session", copy.runMode)
         assertEquals("Daily brief", copy.name)
         assertEquals("provider/model", copy.model)
         assertFalse(JSONObject(copy.json).has("ownedSessionId"))
+        assertFalse(JSONObject(copy.json).has("ownedSessionTranscriptPath"))
+        assertFalse(JSONObject(copy.json).has("ownedSessionMode"))
+        assertFalse(JSONObject(copy.json).has("ownedSessionScopeKey"))
         assertFalse(JSONObject(copy.json).has("targetSessionId"))
+        assertFalse(JSONObject(copy.json).has("targetSessionTranscriptPath"))
+        assertFalse(JSONObject(copy.json).has("targetSessionMode"))
+        assertFalse(JSONObject(copy.json).has("targetSessionScopeKey"))
+        val edit = JSONObject(original.change("name", "Updated").json)
+        assertEquals("old", edit.getString("ownedSessionId"))
+        assertEquals("/guest/owned", edit.getString("ownedSessionTranscriptPath"))
+        assertEquals("chat", edit.getString("ownedSessionMode"))
+        assertEquals("global", edit.getString("ownedSessionScopeKey"))
     }
     @Test
     fun failureNotificationsExcludeSuccessAndPauseCancellation() {

@@ -50,6 +50,7 @@ export function parseDeepLink(raw: string): DeepLinkTarget {
     params[key] = value;
   }
   if (params.mode && !['chat', 'code'].includes(params.mode)) throw new DeepLinkError('invalid', 'Invalid session mode');
+  if (route.startsWith('session/') && !params.mode) throw new DeepLinkError('invalid', 'Session mode is required');
   if (params.message && (!route.startsWith('session/') || !/^[\da-f]{8}(-[\da-f]{4}){3}-[\da-f]{12}$/iu.test(params.message))) throw new DeepLinkError('invalid', 'Invalid message identity');
   if (params.message) params.message = params.message.toLowerCase();
   if (route === 'team/inbox' && Object.keys(params).length) throw new DeepLinkError('invalid', 'Unexpected team inbox parameter');

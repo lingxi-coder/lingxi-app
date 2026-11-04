@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { SessionRuntime } from '../src/main/bridge.js';
 import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 
-const ref = { projectPath: '/resume-owner', sessionId: '11111111-2222-4333-8444-555555555555' };
+const ref = { projectPath: '/resume-owner', sessionId: '11111111-2222-4333-8444-555555555555', mode: 'code' as const };
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -24,7 +24,7 @@ function wire(runtime: SessionRuntime) {
   return client;
 }
 function resumeProof(client: EventEmitter) {
-  client.emit('event', { type: 'session_resumed', session_id: ref.sessionId, messages: [] });
+  client.emit('event', { type: 'session_resumed', session_id: ref.sessionId, mode: ref.mode, messages: [] });
   client.emit('event', { type: 'model_changed', model: 'anthropic/claude-sonnet-4-5' });
 }
 async function expired(promise: Promise<void>) {
@@ -34,7 +34,7 @@ async function expired(promise: Promise<void>) {
 
 test('a timed-out resume credential completion cannot resolve its next unconfirmed resume', async (t) => {
   const credential = deferred<string | undefined>();
-  const runtime = new SessionRuntime({ ...ref, sessionResumeTimeoutMs: 20,
+  const runtime = new SessionRuntime({ ...ref, expectedSessionMode: ref.mode, sessionResumeTimeoutMs: 20,
     launchConfig: () => ({ workspace: ref.projectPath, trusted: true }), resolveProviderAccounts: async () => { await credential.promise; return undefined; } });
   t.after(() => runtime.dispose());
   const client = wire(runtime);

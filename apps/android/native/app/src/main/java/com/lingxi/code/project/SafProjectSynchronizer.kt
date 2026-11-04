@@ -114,6 +114,11 @@ internal fun isLingxiSyncArtifact(name: String): Boolean =
     syncArtifactOriginalName(name, SYNC_TEMP_MARKER) != null ||
         syncArtifactOriginalName(name, SYNC_BACKUP_MARKER) != null
 
+/** These are local owner evidence and its SDK lock, never workspace content. */
+internal fun isLocalSchedulerOwnerState(relativePath: String): Boolean =
+    relativePath == ".lingxi/scheduled_owner_reservations.jsonl" ||
+        relativePath == ".lingxi/scheduled_tasks.lock"
+
 private fun syncArtifactOriginalName(name: String, marker: String): String? {
     val markerIndex = name.lastIndexOf(marker)
     if (markerIndex <= 0) return null
@@ -385,6 +390,7 @@ internal class SafProjectSynchronizer(
             if (isLingxiSyncArtifact(safeName)) continue
             val path = if (prefix.isEmpty()) safeName else "$prefix/$safeName"
             if (!isSafeRelativePath(path)) continue
+            if (isLocalSchedulerOwnerState(path)) continue
             val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, child.documentId)
             if (child.mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
                 scanExternalDirectory(
@@ -446,6 +452,8 @@ internal class SafProjectSynchronizer(
             for (entry in entries) {
                 currentCoroutineContext().ensureActive()
                 budget.includeEntry()
+                val relativePath = rootPath.relativize(entry).toString().replace(File.separatorChar, '/')
+                if (isLocalSchedulerOwnerState(relativePath)) continue
                 val attributes = Files.readAttributes(
                     entry,
                     BasicFileAttributes::class.java,
@@ -457,7 +465,6 @@ internal class SafProjectSynchronizer(
                 if (attributes.isDirectory) {
                     directories.add(file)
                 } else if (attributes.isRegularFile) {
-                    val relativePath = rootPath.relativize(entry).toString().replace(File.separatorChar, '/')
                     if (!isSafeRelativePath(relativePath)) continue
                     val hashed = openInternalInput(file).use { sha256(it) }
                     budget.includeFile(hashed.sizeBytes)

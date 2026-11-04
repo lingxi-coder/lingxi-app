@@ -5,15 +5,13 @@ enum ConversationDeepLink {
         sessionID: String,
         turnID: UInt64?,
         workspaceKey: String? = nil,
-        sessionMode: String? = nil,
+        sessionMode: String,
         messageUUID: String? = nil
     ) -> URL? {
         var parameters: [String: String] = [:]
         if let workspaceKey, !workspaceKey.isEmpty { parameters["workspace"] = workspaceKey }
-        if let sessionMode, !sessionMode.isEmpty {
-            guard ["code", "chat"].contains(sessionMode) else { return nil }
-            parameters["mode"] = sessionMode
-        }
+        guard ["code", "chat"].contains(sessionMode) else { return nil }
+        parameters["mode"] = sessionMode
         if let messageUUID {
             guard UUID(uuidString: messageUUID) != nil else { return nil }
             parameters["message"] = messageUUID.lowercased()
@@ -77,8 +75,8 @@ struct ConversationLiveActivitySnapshot: Equatable, Sendable {
         subtitle: String,
         status: Status,
         updatedAt: Date,
-        workspaceKey: String = "global",
-        sessionMode: String = "code"
+        workspaceKey: String,
+        sessionMode: String
     ) {
         self.sessionID = sessionID
         self.turnID = turnID

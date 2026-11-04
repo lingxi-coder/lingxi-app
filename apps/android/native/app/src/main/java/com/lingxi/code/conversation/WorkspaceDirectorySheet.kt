@@ -23,7 +23,6 @@ import com.lingxi.code.project.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 
 /** Workspace selection and native browsing of the same persistent home mounted by Linux. */
@@ -35,14 +34,18 @@ internal fun WorkspaceDirectorySheet(
     protectedPaths: () -> List<String>, canMutate: () -> Boolean,
     onDismiss: () -> Unit, onPick: (ConversationScope) -> Unit,
     onPickDirectory: suspend (String) -> Unit,
+    workspaceGuestPath: String,
+    verifiedProjects: List<ProjectSnapshot>,
+    verifiedScheduled: ProjectWorkspace?,
+    verifiedAppSource: AuthoringSourceIdentity? = null,
     repositoryOverride: WorkspaceDirectoryRepository? = null,
     onAddDirectory: (suspend (String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
-    val repository = remember(repositoryOverride) { repositoryOverride ?: MobileUserStorage.directories(context).let { paths ->
-        WorkspaceDirectoryRepository(File(paths.home), paths.guestHome,
-            paths.defaultGuestCwd, paths.projectsGuestPath, File(paths.configHome))
-    } }
+    val repository = remember(context, workspaceGuestPath, verifiedProjects, verifiedScheduled, verifiedAppSource, repositoryOverride) {
+        repositoryOverride ?: MobileUserStorage.directories(context)
+            .workspaceDirectoryRepository(workspaceGuestPath, verifiedProjects, verifiedScheduled, verifiedAppSource)
+    }
     val scope = rememberCoroutineScope()
     var folder by remember { mutableStateOf<String?>(null) }
     var adding by remember { mutableStateOf(false) }
@@ -70,7 +73,7 @@ internal fun WorkspaceDirectorySheet(
             finally { busy = false }
         }
     }
-    LaunchedEffect(folder, revision) {
+    LaunchedEffect(repository, folder, revision) {
         try {
             locations = withContext(Dispatchers.IO) { repository.locations() }
         } catch (cause: kotlinx.coroutines.CancellationException) { throw cause }

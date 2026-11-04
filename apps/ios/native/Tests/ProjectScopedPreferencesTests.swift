@@ -2,6 +2,116 @@ import XCTest
 @testable import LingxiCode
 
 final class ProjectScopedPreferencesTests: XCTestCase {
+    func testUnindexedHandoffRestoresBlankDraftBeforeOwnerRegistration() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        preferences.setActiveSessionID("prior", scope: .global, mode: .chat)
+        preferences.setDraft("prior draft", scope: .global, mode: .chat, ownerSessionID: "prior")
+        let units: [UInt16] = [0x61, 0xD800, 0x62]
+        let text = String(decoding: units, as: UTF16.self)
+        let reference = SessionHandoffReference(sourceScopeKey: "project.p", sourceSessionID: "source",
+            sourceMode: .code, targetMode: .chat, cutoff: "cutoff", requestID: "request")
+        preferences.prepareUnindexedHandoffDraft(text, sourceCodeUnits: units, reference: reference,
+                                                  scope: .global, mode: .chat)
+        let reopened = ProjectScopedPreferences(defaults: defaults)
+        XCTAssertEqual(reopened.activeSessionID(scope: .global, mode: .chat), "")
+        XCTAssertEqual(reopened.draft(scope: .global, mode: .chat, ownerSessionID: ""), text)
+        XCTAssertEqual(reopened.draftSourceCodeUnits(scope: .global, mode: .chat, ownerSessionID: ""), units)
+        XCTAssertEqual(reopened.handoffReference(sessionID: "", scope: .global, mode: .chat), reference)
+        XCTAssertEqual(reopened.draft(scope: .global, mode: .chat, ownerSessionID: "prior"), "prior draft")
+    }
+
+    func testHandoffDraftSourceAndReferenceSurviveRestoreWithoutChangingOwners() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        let units: [UInt16] = [0x61, 0xD800, 0x62]
+        let reference = SessionHandoffReference(sourceScopeKey: "project.p", sourceSessionID: "source",
+            sourceMode: .code, targetMode: .chat, cutoff: "fixed-cutoff", requestID: "request")
+        preferences.setDraft(String(decoding: units, as: UTF16.self), scope: .global, mode: .chat, ownerSessionID: "target")
+        preferences.setDraftSourceCodeUnits(units, scope: .global, mode: .chat, ownerSessionID: "target")
+        preferences.setHandoffReference(reference, sessionID: "target", scope: .global, mode: .chat)
+        let reopened = ProjectScopedPreferences(defaults: defaults)
+        XCTAssertEqual(reopened.draftSourceCodeUnits(scope: .global, mode: .chat, ownerSessionID: "target"), units)
+        XCTAssertNil(reopened.draftSourceCodeUnits(scope: .project("p"), mode: .chat, ownerSessionID: "target"))
+        XCTAssertNil(reopened.draftSourceCodeUnits(scope: .global, mode: .code, ownerSessionID: "target"))
+        XCTAssertEqual(reopened.handoffReference(sessionID: "target", scope: .global, mode: .chat), reference)
+        XCTAssertNil(reopened.handoffReference(sessionID: "target", scope: .global, mode: .code))
+        reopened.setDraft("edited", scope: .global, mode: .chat, ownerSessionID: "target")
+        XCTAssertNil(reopened.draftSourceCodeUnits(scope: .global, mode: .chat, ownerSessionID: "target"))
+        reopened.setDraft("é", scope: .global, mode: .chat, ownerSessionID: "target")
+        reopened.setDraftSourceCodeUnits(Array("é".utf16), scope: .global, mode: .chat, ownerSessionID: "target")
+        reopened.setDraft("e\u{0301}", scope: .global, mode: .chat, ownerSessionID: "target")
+        XCTAssertNil(reopened.draftSourceCodeUnits(scope: .global, mode: .chat, ownerSessionID: "target"),
+                     "Canonical-equivalent edits must not restore stale source units")
+    }
+
+    func testLastScopeIsStoredIndependentlyForEachMode() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        preferences.setLastScope(.project("code-project"), mode: .code)
+        preferences.setLastScope(.global, mode: .chat)
+        XCTAssertEqual(preferences.lastScope(mode: .code), .project("code-project"))
+        XCTAssertEqual(preferences.lastScope(mode: .chat), .global)
+    }
+
+    func testSessionScopeCannotFollowItsWorkspaceIntoAProject() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        XCTAssertTrue(preferences.claimSessionScope(sessionID: "sess:abc", scope: .global))
+        XCTAssertFalse(preferences.claimSessionScope(sessionID: "abc", scope: .project("p")))
+        XCTAssertEqual(preferences.sessionScope(sessionID: "abc"), .global)
+    }
+
+    func testInvalidScopeRegistryIsNotOverwrittenByAClaim() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let key = "conversation.spaces.session-scopes"
+        for invalid: [String: Any] in [["existing": 4], ["existing": "project."]] {
+            defaults.set(invalid, forKey: key)
+            let preferences = ProjectScopedPreferences(defaults: defaults)
+            XCTAssertFalse(preferences.hasValidSessionScopeRegistry)
+            XCTAssertFalse(preferences.claimSessionScope(sessionID: "new", scope: .global))
+            XCTAssertEqual(defaults.dictionary(forKey: key) as NSDictionary?, invalid as NSDictionary)
+        }
+    }
+
+    func testObservedScopeRegistryCannotDisappearAndBeRecreated() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        XCTAssertTrue(preferences.claimSessionScope(sessionID: "existing", scope: .global))
+        defaults.removeObject(forKey: "conversation.spaces.session-scopes")
+        XCTAssertFalse(preferences.hasValidSessionScopeRegistry)
+        XCTAssertFalse(preferences.claimSessionScope(sessionID: "new", scope: .global))
+        XCTAssertNil(defaults.object(forKey: "conversation.spaces.session-scopes"))
+    }
+
+    func testLastModeDefaultsToCodeAndPersistsTheSelection() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        defaults.set("chat", forKey: "conversation.last-mode")
+        defaults.set("chat", forKey: "conversation.current-mode")
+        XCTAssertEqual(preferences.lastMode(), .code)
+        XCTAssertEqual(preferences.currentMode(), .code)
+        preferences.setLastMode(.chat)
+        XCTAssertEqual(ProjectScopedPreferences(defaults: defaults).lastMode(), .chat)
+        preferences.setCurrentMode(.code)
+        XCTAssertEqual(preferences.currentMode(), .code)
+        XCTAssertEqual(preferences.lastMode(), .chat)
+        XCTAssertEqual(preferences.currentMode(), .code)
+    }
     #if DEBUG
     func testUITestSessionsAndDraftsCannotOverwriteUserPreferences() {
         let appSuite = "ProjectScopedPreferencesTests.app.\(UUID().uuidString)"
@@ -38,46 +148,38 @@ final class ProjectScopedPreferencesTests: XCTestCase {
     }
     #endif
 
-    func testChatRestoreNeverFallsBackToLegacyCodeSession() {
+    func testRestoreUsesOnlyTheSelectedModeSession() {
         XCTAssertEqual(
             ConversationModeRestorePolicy.sessionID(
                 mode: .chat,
-                scoped: nil,
-
-                projectLastActive: "project-code"
+                scoped: nil
             ),
             ""
         )
         XCTAssertEqual(
             ConversationModeRestorePolicy.sessionID(
                 mode: .chat,
-                scoped: "chat-session",
-
-                projectLastActive: "project-code"
+                scoped: "chat-session"
             ),
             "chat-session"
         )
     }
 
-    func testCodeRestoreUsesCurrentProjectSession() {
+    func testCodeRestoreDoesNotAdoptAnUnscopedSession() {
         XCTAssertEqual(
             ConversationModeRestorePolicy.sessionID(
                 mode: .code,
-                scoped: nil,
-
-                projectLastActive: "project-code"
+                scoped: nil
             ),
-            "project-code"
+            ""
         )
     }
 
-    func testAutomaticResumeDoesNotReplaceAnEmptyDraftInAnotherDirectory() {
+    func testAutomaticResumeKeepsSessionCapturedDirectoryAndMode() {
         let summary = ProjectSessionSummary(sessionId: "session-a", title: "A", messageCount: 1, relativeTime: "Now", updatedAt: Date(),
             workspaceDirectory: "/home/lingxi/a")
-        XCTAssertEqual(ConversationModeRestorePolicy.sessionID(mode: .code, scoped: "session-a", projectLastActive: "session-a",
-            activeDirectory: "/home/lingxi/b", sessions: [summary]), "")
-        XCTAssertEqual(ConversationModeRestorePolicy.sessionID(mode: .code, scoped: "session-a", projectLastActive: "session-a",
-            activeDirectory: "/home/lingxi/a", sessions: [summary]), "session-a")
+        XCTAssertEqual(ConversationModeRestorePolicy.sessionID(mode: .code, scoped: "session-a", sessions: [summary]), "session-a")
+        XCTAssertEqual(ConversationModeRestorePolicy.sessionID(mode: .chat, scoped: "session-a", sessions: [summary]), "")
     }
 
     func testDraftsAndSessionsAreIsolatedByProject() {
@@ -86,54 +188,64 @@ final class ProjectScopedPreferencesTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let preferences = ProjectScopedPreferences(defaults: defaults)
 
-        preferences.setDraft("global", projectID: nil)
-        preferences.setDraft("alpha", projectID: "A")
-        preferences.setDraft("beta", projectID: "B")
-        preferences.setActiveSessionID("session-a", projectID: "A")
-        preferences.setActiveSessionID("session-b", projectID: "B")
+        preferences.setDraft("global", scope: .global, mode: .code)
+        preferences.setDraft("alpha", scope: .project("A"), mode: .code)
+        preferences.setDraft("beta", scope: .project("B"), mode: .code)
+        preferences.setActiveSessionID("session-a", scope: .project("A"), mode: .code)
+        preferences.setActiveSessionID("session-b", scope: .project("B"), mode: .code)
 
-        XCTAssertEqual(preferences.draft(projectID: nil), "global")
-        XCTAssertEqual(preferences.draft(projectID: "A"), "alpha")
-        XCTAssertEqual(preferences.draft(projectID: "B"), "beta")
-        XCTAssertEqual(preferences.activeSessionID(projectID: "A"), "session-a")
-        XCTAssertEqual(preferences.activeSessionID(projectID: "B"), "session-b")
+        XCTAssertEqual(preferences.draft(scope: .global, mode: .code), "global")
+        XCTAssertEqual(preferences.draft(scope: .project("A"), mode: .code), "alpha")
+        XCTAssertEqual(preferences.draft(scope: .project("B"), mode: .code), "beta")
+        XCTAssertEqual(preferences.activeSessionID(scope: .project("A"), mode: .code), "session-a")
+        XCTAssertEqual(preferences.activeSessionID(scope: .project("B"), mode: .code), "session-b")
     }
 
-    func testStoredSessionDistinguishesLegacyMissingKeyFromExplicitNewChat() {
+    func testStoredSessionDistinguishesMissingSelectionFromExplicitNewChat() {
         let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let preferences = ProjectScopedPreferences(defaults: defaults)
 
-        XCTAssertNil(preferences.storedActiveSessionID(projectID: "legacy-project"))
+        XCTAssertNil(preferences.storedActiveSessionID(scope: .project("p"), mode: .code))
 
-        preferences.setActiveSessionID("", projectID: "legacy-project")
+        preferences.setActiveSessionID("", scope: .project("p"), mode: .code)
 
-        XCTAssertEqual(preferences.storedActiveSessionID(projectID: "legacy-project"), "")
+        XCTAssertEqual(preferences.storedActiveSessionID(scope: .project("p"), mode: .code), "")
     }
 
-    /// Back-compat pin: `.project(id)` / `.global` MUST produce the SAME key
-    /// strings the pre-scope `projectID:` path wrote, so existing user state
-    /// survives the ConversationScope refactor.
-    func testScopeKeysPreserveLegacyProjectKeys() {
+    func testOldScopeKeysAreNotReadAndCurrentSpacesStayIsolated() {
         let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let preferences = ProjectScopedPreferences(defaults: defaults)
 
-        // State written under the LEGACY spelling (what shipped builds wrote):
         defaults.set("legacy-draft", forKey: "conversation.proj-a.draft")
         defaults.set("legacy-session", forKey: "conversation.proj-a.active-session")
-        defaults.set("global-draft", forKey: "conversation.global.draft")
+        defaults.set("legacy-code-draft", forKey: "conversation.proj-a.code.draft")
+        defaults.set("legacy-code-session", forKey: "conversation.proj-a.code.active-session")
+        defaults.set(["same-session": "legacy-session-draft"], forKey: "conversation.proj-a.session-drafts")
+        XCTAssertEqual(preferences.draft(scope: .project("Proj-A"), mode: .code), "")
+        XCTAssertNil(preferences.storedActiveSessionID(scope: .project("proj-a"), mode: .code))
+        XCTAssertEqual(preferences.draft(scope: .project("proj-a"), mode: .code, ownerSessionID: "same-session"), "")
 
-        // …must be readable through the scope spelling unchanged.
-        XCTAssertEqual(preferences.draft(scope: .project("Proj-A")), "legacy-draft")
-        XCTAssertEqual(preferences.storedActiveSessionID(scope: .project("proj-a")), "legacy-session")
-        XCTAssertEqual(preferences.draft(scope: .global), "global-draft")
+        preferences.setDraft("current", scope: .project("Proj-A"), mode: .code)
+        preferences.setDraft("global", scope: .global, mode: .code)
+        preferences.setDraft("scheduled", scope: .scheduled, mode: .code)
+        XCTAssertEqual(preferences.draft(scope: .project("proj-a"), mode: .code), "current")
+        XCTAssertEqual(preferences.draft(scope: .global, mode: .code), "global")
+        XCTAssertEqual(preferences.draft(scope: .scheduled, mode: .code), "scheduled")
+        XCTAssertEqual(defaults.string(forKey: "conversation.proj-a.draft"), "legacy-draft")
+    }
 
-        preferences.setDraft("scheduled-draft", scope: .scheduled)
-        XCTAssertEqual(defaults.string(forKey: "conversation.scheduled.draft"), "scheduled-draft")
-        XCTAssertEqual(preferences.draft(scope: .project("proj-a")), "legacy-draft", "the project key is untouched")
+    func testSessionDraftUsesCanonicalOwnerIdentity() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        let id = UUID().uuidString
+        preferences.setDraft("owned", scope: .global, mode: .code, ownerSessionID: "sess:\(id)")
+        XCTAssertEqual(preferences.draft(scope: .global, mode: .code, ownerSessionID: id.lowercased()), "owned")
     }
 
     func testModeScopedKeysKeepChatAndCodeStateSeparate() {
@@ -151,8 +263,8 @@ final class ProjectScopedPreferencesTests: XCTestCase {
         XCTAssertEqual(preferences.draft(scope: .project("proj-a"), mode: .code), "code-draft")
         XCTAssertEqual(preferences.activeSessionID(scope: .project("proj-a"), mode: .chat), "chat-session")
         XCTAssertEqual(preferences.activeSessionID(scope: .project("proj-a"), mode: .code), "code-session")
-        XCTAssertEqual(defaults.string(forKey: "conversation.proj-a.chat.draft"), "chat-draft")
-        XCTAssertEqual(defaults.string(forKey: "conversation.proj-a.code.active-session"), "code-session")
+        XCTAssertEqual(defaults.string(forKey: "conversation.spaces.project.proj-a.chat.draft"), "chat-draft")
+        XCTAssertEqual(defaults.string(forKey: "conversation.spaces.project.proj-a.code.active-session"), "code-session")
     }
 
     func testSessionPinsPersistAndUnpinRemovesThem() {

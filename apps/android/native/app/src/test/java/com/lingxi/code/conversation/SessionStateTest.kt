@@ -1,7 +1,10 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ErrorKindDto
+import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.MessageBlockDto
 import com.lingxi.code.bindings.client.MessageDto
 import com.lingxi.code.bindings.client.SessionModeDto
@@ -12,15 +15,28 @@ import com.lingxi.code.model.Message
 import com.lingxi.code.model.SessionCatalogPhase
 import com.lingxi.code.model.SessionCatalog
 import com.lingxi.code.model.SessionRow
+import com.lingxi.code.model.SessionMode
+import com.lingxi.code.model.ConversationScope
+import com.lingxi.code.model.SessionRef
 import com.lingxi.code.model.withCachedRows
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -33,6 +49,13 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
+import java.io.File
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The OUT-OF-BAND SESSION-state path that drives the drawer from the engine's
@@ -52,6 +75,299 @@ import org.junit.Test
 class SessionStateTest {
 
     private val dispatcher = UnconfinedTestDispatcher()
+    @get:Rule val temp = TemporaryFolder()
+
+    @Test
+    fun selectedModeWritesSurviveUiRecreationAndRestoreInSelectionOrder() = runTest(dispatcher) {
+        val file = File(temp.root, "scope-state.json")
+        val firstWriteStarted = CompletableDeferred<Unit>()
+        val releaseFirstWrite = CountDownLatch(1)
+        val writes = Collections.synchronizedList(mutableListOf<String>())
+        val count = AtomicInteger()
+        val store = com.lingxi.code.project.ScopeStateStore(file, com.lingxi.code.project.ProjectAtomicWriter { target, text, validate ->
+            if (count.getAndIncrement() == 0) {
+                firstWriteStarted.complete(Unit)
+                check(releaseFirstWrite.await(5, TimeUnit.SECONDS))
+            }
+            validate(text)
+            target.writeText(text)
+            writes += org.json.JSONObject(text).getString("selectedMode")
+        })
+        val vm = ChatViewModel(FakeSessionSource(MutableStateFlow(EngineSessionState.loading())))
+        vm.rememberModeSelection(store, SessionMode.Chat)
+        try {
+            firstWriteStarted.await()
+            vm.rememberModeSelection(store, SessionMode.Code)
+            // A recreated screen constructs a new store, but waits for the
+            // retained ViewModel's earlier selection writes before restoring.
+            val restored = async { vm.readSelectedMode(com.lingxi.code.project.ScopeStateStore(file)) }
+            assertFalse(restored.isCompleted)
+            releaseFirstWrite.countDown()
+            assertEquals(SessionMode.Code, restored.await())
+            assertEquals(listOf("chat", "code"), writes.toList())
+        } finally {
+            releaseFirstWrite.countDown()
+        }
+    }
+
+    @Test
+    fun conversationDraftWritesSurviveUiRecreationAndRestoreTheLatestEdit() = runTest(dispatcher) {
+        val file = File(temp.root, "drafts.json")
+        val firstWriteStarted = CompletableDeferred<Unit>()
+        val releaseFirstWrite = CountDownLatch(1)
+        val count = AtomicInteger()
+        val store = com.lingxi.code.project.ScopeStateStore(file, com.lingxi.code.project.ProjectAtomicWriter { target, text, validate ->
+            if (count.getAndIncrement() == 0) {
+                firstWriteStarted.complete(Unit)
+                check(releaseFirstWrite.await(5, TimeUnit.SECONDS))
+            }
+            validate(text)
+            target.writeText(text)
+        })
+        val vm = ChatViewModel(FakeSessionSource(MutableStateFlow(EngineSessionState.loading())))
+        vm.persistConversationDraft(store, ConversationScope.Global, "owner", "first")
+        try {
+            firstWriteStarted.await()
+            vm.persistConversationDraft(store, ConversationScope.Global, "owner", "latest")
+            val restored = async {
+                vm.awaitConversationDraftWrites()
+                com.lingxi.code.project.ScopeStateStore(file).readConversationDraft("global", "owner")
+            }
+            assertFalse(restored.isCompleted)
+            releaseFirstWrite.countDown()
+            assertEquals("latest", restored.await())
+        } finally {
+            releaseFirstWrite.countDown()
+        }
+    }
+
+    @Test
+    fun restoredSavedDraftIsAvailableOnlyToItsConversationOwner() {
+        val saved = androidx.lifecycle.SavedStateHandle(mapOf(
+            ChatViewModel.KEY_SESSION_ID to "saved",
+            ChatViewModel.KEY_SESSION_SCOPE to "global",
+            ChatViewModel.KEY_SESSION_TITLE to "Saved",
+            ChatViewModel.KEY_DRAFT to "unsent",
+        ))
+        val vm = ChatViewModel(FakeSessionSource(MutableStateFlow(EngineSessionState.loading())), saved)
+        assertEquals("unsent", vm.restoredDraftFor(ConversationScope.Global, "saved"))
+        assertNull(vm.restoredDraftFor(ConversationScope.Global, "other"))
+        assertNull(vm.restoredDraftFor(ConversationScope.Project("other"), "saved"))
+        vm.onDraftChanged("new draft", ConversationScope.Global, "new")
+        assertEquals("new draft", vm.restoredDraftFor(ConversationScope.Global, "new"))
+        assertNull(vm.restoredDraftFor(ConversationScope.Global, "saved"))
+    }
+
+    @Test
+    fun conflictingActivationCannotChangeAnExistingOwnerOrItsHistory() = runTest(dispatcher) {
+        val vm = ChatViewModel(FakeSessionSource(MutableStateFlow(EngineSessionState.loading())))
+        val row = Message(role = com.lingxi.code.model.Role.User, text = "hello")
+        vm.applyActivatedSession(ActivatedSession("s", listOf(row), SessionActivationKind.Resumed, SessionMode.Code))
+        vm.applyActivatedSession(ActivatedSession("s", emptyList(), SessionActivationKind.Resumed, SessionMode.Chat))
+        assertEquals(SessionMode.Code, vm.state.value.sessionMode)
+        assertEquals(listOf(row), vm.state.value.messages)
+    }
+
+    @Test
+    fun scopedSavedNavigationBeatsAnOlderModeSlotOnColdStart() = runTest(dispatcher) {
+        val saved = androidx.lifecycle.SavedStateHandle()
+        val oldSource = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val previous = ChatViewModel(oldSource, saved)
+        previous.applyActivatedSession(ActivatedSession("A", emptyList(), SessionActivationKind.Resumed, SessionMode.Code))
+        previous.openSession(SessionRef("B", "pending B"))
+        assertEquals("B", saved.get<String>(ChatViewModel.KEY_SESSION_ID))
+        assertEquals("global", saved.get<String>(ChatViewModel.KEY_SESSION_SCOPE))
+        val restored = androidx.lifecycle.SavedStateHandle(saved.keys().associateWith { saved.get<Any?>(it) })
+        val recreated = ChatViewModel(ConnectingConversationSource(DefaultConversationStrings), restored, sourceGeneration = -1)
+        val selected = recreated.prepareInitialSessionRestore(SessionRef("A", "old A"), ConversationScope.Global)
+        assertEquals("B", selected?.id)
+        assertEquals("B", recreated.state.value.session.id)
+        val replacement = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        recreated.ensureSource(0) { replacement }
+        // The replacement is constructed for B and announces its activation;
+        // a second Resume here would mount or switch the same owner twice.
+        assertTrue(replacement.resumeCalls.isEmpty())
+        assertEquals(0, replacement.newSessionCalls)
+    }
+
+    @Test
+    fun savedNavigationFromAnotherWorkspaceCannotOverrideTheModeSlot() = runTest(dispatcher) {
+        val saved = androidx.lifecycle.SavedStateHandle(mapOf(
+            ChatViewModel.KEY_SESSION_ID to "B",
+            ChatViewModel.KEY_SESSION_TITLE to "other project",
+            ChatViewModel.KEY_SESSION_SCOPE to "project.other",
+        ))
+        val recreated = ChatViewModel(ConnectingConversationSource(DefaultConversationStrings), saved, sourceGeneration = -1)
+        assertEquals("project.other", saved.get<String>(ChatViewModel.KEY_SESSION_SCOPE))
+        val selected = recreated.prepareInitialSessionRestore(SessionRef("A", "global"), ConversationScope.Global)
+        assertEquals("A", selected?.id)
+        assertEquals("A", recreated.state.value.session.id)
+        val replacement = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        recreated.ensureSource(0) { replacement }
+        assertTrue(replacement.resumeCalls.isEmpty())
+        assertEquals("global", saved.get<String>(ChatViewModel.KEY_SESSION_SCOPE))
+    }
+
+    @Test
+    fun pendingWorkspaceTransitionPersistsTheDestinationSessionAndScopeTogether() = runTest(dispatcher) {
+        val saved = androidx.lifecycle.SavedStateHandle()
+        val old = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val replacement = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val vm = ChatViewModel(old, saved)
+        vm.applyActivatedSession(ActivatedSession("A", emptyList(), SessionActivationKind.Resumed, SessionMode.Code))
+        assertTrue(vm.switchWorkspaceSource(
+            projectId = "p", target = SessionRef("B", "project B"), newSession = false,
+            createSource = { replacement },
+        ))
+        assertEquals("B", saved.get<String>(ChatViewModel.KEY_SESSION_ID))
+        assertEquals("project.p", saved.get<String>(ChatViewModel.KEY_SESSION_SCOPE))
+        val restored = androidx.lifecycle.SavedStateHandle(saved.keys().associateWith { saved.get<Any?>(it) })
+        val recreated = ChatViewModel(ConnectingConversationSource(DefaultConversationStrings), restored, sourceGeneration = -1)
+        assertEquals("B", recreated.prepareInitialSessionRestore(SessionRef("A", "older"), ConversationScope.Project("p"))?.id)
+    }
+
+    @Test
+    fun missingSavedViewModelStateAdoptsPendingOwnerWithoutChangingItsMode() = runTest(dispatcher) {
+        val pending = CompletableDeferred<ConversationSource?>()
+        val retained = FakeSessionSource(
+            MutableStateFlow(EngineSessionState.loading()),
+            MutableStateFlow(ActivatedSession("saved", listOf(Message(role = com.lingxi.code.model.Role.User, text = "retained")),
+                SessionActivationKind.Resumed, SessionMode.Code)),
+        )
+        val recovering = RecoveringConversationSource(
+            pending, DefaultConversationStrings,
+            ConversationRecoverySpec(null, null, SessionMode.Code, com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux),
+        )
+        val vm = ChatViewModel(ConnectingConversationSource(DefaultConversationStrings),
+            savedState = androidx.lifecycle.SavedStateHandle(), sourceGeneration = -1)
+        val viewModels = androidx.lifecycle.ViewModelStore().apply { put("chat", vm) }
+        try {
+            vm.prepareInitialSessionRestore(SessionRef("saved", ""), ConversationScope.Global)
+            vm.ensureSource(0) { recovering }
+            assertEquals("saved", vm.state.value.session.id)
+            assertFalse(vm.state.value.sessionReady)
+            assertEquals(0, retained.newSessionCalls)
+
+            pending.complete(retained)
+            // The pending delegate is published from a real Default dispatcher.
+            withContext(Dispatchers.Default) { withTimeout(5_000) { vm.state.first { it.sessionReady } } }
+            assertEquals("saved", vm.state.value.session.id)
+            assertTrue(vm.state.value.sessionReady)
+            assertEquals(SessionMode.Code, vm.state.value.sessionMode)
+            assertEquals(listOf("retained"), vm.state.value.messages.map { it.text })
+            assertEquals(0, retained.newSessionCalls)
+            assertTrue(retained.resumeCalls.isEmpty())
+            assertTrue(vm.sessions.value.isLoading)
+        } finally {
+            viewModels.clear()
+            recovering.close()
+        }
+    }
+
+    @Test
+    fun pendingOwnerSubscribesBeforeSynchronousAttachEvents() = runTest(dispatcher) {
+        val events = MutableSharedFlow<ClientEvent>()
+        val subscriptionRequested = CompletableDeferred<Unit>()
+        val allowSubscription = CompletableDeferred<Unit>()
+        val attached = CompletableDeferred<Unit>()
+        val delegate = object : ConversationSource {
+            override val clientEvents: Flow<ClientEvent> = events
+            override val activeSessionState = MutableStateFlow(
+                ActivatedSession("saved", emptyList(), SessionActivationKind.Resumed, SessionMode.Code),
+            )
+            override suspend fun collectClientEvents(onSubscribed: () -> Unit, onEvent: suspend (ClientEvent) -> Unit) {
+                subscriptionRequested.complete(Unit)
+                allowSubscription.await()
+                super.collectClientEvents(onSubscribed, onEvent)
+            }
+            override suspend fun attachDurableTurnForUi(afterSequence: Long) {
+                assertEquals(1, events.subscriptionCount.value)
+                events.emit(ClientEvent.TaskStatusChanged("work", com.lingxi.code.bindings.client.TaskStatusDto.RUNNING, "saved", null))
+                attached.complete(Unit)
+            }
+        }
+        val pending = CompletableDeferred<ConversationSource?>()
+        val wrapper = RecoveringConversationSource(
+            pending, DefaultConversationStrings,
+            ConversationRecoverySpec(null, null, SessionMode.Code, com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux),
+        )
+        val vm = ChatViewModel(ConnectingConversationSource(DefaultConversationStrings),
+            savedState = androidx.lifecycle.SavedStateHandle(), sourceGeneration = -1)
+        val viewModels = androidx.lifecycle.ViewModelStore().apply { put("chat", vm) }
+        try {
+            vm.prepareInitialSessionRestore(SessionRef("saved", ""), ConversationScope.Global)
+            vm.ensureSource(0) { wrapper }
+            pending.complete(delegate)
+            withContext(Dispatchers.Default) { withTimeout(5_000) { subscriptionRequested.await() } }
+            assertFalse(attached.isCompleted)
+            assertFalse(vm.state.value.sessionReady)
+
+            allowSubscription.complete(Unit)
+            withContext(Dispatchers.Default) {
+                withTimeout(5_000) {
+                    attached.await()
+                    vm.state.first { "work" in it.activeBackgroundTaskIds }
+                }
+            }
+            assertTrue(vm.state.value.sessionReady)
+        } finally {
+            allowSubscription.complete(Unit)
+            viewModels.clear()
+            wrapper.close()
+        }
+    }
+
+    @Test
+    fun retainedOwnerKeepsItsCreationModeBeforeMakingTheSessionReady() = runTest(dispatcher) {
+        val retained = FakeSessionSource(
+            MutableStateFlow(EngineSessionState.loading()),
+            MutableStateFlow(ActivatedSession("saved", listOf(Message(role = com.lingxi.code.model.Role.User, text = "retained")),
+                SessionActivationKind.Resumed, SessionMode.Code)),
+        )
+        val vm = ChatViewModel(ConnectingConversationSource(DefaultConversationStrings),
+            savedState = androidx.lifecycle.SavedStateHandle(), sourceGeneration = -1)
+        vm.prepareInitialSessionRestore(SessionRef("saved", ""), ConversationScope.Global)
+        val readyModes = mutableListOf<SessionMode?>()
+        val observer = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            vm.state.collect { if (it.sessionReady) readyModes += it.sessionMode }
+        }
+        vm.ensureSource(0) { retained }
+        assertTrue(vm.state.value.sessionReady)
+        assertEquals(SessionMode.Code, vm.state.value.sessionMode)
+        assertFalse(readyModes.contains(SessionMode.Chat))
+        assertTrue(readyModes.contains(SessionMode.Code))
+        observer.cancel()
+    }
+
+    @Test
+    fun startupResumesSavedIdentityWithoutWaitingForTheCatalog() = runTest(dispatcher) {
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val vm = ChatViewModel(ConnectingConversationSource(DefaultConversationStrings),
+            savedState = androidx.lifecycle.SavedStateHandle(), sourceGeneration = -1)
+        vm.prepareInitialSessionRestore(SessionRef("saved", ""), ConversationScope.Global)
+        vm.ensureSource(0) { source }
+        assertTrue(source.resumeCalls.isEmpty())
+        assertEquals(0, source.newSessionCalls)
+        assertFalse(vm.state.value.sessionReady)
+        vm.applyActivatedSession(ActivatedSession("saved", listOf(Message(role = com.lingxi.code.model.Role.User, text = "history")),
+            SessionActivationKind.Resumed, SessionMode.Chat))
+        assertTrue(vm.state.value.sessionReady)
+        assertEquals("saved", vm.state.value.session.id)
+        assertTrue(vm.sessions.value.isLoading)
+    }
+
+    @Test
+    fun retainedSourceKeepsItsCreationModeAfterUiRebind() = runTest(dispatcher) {
+        val row = Message(role = com.lingxi.code.model.Role.User, text = "retained")
+        val source = FakeSessionSource(
+            MutableStateFlow(EngineSessionState.loading()),
+            MutableStateFlow(ActivatedSession("s", listOf(row), SessionActivationKind.Resumed, SessionMode.Code)),
+        )
+        val vm = ChatViewModel(source)
+        assertEquals("s", vm.state.value.session.id)
+        assertEquals(SessionMode.Code, vm.state.value.sessionMode)
+        assertEquals(listOf(row), vm.state.value.messages)
+    }
 
     @Before fun setMain() = Dispatchers.setMain(dispatcher)
 
@@ -105,7 +421,7 @@ class SessionStateTest {
     @Test
     fun sessionList_replacesAPriorCatalog_wholesale() {
         val prev = EngineSessionState.ready(
-            rows = listOf(SessionRow("old", "Old", 1, "刚刚")),
+            rows = listOf(SessionRow("old", "Old", 1, "刚刚", mode = com.lingxi.code.model.SessionMode.Code)),
         )
         val next = reduceSessionEvent(
             prev,
@@ -117,7 +433,7 @@ class SessionStateTest {
 
     @Test
     fun sessionList_empty_marksReadyEmpty_withoutMockFallback() {
-        val prev = EngineSessionState.ready(rows = listOf(SessionRow("u", "T", 1, "刚刚")))
+        val prev = EngineSessionState.ready(rows = listOf(SessionRow("u", "T", 1, "刚刚", mode = com.lingxi.code.model.SessionMode.Code)))
         val next = reduceSessionEvent(
             prev,
             ClientEvent.SessionList(sessions = emptyList()),
@@ -142,7 +458,7 @@ class SessionStateTest {
 
     @Test
     fun nonSessionEvent_returnsPrevUnchanged_identity() {
-        val prev = EngineSessionState.ready(rows = listOf(SessionRow("u", "T", 3, "刚刚")))
+        val prev = EngineSessionState.ready(rows = listOf(SessionRow("u", "T", 3, "刚刚", mode = com.lingxi.code.model.SessionMode.Code)))
         // TextDelta / Error / lifecycle events must NOT disturb the catalog.
         assertSame(prev, reduceSessionEvent(prev, ClientEvent.TextDelta("hi".toClientTextDto()), now))
         assertSame(
@@ -170,17 +486,34 @@ class SessionStateTest {
     private class FakeSessionSource(
         private val sessions: MutableStateFlow<EngineSessionState>,
         private val activated: MutableStateFlow<ActivatedSession?> = MutableStateFlow(null),
-    ) : ConversationSource {
+    ) : ConversationSource, SlashCommandConversationSource {
         val resumeCalls = mutableListOf<String>()
+        val commands = mutableListOf<ClientCommand>()
+        val submittedPrompts = mutableListOf<String>()
+        val submittedSlashes = mutableListOf<ClientTextDto>()
+        var commandHandler: suspend (ClientCommand) -> Unit = {}
+        var replies: Flow<ReplyEvent> = emptyFlow()
         var newSessionCalls = 0
         var refreshCalls = 0
+        var cancelCalls = 0
+        var retainedProjection: RetainedConversationTranscript? = null
         override fun initialMessages(): List<Message> = emptyList()
-        override fun submit(text: String): Flow<ReplyEvent> = emptyFlow()
+        override fun submit(text: String): Flow<ReplyEvent> {
+            submittedPrompts += text
+            return replies
+        }
+        override fun submitSlashCommand(raw: ClientTextDto, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> {
+            submittedSlashes += raw
+            return replies
+        }
         override val sessionState: StateFlow<EngineSessionState> = sessions.asStateFlow()
         override val activeSessionState: StateFlow<ActivatedSession?> = activated.asStateFlow()
+        override fun retainUiTranscript(snapshot: RetainedConversationTranscript) { retainedProjection = snapshot }
         override suspend fun refreshSessions() { refreshCalls++ }
+        override suspend fun submitClientCommand(command: ClientCommand) { commands += command; commandHandler(command) }
         override suspend fun resumeSession(uuid: String) { resumeCalls += uuid }
         override suspend fun newSession() { newSessionCalls++ }
+        override suspend fun cancel() { cancelCalls++ }
     }
 
     @Test
@@ -194,7 +527,7 @@ class SessionStateTest {
         val flow = MutableStateFlow(EngineSessionState.loading())
         val vm = ChatViewModel(FakeSessionSource(flow))
 
-        flow.value = EngineSessionState.ready(rows = listOf(SessionRow("u1", "会话一", 5, "刚刚")))
+        flow.value = EngineSessionState.ready(rows = listOf(SessionRow("u1", "会话一", 5, "刚刚", mode = com.lingxi.code.model.SessionMode.Code)))
 
         assertEquals(listOf("u1"), vm.sessions.value.rows.map { it.uuid })
         assertEquals("会话一", vm.sessions.value.rows.single().title)
@@ -205,7 +538,7 @@ class SessionStateTest {
         val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
         val vm = ChatViewModel(source)
 
-        val row = SessionRow(uuid = "uuid-42", title = "差旅规划", messageCount = 12, relativeTime = "昨天")
+        val row = SessionRow(uuid = "uuid-42", title = "差旅规划", messageCount = 12, relativeTime = "昨天", mode = com.lingxi.code.model.SessionMode.Code)
         vm.resumeSession(row)
 
         // Local select: the title bar reflects the resumed session immediately.
@@ -230,6 +563,7 @@ class SessionStateTest {
                 title = "旧版会话",
                 messageCount = 1,
                 relativeTime = "刚刚",
+                mode = com.lingxi.code.model.SessionMode.Code,
             ),
         )
 
@@ -299,6 +633,7 @@ class SessionStateTest {
             title = "新对话",
             messageCount = 0,
             relativeTime = "刚刚",
+            mode = com.lingxi.code.model.SessionMode.Code,
         )
 
         val waiting = EngineSessionState.ready(emptyList()).withCachedRows(listOf(cached))
@@ -382,6 +717,7 @@ class SessionStateTest {
                 Message(role = com.lingxi.code.model.Role.User, text = "q2"),
             ),
             kind = SessionActivationKind.Resumed,
+            mode = com.lingxi.code.model.SessionMode.Code,
         )
 
         // N messages rendered, in order.
@@ -397,8 +733,12 @@ class SessionStateTest {
     fun recreatedModelRestoresDisclosurePreferencesWithoutCrossSessionLeakage() {
         val handle = androidx.lifecycle.SavedStateHandle()
         fun source() = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
-        fun activate(vm: ChatViewModel, id: String) = vm.applyActivatedSession(
-            ActivatedSession(id, emptyList(), SessionActivationKind.Resumed))
+        fun activate(vm: ChatViewModel, id: String) {
+            if (!vm.state.value.sessionTransitioning && vm.state.value.session.id != "new" && vm.state.value.session.id != id) {
+                vm.resumeSession(SessionRow(id, id, 1, "", mode = SessionMode.Code))
+            }
+            vm.applyActivatedSession(ActivatedSession(id, emptyList(), SessionActivationKind.Resumed, SessionMode.Code))
+        }
         val first = ChatViewModel(source(), handle)
         activate(first, "session-a")
         first.toggleToolCall("tool-group:shared-id")
@@ -423,8 +763,12 @@ class SessionStateTest {
     @Test
     fun toolDisclosureRestoresPerSessionWithoutLeakingAcrossSessions() {
         val vm = ChatViewModel(FakeSessionSource(MutableStateFlow(EngineSessionState.loading())))
-        fun activate(id: String) = vm.applyActivatedSession(
-            ActivatedSession(id, emptyList(), SessionActivationKind.Resumed))
+        fun activate(id: String) {
+            if (vm.state.value.session.id != "new" && vm.state.value.session.id != id) {
+                vm.resumeSession(SessionRow(id, id, 1, "", mode = SessionMode.Code))
+            }
+            vm.applyActivatedSession(ActivatedSession(id, emptyList(), SessionActivationKind.Resumed, SessionMode.Code))
+        }
         activate("session-a")
         vm.toggleToolCall("tool-group:first")
         activate("session-b")
@@ -448,6 +792,7 @@ class SessionStateTest {
             sessionId = "uuid-77",
             transcript = listOf(Message(role = com.lingxi.code.model.Role.User, text = "restored")),
             kind = SessionActivationKind.Resumed,
+            mode = com.lingxi.code.model.SessionMode.Code,
         )
 
         assertEquals(listOf("restored"), vm.state.value.messages.map { it.text })
@@ -460,13 +805,14 @@ class SessionStateTest {
         val vm = ChatViewModel(source)
 
         // The drawer's optimistic local select set the title before resume landed.
-        vm.resumeSession(SessionRow(uuid = "uuid-55", title = "差旅规划", messageCount = 3, relativeTime = "昨天"))
+        vm.resumeSession(SessionRow(uuid = "uuid-55", title = "差旅规划", messageCount = 3, relativeTime = "昨天", mode = com.lingxi.code.model.SessionMode.Code))
         // The engine confirms with the rehydrated transcript (id matches the select).
         vm.applyActivatedSession(
             ActivatedSession(
                 sessionId = "uuid-55",
                 transcript = listOf(Message(role = com.lingxi.code.model.Role.User, text = "hi")),
                 kind = SessionActivationKind.Resumed,
+                mode = com.lingxi.code.model.SessionMode.Code,
             ),
         )
 

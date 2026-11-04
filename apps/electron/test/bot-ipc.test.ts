@@ -94,7 +94,7 @@ test('a session is opened by Bot id, optionally with a session id, and listed', 
   assert.deepEqual(await s.call(CH_BOTS_SESSION_OPEN, bot.botId), { botId: bot.botId, projectPath: s.store.workspaceDir(bot.botId), sessionId: SESSION });
   assert.deepEqual(s.calls, [['newSession', s.store.workspaceDir(bot.botId), 'a/b']]);
   assert.deepEqual(await s.call(CH_BOTS_SESSIONS_LIST, bot.botId), { sessions: [] });
-  await assert.rejects(s.call(CH_BOTS_SESSION_OPEN, bot.botId, SESSION), /does not belong to this Bot/);
+  await assert.rejects(s.call(CH_BOTS_SESSION_OPEN, bot.botId, SESSION), /source is unavailable/);
 });
 
 test('the host opens a Bot\'s session by the same checks the window\'s request goes through', async (t) => {
@@ -104,7 +104,7 @@ test('the host opens a Bot\'s session by the same checks the window\'s request g
   assert.deepEqual(await ui.openSession(bot.botId), { botId: bot.botId, projectPath: s.store.workspaceDir(bot.botId), sessionId: SESSION });
   await assert.rejects(ui.openSession('bad'), /invalid Bot id/);
   for (const bad of [5, null, {}, 'not-a-session', [SESSION]]) await assert.rejects(ui.openSession(bot.botId, bad), /invalid session id/);
-  await assert.rejects(ui.openSession(bot.botId, SESSION), /does not belong to this Bot/);
+  await assert.rejects(ui.openSession(bot.botId, SESSION), /source is unavailable/);
 });
 
 test('persona, memory and skills go through to the Bot\'s files', async (t) => {

@@ -22,6 +22,7 @@ import type {
 import type {
   ConnectionState,
   HostPermissionRequest,
+  PromptAdmission,
   PromptSource,
   RemoteObserver,
   RemoteRuntimeView,
@@ -41,13 +42,13 @@ export interface RemoteRuntime {
   pendingPermission(requestId: number): HostPermissionRequest | undefined;
   pendingQuestion(requestId: number): AskUserQuestionRequestDto | undefined;
   promptImage(sequence: number, index: number): { media_type: string; base64: string } | undefined;
-  sendPrompt(text: unknown, images?: unknown, turnId?: unknown, visualizationContext?: unknown, source?: PromptSource): void | Promise<void>;
+  sendPrompt(text: unknown, images?: unknown, turnId?: unknown, visualizationContext?: unknown, source?: PromptSource, admission?: PromptAdmission): void | Promise<void>;
   cancelTurn(turnId: unknown): void;
   approvePermission(requestId: number, response?: unknown): void;
   denyPermission(requestId: number): void;
   answerAskUserQuestion(requestId: number, answers: unknown): void;
   cancelAskUserQuestion(requestId: number): void;
-  dispatchCommand(command: ClientCommand | unknown, source?: PromptSource): Promise<void>;
+  dispatchCommand(command: ClientCommand | unknown, source?: PromptSource, authorize?: () => void): Promise<void>;
   executeMedia(operation: MediaOperationDto, limits?: { timeout_budget_ms?: number; max_payload_bytes?: number }): Promise<{ operation_id: MediaOperationIdDto; incarnation: string; result: MediaResultDto }>;
   readMedia(mediaRef: string): Promise<MediaContentDto>;
   cancelMedia(operationId: MediaOperationIdDto, incarnation: string): Promise<void>;

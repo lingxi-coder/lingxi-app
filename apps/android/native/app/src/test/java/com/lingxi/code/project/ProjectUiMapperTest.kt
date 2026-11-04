@@ -8,9 +8,10 @@ import org.junit.Test
 class ProjectUiMapperTest {
     @Test
     fun `drawer hides archived sessions but retains pending sessions`() {
-        val visible = ProjectSessionSummary("visible", "Visible", 1, "Now", 1L)
+        val visible = ProjectSessionSummary("visible", "Visible", 1, "Now", 1L, com.lingxi.code.model.SessionMode.Code)
         val project = ProjectSnapshot(
-            record = ProjectRecord("project", "Project", ProjectStorageKind.Internal, 1L, 1L),
+            record = ProjectRecord("project", "Project", ProjectStorageKind.Internal, 1L, 1L,
+                visibleModes = setOf(com.lingxi.code.model.SessionMode.Code)),
             workspace = ProjectWorkspace("project", "/tmp/project"),
             sessions = listOf(visible, visible.copy(sessionId = "archived", isArchived = true),
                 visible.copy(sessionId = "pending", pendingCatalogConfirmation = true)),
@@ -23,7 +24,8 @@ class ProjectUiMapperTest {
     fun `localized descriptions retain the sync state used by project actions`() {
         val project = ProjectSnapshot(
             record = ProjectRecord("project", "Project", ProjectStorageKind.SafMirror, 1L, 1L,
-                sourceDisplayName = "Photos", syncState = ProjectSyncState.AuthorizationLost),
+                sourceDisplayName = "Photos", syncState = ProjectSyncState.AuthorizationLost,
+                visibleModes = setOf(com.lingxi.code.model.SessionMode.Code)),
             workspace = ProjectWorkspace("project", "/tmp/project"),
             sessions = emptyList(),
         )

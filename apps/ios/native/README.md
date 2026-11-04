@@ -33,9 +33,9 @@ scripts/install-sherpa-runtime.sh
 ```
 
 The first script builds a host staticlib for metadata + per-arch staticlibs, generates the Swift bindings
-(deduped into a single Swift module), and assembles the xcframework. No secrets
-are baked in — the engine reads `ANTHROPIC_API_KEY` from the runtime
-environment, never from the framework.
+(deduped into a single Swift module), and assembles the xcframework. Provider
+accounts and credentials are configured through Settings and native secure
+storage; they are not taken from the runtime environment or baked into the framework.
 
 The Sherpa installer downloads the pinned 1.13.2 iOS artifact, verifies its
 SHA-256, and stages the gitignored `sherpa-onnx.xcframework` and
@@ -59,22 +59,19 @@ talks to. `ConversationSourceFactory.make()` picks the implementation at app
 start:
 
 - **`EngineConversationSource`** — the real in-process engine over UniFFI. It
-  builds a `MobileEngineHandle` via the generated `buildIosEngine(...)`,
+  builds a `MobileEngineHandle` via the generated `buildIosEngineWithConfig(...)`,
   registers a Swift `IosEventListener` whose `onEvent(_:)` maps each inbound
   `ClientEvent` (`textDelta` / `toolUse*` / `turnStarted` / `turnEnded` /
   `error` / …) onto `@MainActor`-published SwiftUI state, and submits turns with
   `handle.submit(.sendPrompt(...))`.
-- **`MockConversationSource`** — the prior canned reply (used when the engine is
-  not opted in, e.g. previews / no-key runs).
+- **`MockConversationSource`** — the canned reply used by previews and isolated
+  UI-test fixtures.
 
-The engine is selected when its bindings are linked **and** it is opted in:
-either `LINGXI_USE_ENGINE=1` or a non-empty `ANTHROPIC_API_KEY` in the
-environment. Runtime config is read from the environment by
-`EngineConfig.fromEnvironment` — `ANTHROPIC_API_KEY` (the key, **never**
-hardcoded), optional `ANTHROPIC_BASE_URL`, optional `LINGXI_MODEL`. Set these in
-the Xcode scheme's *Run → Arguments → Environment Variables* (or the launching
-shell). The engine roots its filesystem under the app's Application Support
-container.
+When the bindings are linked, normal app launches use the real engine even
+without a configured provider. `ANTHROPIC_BASE_URL` and `LINGXI_MODEL` can
+override the development endpoint and model, but credentials come from the
+account authority. The engine roots its filesystem under the app's Application
+Support container. See [the engine guide](README-engine.md) for account setup.
 
 ## Build & run
 

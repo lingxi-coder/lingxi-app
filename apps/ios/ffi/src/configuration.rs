@@ -21,9 +21,10 @@ pub struct IosMobileLinuxConfigFfi {
     /// App-private root where rootfs state is managed.
     pub managed_root: String,
     /// Explicit host workspace root exposed to the guest. Must not be the app
-    /// sandbox root, the brand config directory, or any provider/config subtree.
+    /// sandbox root or a provider/config subtree, except the exact managed
+    /// projects workspace for this brand profile.
     pub workspace_host_path: String,
-    /// Stable guest workspace id used to produce `/home/<linuxUser>/<brandId>/<id>`.
+    /// Stable guest workspace id used under `/home/<linuxUser>/<configDirName>`.
     pub stable_workspace_id: String,
     /// ABI name for the rootfs payload (`arm64` on device).
     pub abi: String,
@@ -85,6 +86,13 @@ pub struct IosEngineLaunchConfigFfi {
     pub api_base: String,
     pub model: String,
     pub session_mode: SessionModeDto,
+    /// Restore this exact owner before any session lifecycle hooks run.
+    pub initial_session_id: Option<String>,
+    /// Exact catalog-selected transcript for that owner, required on restore.
+    pub initial_session_transcript_path: Option<String>,
+    /// A scheduled controller does not create or own a conversation.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub scheduler_controller: bool,
     pub vision_delegation_enabled: bool,
     pub app_sandbox_root: String,
     /// Optional cwd inside the Linux user HOME, in guest or native coordinates.
@@ -194,11 +202,25 @@ pub(super) fn mobile_linux_authorization_verified(path: Option<&String>) -> bool
 #[cfg(feature = "uniffi")]
 pub(super) fn ios_project_cwd(
     managed_root: &str,
-    project_cwd: Option<&str>,
+    project_cwd: &str,
 ) -> Result<std::path::PathBuf, MobileEngineError> {
     let directories = harness_runtime::mobile::mobile_user_directories(managed_root.to_string())?;
     directories.prepare()?;
-    directories.resolve_cwd(project_cwd).map(|(host, _)| host)
+    directories
+        .resolve_explicit_cwd(project_cwd)
+        .map(|(host, _)| host)
+}
+
+#[cfg(feature = "uniffi")]
+fn ios_engine_cwd(
+    directories: &harness_runtime::mobile::MobileUserDirectories,
+    config: &IosEngineLaunchConfigFfi,
+) -> Result<(PathBuf, PathBuf), MobileEngineError> {
+    if config.scheduler_controller && config.project_cwd.is_none() {
+        directories.resolve_explicit_cwd(&directories.scheduled_cwd)
+    } else {
+        directories.resolve_cwd(config.project_cwd.as_deref(), config.session_mode)
+    }
 }
 
 #[cfg(feature = "uniffi")]
@@ -246,7 +268,7 @@ pub(super) fn ios_mobile_config_from_launch_config(
             directories.prepare()?;
             directories
                 .validate_projects_mount(&linux.workspace_host_path, &linux.stable_workspace_id)?;
-            let (cwd, logical_cwd) = directories.resolve_cwd(config.project_cwd.as_deref())?;
+            let (cwd, logical_cwd) = ios_engine_cwd(&directories, config)?;
             (
                 brand_profile,
                 std::path::PathBuf::from(&directories.config_home),
@@ -313,6 +335,12 @@ pub(super) fn ios_mobile_config_from_launch_config(
         ),
         cwd,
         logical_cwd,
+        initial_session_id: config.initial_session_id.clone(),
+        initial_session_transcript_path: config
+            .initial_session_transcript_path
+            .as_ref()
+            .map(|path| std::path::PathBuf::from(path.as_str())),
+        scheduler_controller: config.scheduler_controller,
         lingxi_home: config_home,
         session_mode: match config.session_mode {
             SessionModeDto::Chat => MobileSessionMode::Chat,
@@ -425,9 +453,9 @@ pub(super) fn validate_mobile_linux_workspace_config(
     app_sandbox_root: &str,
     config: &IosMobileLinuxConfigFfi,
 ) -> Result<(std::path::PathBuf, String), MobileLinuxOperationFfiError> {
-    let workspace_host_path = std::path::PathBuf::from(&config.workspace_host_path);
+    let requested_workspace_host_path = std::path::PathBuf::from(&config.workspace_host_path);
     let workspace_host_path =
-        resolve_mobile_linux_security_path(&workspace_host_path, "workspace_host_path")?;
+        resolve_mobile_linux_security_path(&requested_workspace_host_path, "workspace_host_path")?;
     let sandbox_root = resolve_mobile_linux_security_path(
         std::path::Path::new(app_sandbox_root),
         "app_sandbox_root",
@@ -466,10 +494,22 @@ pub(super) fn validate_mobile_linux_workspace_config(
             purpose: mobile_linux_api::MountPurpose::Workspace,
         },
     );
+    // The native conversation runtime has one primary projects mount.  The
+    // brand container is also the config home, so only its exact projects
+    // child may bypass the config-tree protection here.
+    let managed_projects_workspace = persistent_workspace
+        && config.stable_workspace_id == "projects"
+        && workspace_host_path == brand_config_home.join("projects")
+        && (requested_workspace_host_path
+            == brand_profile
+                .persistent_home_host_path(std::path::Path::new(&config.managed_root))
+                .join(&config.config_dir_name)
+                .join("projects")
+            || requested_workspace_host_path == workspace_host_path);
     if workspace_host_path == sandbox_root
         || (workspace_host_path.starts_with(&managed_root) && !persistent_workspace)
         || managed_root.starts_with(&workspace_host_path)
-        || workspace_host_path.starts_with(&brand_config_home)
+        || (workspace_host_path.starts_with(&brand_config_home) && !managed_projects_workspace)
         || brand_config_home.starts_with(&workspace_host_path)
     {
         return Err(MobileLinuxOperationFfiError::InvalidRequest {
@@ -479,10 +519,12 @@ pub(super) fn validate_mobile_linux_workspace_config(
         });
     }
 
-    if mobile_linux_path_contains_protected_config_subtree(
-        &workspace_host_path,
-        &config.config_dir_name,
-    ) {
+    if !managed_projects_workspace
+        && mobile_linux_path_contains_protected_config_subtree(
+            &workspace_host_path,
+            &config.config_dir_name,
+        )
+    {
         return Err(MobileLinuxOperationFfiError::InvalidRequest {
             message: "workspace_host_path may not target provider/config subtrees".to_string(),
         });
@@ -537,7 +579,7 @@ pub(super) fn ios_project_mount_grants(
     )?;
     let primary_workspace_guest =
         mobile_linux_api::guest_paths::workspace_for_profile(&profile, "projects");
-    let (_, project_cwd_guest) = directories.resolve_cwd(config.project_cwd.as_deref())?;
+    let (_, project_cwd_guest) = ios_engine_cwd(&directories, config)?;
     validate_project_mount_grants(
         &directories,
         &primary_workspace_guest,
@@ -608,12 +650,30 @@ fn validate_project_mount_grants(
         }
 
         let under_apps = guest.starts_with(apps_guest) && guest != apps_guest;
+        // A Project may explicitly register a global or scheduled workspace.
+        // These were not config subtrees before the container was hidden; the
+        // registration and exact host/guest mapping remain mandatory.
+        let workspace_guest = [
+            &directories.chat_guest_cwd,
+            &directories.code_guest_cwd,
+            &directories.scheduled_guest_cwd,
+        ]
+        .iter()
+        .any(|root| guest.starts_with(Path::new(root)));
+        let safe_workspace_guest = workspace_guest
+            && guest != Path::new(&directories.scheduled_guest_cwd)
+            && guest.strip_prefix(config_guest).is_ok_and(|relative| {
+                !mobile_linux_path_contains_protected_config_subtree(
+                    relative,
+                    &directories.config_dir_name,
+                )
+            });
         if guest == apps_guest || apps_guest.starts_with(guest) {
             return Err(
                 "project mount grant may not expose the Local App root or its parent".into(),
             );
         }
-        if paths_overlap(guest, config_guest) && !under_apps {
+        if paths_overlap(guest, config_guest) && !under_apps && !safe_workspace_guest {
             return Err("project mount grant overlaps the protected brand config tree".into());
         }
 
@@ -622,7 +682,14 @@ fn validate_project_mount_grants(
             return Err("project mount grant overlaps the primary Projects mount".into());
         }
         let under_apps_host = host.starts_with(&apps_host) && host != apps_host;
-        if paths_overlap(&host, &config_host) && !under_apps_host {
+        let safe_workspace_host = safe_workspace_guest
+            && host.strip_prefix(&config_host).is_ok_and(|relative| {
+                !mobile_linux_path_contains_protected_config_subtree(
+                    relative,
+                    &directories.config_dir_name,
+                )
+            });
+        if paths_overlap(&host, &config_host) && !under_apps_host && !safe_workspace_host {
             return Err("project mount grant overlaps the protected native config tree".into());
         }
         if apps_host.starts_with(&host) {

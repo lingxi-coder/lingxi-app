@@ -10,6 +10,7 @@ enum SessionPanelAction: Hashable {
     case togglePinned
     case makeScheduled
     case terminal
+    case setMode(SessionMode)
     case continueInOtherMode
     case archive
 }
@@ -21,11 +22,11 @@ struct SessionPanelSheet: View {
     @Environment(\.theme) private var t
     let title: String
     let mode: SessionMode
+    let canSwitchMode: Bool
     let workspaceName: String
     let messageCount: Int
     let modelName: String
     let effortLabel: String
-    /// nil hides the row: a Chat session has no file permissions to ask about.
     let permissionLabel: String?
     let isPinned: Bool
     /// false hides the pin row: a chat that has not started has no id to pin.
@@ -53,12 +54,30 @@ struct SessionPanelSheet: View {
                 }
 
                 Section {
-                    row(
-                        title: String(localized: "cron_mode_label"),
-                        value: mode.title,
-                        footnote: String(localized: "session_panel_mode_hint"),
-                        identifier: "session-panel.mode"
-                    ) { onAction(.continueInOtherMode) }
+                    Menu {
+                        ForEach(SessionMode.allCases, id: \.self) { candidate in
+                            Button {
+                                onAction(.setMode(candidate))
+                            } label: {
+                                Label(candidate.title + " — " + candidate.modeDescription,
+                                      systemImage: candidate == mode ? "checkmark" : "circle")
+                            }
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(String(localized: "cron_mode_label")).foregroundStyle(t.text)
+                                Spacer(minLength: 12)
+                                Text(mode.title).foregroundStyle(t.text3)
+                                LXIcon(name: .chevronR, size: 12, color: t.text4, stroke: 1.7)
+                            }
+                            Text(mode.modeDescription)
+                                .font(.caption2).foregroundStyle(t.text4)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .disabled(!canSwitchMode)
+                    .accessibilityIdentifier("session-panel.mode")
                     row(
                         title: String(localized: "session_details_model"),
                         value: modelName,

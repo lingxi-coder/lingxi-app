@@ -24,6 +24,21 @@ import XCTest
 
     @MainActor
 final class SessionResumeTests: XCTestCase {
+        func testGlobalEventCenterPublishesOnlyTheSelectedOwner() {
+            let center = ClientEventCenter()
+            let a = NSObject()
+            let b = NSObject()
+            var models: [String] = []
+            center.subscribe { event in
+                if case let .modelList(_, current, _, _) = event { models.append(current) }
+            }
+            center.publish(.modelList(models: ["model-a"], current: "model-a", currentModelSource: nil, details: []),
+                           owner: a, selectedOwner: b)
+            center.publish(.modelList(models: ["model-b"], current: "model-b", currentModelSource: nil, details: []),
+                           owner: b, selectedOwner: b)
+            XCTAssertEqual(models, ["model-b"])
+        }
+
         func testReportDeliveryBindingsRoundTripWithoutShiftingAgentFields() throws {
             for delivery in [nil, "pending", "delivered", "flagged", "withheld"] as [String?] {
                 let agent = SessionAgentSummaryDto(reportDelivery: delivery,
@@ -61,8 +76,286 @@ visionDelegationEnabled: true)
 
         private func uuid() -> String { "22222222-2222-4222-8222-222222222222" }
 
+        private func enableResume(_ source: EngineConversationSource, ids: [String],
+                                  submit: @escaping (ClientCommand) async throws -> Void = { _ in }) {
+            source.model.engineSessions = ids.map {
+                EngineSession(id: $0, title: $0, mode: .code, messageCount: 0, modifiedAt: nil,
+                              relativeTime: "", transcriptPath: "/fixture/\($0).jsonl")
+            }
+            source.setResumeSubmitterForTesting { id, path in
+                XCTAssertEqual(path, "/fixture/\(id).jsonl")
+                try await submit(.resumeSession(sessionId: id, cwd: nil, expectedMode: .code))
+            }
+        }
+
         private func sourceText(_ value: String) -> ClientTextDto {
             ClientTextDto(codeUnits: Array(value.utf16))
+        }
+
+        private func existingSource() -> EngineConversationSource {
+            let source = makeSource()
+            source.expectSessionResumeForTesting(uuid())
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [
+                MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: sourceText("history"))])
+            ]))
+            return source
+        }
+
+        func testSessionModeCannotChangeAfterCreation() {
+            let source = existingSource()
+            source.applyForTesting(.sessionStarted(sessionId: uuid(), mode: .chat))
+            XCTAssertEqual(source.model.sessionMode, .code)
+            XCTAssertEqual(source.model.activeSessionId, uuid())
+            XCTAssertEqual(source.model.messages.first?.text, "history")
+        }
+
+        func testAuthoringAdmissionWaitsForExactOwnerWithoutBlockingAnotherSource() async throws {
+            let other = makeSource()
+            let session = uuid()
+            let project = UUID().uuidString.lowercased()
+            let cwd = MobileUserStorage.directories().appsGuestPath + "/authoring-test"
+            let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: NSTemporaryDirectory(),
+                                      projectCwd: cwd, sessionMode: .code, visionDelegationEnabled: true,
+                                      projectMountGrants: [cwd])
+            let source = EngineConversationSource(config: config)
+            let owner = LocalAppAuthoringOwner(sourceDirectory: cwd, projectID: project, sessionID: session, appID: nil)
+            let binding = LocalAppAuthoring(sourceDirectory: cwd, workspaceId: project,
+                                            projectRef: .mobileProject(project), authoringSessionId: session)
+            try source.requireAuthoringBindingBeforeTurns(LocalAppProvisionalAuthoringOwner(
+                sourceDirectory: cwd, projectID: project, appID: nil))
+            source.model.activeSessionId = session
+            source.model.workspaceState = SessionWorkspaceState(sessionId: session, cwd: cwd,
+                projectRoot: cwd, additionalDirectories: [], transcriptPath: "/fixture/session.jsonl")
+            var submitted = 0
+            source.setCommandSubmitterForTesting { _ in submitted += 1 }
+            XCTAssertFalse(source.isAvailableForPrompts)
+            XCTAssertTrue(other.isAvailableForPrompts)
+            let rejected = await source.send("keep this draft")
+            XCTAssertNil(rejected)
+            do {
+                try await source.submitEngineCommand(.sendPrompt(text: sourceText("bypass"), promptMode: nil,
+                                                                  images: [], turnId: 1, visualizationContext: nil))
+                XCTFail("A direct command must not bypass pending authoring admission")
+            } catch {}
+            XCTAssertEqual(submitted, 0)
+            var wrong = binding
+            wrong.authoringSessionId = UUID().uuidString
+            XCTAssertThrowsError(try source.confirmAuthoringBinding(owner, binding: wrong))
+            let wrongOwner = LocalAppAuthoringOwner(sourceDirectory: cwd, projectID: UUID().uuidString,
+                                                     sessionID: session, appID: nil)
+            let wrongBinding = LocalAppAuthoring(sourceDirectory: cwd, workspaceId: wrongOwner.projectID,
+                projectRef: .mobileProject(wrongOwner.projectID), authoringSessionId: session)
+            XCTAssertThrowsError(try source.confirmAuthoringBinding(wrongOwner, binding: wrongBinding))
+            XCTAssertFalse(source.isAvailableForPrompts)
+            try source.confirmAuthoringBinding(owner, binding: binding)
+            XCTAssertTrue(source.isAvailableForPrompts)
+            try await source.submitEngineCommand(.sendPrompt(text: sourceText("admitted"), promptMode: nil,
+                                                              images: [], turnId: 2, visualizationContext: nil))
+            XCTAssertEqual(submitted, 1)
+            source.model.activeSessionId = UUID().uuidString
+            XCTAssertFalse(source.isAvailableForPrompts)
+            do {
+                try await source.submitEngineCommand(.sendPrompt(text: sourceText("wrong owner"), promptMode: nil,
+                                                                  images: [], turnId: 3, visualizationContext: nil))
+                XCTFail("A late owner change must not reuse an earlier binding")
+            } catch {}
+            XCTAssertEqual(submitted, 1)
+        }
+
+        func testAuthoringWorkspaceValidationDrainsAdmittedSubmitAndKeepsOtherOwnersUsable() async throws {
+            let source = makeSource()
+            let other = makeSource()
+            let gate = EngineSubmitGate()
+            source.setCommandSubmitterForTesting { command in try await gate.submit(command) }
+            let submitted = Task { @MainActor in
+                try await source.submitEngineCommand(.sendPrompt(text: sourceText("first"), promptMode: nil,
+                    images: [], turnId: 1, visualizationContext: nil))
+            }
+            await gate.waitForFirstSubmit()
+            XCTAssertThrowsError(try source.beginAuthoringWorkspaceValidation())
+            await gate.releaseFirstSubmit()
+            try await submitted.value
+            let token = try source.beginAuthoringWorkspaceValidation()
+            XCTAssertFalse(source.isAvailableForPrompts)
+            XCTAssertTrue(other.isAvailableForPrompts)
+            let rejected = await source.send("keep this draft")
+            XCTAssertNil(rejected)
+            do {
+                try await source.setWorkspaceDirectory("/different", expectedSessionID: uuid())
+                XCTFail("A workspace change must not overtake source verification")
+            } catch {}
+            source.endAuthoringWorkspaceValidation(token)
+            XCTAssertTrue(source.isAvailableForPrompts)
+        }
+
+        func testColdAuthoringAuthorizationReconnectsSettingsForTheSameOwner() async throws {
+            let session = uuid()
+            let project = UUID().uuidString.lowercased()
+            let cwd = MobileUserStorage.directories().appsGuestPath + "/settings-owner"
+            let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: NSTemporaryDirectory(),
+                projectCwd: cwd, sessionMode: .code, visionDelegationEnabled: true,
+                initialSessionId: session, initialSessionTranscriptPath: "/fixture/session.jsonl")
+            let handle = TestMobileEngineHandle(sessionID: session) { _ in }
+            let source = EngineConversationSource(config: config, handleBuilder: { _, _, _, _ in handle })
+            source.requireAuthoringMountAuthorization()
+            let settings = DesktopSettingsRepository.shared
+            let initialGeneration = settings.sourceGeneration
+            source.setSettingsActive(true)
+            defer { source.setSettingsActive(false) }
+            for _ in 0..<200 {
+                if settings.sourceGeneration >= initialGeneration + 2 { break }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertGreaterThanOrEqual(settings.sourceGeneration, initialGeneration + 2,
+                "The first settings attach must finish while authorization is pending")
+            XCTAssertFalse(settings.connected)
+            let owner = LocalAppAuthoringOwner(sourceDirectory: cwd, projectID: project,
+                                               sessionID: session, appID: nil)
+            try source.authorizeAuthoringMount(grants: [cwd], owner: owner)
+            try await source.prepare()
+            source.setSettingsActive(true)
+            for _ in 0..<200 {
+                if settings.connected { break }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertTrue(settings.connected, "Authorization must reattach settings for the existing selected owner")
+        }
+
+        func testRecoveredAuthoringCannotSubmitBeforeNativeModeAndReceiptAreConfirmed() async throws {
+            let session = uuid()
+            let project = UUID().uuidString.lowercased()
+            let cwd = MobileUserStorage.directories().appsGuestPath + "/cold-owner"
+            let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: NSTemporaryDirectory(),
+                projectCwd: cwd, sessionMode: .code, visionDelegationEnabled: true,
+                initialSessionId: session, initialSessionTranscriptPath: "/fixture/session.jsonl")
+            let source = EngineConversationSource(config: config)
+            let owner = LocalAppAuthoringOwner(sourceDirectory: cwd, projectID: project, sessionID: session, appID: nil)
+            let binding = LocalAppAuthoring(sourceDirectory: cwd, workspaceId: project,
+                projectRef: .mobileProject(project), authoringSessionId: session)
+            source.requireAuthoringMountAuthorization()
+            try source.authorizeAuthoringMount(grants: [cwd], owner: owner)
+            XCTAssertFalse(source.isAvailableForPrompts)
+            let token = await source.send("preserve")
+            XCTAssertNil(token)
+            XCTAssertThrowsError(try source.confirmRecoveredAuthoringOwner(owner, binding: binding))
+            source.expectSessionResumeForTesting(session)
+            source.applyForTesting(.sessionResumed(sessionId: session, mode: .code, messages: []))
+            var wrong = binding
+            wrong.authoringSessionId = UUID().uuidString
+            XCTAssertThrowsError(try source.confirmRecoveredAuthoringOwner(owner, binding: wrong))
+            XCTAssertFalse(source.isAvailableForPrompts)
+            try source.confirmRecoveredAuthoringOwner(owner, binding: binding)
+            XCTAssertTrue(source.isAvailableForPrompts)
+        }
+
+        func testRetiredAuthoringOwnerKeepsUUIDUntilNativeDrainIsConfirmed() async throws {
+            let session = uuid()
+            let project = UUID().uuidString.lowercased()
+            let cwd = MobileUserStorage.directories().appsGuestPath + "/drain-owner"
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: root.path,
+                projectCwd: cwd, sessionMode: .code, visionDelegationEnabled: true,
+                initialSessionId: session, initialSessionTranscriptPath: "/fixture/session.jsonl")
+            let source = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+            let owner = LocalAppAuthoringOwner(sourceDirectory: cwd, projectID: project, sessionID: session, appID: nil)
+            source.requireAuthoringMountAuthorization()
+            try source.authorizeAuthoringMount(grants: [cwd], owner: owner)
+            source.expectSessionResumeForTesting(session)
+            source.applyForTesting(.sessionResumed(sessionId: session, mode: .code, messages: []))
+            await source.waitForDurableRecoveryForTesting()
+            let host = SessionHost()
+            let entry = try host.retain(source: source, scope: .project(project), mode: .code,
+                                        sessionID: session, workspace: cwd, draft: "preserved")
+            let other = MockConversationSource(sessionMode: .chat)
+            let selected = try host.retain(source: other, scope: .global, mode: .chat,
+                                           sessionID: "", workspace: "/global", draft: "")
+            host.select(selected)
+            try await source.retireForReconnect(allowUnconfirmedAuthoring: true)
+            let timedOut = await host.releaseRetiredAuthoringSourceAfterDrain(source, entry: entry,
+                stillCurrent: { true }, waitForRelease: { false })
+            XCTAssertFalse(timedOut)
+            XCTAssertTrue(try host.entryForClaim(sessionID: session, scope: .project(project), mode: .code) === entry)
+            let staleNavigation = await host.releaseRetiredAuthoringSourceAfterDrain(source, entry: entry,
+                stillCurrent: { false }, waitForRelease: { true })
+            XCTAssertFalse(staleNavigation)
+            XCTAssertTrue(host.entry(for: source) === entry)
+            let drained = await host.releaseRetiredAuthoringSourceAfterDrain(source, entry: entry,
+                stillCurrent: { true }, waitForRelease: { true })
+            XCTAssertTrue(drained)
+            XCTAssertNil(host.entry(for: source))
+            XCTAssertTrue(host.entry(for: other) === selected)
+        }
+
+        func testPreFFIMediaRejectionDoesNotFenceTheNextOwner() async throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let project = UUID().uuidString.lowercased()
+            let cwd = MobileUserStorage.directories().appsGuestPath + "/preflight"
+            var config = EngineConfig(apiBase: "", model: "", appSandboxRoot: root.path,
+                                      projectCwd: cwd, sessionMode: .code, visionDelegationEnabled: true)
+            config.projectMountGrants = [cwd]
+            let source = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+            try source.requireAuthoringBindingBeforeTurns(.init(sourceDirectory: cwd, projectID: project, appID: nil))
+            let host = SessionHost()
+            host.protectIdentity(of: source, scope: .project(project), mode: .code)
+            do {
+                try await source.prepare()
+                XCTFail("The missing media host must reject before native dispatch")
+            } catch {
+                XCTAssertEqual((error as NSError).domain, "IOSNativeMediaHost")
+            }
+            XCTAssertFalse(source.nativeConstructionStarted)
+            host.endPreparingClaim(of: source)
+            let retry = MockConversationSource(sessionMode: .code)
+            XCTAssertTrue(host.claimIdentity(UUID().uuidString.lowercased(), for: retry,
+                                             scope: .project(project), mode: .code))
+        }
+
+        func testReconnectRetirementPreservesIdleModelAndRejectsNewPrompts() async throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: root.path,
+                                      sessionMode: .code, visionDelegationEnabled: true)
+            let source = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+            source.expectSessionResumeForTesting(uuid())
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [
+                MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: sourceText("history"))])
+            ]))
+            await source.waitForDurableRecoveryForTesting()
+            try await source.retireForReconnect()
+            XCTAssertFalse(source.isAvailableForPrompts)
+            XCTAssertEqual(source.model.activeSessionId, uuid())
+            XCTAssertEqual(source.model.messages.first?.text, "history")
+            let submitted = await source.send("do not admit after close")
+            XCTAssertNil(submitted)
+            try await source.retireForReconnect()
+        }
+
+        func testReconnectCannotRetireAdmittedTurn() async {
+            let source = existingSource()
+            source.model.streaming = true
+            do {
+                try await source.retireForReconnect()
+                XCTFail("A live owner must not be retired")
+            } catch {}
+            XCTAssertTrue(source.isAvailableForPrompts)
+            XCTAssertTrue(source.model.streaming)
+        }
+
+        func testStartupResumeAcceptsOnlyConfiguredOwner() {
+            let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: NSTemporaryDirectory(),
+                                      sessionMode: .code, visionDelegationEnabled: true, initialSessionId: uuid())
+            let source = EngineConversationSource(config: config)
+            XCTAssertTrue(source.model.sessionTransitionPending)
+            source.applyForTesting(.sessionResumed(sessionId: "other", mode: .code, messages: []))
+            XCTAssertTrue(source.model.sessionTransitionPending)
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: []))
+            XCTAssertEqual(source.model.activeSessionId, uuid())
+            XCTAssertFalse(source.model.sessionTransitionPending)
         }
 
         /// An empty array before the first `SessionList` means "not loaded";
@@ -880,20 +1173,6 @@ visionDelegationEnabled: true)
                     pendingRestoreID: nil
                 )
             )
-            XCTAssertTrue(
-                ConversationSessionRestorePolicy.shouldClearUnavailableSession(
-                    unavailableSessionID: "saved-session",
-                    pendingRestoreID: "saved-session",
-                    activeSessionID: "saved-session"
-                )
-            )
-            XCTAssertFalse(
-                ConversationSessionRestorePolicy.shouldClearUnavailableSession(
-                    unavailableSessionID: "old-session",
-                    pendingRestoreID: "new-session",
-                    activeSessionID: "new-session"
-                )
-            )
             XCTAssertEqual(
                 ConversationSessionRestorePolicy.rollbackSelection(
                     failedSessionID: "new-session",
@@ -944,7 +1223,7 @@ visionDelegationEnabled: true)
             )
         }
 
-        func testMissingResumeCreatesReplacementWithoutShowingEngineError() async {
+        func testMissingResumeReportsFailureWithoutCreatingReplacement() async {
             let source = makeSource()
             let recorder = SessionTransitionRecorder(failure: .missing)
             source.setCommandSubmitterForTesting { command in
@@ -952,24 +1231,26 @@ visionDelegationEnabled: true)
             }
 
             source.resumeSession("missing-session")
-            let receivedCommands = await recorder.waitForCommandCount(2)
-            XCTAssertTrue(receivedCommands)
-
             let commands = await recorder.snapshot()
-            XCTAssertEqual(commands, [.resume, .new])
-            XCTAssertEqual(
-                source.model.sessionRestoreRecovery?.unavailableSessionID,
-                "missing-session"
-            )
-            XCTAssertTrue(source.model.sessionTransitionPending)
-            XCTAssertTrue(source.model.isNew)
-            XCTAssertNil(source.model.error)
-            XCTAssertEqual(source.model.statusLine, "原会话已不存在，已创建新对话")
-
-            source.applyForTesting(.sessionStarted(sessionId: "replacement-session", mode: .code))
+            XCTAssertTrue(commands.isEmpty)
             XCTAssertFalse(source.model.sessionTransitionPending)
-            XCTAssertEqual(source.model.activeSessionId, "replacement-session")
-            XCTAssertEqual(source.model.sessionRefreshRevision, 1)
+            XCTAssertNotNil(source.model.error)
+            XCTAssertEqual(source.model.sessionTransitionFailure?.requestedSessionID, "missing-session")
+        }
+
+        func testMissingSelectedTranscriptDoesNotCancelAnAdmittedTurn() async {
+            let source = makeSource()
+            var commands: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { command in await MainActor.run { commands.append(command) } }
+            source.beginTurnForTesting(turnId: 9, sessionId: "active-session")
+            source.model.engineSessions = [EngineSession(id: "selected", title: "Selected", mode: .code,
+                messageCount: 1, modifiedAt: nil, relativeTime: "", transcriptPath: nil)]
+            source.resumeSession("selected")
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertEqual(source.model.activeSessionId, "active-session")
+            XCTAssertFalse(source.model.sessionTransitionPending)
+            XCTAssertNotNil(source.model.error)
+            XCTAssertTrue(commands.isEmpty)
         }
 
         func testNonMissingResumeFailureRemainsVisible() async {
@@ -978,6 +1259,7 @@ visionDelegationEnabled: true)
             source.setCommandSubmitterForTesting { command in
                 try await recorder.submit(command)
             }
+            enableResume(source, ids: ["saved-session"]) { command in try await recorder.submit(command) }
 
             source.resumeSession("saved-session")
             let receivedCommand = await recorder.waitForCommandCount(1)
@@ -987,7 +1269,6 @@ visionDelegationEnabled: true)
 
             let commands = await recorder.snapshot()
             XCTAssertEqual(commands, [.resume])
-            XCTAssertNil(source.model.sessionRestoreRecovery)
             XCTAssertFalse(source.model.sessionTransitionPending)
             XCTAssertNotNil(source.model.error)
             XCTAssertEqual(
@@ -996,40 +1277,41 @@ visionDelegationEnabled: true)
             )
         }
 
-        func testRejectedMissingResumeUsesTypedFallback() async {
+        func testRejectedResumeDoesNotMatchLegacyErrorText() async {
             let source = makeSource()
             let recorder = SessionTransitionRecorder(failure: .missingRejected)
             source.setCommandSubmitterForTesting { command in
                 try await recorder.submit(command)
             }
+            enableResume(source, ids: ["missing-session"]) { command in try await recorder.submit(command) }
 
             source.resumeSession("missing-session")
-            let receivedCommands = await recorder.waitForCommandCount(2)
+            let receivedCommands = await recorder.waitForCommandCount(1)
             XCTAssertTrue(receivedCommands)
+            let transitionSettled = await waitForSessionTransitionToSettle(source)
+            XCTAssertTrue(transitionSettled)
 
             let commands = await recorder.snapshot()
-            XCTAssertEqual(commands, [.resume, .new])
-            XCTAssertNil(source.model.error)
+            XCTAssertEqual(commands, [.resume])
+            XCTAssertNotNil(source.model.error)
         }
 
-        func testConfirmedEmptyResumePreservesSessionIDThroughDedicatedEntryPoint() async {
+        func testConfirmedEmptyResumePreservesSessionIDAndMode() async {
             let source = makeSource()
             let recorder = EmptySessionResumeRecorder()
-            source.setCommandSubmitterForTesting { _ in
-                XCTFail("a confirmed empty session must not use ResumeSession")
+            source.setCommandSubmitterForTesting { command in
+                await recorder.submit(command)
             }
-            source.setEmptySessionResumerForTesting { sessionID, title in
-                await recorder.resume(sessionID: sessionID, title: title)
-            }
+            enableResume(source, ids: ["empty-session"]) { command in await recorder.submit(command) }
 
-            source.resumeSession("empty-session", emptySessionTitle: "空会话")
+            source.resumeSession("empty-session")
             let didResume = await recorder.waitForResume()
             XCTAssertTrue(didResume)
 
             let request = await recorder.snapshot()
             XCTAssertEqual(
                 request,
-                .init(sessionID: "empty-session", title: "空会话")
+                .resumeSession(sessionId: "empty-session", cwd: nil, expectedMode: .code)
             )
             XCTAssertTrue(source.model.sessionTransitionPending)
 
@@ -1039,9 +1321,30 @@ visionDelegationEnabled: true)
             XCTAssertEqual(source.model.sessionRefreshRevision, 1)
         }
 
+        func testStartupModeMismatchFailsClosedWithoutAdoptingSession() {
+            let source = makeSource()
+            source.applyForTesting(.sessionStarted(sessionId: "other", mode: .chat))
+            XCTAssertEqual(source.model.activeSessionId, "")
+            XCTAssertFalse(source.isAvailableForPrompts)
+            XCTAssertNotNil(source.model.error)
+            XCTAssertFalse(source.model.sessionTransitionPending)
+        }
+
+        func testResumeModeMismatchEndsTransitionWithoutReplacingOwner() {
+            let source = makeSource()
+            source.expectSessionResumeForTesting("saved")
+            source.applyForTesting(.sessionResumed(sessionId: "saved", mode: .chat, messages: []))
+            XCTAssertEqual(source.model.activeSessionId, "")
+            XCTAssertFalse(source.model.sessionTransitionPending)
+            XCTAssertFalse(source.isAvailableForPrompts)
+            XCTAssertEqual(source.model.sessionTransitionFailure?.requestedSessionID, "saved")
+            XCTAssertNotNil(source.model.error)
+        }
+
         func testBootstrapSessionStartedDoesNotClearPendingResume() {
             let source = makeSource()
             source.setCommandSubmitterForTesting { _ in }
+            enableResume(source, ids: ["saved-session"])
 
             source.resumeSession("saved-session")
             XCTAssertTrue(source.model.sessionTransitionPending)
@@ -1060,6 +1363,7 @@ visionDelegationEnabled: true)
         func testSameTargetSessionStartedCannotCompleteResumeBeforeTranscriptReplay() {
             let source = makeSource()
             source.setCommandSubmitterForTesting { _ in }
+            enableResume(source, ids: ["saved-session"])
             source.model.activeSessionId = "saved-session"
 
             source.resumeSession("saved-session")
@@ -1115,6 +1419,7 @@ visionDelegationEnabled: true)
         func testLateSessionResumedCannotOverwriteNewerConfirmedSession() {
             let source = makeSource()
             source.setCommandSubmitterForTesting { _ in }
+            enableResume(source, ids: ["session-b", "session-c"])
             source.model.activeSessionId = "session-a"
 
             source.resumeSession("session-b")
@@ -1531,6 +1836,129 @@ visionDelegationEnabled: true)
             XCTAssertEqual(source.model.messages[0].text, "系统提示")
         }
 
+        func testUnreadableCatalogRejectsUnclaimedOwnerBeforeNativeStartupAndSend() async {
+            let host = SessionHost()
+            var buildCount = 0
+            let source = makeSource(handleBuilder: { _, _, _, _ in
+                buildCount += 1
+                return TestMobileEngineHandle { _ in }
+            })
+            host.admitsUnclaimedOwner = { false }
+            host.protectIdentity(of: source, scope: .global, mode: .code)
+
+            let submitted = await source.send("preserve this draft")
+            XCTAssertNil(submitted)
+            XCTAssertTrue(source.model.messages.isEmpty)
+            await XCTAssertThrowsAsyncError(try await source.prepare())
+            XCTAssertEqual(buildCount, 0, "the native constructor must not run")
+            XCTAssertNotNil(source.model.error)
+        }
+
+        func testRetainedStartupWaitsForReceiptScanAndRechecksOwnerBeforeBuild() async throws {
+            let host = SessionHost()
+            var buildCount = 0
+            let id = uuid()
+            let source = makeSource(handleBuilder: { _, _, _, _ in
+                buildCount += 1
+                return TestMobileEngineHandle(sessionID: id) { _ in }
+            })
+            var scanComplete = false
+            var ownerAllowed = true
+            host.startupAdmissionReady = { scanComplete }
+            host.admitsUnclaimedOwner = { true }
+            host.admitsSessionIdentity = { _, _, _ in ownerAllowed }
+            let entry = try host.retain(source: source, scope: .global, mode: .code,
+                                        sessionID: id, workspace: "/global", draft: "preserved")
+            await XCTAssertThrowsAsyncError(try await source.prepare())
+            XCTAssertEqual(buildCount, 0)
+            scanComplete = true
+            ownerAllowed = false // A newly discovered native receipt owns this UUID elsewhere.
+            await XCTAssertThrowsAsyncError(try await source.prepare())
+            XCTAssertEqual(buildCount, 0)
+            XCTAssertEqual(entry.draft, "preserved")
+            ownerAllowed = true
+            try await source.prepare()
+            XCTAssertEqual(buildCount, 1)
+            scanComplete = false
+            ownerAllowed = false
+            try await source.prepare() // A live handle remains admitted after later index errors.
+            XCTAssertEqual(buildCount, 1)
+            let submitted = await source.send("Continue the admitted owner")
+            XCTAssertNotNil(submitted)
+        }
+
+        func testWorkspaceReadUsesNativeOwnerAndDiscardsALateSessionChange() async throws {
+            let id = uuid()
+            let gate = WorkspaceReadGate(sessionID: id)
+            let handle = TestMobileEngineHandle(sessionID: id, workspaceHandler: { await gate.read() }) { _ in }
+            let source = makeSource(handleBuilder: { _, _, _, _ in handle })
+            try await source.prepare()
+            source.model.activeSessionId = id
+            source.model.workspaceState = SessionWorkspaceState(sessionId: id, cwd: "/forged",
+                projectRoot: "/forged", additionalDirectories: [], transcriptPath: "/other.jsonl")
+            let verified = await source.authenticatedWorkspaceState(sessionID: id, mode: .code)
+            XCTAssertEqual(verified?.cwd, "/fixture")
+            XCTAssertEqual(verified?.transcriptPath, "/fixture/session.jsonl")
+            let host = SessionHost()
+            let entry = try host.retain(source: source, scope: .global, mode: .code, sessionID: id,
+                                        workspace: "/fixture", draft: "")
+            let original = await host.validatesCatalogSource(sessionID: id, scope: .global, mode: .code,
+                                                              transcriptPath: "/fixture/session.jsonl")
+            let copy = await host.validatesCatalogSource(sessionID: id, scope: .global, mode: .code,
+                                                          transcriptPath: "/other.jsonl")
+            XCTAssertTrue(original)
+            XCTAssertFalse(copy, "a catalog row cannot replace the retained native owner's source")
+            let wrongMode = await source.authenticatedWorkspaceState(sessionID: id, mode: .chat)
+            XCTAssertNil(wrongMode)
+
+            await gate.blockNextRead()
+            let snapshotRead = Task { await host.authenticatedWorkspaceSnapshot(for: entry) }
+            guard await gate.waitUntilBlocked() else {
+                snapshotRead.cancel()
+                await gate.releaseRead()
+                return XCTFail("the old native workspace read did not start")
+            }
+            source.model.workspaceState = SessionWorkspaceState(sessionId: id, cwd: "/new",
+                projectRoot: "/fixture", additionalDirectories: [], transcriptPath: "/fixture/session.jsonl")
+            await gate.setCwd("/new")
+            await gate.releaseRead()
+            let snapshot = await snapshotRead.value
+            XCTAssertEqual(snapshot?.state.cwd, "/new", "a workspace event during the read must force a fresh query")
+
+            await gate.blockNextRead()
+            let read = Task { await source.authenticatedWorkspaceState(sessionID: id, mode: .code) }
+            guard await gate.waitUntilBlocked() else {
+                read.cancel()
+                await gate.releaseRead()
+                return XCTFail("the native workspace read did not start")
+            }
+            source.model.activeSessionId = "33333333-3333-4333-8333-333333333333"
+            await gate.releaseRead()
+            let stale = await read.value
+            XCTAssertNil(stale, "a late native reply must not update a different owner")
+        }
+
+        func testMovedIndexedOwnerIsRejectedBeforeNativeStartup() async {
+            let host = SessionHost()
+            var buildCount = 0
+            let source = makeSource(handleBuilder: { _, _, _, _ in
+                buildCount += 1
+                return TestMobileEngineHandle { _ in }
+            })
+            let id = uuid()
+            var indexedScope = ConversationScope.global
+            host.admitsUnclaimedOwner = { true }
+            host.admitsSessionIdentity = { _, scope, _ in scope == indexedScope }
+            host.protectIdentity(of: source, scope: .global, mode: .code, sessionID: id)
+            XCTAssertTrue(host.allowsStartup(of: source, sessionID: id, scope: .global, mode: .code))
+            indexedScope = .project("other")
+
+            let submitted = await source.send("keep this draft")
+            XCTAssertNil(submitted)
+            await XCTAssertThrowsAsyncError(try await source.prepare())
+            XCTAssertEqual(buildCount, 0, "the conflicting UUID must not start a second native owner")
+        }
+
         func testConcurrentEngineEntryPointsShareOneHandleBuild() async throws {
             let gate = EngineSubmitGate()
             let handle = TestMobileEngineHandle { command in
@@ -1544,13 +1972,14 @@ visionDelegationEnabled: true)
 
             source.warmUp()
             source.listSessions()
-            source.send("并发消息")
+            let prompt = Task { await source.send("并发消息") }
             let prepare = Task { try await source.prepare() }
 
             await gate.waitForFirstSubmit()
             XCTAssertEqual(buildCount, 1)
             await gate.releaseFirstSubmit()
             try await prepare.value
+            _ = await prompt.value
             let receivedCommands = await gate.waitForSubmitCount(4)
             XCTAssertTrue(receivedCommands)
 
@@ -1559,12 +1988,67 @@ visionDelegationEnabled: true)
             let commands = await gate.snapshot()
             var sessionListCommandCount = 0
             for command in commands {
-                guard case let .listSessions(limit) = command else { continue }
+                guard case let .listSessions(limit, _) = command else { continue }
                 sessionListCommandCount += 1
                 XCTAssertEqual(limit, UInt32.max,
                                "bootstrap and drawer refresh must both request the full catalog")
             }
             XCTAssertGreaterThan(sessionListCommandCount, 0)
+        }
+
+        func testRetirementWaitsForInFlightBootstrapAndKeepsItsRealUUID() async throws {
+            let gate = EngineSubmitGate()
+            let sessionID = uuid()
+            let handle = TestMobileEngineHandle(sessionID: sessionID) { command in try await gate.submit(command) }
+            let source = makeSource(handleBuilder: { _, _, _, _ in handle })
+            var fencedEngineIdentity: ObjectIdentifier?
+            var beginCalls = 0
+            var mediaDrained = false
+            source.setMediaDrainForTesting(begin: { engine in
+                beginCalls += 1
+                fencedEngineIdentity = ObjectIdentifier(engine)
+            }, wait: { _ in mediaDrained })
+            let preparing = Task { try await source.prepare() }
+            await gate.waitForFirstSubmit()
+            var firstFinished = false
+            var secondFinished = false
+            let first = Task { @MainActor in
+                try await source.retireForReconnect()
+                firstFinished = true
+            }
+            let second = Task { @MainActor in
+                try await source.retireForReconnect()
+                secondFinished = true
+            }
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(1))
+            while !source.isRetiredForReconnect, clock.now < deadline { await Task.yield() }
+            guard source.isRetiredForReconnect else {
+                await gate.releaseFirstSubmit()
+                _ = try? await preparing.value
+                _ = try? await first.value
+                _ = try? await second.value
+                return XCTFail("retirement did not start")
+            }
+            XCTAssertFalse(firstFinished)
+            XCTAssertFalse(secondFinished)
+            await gate.releaseFirstSubmit()
+            try await first.value
+            try await second.value
+            await XCTAssertThrowsAsyncError(try await preparing.value)
+            XCTAssertTrue(firstFinished)
+            XCTAssertTrue(secondFinished)
+            XCTAssertEqual(beginCalls, 1, "Concurrent retirement must fence the constructed engine exactly once")
+            XCTAssertEqual(fencedEngineIdentity, ObjectIdentifier(handle),
+                           "The drain must use the engine returned by the in-flight build")
+            XCTAssertFalse(source.hasPreparedNativeHandle)
+            let capturedID = await source.preparedSessionIDForRelease()
+            XCTAssertEqual(capturedID, sessionID)
+            let timedOut = await source.waitForMediaAttachmentDrain(timeoutMs: 1)
+            XCTAssertFalse(timedOut)
+            mediaDrained = true
+            let drained = await source.waitForMediaAttachmentDrain(timeoutMs: 1)
+            XCTAssertTrue(drained)
         }
 
         func testEngineHandleConstructionDoesNotRunOnMainThread() async throws {
@@ -1608,7 +2092,7 @@ visionDelegationEnabled: true)
             }) else {
                 return XCTFail("engine bootstrap must request the session catalog")
             }
-            guard case let .listSessions(limit) = sessionList else { return }
+            guard case let .listSessions(limit, _) = sessionList else { return }
             XCTAssertEqual(limit, UInt32.max,
                            "project persistence requires an uncapped catalog")
         }
@@ -1646,13 +2130,79 @@ visionDelegationEnabled: true)
             XCTAssertEqual(buildCount, 2)
         }
 
+        func testConcurrentPrepareWaitsForOwnerAdmissionAndSharesRejection() async throws {
+            let id = uuid()
+            let workspace = WorkspaceReadGate(sessionID: id)
+            let submissions = EngineSubmitGate()
+            let handle = TestMobileEngineHandle(sessionID: id, workspaceHandler: { await workspace.read() }) { command in
+                try await submissions.submit(command)
+            }
+            let source = makeSource(handleBuilder: { _, _, _, _ in handle })
+            var leaseActive = false
+            var leaseFinishes = 0
+            source.setSessionStartupLease(begin: { leaseActive = true; return true }, finish: {
+                leaseActive = false; leaseFinishes += 1
+            })
+            source.setSessionOwnerAdmission { _ in false }
+            var firstSettled = false, secondSettled = false
+            let first = Task { @MainActor in
+                defer { firstSettled = true }
+                try await source.prepare()
+            }
+            await submissions.waitForFirstSubmit()
+            await workspace.blockNextRead()
+            let second = Task { @MainActor in
+                defer { secondSettled = true }
+                try await source.prepare()
+            }
+            await Task.yield()
+            await submissions.releaseFirstSubmit()
+            guard await workspace.waitUntilBlocked() else {
+                await workspace.releaseRead()
+                return XCTFail("final owner admission did not reach the workspace read")
+            }
+            await Task.yield()
+            XCTAssertFalse(firstSettled)
+            XCTAssertFalse(secondSettled, "a concurrent caller cannot receive the raw, unadmitted handle")
+            XCTAssertTrue(leaseActive)
+            await workspace.releaseRead()
+            await XCTAssertThrowsAsyncError(try await first.value)
+            await XCTAssertThrowsAsyncError(try await second.value)
+            XCTAssertFalse(source.hasPreparedNativeHandle)
+            XCTAssertFalse(leaseActive)
+            XCTAssertEqual(leaseFinishes, 1)
+        }
+
+        func testFirstPromptCheckpointFailureDoesNotSubmitOrConsumeDraft() async throws {
+            let sandbox = FileManager.default.temporaryDirectory.appendingPathComponent("lingxi-first-prompt-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: sandbox) }
+            let failure = RecoveryWriterFailure()
+            failure.set(.beforeLedger)
+            let ledger = DurableConversationTurnLedger(writer: RecoveryFailureWriter(failure: failure))
+            let commands = EngineCommandRecorder()
+            let handle = TestMobileEngineHandle(sessionID: uuid()) { command in await commands.append(command) }
+            let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: sandbox.path,
+                                      sessionMode: .code, visionDelegationEnabled: false)
+            let source = EngineConversationSource(config: config, handleBuilder: { _, _, _, _ in handle }, recoveryLedger: ledger)
+            let token = await source.send("keep the first draft")
+            XCTAssertNil(token)
+            XCTAssertTrue(source.model.messages.isEmpty)
+            let submitted = await commands.snapshot()
+            XCTAssertFalse(submitted.contains { if case .sendPrompt = $0 { return true }; return false })
+            XCTAssertNotNil(source.model.error)
+        }
+
         private func makeSource(
             handleBuilder: @escaping EngineConversationSource.HandleBuilder
         ) -> EngineConversationSource {
+            let sandbox = FileManager.default.temporaryDirectory.appendingPathComponent("lingxi-resume-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: sandbox) }
             let config = EngineConfig(
                 apiBase: "https://api.anthropic.com",
                 model: "",
-                appSandboxRoot: NSTemporaryDirectory(),
+                appSandboxRoot: sandbox.path,
                                 sessionMode: .code,
 visionDelegationEnabled: true)
             return EngineConversationSource(config: config, handleBuilder: handleBuilder)
@@ -1743,15 +2293,10 @@ visionDelegationEnabled: true)
     }
 
     private actor EmptySessionResumeRecorder {
-        struct Request: Equatable {
-            let sessionID: String
-            let title: String
-        }
+        private var request: ClientCommand?
 
-        private var request: Request?
-
-        func resume(sessionID: String, title: String) {
-            request = Request(sessionID: sessionID, title: title)
+        func submit(_ command: ClientCommand) {
+            request = command
         }
 
         func waitForResume() async -> Bool {
@@ -1763,26 +2308,34 @@ visionDelegationEnabled: true)
             return request != nil
         }
 
-        func snapshot() -> Request? {
+        func snapshot() -> ClientCommand? {
             request
         }
     }
 
     private final class TestMobileEngineHandle: MobileEngineHandle, @unchecked Sendable {
         private let submitHandler: (ClientCommand) async throws -> Void
+        private let sessionID: String
+        private let workspaceHandler: (() async -> WorkspaceStateDto)?
 
         required init(unsafeFromHandle handle: UInt64) {
             submitHandler = { _ in }
+            sessionID = "fixture-session"
+            workspaceHandler = nil
             super.init(unsafeFromHandle: handle)
         }
 
-        init(submitHandler: @escaping (ClientCommand) async throws -> Void) {
+        init(sessionID: String = "fixture-session", workspaceHandler: (() async -> WorkspaceStateDto)? = nil,
+             submitHandler: @escaping (ClientCommand) async throws -> Void) {
             self.submitHandler = submitHandler
+            self.sessionID = sessionID
+            self.workspaceHandler = workspaceHandler
             super.init(noHandle: .init())
         }
 
         override func workspaceState() async -> WorkspaceStateDto {
-            WorkspaceStateDto(sessionId: "fixture-session", cwd: "/fixture", projectRoot: "/fixture",
+            if let workspaceHandler { return await workspaceHandler() }
+            return WorkspaceStateDto(sessionId: sessionID, cwd: "/fixture", projectRoot: "/fixture",
                 additionalDirectories: [], transcriptPath: "/fixture/session.jsonl")
         }
 
@@ -1792,6 +2345,36 @@ visionDelegationEnabled: true)
 
         override func submit(command: ClientCommand) async throws {
             try await submitHandler(command)
+        }
+    }
+
+    private actor WorkspaceReadGate {
+        private let sessionID: String
+        private var cwd = "/fixture"
+        private var block = false
+        private var blocked = false
+        private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+        init(sessionID: String) { self.sessionID = sessionID }
+        func blockNextRead() { block = true; blocked = false }
+        func setCwd(_ value: String) { cwd = value }
+        func waitUntilBlocked() async -> Bool {
+            for _ in 0..<200 {
+                if blocked { return true }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            return blocked
+        }
+        func releaseRead() { releaseWaiter?.resume(); releaseWaiter = nil }
+        func read() async -> WorkspaceStateDto {
+            let capturedCwd = cwd
+            if block {
+                block = false
+                blocked = true
+                await withCheckedContinuation { releaseWaiter = $0 }
+            }
+            return WorkspaceStateDto(sessionId: sessionID, cwd: capturedCwd, projectRoot: "/fixture",
+                additionalDirectories: [], transcriptPath: "/fixture/session.jsonl")
         }
     }
 
@@ -1837,6 +2420,12 @@ visionDelegationEnabled: true)
         func snapshot() -> [ClientCommand] {
             commands
         }
+    }
+
+    private actor EngineCommandRecorder {
+        private var commands: [ClientCommand] = []
+        func append(_ command: ClientCommand) { commands.append(command) }
+        func snapshot() -> [ClientCommand] { commands }
     }
 
 #endif

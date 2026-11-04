@@ -1,11 +1,13 @@
-import { gatewayFixture, FakeRuntime, SESSION_A, SESSION_B, RecordingChannel, viewer } from './remote-session-helpers.js';
+import { gatewayFixture, FakeRuntime, PNG_BASE64, SESSION_A, SESSION_B, RecordingChannel, viewer } from './remote-session-helpers.js';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { FileChannel, FILE_CHUNK_BYTES, decodeFileFrame, encodeFileFrame, hashFile, validateFileOffer, type FragmentLink, type FileOffer, type FileSink } from '@lingxi/bridge-client/remote';
 import { REMOTE_ATTACHMENT_PREFIX, RemoteFileStore } from '../src/main/remoteControl/fileStore.js';
+import { SessionRuntime } from '../src/main/bridge.js';
 class Link implements FragmentLink {
   maxFragmentBytes = 16384;
   peer!: Link; handler?: (bytes: Uint8Array) => void; closers: Array<(reason: string) => void> = []; closed = false; max = 0;
@@ -124,6 +126,122 @@ test('an empty attachment list cannot send after its viewer closes before prepar
     assert.equal(f.echoes.length, 0);
   } finally { f.gateway.dispose(); }
 }));
+test('a running turn accepts text steering but rejects new file attachments before creating working copies', async () => withStore(async (store, root) => {
+  const workspace = await mkdtemp(join(root, 'workspace-'));
+  const f = gatewayFixture({ files: store }); f.enable(SESSION_A);
+  const runtime = new FakeRuntime(SESSION_A); runtime.engineWorkspacePath = workspace;
+  f.runtimes.add(runtime).resume();
+  const who = { viewer: viewer({ account_uid: 'account' }), channel: new RecordingChannel() };
+  const info = { ...await offer(0), session_id: SESSION_A };
+  await (await store.accept('account\0device-1', info, authorize)).finish();
+  try {
+    await f.call('session.attach', { session_id: SESSION_A }, who);
+    runtime.turnActive = true;
+    await assert.rejects(f.call('prompt.send', { session_id: SESSION_A, text: 'Read file', client_request_id: 'busy-file', file_refs: [info.transfer_id] }, who), /files cannot be sent while a turn is running/);
+    assert.deepEqual(await readdir(workspace), []);
+    assert.equal(runtime.callsOf('sendPrompt').length, 0);
+    await f.call('prompt.send', { session_id: SESSION_A, text: 'Continue', client_request_id: 'busy-text', file_refs: [] }, who);
+    assert.equal(runtime.callsOf('sendPrompt').length, 1);
+  } finally { f.gateway.dispose(); }
+}));
+test('a turn starting during file resolution rejects the prompt and removes its working copy', async () => withStore(async (store, root) => {
+  const workspace = await mkdtemp(join(root, 'workspace-'));
+  const f = gatewayFixture({ files: store }); f.enable(SESSION_A);
+  const runtime = new FakeRuntime(SESSION_A); runtime.engineWorkspacePath = workspace;
+  f.runtimes.add(runtime).resume();
+  const who = { viewer: viewer({ account_uid: 'account' }), channel: new RecordingChannel() };
+  const info = { ...await offer(0), session_id: SESSION_A };
+  await (await store.accept('account\0device-1', info, authorize)).finish();
+  const original = store.promptReference.bind(store);
+  let signalReady!: () => void; const ready = new Promise<void>(resolve => { signalReady = resolve; });
+  let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; });
+  store.promptReference = async (...args) => { const ref = await original(...args); signalReady(); await blocked; return ref; };
+  const request = { session_id: SESSION_A, text: 'Read file', client_request_id: 'race-file', file_refs: [info.transfer_id] };
+  try {
+    await f.call('session.attach', { session_id: SESSION_A }, who);
+    const pending = f.call('prompt.send', request, who);
+    await ready;
+    runtime.turnActive = true;
+    release();
+    await assert.rejects(pending, /files cannot be sent while a turn is running/);
+    assert.deepEqual(await readdir(workspace), []);
+    assert.equal(runtime.callsOf('sendPrompt').length, 0);
+    assert.equal(f.echoes.length, 0);
+    runtime.turnActive = false;
+    await f.call('prompt.send', request, who);
+    runtime.turnActive = true;
+    await f.call('prompt.send', request, who);
+    assert.equal(runtime.callsOf('sendPrompt').length, 1, 'a successful retry replays its original result');
+  } finally { release(); f.gateway.dispose(); }
+}));
+for (const [attachment, interruption] of [
+  ['file', 'none'], ['file', 'turn'], ['file', 'detach'], ['file', 'revoke'],
+  ['image', 'none'], ['image', 'turn'], ['image', 'detach'], ['image', 'reattach'], ['image', 'revoke'],
+  ['text', 'none'], ['text', 'turn'], ['text', 'detach'], ['text', 'reattach'], ['text', 'revoke'], ['text', 'closed'],
+  ['slash', 'detach'], ['slash', 'revoke'],
+] as const) {
+  test(`${attachment} admission rechecks ${interruption} after account hydration and before the bridge send`, async () => withStore(async (store, root) => {
+    const workspace = await mkdtemp(join(root, 'workspace-'));
+    const f = gatewayFixture({ files: store }); f.enable(SESSION_A);
+    const proxy = new FakeRuntime(SESSION_A); proxy.engineWorkspacePath = workspace;
+    f.runtimes.add(proxy).resume();
+    const who = { viewer: viewer({ account_uid: 'account' }), channel: new RecordingChannel() };
+    const info = { ...await offer(0), session_id: SESSION_A };
+    await (await store.accept('account\0device-1', info, authorize)).finish();
+    let enterHydration!: () => void; const entered = new Promise<void>(resolve => { enterHydration = resolve; });
+    let releaseHydration!: () => void; const blocked = new Promise<void>(resolve => { releaseHydration = resolve; });
+    const actual = new SessionRuntime({ sessionId: SESSION_A, projectPath: workspace,
+      launchConfig: () => ({ workspace, trusted: true }),
+      onModelSelected: () => undefined,
+      resolveProviderAccounts: async () => {
+        enterHydration(); await blocked;
+        return { providerAccounts: { storeScope: 'host', configRevision: 0, accounts: [], health: [] }, providerAccountCredentials: {} };
+      },
+    });
+    const sent: string[] = [];
+    const client = Object.assign(new EventEmitter(), {
+      close() {}, sendPrompt: (text: string) => { sent.push(text); },
+      sendCommand: (command: any) => {
+        if (command.type === 'provider_accounts') queueMicrotask(() => client.emit('event', { type: 'provider_accounts_updated', operation_id: command.operation_id }));
+        if (command.type === 'run_slash_command') sent.push(command.raw);
+      },
+    });
+    const internal = actual as any;
+    internal.client = client; internal.activeWorkspace = workspace; internal.activeWorkspaceTrusted = true;
+    internal.credentialRoutingSettings = {}; internal.selectedModelReference = 'openai/test-model';
+    internal.setState({ status: 'connected' }); internal.wireClient(client, internal.generation);
+    Object.defineProperty(proxy, 'turnActive', { get: () => actual.turnActive });
+    (proxy as any).sendPrompt = (...args: Parameters<SessionRuntime['sendPrompt']>) => actual.sendPrompt(...args);
+    (proxy as any).dispatchCommand = (...args: Parameters<SessionRuntime['dispatchCommand']>) => actual.dispatchCommand(...args);
+    const request = { session_id: SESSION_A, text: attachment === 'slash' ? '/model openai/test-model' : 'Read attachment', client_request_id: 'hydrating',
+      ...(attachment === 'file' ? { file_refs: [info.transfer_id] } : attachment === 'image' ? { images: [{ media_type: 'image/png', base64: PNG_BASE64 }] } : {}) };
+    try {
+      await f.call('session.attach', { session_id: SESSION_A }, who);
+      const pending = f.call('prompt.send', request, who);
+      await entered;
+      if (interruption === 'turn') client.emit('event', { type: 'turn_started', turn_id: 99 });
+      if (interruption === 'detach' || interruption === 'reattach') await f.call('session.detach', { session_id: SESSION_A }, who);
+      if (interruption === 'reattach') await f.call('session.attach', { session_id: SESSION_A }, who);
+      if (interruption === 'revoke') f.policy.setSessionEnabled({ projectPath: '/work/project-one', sessionId: SESSION_A }, false);
+      if (interruption === 'closed') f.gateway.viewerClosed(who.viewer);
+      assert.equal(actual.connectionState.status, 'connected', 'viewer withdrawal does not disconnect the host runtime');
+      releaseHydration();
+      if (interruption === 'none' || (attachment === 'text' && interruption === 'turn')) {
+        await pending;
+        assert.equal(sent.length, 1, 'the prompt must not conflict with its own hydration lease');
+        assert.equal(f.echoes.length, 1);
+        await f.call('prompt.send', request, who);
+        assert.equal(sent.length, 1, 'successful requests are replayed without another send');
+      } else {
+        await assert.rejects(pending, interruption === 'turn' ? /cannot be sent while a turn is running/ : /attachment|attach|Remote Control/);
+        assert.deepEqual(sent, []);
+        assert.equal(f.echoes.length, 0);
+        assert.deepEqual(await readdir(workspace), [], 'unpublished working copies are removed');
+        if (interruption === 'turn') assert.equal(actual.turnActive, true, 'the other turn remains active');
+      }
+    } finally { releaseHydration(); f.gateway.dispose(); await actual.dispose(); }
+  }));
+}
 for (const failure of ['second reference', 'prompt refused', 'attachment replaced', 'workspace changed']) {
   test(`unpublished working copies are removed when ${failure}`, async () => withStore(async (store, root) => {
     const workspace = await mkdtemp(join(root, 'workspace-'));

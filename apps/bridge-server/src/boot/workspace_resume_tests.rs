@@ -97,6 +97,7 @@ fn isolated_config(cwd: &Path, home: &Path) -> DesktopConfig {
     cfg.host_workspace_trusted = Some(true);
     cfg.default_model_explicit = true;
     cfg.enable_automation_scheduler = false;
+    cfg.initial_conversation_mode = Some(ConversationMode::Code);
     cfg.connect_mcp_in_background = false;
     cfg.memory_provider = None;
     cfg.mcp_paths = Vec::new();
@@ -245,7 +246,8 @@ fn pending_bash_config(cwd: &Path, count: usize) -> (DesktopConfig, PathBuf, Vec
     let id = uuid::Uuid::new_v4();
     let user = uuid::Uuid::new_v4();
     let assistant = uuid::Uuid::new_v4();
-    let selected = cwd.join(format!("{id}.jsonl"));
+    let home = cwd.join("config");
+    let selected = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
     let markers = (0..count)
         .map(|index| cwd.join(format!("approved-tool-{index}")))
         .collect::<Vec<_>>();
@@ -259,6 +261,7 @@ fn pending_bash_config(cwd: &Path, count: usize) -> (DesktopConfig, PathBuf, Vec
         .map(|(index, input)| serde_json::json!({"type":"tool_use","id":format!("pending_{index}"),"name":"Bash","input":input}))
         .collect::<Vec<_>>();
     let mut rows = vec![
+        serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
         serde_json::json!({"type":"user","uuid":user,"sessionId":id,"cwd":cwd,"parentUuid":null,"message":{"role":"user","content":"pending user approval"}}),
         serde_json::json!({"type":"assistant","uuid":assistant,"sessionId":id,"cwd":cwd,"parentUuid":user,"message":{"role":"assistant","content":tools}}),
     ];
@@ -268,6 +271,7 @@ fn pending_bash_config(cwd: &Path, count: usize) -> (DesktopConfig, PathBuf, Vec
         rows.push(serde_json::json!({"type":"attachment","uuid":uuid,"sessionId":id,"parentUuid":parent,"attachment":{"type":"hook_deferred_tool","toolUseID":format!("pending_{index}"),"toolName":"Bash","toolInput":input}}));
         parent = uuid;
     }
+    std::fs::create_dir_all(selected.parent().unwrap()).unwrap();
     std::fs::write(
         &selected,
         rows.iter()
@@ -276,7 +280,7 @@ fn pending_bash_config(cwd: &Path, count: usize) -> (DesktopConfig, PathBuf, Vec
     )
     .unwrap();
     let settings = serde_json::json!({"permissions":{"ask":["Bash"]}});
-    let mut cfg = isolated_config(cwd, &cwd.join("config"));
+    let mut cfg = isolated_config(cwd, &home);
     cfg.session_id_override = Some(id.to_string());
     cfg.session_transcript_path = Some(selected.clone());
     cfg.flag_settings = Some(serde_json::from_value(settings.clone()).unwrap());
@@ -287,6 +291,110 @@ fn pending_bash_config(cwd: &Path, count: usize) -> (DesktopConfig, PathBuf, Vec
 
 fn client_command(command: client::protocol::commands::ClientCommand) -> Utf16JsonProjection {
     Utf16JsonProjection::parse(&serde_json::to_string(&command).unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn fork_source_real_runtime_publishes_and_mounts_exact_target() {
+    use client::protocol::commands::ClientCommand;
+    use client::protocol::listings::SessionModeDto;
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let home = cwd.join("config");
+    let id = uuid::Uuid::new_v4();
+    let mut cfg = isolated_config(&cwd, &home);
+    cfg.session_id_override = Some(id.to_string());
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let runtime = bound.runtime.clone();
+    runtime
+        .orchestrator
+        .initialize_conversation_mode()
+        .await
+        .unwrap();
+    let row: session::JsonlMessage = serde_json::from_value(serde_json::json!({
+        "type":"user", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
+        "sessionId":id, "cwd":cwd,
+        "message":{"role":"user", "content":"source of real bridge fork"}
+    }))
+    .unwrap();
+    // The orchestrator exposes the same composition-owned writer used by
+    // Desktop's fork path; retain it across remount to inspect its live owner.
+    let writer = runtime.orchestrator.session_transcript_writer().unwrap();
+    writer.append(&row).await.unwrap();
+    let source = writer.active_transcript_authority().unwrap().path();
+    let source_before = std::fs::read(&source).unwrap();
+    let lifecycle = bound.session_lifecycle();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    send(
+        &mut socket,
+        2,
+        "command",
+        client_command(ClientCommand::ForkSession {
+            session_id: id.to_string(),
+            target_mode: SessionModeDto::Code,
+        }),
+    )
+    .await;
+    let target = loop {
+        match next_frame(&mut socket).await {
+            Frame::Event(ClientEvent::SessionForked { session_id, .. }) => {
+                break uuid::Uuid::parse_str(&session_id).unwrap()
+            }
+            Frame::Event(ClientEvent::Error { message, .. }) => {
+                panic!(
+                    "fork rejected: {}",
+                    String::from_utf16_lossy(&message.code_units)
+                )
+            }
+            _ => {}
+        }
+    };
+    let target_path =
+        session::jsonl::session_path(&home, &cwd.to_string_lossy(), &target.to_string());
+    let target_before = std::fs::read(&target_path).unwrap();
+    assert!(String::from_utf8_lossy(&target_before).contains("source of real bridge fork"));
+    send(
+        &mut socket,
+        3,
+        "command",
+        client_command(ClientCommand::ResumeSession {
+            session_id: target.to_string(),
+            cwd: None,
+            expected_mode: SessionModeDto::Code,
+        }),
+    )
+    .await;
+    loop {
+        match next_frame(&mut socket).await {
+            Frame::Event(ClientEvent::SessionResumed { session_id, .. }) => {
+                assert_eq!(session_id, target.to_string());
+                break;
+            }
+            Frame::Event(ClientEvent::Error { message, .. }) => {
+                panic!(
+                    "fork resume rejected: {}",
+                    String::from_utf16_lossy(&message.code_units)
+                )
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        runtime.orchestrator.current_session_id().await.as_uuid(),
+        target
+    );
+    let mounted = writer.active_transcript_authority().unwrap();
+    assert_eq!(mounted.path(), target_path);
+    assert_eq!(std::fs::read(&source).unwrap(), source_before);
+    assert!(std::fs::read(&target_path)
+        .unwrap()
+        .starts_with(&target_before));
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
 }
 
 #[tokio::test]
@@ -307,7 +415,9 @@ async fn private_resume_owns_foreground_adapter_approval_without_a_chat_turn() {
         &mut socket,
         2,
         "resume_selected_session",
-        projection(serde_json::json!({"session_id":id,"transcript_path":selected})),
+        projection(
+            serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"}),
+        ),
     )
     .await;
     let (mut events, permission) = wait_for_permission(&mut socket).await;
@@ -395,7 +505,7 @@ async fn private_resume_cancel_and_disconnect_deny_parked_and_later_tools() {
             &mut socket,
             2,
             "resume_selected_session",
-            projection(serde_json::json!({"session_id":id,"transcript_path":selected})),
+            projection(serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"})),
         )
         .await;
         let (_, permission) = wait_for_permission(&mut socket).await;
@@ -505,10 +615,11 @@ async fn cold_selected_boot_confirmation_keeps_live_state_and_is_consumed_once()
     let old = uuid::Uuid::new_v4();
     let user = uuid::Uuid::new_v4();
     let assistant = uuid::Uuid::new_v4();
-    let selected = cwd.join(format!("{id}.jsonl"));
+    let selected = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
     let dispatches = cwd.join("deferred-dispatches");
     let hook_dispatches = cwd.join("startup-dispatches");
     let content = [
+        serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
         serde_json::json!({"type":"user","uuid":old,"sessionId":id,"parentUuid":null,"cwd":cwd,"timestamp":"2026-10-20T01:00:00.000Z","message":{"role":"user","content":"historical display row"}}),
         serde_json::json!({"type":"user","uuid":user,"sessionId":id,"parentUuid":null,"cwd":cwd,"timestamp":"2026-10-21T01:00:00.000Z","message":{"role":"user","content":"captured selected row"}}),
         serde_json::json!({"type":"assistant","uuid":assistant,"sessionId":id,"parentUuid":user,"cwd":cwd,"message":{"role":"assistant","content":[{"type":"tool_use","id":"deferred_cold","name":"Visualization","input":{}}]}}),
@@ -517,8 +628,13 @@ async fn cold_selected_boot_confirmation_keeps_live_state_and_is_consumed_once()
     .iter()
     .map(|row| format!("{row}\n"))
     .collect::<String>();
+    std::fs::create_dir_all(selected.parent().unwrap()).unwrap();
     std::fs::write(&selected, &content).unwrap();
-    let unselected = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+    let unselected = session::jsonl::session_path(
+        &home,
+        &cwd.join("unselected-project").to_string_lossy(),
+        &id.to_string(),
+    );
     std::fs::create_dir_all(unselected.parent().unwrap()).unwrap();
     let unselected_content = content.replace("captured selected row", "unselected sibling");
     std::fs::write(&unselected, &unselected_content).unwrap();
@@ -564,7 +680,9 @@ async fn cold_selected_boot_confirmation_keeps_live_state_and_is_consumed_once()
     )
     .unwrap();
     let (endpoint, mut socket) = connect(bound.connection).await;
-    let request = projection(serde_json::json!({"session_id":id,"transcript_path":selected}));
+    let request = projection(
+        serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"}),
+    );
     let (events, response) =
         call_approving(&mut socket, 2, "resume_selected_session", request.clone()).await;
     assert!(response.error.is_none(), "{response:?}");
@@ -613,7 +731,11 @@ async fn cold_selected_boot_confirmation_keeps_live_state_and_is_consumed_once()
         .any(|row| row.text_content() == "disk changed after boot"));
     assert_eq!(std::fs::read_to_string(&dispatches).unwrap(), "x");
 
-    let other = cwd.join("other-copy").join(format!("{id}.jsonl"));
+    let other = session::jsonl::session_path(
+        &home,
+        &cwd.join("other-copy").to_string_lossy(),
+        &id.to_string(),
+    );
     std::fs::create_dir_all(other.parent().unwrap()).unwrap();
     std::fs::write(
         &other,
@@ -624,7 +746,9 @@ async fn cold_selected_boot_confirmation_keeps_live_state_and_is_consumed_once()
         &mut socket,
         4,
         "resume_selected_session",
-        projection(serde_json::json!({"session_id":id,"transcript_path":other})),
+        projection(
+            serde_json::json!({"session_id":id,"transcript_path":other,"expected_mode":"code"}),
+        ),
     )
     .await;
     assert!(response.error.is_none(), "{response:?}");
@@ -683,9 +807,10 @@ async fn auto_cold_resume_classifier_unavailable_persists_denial_and_proof() {
     let id = uuid::Uuid::new_v4();
     let user = uuid::Uuid::new_v4();
     let assistant = uuid::Uuid::new_v4();
-    let selected = cwd.join(format!("{id}.jsonl"));
+    let selected = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
     let dispatches = cwd.join("auto-deferred-dispatches");
     let content = [
+        serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
         serde_json::json!({"type":"user","uuid":user,"sessionId":id,"parentUuid":null,"cwd":cwd,"message":{"role":"user","content":"offline Auto selected row"}}),
         serde_json::json!({"type":"assistant","uuid":assistant,"sessionId":id,"parentUuid":user,"cwd":cwd,"message":{"role":"assistant","content":[{"type":"tool_use","id":"deferred_auto","name":"Visualization","input":{}}]}}),
         serde_json::json!({"type":"attachment","uuid":uuid::Uuid::new_v4(),"sessionId":id,"parentUuid":assistant,"attachment":{"type":"hook_deferred_tool","toolUseID":"deferred_auto","toolName":"Visualization","toolInput":{}}}),
@@ -693,6 +818,7 @@ async fn auto_cold_resume_classifier_unavailable_persists_denial_and_proof() {
     .iter()
     .map(|row| format!("{row}\n"))
     .collect::<String>();
+    std::fs::create_dir_all(selected.parent().unwrap()).unwrap();
     std::fs::write(&selected, content).unwrap();
     let mut cfg = isolated_config(&cwd, &home);
     cfg.permission_mode = permission::PermissionMode::Auto;
@@ -750,7 +876,7 @@ async fn auto_cold_resume_classifier_unavailable_persists_denial_and_proof() {
             &mut socket,
             2,
             "resume_selected_session",
-            projection(serde_json::json!({"session_id":id,"transcript_path":selected})),
+            projection(serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"})),
         ),
     )
     .await
@@ -822,7 +948,7 @@ async fn auto_cold_resume_classifier_unavailable_persists_denial_and_proof() {
 }
 
 #[tokio::test]
-async fn fresh_private_cd_does_not_create_a_conversation_transcript() {
+async fn fresh_private_cd_preserves_mode_only_source_without_conversation() {
     let _serial = crate::driver::LOOP_KA_TEST_SERIAL
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -841,7 +967,13 @@ async fn fresh_private_cd_does_not_create_a_conversation_transcript() {
         .session_transcript_writer()
         .unwrap()
         .active_path();
-    assert!(!original.exists());
+    let id = runtime.orchestrator.current_session_id().await.as_uuid();
+    let before_contents = std::fs::read_to_string(&original).unwrap();
+    let before_metadata = std::fs::metadata(&original).unwrap();
+    assert!(session::jsonl::is_mode_only_draft(
+        &before_contents,
+        &id.to_string()
+    ));
     let (endpoint, mut socket) = connect(bound.connection).await;
     let (_, before) = call(
         &mut socket,
@@ -886,10 +1018,486 @@ async fn fresh_private_cd_does_not_create_a_conversation_transcript() {
         Some(false)
     );
     assert_eq!(after.string_at("/cwd"), target.to_str());
-    assert!(!Path::new(after.string_at("/transcript_path").unwrap()).exists());
-    assert!(!original.exists());
+    assert_eq!(
+        Path::new(after.string_at("/transcript_path").unwrap()),
+        original
+    );
+    let after_contents = std::fs::read_to_string(&original).unwrap();
+    assert!(after_contents.starts_with(&before_contents));
+    assert!(session::jsonl::is_mode_only_draft(
+        &after_contents,
+        &id.to_string()
+    ));
+    let profile =
+        session::JsonlWriter::fixed_session_profile_from_source(&after_contents, &id.to_string())
+            .unwrap();
+    assert_eq!(profile.mode, ConversationMode::Code);
+    let relocated = after_contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|row| row["type"] == "relocated" && row["sessionId"] == id.to_string())
+        .last()
+        .unwrap();
+    assert_eq!(relocated["relocatedCwd"].as_str(), target.to_str());
+    let destination =
+        session::jsonl::session_path(&home, &target.to_string_lossy(), &id.to_string());
+    assert!(!destination.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let after_metadata = std::fs::metadata(&original).unwrap();
+        assert_eq!(
+            (before_metadata.dev(), before_metadata.ino()),
+            (after_metadata.dev(), after_metadata.ino())
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = before_metadata;
     socket.close(None).await.unwrap();
     endpoint.shutdown().await;
     let report = lifecycle.shutdown_and_drain().await;
     assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
+async fn cold_resume_reports_fixed_mode_in_lifecycle_and_manifest() {
+    use client::protocol::commands::ClientCommand;
+    use client::protocol::listings::SessionModeDto;
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let home = cwd.join("config");
+    let id = uuid::Uuid::new_v4();
+    let user = uuid::Uuid::new_v4();
+    let selected = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+    let rows = [
+        serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+        serde_json::json!({"type":"user","uuid":user,"sessionId":id,"cwd":cwd,"parentUuid":null,"message":{"role":"user","content":"resume the existing conversation"}}),
+    ];
+    std::fs::create_dir_all(selected.parent().unwrap()).unwrap();
+    std::fs::write(
+        &selected,
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let mut cfg = isolated_config(&cwd, &home);
+    cfg.session_id_override = Some(id.to_string());
+    cfg.session_transcript_path = Some(selected.clone());
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let lifecycle = bound.session_lifecycle();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    let (events, response) = call(
+        &mut socket,
+        2,
+        "resume_selected_session",
+        projection(
+            serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"}),
+        ),
+    )
+    .await;
+    assert!(response.error.is_none(), "{response:?}");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::SessionResumed {
+        session_id, mode: SessionModeDto::Code, ..
+    } if session_id == &id.to_string())),
+        "{events:?}"
+    );
+    send(
+        &mut socket,
+        3,
+        "command",
+        client_command(ClientCommand::GetContextManifest),
+    )
+    .await;
+    loop {
+        if let Frame::Event(ClientEvent::ContextManifest { manifest_json }) =
+            next_frame(&mut socket).await
+        {
+            let manifest: serde_json::Value = serde_json::from_str(&manifest_json).unwrap();
+            assert_eq!(manifest["session"]["session_id"], id.to_string());
+            assert_eq!(manifest["session"]["mode"], "code");
+            assert_eq!(manifest["projected"], false);
+            break;
+        }
+    }
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
+async fn cold_draft_boot_restores_fixed_mode_and_instruction_epoch() {
+    use client::protocol::commands::ClientCommand;
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let home = cwd.join("config");
+    let id = uuid::Uuid::new_v4();
+    let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type":"fixed-session-mode", "sessionId":id, "sessionMode":"code", "instructionEpoch":3
+            })
+        ),
+    )
+    .unwrap();
+    let mut cfg = isolated_config(&cwd, &home);
+    cfg.session_id_override = Some(id.to_string());
+    cfg.restore_draft = true;
+    cfg.initial_conversation_mode =
+        Some(lingxi_core::host::session_context::ConversationMode::Code);
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let lifecycle = bound.session_lifecycle();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    send(
+        &mut socket,
+        2,
+        "command",
+        client_command(ClientCommand::GetContextManifest),
+    )
+    .await;
+    loop {
+        if let Frame::Event(ClientEvent::ContextManifest { manifest_json }) =
+            next_frame(&mut socket).await
+        {
+            let manifest: serde_json::Value = serde_json::from_str(&manifest_json).unwrap();
+            assert_eq!(manifest["session"]["session_id"], id.to_string());
+            assert_eq!(manifest["session"]["mode"], "code");
+            break;
+        }
+    }
+    let source = std::fs::read_to_string(&path).unwrap();
+    let profile =
+        session::JsonlWriter::fixed_session_profile_from_source(&source, &id.to_string()).unwrap();
+    assert_eq!(
+        profile.mode,
+        lingxi_core::host::session_context::ConversationMode::Code
+    );
+    assert_eq!(profile.instruction_epoch, 3);
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
+async fn durable_draft_is_discoverable_and_resumable_before_first_turn() {
+    use lingxi_core::host::OrchestratorHandle;
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for (mode, expected) in [
+        ("chat", ConversationMode::Chat),
+        ("code", ConversationMode::Code),
+    ] {
+        let title = if mode == "code" {
+            "Local App development"
+        } else {
+            "Scheduled task"
+        };
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().canonicalize().unwrap();
+        let home = cwd.join("config");
+        let id = uuid::Uuid::new_v4();
+        let id_text = id.to_string();
+        let args = BridgeArgs::parse([
+            "--session-id",
+            &id_text,
+            "--restore-draft",
+            "--initial-conversation-mode",
+            mode,
+            "--durable-draft-title",
+            title,
+        ])
+        .unwrap();
+        let resolved = resolve_desktop_config(&args).unwrap();
+        let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id_text);
+        {
+            let mut cfg = isolated_config(&cwd, &home);
+            cfg.session_id_override = resolved.session_id_override;
+            cfg.restore_draft = resolved.restore_draft;
+            cfg.initial_conversation_mode = resolved.initial_conversation_mode;
+            cfg.durable_draft_title = resolved.durable_draft_title;
+            let bound = Box::pin(assemble(cfg)).await.unwrap();
+            let lifecycle = bound.session_lifecycle();
+            let (endpoint, mut socket) = connect(bound.connection).await;
+
+            // Endpoint readiness is the barrier before the owner binding ACK.
+            let source = std::fs::read_to_string(&path).unwrap();
+            let rows: Vec<serde_json::Value> = source
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(rows[0]["type"], "fixed-session-mode");
+            assert_eq!(rows[0]["sessionId"], id_text);
+            assert_eq!(rows[0]["sessionMode"], mode);
+            assert!(rows.iter().any(|row| row["mobileEmptySession"] == 1
+                && row["customTitle"] == title
+                && row["sessionId"] == id_text
+                && row["cwd"].as_str() == cwd.to_str()));
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row["mobileEmptySession"] == 1)
+                    .count(),
+                1
+            );
+            let sessions = session::jsonl::list_recent_sessions(
+                &home,
+                &cwd.to_string_lossy(),
+                20,
+                Arc::new(HostFileSystem::new(cwd.clone())),
+            )
+            .await
+            .unwrap();
+            assert!(sessions
+                .iter()
+                .any(|session| session.uuid == id && session.message_count == 0));
+            socket.close(None).await.unwrap();
+            endpoint.shutdown().await;
+            let report = lifecycle.shutdown_and_drain().await;
+            assert!(report.complete, "{:?}", report.errors);
+        }
+
+        // A failed launch may be retried after the anchor reached disk but
+        // before the endpoint became visible. It must not write another one.
+        {
+            let mut cfg = isolated_config(&cwd, &home);
+            cfg.session_id_override = Some(id_text.clone());
+            cfg.restore_draft = true;
+            cfg.initial_conversation_mode = Some(expected);
+            cfg.durable_draft_title = Some(title.to_owned());
+            let bound = Box::pin(assemble(cfg)).await.unwrap();
+            assert_eq!(
+                bound.runtime.orchestrator.conversation_mode().await.mode,
+                expected
+            );
+            let source = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                source
+                    .lines()
+                    .filter(|line| line.contains("\"mobileEmptySession\":1"))
+                    .count(),
+                1
+            );
+            close_unserved_for_test(&bound).await;
+            let report = bound.session_lifecycle().shutdown_and_drain().await;
+            assert!(report.complete, "{:?}", report.errors);
+        }
+
+        // Simulate cancellation after binding, before sending the first turn.
+        let mut cfg = isolated_config(&cwd, &home);
+        cfg.session_id_override = Some(id_text.clone());
+        cfg.session_transcript_path = Some(path.clone());
+        cfg.initial_conversation_mode = Some(expected);
+        let bound = Box::pin(assemble(cfg)).await.unwrap();
+        let orchestrator = &bound.runtime.orchestrator;
+        assert_eq!(orchestrator.conversation_mode().await.mode, expected);
+        assert_eq!(orchestrator.current_session_id().await.as_uuid(), id);
+        assert!(orchestrator.session().lock().await.history.is_empty());
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            source
+                .lines()
+                .filter(|line| line.contains("\"mobileEmptySession\":1"))
+                .count(),
+            1
+        );
+        close_unserved_for_test(&bound).await;
+        let report = bound.session_lifecycle().shutdown_and_drain().await;
+        assert!(report.complete, "{:?}", report.errors);
+    }
+}
+
+#[tokio::test]
+async fn durable_draft_cannot_adopt_an_existing_conversation() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let home = cwd.join("config");
+    let id = uuid::Uuid::new_v4();
+    let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let source = format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":id, "sessionMode":"code", "instructionEpoch":0}),
+        serde_json::json!({"type":"user", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
+            "sessionId":id, "cwd":cwd, "message":{"role":"user", "content":"existing conversation"}}),
+    );
+    std::fs::write(&path, &source).unwrap();
+    let mut cfg = isolated_config(&cwd, &home);
+    cfg.session_id_override = Some(id.to_string());
+    cfg.restore_draft = true;
+    cfg.durable_draft_title = Some("Local App development".into());
+    assert!(Box::pin(assemble(cfg)).await.is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+}
+
+#[tokio::test]
+async fn fresh_desktop_draft_selects_default_before_session_start_hook() {
+    use lingxi_core::host::{session_context::ConversationMode, OrchestratorHandle};
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let home = cwd.join("config");
+    let id = uuid::Uuid::new_v4();
+    let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+    let hook_input = cwd.join("session-start-input.json");
+    let observed_transcript = cwd.join("session-start-transcript.jsonl");
+    let hook_output = serde_json::json!({"hookSpecificOutput":{
+        "hookEventName":"SessionStart", "additionalContext":"startup context"
+    }});
+    let settings = serde_json::json!({"hooks":{"SessionStart":[{"hooks":[{
+        "type":"command", "command":format!(
+            "cat > '{}'; if [ -f '{}' ]; then cat '{}' > '{}'; else : > '{}'; fi; printf '%s\\n' '{}'",
+            hook_input.display(), path.display(), path.display(), observed_transcript.display(),
+            observed_transcript.display(), hook_output)
+    }]}]}});
+    let id_string = id.to_string();
+    let args = BridgeArgs::parse([
+        "--session-id",
+        id_string.as_str(),
+        "--restore-draft",
+        "--initial-conversation-mode",
+        "chat",
+    ])
+    .unwrap();
+    let mut cfg = isolated_config(&cwd, &home);
+    cfg.session_id_override = args.session_id.clone();
+    cfg.restore_draft = args.restore_draft;
+    cfg.initial_conversation_mode = resolve_desktop_config(&args)
+        .unwrap()
+        .initial_conversation_mode;
+    cfg.flag_settings = Some(serde_json::from_value(settings.clone()).unwrap());
+    cfg.flag_settings_source = Some(settings.to_string());
+
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let mode = bound.runtime.orchestrator.conversation_mode().await;
+    assert_eq!(mode.mode, ConversationMode::Chat);
+    let input: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(hook_input).unwrap()).unwrap();
+    assert_eq!(input["source"], "startup");
+    let at_hook = std::fs::read_to_string(observed_transcript).unwrap();
+    let transition = session::JsonlWriter::fixed_session_profile_from_source(&at_hook, &id_string)
+        .expect("the initial mode must be durable before SessionStart executes");
+    assert_eq!(transition.mode, ConversationMode::Chat);
+    let lifecycle = bound.session_lifecycle();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
+async fn cold_draft_reopens_real_session_start_attachments_for_code_and_chat() {
+    use lingxi_core::host::{session_context::ConversationMode, OrchestratorHandle};
+
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for expected in [ConversationMode::Code, ConversationMode::Chat] {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().canonicalize().unwrap();
+        let home = cwd.join("config");
+        let id = uuid::Uuid::new_v4();
+        let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+        let hook_input = cwd.join("session-start-input.json");
+        let hook_output = serde_json::json!({"hookSpecificOutput":{
+            "hookEventName":"SessionStart", "additionalContext":"startup context"
+        }});
+        let settings = serde_json::json!({"hooks":{"SessionStart":[{"hooks":[{
+            "type":"command", "command":format!(
+                "cat > '{}'; printf '%s\\n' '{}'", hook_input.display(), hook_output)
+        }]}]}});
+        let mut cfg = isolated_config(&cwd, &home);
+        cfg.session_id_override = Some(id.to_string());
+        cfg.restore_draft = true;
+        cfg.flag_settings = Some(serde_json::from_value(settings.clone()).unwrap());
+        cfg.flag_settings_source = Some(settings.to_string());
+
+        let sessions =
+            lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"));
+        cfg.initial_conversation_mode = Some(expected);
+        let (retired_runtime, retired_writer, retired_tools) = {
+            let mut first_cfg = cfg.clone();
+            // Observe the exact claim acquired by normal draft preparation,
+            // including any independent scopes retained after the runtime.
+            prepare_draft_boot_session(&mut first_cfg).await.unwrap();
+            let retired_writer = Arc::downgrade(first_cfg.session_writer_lease.as_ref().unwrap());
+            let first = Box::pin(assemble(first_cfg)).await.unwrap();
+            let retired_runtime = Arc::downgrade(&first.runtime);
+            let retired_tools = Arc::downgrade(&first.runtime.orchestrator.shared_tool_registry());
+            let competing_claim = sessions.claim_session_id(&id.to_string(), std::process::id());
+            assert!(
+                matches!(competing_claim, Err(ref error) if error.kind() == std::io::ErrorKind::AlreadyExists),
+                "the live draft must retain its exclusive writer lease: {competing_claim:?}"
+            );
+            // Mirror the host: close the connection before draining accepted
+            // session work, then release the remaining runtime owners.
+            let lifecycle = first.session_lifecycle();
+            let (endpoint, mut socket) = connect(first.connection).await;
+            socket.close(None).await.unwrap();
+            endpoint.shutdown().await;
+            let report = lifecycle.shutdown_and_drain().await;
+            assert!(report.complete, "{:?}", report.errors);
+            (retired_runtime, retired_writer, retired_tools)
+        };
+        // Dropping the connection aborts its queue watcher asynchronously;
+        // wait for its owners and the live tool graph to retire before testing
+        // the claim. The timeout is a failure bound, not a fixed delay.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while retired_runtime.strong_count() != 0
+                || retired_writer.strong_count() != 0
+                || retired_tools.strong_count() != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "closed draft remains owned: runtime={}, writer={}, tools={}",
+                retired_runtime.strong_count(),
+                retired_writer.strong_count(),
+                retired_tools.strong_count()
+            )
+        });
+        let reclaimed = sessions
+            .claim_session_id(&id.to_string(), std::process::id())
+            .expect("the drained and dropped draft must release its writer lease");
+        drop(reclaimed);
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(before.contains("hook_additional_context"), "{before}");
+        assert!(harness_runtime::desktop::session_state::is_mode_only_draft(
+            &before,
+            &id.to_string()
+        ));
+        assert_eq!(before.contains("\"fixed-session-mode\""), true);
+
+        let second = Box::pin(assemble(cfg)).await.unwrap();
+        let profile = second.runtime.orchestrator.conversation_mode().await;
+        assert_eq!(profile.mode, expected);
+        let input: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&hook_input).unwrap()).unwrap();
+        assert_eq!(input["source"], "resume");
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with(&before));
+        close_unserved_for_test(&second).await;
+        let report = second.session_lifecycle().shutdown_and_drain().await;
+        assert!(report.complete, "{:?}", report.errors);
+    }
 }

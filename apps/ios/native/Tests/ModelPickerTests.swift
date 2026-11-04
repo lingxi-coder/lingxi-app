@@ -6,6 +6,20 @@ import XCTest
 /// Pure model-picker and composer presentation policies that can be tested
 /// without driving the SwiftUI hierarchy.
 final class ModelPickerTests: XCTestCase {
+    @MainActor
+    func testRemotePickerUsesOnlyRemoteCatalogAndNeverConsultsLocalAccounts() {
+        var localFilterCalled = false
+        let references = ModelPickerSheet.modelReferences(
+            available: ["remote/model", "remote/model", "remote/other"],
+            projected: ["local/private"], usesLocalAccountCatalog: false
+        ) { values in
+            localFilterCalled = true
+            return values.filter { $0 != "remote/model" }
+        }
+        XCTAssertEqual(references, ["remote/model", "remote/other"])
+        XCTAssertFalse(localFilterCalled)
+    }
+
     func testPickerBillingChannelsStayAdjacentAndPreserveExecutionReferences() {
         let sections = ModelDisplay.pickerSections(for: ["openai/shared-model", "anthropic/other", "openai-chatgpt/shared-model"],
             eligibleReferences: ["openai-chatgpt/shared-model"])

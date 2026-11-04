@@ -8,6 +8,11 @@ private let maxSyncFileBytes: Int64 = 2 * 1024 * 1024 * 1024
 private let maxSyncTotalBytes: Int64 = 8 * 1024 * 1024 * 1024
 private let minFreeSpaceBytes: Int64 = 64 * 1024 * 1024
 
+// These two files are local scheduler ownership state, not workspace content.
+private func isLocalSchedulerOwnershipPath(_ path: String) -> Bool {
+    path == ".lingxi/scheduled_owner_reservations.jsonl" || path == ".lingxi/scheduled_tasks.lock"
+}
+
 protocol ProjectPathCoordinating: Sendable {
     func coordinateRead<T>(at url: URL, _ block: (URL) throws -> T) throws -> T
     func coordinateWrite<T>(at url: URL, _ block: (URL) throws -> T) throws -> T
@@ -79,19 +84,25 @@ final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
     private let coordinator: ProjectPathCoordinating
     private let now: @Sendable () -> Date
     private let hooks: ProjectExternalTransactionHooks
+    private let availableCapacity: @Sendable (URL) throws -> Int64
 
     init(
         repository: ProjectRepository,
         bookmarkResolver: ProjectBookmarkResolving = SecurityScopedProjectBookmarkResolver(),
         coordinator: ProjectPathCoordinating = NSFileProjectCoordinator(),
         now: @escaping @Sendable () -> Date = { Date() },
-        hooks: ProjectExternalTransactionHooks = .init()
+        hooks: ProjectExternalTransactionHooks = .init(),
+        availableCapacity: @escaping @Sendable (URL) throws -> Int64 = {
+            try $0.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+                .volumeAvailableCapacityForImportantUsage ?? 0
+        }
     ) {
         self.repository = repository
         self.bookmarkResolver = bookmarkResolver
         self.coordinator = coordinator
         self.now = now
         self.hooks = hooks
+        self.availableCapacity = availableCapacity
     }
 
     func importInitial(projectId: String) throws -> ProjectSyncResult {
@@ -170,6 +181,7 @@ final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
                         .union(internalFiles.keys)
                         .union(baseline.files.keys)
                     for path in allPaths.sorted() {
+                        guard !isLocalSchedulerOwnershipPath(path) else { continue }
                         let externalFile = externalFiles[path]
                         let internalFile = internalFiles[path]
                         let baselineHash = baseline.files[path]?.sha256
@@ -224,6 +236,7 @@ final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
                         .union(internalFiles.keys)
                         .union(baseline.files.keys)
                     for path in allPaths.sorted() {
+                        guard !isLocalSchedulerOwnershipPath(path) else { continue }
                         let externalFile = externalFiles[path]
                         let internalFile = internalFiles[path]
                         let baselineHash = baseline.files[path]?.sha256
@@ -317,7 +330,7 @@ final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
                     stack.append(entry)
                 } else if values.isRegularFile == true {
                     let relativePath = relativePath(from: canonicalRoot, to: entry)
-                    guard isSafeRelativePath(relativePath) else { continue }
+                    guard isSafeRelativePath(relativePath), !isLocalSchedulerOwnershipPath(relativePath) else { continue }
                     let hashed = try hashFile(at: entry)
                     try budget.includeFile(hashed.sizeBytes)
                     files[relativePath] = ScannedFile(url: entry, sha256: hashed.sha256, sizeBytes: hashed.sizeBytes)
@@ -334,8 +347,7 @@ final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
         guard isSafeProjectWorkspacePath(root: root, candidate: target) else {
             throw ProjectSynchronizerError.copyEscapedWorkspace
         }
-        let capacity = try root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            .volumeAvailableCapacityForImportantUsage ?? 0
+        let capacity = try availableCapacity(root)
         guard Int64(capacity) >= source.sizeBytes + minFreeSpaceBytes else {
             throw ProjectSynchronizerError.notEnoughFreeSpace(relativePath)
         }
@@ -418,8 +430,16 @@ final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
             guard values.isDirectory != true else { continue }
             let name = fileURL.lastPathComponent
             if let original = syncArtifactOriginalName(name: name, marker: syncBackupMarker) {
+                let parent = relativePath(from: root, to: fileURL.deletingLastPathComponent())
+                let target = parent.isEmpty ? original : parent + "/" + original
+                guard !isLocalSchedulerOwnershipPath(target) else { continue }
                 backupsByDirectory[fileURL.deletingLastPathComponent(), default: []].append((original, fileURL))
             } else if syncArtifactOriginalName(name: name, marker: syncTempMarker) != nil {
+                if let original = syncArtifactOriginalName(name: name, marker: syncTempMarker) {
+                    let parent = relativePath(from: root, to: fileURL.deletingLastPathComponent())
+                    let target = parent.isEmpty ? original : parent + "/" + original
+                    guard !isLocalSchedulerOwnershipPath(target) else { continue }
+                }
                 tempFiles.append(fileURL)
             }
         }

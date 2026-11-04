@@ -1,4 +1,19 @@
 export const chatCatalog: Record<string, Record<string, string>> = {
+  "desktop_chat_drafts": {
+    "zh-Hans": "草稿", "zh-Hant": "草稿", "en": "Drafts", "ja": "下書き", "ko": "초안"
+  },
+  "desktop_handoff_continue": {
+    "zh-Hans": "交接到 %1$s", "zh-Hant": "交接至 %1$s", "en": "Continue in %1$s", "ja": "%1$s に引き継ぐ", "ko": "%1$s에서 계속"
+  },
+  "desktop_handoff_retry": {
+    "zh-Hans": "重试交接摘要", "zh-Hant": "重試交接摘要", "en": "Retry handoff summary", "ja": "引き継ぎ要約を再試行", "ko": "인계 요약 다시 시도"
+  },
+  "desktop_handoff_cancel": {
+    "zh-Hans": "取消交接摘要", "zh-Hant": "取消交接摘要", "en": "Cancel handoff summary", "ja": "引き継ぎ要約をキャンセル", "ko": "인계 요약 취소"
+  },
+  "desktop_handoff_source": {
+    "zh-Hans": "交接来源：%1$s · %2$s", "zh-Hant": "交接來源：%1$s · %2$s", "en": "Handoff from %1$s · %2$s", "ja": "%1$s から引き継ぎ · %2$s", "ko": "%1$s에서 인계 · %2$s"
+  },
   "desktop_chat_no_project": {
     "zh-Hans": "未选择项目",
     "zh-Hant": "未選擇專案",
@@ -1006,5 +1021,20 @@ export const chatCatalog: Record<string, Record<string, string>> = {
     "en": "Unrestricted access to tools and files on this computer",
     "ja": "このコンピュータのツールとファイルに制限なくアクセス",
     "ko": "이 컴퓨터의 도구 및 파일에 제한 없이 접근"
+  },
+  "desktop_chat_conversation_mode": {
+    "zh-Hans": "会话模式", "zh-Hant": "對話模式", "en": "Conversation mode", "ja": "会話モード", "ko": "대화 모드"
+  },
+  "desktop_chat_mode_chat_description": {
+    "zh-Hans": "通用助手，适合研究、写作和日常任务", "zh-Hant": "通用助理，適合研究、寫作和日常工作", "en": "A general assistant for research, writing, and everyday tasks", "ja": "調査、執筆、日常の作業に対応するアシスタント", "ko": "조사, 글쓰기, 일상 작업을 위한 범용 어시스턴트"
+  },
+  "desktop_chat_mode_code_description": {
+    "zh-Hans": "专注于软件开发和工程任务", "zh-Hant": "專注於軟體開發和工程工作", "en": "Focused on software development and engineering", "ja": "ソフトウェア開発とエンジニアリングに特化", "ko": "소프트웨어 개발과 엔지니어링에 집중"
+  },
+  "desktop_chat_mode_next_short": {
+    "zh-Hans": "下一回合：%1$s", "zh-Hant": "下一回合：%1$s", "en": "Next: %1$s", "ja": "次: %1$s", "ko": "다음: %1$s"
+  },
+  "desktop_chat_mode_next_turn": {
+    "zh-Hans": "下一回合切换到 %1$s", "zh-Hant": "下一回合切換至 %1$s", "en": "%1$s applies to the next turn", "ja": "次のターンから %1$s を適用", "ko": "다음 턴부터 %1$s 적용"
   }
 };

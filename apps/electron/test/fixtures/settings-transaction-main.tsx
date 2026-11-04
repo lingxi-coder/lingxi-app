@@ -69,12 +69,14 @@ function Fixture() {
   useEffect(() => {
     window.__settingsTransactionTest = {
       startSave: () => {
-        const input = document.querySelector<HTMLInputElement>('input[type="password"]');
+        const input = document.querySelector<HTMLInputElement>('dialog[open] input[type="password"]');
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
         setter?.call(input, 'sk-pending-save');
         input?.dispatchEvent(new Event('input', { bubbles: true }));
-        setTimeout(() => [...document.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Add API key')?.click(), 0);
+        setTimeout(() => document.querySelector<HTMLFormElement>('dialog[open] form')?.requestSubmit(), 0);
       },
+      openAddAccount: () => document.querySelector<HTMLButtonElement>('.pa-toolbar .pa-primary')?.click(),
+      closeOwner: () => { closeCalls += 1; setOpen(false); },
       resolvePersistence: () => {
         resolvePersistence?.(undefined);
         resolvePersistence = undefined;
@@ -99,14 +101,15 @@ function Fixture() {
         return {
           exists: Boolean(button),
           disabled: button?.disabled ?? true,
-          providerCredentialField: Boolean(document.querySelector('input[aria-label="API key"]')),
+          providerCredentialField: Boolean(document.querySelector('dialog[open] input[type="password"]')),
         };
       },
       connectionTestCalls: () => connectionTestCalls,
       clearStoredCredential: () => {
-        const remove = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Remove');
-        remove?.click();
+        document.querySelector<HTMLElement>('.pa-account .pa-more summary')?.click();
+        document.querySelector<HTMLButtonElement>('.pa-account .pa-destructive')?.click();
       },
+      confirmCredentialRemoval: () => document.querySelector<HTMLButtonElement>('dialog[open] .pa-danger-button')?.click(),
       connectionTestErrorVisible: () => document.body.innerText.includes('test credential rejected'),
       state: () => ({ persistencePending, restartCalls, closeCalls, activeSessionId, activeWork }),
     };
@@ -135,12 +138,15 @@ declare global {
   interface Window {
     __settingsTransactionTest?: {
       startSave(): void;
+      openAddAccount(): void;
+      closeOwner(): void;
       resolvePersistence(): void;
       switchSessionAndStartWork(): void;
       startConnectionTest(): void;
       connectionTestButtonState(): { exists: boolean; disabled: boolean; providerCredentialField: boolean };
       connectionTestCalls(): number;
       clearStoredCredential(): void;
+      confirmCredentialRemoval(): void;
       connectionTestErrorVisible(): boolean;
       state(): { persistencePending: boolean; restartCalls: number; closeCalls: number; activeSessionId: string; activeWork: boolean };
     };

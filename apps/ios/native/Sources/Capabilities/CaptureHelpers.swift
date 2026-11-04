@@ -92,7 +92,8 @@ protocol VoiceTranscriptionSession: AnyObject {
     func transcribe(
         language: String?,
         automaticEndpointAfterSilence: Duration?,
-        configurationSnapshot: AudioConfigurationSnapshot
+        configurationSnapshot: AudioConfigurationSnapshot,
+        audioOwner: IOSAudioOwner?
     ) async throws -> String
     func finishRecording()
     func cancelRecognition()
@@ -102,7 +103,8 @@ extension VoiceTranscriptionSession {
     func transcribe(
         language: String?,
         automaticEndpointAfterSilence: Duration?,
-        configurationSnapshot _: AudioConfigurationSnapshot
+        configurationSnapshot _: AudioConfigurationSnapshot,
+        audioOwner _: IOSAudioOwner?
     ) async throws -> String {
         try await transcribe(language: language, automaticEndpointAfterSilence: automaticEndpointAfterSilence)
     }
@@ -118,19 +120,22 @@ extension VoiceTranscriptionSession {
             try await IOSAudioService.shared.transcribeFromUI(
                 language: language,
                 automaticEndpointAfterSilence: automaticEndpointAfterSilence,
-                configurationSnapshot: AudioConfigurationRuntime.snapshot()
+                configurationSnapshot: AudioConfigurationRuntime.snapshot(),
+                audioOwner: nil
             )
         }
 
         func transcribe(
             language: String?,
             automaticEndpointAfterSilence: Duration?,
-            configurationSnapshot: AudioConfigurationSnapshot
+            configurationSnapshot: AudioConfigurationSnapshot,
+            audioOwner: IOSAudioOwner?
         ) async throws -> String {
             try await IOSAudioService.shared.transcribeFromUI(
                 language: language,
                 automaticEndpointAfterSilence: automaticEndpointAfterSilence,
-                configurationSnapshot: configurationSnapshot
+                configurationSnapshot: configurationSnapshot,
+                audioOwner: audioOwner
             )
         }
 
@@ -187,6 +192,7 @@ final class VoiceCapture {
         language: String? = nil,
         automaticEndpointAfterSilence: Duration? = nil,
         configurationSnapshot: AudioConfigurationSnapshot? = nil,
+        audioOwner: IOSAudioOwner? = nil,
         completion: @escaping Completion
     ) {
         cancel()
@@ -205,7 +211,8 @@ final class VoiceCapture {
                     transcribed = try await session.transcribe(
                         language: language,
                         automaticEndpointAfterSilence: automaticEndpointAfterSilence,
-                        configurationSnapshot: configurationSnapshot
+                        configurationSnapshot: configurationSnapshot,
+                        audioOwner: audioOwner
                     )
                 } else {
                     transcribed = try await session.transcribe(
@@ -235,14 +242,22 @@ final class VoiceCapture {
     }
 
     func cancel() {
+        _ = cancelForDrain()
+    }
+
+    /// Return the exact capture task so a different owner cannot begin while
+    /// cancellation of this operation is still unwinding.
+    @discardableResult
+    func cancelForDrain() -> Task<Void, Never>? {
         guard let activeCapture else {
             phase = .idle
-            return
+            return nil
         }
         self.activeCapture = nil
         phase = .idle
         activeCapture.session.cancelRecognition()
         activeCapture.task.cancel()
+        return activeCapture.task
     }
 
     private func complete(id: UUID, result: VoiceCaptureResult, completion: Completion) {

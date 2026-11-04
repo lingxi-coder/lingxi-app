@@ -31,7 +31,7 @@ final class LocalAppDistributionChannelTests: XCTestCase {
         let client = LocalAppServiceClient()
         let published: LocalAppPublishResult = try await client.request([
             "op": .string("publish"), "sourcePath": .string(source.path), "expectedRevision": .number(0)
-        ])
+        ], purpose: .development(.code))
         let id = published.record.appId
         do {
             let _: LocalAppJSON = try await client.request(["op": .string("grant"), "appId": .string(id), "digest": .string(published.release.digest)])

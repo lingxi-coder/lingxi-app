@@ -33,13 +33,14 @@ import type {
   NativeAudioCommand,
   NativeAudioCommandResult,
   NativeAudioOperationResponse,
+  NativeAudioFlowLease,
   NativeAudioSnapshot,
 } from '../../shared/nativeAudio.js';
 import type { NotificationPreferences } from '../../shared/notificationPreferences.js';
 import type { HostPermissionRequest } from '../../shared/permission.js';
 import type { ScheduledContext, ScheduledScope } from '../../shared/scheduled.js';
 import type { ModelPickerVisibilitySettings } from '../../shared/settings.js';
-import type { SessionCatalogScope, SessionOpenSelection, SessionWorkspaceOperation } from '../../shared/sessionWorkspace.js';
+import type { SessionCatalogScope, SessionOpenSelection, SessionMetadataSelection, SessionWorkspaceOperation } from '../../shared/sessionWorkspace.js';
 import type { VoicePreferences } from '../../shared/voicePreferences.js';
 import type { VisualizationContextChip, VisualizationFollowup } from '../model/runItem.js';
 import type { ConversationState, UsageSnapshot } from './conversation.js';
@@ -168,7 +169,7 @@ export interface UseBridge {
     images?: ImageRefDto[],
     imageNames?: string[],
     filePaths?: string[],
-    options?: { purpose?: TrackedPromptPurpose; visualizationContext?: VisualizationContextChip },
+    options?: { purpose?: TrackedPromptPurpose; visualizationContext?: VisualizationContextChip; sessionId?: string },
   ): { token: DesktopTurnToken; queued: Promise<void> } | null;
   /** A follow-up a widget in the active session drafted, until the composer takes it. */
   readonly visualizationFollowup: VisualizationFollowup | null;
@@ -212,15 +213,18 @@ export interface UseBridge {
   cancelProjectCreation(): void;
   activateProject(path: string): Promise<WorkspaceMetadata | null>;
   removeProject(path: string): Promise<void>;
-  updateSidebarPreferences(preferences: import('../../shared/settings').SidebarPreferences): Promise<void>;
-  preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
-  archiveSession(projectPath: string, sessionId: string): Promise<void>;
-  touchSession(projectPath: string, sessionId: string): Promise<void>;
-  renameSession(projectPath: string, sessionId: string, title: string): Promise<void>;
+  /** Save sidebar preferences; the keys left out keep their saved value. */
+  updateSidebarPreferences(preferences: Partial<import('../../shared/settings').SidebarPreferences>): Promise<void>;
+  prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
+  releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
+  preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;
+  archiveSession(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<void>;
+  touchSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<void>;
+  renameSession(projectPath: string, sessionId: string, title: string, selection: SessionMetadataSelection): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
-  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionRef | false>;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<SessionRef | false>;
   /** Show a chat of a Bot in the chat view; a new one when `sessionId` is absent. Rejects with the reason it could not start. */
-  openBotSession(botId: string, sessionId?: string): Promise<import('../../shared/bots').BotSessionRefUi>;
+  openBotSession(botId: string, sessionId?: string, transcriptPath?: string): Promise<import('../../shared/bots').BotSessionRefUi>;
   /** Follow the host, which made a chat of a Bot the displayed one on its own (the owner clicked a notification). */
   showBotSession(session: import('../../shared/bots').BotSessionRefUi): Promise<void>;
   deleteBot(botId: string): Promise<void>;
@@ -313,7 +317,7 @@ export interface UseBridge {
   scheduledContext(scopeId: string): Promise<ScheduledContext>;
   manageScheduled(scopeId: string, request: CronRequestDto): Promise<CronJobDto[]>;
   readScheduledHistory(scopeId: string, jobId: string): Promise<CronRunDto[]>;
-  openScheduledSession(scopeId: string, sessionId: string): Promise<void>;
+  openScheduledSession(scopeId: string, sessionId: string): Promise<boolean>;
   skillAdmin(command: SkillAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop MCP administration with strict validation, revision/CAS, approval, and live reconcile. */
   mcpAdmin(command: McpAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
@@ -328,12 +332,19 @@ export interface UseBridge {
   copyText(text: string): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
   audioRequest(command: NativeAudioCommand): Promise<NativeAudioCommandResult>;
-  audioExecute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV4): Promise<NativeAudioOperationResponse>;
-  audioCancel(): Promise<void>;
-  audioFinishListen(): Promise<void>;
+  audioExecute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV4, flow?: NativeAudioFlowLease): Promise<NativeAudioOperationResponse>;
+  audioCancel(flow?: NativeAudioFlowLease): Promise<void>;
+  audioRetainFlow(sessionId: string, leaseId: string, retain: boolean): Promise<void>;
+  audioFinishListen(flow?: NativeAudioFlowLease): Promise<void>;
   refresh(): Promise<void>;
-  newSession(projectPath?: string): Promise<import("../../shared/settings").SessionRef | undefined>;
+  newSession(projectPath?: string, purpose?: import('../../shared/localApps').LocalAppSessionPurpose): Promise<import("../../shared/settings").SessionRef | undefined>;
   resumeSession(sessionId: string): Promise<void>;
+  switchConversationSpace(mode: 'chat' | 'code'): Promise<void>;
+  readonly handoffPending: boolean;
+  readonly handoffRetryAvailable: boolean;
+  prepareSessionHandoff(): Promise<void>;
+  cancelSessionHandoff(): Promise<void>;
+  openHandoffSource(source: import('../../shared/conversationSpaces').HandoffBacklink): Promise<void>;
   setModel(model: string): Promise<void>;
   setReasoningSelection(selection: ReasoningSelectionDto): Promise<void>;
   setFastMode(enabled: boolean): Promise<void>;

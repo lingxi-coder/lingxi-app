@@ -8,6 +8,7 @@ import { ManualClock } from '@lingxi/bridge-client/remote';
 import type { MessageDto } from '@lingxi/bridge-client';
 import { Composer } from '../src/remote/Composer';
 import { Files } from '../src/remote/Files';
+import { SessionView } from '../src/remote/SessionView';
 import type { RemoteClient } from '../src/remote/remoteClient';
 import { SessionController, questionAnswers, type SessionIo } from '../src/remote/remoteClient';
 
@@ -47,7 +48,7 @@ function historyController() {
   };
   const controller = new SessionController('s', io, () => true);
   const snapshot = (epoch: string, text: string, first: number) => {
-    controller.handleSnapshot({ session_id: 's', phase: 'begin', epoch, first_message_index: first });
+    controller.handleSnapshot({ session_id: 's', phase: 'begin', epoch, first_message_index: first, session_mode: 'code' });
     controller.handleSnapshot({ session_id: 's', phase: 'messages', messages: [message(text)] });
     controller.handleSnapshot({ session_id: 's', phase: 'end', cursor: { epoch, seq: 0 }, pending: noPending, turn: { running: false } });
   };
@@ -93,7 +94,7 @@ test('a text follow-up while running preserves the prepared image draft for the 
   const original = globalThis.createImageBitmap;
   globalThis.createImageBitmap = (async () => ({ width: 128, height: 128, close() {} })) as typeof createImageBitmap;
   const sent: Array<{ text: string; images: unknown[] }> = [];
-  const props = { locale: 'en' as const, disabled: false, onStop() {}, onSend(text: string, images: unknown[]) { sent.push({ text, images }); } };
+  const props = { locale: 'en' as const, disabled: false, onStop() {}, onSend(text: string, images: unknown[]) { sent.push({ text, images }); return true; } };
   let renderer: any;
   try {
     await act(async () => { renderer = create(createElement(Composer, { ...props, running: false })); });
@@ -115,6 +116,149 @@ test('a text follow-up while running preserves the prepared image draft for the 
   }
 });
 
+test('a rejected remote admission preserves the original text and prepared image', async () => {
+  const original = globalThis.createImageBitmap;
+  globalThis.createImageBitmap = (async () => ({ width: 128, height: 128, close() {} })) as typeof createImageBitmap;
+  const text = 'unpaired: \ud800 and original text';
+  let renderer: any;
+  try {
+    await act(async () => { renderer = create(createElement(Composer, {
+      locale: 'en', disabled: false, running: false, onStop() {}, onSend: () => false,
+    })); });
+    await act(async () => { await renderer.root.findByProps({ type: 'file' }).props.onChange({ target: { files: [new Blob(['red'], { type: 'image/png' })] } }); });
+    await act(async () => { renderer.root.findByType('textarea').props.onChange({ target: { value: text } }); });
+    await act(async () => { renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
+    assert.equal(renderer.root.findByType('textarea').props.value, text);
+    assert.equal(renderer.root.findAllByType('img').length, 1);
+    assert.equal(renderer.root.findAllByProps({ role: 'alert' }).length, 1);
+  } finally {
+    if (renderer) act(() => renderer.unmount());
+    globalThis.createImageBitmap = original;
+  }
+});
+
+test('a mode conflict between render and send retains the session file attachment and text', async () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} } as unknown as Document;
+  const { controller, snapshot } = historyController();
+  snapshot('e1', 'base', 0);
+  controller.activate = () => {};
+  controller.deactivate = () => {};
+  const receipt = { transfer_id: 'ab'.repeat(16), ref: 'ab'.repeat(16), session_id: 's', name: 'kept.bin', size: 0, sha256: '0'.repeat(64) };
+  const state = { sessions: [], bots: [] };
+  const client = {
+    session: () => controller, getState: () => state, subscribe: () => () => {}, botOfThread: () => undefined,
+    models: async () => ({ models: [], current: '' }), listFiles: async () => [], uploadFile: async () => receipt,
+  } as unknown as RemoteClient;
+  let renderer: any;
+  const text = 'keep \ud800';
+  try {
+    await act(async () => { renderer = create(createElement(SessionView, {
+      locale: 'en', client, sessionId: 's', connection: { phase: 'ready', hostId: 'h', transport: 'webrtc', attempt: 0, everReady: true },
+      deviceName: 'browser', onBack() {},
+    })); });
+    const fileInput = renderer.root.findAllByProps({ type: 'file' })[0];
+    await act(async () => { fileInput.props.onChange({ target: { files: [new File([], 'kept.bin')], value: '' } }); });
+    await act(async () => { renderer.root.findByType('textarea').props.onChange({ target: { value: text } }); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Remove file' }).length, 1);
+    await act(async () => {
+      controller.handleSnapshot({ session_id: 's', phase: 'begin', epoch: 'e2', first_message_index: 0, session_mode: 'chat' });
+      renderer.root.findByType('form').props.onSubmit({ preventDefault() {} });
+    });
+    assert.equal(renderer.root.findByType('textarea').props.value, text);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Remove file' }).length, 1);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.document = originalDocument;
+  }
+});
+
+test('adding a fifth file keeps the four existing draft attachments', async () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} } as unknown as Document;
+  const { controller, snapshot } = historyController();
+  snapshot('e1', 'base', 0);
+  controller.activate = () => {};
+  controller.deactivate = () => {};
+  const receipts = Array.from({ length: 5 }, (_, index) => ({
+    transfer_id: String(index).repeat(32), ref: String(index).repeat(32), session_id: 's',
+    name: `file-${index}.txt`, size: 0, sha256: '0'.repeat(64),
+  }));
+  const state = { sessions: [], bots: [] };
+  const client = {
+    session: () => controller, getState: () => state, subscribe: () => () => {}, botOfThread: () => undefined,
+    models: async () => ({ models: [], current: '' }), listFiles: async () => receipts,
+  } as unknown as RemoteClient;
+  let renderer: any;
+  try {
+    await act(async () => { renderer = create(createElement(SessionView, {
+      locale: 'en', client, sessionId: 's', connection: { phase: 'ready', hostId: 'h', transport: 'webrtc', attempt: 0, everReady: true },
+      deviceName: 'browser', onBack() {},
+    })); });
+    const attachButtons = () => renderer.root.findAllByType('button').filter((button: any) => button.children.includes('Attach'));
+    assert.equal(attachButtons().length, 5);
+    for (let index = 0; index < 4; index += 1) {
+      await act(async () => { attachButtons()[index].props.onClick(); });
+    }
+    assert.equal(attachButtons()[4].props.disabled, true);
+    // Even a late callback cannot evict an existing attachment.
+    await act(async () => { attachButtons()[4].props.onClick(); });
+    const removed = renderer.root.findAllByProps({ 'aria-label': 'Remove file' });
+    assert.deepEqual(removed.map((button: any) => button.parent.children[0]), receipts.slice(0, 4).map(file => file.name));
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.document = originalDocument;
+  }
+});
+
+test('a turn starting between render and send retains files for the next idle turn', async () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} } as unknown as Document;
+  const calls: Array<{ method: string; params: any }> = [];
+  const controller = new SessionController('s', {
+    request: (async (method: string, params: unknown) => { calls.push({ method, params }); return { turn_id: 1 }; }) as SessionIo['request'],
+    notify() {}, clock: new ManualClock(),
+  }, () => true);
+  controller.handleSnapshot({ session_id: 's', phase: 'begin', epoch: 'e1', first_message_index: 0, session_mode: 'code' });
+  controller.handleSnapshot({ session_id: 's', phase: 'end', cursor: { epoch: 'e1', seq: 0 }, pending: noPending, turn: { running: false } });
+  controller.activate = () => {};
+  controller.deactivate = () => {};
+  const receipt = { transfer_id: 'ab'.repeat(16), ref: 'ab'.repeat(16), session_id: 's', name: 'kept.bin', size: 0, sha256: '0'.repeat(64) };
+  const state = { sessions: [], bots: [] };
+  const client = {
+    session: () => controller, getState: () => state, subscribe: () => () => {}, botOfThread: () => undefined,
+    models: async () => ({ models: [], current: '' }), listFiles: async () => [], uploadFile: async () => receipt,
+  } as unknown as RemoteClient;
+  let renderer: any;
+  try {
+    await act(async () => { renderer = create(createElement(SessionView, {
+      locale: 'en', client, sessionId: 's', connection: { phase: 'ready', hostId: 'h', transport: 'webrtc', attempt: 0, everReady: true },
+      deviceName: 'browser', onBack() {},
+    })); });
+    const fileInput = renderer.root.findAllByProps({ type: 'file' })[0];
+    await act(async () => { fileInput.props.onChange({ target: { files: [new File([], 'kept.bin')], value: '' } }); });
+    await act(async () => { renderer.root.findByType('textarea').props.onChange({ target: { value: 'keep this' } }); });
+    await act(async () => {
+      controller.handleEvent({ seq: 1, record: { type: 'event', event: { type: 'turn_started', turn_id: 1 } } });
+      renderer.root.findByType('form').props.onSubmit({ preventDefault() {} });
+    });
+    assert.equal(renderer.root.findByType('textarea').props.value, 'keep this');
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Remove file' }).length, 1);
+    assert.equal(calls.filter(call => call.method === 'prompt.send').length, 0);
+    // Once the running state has rendered, a text-only follow-up can proceed
+    // without consuming the file attachment.
+    await act(async () => { renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
+    assert.equal(calls.filter(call => call.method === 'prompt.send').length, 1);
+    assert.equal(calls.find(call => call.method === 'prompt.send')!.params.file_refs, undefined);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Remove file' }).length, 1);
+    assert.equal(renderer.root.findByProps({ type: 'submit' }).props.disabled, true,
+      'a file alone cannot be sent until the turn is idle');
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.document = originalDocument;
+  }
+});
+
 test('overflow while a snapshot is assembling requests a fresh base instead of skipping live records', async () => {
   const requests: Array<{ method: string; params: unknown }> = [];
   const controller = new SessionController('s', {
@@ -126,7 +270,7 @@ test('overflow while a snapshot is assembling requests a fresh base instead of s
   }, () => true);
   controller.activate();
   await Promise.resolve();
-  controller.handleSnapshot({ session_id: 's', phase: 'begin', epoch: 'e1', first_message_index: 0 });
+  controller.handleSnapshot({ session_id: 's', phase: 'begin', epoch: 'e1', first_message_index: 0, session_mode: 'code' });
   for (let seq = 1; seq <= 5001; seq++) controller.handleEvent({ seq, record: { type: 'event', event: { type: 'text_delta', text: 'x' } } });
   controller.handleSnapshot({ session_id: 's', phase: 'end', cursor: { epoch: 'e1', seq: 0 }, pending: noPending, turn: { running: true } });
   await Promise.resolve();
@@ -144,7 +288,7 @@ test('a snapshot whose cursor covers the overflow does not need another attach',
   }, () => true);
   controller.activate();
   await Promise.resolve();
-  controller.handleSnapshot({ session_id: 's', phase: 'begin', epoch: 'e1', first_message_index: 0 });
+  controller.handleSnapshot({ session_id: 's', phase: 'begin', epoch: 'e1', first_message_index: 0, session_mode: 'code' });
   for (let seq = 1; seq <= 5001; seq++) controller.handleEvent({ seq, record: { type: 'event', event: { type: 'text_delta', text: 'x' } } });
   controller.handleSnapshot({ session_id: 's', phase: 'end', cursor: { epoch: 'e1', seq: 5001 }, pending: noPending, turn: { running: false } });
   await Promise.resolve();
@@ -158,7 +302,7 @@ test('starting a turn during image preparation does not drop or prematurely send
   const bitmap = deferred<ImageBitmap>();
   globalThis.createImageBitmap = (() => bitmap.promise) as typeof createImageBitmap;
   const sent: Array<{ text: string; images: unknown[] }> = [];
-  const props = { locale: 'en' as const, disabled: false, onStop() {}, onSend(text: string, images: unknown[]) { sent.push({ text, images }); } };
+  const props = { locale: 'en' as const, disabled: false, onStop() {}, onSend(text: string, images: unknown[]) { sent.push({ text, images }); return true; } };
   let renderer: any;
   try {
     await act(async () => { renderer = create(createElement(Composer, { ...props, running: false })); });

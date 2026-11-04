@@ -18,6 +18,7 @@ function settingsFixture(t: TestContext) {
   const settings = new SettingsStore(userData);
   settings.addProject(old); settings.addProject(target); settings.activateProject(old);
   const ref = { projectPath: old, sessionId }, moved = { projectPath: target, sessionId };
+  settings.conversationSpaces.register({ ...ref, projectId: old, mode: 'code' });
   settings.setActiveSession(ref);
   return { root, userData, old, target, settings, ref, moved };
 }
@@ -34,13 +35,13 @@ test('relocation atomically moves active identity, model, pin and manual order w
   f.settings.relocateSession(f.ref, f.target);
   const saved = new SettingsStore(f.userData);
   const state = saved.getPublic();
-  assert.deepEqual(state.activeSession, f.moved);
-  assert.equal(state.activeProject, f.target);
+  assert.deepEqual(state.activeSession, { ...f.moved, projectId: f.old, mode: 'code' });
+  assert.equal(state.activeProject, f.old);
   assert.equal(saved.getSessionModel(f.ref), undefined);
   assert.equal(saved.getSessionModel(f.moved), 'anthropic/selected-model');
   assert.equal(saved.getSessionModel({ projectPath: f.old, sessionId: otherId }), 'openai/other-model');
-  assert.deepEqual(state.pinnedSessions, [{ ...f.moved, title: 'Pinned chat', pinnedAt }]);
-  assert.deepEqual(state.sidebar?.manualSessionOrder, { [f.old]: [otherId], [f.target]: [otherId, sessionId] });
+  assert.deepEqual(state.pinnedSessions, [{ ...f.moved, projectId: f.old, mode: 'code', title: 'Pinned chat', pinnedAt }]);
+  assert.deepEqual(state.sidebar?.manualSessionOrder, { [f.old]: [otherId, sessionId], [f.target]: [otherId] });
 });
 
 test('relocation carries archived metadata to the same UUID in the new directory', (t) => {
@@ -67,13 +68,14 @@ test('relocation carries Remote Control enablement to the new directory', (t) =>
 
 test('relocation carries a volatile draft without overwriting the last durable session', (t) => {
   const f = settingsFixture(t);
+  f.settings.conversationSpaces.register({ projectPath: f.old, projectId: f.old, sessionId: otherId, mode: 'code' });
   f.settings.setActiveSession({ projectPath: f.old, sessionId: otherId });
   f.settings.setActiveSessionDraft(f.ref);
   f.settings.relocateSession(f.ref, f.target);
-  assert.deepEqual(f.settings.getPublic().activeSession, f.moved);
+  assert.deepEqual(f.settings.getPublic().activeSession, { ...f.moved, projectId: f.old, mode: 'code' });
   const saved = new SettingsStore(f.userData);
-  assert.deepEqual(saved.getPublic().activeSession, { projectPath: f.old, sessionId: otherId });
-  assert.equal(saved.getPublic().activeProject, f.target);
+  assert.deepEqual(saved.getPublic().activeSession, { projectPath: f.old, projectId: f.old, sessionId: otherId, mode: 'code' });
+  assert.equal(saved.getPublic().activeProject, f.old);
 });
 
 test('moving an unsent first draft persists its directory without a nonexistent resume target', (t) => {
@@ -81,10 +83,10 @@ test('moving an unsent first draft persists its directory without a nonexistent 
   f.settings.setActiveSession(undefined);
   f.settings.setActiveSessionDraft(f.ref);
   f.settings.relocateSession(f.ref, f.target);
-  assert.deepEqual(f.settings.getPublic().activeSession, f.moved);
+  assert.deepEqual(f.settings.getPublic().activeSession, { ...f.moved, projectId: f.old, mode: 'code' });
   const saved = new SettingsStore(f.userData);
   assert.equal(saved.getPublic().activeSession, undefined);
-  assert.equal(saved.getPublic().activeProject, f.target);
+  assert.equal(saved.getPublic().activeProject, f.old);
 });
 
 test('a failed relocation write preserves the previous file, memory, pin and volatile active draft', (t) => {
@@ -112,7 +114,7 @@ test('selected transcript context survives relocation and reload without enterin
   const saved = new SettingsStore(f.userData);
   assert.equal(saved.getSessionTranscriptSelection(f.ref), undefined);
   assert.deepEqual(saved.getSessionTranscriptSelection(f.moved), { ...f.moved, ...selected });
-  assert.deepEqual(saved.getPublic().activeSession, f.moved);
+  assert.deepEqual(saved.getPublic().activeSession, { ...f.moved, projectId: f.old, mode: 'code' });
   assert.equal('sessionTranscriptSelections' in saved.getPublic(), false);
   saved.relocateSession(f.ref, f.target);
   assert.deepEqual(saved.getSessionTranscriptSelection(f.moved), { ...f.moved, ...selected },
@@ -147,7 +149,7 @@ test('empty native drafts clear a remembered source without making the draft dur
   const saved = new SettingsStore(f.userData);
   assert.equal(saved.getPublic().activeSession, undefined);
   assert.equal(saved.getSessionTranscriptSelection(f.moved), undefined);
-  assert.deepEqual(f.settings.getPublic().activeSession, f.moved);
+  assert.deepEqual(f.settings.getPublic().activeSession, { ...f.moved, projectId: f.old, mode: 'code' });
 });
 
 test('a failed selection write preserves both remembered transcript and navigation atomically', (t) => {
@@ -156,7 +158,7 @@ test('a failed selection write preserves both remembered transcript and navigati
   const bytes = readFileSync(f.settings.settingsPath, 'utf8');
   mkdirSync(`${f.settings.settingsPath}.tmp`);
   assert.throws(() => f.settings.relocateSession(f.ref, f.target, { ...selected, transcriptPath: join(f.target, `${sessionId}.jsonl`) }), /EISDIR|illegal operation|directory/i);
-  assert.deepEqual(f.settings.getPublic().activeSession, f.ref);
+  assert.deepEqual(f.settings.getPublic().activeSession, { ...f.ref, projectId: f.old, mode: 'code' });
   assert.deepEqual(f.settings.getSessionTranscriptSelection(f.ref), { ...f.ref, ...selected });
   assert.equal(f.settings.getSessionTranscriptSelection(f.moved), undefined);
   assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);

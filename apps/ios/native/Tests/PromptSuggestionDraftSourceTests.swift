@@ -2,6 +2,27 @@ import XCTest
 @testable import LingxiCode
 
 final class PromptSuggestionDraftSourceTests: XCTestCase {
+    func testVoiceTranscriptAppendsToRawDraftWhileItsComposerIsDetached() {
+        let original: [UInt16] = [0x61, 0xD800, 0x62]
+        let result = PromptSuggestionDraftSource.appendingTranscript(
+            "spoken 😃", to: String(decoding: original, as: UTF16.self), sourceCodeUnits: original)
+        XCTAssertEqual(result.text, "a\u{FFFD}b spoken 😃")
+        XCTAssertEqual(result.sourceCodeUnits, original + [0x20] + Array("spoken 😃".utf16))
+    }
+
+    func testVoiceTranscriptDoesNotReuseStaleSourceUnits() {
+        let stale = Array("é".utf16)
+        let result = PromptSuggestionDraftSource.appendingTranscript(
+            "spoken", to: "e\u{301}", sourceCodeUnits: stale)
+        XCTAssertEqual(Array(result.text.utf16), Array("e\u{301} spoken".utf16))
+        XCTAssertNil(result.sourceCodeUnits)
+
+        let blank = PromptSuggestionDraftSource.appendingTranscript(
+            "spoken", to: " \n", sourceCodeUnits: Array(" \n".utf16))
+        XCTAssertEqual(blank.text, "spoken")
+        XCTAssertNil(blank.sourceCodeUnits)
+    }
+
     func testAppendingAfterDisplayedIsolatedSurrogatePreservesItsSourceUnit() throws {
         let source = [UInt16(0xD800), 0x61]
         let displayed = PromptSuggestionDraftSource.displayCodeUnits(for: source)

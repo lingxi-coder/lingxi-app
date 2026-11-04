@@ -15,7 +15,7 @@ use client::protocol::commands::ImageRefDto;
 use client::protocol::computer_access::ComputerAccessRequestDto;
 use client::protocol::controls::{ConversationControlsDto, ReasoningSelectionDto};
 use client::protocol::events::ClientEvent;
-use client::protocol::listings::ModelDetailsDto;
+use client::protocol::listings::{ModelDetailsDto, SessionModeDto};
 use client::protocol::message::MessageDto;
 use client::protocol::permission::PermissionRequest;
 use remote_control_client::clock::{system_clock, Clock};
@@ -47,8 +47,9 @@ use remote_control_client::rtdb::{
     TokenProvider,
 };
 use remote_control_client::session::{
-    BotThreadsState, BotsState, OutgoingPrompt, OutgoingStatus, RemoteClient, RemoteClientListener,
-    SessionController, SessionListener, SessionState, SessionStatus,
+    is_supported_image_media_type, BotThreadsState, BotsState, OutgoingPrompt, OutgoingStatus,
+    RemoteClient, RemoteClientListener, SessionController, SessionListener, SessionState,
+    SessionStatus, MAX_IMAGE_ATTACHMENTS,
 };
 use remote_control_client::signaling::{
     hosts_path, parse_hosts_listing, DevicePlatform, HostPresence, HostRecord, TransportKind,
@@ -120,9 +121,11 @@ mod provider_account_rpc_tests {
             "reorder",
             "set_enabled",
             "set_credential",
+            "clear_credential",
             "remove",
             "logout",
             "test",
+            "set_policy",
         ] {
             assert!(validate_remote_provider_account_request(
                 &serde_json::json!({"action":action,"expectedRevision":0}).to_string()
@@ -971,6 +974,8 @@ pub struct RemoteOutgoingPromptFfi {
 pub struct RemoteSessionUpdateFfi {
     /// The session.
     pub session_id: String,
+    /// The desktop's authoritative conversation mode, when supplied.
+    pub session_mode: Option<SessionModeDto>,
     /// Where it stands.
     pub phase: RemoteSessionPhaseFfi,
     /// Why the attach failed.
@@ -1357,6 +1362,7 @@ impl SentMarker {
 fn session_update(marker: &mut SentMarker, state: &SessionState) -> RemoteSessionUpdateFfi {
     let mut update = RemoteSessionUpdateFfi {
         session_id: state.session_id.clone(),
+        session_mode: state.session_mode,
         phase: match state.status {
             SessionStatus::Loading => RemoteSessionPhaseFfi::Loading,
             SessionStatus::Live => RemoteSessionPhaseFfi::Live,
@@ -1433,9 +1439,19 @@ fn image_from_data_url(url: &str) -> Result<RemoteImageFfi, RemoteFfiError> {
 }
 
 fn prompt_images(images: Vec<RemotePromptImageFfi>) -> Result<Vec<ImageRefDto>, RemoteFfiError> {
+    if images.len() > MAX_IMAGE_ATTACHMENTS {
+        return Err(RemoteFfiError::InvalidArgument {
+            message: "too many prompt images".into(),
+        });
+    }
     images
         .into_iter()
         .map(|image| {
+            if !is_supported_image_media_type(&image.media_type) {
+                return Err(RemoteFfiError::InvalidArgument {
+                    message: "unsupported prompt image type".into(),
+                });
+            }
             if image.bytes.len() > MAX_PROMPT_IMAGE_BYTES {
                 return Err(RemoteFfiError::InvalidArgument {
                     message: "an image is larger than 2 MiB".into(),
@@ -2418,7 +2434,7 @@ impl RemoteControlCore {
     }
 
     /// Send a prompt. It shows up in `outgoing` until its own record comes back;
-    /// a failure shows there too (see `retry_prompt`). While a turn runs only text is sent.
+    /// a failure shows there too (see `retry_prompt`). While a turn runs only text is accepted.
     pub async fn send_prompt(
         &self,
         session_id: String,
@@ -2428,8 +2444,8 @@ impl RemoteControlCore {
         let images = prompt_images(images)?;
         self.controller(&session_id)?
             .send_prompt(&text, images)
-            .await;
-        Ok(())
+            .await
+            .map_err(rpc_error)
     }
 
     /// Hash an original file without loading it into memory.
@@ -2439,6 +2455,9 @@ impl RemoteControlCore {
         path: String,
         name: String,
     ) -> Result<RemoteFileFfi, RemoteFfiError> {
+        self.controller(&session_id)?
+            .require_conversation_access()
+            .map_err(rpc_error)?;
         let task = self.begin_file_task(&path)?;
         let offer = task
             .run(
@@ -2464,6 +2483,9 @@ impl RemoteControlCore {
         file: RemoteFileFfi,
         path: String,
     ) -> Result<RemoteFileFfi, RemoteFfiError> {
+        self.controller(&file.session_id)?
+            .require_conversation_access()
+            .map_err(rpc_error)?;
         let connection = self.file_connection()?;
         let task = self.begin_file_task(&file.transfer_id)?;
         task.run(
@@ -2485,6 +2507,9 @@ impl RemoteControlCore {
         &self,
         session_id: String,
     ) -> Result<Vec<RemoteFileFfi>, RemoteFfiError> {
+        self.controller(&session_id)?
+            .require_conversation_access()
+            .map_err(rpc_error)?;
         let value = self
             .file_connection()?
             .request(
@@ -2511,6 +2536,9 @@ impl RemoteControlCore {
         file: RemoteFileFfi,
         path: String,
     ) -> Result<RemoteFileFfi, RemoteFfiError> {
+        self.controller(&file.session_id)?
+            .require_conversation_access()
+            .map_err(rpc_error)?;
         let connection = self.file_connection()?;
         let task = self.begin_file_task(&file.transfer_id)?;
         let file_ref = file.file_ref.clone();
@@ -2562,8 +2590,8 @@ impl RemoteControlCore {
     ) -> Result<(), RemoteFfiError> {
         self.controller(&session_id)?
             .send_prompt_with_files(&text, prompt_images(images)?, file_refs)
-            .await;
-        Ok(())
+            .await
+            .map_err(rpc_error)
     }
 
     /// Send a failed prompt again with the same request id.
@@ -2572,8 +2600,10 @@ impl RemoteControlCore {
         session_id: String,
         prompt_id: String,
     ) -> Result<(), RemoteFfiError> {
-        self.controller(&session_id)?.retry_prompt(&prompt_id).await;
-        Ok(())
+        self.controller(&session_id)?
+            .retry_prompt(&prompt_id)
+            .await
+            .map_err(rpc_error)
     }
 
     /// Drop a prompt from the outgoing list.

@@ -16,11 +16,13 @@ struct Drawer: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Bindable var projectStore: ProjectStore
     let activeScope: ConversationScope
+    let activeMode: SessionMode
     @Binding var activeSession: String
 
     let source: any ConversationSource
     let cronState: CronRepositoryState
     let sessionPinnedAt: [String: Date]
+    let statusForSession: ((String) -> RecentStatus)?
     let newCronResults: Int
     let account: DrawerAccountSummary?
     let openSettings: () -> Void
@@ -31,7 +33,7 @@ struct Drawer: View {
     let openProjects: () -> Void
     let openProject: (String) -> Void
     let closeSidebar: () -> Void
-    let onOpenSession: (ConversationScope, SessionMode, String) -> Void
+    let onOpenSession: (ConversationScope, SessionMode, String, String?) -> Void
     let onToggleSessionPinned: (String) -> Void
     let onContinueInMode: (ConversationScope, String, SessionMode, SessionMode) -> Void
     /// The independent app library remains available without a chat engine.
@@ -49,11 +51,13 @@ struct Drawer: View {
     init(
         projectStore: ProjectStore,
         activeScope: ConversationScope = .global,
+        activeMode: SessionMode = .code,
         activeSession: Binding<String>,
         source: any ConversationSource,
         cronState: CronRepositoryState = .init(),
         filter: Binding<RecentsFilter>,
         sessionPinnedAt: [String: Date] = [:],
+        statusForSession: ((String) -> RecentStatus)? = nil,
         newCronResults: Int = 0,
         account: DrawerAccountSummary? = nil,
         openSettings: @escaping () -> Void,
@@ -64,7 +68,7 @@ struct Drawer: View {
         openProjects: @escaping () -> Void = {},
         openProject: @escaping (String) -> Void = { _ in },
         closeSidebar: @escaping () -> Void,
-        onOpenSession: @escaping (ConversationScope, SessionMode, String) -> Void,
+        onOpenSession: @escaping (ConversationScope, SessionMode, String, String?) -> Void,
         onToggleSessionPinned: @escaping (String) -> Void = { _ in },
         onContinueInMode: @escaping (ConversationScope, String, SessionMode, SessionMode) -> Void = { _, _, _, _ in },
         appLibrary: UnifiedLocalApps? = nil,
@@ -75,11 +79,13 @@ struct Drawer: View {
     ) {
         self.projectStore = projectStore
         self.activeScope = activeScope
+        self.activeMode = activeMode
         _activeSession = activeSession
         self.source = source
         self.cronState = cronState
         _filter = filter
         self.sessionPinnedAt = sessionPinnedAt
+        self.statusForSession = statusForSession
         self.newCronResults = newCronResults
         self.account = account
         self.openSettings = openSettings
@@ -117,11 +123,11 @@ struct Drawer: View {
             subtitle: nil,
             updatedAt: nil,
             sessions: WorkspaceGroupBuilder.mergedSessionRows(
-                live: activeScope == .global ? convo.engineSessions : [],
-                cached: projectStore.globalSessions
+                live: activeScope == .global ? convo.engineSessions.filter { projectStore.allowsSession($0.id, in: .global) } : [],
+                cached: projectStore.globalSessions.filter { projectStore.allowsSession($0.sessionId, in: .global) }
             )
         )
-        let projectSeeds = projectStore.projects.map { project in
+        let projectSeeds = projectStore.projects.filter { $0.record.visibleModes.contains(activeMode) }.map { project in
             let scope = ConversationScope.project(project.id)
             return WorkspaceGroupSeed(
                 scope: scope,
@@ -130,8 +136,8 @@ struct Drawer: View {
                 subtitle: project.record.syncState.label,
                 updatedAt: project.record.updatedAt,
                 sessions: WorkspaceGroupBuilder.mergedSessionRows(
-                    live: activeScope == scope ? convo.engineSessions : [],
-                    cached: project.sessions
+                    live: activeScope == scope ? convo.engineSessions.filter { projectStore.allowsSession($0.id, in: scope) } : [],
+                    cached: project.sessions.filter { projectStore.allowsSession($0.sessionId, in: scope) }
                 )
             )
         }
@@ -148,6 +154,7 @@ struct Drawer: View {
 
     /// Only the bound session can be running or waiting for the user.
     private func status(of sessionID: String) -> RecentStatus {
+        if let statusForSession { return statusForSession(sessionID) }
         guard !sessionID.isEmpty, sessionID == activeSession else { return .idle }
         if awaitingConfirmation { return .awaitingConfirmation }
         return convo.streaming ? .running : .idle
@@ -157,7 +164,7 @@ struct Drawer: View {
         RecentSessionsBuilder.groups(
             seeds: seeds,
             // The chips are hidden while searching, so they must not narrow it.
-            filter: searching ? .all : filter,
+            filter: activeMode == .chat ? .chat : .code,
             query: query,
             pinnedAt: sessionPinnedAt,
             statusFor: status(of:)
@@ -167,7 +174,7 @@ struct Drawer: View {
     private var matchingProjects: [ProjectSnapshot] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return [] }
-        return RecentSessionsBuilder.sortedProjects(projectStore.projects, pinnedAt: [:])
+        return RecentSessionsBuilder.sortedProjects(projectStore.projects.filter { $0.record.visibleModes.contains(activeMode) }, pinnedAt: [:])
             .filter { $0.record.name.localizedStandardContains(needle) }
     }
 
@@ -196,7 +203,6 @@ struct Drawer: View {
                         searchResults
                     } else {
                         entries
-                        filterChips
                         recents
                     }
                 }
@@ -495,7 +501,7 @@ struct Drawer: View {
         let active = row.scope == activeScope && row.id == activeSession
         let targetMode: SessionMode = row.mode == .chat ? .code : .chat
         return Button {
-            onOpenSession(row.scope, row.mode, row.id)
+            onOpenSession(row.scope, row.mode, row.id, row.transcriptPath)
         } label: {
             HStack(spacing: 10) {
                 row.mode.glyph(t, size: 15)
@@ -643,6 +649,13 @@ extension RecentBucket {
 }
 
 extension SessionMode {
+    var modeDescription: String {
+        switch self {
+        case .chat: String(localized: "session_mode_chat_description")
+        case .code: String(localized: "session_mode_code_description")
+        }
+    }
+
     var title: String {
         switch self {
         case .chat: String(localized: "session_mode_chat")

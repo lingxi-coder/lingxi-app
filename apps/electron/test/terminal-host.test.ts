@@ -74,17 +74,14 @@ test('the host tells the terminal manager when a chat or project goes away', asy
     migrateScope: (from: TerminalScope, to: TerminalScope) => { calls.push(`migrate:${from.sessionId}->${to.sessionId}`); },
   };
   const replacement = { projectPath: project, sessionId: '22222222-3333-4444-8555-666666666666' };
+  let newCount = 0;
   const bridge = {
     registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, hasActiveWork: () => false,
     get: () => undefined,
     closeSession: async () => { calls.push('closeSession'); },
     closeProject: async () => { calls.push('closeProject:bridge'); },
-    newSession: async () => replacement,
-    withBackgroundSession: async (_r: unknown, _e: unknown, _m: unknown, run: (runtime: unknown) => Promise<unknown>) => run({
-      projectPath: project, connectionState: { status: 'connected' },
-      beginArchive: () => () => undefined,
-      manageCron: async () => [],
-    }),
+    newSession: async () => ++newCount === 1 ? replacement : { projectPath: project, sessionId: '33333333-4444-4555-8666-777777777777' },
+    withBackgroundSession: () => { throw new Error('archive must not start a cold session'); },
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer());
   host.attachTerminals(manager as any);
@@ -106,6 +103,8 @@ test('the host tells the terminal manager when a chat or project goes away', asy
     assert.deepEqual(calls, [`migrate:__draft__->${replacement.sessionId}`]);
     calls.length = 0;
 
+    settings.conversationSpaces.register({ ...ref, mode: 'code', projectId: project });
+    settings.conversationSpaces.setMode('code');
     settings.setActiveSession(ref);
     await (host as any).clearActiveSession(sessionId);
     assert.ok(calls.includes(`closeScope:${sessionId}`), 'clearing a chat closes its shells');
@@ -114,7 +113,13 @@ test('the host tells the terminal manager when a chat or project goes away', asy
 
     calls.length = 0;
     settings.setActiveSession(ref);
-    await (host as any).archiveSessionInternal(ref);
+    (host as any).scheduled = { manage: async (scope: string, request: { action: string }) => {
+      assert.equal(scope, project); assert.equal(request.action, 'list'); return [];
+    }, dispose() {} };
+    const captured = { requested: ref, source: { ref: { ...ref, mode: 'code' }, row, transcriptPath: path },
+      owner: { ...ref, mode: 'code', projectId: project }, selection: { scope: 'current', transcriptPath: path },
+      apply: async (action: string) => { assert.equal(action, 'verify'); } };
+    await (host as any).archiveSessionInternal(ref, captured);
     assert.ok(calls.includes(`closeScope:${sessionId}`), 'archiving a chat closes its shells');
 
     calls.length = 0;
@@ -130,11 +135,12 @@ test('a shell opened in the draft scope follows the chat the New-chat action cre
   const project = realpathSync(directory);
   const settings = new SettingsStore(join(directory, 'settings'));
   settings.addProject(project);
+  settings.conversationSpaces.addProject(project, 'chat');
   const created = { projectPath: project, sessionId: '33333333-4444-4555-8666-777777777777' };
   const migrations: string[] = [];
   const handlers = new Map<string, (...args: any[]) => any>();
   const ipc = { handle: (name: string, fn: (...args: any[]) => any) => handlers.set(name, fn), removeHandler: (name: string) => handlers.delete(name) };
-  const bridge = { registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, newSession: async () => created, get: () => undefined };
+  const bridge = { registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, newSession: async () => created, get: () => undefined, activateSession() {} };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
   host.attachTerminals({
     setOutputPaused() {}, onEvent: () => () => {},

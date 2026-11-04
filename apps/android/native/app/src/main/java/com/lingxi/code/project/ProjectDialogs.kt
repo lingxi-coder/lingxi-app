@@ -118,6 +118,7 @@ fun ProjectConflictDialog(
 fun ProjectErrorDialog(
     message: String?,
     onDismiss: () -> Unit,
+    onRetry: (() -> Unit)? = null,
 ) {
     if (message == null) return
     AlertDialog(
@@ -125,7 +126,12 @@ fun ProjectErrorDialog(
         title = { Text(stringResource(R.string.project_error_dialog_title)) },
         text = { Text(message) },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_got_it)) }
+            TextButton(onClick = onRetry ?: onDismiss) {
+                Text(stringResource(if (onRetry != null) R.string.common_retry else R.string.common_got_it))
+            }
         },
+        dismissButton = if (onRetry == null) null else ({
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_got_it)) }
+        }),
     )
 }

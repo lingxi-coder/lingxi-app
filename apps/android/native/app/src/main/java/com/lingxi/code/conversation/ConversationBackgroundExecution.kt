@@ -26,6 +26,7 @@ import com.lingxi.code.bindings.client.TaskStatusDto
 import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.SessionMode
+import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.sessionModeFromWireValue
 import com.lingxi.code.notify.NotificationKind
 import com.lingxi.code.notify.NotificationPolicy
@@ -54,6 +55,124 @@ data class ConversationBackgroundSnapshot(
     val executorActive: Boolean = false,
 )
 
+/** The foreground service belongs to all running owners, not the visible UI. */
+internal object ConversationServiceOwners {
+    private val owners = linkedMapOf<String, ConversationBackgroundSnapshot?>()
+    private var context: Context? = null
+
+    @Synchronized fun initialize(context: Context) {
+        if (this.context != null) return
+        val applicationContext = context.applicationContext
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching {
+                val latest = applicationContext.getSystemService(ActivityManager::class.java)
+                    .getHistoricalProcessExitReasons(applicationContext.packageName, 0, 1).firstOrNull()
+                if (latest != null) recordHandledServiceExit(
+                    applicationContext.getSharedPreferences("conversation_service_owners", Context.MODE_PRIVATE),
+                    latest.timestamp, latest.reason == android.app.ApplicationExitInfo.REASON_USER_REQUESTED,
+                )
+            }
+        }
+        persisted(applicationContext).forEach { snapshot ->
+            snapshot.recoverySpec?.ownerKey?.let { owners.putIfAbsent(it, snapshot) }
+        }
+        this.context = applicationContext
+    }
+    @Synchronized fun retain(owner: String, snapshot: ConversationBackgroundSnapshot?) {
+        owners[owner] = snapshot?.let { reconcileConversationSnapshot(it, owners.values) }
+        persist()
+    }
+    @Synchronized fun update(owner: String, snapshot: ConversationBackgroundSnapshot?) {
+        if (owners.containsKey(owner)) { owners[owner] = snapshot?.let { reconcileConversationSnapshot(it, owners.values) }; persist() }
+    }
+    @Synchronized fun resolved(snapshot: ConversationBackgroundSnapshot): ConversationBackgroundSnapshot =
+        reconcileConversationAction(snapshot, owners)
+    /** The exact source must reach durable storage before native accepts a turn. */
+    fun persistForSubmission(owner: String, snapshot: ConversationBackgroundSnapshot) {
+        // An empty commit waits for preceding apply writes without replacing a
+        // newer in-memory snapshot. Do not hold the owner lock during fsync:
+        // another owner's UI, permission, and audio updates must stay live.
+        flushConversationRecovery(stage = {
+            val preferences = synchronized(this) {
+                val currentContext = checkNotNull(context) { "Conversation owner storage is unavailable" }
+                val updated = submissionOwnerSnapshots(owner, snapshot, owners)
+                updated.forEach { (key, value) -> owners[key] = value }
+                persist()
+                currentContext.getSharedPreferences("conversation_service_owners", Context.MODE_PRIVATE)
+            }
+            val flush: () -> Boolean = { preferences.edit().commit() }
+            flush
+        }, revalidate = {
+            synchronized(this) { submissionOwnerSnapshots(owner, snapshot, owners) }
+        })
+    }
+    @Synchronized fun release(owner: String): ConversationBackgroundSnapshot? {
+        owners.remove(owner)
+        persist()
+        return owners.values.lastOrNull { it != null }
+    }
+    @Synchronized fun isEmpty(): Boolean = owners.isEmpty()
+
+    private fun persist() {
+        val context = context ?: return
+        val array = org.json.JSONArray()
+        owners.values.filterNotNull().forEach { snapshot ->
+            val spec = snapshot.recoverySpec ?: return@forEach
+            if (spec.transcriptPath.isNullOrBlank()) return@forEach
+            array.put(org.json.JSONObject().put("session", snapshot.sessionId)
+                .put("turn", snapshot.turnId).put("status", snapshot.statusText)
+                .put("project", spec.projectId).put("host", spec.hostPath).put("guest", spec.guestPath)
+                .put("directories", org.json.JSONArray(spec.additionalDirectories))
+                .put("mode", spec.sessionMode.wireValue).put("linux", spec.linuxRuntimeMode.name)
+                .put("workspace", spec.workspaceKey).put("generation", spec.runtimeGeneration)
+                .put("transcript", spec.transcriptPath)
+                .put("tasks", org.json.JSONArray(snapshot.activeTaskIds.toList())))
+        }
+        context.getSharedPreferences("conversation_service_owners", Context.MODE_PRIVATE)
+            .edit().putString("snapshots", array.toString()).apply()
+    }
+
+    @Synchronized fun persisted(context: Context): List<ConversationBackgroundSnapshot> {
+        val raw = context.getSharedPreferences("conversation_service_owners", Context.MODE_PRIVATE)
+            .getString("snapshots", "[]") ?: "[]"
+        val array = org.json.JSONArray(raw)
+        return (0 until array.length()).map { index ->
+            val json = array.getJSONObject(index)
+            fun optional(name: String) = if (json.isNull(name)) null else json.getString(name)
+            fun strings(name: String): List<String> = json.getJSONArray(name).let { values ->
+                (0 until values.length()).map { values.getString(it) }
+            }
+            val spec = ConversationRecoverySpec(
+                projectId = optional("project"), hostPath = optional("host"), guestPath = optional("guest"),
+                additionalDirectories = strings("directories"), sessionMode = sessionModeFromWireValue(json.getString("mode")),
+                linuxRuntimeMode = LinuxRuntimeMode.valueOf(json.getString("linux")),
+                workspaceKey = json.getString("workspace").also { require(it.isNotBlank()) },
+                runtimeGeneration = json.getString("generation").also { require(isValidRuntimeGeneration(it)) },
+                transcriptPath = optional("transcript")?.takeIf { it.startsWith('/') }
+                    ?: error("Conversation recovery source is missing or invalid"),
+            )
+            ConversationBackgroundSnapshot(json.getString("session"),
+                if (json.isNull("turn")) null else json.getLong("turn"), optional("status"), spec, strings("tasks").toSet())
+        }
+    }
+}
+
+/** Do not resurrect any service owner after the user explicitly stops the app. */
+internal fun recordHandledServiceExit(preferences: android.content.SharedPreferences, timestamp: Long, userRequested: Boolean) {
+    if (timestamp <= preferences.getLong("handled_exit_timestamp", 0L)) return
+    val editor = preferences.edit().putLong("handled_exit_timestamp", timestamp)
+    if (userRequested) editor.remove("snapshots")
+    check(editor.commit())
+}
+
+private fun refreshOrStopConversationService(context: Context, next: ConversationBackgroundSnapshot?) {
+    if (ConversationServiceOwners.isEmpty()) {
+        context.stopService(Intent(context, ConversationTurnService::class.java))
+    } else if (next != null) {
+        runCatching { context.startService(ConversationTurnService.intent(context, ConversationTurnService.ACTION_UPDATE, next)) }
+    }
+}
+
 enum class ConversationBackgroundAlert {
     Completed,
     Failed,
@@ -67,6 +186,7 @@ enum class ConversationBackgroundAlert {
 interface ConversationBackgroundExecution {
     fun setTurnActive(active: Boolean)
     fun updateTurn(snapshot: ConversationBackgroundSnapshot?) {}
+    suspend fun prepareSubmission(snapshot: ConversationBackgroundSnapshot) {}
     fun finishTurn(
         snapshot: ConversationBackgroundSnapshot,
         outcome: ConversationTurnOutcome,
@@ -123,6 +243,14 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
     private val mainHandler = Handler(Looper.getMainLooper())
     private var promotionToken: Long? = null
     private var latestSnapshot: ConversationBackgroundSnapshot? = null
+    private val leaseOwner = java.util.UUID.randomUUID().toString()
+    // The shell must remain constructible to show a recoverable storage error.
+    // Root validates this store before admitting an owner, and activation below
+    // rechecks it for callers that do not go through Root.
+    init {
+        runCatching { ConversationServiceOwners.initialize(appContext) }
+            .onFailure { Log.w(TAG, "Conversation recovery store is unavailable", it) }
+    }
     private val deliveredAlertTags = ConcurrentHashMap.newKeySet<String>()
 
     private val notifPrefsStore = NotificationPrefsStore(appContext)
@@ -150,7 +278,13 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
         // Upstream's `!isLoading` clause. A new turn starting during the
         // countdown means the session is not idle after all, so the armed
         // alert is wrong and gets dropped rather than re-checked later.
-        if (active) cancelIdleAlert()
+        if (active) {
+            cancelIdleAlert()
+            runCatching {
+                ConversationServiceOwners.initialize(appContext)
+                ConversationServiceOwners.retain(leaseOwner, latestSnapshot)
+            }.onFailure { Log.w(TAG, "Conversation recovery store is unavailable", it) }
+        }
         lease.setTurnActive(active)
     }
 
@@ -164,6 +298,8 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
 
     override fun updateTurn(snapshot: ConversationBackgroundSnapshot?) {
         latestSnapshot = snapshot
+        if (runCatching { ConversationServiceOwners.update(leaseOwner, snapshot) }
+                .onFailure { Log.w(TAG, "Unable to update conversation recovery state", it) }.isFailure) return
         if (snapshot == null || (!lease.isActive && !lease.isStartPending)) return
         // `isStartPending` means the START was submitted but promotion has NOT
         // been acknowledged yet, so the service may not be a foreground service
@@ -181,6 +317,13 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
                 ),
             )
         }.onFailure { Log.w(TAG, "Unable to refresh conversation foreground notification", it) }
+    }
+
+    override suspend fun prepareSubmission(snapshot: ConversationBackgroundSnapshot) {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            ConversationServiceOwners.persistForSubmission(leaseOwner, snapshot)
+        }
+        updateTurn(snapshot)
     }
 
     /**
@@ -287,6 +430,7 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
             ?.engineSourceForBackgroundRetention()
             ?: return false
         ConversationHeadlessRecovery.monitorExisting(appContext, snapshot, engine)
+        lease.setTurnActive(false)
         return true
     }
 
@@ -361,12 +505,9 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
                 PendingIntent.getActivity(
                     appContext,
                     tag.hashCode(),
-                    ConversationNotificationRoute.openIntent(
-                        appContext,
-                        snapshot.sessionId,
-                        snapshot.turnId,
-                        snapshot.recoverySpec,
-                    ),
+                    snapshot.recoverySpec?.let {
+                        ConversationNotificationRoute.openIntent(appContext, snapshot.sessionId, snapshot.turnId, it)
+                    } ?: Intent(appContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 ),
             )
@@ -416,7 +557,7 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
         promotionToken?.let(ConversationTurnServicePromotion::unregister)
         promotionToken = null
         latestSnapshot = null
-        appContext.stopService(Intent(appContext, ConversationTurnService::class.java))
+        refreshOrStopConversationService(appContext, ConversationServiceOwners.release(leaseOwner))
     }
 
     private companion object {
@@ -542,11 +683,38 @@ internal fun shouldStopConversationService(
  * from its durable client cursor. A UI-created source is registered here too,
  * so service-only restarts reuse it instead of creating a second engine.
  */
+internal fun matchesRetainedConversationOwner(
+    candidate: ConversationRecoverySpec,
+    candidateSessionId: String?,
+    requested: ConversationRecoverySpec,
+    requestedSessionId: String,
+): Boolean = candidate.projectId == requested.projectId &&
+    candidate.workspaceKey == requested.workspaceKey &&
+    candidate.sessionMode == requested.sessionMode &&
+    candidate.linuxRuntimeMode == requested.linuxRuntimeMode &&
+    (candidate.transcriptPath == null || requested.transcriptPath == null || candidate.transcriptPath == requested.transcriptPath) &&
+    candidateSessionId?.let {
+        com.lingxi.code.model.canonicalSessionId(it) == com.lingxi.code.model.canonicalSessionId(requestedSessionId)
+    } == true
+
 internal object ConversationHeadlessRecovery {
+    private fun retainFailedRecovery(context: Context, snapshot: ConversationBackgroundSnapshot) {
+        val spec = snapshot.recoverySpec ?: return
+        val paused = snapshot.copy(statusText = context.getString(R.string.chat_background_paused_text))
+        // A missing transcript, temporarily unavailable mount, or engine build
+        // failure is not evidence that the durable turn has ended. Keep its
+        // original owner and selected path so a later retry can recover it.
+        ConversationServiceOwners.retain(spec.ownerKey, paused)
+        runCatching { AndroidConversationBackgroundExecution(context).notifyPausedRecoverable(paused) }
+            .onFailure { Log.w("ConversationRecovery", "Unable to notify that recovery needs attention", it) }
+        refreshOrStopConversationService(context, paused)
+    }
+
     internal sealed interface UiSourceClaim {
         data class Existing(val source: EngineConversationSource) : UiSourceClaim
         data class Pending(val source: ConversationSource) : UiSourceClaim
         data object Build : UiSourceClaim
+        data object WrongGeneration : UiSourceClaim
     }
 
     internal class RecoveryOwner(
@@ -554,6 +722,7 @@ internal object ConversationHeadlessRecovery {
     ) {
         val pending = CompletableDeferred<EngineConversationSource?>()
         @Volatile var source: EngineConversationSource? = null
+        @Volatile var recoverySessionId: String? = null
         @Volatile var monitorJob: Job? = null
         @Volatile var pendingCancellation: ConversationBackgroundSnapshot? = null
         val cancellationInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -561,15 +730,17 @@ internal object ConversationHeadlessRecovery {
         val turnAttached = CompletableDeferred<Unit>()
         @Volatile var awaitingRecoveryAttach = false
         @Volatile var headlessExecutorActive = false
+        @Volatile var serviceOwnsRecovery = false
         @Volatile var uiAttachResumeRequired = true
         private val claimedByUi = java.util.concurrent.atomic.AtomicBoolean(false)
 
-        fun claimForUi() {
+        @Synchronized fun claimForUi() {
             val wasAlreadyUiOwned = claimedByUi.getAndSet(true)
             val hadHeadlessExecutor = headlessExecutorActive
             headlessExecutorActive = false
-            monitorJob?.cancel()
-            monitorJob = null
+            // Keep monitoring the admitted executor until its terminal event.
+            // The UI joins that owner; it does not take the service lease away
+            // before its own projection and lease are attached.
             if (!wasAlreadyUiOwned) {
                 uiAttachResumeRequired = shouldResumeUiAttach(
                     hadHeadlessExecutor = hadHeadlessExecutor,
@@ -580,15 +751,19 @@ internal object ConversationHeadlessRecovery {
             source?.claimDurableTurnForUi()
         }
 
-        fun releaseToBackground() {
+        @Synchronized fun releaseToBackground() {
             claimedByUi.set(false)
             source?.releaseDurableTurnToHeadless()
         }
 
         fun isClaimedByUi(): Boolean = claimedByUi.get()
 
-        fun complete(source: EngineConversationSource?) {
+        @Synchronized fun complete(source: EngineConversationSource?) {
             this.source = source
+            if (source != null && claimedByUi.get()) {
+                source.setUiAttachResumeRequired(uiAttachResumeRequired)
+                source.claimDurableTurnForUi()
+            }
             if (!pending.isCompleted) pending.complete(source)
         }
     }
@@ -608,9 +783,27 @@ internal object ConversationHeadlessRecovery {
     fun acquireForUi(
         recoverySpec: ConversationRecoverySpec,
         strings: ConversationStrings,
+        sessionId: String? = null,
+        strictGeneration: Boolean = false,
     ): UiSourceClaim {
-        val scopeKey = recoverySpec.scopeKey
-        val owner = owners[scopeKey]
+        val scopeKey = recoverySpec.ownerKey
+        // The immutable owner key contains its launch mode. A session may
+        // subsequently switch modes, so claim that exact retained session by
+        // identity and matching workspace before building another engine.
+        val retained = sessionId?.let { expected ->
+            owners.values.firstOrNull { candidate ->
+                val candidateId = candidate.recoverySessionId ?: candidate.source?.activeSessionState?.value?.sessionId
+                candidateId?.let(::canonicalSessionId) == canonicalSessionId(expected)
+            }
+        }
+        if (retained != null && !matchesRetainedConversationOwner(
+                retained.source?.recoverySpec ?: retained.recoverySpec,
+                retained.recoverySessionId ?: retained.source?.activeSessionState?.value?.sessionId,
+                recoverySpec, checkNotNull(sessionId),
+            )) return UiSourceClaim.WrongGeneration
+        val owner = retained ?: owners[scopeKey]
+        if (owner != null && strictGeneration &&
+            owner.recoverySpec.runtimeGeneration != recoverySpec.runtimeGeneration) return UiSourceClaim.WrongGeneration
         owner?.source?.let {
             owner.claimForUi()
             return UiSourceClaim.Existing(it)
@@ -625,8 +818,9 @@ internal object ConversationHeadlessRecovery {
                 ),
             )
         }
-        if (owner != null) owners.remove(scopeKey, owner)
+        if (owner != null) owners.remove(owner.recoverySpec.ownerKey, owner)
         val reservation = RecoveryOwner(recoverySpec)
+        reservation.recoverySessionId = sessionId?.let(::canonicalSessionId)
         reservation.claimForUi()
         owners[scopeKey] = reservation
         return UiSourceClaim.Build
@@ -650,6 +844,21 @@ internal object ConversationHeadlessRecovery {
         owners[scopeKey]?.claimForUi()
     }
 
+    /** Abandoning a pending UI wrapper must not close the service's source. */
+    @Synchronized fun releaseUiClaim(scopeKey: String): Boolean {
+        val owner = owners[scopeKey] ?: return false
+        owner.releaseToBackground()
+        if (owner.monitorJob?.isActive == true) owner.source?.startHeadlessRecovery()
+        return true
+    }
+
+    fun protectsSource(source: ConversationSource): Boolean {
+        val key = source.recoverySpec?.ownerKey ?: return false
+        val owner = owners[key] ?: return false
+        return owner.serviceOwnsRecovery &&
+            (!owner.pending.isCompleted || owner.monitorJob?.isActive == true || owner.headlessExecutorActive)
+    }
+
     /** A failed Attach/Resume leaves no headless executor to suppress UI Resume. */
     fun markDurableAttachFailed(scopeKey: String, source: EngineConversationSource) {
         owners[scopeKey]?.takeIf { it.source == source }?.let { owner ->
@@ -658,13 +867,18 @@ internal object ConversationHeadlessRecovery {
     }
 
     /** Consume the first UI Resume requirement after its command succeeds. */
-    fun markDurableUiExecutorActive(scopeKey: String, source: EngineConversationSource) {
+    fun markDurableExecutorActive(scopeKey: String, source: EngineConversationSource) {
         owners[scopeKey]?.takeIf {
-            it.source == source && it.isClaimedByUi()
+            it.source == source
         }?.let { owner ->
+            owner.headlessExecutorActive = true
             owner.uiAttachResumeRequired = false
+            source.setUiAttachResumeRequired(false)
         }
     }
+
+    fun hasLiveExecutor(scopeKey: String, source: EngineConversationSource): Boolean =
+        owners[scopeKey]?.let { it.source == source && it.headlessExecutorActive } == true
 
     @Synchronized
     fun releaseUiReservation(scopeKey: String) {
@@ -679,14 +893,6 @@ internal object ConversationHeadlessRecovery {
         owner.pendingCancellation = pendingCancellations.remove(scopeKey)
             ?: owner.pendingCancellation
         owner.complete(source)
-        if (owner.isClaimedByUi()) {
-            // A pending UI claim happens before the headless source is
-            // registered. Reapply the dynamic disposition here; the source's
-            // construction flag is false for the headless implementation, but
-            // a cold UI takeover still owns the first Resume.
-            source.setUiAttachResumeRequired(owner.uiAttachResumeRequired)
-            source.claimDurableTurnForUi()
-        }
     }
 
     fun unregister(scopeKey: String, source: EngineConversationSource) {
@@ -696,15 +902,47 @@ internal object ConversationHeadlessRecovery {
         }
     }
 
-    fun recover(context: Context, snapshot: ConversationBackgroundSnapshot) {
+    @Synchronized fun recover(context: Context, suppliedSnapshot: ConversationBackgroundSnapshot) {
+        val snapshot = runCatching { ConversationServiceOwners.resolved(suppliedSnapshot) }.getOrElse {
+            Log.w("ConversationRecovery", "Refusing a conflicting recovery source", it)
+            return
+        }
         val spec = snapshot.recoverySpec ?: return
+        if (spec.transcriptPath.isNullOrBlank()) {
+            runCatching { AndroidConversationBackgroundExecution(context).notifyPausedRecoverable(snapshot) }
+            return
+        }
+        val existingBySession = owners.values.firstOrNull { candidate ->
+            val id = candidate.recoverySessionId ?: candidate.source?.activeSessionState?.value?.sessionId
+            id?.let(::canonicalSessionId) == canonicalSessionId(snapshot.sessionId)
+        }
+        if (existingBySession != null) {
+            if (existingBySession.recoverySpec.ownerKey != spec.ownerKey ||
+                !matchesRetainedConversationOwner(existingBySession.recoverySpec,
+                    existingBySession.recoverySessionId ?: existingBySession.source?.activeSessionState?.value?.sessionId,
+                    spec, snapshot.sessionId)) {
+                // Do not replace or discard the already retained owner's state.
+                Log.w("ConversationRecovery", "Refusing a conflicting recovery owner for ${snapshot.sessionId}")
+                runCatching { AndroidConversationBackgroundExecution(context).notifyPausedRecoverable(snapshot) }
+                return
+            }
+            ConversationServiceOwners.retain(spec.ownerKey, snapshot)
+            existingBySession.serviceOwnsRecovery = true
+            existingBySession.pendingCancellation = pendingCancellations.remove(spec.ownerKey)
+                ?: existingBySession.pendingCancellation
+            existingBySession.source?.let { submitPendingCancellationIfMonitored(existingBySession, it, context) }
+            return
+        }
+        ConversationServiceOwners.retain(spec.ownerKey, snapshot)
         val owner = RecoveryOwner(spec)
-        val pendingCancellation = pendingCancellations.remove(spec.scopeKey)
+        owner.serviceOwnsRecovery = true
+        owner.recoverySessionId = snapshot.sessionId
+        val pendingCancellation = pendingCancellations.remove(spec.ownerKey)
         owner.pendingCancellation = pendingCancellation
-        if (owners.putIfAbsent(spec.scopeKey, owner) != null) {
-            owners[spec.scopeKey]?.let { existing ->
+        if (owners.putIfAbsent(spec.ownerKey, owner) != null) {
+            owners[spec.ownerKey]?.let { existing ->
                 existing.pendingCancellation = pendingCancellation
-                    ?: pendingCancellations.remove(spec.scopeKey)
+                    ?: pendingCancellations.remove(spec.ownerKey)
                     ?: existing.pendingCancellation
                 existing.source?.let { source ->
                     submitPendingCancellationIfMonitored(existing, source, context)
@@ -713,7 +951,9 @@ internal object ConversationHeadlessRecovery {
             return
         }
         scope.launch {
+            var preparation: Long? = null
             try {
+                preparation = SessionAdmissionGate.awaitSourcePreparation(canonicalSessionId(snapshot.sessionId), admittedRecovery = true)
                 val source = EngineConversationSource.create(
                     context = context.applicationContext,
                     projectWorkspace = spec.projectWorkspace(),
@@ -721,25 +961,36 @@ internal object ConversationHeadlessRecovery {
                     sessionMode = spec.sessionMode,
                     linuxRuntimeMode = spec.linuxRuntimeMode,
                     reuseProcessSource = false,
+                    expectedSessionId = snapshot.sessionId,
+                    initialSessionTranscriptPath = spec.transcriptPath,
+                    runtimeGeneration = spec.runtimeGeneration,
+                    autoAttachDurableTurns = false,
+                    registerOnCreate = false,
                 ) as? EngineConversationSource ?: run {
-                    owners.remove(spec.scopeKey, owner)
+                    owners.remove(spec.ownerKey, owner)
                     owner.complete(null)
-                    context.stopService(Intent(context, ConversationTurnService::class.java))
+                    retainFailedRecovery(context, snapshot)
                     return@launch
                 }
+                owner.awaitingRecoveryAttach = true
                 startMonitor(
                     context = context,
                     snapshot = snapshot,
                     source = source,
                     minimumActionStateIndex = 2L,
-                    resumeSession = true,
+                    resumeSession = false,
+                    allowUiOwned = true,
                 )
+                register(spec.ownerKey, source)
+                source.startHeadlessRecovery()
                 submitPendingCancellationIfMonitored(owner, source, context)
             } catch (error: Throwable) {
-                owners.remove(spec.scopeKey, owner)
+                owners.remove(spec.ownerKey, owner)
                 owner.complete(null)
                 Log.w("ConversationRecovery", "Unable to rebuild engine after service redelivery", error)
-                context.stopService(Intent(context, ConversationTurnService::class.java))
+                retainFailedRecovery(context, snapshot)
+            } finally {
+                preparation?.let(SessionAdmissionGate::finishSourcePreparation)
             }
         }
     }
@@ -749,7 +1000,11 @@ internal object ConversationHeadlessRecovery {
         snapshot: ConversationBackgroundSnapshot,
         source: EngineConversationSource,
     ) {
-        owners[source.recoverySpec.scopeKey]?.releaseToBackground()
+        owners[source.recoverySpec.ownerKey]?.let {
+            it.recoverySessionId = snapshot.sessionId
+            it.serviceOwnsRecovery = true
+            it.releaseToBackground()
+        }
         startMonitor(
             context = context,
             snapshot = snapshot,
@@ -767,13 +1022,21 @@ internal object ConversationHeadlessRecovery {
      */
     fun requestCancellation(
         context: Context,
-        snapshot: ConversationBackgroundSnapshot,
+        suppliedSnapshot: ConversationBackgroundSnapshot,
     ): Boolean {
+        val snapshot = runCatching { ConversationServiceOwners.resolved(suppliedSnapshot) }.getOrElse {
+            Log.w("ConversationRecovery", "Refusing a conflicting cancellation source", it)
+            return false
+        }
         val turnId = snapshot.turnId ?: return false
         val spec = snapshot.recoverySpec ?: return false
-        val owner = owners[spec.scopeKey]
+        if (spec.transcriptPath.isNullOrBlank()) {
+            runCatching { AndroidConversationBackgroundExecution(context).notifyPausedRecoverable(snapshot) }
+            return false
+        }
+        val owner = owners[spec.ownerKey]
         if (owner == null) {
-            pendingCancellations[spec.scopeKey] = snapshot
+            pendingCancellations[spec.ownerKey] = snapshot
             recover(context, snapshot)
             return true
         }
@@ -829,6 +1092,8 @@ internal object ConversationHeadlessRecovery {
     ) {
         val snapshot = owner.pendingCancellation ?: return
         val turnId = snapshot.turnId ?: return
+        val generation = snapshot.recoverySpec?.runtimeGeneration ?: return
+        if (!source.ownsDurableTurn(snapshot.sessionId, turnId, generation)) return
         if (!owner.cancellationInFlight.compareAndSet(false, true)) return
         scope.launch {
             runCatching { source.discardDurableTurn(turnId) }
@@ -857,12 +1122,13 @@ internal object ConversationHeadlessRecovery {
         val turnId = snapshot.turnId
         if (turnId == null && snapshot.activeTaskIds.isEmpty()) return
         val spec = snapshot.recoverySpec ?: source.recoverySpec
-        val owner = owners[spec.scopeKey] ?: return
+        val owner = owners[spec.ownerKey] ?: return
         if (owner.isClaimedByUi() && !allowUiOwned) {
-            context.stopService(Intent(context, ConversationTurnService::class.java))
+            refreshOrStopConversationService(context, ConversationServiceOwners.release(spec.ownerKey))
             return
         }
         if (owner.monitorJob?.isActive == true) return
+        ConversationServiceOwners.retain(spec.ownerKey, snapshot)
         if (!owner.isClaimedByUi() && retainedExecutorActive) {
             // This is the UI's still-live executor being handed to the
             // background owner, not a speculative cold-service lease.
@@ -928,7 +1194,7 @@ internal object ConversationHeadlessRecovery {
                                 if (stateIndex >= minimumActionStateIndex) {
                                     alerts.notifyWaitingForUser(current)
                                     settle(
-                                        spec.scopeKey,
+                                        spec.ownerKey,
                                         context,
                                         retainExecutorOwnership = owner.headlessExecutorActive,
                                     )
@@ -936,21 +1202,21 @@ internal object ConversationHeadlessRecovery {
                             TurnRecoveryStateDto.PAUSED_RECOVERABLE ->
                                 if (stateIndex >= minimumActionStateIndex) {
                                     alerts.notifyPausedRecoverable(current)
-                                    settle(spec.scopeKey, context)
+                                    settle(spec.ownerKey, context)
                                 }
                             TurnRecoveryStateDto.COMPLETED ->
                                 if (stateIndex >= minimumActionStateIndex) {
                                     alerts.finishTurn(current, ConversationTurnOutcome.Completed)
-                                    if (activeTaskIds.isEmpty()) settle(spec.scopeKey, context)
+                                    if (activeTaskIds.isEmpty()) settle(spec.ownerKey, context)
                                 }
                             TurnRecoveryStateDto.FAILED ->
                                 if (stateIndex >= minimumActionStateIndex) {
                                     alerts.finishTurn(current, ConversationTurnOutcome.Failed)
-                                    if (activeTaskIds.isEmpty()) settle(spec.scopeKey, context)
+                                    if (activeTaskIds.isEmpty()) settle(spec.ownerKey, context)
                                 }
                             TurnRecoveryStateDto.CANCELLED ->
                                 if (stateIndex >= minimumActionStateIndex && activeTaskIds.isEmpty()) {
-                                    settle(spec.scopeKey, context)
+                                    settle(spec.ownerKey, context)
                                 }
                         }
                         return@collect
@@ -979,7 +1245,7 @@ internal object ConversationHeadlessRecovery {
                         TaskStatusDto.CANCELLED -> activeTaskIds.remove(taskStatus.first)
                     }
                     if (activeTaskIds.isEmpty() && (turnId == null || recoveryStateCount.get() > 0L)) {
-                        settle(spec.scopeKey, context)
+                        settle(spec.ownerKey, context)
                     }
                 }
             }
@@ -988,7 +1254,7 @@ internal object ConversationHeadlessRecovery {
                     .onFailure {
                         Log.w("ConversationRecovery", "Unable to resume session after service redelivery", it)
                         owner.recoveryReady.completeExceptionally(it)
-                        discard(spec.scopeKey, source, context)
+                        discard(spec.ownerKey, source, context)
                         return@launch
                     }
                 runCatching { source.refreshExecutionStatus() }
@@ -997,7 +1263,7 @@ internal object ConversationHeadlessRecovery {
                 // Attach state arrives, do not leave an orphan ongoing notification.
                 delay(10_000L)
                 if (!observedRecoverySignal.get()) {
-                    discard(spec.scopeKey, source, context)
+                    discard(spec.ownerKey, source, context)
                     return@launch
                 }
             } else if (!owner.recoveryReady.isCompleted) {
@@ -1007,7 +1273,7 @@ internal object ConversationHeadlessRecovery {
         }
         job.invokeOnCompletion {
             if (owner.isClaimedByUi()) {
-                context.stopService(Intent(context, ConversationTurnService::class.java))
+                refreshOrStopConversationService(context, ConversationServiceOwners.release(spec.ownerKey))
             }
         }
         owner.monitorJob = job
@@ -1023,13 +1289,13 @@ internal object ConversationHeadlessRecovery {
             owner.monitorJob?.cancel()
             owner.monitorJob = null
         }
-        context.stopService(Intent(context, ConversationTurnService::class.java))
+        refreshOrStopConversationService(context, ConversationServiceOwners.release(scopeKey))
     }
 
     private fun discard(scopeKey: String, source: EngineConversationSource, context: Context) {
         val owner = owners.remove(scopeKey) ?: return run {
             runCatching { source.close() }
-            context.stopService(Intent(context, ConversationTurnService::class.java))
+            refreshOrStopConversationService(context, ConversationServiceOwners.release(scopeKey))
         }
         owner.headlessExecutorActive = false
         owner.monitorJob?.cancel()
@@ -1041,7 +1307,7 @@ internal object ConversationHeadlessRecovery {
         )
         owner.complete(null)
         runCatching { source.close() }
-        context.stopService(Intent(context, ConversationTurnService::class.java))
+        refreshOrStopConversationService(context, ConversationServiceOwners.release(scopeKey))
     }
 }
 
@@ -1097,9 +1363,11 @@ internal fun headlessExecutorActiveAfterRecoveryState(
  */
 class ConversationTurnService : Service() {
     private var latestSnapshot: ConversationBackgroundSnapshot? = null
+    private var invalidOwnerStore = false
 
     override fun onCreate() {
         super.onCreate()
+        invalidOwnerStore = runCatching { ConversationServiceOwners.initialize(applicationContext) }.isFailure
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(
@@ -1114,12 +1382,27 @@ class ConversationTurnService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (invalidOwnerStore) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         val action = intent?.action
+        val savedOwners = if (flags and START_FLAG_REDELIVERY != 0) {
+            runCatching { ConversationServiceOwners.persisted(applicationContext) }.getOrElse {
+                stopSelf(startId)
+                return START_NOT_STICKY
+            }
+        } else emptyList()
         val promotionToken = intent?.getLongExtra(EXTRA_PROMOTION_TOKEN, NO_PROMOTION_TOKEN)
             ?: NO_PROMOTION_TOKEN
+        val cancellationSnapshot = if (action == ACTION_CANCEL) {
+            cancellationTarget(intent?.snapshot())?.let { supplied ->
+                runCatching { ConversationServiceOwners.resolved(supplied) }.getOrNull()
+                    ?.takeIf { !it.recoverySpec?.transcriptPath.isNullOrBlank() }
+            }
+        } else null
         if (action == ACTION_CANCEL) {
-            val snapshot = intent?.snapshot() ?: latestSnapshot
-            if (snapshot != null) latestSnapshot = snapshot
+            if (cancellationSnapshot != null) latestSnapshot = cancellationSnapshot
         } else {
             latestSnapshot = intent?.snapshot()
         }
@@ -1141,32 +1424,34 @@ class ConversationTurnService : Service() {
         val promotionAcknowledged = promotionToken != NO_PROMOTION_TOKEN &&
             ConversationTurnServicePromotion.report(promotionToken, promoted)
         if (action == ACTION_CANCEL) {
-            val snapshot = latestSnapshot
-            if (snapshot?.turnId != null) {
+            val snapshot = cancellationSnapshot
+            if (snapshot != null) {
                 // Do not stop the service here, even if foreground promotion
                 // failed. The private service action must still submit
                 // ClientCommand.Cancel, and ConversationHeadlessRecovery keeps
                 // the request alive until the matching terminal checkpoint.
                 ConversationHeadlessRecovery.requestCancellation(
                     context = applicationContext,
-                    snapshot = snapshot,
+                    suppliedSnapshot = snapshot,
                 )
+                savedOwners.filterNot { it.recoverySpec?.ownerKey == snapshot.recoverySpec?.ownerKey }
+                    .forEach { ConversationHeadlessRecovery.recover(applicationContext, it) }
             } else {
-                // A Stop action without a correlated durable turn cannot safely
-                // cancel engine work. There is no active turn to retain for, so
-                // only this orphaned service instance is eligible to stop.
-                stopSelf(startId)
+                // An incomplete Stop request cannot borrow another owner's
+                // foreground snapshot or stop a service retaining live owners.
+                if (ConversationServiceOwners.isEmpty()) stopSelf(startId)
             }
             // Redelivery preserves the correlated Stop request if Android
             // reclaims the process before the terminal recovery event arrives.
-            return START_REDELIVER_INTENT
+            return if (snapshot != null) START_REDELIVER_INTENT else START_NOT_STICKY
         }
         if (
             promoted &&
             flags and START_FLAG_REDELIVERY != 0 &&
             latestSnapshot != null
         ) {
-            ConversationHeadlessRecovery.recover(applicationContext, latestSnapshot!!)
+            (savedOwners + latestSnapshot!!).distinctBy { it.recoverySpec?.ownerKey }
+                .forEach { ConversationHeadlessRecovery.recover(applicationContext, it) }
         }
         if (shouldStopConversationService(action, promoted, promotionAcknowledged, latestSnapshot)) {
             stopSelf(startId)
@@ -1203,13 +1488,10 @@ class ConversationTurnService : Service() {
             this,
             0,
             latestSnapshot
-                ?.let {
-                    ConversationNotificationRoute.openIntent(
-                        this,
-                        it.sessionId,
-                        it.turnId,
-                        it.recoverySpec,
-                    )
+                ?.let { snapshot ->
+                    snapshot.recoverySpec?.let {
+                        ConversationNotificationRoute.openIntent(this, snapshot.sessionId, snapshot.turnId, it)
+                    }
                 }
                 ?: Intent(this, MainActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
@@ -1223,6 +1505,7 @@ class ConversationTurnService : Service() {
             sessionId = snapshot?.sessionId.orEmpty(),
             turnId = snapshot?.turnId,
             recoverySpec = snapshot?.recoverySpec,
+            activeTaskIds = snapshot?.activeTaskIds.orEmpty(),
         )
     }
 
@@ -1239,7 +1522,9 @@ class ConversationTurnService : Service() {
         internal const val EXTRA_GUEST_PATH = "conversation_guest_path"
         internal const val EXTRA_ADDITIONAL_DIRECTORIES = "conversation_additional_directories"
         internal const val EXTRA_SESSION_MODE = "conversation_session_mode"
+        internal const val EXTRA_RUNTIME_GENERATION = "conversation_runtime_generation"
         internal const val EXTRA_WORKSPACE_KEY = "conversation_workspace_key"
+        internal const val EXTRA_TRANSCRIPT_PATH = "conversation_transcript_path"
         internal const val EXTRA_LINUX_RUNTIME_MODE = "conversation_linux_runtime_mode"
         internal const val EXTRA_ACTIVE_TASK_IDS = "conversation_active_task_ids"
         private const val NO_PROMOTION_TOKEN = -1L
@@ -1268,8 +1553,10 @@ class ConversationTurnService : Service() {
                         putExtra(EXTRA_GUEST_PATH, spec.guestPath)
                         putExtra(EXTRA_ADDITIONAL_DIRECTORIES, spec.additionalDirectories.toTypedArray())
                         putExtra(EXTRA_SESSION_MODE, spec.sessionMode.wireValue)
+                        putExtra(EXTRA_RUNTIME_GENERATION, spec.runtimeGeneration)
                         putExtra(EXTRA_LINUX_RUNTIME_MODE, spec.linuxRuntimeMode.name)
                         putExtra(EXTRA_WORKSPACE_KEY, spec.workspaceKey)
+                        putExtra(EXTRA_TRANSCRIPT_PATH, spec.transcriptPath)
                     }
                     putExtra(EXTRA_ACTIVE_TASK_IDS, snapshot.activeTaskIds.toTypedArray())
                 }
@@ -1277,7 +1564,13 @@ class ConversationTurnService : Service() {
     }
 }
 
-private fun Intent.snapshot(): ConversationBackgroundSnapshot? {
+internal fun isValidRuntimeGeneration(value: String): Boolean =
+    runCatching { java.util.UUID.fromString(value).toString() == value }.getOrDefault(false)
+
+internal fun cancellationTarget(snapshot: ConversationBackgroundSnapshot?): ConversationBackgroundSnapshot? =
+    snapshot?.takeIf { it.turnId != null && it.turnId > 0L && it.recoverySpec != null }
+
+internal fun Intent.snapshot(): ConversationBackgroundSnapshot? {
     val sessionId = getStringExtra(ConversationTurnService.EXTRA_SESSION_ID)
         ?.takeIf(String::isNotBlank)
         ?: return null
@@ -1287,37 +1580,30 @@ private fun Intent.snapshot(): ConversationBackgroundSnapshot? {
         null
     }
     val status = getStringExtra(ConversationTurnService.EXTRA_STATUS_TEXT)
-    val sessionMode = sessionModeFromWireValue(
-        getStringExtra(ConversationTurnService.EXTRA_SESSION_MODE),
-    )
+    val sessionMode = getStringExtra(ConversationTurnService.EXTRA_SESSION_MODE)
+        ?.let { runCatching { sessionModeFromWireValue(it) }.getOrNull() } ?: return null
     val runtimeMode = getStringExtra(ConversationTurnService.EXTRA_LINUX_RUNTIME_MODE)
         ?.let { encoded -> LinuxRuntimeMode.entries.firstOrNull { it.name == encoded } }
-        ?: LinuxRuntimeMode.MobileLinux
-    val recoverySpec = if (
-        hasExtra(ConversationTurnService.EXTRA_LINUX_RUNTIME_MODE) ||
-        hasExtra(ConversationTurnService.EXTRA_HOST_PATH) ||
-        hasExtra(ConversationTurnService.EXTRA_SESSION_MODE) ||
-        hasExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY)
-    ) {
-        ConversationRecoverySpec(
-            projectId = getStringExtra(ConversationTurnService.EXTRA_PROJECT_ID),
-            hostPath = getStringExtra(ConversationTurnService.EXTRA_HOST_PATH),
-            guestPath = getStringExtra(ConversationTurnService.EXTRA_GUEST_PATH),
-            additionalDirectories = getStringArrayExtra(ConversationTurnService.EXTRA_ADDITIONAL_DIRECTORIES)?.toList().orEmpty(),
-            sessionMode = sessionMode,
-            linuxRuntimeMode = runtimeMode,
-            workspaceKey = getStringExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY),
-        )
-    } else {
-        null
-    }
+        ?: return null
+    val workspaceKey = getStringExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY)?.takeIf(String::isNotBlank) ?: return null
+    val runtimeGeneration = getStringExtra(ConversationTurnService.EXTRA_RUNTIME_GENERATION)
+        ?.takeIf(::isValidRuntimeGeneration) ?: return null
+    val recoverySpec = ConversationRecoverySpec(
+        projectId = getStringExtra(ConversationTurnService.EXTRA_PROJECT_ID),
+        hostPath = getStringExtra(ConversationTurnService.EXTRA_HOST_PATH),
+        guestPath = getStringExtra(ConversationTurnService.EXTRA_GUEST_PATH),
+        additionalDirectories = getStringArrayExtra(ConversationTurnService.EXTRA_ADDITIONAL_DIRECTORIES)?.toList() ?: return null,
+        sessionMode = sessionMode,
+        linuxRuntimeMode = runtimeMode,
+        workspaceKey = workspaceKey,
+        runtimeGeneration = runtimeGeneration,
+        transcriptPath = getStringExtra(ConversationTurnService.EXTRA_TRANSCRIPT_PATH),
+    )
     return ConversationBackgroundSnapshot(
         sessionId = sessionId,
         turnId = turnId,
         statusText = status,
         recoverySpec = recoverySpec,
-        activeTaskIds = getStringArrayExtra(ConversationTurnService.EXTRA_ACTIVE_TASK_IDS)
-            ?.toSet()
-            .orEmpty(),
+        activeTaskIds = getStringArrayExtra(ConversationTurnService.EXTRA_ACTIVE_TASK_IDS)?.toSet() ?: return null,
     )
 }

@@ -82,7 +82,8 @@ pub use audio_provider::{
 #[cfg(feature = "uniffi")]
 pub use harness_runtime::mobile::{
     max_audio_payload_bytes, ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto,
-    CronTaskDto, FiredCronJobDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
+    CronOwnerCandidateDto, CronOwnerReservationDto, CronTaskDto, FiredCronJobDto, MobileConfig,
+    MobileCronAdmission, MobileCronOwnerAdmission, MobileCronStoreHandle, MobileEngineError,
     MobileEngineHandle, MobileSessionMode, ModelBillingModeDto, ModelCapabilitiesDto,
     ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, PermissionRequestSink, SessionModeDto,
 };
@@ -186,6 +187,8 @@ pub use host::build_android_engine;
 pub use host::build_mobile_engine;
 #[cfg(feature = "uniffi")]
 pub use host::create_android_side_chat;
+#[cfg(feature = "uniffi")]
+pub use host::AndroidMediaDrainStatus;
 #[cfg(feature = "uniffi")]
 pub use host::AndroidNativeMediaHost;
 #[cfg(feature = "uniffi")]

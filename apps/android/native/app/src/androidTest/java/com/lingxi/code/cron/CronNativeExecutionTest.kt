@@ -51,19 +51,22 @@ class CronNativeExecutionTest {
             val runtimeConfig = com.lingxi.code.mobileWorkspaceTestConfiguration(root)
             val server = LoopbackAnthropicServer()
             val events = Channel<ClientEvent>(Channel.UNLIMITED)
+            val controllerEvents = Channel<ClientEvent>(Channel.UNLIMITED)
             try {
-                val engine = buildAndroidEngine(
+                fun buildEngine(scheduler: Boolean) = buildAndroidEngine(
                     config = AndroidEngineLaunchConfigFfi(
                         appVersion = null,
-                        appAgentHost = false,
+                        appAgentHost = false, schedulerController = scheduler,
                         apiBase = server.baseUrl, model = "anthropic/claude-sonnet-4-6", sessionMode = SessionModeDto.CODE,
+                        initialSessionId = null, initialSessionTranscriptPath = null,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,
                         providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":["anthropic"]}"""),
                         mobileLinux = runtimeConfig,
                         physicalMemoryBytes = 0u, hostEnvironment = null),
                     listener = object : AndroidEventListener {
                         override suspend fun onEvent(event: ClientEvent) {
-                            if (event is ClientEvent.ConversationControlsChanged || event is ClientEvent.Error || event is ClientEvent.TurnEnded) events.trySend(event)
+                            if (scheduler) controllerEvents.trySend(event)
+                            else if (event is ClientEvent.ConversationControlsChanged || event is ClientEvent.Error || event is ClientEvent.TurnEnded) events.trySend(event)
                         }
                         override suspend fun onWorkflowProgress(originSessionId: String, taskId: String, runId: String, progress: WorkflowProgressDto) {}
                     },
@@ -72,13 +75,42 @@ class CronNativeExecutionTest {
                     permissions = object : AndroidPermissionSink { override suspend fun onRequest(request: PermissionRequest) { error("Scheduled fixture must not request permission") } },
                     computerUse = null, shell = null, git = null, gitCredentialProvider = null, secureStorage = com.lingxi.code.secure.AndroidSecureStorageAdapter(File(root, "secure-store")), deviceControl = null)
 
+                val engine = buildEngine(scheduler = false)
                 val accountId = UUID.randomUUID().toString()
                 engine.providerAccountCommand(JSONObject().put("action", "add").put("expectedRevision", 0)
                     .put("accountId", accountId).put("providerId", "anthropic").put("displayName", "Local test")
                     .put("executionBindingId", "anthropic").put("authKind", "api_key").toString(), "test-only-local")
 
+                fun transcriptFiles(): Set<String> = File(paths.configHome, "projects").walkTopDown()
+                    .filter { it.isFile && it.name.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.jsonl")) }
+                    .map { it.absolutePath }.toSet()
+                val beforeController = transcriptFiles()
+                val controller = buildEngine(scheduler = true)
+                try {
+                val placeholder = controller.workspaceState().sessionId.removePrefix("sess:")
+                assertEquals("Cron controller must not create a transcript", beforeController, transcriptFiles())
+                assertTrue("Controller cannot submit conversation commands", runCatching { controller.submit(ClientCommand.GetConversationControls) }.isFailure)
+                delay(100)
+                assertTrue(generateSequence { controllerEvents.tryReceive().getOrNull() }.none {
+                    it is ClientEvent.SessionStarted || it is ClientEvent.SessionResumed
+                })
+                assertFalse(transcriptFiles().any { File(it).name == "$placeholder.jsonl" })
                 val store = buildAndroidCronStore(root.path, managedRoot.path, null)
                 try {
+                    suspend fun runWithFixtureAdmission(id: String, occurrence: ULong? = null): FiredCronJobDto? {
+                        val admission = MobileCronAdmission(object : MobileCronOwnerAdmission {
+                            override suspend fun beginOwner(candidate: CronOwnerCandidateDto): Boolean = true
+                            override suspend fun confirmOwner(reservation: CronOwnerReservationDto): Boolean = true
+                        })
+                        return try {
+                            if (occurrence == null) controller.runCronTaskNow(id, admission)
+                            else controller.runCronTaskNowAt(id, occurrence, admission)
+                        } finally {
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                                try { admission.cancelAndWait() } finally { admission.destroy() }
+                            }
+                        }
+                    }
                     suspend fun controls(): ConversationControlsDto {
                         while (events.tryReceive().getOrNull() != null) { /* discard older snapshots */ }
                         engine.submit(ClientCommand.GetConversationControls)
@@ -95,21 +127,34 @@ class CronNativeExecutionTest {
                     }
                     suspend fun fire(id: String, occurrenceAt: ULong? = null): String {
                         val fired = withTimeout(45_000) {
-                            if (occurrenceAt == null) engine.runCronTaskNow(id)
-                            else engine.runCronTaskNowAt(id, occurrenceAt)
+                            runWithFixtureAdmission(id, occurrenceAt)
                         }
                         assertNotNull("Configured task must produce a result", fired)
                         assertEquals("Native execution failed: ${fired?.status}", CronFireStatusDto.Ok, fired!!.status)
                         return requireNotNull(fired.sessionId).removePrefix("sess:")
                     }
-                    val human = UUID.randomUUID().toString()
-                    engine.resumeEmptySession(human, "Human conversation")
+                    val humanWorkspace = engine.workspaceState()
+                    val human = humanWorkspace.sessionId.removePrefix("sess:")
+                    engine.submit(ClientCommand.SendPrompt(
+                        text = ClientTextDto("Create the offline test anchor".map { it.code.toUShort() }),
+                        visualizationContext = null, promptMode = null, images = emptyList(), turnId = null,
+                    ))
+                    withTimeout(45_000) {
+                        while (true) {
+                            when (val event = events.receive()) {
+                                is ClientEvent.TurnEnded -> break
+                                is ClientEvent.Error -> error(event.message.displayText())
+                                else -> Unit
+                            }
+                        }
+                    }
                     engine.submit(ClientCommand.SetReasoningSelection(ReasoningSelectionDto.Level("low")))
                     val before = controls()
                     assertTrue(before.qualifiedModel.endsWith("claude-sonnet-4-6"))
                     assertEquals(ReasoningSelectionDto.Level("low"), before.reasoning.requested)
                     val fixed = CronAutomation.defaults("anthropic/claude-opus-4-6")
                         .withReasoning(ReasoningSelectionDto.Level("high"))
+                        .change("sessionMode", "code").change("sessionScopeKey", "scheduled")
                     val prompt = "cron-native-fixture: Reply with a brief confirmation. Do not call tools."
                     val fresh = store.createConfigured("0 9 * * *", prompt, true, fixed.json)
                     val first = fire(fresh.id)
@@ -119,16 +164,17 @@ class CronNativeExecutionTest {
                     val owned = fire(dedicated.id)
                     assertEquals("task_session must reuse its durable conversation", owned, fire(dedicated.id))
                     val selected = store.createConfigured("0 9 * * *", prompt, true,
-                        fixed.change("runMode", "selected_session").change("targetSessionId", human).json)
+                        fixed.change("runMode", "selected_session").change("targetSessionId", human)
+                            .change("targetSessionTranscriptPath", humanWorkspace.transcriptPath)
+                            .change("targetSessionMode", "code").change("targetSessionScopeKey", "scheduled").json)
                     assertEquals("selected_session must continue the chosen conversation", human, fire(selected.id))
-                    engine.submit(ClientCommand.ResumeSession(human, null))
                     val after = controls()
                     val oneShot = store.createConfigured("0 9 * * *", prompt, false, fixed.json)
                     fire(oneShot.id)
                     val completed = store.list().first { it.id == oneShot.id }
                     assertEquals("completed", CronAutomation.from(completed).status)
                     assertNull(completed.nextFireMs)
-                    assertNull("Completed one-shot must not execute again", engine.runCronTaskNow(oneShot.id))
+                    assertNull("Completed one-shot must not execute again", runWithFixtureAdmission(oneShot.id))
                     val requests = server.requests.filter { it.optJSONArray("messages")?.toString().orEmpty().contains("cron-native-fixture") }
                     assertTrue("Each real scheduled run must reach the loopback provider", requests.size >= 6)
                     requests.forEach { request ->
@@ -162,7 +208,7 @@ class CronNativeExecutionTest {
                     }
                     humanGate.awaitRequest()
                     val manualOccurrence = System.currentTimeMillis().toULong()
-                    val busy = withTimeout(20_000) { engine.runCronTaskNowAt(selected.id, manualOccurrence) }
+                    val busy = withTimeout(20_000) { runWithFixtureAdmission(selected.id, manualOccurrence) }
                     assertNotNull("Busy execution must not disappear as a skipped result", busy)
                     val busyStatus = busy!!.status
                     assertTrue(busyStatus is CronFireStatusDto.Failed && busyStatus.message.startsWith("busy:"))
@@ -178,13 +224,13 @@ class CronNativeExecutionTest {
                     assertEquals(human, fire(selected.id, manualOccurrence))
                     assertEquals("Busy retry must retain its persisted run ID", pending.getString("id"), latestRun(selected.id).getString("id"))
                     assertTrue(latestRun(selected.id).getLong("claimGeneration") > pending.getLong("claimGeneration"))
-                    assertNull("Successful manual occurrence must not replay", engine.runCronTaskNowAt(selected.id, manualOccurrence))
+                    assertNull("Successful manual occurrence must not replay", runWithFixtureAdmission(selected.id, manualOccurrence))
 
                     // Exercise the actual UniFFI future cancellation path while
                     // the provider is blocked. The same process must recover.
                     val cancelledGate = server.blockNextRequest()
                     val cancelledOccurrence = System.currentTimeMillis().toULong()
-                    val cancelledCall = async { engine.runCronTaskNowAt(fresh.id, cancelledOccurrence) }
+                    val cancelledCall = async { runWithFixtureAdmission(fresh.id, cancelledOccurrence) }
                     cancelledGate.awaitRequest()
                     val cancelledId = latestRun(fresh.id).getString("id")
                     cancelledCall.cancelAndJoin()
@@ -193,7 +239,7 @@ class CronNativeExecutionTest {
                     }
                     assertEquals(cancelledId, latestRun(fresh.id).getString("id"))
                     cancelledGate.release(sendResponse = false)
-                    assertNull("Cancelled manual occurrence must not replay", engine.runCronTaskNowAt(fresh.id, cancelledOccurrence))
+                    assertNull("Cancelled manual occurrence must not replay", runWithFixtureAdmission(fresh.id, cancelledOccurrence))
                     fire(fresh.id)
                     assertEquals("succeeded", latestRun(fresh.id).getString("status"))
                     assertNotEquals(cancelledId, latestRun(fresh.id).getString("id"))
@@ -203,9 +249,10 @@ class CronNativeExecutionTest {
                         engine.providerAccountCommand(JSONObject().put("action", "remove").put("expectedRevision", revision)
                             .put("accountId", accountId).toString(), null)
                     }
-                    store.destroy(); engine.destroy()
+                    store.destroy()
                 }
-            } finally { events.close(); server.close(); root.deleteRecursively() }
+                } finally { controller.destroy(); engine.destroy() }
+            } finally { events.close(); controllerEvents.close(); server.close(); root.deleteRecursively() }
         }
     }
 }

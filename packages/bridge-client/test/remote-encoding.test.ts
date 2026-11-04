@@ -148,7 +148,7 @@ test('protocol constants carry the plan\'s values', () => {
 
 test('the client protocol major is read from the SDK\'s own version, not copied', () => {
   assert.equal(version.CLIENT_PROTOCOL_MAJOR, Number.parseInt(CLIENT_PROTOCOL_VERSION, 10));
-  assert.equal(version.CLIENT_PROTOCOL_MAJOR, 31);
+  assert.equal(version.CLIENT_PROTOCOL_MAJOR, 32);
 });
 
 test('frame sizes are consistent: a full frame stores as exactly 65536 characters', () => {

@@ -320,6 +320,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
             ClientCommand::ResumeSession {
                 session_id: session_c_text.clone(),
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
             resumed_sink.clone(),
         )

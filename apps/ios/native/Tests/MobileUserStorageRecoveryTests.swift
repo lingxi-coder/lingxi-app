@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import LingxiCode
@@ -16,13 +17,30 @@ final class MobileUserStorageRecoveryTests: XCTestCase {
         let id = UUID().uuidString.lowercased()
         let manifest = manifests.appendingPathComponent("\(id).json")
         func write(_ value: String) throws {
-            try JSONSerialization.data(withJSONObject: ["version": 1, "workspace": value]).write(to: manifest)
+            try JSONSerialization.data(withJSONObject: ["version": 1, "workspace": value, "task_id": "test-task"]).write(to: manifest)
         }
-        XCTAssertEqual(try MobileUserStorage.scheduledWorkspace(sessionID: id, managedRoot: root.path), paths.scheduledCwd)
+        XCTAssertEqual(try MobileUserStorage.scheduledWorkspace(sessionID: nil, managedRoot: root.path), paths.scheduledCwd)
+        XCTAssertThrowsError(try MobileUserStorage.scheduledWorkspace(sessionID: id, managedRoot: root.path))
+        XCTAssertThrowsError(try MobileUserStorage.scheduledGuestWorkspace(sessionID: id, managedRoot: root.path))
         try write(relative)
         XCTAssertEqual(try MobileUserStorage.scheduledWorkspace(sessionID: "sess:" + id, managedRoot: root.path), workspace.resolvingSymlinksInPath().path)
+        XCTAssertEqual(try MobileUserStorage.scheduledGuestWorkspace(sessionID: id, managedRoot: root.path), paths.configGuestPath + "/" + relative)
+        XCTAssertThrowsError(try MobileUserStorage.scheduledGuestWorkspace(sessionID: UUID().uuidString.lowercased(), managedRoot: root.path))
+        let realManifests = manifests.deletingLastPathComponent().appendingPathComponent("sessions-real")
+        try FileManager.default.moveItem(at: manifests, to: realManifests)
+        try FileManager.default.createSymbolicLink(at: manifests, withDestinationURL: realManifests)
+        XCTAssertThrowsError(try MobileUserStorage.scheduledGuestWorkspace(sessionID: id, managedRoot: root.path))
+        try FileManager.default.removeItem(at: manifests)
+        try FileManager.default.moveItem(at: realManifests, to: manifests)
+        try FileManager.default.removeItem(at: manifest)
+        XCTAssertEqual(mkfifo(manifest.path, 0o600), 0)
+        XCTAssertThrowsError(try MobileUserStorage.scheduledGuestWorkspace(sessionID: id, managedRoot: root.path))
+        try FileManager.default.removeItem(at: manifest)
+        try JSONSerialization.data(withJSONObject: ["version": 1, "workspace": relative]).write(to: manifest)
+        XCTAssertThrowsError(try MobileUserStorage.scheduledGuestWorkspace(sessionID: id, managedRoot: root.path))
         try write("workspaces/../outside")
         XCTAssertThrowsError(try MobileUserStorage.scheduledWorkspace(sessionID: id, managedRoot: root.path))
+        XCTAssertThrowsError(try MobileUserStorage.scheduledGuestWorkspace(sessionID: id, managedRoot: root.path))
         try write(relative)
         try FileManager.default.removeItem(at: workspace)
         try FileManager.default.createSymbolicLink(at: workspace, withDestinationURL: root)
@@ -32,7 +50,8 @@ final class MobileUserStorageRecoveryTests: XCTestCase {
     func testRelocatedContainerRecognitionIsLimitedToTheManagedWorkspace() {
         let home = "/var/mobile/Containers/Data/Application/11111111-1111-4111-8111-111111111111"
         let previous = "/private/var/mobile/Containers/Data/Application/22222222-2222-4222-8222-222222222222"
-        let suffix = "/Library/Application Support/mobile-linux/ios-ish/persistent/lingxi/lingxi/projects"
+        let profile = MobileUserStorage.directories()
+        let suffix = "/Library/Application Support/mobile-linux/ios-ish/persistent/\(profile.linuxUser)/\(profile.configDirName)/projects"
         let projects = home + suffix
         XCTAssertTrue(MobileUserStorage.isRelocatedManagedWorkspaceLink(previous + suffix, projects: projects, applicationHome: home))
         for target in [previous + "/Documents/project", previous + suffix + "/source", home + suffix,

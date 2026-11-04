@@ -21,6 +21,7 @@ struct Composer: View {
     // `model` remains in the view API for compatibility with its existing owner.
     var availableModels: [String] = []
     var availableModelDetails: [String: ModelRuntimeDetails] = [:]
+    var usesLocalAccountCatalog = true
     var contextUsage: ConversationUsageSnapshot? = nil
     var activeModelId: String = ""
     var activeModelDisplay: String? = nil
@@ -62,6 +63,8 @@ struct Composer: View {
     var promptSuggestionSourceCodeUnits: [UInt16]? = nil
     var promptSuggestionNotice: String? = nil
     var suggestionTurnKey: String = ""
+    var historySessionKey: String = ""
+    var historyMessages: [String] = []
     var onSuggestionFeedback: (String) -> Void = { _ in }
     @State private var shownSuggestionKey: String?
     @State private var rejectedSuggestionKey: String?
@@ -114,8 +117,7 @@ struct Composer: View {
     /// Owned by the chat so the session panel can open the same pickers.
     @Binding var modelOpen: Bool
     @Binding var controlsOpen: Bool
-    /// A Chat session has no file permissions to ask about, so only Code
-    /// sessions get the permission chip.
+    /// Permission controls are independent of conversation mode.
     var showsPermissionChip: Bool = true
     @State private var holding = false
     @State private var cancellingHold = false
@@ -126,6 +128,7 @@ struct Composer: View {
         model: Binding<ModelOption>,
         availableModels: [String] = [],
         availableModelDetails: [String: ModelRuntimeDetails] = [:],
+        usesLocalAccountCatalog: Bool = true,
         activeModelId: String = "",
         activeModelDisplay: String? = nil,
         contextUsage: ConversationUsageSnapshot? = nil,
@@ -159,6 +162,8 @@ struct Composer: View {
         promptSuggestionSourceCodeUnits: [UInt16]? = nil,
         promptSuggestionNotice: String? = nil,
         suggestionTurnKey: String = "",
+        historySessionKey: String = "",
+        historyMessages: [String] = [],
         onSuggestionFeedback: @escaping (String) -> Void = { _ in },
         slashCommands: [ConversationSlashCommand] = [],
         slashCommandsLoaded: Bool = false,
@@ -189,6 +194,7 @@ struct Composer: View {
         self._model = model
         self.availableModels = availableModels
         self.availableModelDetails = availableModelDetails
+        self.usesLocalAccountCatalog = usesLocalAccountCatalog
         self.activeModelId = activeModelId
         self.activeModelDisplay = activeModelDisplay
         self.contextUsage = contextUsage
@@ -222,6 +228,8 @@ struct Composer: View {
         self.promptSuggestionSourceCodeUnits = promptSuggestionSourceCodeUnits
         self.promptSuggestionNotice = promptSuggestionNotice
         self.suggestionTurnKey = suggestionTurnKey
+        self.historySessionKey = historySessionKey
+        self.historyMessages = historyMessages
         self.onSuggestionFeedback = onSuggestionFeedback
         self.slashCommands = slashCommands
         self.slashCommandsLoaded = slashCommandsLoaded
@@ -287,7 +295,9 @@ struct Composer: View {
                         return SlashCommandMatcher.argumentHint(for: text, catalog: slashCommands, cursor: cursor)
                     },
                     onSubmit: send,
-                    onAcceptSuggestion: visibleSuggestion == nil ? nil : acceptSuggestion
+                    onAcceptSuggestion: visibleSuggestion == nil ? nil : acceptSuggestion,
+                    historySessionKey: historySessionKey,
+                    historyMessages: historyMessages
                 )
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .onChange(of: Array(draft.utf16)) { _, newDisplayCodeUnits in
@@ -301,7 +311,7 @@ struct Composer: View {
                         recordSuggestionPresentation()
                     }
                     .onChange(of: suggestionTurnKey) { _, _ in
-                        clearDraftSourceCodeUnits()
+                        if draft.isEmpty { clearDraftSourceCodeUnits() }
                         recordSuggestionPresentation()
                     }
                     .onChange(of: draftSourceCodeUnits) { _, _ in
@@ -403,7 +413,8 @@ struct Composer: View {
                 fastModePending: fastModePending,
                 fastModeError: fastModeError,
                 onSetFastMode: onSetFastMode,
-                showsFastMode: showsFastMode)
+                showsFastMode: showsFastMode,
+                usesLocalAccountCatalog: usesLocalAccountCatalog)
 
         }
         .sheet(isPresented: $controlsOpen) {
@@ -805,6 +816,12 @@ struct Composer: View {
     private func updateDraftSourceCodeUnits(forDisplayCodeUnits newDisplayCodeUnits: [UInt16]) {
         guard let sourceCodeUnits = draftSourceCodeUnits,
               let previousDisplayCodeUnits = draftSourceDisplayCodeUnits else { return }
+        // An external edit (for example, a completed voice capture) may have
+        // updated the source and display together before this observer runs.
+        if PromptSuggestionDraftSource.displayCodeUnits(for: sourceCodeUnits) == newDisplayCodeUnits {
+            draftSourceDisplayCodeUnits = newDisplayCodeUnits
+            return
+        }
         guard let updatedSourceCodeUnits = PromptSuggestionDraftSource.applyingEdit(
             sourceCodeUnits: sourceCodeUnits,
             previousDisplayCodeUnits: previousDisplayCodeUnits,

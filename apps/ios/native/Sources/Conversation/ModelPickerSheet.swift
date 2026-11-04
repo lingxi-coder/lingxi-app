@@ -38,6 +38,7 @@ struct ModelPickerSheet: View {
     var fastModeError: String? = nil
     var onSetFastMode: (Bool) -> Void = { _ in }
     var showsFastMode = true
+    var usesLocalAccountCatalog = true
 
     @State private var requestedModel: String?
     @State private var detent: PresentationDetent = .large
@@ -97,7 +98,9 @@ struct ModelPickerSheet: View {
                         } header: {
                             Text(section.name)
                         } footer: {
-                            Text(ProviderAccountRepository.shared.configurationDescription(executionBindingId: section.providerId))
+                            if usesLocalAccountCatalog {
+                                Text(ProviderAccountRepository.shared.configurationDescription(executionBindingId: section.providerId))
+                            }
                         }
                     }
                 }
@@ -125,7 +128,7 @@ struct ModelPickerSheet: View {
         .onChange(of: controlsError) { _, error in
             if error != nil { requestedModel = nil }
         }
-        .task { await ProviderAccountRepository.shared.refresh() }
+        .task { if usesLocalAccountCatalog { await ProviderAccountRepository.shared.refresh() } }
         .presentationDragIndicator(.visible)
         .sheet(item: $selectedDetails) { details in
             ModelDetailsSheet(
@@ -174,11 +177,19 @@ struct ModelPickerSheet: View {
 
     /// The references surviving the search box, in engine order.
     private var visibleModels: [String] {
-        let projected = ProviderAccountRepository.shared.snapshot.modelAvailability.map {
+        let projected = usesLocalAccountCatalog ? ProviderAccountRepository.shared.snapshot.modelAvailability.map {
             "\($0.executionBindingId)/\($0.modelId)"
-        }
+        } : []
+        return Self.modelReferences(available: availableModels, projected: projected,
+                                    usesLocalAccountCatalog: usesLocalAccountCatalog,
+                                    localFilter: repository.visibleModelReferences)
+    }
+
+    static func modelReferences(available: [String], projected: [String], usesLocalAccountCatalog: Bool,
+                                localFilter: ([String]) -> [String]) -> [String] {
         var seen = Set<String>()
-        return repository.visibleModelReferences((availableModels + projected).filter { seen.insert($0).inserted })
+        let references = (available + (usesLocalAccountCatalog ? projected : [])).filter { seen.insert($0).inserted }
+        return usesLocalAccountCatalog ? localFilter(references) : references
     }
 
     /// The references surviving the search box, in engine order.
@@ -207,7 +218,7 @@ struct ModelPickerSheet: View {
     private var sections: [ModelProviderSection] {
         let accounts = ProviderAccountRepository.shared
         return ModelDisplay.pickerSections(for: matches, detailsByReference: detailsByReference,
-            eligibleReferences: Set(matches.filter { accounts.modelIsAvailable(reference: $0) }))
+            eligibleReferences: Set(matches.filter { !usesLocalAccountCatalog || accounts.modelIsAvailable(reference: $0) }))
     }
 
     /// Recently-picked references that also survive the search, in recency
@@ -240,9 +251,11 @@ struct ModelPickerSheet: View {
                         Text(item.name)
                             .font(.body)
                             .foregroundStyle(Color.primary)
-                        Text(ProviderAccountRepository.shared.modelAccessDescription(
-                            bindingId: String(reference.split(separator: "/", maxSplits: 1).first ?? ""), modelId: item.modelId))
-                            .font(.caption).foregroundStyle(.secondary)
+                        if usesLocalAccountCatalog {
+                            Text(ProviderAccountRepository.shared.modelAccessDescription(
+                                bindingId: String(reference.split(separator: "/", maxSplits: 1).first ?? ""), modelId: item.modelId))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         // The provider header supplies context; repeat only
                         // a distinct wire ID so similar model names stay clear.
                         if item.name != item.modelId {

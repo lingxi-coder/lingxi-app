@@ -7,7 +7,9 @@ struct NewChatBar: View {
     @Environment(\.theme) private var t
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let mode: SessionMode
+    let workspaceKey: String
     let workspaceName: String
+    let modeSelectionDisabled: Bool
     let onSelectMode: (SessionMode) -> Void
     let onPickWorkspace: () -> Void
 
@@ -24,6 +26,8 @@ struct NewChatBar: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("newchat.scope.\(workspaceKey)")
     }
 
     @ViewBuilder
@@ -50,6 +54,7 @@ struct NewChatBar: View {
         } label: {
             Text(mode.title)
         }
+        .disabled(modeSelectionDisabled)
     }
 
     private var workspaceButton: some View {

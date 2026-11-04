@@ -32,6 +32,7 @@ class CronNativeRoundtripTest {
             val config = CronAutomation.defaults("provider/model").change("name", "Daily brief")
                 .withReasoning(ReasoningSelectionDto.Level("high"))
                 .change("notificationPolicy", "failed").change("runMode", "task_session")
+                .change("sessionMode", "code").change("sessionScopeKey", "scheduled")
             val store = buildAndroidCronStore(root.path, File(root, "runtime").path, null)
             val created = try {
                 store.setMigrationDefaults("provider/model", """{"type":"automatic"}""")
@@ -67,22 +68,28 @@ class CronNativeRoundtripTest {
         val runtime = com.lingxi.code.mobileWorkspaceTestConfiguration(root)
         val paths = com.lingxi.code.bindings.runtime.mobileUserDirectories(runtime.managedRoot)
         val workspace = File(paths.scheduledCwd).apply { mkdirs() }
-        val id = UUID.randomUUID().toString()
+        var id: String? = null
+        var transcriptPath: String? = null
         try {
             repeat(2) { pass ->
+                if (pass > 0) {
+                    assertTrue(com.lingxi.code.bindings.runtime.waitForMobileSessionRelease(paths.configHome, checkNotNull(id), 8000u))
+                }
                 val events = Channel<ClientEvent>(Channel.UNLIMITED)
                 val engine = buildAndroidEngine(
                     config = AndroidEngineLaunchConfigFfi(
                         appVersion = null,
-                        appAgentHost = false,
+                        appAgentHost = false, schedulerController = false,
                         apiBase = "https://invalid.example", model = "", sessionMode = SessionModeDto.CODE,
+                        initialSessionId = id,
+                        initialSessionTranscriptPath = transcriptPath,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,
                         providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":[]}"""),
                         mobileLinux = runtime,
                         physicalMemoryBytes = 0u, hostEnvironment = null),
                     listener = object : AndroidEventListener {
                         override suspend fun onEvent(event: ClientEvent) {
-                            if (event is ClientEvent.SessionResumed || event is ClientEvent.Error) events.trySend(event)
+                            if (event is ClientEvent.SessionResumed || event is ClientEvent.Error || event is ClientEvent.TurnEnded) events.trySend(event)
                         }
                         override suspend fun onWorkflowProgress(originSessionId: String, taskId: String, runId: String, progress: WorkflowProgressDto) {}
                     },
@@ -92,13 +99,28 @@ class CronNativeRoundtripTest {
                     computerUse = null, shell = null, git = null, gitCredentialProvider = null, secureStorage = null, deviceControl = null)
 
                 try {
-                    if (pass == 0) engine.resumeEmptySession(id, "Scheduled result")
-                    else engine.submit(ClientCommand.ResumeSession(id, null))
-                    withTimeout(20_000) {
+                    if (pass == 0) {
+                        val state = engine.workspaceState()
+                        id = state.sessionId.removePrefix("sess:")
+                        transcriptPath = state.transcriptPath.takeIf(String::isNotBlank)
+                        checkNotNull(transcriptPath)
+                        engine.submit(ClientCommand.SendPrompt(
+                            text = ClientTextDto("Isolated cold restore fixture".map { it.code.toUShort() }),
+                            visualizationContext = null, promptMode = null, images = emptyList(), turnId = null,
+                        ))
+                        withTimeout(60_000) {
+                            while (true) {
+                                when (events.receive()) {
+                                    is ClientEvent.Error, is ClientEvent.TurnEnded -> break
+                                    else -> Unit
+                                }
+                            }
+                        }
+                    } else withTimeout(20_000) {
                         while (true) {
                             when (val event = events.receive()) {
                                 is ClientEvent.SessionResumed -> {
-                                    assertEquals(id, event.sessionId.removePrefix("sess:"))
+                                    assertEquals(checkNotNull(id), event.sessionId.removePrefix("sess:"))
                                     return@withTimeout
                                 }
                                 is ClientEvent.Error -> error(event.message.displayText())

@@ -6,6 +6,7 @@ import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.SessionRef
+import com.lingxi.code.model.SessionMode
 
 /**
  * Immutable UI state for the conversation surface. Hoisted out of the
@@ -130,6 +131,7 @@ data class ChatState(
     val visualizationChip: VisualizationContextChip? = null,
     /** A widget's drafted follow-up, waiting for the composer to take it. */
     val visualizationFollowup: VisualizationFollowup? = null,
+    val sessionMode: SessionMode? = null,
 ) {
     /** True while a turn is in flight or a live executor is waiting for input. */
     val isStreaming: Boolean get() = streaming || liveTurnWaitingForUser
@@ -145,6 +147,7 @@ data class ChatState(
             agentRunsByMessageId.values.any { it.activeWorkers > 0 } ||
             agentRun?.tools?.any { it.status == AgentToolStatus.Running } == true
 }
+
 
 /**
  * A user-facing turn error rendered as the dismissible banner. [message] is the

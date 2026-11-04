@@ -14,6 +14,7 @@ import com.lingxi.code.bindings.android.RemoteTurnFfi
 import com.lingxi.code.bindings.client.MessageBlockDto
 import com.lingxi.code.bindings.client.MessageDto
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
+import com.lingxi.code.bindings.client.SessionModeDto
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -30,8 +31,10 @@ internal fun remoteUpdate(
     outgoing: List<RemoteOutgoingPromptFfi> = emptyList(),
     hasOlder: Boolean = false,
     answeredElsewhere: Boolean = false,
+    sessionMode: SessionModeDto? = SessionModeDto.CODE,
 ) = RemoteSessionUpdateFfi(
     sessionId = sessionId,
+    sessionMode = sessionMode,
     phase = phase,
     error = null,
     replace = replace,
@@ -57,9 +60,15 @@ internal class FakeRemoteSessionPort : RemoteSessionPort {
     val calls = mutableListOf<String>()
     val sentImages = mutableListOf<List<RemotePromptImageFfi>>()
     var fetchGate: CompletableDeferred<Unit>? = null
+    var sendGate: CompletableDeferred<Unit>? = null
+    var providerAccountGate: CompletableDeferred<Unit>? = null
+    var permissionGate: CompletableDeferred<Unit>? = null
+    var permissionFailure: Exception? = null
+    var modelListRequests = 0
 
     /** The Bot that handed over a turn's prompt, by turn id; a turn without an entry has none. */
     val botNames = mutableMapOf<ULong, String>()
+    val botNameQueries = mutableListOf<ULong>()
 
     override fun follow(): Flow<RemoteSessionUpdateFfi> = updates
     override suspend fun setForeground(foreground: Boolean) { calls += "foreground:$foreground" }
@@ -70,18 +79,34 @@ internal class FakeRemoteSessionPort : RemoteSessionPort {
         return RemoteImageFfi("image/png", byteArrayOf(1, 2, 3))
     }
     override suspend fun sendPrompt(text: String, images: List<RemotePromptImageFfi>) {
+        sendGate?.await()
         calls += "send:$text"
         sentImages += images
     }
     override suspend fun retryPrompt(promptId: String) { calls += "retry:$promptId" }
     override suspend fun dismissPrompt(promptId: String) { calls += "dismiss:$promptId" }
     override suspend fun cancelTurn() { calls += "cancel" }
-    override suspend fun respondPermission(requestId: ULong, allow: Boolean) { calls += "permission:$requestId:$allow" }
+    override suspend fun respondPermission(requestId: ULong, allow: Boolean) {
+        permissionGate?.await()
+        permissionFailure?.let { throw it }
+        calls += "permission:$requestId:$allow"
+    }
     override suspend fun answerQuestion(requestId: ULong, answers: Map<String, String>) { calls += "answer:$requestId:$answers" }
     override suspend fun cancelQuestion(requestId: ULong) { calls += "cancelQuestion:$requestId" }
     override suspend fun setModel(model: String) { calls += "model:$model" }
     override suspend fun setReasoning(selection: ReasoningSelectionDto) { calls += "reasoning" }
     override suspend fun setPermissionMode(mode: RemotePermissionModeFfi) { calls += "mode:$mode" }
-    override suspend fun listModels(): RemoteModelsFfi = RemoteModelsFfi(listOf("a"), "a", emptyList())
-    override fun promptOriginBotName(turnId: ULong): String? = botNames[turnId]
+    override suspend fun providerAccountCommand(requestJson: String, credential: String?): String {
+        calls += "providerAccount"
+        providerAccountGate?.await()
+        return "{}"
+    }
+    override suspend fun listModels(): RemoteModelsFfi {
+        modelListRequests++
+        return RemoteModelsFfi(listOf("a"), "a", emptyList())
+    }
+    override fun promptOriginBotName(turnId: ULong): String? {
+        botNameQueries += turnId
+        return botNames[turnId]
+    }
 }

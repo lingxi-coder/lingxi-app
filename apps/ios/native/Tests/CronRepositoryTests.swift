@@ -1,9 +1,819 @@
+import Darwin
 import XCTest
 
 @testable import LingxiCode
 
+#if canImport(harness_runtimeFFI)
+import harness_runtimeFFI
+#endif
+
 @MainActor
 final class CronRepositoryTests: XCTestCase {
+    func testReceiptStagingDoesNotBlockOtherOwnersOrReleaseItsReservation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronReceiptAsync.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let staged = expectation(description: "receipt staged off main")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let writer = DefaultProjectAtomicWriter(onGuardedStaged: { _ in staged.fulfill(); release.wait() })
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path,
+            preferences: ProjectScopedPreferences(defaults: defaults), writer: writer)
+        XCTAssertTrue(try index.claims().isEmpty)
+        let first = "11111111-1111-4111-8111-111111111111"
+        let second = "22222222-2222-4222-8222-222222222222"
+        let gate = CronOwnerAdmissionGate()
+        let token = UUID()
+        XCTAssertTrue(gate.begin(sessionID: first, token: token))
+        let row = CronGeneratedSession(id: first, projectID: nil, title: "Scheduled", updatedAtMs: 1,
+            sessionTranscriptPath: "/first.jsonl", sessionMode: .chat, sessionScopeKey: "scheduled")
+        let pending = Task { try await index.mergeReceipts([row]) }
+        await fulfillment(of: [staged], timeout: 2)
+        XCTAssertFalse(gate.allowsNewOwner(sessionID: first))
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: second), "another owner remains navigable while staging is held")
+        release.signal()
+        try await pending.value
+        gate.finish(token)
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: first))
+        XCTAssertEqual(try index.claims()[first]?.transcriptPath, "/first.jsonl")
+    }
+
+    #if canImport(harness_runtimeFFI)
+    func testNativeCronCallbackRetainsReservationWhileConfirmationSuspends() async throws {
+        let gate = CronOwnerAdmissionGate()
+        let scope = CronScope.global(appSandboxRoot: NSTemporaryDirectory())
+        var task = CronTaskRecord(id: "task", cron: "0 9 * * *", prompt: "Test", createdAtMs: 0,
+            lastFiredAtMs: nil, recurring: true, nextFireMs: nil, human: "Daily")
+        var automation = CronAutomation()
+        automation.sessionMode = .chat
+        automation.sessionScopeKey = "global"
+        task.automation = automation
+        let first = "11111111-1111-4111-8111-111111111111"
+        let second = "22222222-2222-4222-8222-222222222222"
+        let waiting = expectation(description: "receipt confirmation suspended")
+        var resume: CheckedContinuation<Void, Never>?
+        let callback = FfiCronOwnerAdmission(gate: gate, scope: scope, task: task, prepare: { _, _, _ in true },
+            confirm: { _, _, _ in await withCheckedContinuation { continuation in resume = continuation; waiting.fulfill() } },
+            blockAdmission: { _ in XCTFail("valid receipt should be admitted") })
+        let candidate = CronOwnerCandidateDto(sessionId: first, sessionTranscriptPath: nil, sessionMode: "chat", sessionScopeKey: "global")
+        let began = await callback.beginOwner(candidate: candidate)
+        XCTAssertTrue(began)
+        let receipt = CronOwnerReservationDto(sessionId: first, sessionTranscriptPath: "/first.jsonl", sessionMode: "chat", sessionScopeKey: "global")
+        let pending = Task { await callback.confirmOwner(reservation: receipt) }
+        await fulfillment(of: [waiting], timeout: 2)
+        XCTAssertFalse(gate.allowsNewOwner(sessionID: first))
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: second))
+        resume?.resume()
+        let accepted = await pending.value
+        XCTAssertTrue(accepted)
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: first))
+    }
+
+    func testNativeCronCallbackMirrorsBeforeReleasingAdmissionGate() async {
+        let gate = CronOwnerAdmissionGate()
+        let scope = CronScope.global(appSandboxRoot: NSTemporaryDirectory())
+        var task = CronTaskRecord(id: "task", cron: "0 9 * * *", prompt: "Test", createdAtMs: 0,
+            lastFiredAtMs: nil, recurring: true, nextFireMs: nil, human: "Daily")
+        var automation = CronAutomation()
+        automation.sessionMode = .chat
+        automation.sessionScopeKey = "global"
+        task.automation = automation
+        var captured: CronOwnerReservation?
+        var blocked = false
+        let id = "11111111-1111-4111-8111-111111111111"
+        let callback = FfiCronOwnerAdmission(gate: gate, scope: scope, task: task, prepare: { _, _, _ in true }, confirm: { owner, _, _ in
+            XCTAssertFalse(gate.allowsNewOwner(sessionID: id))
+            captured = owner
+        }, blockAdmission: { _ in blocked = true })
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: id))
+        let candidate = CronOwnerCandidateDto(sessionId: id, sessionTranscriptPath: nil, sessionMode: "chat", sessionScopeKey: "global")
+        let began = await callback.beginOwner(candidate: candidate)
+        XCTAssertTrue(began)
+        let beganAgain = await callback.beginOwner(candidate: candidate)
+        XCTAssertFalse(beganAgain)
+        XCTAssertFalse(gate.allowsNewOwner(sessionID: id))
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: "22222222-2222-4222-8222-222222222222"))
+        let dto = CronOwnerReservationDto(sessionId: id,
+            sessionTranscriptPath: "/home/lingxi/source.jsonl", sessionMode: "chat", sessionScopeKey: "global")
+        let accepted = await callback.confirmOwner(reservation: dto)
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(captured?.sessionTranscriptPath, "/home/lingxi/source.jsonl")
+        XCTAssertEqual(captured?.sessionMode, .chat)
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: id))
+        XCTAssertFalse(blocked)
+    }
+
+    func testNativeCronCallbackRejectsConflictingOwnerAndReleasesGate() async {
+        let gate = CronOwnerAdmissionGate()
+        let scope = CronScope.global(appSandboxRoot: NSTemporaryDirectory())
+        var task = CronTaskRecord(id: "task", cron: "0 9 * * *", prompt: "Test", createdAtMs: 0,
+            lastFiredAtMs: nil, recurring: true, nextFireMs: nil, human: "Daily")
+        var automation = CronAutomation()
+        automation.sessionMode = .chat
+        automation.sessionScopeKey = "global"
+        task.automation = automation
+        var blocked = false
+        let callback = FfiCronOwnerAdmission(gate: gate, scope: scope, task: task,
+            prepare: { _, _, _ in true },
+            confirm: { _, _, _ in throw ProjectRepositoryError.conflictingSessionScope },
+            blockAdmission: { _ in blocked = true })
+        let id = "11111111-1111-4111-8111-111111111111"
+        let candidate = CronOwnerCandidateDto(sessionId: id, sessionTranscriptPath: nil, sessionMode: "chat", sessionScopeKey: "global")
+        let began = await callback.beginOwner(candidate: candidate)
+        XCTAssertTrue(began)
+        let dto = CronOwnerReservationDto(sessionId: id,
+            sessionTranscriptPath: "/home/lingxi/source.jsonl", sessionMode: "chat", sessionScopeKey: "global")
+        let accepted = await callback.confirmOwner(reservation: dto)
+        XCTAssertFalse(accepted)
+        XCTAssertTrue(blocked)
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: id))
+    }
+
+    func testNativeCronCallbackRejectsReceiptForDifferentReservation() async {
+        let gate = CronOwnerAdmissionGate()
+        let scope = CronScope.global(appSandboxRoot: NSTemporaryDirectory())
+        var automation = CronAutomation()
+        automation.sessionMode = .chat
+        automation.sessionScopeKey = "global"
+        let task = CronTaskRecord(id: "task", cron: "0 9 * * *", prompt: "Test", createdAtMs: 0,
+            lastFiredAtMs: nil, recurring: true, nextFireMs: nil, human: "Daily", automation: automation)
+        var blocked = false
+        let callback = FfiCronOwnerAdmission(gate: gate, scope: scope, task: task,
+            prepare: { _, _, _ in true }, confirm: { _, _, _ in XCTFail("Mismatched owner must not be mirrored") },
+            blockAdmission: { _ in blocked = true })
+        let id = "11111111-1111-4111-8111-111111111111"
+        let candidate = CronOwnerCandidateDto(sessionId: id, sessionTranscriptPath: nil, sessionMode: "chat", sessionScopeKey: "global")
+        let began = await callback.beginOwner(candidate: candidate)
+        XCTAssertTrue(began)
+        let receipt = CronOwnerReservationDto(sessionId: "22222222-2222-4222-8222-222222222222",
+            sessionTranscriptPath: "/home/lingxi/other.jsonl", sessionMode: "chat", sessionScopeKey: "global")
+        let accepted = await callback.confirmOwner(reservation: receipt)
+        XCTAssertFalse(accepted)
+        XCTAssertTrue(blocked)
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: id))
+    }
+    #endif
+    func testScheduledAdmissionGateOnlyHoldsDuringReservation() {
+        let gate = CronOwnerAdmissionGate()
+        let first = UUID()
+        let second = UUID()
+        let a = "11111111-1111-4111-8111-111111111111"
+        let b = "22222222-2222-4222-8222-222222222222"
+        XCTAssertTrue(gate.begin(sessionID: a, token: first))
+        XCTAssertFalse(gate.begin(sessionID: a, token: second))
+        XCTAssertFalse(gate.allowsNewOwner(sessionID: a))
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: b))
+        XCTAssertTrue(gate.begin(sessionID: b, token: second))
+        gate.finish(first)
+        gate.finish(first) // Completion and cancellation can race.
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: a))
+        XCTAssertFalse(gate.allowsNewOwner(sessionID: b))
+        gate.finish(second)
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: b))
+    }
+
+    func testOnlyTheReservedSessionWaitsAndCancelledWaitersDoNotInterfere() async throws {
+        let gate = CronOwnerAdmissionGate()
+        let a = "11111111-1111-4111-8111-111111111111"
+        let b = "22222222-2222-4222-8222-222222222222"
+        let token = UUID()
+        XCTAssertTrue(gate.begin(sessionID: a, token: token))
+        try await gate.waitUntilAvailable(sessionID: b)
+        let cancelled = Task { try await gate.waitUntilAvailable(sessionID: a) }
+        let waiting = Task { try await gate.waitUntilAvailable(sessionID: a) }
+        await Task.yield()
+        cancelled.cancel()
+        do { try await cancelled.value; XCTFail("The cancelled waiter must not be admitted") }
+        catch is CancellationError {}
+        XCTAssertFalse(gate.allowsNewOwner(sessionID: a))
+        gate.finish(token)
+        try await waiting.value
+        XCTAssertTrue(gate.allowsNewOwner(sessionID: a))
+    }
+
+    func testScopeMutationWaitsForPreparingSourceAndBlocksOnlyNewClaims() async throws {
+        let gate = CronOwnerAdmissionGate()
+        let existing = MockConversationSource(sessionMode: .chat)
+        let existingToken = await existing.send("continue")
+        XCTAssertNotNil(existingToken)
+        XCTAssertTrue(gate.beginSourcePreparation(existing))
+        let pending = Task { try await gate.beginScopeMutation() }
+        for _ in 0..<100 where !gate.scopeMutationPending { await Task.yield() }
+        XCTAssertTrue(gate.scopeMutationPending)
+        let other = MockConversationSource(sessionMode: .code)
+        XCTAssertFalse(gate.beginSourcePreparation(other))
+        XCTAssertFalse(gate.begin(sessionID: "11111111-1111-4111-8111-111111111111", token: UUID()))
+        XCTAssertTrue(existing.model.streaming)
+        gate.endSourcePreparation(existing)
+        let token = try await pending.value
+        XCTAssertTrue(gate.scopeMutationPending)
+        XCTAssertTrue(existing.model.streaming)
+        gate.endScopeMutation(token)
+        XCTAssertTrue(gate.beginSourcePreparation(other))
+        gate.endSourcePreparation(other)
+    }
+
+    func testScopeMutationWaitsForAnEmptyCatalogWrite() async throws {
+        let gate = CronOwnerAdmissionGate()
+        let catalog = try await gate.beginCatalogUpdate(sessionIDs: [])
+        let mutation = Task { try await gate.beginScopeMutation() }
+        for _ in 0..<100 where !gate.scopeMutationPending { await Task.yield() }
+        XCTAssertTrue(gate.scopeMutationPending)
+        gate.finish(catalog)
+        let token = try await mutation.value
+        XCTAssertTrue(gate.scopeMutationPending)
+        gate.endScopeMutation(token)
+        XCTAssertFalse(gate.scopeMutationPending)
+    }
+
+    func testScheduledAdmissionChecksLiveOwnerWithoutStoppingItsTurn() async throws {
+        let host = SessionHost()
+        let gate = CronOwnerAdmissionGate()
+        gate.sessionHost = host
+        let id = "11111111-1111-4111-8111-111111111111"
+        let source = MockConversationSource(sessionMode: .chat)
+        source.model.activeSessionId = id
+        source.model.workspaceState = SessionWorkspaceState(sessionId: id, cwd: "/workspace", projectRoot: "/workspace",
+            additionalDirectories: [], transcriptPath: "/catalog/original.jsonl")
+        _ = try host.retain(source: source, scope: .global, mode: .chat, sessionID: id, workspace: "/workspace", draft: "keep")
+        let sourceToken = await source.send("continue")
+        XCTAssertNotNil(sourceToken)
+        let token = UUID()
+        XCTAssertTrue(gate.begin(sessionID: id, token: token))
+        XCTAssertTrue(gate.allowsReservation(sessionID: id,
+            owner: SessionOwnerEvidence(scope: .global, mode: .chat, transcriptPath: "/catalog/original.jsonl"), previouslyKnown: true))
+        XCTAssertFalse(gate.allowsReservation(sessionID: id,
+            owner: SessionOwnerEvidence(scope: .global, mode: .chat, transcriptPath: "/catalog/copy.jsonl"), previouslyKnown: true))
+        XCTAssertFalse(gate.allowsReservation(sessionID: id,
+            owner: SessionOwnerEvidence(scope: .scheduled, mode: .chat, transcriptPath: "/catalog/original.jsonl"), previouslyKnown: false))
+        XCTAssertTrue(source.model.streaming)
+        gate.finish(token)
+        XCTAssertTrue(source.model.streaming)
+    }
+
+    func testScheduledReservationCompetesWithPreparingOwnerAndReconnect() throws {
+        let host = SessionHost()
+        let gate = CronOwnerAdmissionGate()
+        gate.sessionHost = host
+        host.admitsSessionIdentity = { id, _, _ in gate.allowsNewOwner(sessionID: id) }
+        let id = "11111111-1111-4111-8111-111111111111"
+        let preparing = MockConversationSource(sessionMode: .chat)
+        XCTAssertTrue(host.claimIdentity(id, for: preparing, scope: .global, mode: .chat))
+        XCTAssertFalse(gate.allowsUnclaimedReservation(sessionID: id))
+        host.endPreparingClaim(of: preparing)
+        XCTAssertTrue(gate.allowsUnclaimedReservation(sessionID: id))
+
+        preparing.model.activeSessionId = id
+        _ = try host.retain(source: preparing, scope: .global, mode: .chat, sessionID: id, workspace: "/", draft: "keep")
+        let replacement = MockConversationSource(sessionMode: .chat)
+        XCTAssertTrue(host.beginReplacement(of: preparing, with: replacement, sessionID: id, scope: .global, mode: .chat))
+        let owner = SessionOwnerEvidence(scope: .global, mode: .chat, transcriptPath: "/catalog/one.jsonl")
+        XCTAssertFalse(gate.allowsReservation(sessionID: id, owner: owner, previouslyKnown: true))
+        host.endPreparingClaim(of: replacement)
+        XCTAssertTrue(gate.allowsReservation(sessionID: id, owner: owner, previouslyKnown: true))
+        let token = UUID()
+        XCTAssertTrue(gate.begin(sessionID: id, token: token))
+        XCTAssertFalse(host.beginReplacement(of: preparing, with: replacement, sessionID: id, scope: .global, mode: .chat))
+        XCTAssertTrue(host.claimIdentity(id, for: preparing, scope: .global, mode: .chat), "An admitted owner continues")
+        gate.finish(token)
+    }
+
+    func testScheduledCandidateAndReceiptMatchTheCapturedTaskOwner() {
+        let id = "11111111-1111-4111-8111-111111111111"
+        let path = "/home/lingxi/original.jsonl"
+        var task = CronTaskRecord(id: "task", cron: "0 9 * * *", prompt: "Test", createdAtMs: 0,
+                                  lastFiredAtMs: nil, recurring: true, nextFireMs: nil, human: "Daily")
+        var config = CronAutomation()
+        config.runMode = .selectedSession
+        config.targetSessionId = id
+        config.targetSessionMode = .chat
+        config.targetSessionScopeKey = "global"
+        config.targetSessionTranscriptPath = path
+        task.automation = config
+        let selected = CronOwnerCandidate(sessionId: id, sessionMode: .chat, sessionScopeKey: "global", sessionTranscriptPath: path)
+        XCTAssertTrue(cronCandidateMatchesTask(selected, task: task))
+        XCTAssertFalse(cronCandidateMatchesTask(CronOwnerCandidate(sessionId: id, sessionMode: .chat,
+            sessionScopeKey: "global", sessionTranscriptPath: "/home/lingxi/copy.jsonl"), task: task))
+        XCTAssertTrue(cronReservationMatchesTask(CronOwnerReservation(sessionId: id, sessionTranscriptPath: path,
+            sessionMode: .chat, sessionScopeKey: "global"), task: task))
+        XCTAssertFalse(cronReservationMatchesTask(CronOwnerReservation(sessionId: id, sessionTranscriptPath: path,
+            sessionMode: .code, sessionScopeKey: "global"), task: task))
+        config.runMode = .newSession
+        config.sessionMode = .code
+        config.sessionScopeKey = "scheduled"
+        task.automation = config
+        XCTAssertTrue(cronCandidateMatchesTask(CronOwnerCandidate(sessionId: id, sessionMode: .code,
+            sessionScopeKey: "scheduled", sessionTranscriptPath: nil), task: task))
+        XCTAssertFalse(cronCandidateMatchesTask(CronOwnerCandidate(sessionId: id, sessionMode: .code,
+            sessionScopeKey: "scheduled", sessionTranscriptPath: path), task: task))
+    }
+
+    func testOwnedTaskSessionRoundTripsTheCompleteSourceAndCopyClearsIt() throws {
+        var automation = CronAutomation()
+        automation.runMode = .taskSession
+        automation.sessionMode = .chat
+        automation.sessionScopeKey = "scheduled"
+        automation.ownedSessionId = "11111111-1111-4111-8111-111111111111"
+        automation.ownedSessionTranscriptPath = "/home/lingxi/original.jsonl"
+        automation.ownedSessionMode = .chat
+        automation.ownedSessionScopeKey = "scheduled"
+        let decoded = try JSONDecoder().decode(CronAutomation.self, from: JSONEncoder().encode(automation))
+        XCTAssertEqual(decoded, automation)
+        let task = CronTaskRecord(id: "task", cron: "0 9 * * *", prompt: "Test", createdAtMs: 0,
+            lastFiredAtMs: nil, recurring: true, nextFireMs: nil, human: "Daily", automation: decoded)
+        let candidate = CronOwnerCandidate(sessionId: automation.ownedSessionId!, sessionMode: .chat,
+            sessionScopeKey: "scheduled", sessionTranscriptPath: automation.ownedSessionTranscriptPath)
+        XCTAssertTrue(cronCandidateMatchesTask(candidate, task: task))
+        XCTAssertFalse(cronCandidateMatchesTask(CronOwnerCandidate(sessionId: candidate.sessionId, sessionMode: .chat,
+            sessionScopeKey: "scheduled", sessionTranscriptPath: "/home/lingxi/copy.jsonl"), task: task))
+        let repository = CronRepository(appSandboxRoot: NSTemporaryDirectory())
+        repository.draft.automation = decoded
+        repository.beginCopy()
+        XCTAssertNil(repository.draft.automation.ownedSessionId)
+        XCTAssertNil(repository.draft.automation.ownedSessionTranscriptPath)
+        XCTAssertNil(repository.draft.automation.ownedSessionMode)
+        XCTAssertNil(repository.draft.automation.ownedSessionScopeKey)
+    }
+
+    func testScheduledRunPreservesItsNativeClaimOwner() throws {
+        let json = #"{"id":"run","taskId":"task","ownerPid":42,"claimGeneration":7,"scheduledAt":1,"status":"running","model":"provider/model"}"#
+        let run = try JSONDecoder().decode(CronAutomationRun.self, from: Data(json.utf8))
+        XCTAssertEqual(run.ownerPid, 42)
+        XCTAssertEqual(run.claimGeneration, 7)
+        let reopened = try JSONDecoder().decode(CronAutomationRun.self, from: JSONEncoder().encode(run))
+        XCTAssertEqual(reopened.ownerPid, 42)
+        XCTAssertEqual(reopened.claimGeneration, 7)
+    }
+
+    func testChangingTaskSessionToNewSessionClearsTheEntireOwnedSource() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        let provider = JsonCronStoreProvider()
+        let store = try await provider.store(for: scope, appSandboxRoot: root.path)
+        var original = CronTaskDraft.create()
+        original.prompt = "Owned task"
+        original.automation.model = "provider/model"
+        original.automation.runMode = .taskSession
+        original.automation.sessionMode = .chat
+        original.automation.sessionScopeKey = "scheduled"
+        original.automation.ownedSessionId = "11111111-1111-4111-8111-111111111111"
+        original.automation.ownedSessionTranscriptPath = "/home/lingxi/original.jsonl"
+        original.automation.ownedSessionMode = .chat
+        original.automation.ownedSessionScopeKey = "scheduled"
+        let task = try await store.saveConfigured(draft: original)
+        let repository = CronRepository(appSandboxRoot: root.path, storeProvider: provider)
+        repository.editorMode = .chat
+        await repository.refresh()
+        repository.beginEdit(scopeID: scope.scopeID, taskID: task.id)
+        repository.draft.automation.runMode = .newSession
+        await repository.saveDraft()
+        let savedTasks = try await store.list()
+        let saved = try XCTUnwrap(savedTasks.first)
+        XCTAssertEqual(saved.configuration.runMode, .newSession)
+        XCTAssertNil(saved.configuration.ownedSessionId)
+        XCTAssertNil(saved.configuration.ownedSessionTranscriptPath)
+        XCTAssertNil(saved.configuration.ownedSessionMode)
+        XCTAssertNil(saved.configuration.ownedSessionScopeKey)
+    }
+    func testGeneratedOwnerIndexJoinsCatalogAndPreservesConflicts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: preferences)
+        let history = CronRunHistoryStore(fileURL: root.appendingPathComponent("cron/history.json"))
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        let queued = try await history.claim(scope: scope, taskID: "queued", prompt: "No receipt yet", scheduledAtMs: 1)
+        XCTAssertTrue(try index.claims().isEmpty, "A queued run without a session receipt is a valid first-run state")
+        let file = root.appendingPathComponent("cron/sessions.json")
+        let id = "11111111-1111-4111-8111-111111111111"
+        _ = try await history.markTerminal(runID: XCTUnwrap(queued?.runID), status: .succeeded, sessionID: id,
+            sessionTranscriptPath: "/home/lingxi/scheduled.jsonl", sessionMode: .chat, sessionScopeKey: "scheduled")
+        XCTAssertEqual(try index.claims()[id], SessionOwnerEvidence(scope: .scheduled, mode: .chat,
+            transcriptPath: "/home/lingxi/scheduled.jsonl"), "A history receipt owns its UUID before index refresh")
+        let row = CronGeneratedSession(id: id, projectID: nil, title: "Scheduled", updatedAtMs: 1,
+            sessionTranscriptPath: "/home/lingxi/scheduled.jsonl", sessionMode: .chat, sessionScopeKey: "scheduled")
+        try JSONEncoder().encode([row]).write(to: file)
+        let repository = ProjectRepository(projectsRoot: root.appendingPathComponent("projects"))
+        let store = ProjectStore(repository: repository, synchronizer: ProjectWorkspaceSynchronizer(repository: repository))
+        store.sessionScopeClaims = { preferences.sessionScopeClaims }
+        store.additionalSessionEvidence = { try index.claims() }
+        XCTAssertTrue(store.admitsSessionIdentity(id, in: .scheduled, mode: .chat))
+        XCTAssertFalse(store.admitsSessionIdentity(id, in: .scheduled, mode: .code))
+        XCTAssertFalse(store.admitsSessionIdentity(id, in: .global, mode: .chat))
+
+        let validIndex = try Data(contentsOf: file)
+        let corruptIndex = Data("{".utf8)
+        try corruptIndex.write(to: file)
+        XCTAssertFalse(store.admitsUnclaimedOwner())
+        XCTAssertTrue(store.errorMessage?.contains("scheduled") == true)
+        XCTAssertEqual(try Data(contentsOf: file), corruptIndex)
+        try validIndex.write(to: file)
+        var wrongMode = row
+        wrongMode.sessionMode = .code
+        try JSONEncoder().encode([wrongMode]).write(to: file)
+        XCTAssertFalse(store.admitsUnclaimedOwner(), "Index and history cannot disagree about fixed mode")
+        try validIndex.write(to: file)
+
+        let global = ProjectSessionSummary(sessionId: id, title: "Conflicting", messageCount: 1,
+            relativeTime: "Now", updatedAt: Date(), mode: .chat, transcriptPath: "/other/copy.jsonl")
+        _ = try repository.updateSessions(projectId: nil, sessions: [global])
+        let preserved = try Data(contentsOf: file)
+        XCTAssertFalse(store.admitsSessionIdentity(id, in: .scheduled, mode: .chat))
+        XCTAssertFalse(store.admitsSessionIdentity(id, in: .global, mode: .chat))
+        XCTAssertEqual(try Data(contentsOf: file), preserved)
+
+        try FileManager.default.removeItem(at: file)
+        let reopened = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: preferences)
+        XCTAssertThrowsError(try reopened.claims(), "A previously observed missing index is never recreated")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    func testMissingGeneratedIndexWithSessionReceiptIsNotInitialized() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let history = CronRunHistoryStore(fileURL: root.appendingPathComponent("cron/history.json"))
+        let claimed = try await history.claim(scope: .global(appSandboxRoot: root.path), taskID: "task", prompt: "Done", scheduledAtMs: 1)
+        _ = try await history.markTerminal(runID: XCTUnwrap(claimed?.runID), status: .succeeded,
+                                          sessionID: "11111111-1111-4111-8111-111111111111")
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: ProjectScopedPreferences(defaults: defaults))
+        XCTAssertThrowsError(try index.claims())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("cron/sessions.json").path))
+    }
+
+    func testGeneratedIndexSymlinkIsRejectedAndPreserved() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let cron = root.appendingPathComponent("cron")
+        try FileManager.default.createDirectory(at: cron, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let external = root.appendingPathComponent("other.json")
+        let original = Data("[]".utf8)
+        try original.write(to: external)
+        let file = cron.appendingPathComponent("sessions.json")
+        try FileManager.default.createSymbolicLink(at: file, withDestinationURL: external)
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: ProjectScopedPreferences(defaults: defaults))
+        XCTAssertThrowsError(try index.claims())
+        XCTAssertEqual(try Data(contentsOf: external), original)
+        XCTAssertTrue(try file.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+    }
+
+    func testGeneratedIndexDuplicateOwnerKeysAreRejectedAndPreserved() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: ProjectScopedPreferences(defaults: defaults))
+        XCTAssertTrue(try index.claims().isEmpty)
+        let file = root.appendingPathComponent("cron/sessions.json")
+        let corrupt = Data(#"[{"id":"11111111-1111-4111-8111-111111111111","projectID":null,"title":"x","updatedAtMs":1,"sessionTranscriptPath":"/a","sessionMode":"chat","sessionScopeKey":"global","sessionScopeKey":"scheduled"}]"#.utf8)
+        try corrupt.write(to: file)
+        XCTAssertThrowsError(try index.claims())
+        XCTAssertEqual(try Data(contentsOf: file), corrupt)
+    }
+
+    func testStartupScansNativeReceiptsBeforeAllowingOwnerAdmission() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: ProjectScopedPreferences(defaults: defaults))
+        XCTAssertTrue(try index.claims().isEmpty)
+        let id = "11111111-1111-4111-8111-111111111111"
+        let reservation = CronOwnerReservation(sessionId: id, sessionTranscriptPath: "/home/lingxi/actual.jsonl",
+                                               sessionMode: .chat, sessionScopeKey: "scheduled")
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        // The task and its bounded run history were deleted; the ledger still owns the UUID.
+        let provider = FakeStoreProvider(stores: [scope.scopeID: FakeCronStore(tasks: [], reservations: [reservation])])
+        let repository = CronRepository(appSandboxRoot: root.path, storeProvider: provider)
+        repository.startupOwnerIndex = index
+        XCTAssertFalse(repository.ownerAdmissionReady)
+        try await repository.prepareOwnerAdmission()
+        XCTAssertTrue(repository.ownerAdmissionReady)
+        XCTAssertEqual(try index.claims()[id], SessionOwnerEvidence(scope: .scheduled, mode: .chat,
+            transcriptPath: "/home/lingxi/actual.jsonl"))
+        XCTAssertEqual(try CronRepository.scheduledTranscriptPath(appSandboxRoot: root.path, sessionID: id, mode: .chat),
+                       "/home/lingxi/actual.jsonl")
+    }
+
+    func testInvalidNativeReceiptFreezesStartupWithoutOverwritingIndex() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: ProjectScopedPreferences(defaults: defaults))
+        XCTAssertTrue(try index.claims().isEmpty)
+        let file = root.appendingPathComponent("cron/sessions.json")
+        let original = try Data(contentsOf: file)
+        let invalid = CronOwnerReservation(sessionId: "11111111-1111-4111-8111-111111111111",
+            sessionTranscriptPath: "", sessionMode: .chat, sessionScopeKey: "scheduled")
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        let repository = CronRepository(appSandboxRoot: root.path,
+            storeProvider: FakeStoreProvider(stores: [scope.scopeID: FakeCronStore(tasks: [], reservations: [invalid])]))
+        repository.startupOwnerIndex = index
+        do { try await repository.prepareOwnerAdmission(); XCTFail("Incomplete receipt must prevent startup") } catch {}
+        XCTAssertFalse(repository.ownerAdmissionReady)
+        XCTAssertEqual(try Data(contentsOf: file), original)
+    }
+
+    func testEarlyCronEntryPointsDoNotRunWhenOwnerPreflightFails() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: ProjectScopedPreferences(defaults: defaults))
+        let executor = FakeExecutor()
+        let repository = CronRepository(appSandboxRoot: root.path, executor: executor)
+        repository.startupOwnerIndex = index
+        repository.startupOwnerCatalogPreflight = {
+            throw ProjectRepositoryError.invalidSessionOwnership("project.bad: unreadable index")
+        }
+        await repository.reconcile(reason: "foreground")
+        await repository.runNow(scopeID: "global", taskID: "task")
+        let due = await executor.dueCalls
+        let manual = await executor.manualCalls
+        XCTAssertTrue(due.isEmpty)
+        XCTAssertTrue(manual.isEmpty)
+        XCTAssertFalse(repository.ownerAdmissionReady)
+    }
+
+    func testRefreshPreservesOwnerIndexWhenHistoryContradictsIt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: ProjectScopedPreferences(defaults: defaults))
+        XCTAssertTrue(try index.claims().isEmpty)
+        let id = "11111111-1111-4111-8111-111111111111"
+        let row = CronGeneratedSession(id: id, projectID: nil, title: "Existing", updatedAtMs: 1,
+            sessionTranscriptPath: "/home/lingxi/original.jsonl", sessionMode: .chat, sessionScopeKey: "scheduled")
+        let file = root.appendingPathComponent("cron/sessions.json")
+        let original = try JSONEncoder().encode([row])
+        try original.write(to: file)
+        let history = CronRunHistoryStore(fileURL: root.appendingPathComponent("cron/history.json"))
+        let run = try await history.claim(scope: .global(appSandboxRoot: root.path), taskID: "task", prompt: "Conflict", scheduledAtMs: 1)
+        _ = try await history.markTerminal(runID: XCTUnwrap(run?.runID), status: .succeeded, sessionID: id,
+            sessionTranscriptPath: "/home/lingxi/other.jsonl", sessionMode: .chat, sessionScopeKey: "scheduled")
+        let repository = CronRepository(appSandboxRoot: root.path, historyStore: history)
+        repository.startupOwnerIndex = index
+        await repository.refresh()
+        XCTAssertEqual(try Data(contentsOf: file), original)
+        XCTAssertNotNil(repository.state.errorMessage)
+        XCTAssertThrowsError(try index.claims())
+    }
+
+    func testCorruptReservationLedgerFreezesStartupAndPreservesFiles() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: ProjectScopedPreferences(defaults: defaults))
+        XCTAssertTrue(try index.claims().isEmpty)
+        let directory = root.appendingPathComponent("cron/global")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let ledger = directory.appendingPathComponent("owner-reservations.json")
+        let corrupt = Data("{".utf8)
+        try corrupt.write(to: ledger)
+        let indexFile = root.appendingPathComponent("cron/sessions.json")
+        let original = try Data(contentsOf: indexFile)
+        let repository = CronRepository(appSandboxRoot: root.path)
+        repository.startupOwnerIndex = index
+        do { try await repository.prepareOwnerAdmission(); XCTFail("Unreadable ledger must prevent startup") } catch {}
+        XCTAssertFalse(repository.ownerAdmissionReady)
+        XCTAssertTrue(repository.state.errorMessage?.contains("scheduled") == true)
+        XCTAssertEqual(try Data(contentsOf: ledger), corrupt)
+        XCTAssertEqual(try Data(contentsOf: indexFile), original)
+    }
+
+    func testStartupDoesNotAdmitWhenSchedulerScopesChangeDuringScan() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: ProjectScopedPreferences(defaults: defaults))
+        XCTAssertTrue(try index.claims().isEmpty)
+        let provider = PausingCronStoreProvider()
+        let repository = CronRepository(appSandboxRoot: root.path, storeProvider: provider)
+        repository.startupOwnerIndex = index
+        var scopes = [CronScope.global(appSandboxRoot: root.path)]
+        repository.startupOwnerScopes = { scopes }
+        await provider.pauseNextStore()
+        let scan = Task { try await repository.prepareOwnerAdmission() }
+        await provider.waitUntilPaused()
+        scopes.append(CronScope(scopeID: "project", projectID: "project", projectName: "Project",
+                                projectCwd: "/workspace", guestWorkspacePath: nil))
+        await provider.releaseStore()
+        do { try await scan.value; XCTFail("A newly discovered scheduler scope must be scanned") } catch {}
+        XCTAssertFalse(repository.ownerAdmissionReady)
+        XCTAssertTrue(try index.claims().isEmpty)
+    }
+
+    func testNewProjectScopeIsScannedBeforeAnotherOwnerIsAdmitted() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: ProjectScopedPreferences(defaults: defaults))
+        XCTAssertTrue(try index.claims().isEmpty)
+        let global = CronScope.global(appSandboxRoot: root.path)
+        let project = CronScope(scopeID: "new-project", projectID: "new-project", projectName: "New",
+                                projectCwd: "/project", guestWorkspacePath: nil)
+        let id = "11111111-1111-4111-8111-111111111111"
+        let owner = CronOwnerReservation(sessionId: id, sessionTranscriptPath: "/home/lingxi/project/session.jsonl",
+                                         sessionMode: .chat, sessionScopeKey: "project.new-project")
+        let provider = FakeStoreProvider(stores: [global.scopeID: FakeCronStore(tasks: []),
+                                                  project.scopeID: FakeCronStore(tasks: [], reservations: [owner])])
+        let repository = CronRepository(appSandboxRoot: root.path, storeProvider: provider)
+        repository.startupOwnerIndex = index
+        var scopes = [global]
+        repository.startupOwnerScopes = { scopes }
+        try await repository.prepareOwnerAdmission()
+        XCTAssertTrue(repository.ownerAdmissionIsCurrent)
+        XCTAssertNil(try index.claims()[id])
+        scopes.append(project)
+        XCTAssertFalse(repository.ownerAdmissionIsCurrent)
+        try await repository.prepareOwnerAdmission()
+        XCTAssertTrue(repository.ownerAdmissionIsCurrent)
+        XCTAssertEqual(try index.claims()[id], SessionOwnerEvidence(scope: .project("new-project"), mode: .chat,
+                                                                    transcriptPath: owner.sessionTranscriptPath))
+    }
+
+    func testConflictingNativeReceiptDoesNotReplaceExistingOwnerIndex() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "CronOwnerIndex.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let index = CronSessionOwnershipIndex(appSandboxRoot: root.path, preferences: ProjectScopedPreferences(defaults: defaults))
+        XCTAssertTrue(try index.claims().isEmpty)
+        let file = root.appendingPathComponent("cron/sessions.json")
+        let original = try Data(contentsOf: file)
+        let id = "11111111-1111-4111-8111-111111111111"
+        let projects = ProjectRepository(projectsRoot: root.appendingPathComponent("projects"))
+        let row = ProjectSessionSummary(sessionId: id, title: "Global", messageCount: 1, relativeTime: "Now",
+            updatedAt: Date(), mode: .chat, transcriptPath: "/home/lingxi/original.jsonl")
+        _ = try projects.updateSessions(projectId: nil, sessions: [row])
+        let store = ProjectStore(repository: projects, synchronizer: ProjectWorkspaceSynchronizer(repository: projects))
+        store.additionalSessionEvidence = { try index.claims() }
+        let conflicting = CronOwnerReservation(sessionId: id, sessionTranscriptPath: "/home/lingxi/copy.jsonl",
+                                             sessionMode: .chat, sessionScopeKey: "global")
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        let repository = CronRepository(appSandboxRoot: root.path,
+            storeProvider: FakeStoreProvider(stores: [scope.scopeID: FakeCronStore(tasks: [], reservations: [conflicting])]))
+        repository.startupOwnerIndex = index
+        repository.startupReceiptValidator = { receipt in
+            guard let path = receipt.sessionTranscriptPath,
+                  store.admitsSessionEvidence(receipt.id, owner: SessionOwnerEvidence(scope: .global, mode: .chat, transcriptPath: path)) else {
+                throw ProjectRepositoryError.conflictingSessionScope
+            }
+        }
+        do { try await repository.prepareOwnerAdmission(); XCTFail("Conflicting receipt must prevent startup") } catch {}
+        XCTAssertFalse(repository.ownerAdmissionReady)
+        XCTAssertEqual(try Data(contentsOf: file), original)
+        XCTAssertEqual(try store.transcriptPathForSession(id, in: .global, mode: .chat), "/home/lingxi/original.jsonl")
+    }
+
+    func testCancelledHistoryWaiterDoesNotCommitAfterLockRelease() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        let lockURL = file.appendingPathExtension("lock")
+        let fd = lockURL.path.withCString { open($0, O_WRONLY | O_CREAT, 0o600) }
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        guard fd >= 0 else { return }
+        XCTAssertEqual(flock(fd, LOCK_EX), 0)
+        let store = CronRunHistoryStore(fileURL: file)
+        let task = Task {
+            try await store.claim(scope: .global(appSandboxRoot: root.path), taskID: "cancelled", prompt: "Keep", scheduledAtMs: 1)
+        }
+        try await Task.sleep(for: .milliseconds(40))
+        task.cancel()
+        flock(fd, LOCK_UN)
+        close(fd)
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled waiter must not commit")
+        } catch is CancellationError {}
+        let records = try await store.records()
+        XCTAssertTrue(records.isEmpty)
+    }
+    func testSelectedTargetIsRevalidatedAfterStorePreparationSuspends() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = PausingCronStoreProvider()
+        let repository = CronRepository(appSandboxRoot: root.path, storeProvider: provider)
+        await repository.refresh()
+        repository.editorMode = .chat
+        let id = "11111111-1111-4111-8111-111111111111"
+        var path = "/home/lingxi/.lingxi/projects/original.jsonl"
+        repository.sessionChoiceProvider = { mode in
+            guard mode == .chat else { return [] }
+            return [CronSessionChoice(id: id, title: "Global", scopeID: globalCronScopeID,
+                owner: .global, mode: .chat, transcriptPath: path)]
+        }
+        repository.beginCreate()
+        repository.draft.prompt = "Preserve the original source"
+        repository.draft.automation.model = "provider/model"
+        repository.draft.automation.runMode = .selectedSession
+        repository.selectTarget(id)
+        await provider.pauseNextStore()
+        let saving = Task { await repository.saveDraft() }
+        await provider.waitUntilPaused()
+        path = "/home/lingxi/.lingxi/projects/copy.jsonl"
+        await provider.releaseStore()
+        await saving.value
+        XCTAssertNotNil(repository.state.errorMessage)
+        XCTAssertEqual(repository.draft.automation.targetSessionTranscriptPath, "/home/lingxi/.lingxi/projects/original.jsonl")
+        XCTAssertEqual(repository.draft.prompt, "Preserve the original source")
+        let store = try await provider.store(for: .global(appSandboxRoot: root.path), appSandboxRoot: root.path)
+        let before = try await store.list()
+        XCTAssertTrue(before.isEmpty)
+
+        path = "/home/lingxi/.lingxi/projects/original.jsonl"
+        repository.editorMode = .code
+        await repository.saveDraft()
+        XCTAssertNotNil(repository.state.errorMessage)
+        repository.editorMode = .chat
+        await repository.saveDraft()
+        let tasks = try await store.list()
+        let saved = try XCTUnwrap(tasks.first?.configuration)
+        XCTAssertEqual(saved.targetSessionId, id)
+        XCTAssertEqual(saved.targetSessionTranscriptPath, path)
+        XCTAssertEqual(saved.targetSessionMode, .chat)
+        XCTAssertEqual(saved.targetSessionScopeKey, ConversationScope.global.workspaceKey)
+    }
+
+    func testNewCronCapturesModeAndScheduledOwner() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = JsonCronStoreProvider()
+        let repository = CronRepository(appSandboxRoot: root.path, storeProvider: provider)
+        await repository.refresh()
+        repository.editorMode = .chat
+        repository.beginCreate()
+        repository.draft.prompt = "Run in Chat"
+        repository.draft.automation.model = "provider/model"
+        await repository.saveDraft()
+        let store = try await provider.store(for: .global(appSandboxRoot: root.path), appSandboxRoot: root.path)
+        let tasks = try await store.list()
+        let saved = try XCTUnwrap(tasks.first?.configuration)
+        XCTAssertEqual(saved.sessionMode, .chat)
+        XCTAssertEqual(saved.sessionScopeKey, ConversationScope.scheduled.workspaceKey)
+    }
+
+    func testCorruptGeneratedIndexIsPreservedAndFreezesAdmission() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = CronRepository(appSandboxRoot: root.path)
+        await repository.refresh()
+        XCTAssertNotNil(repository.generatedSessionsForAdmission())
+        let index = root.appendingPathComponent("cron/sessions.json")
+        let corrupt = Data("{".utf8)
+        try corrupt.write(to: index)
+        XCTAssertNil(repository.generatedSessionsForAdmission())
+        await repository.refresh()
+        XCTAssertNil(repository.generatedSessionsForAdmission())
+        XCTAssertFalse(repository.state.scopes.isEmpty, "Unrelated task access should remain available")
+        XCTAssertTrue(repository.state.errorMessage?.contains("scheduled") == true)
+        XCTAssertEqual(try Data(contentsOf: index), corrupt)
+    }
+
+    func testScheduledRestoreRequiresOneExactSource() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = root.appendingPathComponent("cron")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = "11111111-1111-4111-8111-111111111111"
+        let row = CronGeneratedSession(id: id, projectID: nil, title: "Result", updatedAtMs: 1,
+            sessionTranscriptPath: "/home/lingxi/original.jsonl", sessionMode: .chat, sessionScopeKey: "scheduled")
+        let index = directory.appendingPathComponent("sessions.json")
+        try JSONEncoder().encode([row]).write(to: index)
+        XCTAssertEqual(try CronRepository.scheduledTranscriptPath(appSandboxRoot: root.path, sessionID: id, mode: .chat), row.sessionTranscriptPath)
+        XCTAssertThrowsError(try CronRepository.scheduledTranscriptPath(appSandboxRoot: root.path, sessionID: id, mode: .code))
+        var conflicting = row
+        conflicting.sessionTranscriptPath = "/home/lingxi/copy.jsonl"
+        try JSONEncoder().encode([row, conflicting]).write(to: index)
+        XCTAssertThrowsError(try CronRepository.scheduledTranscriptPath(appSandboxRoot: root.path, sessionID: id, mode: .chat))
+    }
     func testConfiguredTaskPausesPersistsAndResumesInFuture() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -107,23 +917,24 @@ final class CronRepositoryTests: XCTestCase {
     func testScheduledScopeHasDedicatedPreferenceAndWorkspaceIdentity() {
         XCTAssertEqual(ConversationScope(workspaceKey: "scheduled"), .scheduled)
         XCTAssertNotEqual(ConversationScope.scheduled.preferenceScope, ConversationScope.global.preferenceScope)
-        XCTAssertEqual(CronScope.global(appSandboxRoot: "/app").guestWorkspacePath, "/app/scheduled/workspace")
+        XCTAssertEqual(CronScope.global(appSandboxRoot: "/app").guestWorkspacePath, LXISHGuestPaths.workspace("scheduled"))
     }
 
-    func testLegacyMigrationIsIdempotentAndPausesWithoutModel() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let store = JsonCronStoreClient(fileURL: directory.appendingPathComponent("tasks.json"), now: { 1_700_000_000_000 }, makeID: { "legacy" }, calendar: Calendar(identifier: .gregorian))
-        let legacy = try await store.create(cronExpr: "0 9 * * *", prompt: "Legacy instructions", recurring: true)
-        try await store.migrateLegacyTasks(defaultModel: nil, reasoning: CronReasoning())
-        let first = try await store.list()
-        XCTAssertEqual(first.first?.status, .paused)
-        XCTAssertEqual(first.first?.id, legacy.id)
-        XCTAssertEqual(first.first?.createdAtMs, legacy.createdAtMs)
-        XCTAssertEqual(first.first?.prompt, legacy.prompt)
-        try await store.migrateLegacyTasks(defaultModel: "provider/model", reasoning: CronReasoning(selection: "high"))
-        let second = try await store.list()
-        XCTAssertEqual(first, second)
+    func testProjectCronScopeKeepsItsStorageRootWhenSessionDirectoryChanges() {
+        let id = "11111111-1111-4111-8111-111111111111"
+        var record = ProjectRecord(id: id, name: "Project", storageKind: .internal, createdAt: Date(), updatedAt: Date())
+        let root = ProjectWorkspace(projectId: id, hostURL: URL(fileURLWithPath: "/managed/project/workspace"),
+                                    guestPath: "/home/lingxi/projects/project/workspace")
+        var project = ProjectSnapshot(record: record, workspace: root, sourceWorkspace: root, sessions: [])
+        let before = CronScope.project(project)
+        record.activeDirectory = "/home/lingxi/other"
+        project.record = record
+        project.workspace = ProjectWorkspace(projectId: id, hostURL: URL(fileURLWithPath: "/managed/other"),
+                                             guestPath: record.activeDirectory)
+        let after = CronScope.project(project)
+        XCTAssertEqual(before, after)
+        XCTAssertEqual(after.projectCwd, "/managed/project/workspace")
+        XCTAssertEqual(after.guestWorkspacePath, "/home/lingxi/projects/project/workspace")
     }
 
     func testRecoveryUsesNativeTerminalResultBeforeMarkingInterrupted() async throws {
@@ -146,6 +957,7 @@ final class CronRepositoryTests: XCTestCase {
         _ = try await history.markRunning(runID: XCTUnwrap(pending?.runID), attempt: 1)
         let notifier = FakeNotifier()
         let repository = CronRepository(appSandboxRoot: directory.path, storeProvider: provider, historyStore: history, notifier: notifier)
+        await repository.refresh() // Establish the empty index before recovery records a result.
         await repository.reconcile(reason: "restart")
         XCTAssertEqual(repository.state.history.first?.status, .succeeded)
         XCTAssertEqual(repository.state.history.first?.sessionID, "result-chat")
@@ -161,11 +973,12 @@ final class CronRepositoryTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let handle = try buildIosCronStore(appSandboxRoot: directory.path, managedRoot: directory.appendingPathComponent("runtime", isDirectory: true).path, projectCwd: nil)
-        try await handle.setMigrationDefaults(model: "provider/model", reasoningJson: "{\"type\":\"automatic\"}")
         var configuration = CronAutomation()
         configuration.model = "provider/model"
         configuration.reasoning = CronReasoning(selection: "high")
         configuration.runMode = .taskSession
+        configuration.sessionMode = .code
+        configuration.sessionScopeKey = ConversationScope.scheduled.workspaceKey
         let created = try await handle.createConfigured(cronExpr: "0 9 * * *", prompt: "Native round trip", recurring: true,
             automationJson: String(decoding: JSONEncoder().encode(configuration), as: UTF8.self))
         let decoded = try JSONDecoder().decode(CronAutomation.self, from: Data(XCTUnwrap(created.automationJson).utf8))
@@ -738,6 +1551,26 @@ final class CronRepositoryTests: XCTestCase {
         XCTAssertEqual(afterThirdPass, 1)
     }
 
+    func testUnknownScheduledOutcomeIsTerminalAndNeverAutomaticallyReplayed() async {
+        let global = CronScope.global(appSandboxRoot: "/tmp")
+        let task = CronTaskRecord(id: "unknown", cron: "*/15 * * * *", prompt: "Run", createdAtMs: 0,
+            lastFiredAtMs: nil, recurring: true, nextFireMs: 1_000, human: "Every 15 minutes")
+        let store = FakeCronStore(tasks: [task])
+        let outcome = CronExecutionOutcome(status: .interrupted, resultText: nil,
+            errorMessage: "The final outcome could not be saved", errorKind: .system,
+            sessionID: "11111111-1111-4111-8111-111111111111", sessionTranscriptPath: "/catalog/exact.jsonl",
+            sessionMode: .chat, sessionScopeKey: "scheduled")
+        let executor = FakeExecutor(dueResult: .success(outcome))
+        let repository = makeRepository(scopes: [global], activeScopeID: global.scopeID,
+            storeProvider: FakeStoreProvider(stores: [global.scopeID: store]), executor: executor, now: { 2_000 })
+        await repository.reconcile(reason: "first")
+        await repository.reconcile(reason: "again")
+        let calls = await executor.dueCalls
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(repository.state.history.first?.status, .interrupted)
+        XCTAssertEqual(repository.state.history.first?.sessionTranscriptPath, "/catalog/exact.jsonl")
+    }
+
     func testReconcileRecoversStartedOccurrenceWithoutRerunOrRenotify() async throws {
         let global = CronScope.global(appSandboxRoot: "/tmp")
         let task = CronTaskRecord(
@@ -925,6 +1758,55 @@ final class CronRepositoryTests: XCTestCase {
         XCTAssertEqual(restarted.state.history.first?.status, .succeeded)
     }
 
+    func testObservedHistoryMissingAfterClaimFailsClosedAcrossReopen() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        let store = CronRunHistoryStore(fileURL: file, newID: { "claimed" })
+        let claim = try await store.claim(scope: scope, taskID: "task", prompt: "Run", scheduledAtMs: 1)
+        XCTAssertNotNil(claim)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.appendingPathExtension("observed").path))
+        try FileManager.default.removeItem(at: file)
+        do { _ = try await store.markRunning(runID: "claimed", attempt: 1); XCTFail("Missing observed history must reject dispatch") }
+        catch {}
+        let reopened = CronRunHistoryStore(fileURL: file)
+        do { _ = try await reopened.claim(scope: scope, taskID: "other", prompt: "Run", scheduledAtMs: 2); XCTFail("Cold reopen must not recreate history") }
+        catch {}
+        XCTAssertThrowsError(try CronRunHistoryStore.storedSessionReceipts(fileURL: file))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    func testInterruptedHistoryInitializationIsNotTreatedAsFresh() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("history.json")
+        try Data("lingxi-cron-history-observed-v1\n".utf8).write(to: file.appendingPathExtension("observed"))
+        let store = CronRunHistoryStore(fileURL: file)
+        do { _ = try await store.records(); XCTFail("A witness without history is interrupted initialization") }
+        catch {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    func testHistoryUpdateRejectsReplacementDuringStaging() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        let first = CronRunHistoryStore(fileURL: file, newID: { "claimed" })
+        _ = try await first.claim(scope: scope, taskID: "task", prompt: "Run", scheduledAtMs: 1)
+        let external = Data("unrelated replacement".utf8)
+        let writer = DefaultProjectAtomicWriter(onGuardedStaged: { _ in try? external.write(to: file, options: .atomic) })
+        let store = CronRunHistoryStore(fileURL: file, writer: writer)
+        do { _ = try await store.markRunning(runID: "claimed", attempt: 1); XCTFail("Changed source must not be published over") }
+        catch {}
+        XCTAssertEqual(try Data(contentsOf: file), external)
+        do { _ = try await CronRunHistoryStore(fileURL: file).records(); XCTFail("Corrupt evidence must stay closed on reopen") }
+        catch {}
+        XCTAssertEqual(try Data(contentsOf: file), external)
+    }
+
     func testNotificationReservationIsExclusiveAcrossHistoryStoreInstances() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1038,31 +1920,7 @@ final class CronRepositoryTests: XCTestCase {
         }
     }
 
-    func testManualRecoveryUsesPersistedExecutionTimestamp() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let scope = CronScope.global(appSandboxRoot: root.path)
-        let provider = JsonCronStoreProvider()
-        let store = try await provider.store(for: scope, appSandboxRoot: root.path)
-        var draft = CronTaskDraft.create()
-        draft.prompt = "Manual recovery"
-        draft.automation.model = "provider/model"
-        let task = try await store.saveConfigured(draft: draft)
-        var config = task.configuration
-        config.runs = [CronAutomationRun(id: "native-manual", taskId: task.id, scheduledAt: 1_000,
-            startedAt: 1_010, finishedAt: 1_020, status: .succeeded, model: "provider/model",
-            sessionId: "actual-chat", summary: "Actual success")]
-        _ = try await store.updateAutomation(taskID: task.id, automation: config)
-        let history = CronRunHistoryStore(fileURL: root.appendingPathComponent("history.json"), newID: { "host-manual" })
-        _ = try await history.claim(scope: scope, taskID: task.id, prompt: task.prompt, scheduledAtMs: 1_000, manual: true)
-        _ = try await history.markRunning(runID: "host-manual", attempt: 1)
-        let repository = CronRepository(appSandboxRoot: root.path, storeProvider: provider, historyStore: history)
-        await repository.reconcile(reason: "restart")
-        XCTAssertEqual(repository.state.history.first?.status, .succeeded)
-        XCTAssertEqual(repository.state.history.first?.sessionID, "actual-chat")
-    }
-
-    func testLegacyAdoptedManualRecoveryUsesHostOccurrenceMarker() async throws {
+    func testManualRecoveryUsesExactHostOccurrenceMarker() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let scope = CronScope.global(appSandboxRoot: root.path)
@@ -1086,8 +1944,8 @@ final class CronRepositoryTests: XCTestCase {
         XCTAssertEqual(repository.state.history.first?.sessionID, "actual-chat")
     }
 
-    func testPreIdentityManualRecoveryRequiresOneUnambiguousTerminal() async throws {
-        for ambiguous in [false, true] {
+    func testManualRecoveryDoesNotInferAnOccurrenceFromTimestampOrOtherRuns() async throws {
+        for (scheduledAt, ambiguous) in [(UInt64(1_000), false), (1_010, false), (1_010, true)] {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: root) }
             let scope = CronScope.global(appSandboxRoot: root.path)
@@ -1099,7 +1957,7 @@ final class CronRepositoryTests: XCTestCase {
             let task = try await store.saveConfigured(draft: draft)
             var config = task.configuration
             config.runs = [CronAutomationRun(id: "\(task.id)-manual-1010-0", taskId: task.id,
-                scheduledAt: 1_010, startedAt: 1_011, finishedAt: 1_020, status: .succeeded,
+                scheduledAt: scheduledAt, startedAt: 1_011, finishedAt: 1_020, status: .succeeded,
                 model: "provider/model", sessionId: "actual-chat", summary: "Actual success")]
             if ambiguous {
                 config.runs.append(CronAutomationRun(id: "\(task.id)-manual-1020-1", taskId: task.id,
@@ -1115,8 +1973,9 @@ final class CronRepositoryTests: XCTestCase {
                 historyStore: history, executor: executor)
             await repository.reconcile(reason: "upgrade")
             await repository.reconcile(reason: "again")
-            XCTAssertEqual(repository.state.history.first?.status, ambiguous ? .interrupted : .succeeded)
-            XCTAssertEqual(repository.state.history.first?.sessionID, ambiguous ? nil : "actual-chat")
+            XCTAssertEqual(repository.state.history.first?.status, .interrupted)
+            XCTAssertNil(repository.state.history.first?.sessionID)
+            XCTAssertNil(repository.state.history.first?.resultText)
             let calls = await executor.manualCalls.count
             XCTAssertEqual(calls, 0, "Recovery must never replay a started run")
         }
@@ -1532,20 +2391,24 @@ private struct FakeScopeProvider: CronScopeProviding {
 
 private actor FakeCronStore: CronStoreClient {
     private(set) var tasks: [CronTaskRecord]
-    private var nextCreateIndex = 100
     private(set) var acknowledgedOccurrences: [CronOccurrence] = []
     private var ackFailureCount: Int
     private let recoveryBarrier: Bool
     private let cancelAfterAcknowledgement: Bool
     private var listCalls = 0
     private var waitingList: CheckedContinuation<Void, Never>?
+    private let reservations: [CronOwnerReservation]
 
-    init(tasks: [CronTaskRecord], ackFailureCount: Int = 0, recoveryBarrier: Bool = false, cancelAfterAcknowledgement: Bool = false) {
+    init(tasks: [CronTaskRecord], ackFailureCount: Int = 0, recoveryBarrier: Bool = false,
+         cancelAfterAcknowledgement: Bool = false, reservations: [CronOwnerReservation] = []) {
         self.tasks = tasks
         self.ackFailureCount = ackFailureCount
         self.recoveryBarrier = recoveryBarrier
         self.cancelAfterAcknowledgement = cancelAfterAcknowledgement
+        self.reservations = reservations
     }
+
+    func listOwnerReservations() async throws -> [CronOwnerReservation] { reservations }
 
     func list() async throws -> [CronTaskRecord] {
         listCalls += 1
@@ -1558,33 +2421,6 @@ private actor FakeCronStore: CronStoreClient {
         return tasks.sorted { lhs, rhs in
             (lhs.nextFireMs ?? .max) < (rhs.nextFireMs ?? .max)
         }
-    }
-
-    func create(cronExpr: String, prompt: String, recurring: Bool) async throws -> CronTaskRecord {
-        nextCreateIndex += 1
-        let task = CronTaskRecord(
-            id: "created-\(nextCreateIndex)",
-            cron: cronExpr,
-            prompt: prompt,
-            createdAtMs: UInt64(nextCreateIndex),
-            lastFiredAtMs: nil,
-            recurring: recurring,
-            nextFireMs: UInt64(nextCreateIndex * 1_000),
-            human: cronExpr
-        )
-        tasks.append(task)
-        return task
-    }
-
-    func update(taskID: String, cronExpr: String, prompt: String, recurring: Bool) async throws -> CronTaskRecord {
-        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else {
-            throw SimpleError("missing task")
-        }
-        tasks[index].cron = cronExpr
-        tasks[index].prompt = prompt
-        tasks[index].recurring = recurring
-        tasks[index].human = cronExpr
-        return tasks[index]
     }
 
     func delete(taskID: String) async throws -> Bool {
@@ -1619,6 +2455,31 @@ private actor FakeCronStore: CronStoreClient {
         }
         if cancelAfterAcknowledgement { withUnsafeCurrentTask { $0?.cancel() } }
         return true
+    }
+}
+
+private actor PausingCronStoreProvider: CronStoreProviding {
+    private let inner = JsonCronStoreProvider()
+    private var shouldPause = false
+    private var pausedWaiter: CheckedContinuation<Void, Never>?
+    private var release: CheckedContinuation<Void, Never>?
+
+    func pauseNextStore() { shouldPause = true }
+    func waitUntilPaused() async {
+        if release != nil { return }
+        await withCheckedContinuation { pausedWaiter = $0 }
+    }
+    func releaseStore() { release?.resume(); release = nil }
+    func store(for scope: CronScope, appSandboxRoot: String) async throws -> any CronStoreClient {
+        if shouldPause {
+            shouldPause = false
+            await withCheckedContinuation { continuation in
+                release = continuation
+                pausedWaiter?.resume()
+                pausedWaiter = nil
+            }
+        }
+        return try await inner.store(for: scope, appSandboxRoot: appSandboxRoot)
     }
 }
 

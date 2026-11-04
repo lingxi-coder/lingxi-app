@@ -1445,6 +1445,30 @@ export function validateClientEvent(value: unknown): ClientEvent {
         mode: sessionMode(input['mode'], 'mode'),
         messages: input['messages'] as ClientEvent & { messages: unknown[] }['messages'],
       } as ClientEvent;
+    case 'session_handoff_prepared':
+      exactKeys(input, ['type', 'request_id', 'source_session_id', 'source_mode', 'target_mode', 'cutoff', 'summary'], 'client event');
+      return { type,
+        request_id: string(input['request_id'], 'request_id'),
+        source_session_id: string(input['source_session_id'], 'source_session_id'),
+        source_mode: sessionMode(input['source_mode'], 'source_mode'),
+        target_mode: sessionMode(input['target_mode'], 'target_mode'),
+        cutoff: string(input['cutoff'], 'cutoff'),
+        summary: string(input['summary'], 'summary'),
+      };
+    case 'session_handoff_failed':
+      exactKeys(input, ['type', 'request_id', 'message'], 'client event');
+      return { type, request_id: string(input['request_id'], 'request_id'), message: string(input['message'], 'message') };
+    case 'context_manifest': {
+      exactKeys(input, ['type', 'manifest_json'], 'client event');
+      const manifest_json = string(input['manifest_json'], 'manifest_json');
+      // This private response contains inventory metadata, never prompt bodies.
+      // Reject unbounded strings before JSON parsing or retaining their contents.
+      if (manifest_json.length > 256 * 1024) throw new Error('context manifest is too large');
+      let manifest: unknown;
+      try { manifest = JSON.parse(manifest_json); } catch { throw new Error('invalid context manifest JSON'); }
+      object(manifest, 'context manifest');
+      return { type, manifest_json };
+    }
     case 'session_forked':
       exactKeys(input, ['type', 'source_session_id', 'session_id', 'mode'], 'client event');
       return {

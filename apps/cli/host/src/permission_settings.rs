@@ -2,15 +2,32 @@ use super::init;
 use super::permission_mode_preference;
 use crate::argv::Argv;
 
+/// Check the mode resolved for the workspace that will actually run.
+pub(crate) async fn enforce_permission_mode_safety(
+    argv: &Argv,
+    mode: permission::PermissionMode,
+) -> Result<(), String> {
+    if argv.restricted_enabled()
+        && (mode == permission::PermissionMode::BypassPermissions
+            || argv.dangerously_skip_permissions
+            || argv.allow_dangerously_skip_permissions)
+    {
+        return Err("bypassPermissions not supported in restricted mode".into());
+    }
+    if mode == permission::PermissionMode::BypassPermissions || argv.dangerously_skip_permissions {
+        permission::enforce_bypass_safety(&crate::bypass_env::RealBypassEnv::new()).await?;
+    }
+    Ok(())
+}
+
 /// Resolve the session permission mode (and any suppression notice) from CLI
 /// flags + merged `settings.json` — the shared resolver every dispatch path
 /// uses so the one-shot/print, interactive TUI, and stdio-REPL paths all see
 /// the SAME `initialPermissionModeFromCLI` result.
 ///
 /// This is `read_cli_mode_settings` + `permission::initial_permission_mode_from_cli`,
-/// with NO bypass-safety guard: the guard runs exactly once in [`run_cli`]
-/// (before mode dispatch, for all modes), so the interactive paths that call
-/// this helper to re-derive the mode must NOT re-run it. Returns
+/// with NO bypass-safety guard: dispatch checks the result before runtime
+/// construction, after a selected resume workspace has been identified. Returns
 /// `(mode, notice)` where `notice` is `Some` when the bypass killswitch
 /// suppressed a requested bypass, OR when the auto-mode availability gate
 /// downgraded a requested `auto` (`permissionModeNotification`).
@@ -37,7 +54,12 @@ use crate::argv::Argv;
 /// boot downgrade; the circuit breaker is fresh at boot and the provider is
 /// `"firstParty"` at this CLI surface, exactly as there.
 pub(crate) fn auto_mode_cycle_available(argv: &Argv) -> bool {
-    let settings = read_cli_mode_settings(argv);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    auto_mode_cycle_available_at(argv, &cwd)
+}
+
+pub(crate) fn auto_mode_cycle_available_at(argv: &Argv, cwd: &std::path::Path) -> bool {
+    let settings = read_cli_mode_settings_at(argv, cwd);
     let model = argv
         .model
         .clone()
@@ -51,7 +73,15 @@ pub(crate) fn auto_mode_cycle_available(argv: &Argv) -> bool {
 }
 
 pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMode, Option<String>) {
-    let mut settings = read_cli_mode_settings(argv);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    resolve_permission_mode_at(argv, &cwd)
+}
+
+pub(crate) fn resolve_permission_mode_at(
+    argv: &Argv,
+    cwd: &std::path::Path,
+) -> (permission::PermissionMode, Option<String>) {
+    let mut settings = read_cli_mode_settings_at(argv, cwd);
     if let Some(mode) = permission_mode_preference::load(argv) {
         settings.default_mode = Some(mode);
         // A remembered mode is the user's last interactive pick — trusted,
@@ -148,6 +178,14 @@ fn should_surface_auto_mode_gate_notice(
 /// Explicit `--settings` is read after ambient files so it remains effective
 /// in restricted mode even while user/project/local files are suppressed.
 pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettings {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    read_cli_mode_settings_at(parsed, &cwd)
+}
+
+fn read_cli_mode_settings_at(
+    parsed: &Argv,
+    project_dir: &std::path::Path,
+) -> permission::CliModeSettings {
     // `--setting-sources <user,project,local>` gates which settings files this
     // permission-mode reader consults too (claude scopes ALL settings loading,
     // not just providers/routing). `None` ⟶ both layers (default).
@@ -156,7 +194,6 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
     } else {
         init::setting_source_flags(parsed.setting_sources.as_deref())
     };
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut default_mode = None;
     let mut bypass_disabled = false;
     let mut auto_mode_disabled = false;
@@ -287,6 +324,58 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_mode_uses_selected_workspace_and_respects_explicit_override() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin");
+        let resumed = root.path().join("resumed");
+        for (workspace, mode) in [(&origin, "acceptEdits"), (&resumed, "plan")] {
+            let settings_dir = workspace.join(branding::DOT_DIR);
+            std::fs::create_dir_all(&settings_dir).unwrap();
+            std::fs::write(
+                settings_dir.join("settings.json"),
+                format!(r#"{{"permissions":{{"defaultMode":"{mode}"}}}}"#),
+            )
+            .unwrap();
+        }
+        let argv = Argv {
+            setting_sources: Some("project".into()),
+            ..Argv::default()
+        };
+        assert_eq!(
+            resolve_permission_mode_at(&argv, &origin).0,
+            permission::PermissionMode::AcceptEdits
+        );
+        assert_eq!(
+            resolve_permission_mode_at(&argv, &resumed).0,
+            permission::PermissionMode::Plan
+        );
+        let explicit = Argv {
+            permission_mode: Some("default".into()),
+            ..argv
+        };
+        assert_eq!(
+            resolve_permission_mode_at(&explicit, &resumed).0,
+            permission::PermissionMode::Default
+        );
+        std::fs::write(
+            resumed.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"permissions":{"disableBypassPermissionsMode":"disable"}}"#,
+        )
+        .unwrap();
+        let bypass = Argv {
+            permission_mode: Some("bypassPermissions".into()),
+            ..explicit
+        };
+        assert_eq!(
+            resolve_permission_mode_at(&bypass, &origin).0,
+            permission::PermissionMode::BypassPermissions
+        );
+        let (blocked, notice) = resolve_permission_mode_at(&bypass, &resumed);
+        assert_ne!(blocked, permission::PermissionMode::BypassPermissions);
+        assert!(notice.is_some());
+    }
 
     fn settings(
         default_mode: Option<permission::PermissionMode>,

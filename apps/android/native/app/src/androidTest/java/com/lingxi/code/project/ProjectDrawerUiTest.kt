@@ -32,7 +32,7 @@ class ProjectDrawerUiTest {
             color = Color.Blue,
             desc = "本机",
             sessions = listOf(
-                ProjectSession("session-1", "真实会话", "刚刚", "", msgs = 3),
+                ProjectSession("session-1", "真实会话", "刚刚", "", msgs = 3, mode = com.lingxi.code.model.SessionMode.Code),
             ),
         )
         rule.setContent {

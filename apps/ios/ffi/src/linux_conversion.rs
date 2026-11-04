@@ -128,8 +128,9 @@ pub(super) fn mount_spec_from_ffi(value: MobileLinuxMountSpecFfi) -> mobile_linu
 #[cfg(feature = "uniffi")]
 pub(super) fn command_request_from_ffi(
     value: MobileLinuxCommandRequestFfi,
-) -> mobile_linux_api::LinuxCommandRequest {
-    mobile_linux_api::LinuxCommandRequest {
+) -> Result<mobile_linux_api::LinuxCommandRequest, MobileLinuxOperationFfiError> {
+    require_explicit_cwd(value.cwd.as_deref())?;
+    Ok(mobile_linux_api::LinuxCommandRequest {
         command: value.command,
         args: value.args,
         cwd: value.cwd,
@@ -139,14 +140,15 @@ pub(super) fn command_request_from_ffi(
         network: network_policy_from_ffi(value.network),
         resource_limits: mobile_linux_api::ResourceLimits::default(),
         mounts: value.mounts.into_iter().map(mount_spec_from_ffi).collect(),
-    }
+    })
 }
 
 #[cfg(feature = "uniffi")]
 pub(super) fn pty_request_from_ffi(
     value: MobileLinuxPtyOpenRequestFfi,
-) -> mobile_linux_api::PtyOpenRequest {
-    mobile_linux_api::PtyOpenRequest {
+) -> Result<mobile_linux_api::PtyOpenRequest, MobileLinuxOperationFfiError> {
+    require_explicit_cwd(value.cwd.as_deref())?;
+    Ok(mobile_linux_api::PtyOpenRequest {
         command: value.command,
         args: value.args,
         cwd: value.cwd,
@@ -156,7 +158,17 @@ pub(super) fn pty_request_from_ffi(
             rows: value.rows,
         },
         mounts: value.mounts.into_iter().map(mount_spec_from_ffi).collect(),
+    })
+}
+
+#[cfg(feature = "uniffi")]
+fn require_explicit_cwd(cwd: Option<&str>) -> Result<(), MobileLinuxOperationFfiError> {
+    if cwd.is_none_or(|path| path.trim().is_empty()) {
+        return Err(MobileLinuxOperationFfiError::InvalidRequest {
+            message: "cwd must be explicitly provided".to_string(),
+        });
     }
+    Ok(())
 }
 
 #[cfg(feature = "uniffi")]
@@ -352,5 +364,57 @@ pub(super) fn mobile_linux_error_to_ffi(
             }
         }
         mobile_linux_api::MobileLinuxError::Timeout => MobileLinuxOperationFfiError::Timeout,
+    }
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod explicit_cwd_tests {
+    use super::*;
+
+    #[test]
+    fn command_and_pty_require_explicit_cwd() {
+        let command = MobileLinuxCommandRequestFfi {
+            command: "/bin/sh".into(),
+            args: Vec::new(),
+            cwd: None,
+            env: std::collections::HashMap::new(),
+            stdin: None,
+            timeout_ms: None,
+            network: MobileLinuxNetworkPolicyFfi::Disabled,
+            mounts: Vec::new(),
+        };
+        let pty = MobileLinuxPtyOpenRequestFfi {
+            command: "/bin/sh".into(),
+            args: Vec::new(),
+            cwd: None,
+            env: std::collections::HashMap::new(),
+            cols: 80,
+            rows: 24,
+            mounts: Vec::new(),
+        };
+        for cwd in [None, Some(String::new()), Some("  ".into())] {
+            let mut command = command.clone();
+            command.cwd = cwd.clone();
+            assert!(matches!(
+                command_request_from_ffi(command),
+                Err(MobileLinuxOperationFfiError::InvalidRequest { .. })
+            ));
+            let mut pty = pty.clone();
+            pty.cwd = cwd;
+            assert!(matches!(
+                pty_request_from_ffi(pty),
+                Err(MobileLinuxOperationFfiError::InvalidRequest { .. })
+            ));
+        }
+        let cwd = "/home/lingxi/.lingxi/code".to_string();
+        let mut command = command;
+        command.cwd = Some(cwd.clone());
+        assert_eq!(
+            command_request_from_ffi(command).unwrap().cwd,
+            Some(cwd.clone())
+        );
+        let mut pty = pty;
+        pty.cwd = Some(cwd.clone());
+        assert_eq!(pty_request_from_ffi(pty).unwrap().cwd, Some(cwd));
     }
 }

@@ -60,6 +60,7 @@ async fn resume_usage_snapshot_crosses_idle_websocket_and_late_usage_stays_filte
             &ClientCommand::ResumeSession {
                 session_id: session_id.clone(),
                 cwd: None,
+                expected_mode: client::protocol::listings::SessionModeDto::Code,
             },
         )
         .await;

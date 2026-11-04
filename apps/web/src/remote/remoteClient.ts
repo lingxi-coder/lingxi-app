@@ -8,6 +8,7 @@ import type {
   PermissionModeId,
   PermissionResponseDto,
   ReasoningSelectionDto,
+  SessionModeDto,
 } from '@lingxi/bridge-client';
 import {
   RemoteRpcError,
@@ -27,7 +28,7 @@ import {
 import { emptyTranscript, TranscriptBuilder, type Transcript } from './sessionModel';
 import { displayText } from './text';
 import type { ViewerConnection } from './viewerConnection';
-import { isPermissionModeId, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS } from './reuse';
+import { isPermissionModeId, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS, slashCommandEchoesRequest } from './reuse';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Session state
@@ -57,6 +58,7 @@ export interface OutgoingPrompt {
 
 export interface SessionState {
   sessionId: string;
+  sessionMode?: SessionModeDto;
   status: SessionStatus;
   error?: { code: string; message: string };
   transcript: Transcript;
@@ -78,8 +80,37 @@ const ATTACH_TIMEOUT_MS = 60_000;
 const RESET_SNAPSHOT_WAIT_MS = 3000;
 /** Live events kept while a snapshot is still being assembled. */
 const MAX_BUFFERED_EVENTS = 5000;
+const MAX_MODE_WAIT_UPDATES = 128;
+const MAX_MODE_WAIT_BYTES = 4 * 1024 * 1024;
 /** How long a request that the link dropped under waits for the link to come back, before it is given up. */
 const RECONNECT_WAIT_MS = 30_000;
+
+export const isTeamApproval = (sessionId: string): boolean => sessionId.length === 46
+  && /^team-approval:[A-Za-z0-9_-]{32}$/u.test(sessionId);
+const validMode = (mode: unknown): mode is SessionModeDto => mode === 'chat' || mode === 'code';
+const approvalPendingOnly = (pending: RemotePending): boolean => pending.questions.length === 0 && pending.computer_access.length === 0;
+
+/** Configuration slash commands have no prompt record to reconcile with. */
+function promptExpectsEcho(text: string): boolean {
+  const trimmed = text.trim();
+  return !/^\/[^\s/]+(?:\s|$)/u.test(trimmed) || slashCommandEchoesRequest(trimmed);
+}
+
+type SnapshotAssembly = { epoch: string; mode?: SessionModeDto; first: number; messages: MessageDto[]; records: RemoteSeqRecord[] };
+type SnapshotEnd = Extract<SessionSnapshotParams, { phase: 'end' }>;
+
+function recordMode(record: RemoteSeqRecord, sessionId: string): SessionModeDto | undefined | null {
+  if (record.record.type !== 'event') return undefined;
+  const event = record.record.event;
+  if ((event.type !== 'session_started' && event.type !== 'session_resumed') || event.session_id !== sessionId) return undefined;
+  return validMode(event.mode) ? event.mode : null;
+}
+
+function combineModes(known: SessionModeDto | undefined, incoming: unknown): SessionModeDto | undefined | null {
+  if (incoming === undefined) return known;
+  if (!validMode(incoming) || (known !== undefined && known !== incoming)) return null;
+  return incoming;
+}
 
 function initialState(sessionId: string): SessionState {
   return {
@@ -153,8 +184,15 @@ export class SessionController {
   private firstMessageIndex = 0;
   private records: RemoteSeqRecord[] = [];
   private builder = new TranscriptBuilder();
-  private assembly: { epoch: string; first: number; messages: MessageDto[]; records: RemoteSeqRecord[] } | undefined;
+  private assembly: SnapshotAssembly | undefined;
+  private pendingSnapshot: { assembly: SnapshotAssembly; end: SnapshotEnd } | undefined;
   private held: RemoteSeqRecord[] = [];
+  private heldPending: RemotePending | undefined;
+  private modeWaitUpdates = 0;
+  private modeWaitBytes = 0;
+  private modeRejected = false;
+  private approvalResponse: 'available' | 'inFlight' | 'consumed' = 'available';
+  private snapshotFinishedDuringAttach = false;
   private droppedThroughSeq: number | undefined;
   private awaitingAttach = false;
   private resetTimer: unknown;
@@ -178,6 +216,9 @@ export class SessionController {
 
   private commit(change: Partial<SessionState>): void {
     this.current = { ...this.current, ...change };
+    if (this.approvalResponse === 'consumed') {
+      this.current = { ...this.current, pending: { ...this.current.pending, permissions: [] } };
+    }
     if (this.notifyScheduled) return;
     this.notifyScheduled = true;
     // Records arrive in bursts; one render per burst is enough.
@@ -187,12 +228,65 @@ export class SessionController {
     });
   }
 
+  /** Conversation operations require the matching session's confirmed fixed mode. */
+  requireConversation(): void {
+    if (isTeamApproval(this.sessionId) || this.modeRejected || this.current.status !== 'live'
+      || this.current.sessionMode === undefined || !this.connected()) {
+      throw new RemoteRpcError('closed', 'The remote session does not have a confirmed mode.');
+    }
+  }
+
+  private rejectMode(code = 'SESSION_MODE_MISMATCH'): void {
+    this.modeRejected = true;
+    this.attachId += 1;
+    this.awaitingAttach = false;
+    this.assembly = undefined;
+    this.pendingSnapshot = undefined;
+    this.held = [];
+    this.heldPending = undefined;
+    this.io.clock.clearTimeout(this.resetTimer);
+    this.invalidateHistory();
+    this.images.clear();
+    this.commit({ status: 'error', error: { code, message: code === 'SESSION_MODE_OVERFLOW'
+      ? 'Remote session data exceeded the mode confirmation limit.'
+      : 'The remote session reported a different fixed mode.' } });
+  }
+
+  private chargeModeWait(value: unknown): boolean {
+    if (this.current.sessionMode !== undefined || isTeamApproval(this.sessionId) || this.assembly?.mode !== undefined) return true;
+    let bytes: number;
+    try { bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength; }
+    catch { this.rejectMode('SESSION_MODE_OVERFLOW'); return false; }
+    if (this.modeWaitUpdates >= MAX_MODE_WAIT_UPDATES || bytes > MAX_MODE_WAIT_BYTES - this.modeWaitBytes) {
+      this.rejectMode('SESSION_MODE_OVERFLOW');
+      return false;
+    }
+    this.modeWaitUpdates += 1;
+    this.modeWaitBytes += bytes;
+    return true;
+  }
+
+  private heldMode(known: SessionModeDto | undefined, after: number): SessionModeDto | undefined | null {
+    let mode: SessionModeDto | undefined | null = known;
+    let last = after;
+    for (const item of [...this.held].sort((a, b) => a.seq - b.seq)) {
+      if (item.seq <= last) continue;
+      const next = recordMode(item, this.sessionId);
+      if (next === null) return null;
+      mode = combineModes(mode, next);
+      if (mode === null) return null;
+      last = item.seq;
+    }
+    return mode;
+  }
+
   // ───────────────────────────────────────────────────────────────────────────
   // Attaching
   // ───────────────────────────────────────────────────────────────────────────
 
   /** The page is showing this session: attach now if connected, and again after every reconnect. */
   activate(): void {
+    if (this.modeRejected) return;
     this.active = true;
     if (this.connected()) void this.attach();
   }
@@ -209,25 +303,32 @@ export class SessionController {
 
   /** The connection became ready again. */
   connectionReady(): void {
-    if (this.active) void this.attach();
+    if (this.active && !this.modeRejected) void this.attach();
   }
 
   connectionLost(): void {
     this.attachId += 1;
     this.invalidateHistory();
     this.assembly = undefined;
+    this.pendingSnapshot = undefined;
     this.awaitingAttach = false;
     if (this.current.status === 'loading' || this.current.status === 'live') this.commit({ status: 'offline' });
   }
 
   private async attach(): Promise<void> {
+    if (this.modeRejected || !this.active || !this.connected()) return;
     const id = ++this.attachId;
     this.invalidateHistory();
     this.io.clock.clearTimeout(this.resetTimer);
     this.assembly = undefined;
+    this.pendingSnapshot = undefined;
     this.held = [];
+    this.heldPending = undefined;
+    this.modeWaitUpdates = 0;
+    this.modeWaitBytes = 0;
     this.droppedThroughSeq = undefined;
     this.awaitingAttach = true;
+    this.snapshotFinishedDuringAttach = false;
     this.commit({ status: 'loading', error: undefined });
     const resume = this.cursor === undefined ? undefined : { epoch: this.cursor.epoch, after_seq: this.cursor.seq };
     try {
@@ -245,10 +346,20 @@ export class SessionController {
           void this.attach();
           return;
         }
-        this.commit({ status: 'live', pending: result.pending });
-        if (this.flushHeld()) this.sendPresence();
-      } else if (this.current.status === 'live' && this.cursor?.epoch === result.epoch) {
-        this.sendPresence(); // the snapshot was complete before the reply was handled
+        const mode = this.heldMode(this.current.sessionMode, this.cursor.seq);
+        if (mode === null || (isTeamApproval(this.sessionId) && !approvalPendingOnly(result.pending))) { this.rejectMode(); return; }
+        const approval = isTeamApproval(this.sessionId);
+        this.commit({ status: mode !== undefined || approval ? 'live' : 'loading', sessionMode: mode, pending: this.heldPending ?? result.pending });
+        this.heldPending = undefined;
+        if ((mode !== undefined || approval) && this.flushHeld()) this.sendPresence();
+      } else if (this.snapshotFinishedDuringAttach && this.cursor?.epoch === result.epoch) {
+        this.snapshotFinishedDuringAttach = false;
+        const mode = this.heldMode(this.current.sessionMode, this.cursor.seq);
+        if (mode === null) { this.rejectMode(); return; }
+        if (mode !== undefined || isTeamApproval(this.sessionId)) {
+          this.commit({ status: 'live', sessionMode: mode });
+          if (this.flushHeld()) this.sendPresence();
+        }
       }
     } catch (error) {
       if (id !== this.attachId) return;
@@ -264,10 +375,11 @@ export class SessionController {
   /** Tell the desktop whether this browser is looking at the session (it uses this to decide about notifications). */
   setForeground(foreground: boolean): void {
     this.foreground = foreground;
-    if (this.current.status === 'live') this.sendPresence();
+    if (this.current.status === 'live' && !isTeamApproval(this.sessionId)) this.sendPresence();
   }
 
   private sendPresence(): void {
+    if (this.modeRejected || isTeamApproval(this.sessionId) || this.current.status !== 'live' || this.current.sessionMode === undefined) return;
     this.io.notify('session.presence', { session_id: this.sessionId, foreground: this.foreground });
   }
 
@@ -276,29 +388,67 @@ export class SessionController {
   // ───────────────────────────────────────────────────────────────────────────
 
   handleSnapshot(params: SessionSnapshotParams): void {
+    if (this.modeRejected || params.session_id !== this.sessionId) return;
     switch (params.phase) {
-      case 'begin':
+      case 'begin': {
+        const mode = combineModes(this.current.sessionMode, params.session_mode);
+        if (mode === null || (isTeamApproval(this.sessionId)
+          && (params.session_mode !== undefined || params.first_message_index !== 0))) { this.rejectMode(); return; }
         this.invalidateHistory();
-        this.assembly = { epoch: params.epoch, first: params.first_message_index, messages: [], records: [] };
+        this.pendingSnapshot = undefined;
+        this.heldPending = undefined;
+        this.assembly = { epoch: params.epoch, mode, first: params.first_message_index, messages: [], records: [] };
         this.commit({ status: 'loading', error: undefined });
         this.io.clock.clearTimeout(this.resetTimer);
         break;
+      }
       case 'messages':
+        if (isTeamApproval(this.sessionId) && params.messages.length > 0) { this.rejectMode(); return; }
+        if (this.assembly && !this.chargeModeWait(params.messages)) return;
         this.assembly?.messages.push(...params.messages);
         break;
       case 'records':
+        if (isTeamApproval(this.sessionId) && params.records.length > 0) { this.rejectMode(); return; }
+        if (this.assembly && !this.chargeModeWait(params.records)) return;
         this.assembly?.records.push(...params.records);
         break;
       case 'end':
-        this.finishSnapshot(params);
+        if (!this.assembly || !this.chargeModeWait(params)) return;
+        this.pendingSnapshot = { assembly: this.assembly, end: params };
+        this.assembly = undefined;
+        this.finishSnapshot();
         break;
     }
   }
 
-  private finishSnapshot(end: Extract<SessionSnapshotParams, { phase: 'end' }>): void {
-    const assembly = this.assembly;
-    this.assembly = undefined;
-    if (assembly === undefined) return;
+  private finishSnapshot(): void {
+    const pending = this.pendingSnapshot;
+    if (pending === undefined) return;
+    const { assembly, end } = pending;
+    if (assembly.epoch !== end.cursor.epoch) {
+      this.pendingSnapshot = undefined;
+      this.cursor = undefined;
+      this.commit({ status: 'loading' });
+      if (this.active && this.connected()) void this.attach();
+      return;
+    }
+    let mode: SessionModeDto | undefined | null = combineModes(this.current.sessionMode, assembly.mode);
+    for (const item of assembly.records) {
+      const next = recordMode(item, this.sessionId);
+      if (next === null || mode === null) { this.rejectMode(); return; }
+      mode = combineModes(mode, next);
+    }
+    if (mode !== null) mode = this.heldMode(mode, end.cursor.seq);
+    if (mode === null) { this.rejectMode(); return; }
+    const approval = isTeamApproval(this.sessionId);
+    if (approval && (mode !== undefined || end.cursor.seq !== 0 || assembly.messages.length > 0 || assembly.records.length > 0
+      || this.held.length > 0 || !approvalPendingOnly(end.pending) || end.turn.running
+      || end.turn.turn_id !== undefined || end.controls !== undefined)) { this.rejectMode(); return; }
+    if (mode === undefined && !approval) return;
+    this.pendingSnapshot = undefined;
+    this.modeWaitUpdates = 0;
+    this.modeWaitBytes = 0;
+    if (this.cursor?.epoch !== end.cursor.epoch) this.images.clear();
     this.baseMessages = assembly.messages;
     this.firstMessageIndex = assembly.first;
     this.records = [...assembly.records].sort((a, b) => a.seq - b.seq);
@@ -309,14 +459,17 @@ export class SessionController {
     this.builder.setRunning(end.turn.running);
     this.commit({
       status: 'live',
+      sessionMode: mode,
       transcript: this.builder.snapshot(),
-      pending: end.pending,
+      pending: this.heldPending ?? end.pending,
       turn: end.turn,
       controls: end.controls ?? this.controlsFromRecords(),
       hasOlder: this.firstMessageIndex > 0,
       loadingOlder: false,
       outgoing: this.current.outgoing.filter((prompt) => prompt.turnId === undefined || !this.seenTurns.has(prompt.turnId)),
     });
+    this.heldPending = undefined;
+    this.snapshotFinishedDuringAttach = this.awaitingAttach;
     if (this.flushHeld() && !this.awaitingAttach) this.sendPresence();
   }
 
@@ -329,9 +482,13 @@ export class SessionController {
   }
 
   handleEvent(item: RemoteSeqRecord): void {
+    if (this.modeRejected) return;
+    if (isTeamApproval(this.sessionId)) { this.rejectMode(); return; }
     if (this.assembly !== undefined || this.awaitingAttach || this.current.status === 'loading') {
+      if (!this.chargeModeWait(item)) return;
       if (this.held.length < MAX_BUFFERED_EVENTS) this.held.push(item);
       else this.droppedThroughSeq = Math.max(this.droppedThroughSeq ?? item.seq, item.seq);
+      if (this.pendingSnapshot) this.finishSnapshot();
       return;
     }
     this.applyLive(item);
@@ -356,6 +513,8 @@ export class SessionController {
 
   private applyLive(item: RemoteSeqRecord): void {
     if (this.cursor === undefined || item.seq <= this.cursor.seq) return; // already covered
+    const next = recordMode(item, this.sessionId);
+    if (next === null || combineModes(this.current.sessionMode, next) === null) { this.rejectMode(); return; }
     this.cursor = { epoch: this.cursor.epoch, seq: item.seq };
     this.records.push(item);
     this.builder.apply(item.record);
@@ -381,20 +540,32 @@ export class SessionController {
   }
 
   handlePending(pending: RemotePending): void {
+    if (this.modeRejected) return;
+    if (isTeamApproval(this.sessionId) && !approvalPendingOnly(pending)) { this.rejectMode(); return; }
+    if (this.current.sessionMode === undefined && !isTeamApproval(this.sessionId)) {
+      if (this.chargeModeWait(pending)) this.heldPending = pending;
+      return;
+    }
     this.commit({ pending, answeredElsewhere: false });
   }
 
   handleReset(): void {
+    if (this.modeRejected) return;
     this.invalidateHistory();
     this.cursor = undefined;
     this.baseMessages = [];
     this.records = [];
     this.held = [];
+    this.heldPending = undefined;
+    this.pendingSnapshot = undefined;
+    this.modeWaitUpdates = 0;
+    this.modeWaitBytes = 0;
     this.droppedThroughSeq = undefined;
     this.assembly = undefined;
     this.firstMessageIndex = 0;
     this.seenTurns.clear();
     this.builder = new TranscriptBuilder();
+    this.images.clear();
     this.commit({ status: 'loading', transcript: this.builder.snapshot(), pending: NO_PENDING, turn: { running: false }, hasOlder: false });
     this.io.clock.clearTimeout(this.resetTimer);
     // The desktop sends a fresh snapshot by itself; if it does not, ask.
@@ -404,6 +575,7 @@ export class SessionController {
   }
 
   handleClosed(): void {
+    if (this.modeRejected) return;
     this.attachId += 1;
     this.invalidateHistory();
     this.commit({ status: 'closed' });
@@ -413,20 +585,32 @@ export class SessionController {
   // Commands
   // ───────────────────────────────────────────────────────────────────────────
 
-  /** Send a prompt. While a turn runs the desktop takes plain text only, so images are left out then. */
-  async sendPrompt(text: string, images: readonly ImageRefDto[] = [], files: readonly string[] = []): Promise<void> {
+  /** Send a prompt. The desktop accepts only text while a turn is running. */
+  sendPrompt(text: string, images: readonly ImageRefDto[] = [], files: readonly string[] = []): Promise<void> {
+    this.requireConversation();
     const running = this.current.turn.running || this.current.transcript.conversation.running;
-    const attachments = running ? [] : images.filter((image) => isSupportedImageMediaType(image.media_type)).slice(0, MAX_IMAGE_ATTACHMENTS);
-    if (text.trim().length === 0 && attachments.length === 0 && files.length === 0) return;
+    if (running && (images.length > 0 || files.length > 0)) {
+      throw new RemoteRpcError('forbidden', 'Attachments cannot be sent while a turn is running.');
+    }
+    if (images.length > MAX_IMAGE_ATTACHMENTS || images.some((image) => !isSupportedImageMediaType(image.media_type)) || files.length > 4) {
+      throw new RemoteRpcError('invalid_params', 'The prompt contains unsupported or too many attachments.');
+    }
+    const attachments = [...images];
+    if (text.trim().length === 0 && attachments.length === 0 && files.length === 0) return Promise.resolve();
     const prompt: OutgoingPrompt = { id: randomId(), text, images: attachments, files, status: 'sending' };
     this.commit({ outgoing: [...this.current.outgoing, prompt] });
-    await this.dispatchPrompt(prompt);
+    return this.dispatchPrompt(prompt);
   }
 
   /** Send a failed prompt again with the same request id, so the desktop can tell it is a repeat. */
   async retryPrompt(id: string): Promise<void> {
+    this.requireConversation();
     const prompt = this.current.outgoing.find((entry) => entry.id === id);
     if (prompt === undefined || prompt.status !== 'failed') return;
+    const running = this.current.turn.running || this.current.transcript.conversation.running;
+    if (running && (prompt.images.length > 0 || (prompt.files?.length ?? 0) > 0)) {
+      throw new RemoteRpcError('forbidden', 'Attachments cannot be sent while a turn is running.');
+    }
     this.updateOutgoing(id, { status: 'sending', error: undefined });
     await this.dispatchPrompt(prompt);
   }
@@ -444,7 +628,7 @@ export class SessionController {
         ...((prompt.files?.length ?? 0) > 0 ? { file_refs: [...prompt.files!] } : {}),
         client_request_id: prompt.id,
       });
-      if (this.seenTurns.has(result.turn_id)) this.dismissPrompt(prompt.id);
+      if (!promptExpectsEcho(prompt.text) || this.seenTurns.has(result.turn_id)) this.dismissPrompt(prompt.id);
       else this.updateOutgoing(prompt.id, { turnId: result.turn_id });
     } catch (error) {
       this.updateOutgoing(prompt.id, { status: 'failed', error: errorMessage(error).code });
@@ -462,14 +646,41 @@ export class SessionController {
 
   /** Allow once or deny; always-allow is not offered from here. */
   async respondPermission(requestId: number, decision: Extract<PermissionResponseDto, { type: 'allow_once' | 'deny' }>): Promise<void> {
-    await this.answer(() => this.io.request('permission.respond', { session_id: this.sessionId, request_id: requestId, decision }));
+    if (isTeamApproval(this.sessionId)) {
+      if (this.modeRejected || this.current.status !== 'live' || !this.connected()
+        || this.approvalResponse !== 'available'
+        || this.current.sessionMode !== undefined || !this.current.pending.permissions.some((request) => request.request_id === requestId)
+        || (decision.type !== 'allow_once' && decision.type !== 'deny')) {
+        throw new RemoteRpcError('closed', 'The remote approval is unavailable.');
+      }
+      this.approvalResponse = 'inFlight';
+      try {
+        await this.answer(() => this.io.request('permission.respond', { session_id: this.sessionId, request_id: requestId, decision }));
+        this.approvalResponse = 'consumed';
+        this.commit({});
+      } catch (error) {
+        if (!(error instanceof RemoteRpcError) || error.code === 'timeout' || error.code === 'closed' || error.code === 'internal') {
+          // The host may have received the answer even when its reply was lost.
+          this.approvalResponse = 'consumed';
+          this.commit({});
+        } else {
+          this.approvalResponse = 'available';
+        }
+        throw error;
+      }
+    } else {
+      this.requireConversation();
+      await this.answer(() => this.io.request('permission.respond', { session_id: this.sessionId, request_id: requestId, decision }));
+    }
   }
 
   async answerQuestion(requestId: number, answers: Record<string, string>): Promise<void> {
+    this.requireConversation();
     await this.answer(() => this.io.request('question.answer', { session_id: this.sessionId, request_id: requestId, answers }));
   }
 
   async cancelQuestion(requestId: number): Promise<void> {
+    this.requireConversation();
     await this.answer(() => this.io.request('question.cancel', { session_id: this.sessionId, request_id: requestId }));
   }
 
@@ -500,12 +711,14 @@ export class SessionController {
     method: K,
     params: Parameters<Request>[1],
   ): Promise<void> {
+    this.requireConversation();
     await this.io.request(method, params as never);
   }
 
   /** Fetch the page of messages before the ones held. */
   async loadOlder(): Promise<void> {
-    if (this.current.status !== 'live' || !this.connected() || !this.current.hasOlder || this.current.loadingOlder) return;
+    try { this.requireConversation(); } catch { return; }
+    if (!this.current.hasOlder || this.current.loadingOlder) return;
     const id = ++this.historyId;
     this.commit({ loadingOlder: true });
     try {
@@ -538,13 +751,20 @@ export class SessionController {
 
   /** The bytes of an image the desktop keeps, as a `data:` URL; fetched once. */
   fetchImage(ref: string): Promise<string> {
+    try { this.requireConversation(); } catch (error) { return Promise.reject(error); }
+    if (!ref.startsWith(`${this.sessionId}:`)) {
+      return Promise.reject(new RemoteRpcError('forbidden', 'The image belongs to a different remote session.'));
+    }
     let image = this.images.get(ref);
     if (image === undefined) {
+      const epoch = this.cursor?.epoch;
       image = this.io.request('image.get', { ref }).then((result) => {
+        this.requireConversation();
+        if (this.cursor?.epoch !== epoch) throw new RemoteRpcError('closed', 'The remote session changed.');
         if (!isSupportedImageMediaType(result.media_type) || !/^[A-Za-z0-9+/]+={0,2}$/u.test(result.base64)) throw new Error('unsupported image');
         return `data:${result.media_type};base64,${result.base64}`;
       });
-      image.catch(() => this.images.delete(ref));
+      image.catch(() => { if (this.images.get(ref) === image) this.images.delete(ref); });
       this.images.set(ref, image);
     }
     return image;
@@ -817,15 +1037,19 @@ export class RemoteClient {
     });
   }
 
-  listFiles(session_id: string): Promise<FileReceipt[]> { return this.connection.request('file.list', { session_id }).then(result => result.files.map(file => {
+  async listFiles(session_id: string): Promise<FileReceipt[]> { this.session(session_id).requireConversation(); return this.connection.request('file.list', { session_id }).then(result => result.files.map(file => {
     const offer = validateFileOffer(file);
     if (offer.session_id !== session_id || file.ref !== offer.transfer_id) throw new Error('Invalid file receipt');
     return { ...offer, ref: file.ref };
   })); }
-  uploadFile(session: string, file: File, progress?: FileProgress, signal?: AbortSignal): Promise<FileReceipt> {
+  async uploadFile(session: string, file: File, progress?: FileProgress, signal?: AbortSignal): Promise<FileReceipt> {
+    this.session(session).requireConversation();
     return uploadFile(this.connection, session, file, progress, signal);
   }
-  downloadFile(file: FileReceipt, progress?: FileProgress, signal?: AbortSignal): Promise<File> { return downloadFile(this.connection, file, progress, signal); }
+  async downloadFile(file: FileReceipt, progress?: FileProgress, signal?: AbortSignal): Promise<File> {
+    this.session(file.session_id).requireConversation();
+    return downloadFile(this.connection, file, progress, signal);
+  }
 
   /** The models the desktop offers; asked once per connection. */
   models(): Promise<ModelsListResult> {

@@ -44,7 +44,8 @@ use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
 use harness_runtime::desktop::{DesktopAudio, DesktopConfig, DesktopRuntime};
 use lingxi_core::host::{
-    CredentialStoragePolicy, OrchestratorHandle, OutputStream, SlashCommandDispatcher,
+    session_context::ConversationMode, CredentialStoragePolicy, OrchestratorHandle, OutputStream,
+    SlashCommandDispatcher,
 };
 
 use crate::audio_bridge::{new_audio_bridge, AudioBridge};
@@ -142,6 +143,14 @@ pub struct BridgeArgs {
     pub catalog_session_id: Option<String>,
     /// Exact persisted source selected by the host before lifecycle hooks run.
     pub session_transcript_path: Option<PathBuf>,
+    /// Restore an owned, unsent desktop draft from its canonical metadata source.
+    pub restore_draft: bool,
+    /// Retain a newly created owned draft under its explicit display title.
+    pub durable_draft_title: Option<String>,
+    /// Device default for an uninitialized draft, applied before startup hooks.
+    pub initial_conversation_mode: Option<ConversationMode>,
+    /// Required ownership for an explicitly selected persisted transcript.
+    pub expected_conversation_mode: Option<ConversationMode>,
     /// `--list-sessions-json`: read the session catalog and exit without building an engine.
     pub list_sessions_json: bool,
     /// Read the merged workspace environment without building an engine.
@@ -306,6 +315,33 @@ impl BridgeArgs {
                     }
                     out.session_transcript_path = Some(path);
                 }
+                "--restore-draft" => out.restore_draft = true,
+                "--durable-draft-title" => {
+                    let title = it.next().ok_or("--durable-draft-title requires a title")?;
+                    let title = title.as_ref();
+                    if title.trim().is_empty() || title.contains('\0') {
+                        return Err("--durable-draft-title requires a nonempty title".into());
+                    }
+                    out.durable_draft_title = Some(title.to_owned());
+                }
+                "--initial-conversation-mode" => {
+                    let value = it
+                        .next()
+                        .ok_or("--initial-conversation-mode requires chat or code")?;
+                    out.initial_conversation_mode = Some(
+                        ConversationMode::from_str(value.as_ref())
+                            .ok_or("--initial-conversation-mode requires chat or code")?,
+                    );
+                }
+                "--expected-conversation-mode" => {
+                    let value = it
+                        .next()
+                        .ok_or("--expected-conversation-mode requires chat or code")?;
+                    out.expected_conversation_mode = Some(
+                        ConversationMode::from_str(value.as_ref())
+                            .ok_or("--expected-conversation-mode requires chat or code")?,
+                    );
+                }
                 "--model" => {
                     let v = it
                         .next()
@@ -384,14 +420,67 @@ impl BridgeArgs {
         if out.session_scope.is_some() && !out.list_sessions_json {
             return Err("--session-scope requires --list-sessions-json".into());
         }
+        if out.restore_draft
+            && (out.session_id.is_none()
+                || out.session_transcript_path.is_some()
+                || out.list_sessions_json
+                || out.workspace_environment_json
+                || out.product_paths_json)
+        {
+            return Err(
+                "--restore-draft requires a runtime session UUID and no selected transcript".into(),
+            );
+        }
+        if out.initial_conversation_mode.is_some() && !out.restore_draft {
+            return Err("--initial-conversation-mode requires --restore-draft".into());
+        }
+        if out.restore_draft && out.initial_conversation_mode.is_none() {
+            return Err("--restore-draft requires --initial-conversation-mode".into());
+        }
+        if let (Some(initial), Some(expected)) = (
+            out.initial_conversation_mode,
+            out.expected_conversation_mode,
+        ) {
+            if initial != expected {
+                return Err("initial and expected conversation modes must match".into());
+            }
+        }
+        if out.durable_draft_title.is_some()
+            && (!out.restore_draft || out.expected_conversation_mode.is_some())
+        {
+            return Err("--durable-draft-title requires a new owned draft".into());
+        }
+        if out.expected_conversation_mode.is_some() && out.session_id.is_none() {
+            return Err("--expected-conversation-mode requires --session-id".into());
+        }
         if let Some(path) = &out.session_transcript_path {
             let id = out
                 .session_id
                 .as_deref()
                 .ok_or("--session-transcript-path requires --session-id")?;
             validate_selected_transcript_identity(path, id)?;
-            if out.list_sessions_json || out.workspace_environment_json || out.product_paths_json {
-                return Err("--session-transcript-path requires a runtime launch".into());
+            if out.workspace_environment_json
+                || out.product_paths_json
+                || out.provider_account_command
+            {
+                return Err(
+                    "--session-transcript-path requires a runtime launch or session catalog lookup"
+                        .into(),
+                );
+            }
+            if out.list_sessions_json {
+                if out.session_scope.is_none() {
+                    return Err("a selected catalog transcript requires --session-scope".into());
+                }
+                if out.expected_conversation_mode.is_some() {
+                    return Err(
+                        "a selected catalog transcript reports its own conversation mode".into(),
+                    );
+                }
+            } else if out.expected_conversation_mode.is_none() {
+                return Err(
+                    "--session-transcript-path requires --expected-conversation-mode".into(),
+                );
             }
         }
         if out.workspace_environment_json && (out.list_sessions_json || out.session_id.is_some()) {
@@ -732,11 +821,17 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> Result<DesktopConfig, String
         __desktop_config.ask_user_question_timeout_override = args.ask_user_question_timeout;
         __desktop_config.composition = None;
         __desktop_config.defer_session_start = false;
+        __desktop_config.initial_conversation_mode = args
+            .expected_conversation_mode
+            .or(args.initial_conversation_mode);
         // The desktop opens a session while its startup MCP servers connect;
         // `spawn_mcp_startup_publisher` re-publishes the listings as each
         // settles.
         __desktop_config.connect_mcp_in_background = true;
         __desktop_config.session_transcript_path = args.session_transcript_path.clone();
+        __desktop_config.session_transcript_authority = None;
+        __desktop_config.restore_draft = args.restore_draft;
+        __desktop_config.durable_draft_title = args.durable_draft_title.clone();
         __desktop_config.session_resume_snapshot = None;
         __desktop_config.session_resume_cost = None;
         __desktop_config.max_structured_output_retries = 5;
@@ -1176,9 +1271,109 @@ fn validate_selected_transcript_identity(path: &Path, id: &str) -> Result<uuid::
     Ok(expected)
 }
 
+fn validate_selected_session_mode(
+    content: &str,
+    uuid: uuid::Uuid,
+    expected: ConversationMode,
+) -> Result<(), String> {
+    let actual = session::JsonlWriter::fixed_session_mode_from_source(content, &uuid.to_string())
+        .map_err(|error| format!("invalid session mode: {error}"))?;
+    if actual != expected {
+        return Err(format!(
+            "session_mode_mismatch: session {uuid} belongs to {}",
+            actual.as_str()
+        ));
+    }
+    Ok(())
+}
+
+/// Capture a catalog-selected transcript without following any project or
+/// bucket symlink. Only the trusted home root itself may be canonicalized.
+pub(crate) fn capture_selected_transcript_source(
+    home: &Path,
+    path: &Path,
+    id: uuid::Uuid,
+) -> Result<(session::jsonl::writer::TranscriptFileAuthority, String), String> {
+    validate_selected_transcript_identity(path, &id.to_string())?;
+    let canonical_home =
+        std::fs::canonicalize(home).map_err(|_| "selected transcript home is unavailable")?;
+    let relative = path
+        .strip_prefix(home)
+        .or_else(|_| path.strip_prefix(&canonical_home))
+        .map_err(|_| "selected transcript is outside the session catalog")?;
+    let parts: Vec<_> = relative.components().collect();
+    if parts.len() != 3
+        || !matches!(parts[0], std::path::Component::Normal(name) if name == "projects")
+        || !matches!(parts[1], std::path::Component::Normal(_))
+        || !matches!(parts[2], std::path::Component::Normal(_))
+    {
+        return Err("selected transcript is outside the session catalog".into());
+    }
+    let (authority, bytes) = session::jsonl::writer::TranscriptFileAuthority::capture(
+        canonical_home,
+        relative.to_path_buf(),
+    )
+    .map_err(|error| format!("selected transcript is unavailable: {error}"))?;
+    let content = String::from_utf8(bytes).map_err(|_| "selected transcript is not valid UTF-8")?;
+    if content.is_empty() {
+        return Err("selected transcript must be a nonempty JSONL file".into());
+    }
+    Ok((authority, content))
+}
+
+/// Empty scheduled owners must carry the authoritative workspace anchor.
+/// Explicit draft restore also permits a valid, still-unanchored mode-only file.
+pub(crate) fn validate_captured_transcript(
+    path: &Path,
+    id: uuid::Uuid,
+    content: &str,
+    loaded: &session::jsonl::LoadedTranscript,
+    allow_unanchored_draft: bool,
+) -> Result<(), String> {
+    if !content.ends_with('\n') {
+        return Err("selected transcript has an incomplete final record".into());
+    }
+    if loaded.malformed_line_count != 0 {
+        return Err("selected transcript contains malformed records".into());
+    }
+    let id_text = id.to_string();
+    let (messages, _) = session::jsonl::build_conversation_chain(loaded, &id_text);
+    if !messages.is_empty() {
+        return Ok(());
+    }
+    let has_anchor_field = content.lines().any(|line| {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line)
+            .is_ok_and(|row| row.contains_property("mobileEmptySession"))
+    });
+    if allow_unanchored_draft
+        && !has_anchor_field
+        && session::jsonl::is_mode_only_draft(content, &id_text)
+    {
+        return Ok(());
+    }
+    let cwd = session::jsonl::validated_empty_draft_cwd(content, &id_text)
+        .ok_or("empty session has no valid workspace anchor")?;
+    if session::jsonl::loader::transcript_workspace_path(path, loaded)
+        .map(PathBuf::from)
+        .as_deref()
+        != Some(cwd.as_path())
+        || !cwd.is_dir()
+    {
+        return Err("empty session workspace does not match its transcript".into());
+    }
+    Ok(())
+}
+
 /// Bind a selected transcript under its writer authority before configuration,
 /// provider assembly, or lifecycle hooks can write a default transcript.
 async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), String> {
+    prepare_selected_boot_session_after_capture(cfg, || {}).await
+}
+
+async fn prepare_selected_boot_session_after_capture(
+    cfg: &mut DesktopConfig,
+    after_capture: impl FnOnce() + Send,
+) -> Result<(), String> {
     let Some(path) = cfg.session_transcript_path.clone() else {
         return Ok(());
     };
@@ -1187,17 +1382,49 @@ async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), St
         .as_deref()
         .ok_or("selected transcript requires a session UUID")?;
     let uuid = validate_selected_transcript_identity(&path, id)?;
-    // A caller-provided leased snapshot may target a lazy new fork file. Keep
-    // its captured revision; the private launch flag supplies no snapshot.
-    if cfg.session_resume_snapshot.is_some() {
-        return Ok(());
+    let expected = cfg
+        .initial_conversation_mode
+        .ok_or("selected transcript requires an expected conversation mode")?;
+    // An existing snapshot must prove the same selected file and live lease.
+    if let Some(snapshot) = &cfg.session_resume_snapshot {
+        let authority = cfg
+            .session_transcript_authority
+            .as_ref()
+            .ok_or("selected transcript snapshot requires file authority")?;
+        let lease = cfg
+            .session_writer_lease
+            .as_ref()
+            .ok_or("selected transcript snapshot requires writer authority")?;
+        if lease.canonical_session_id().map(|id| id.as_uuid()) != Some(uuid)
+            || uuid::Uuid::parse_str(&snapshot.source_session_id).ok() != Some(uuid)
+        {
+            return Err("selected transcript snapshot has a different session owner".into());
+        }
+        let (current, content) = capture_selected_transcript_source(&cfg.lingxi_home, &path, uuid)?;
+        if &current != authority || content != snapshot.content.as_ref() {
+            return Err("selected transcript snapshot source changed".into());
+        }
+        let loaded = session::jsonl::route_lines(&content);
+        validate_captured_transcript(
+            &authority.path(),
+            uuid,
+            &content,
+            &loaded,
+            cfg.restore_draft,
+        )?;
+        return validate_selected_session_mode(&content, uuid, expected);
     }
-    let metadata = tokio::fs::metadata(&path)
-        .await
-        .map_err(|_| "selected transcript is unavailable")?;
-    if !metadata.is_file() || metadata.len() == 0 {
-        return Err("selected transcript must be a nonempty JSONL file".into());
-    }
+    let (authority, preflight) = capture_selected_transcript_source(&cfg.lingxi_home, &path, uuid)?;
+    validate_selected_session_mode(&preflight, uuid, expected)?;
+    let preview = session::jsonl::route_lines(&preflight);
+    validate_captured_transcript(
+        &authority.path(),
+        uuid,
+        &preflight,
+        &preview,
+        cfg.restore_draft,
+    )?;
+    after_capture();
     let lease = if let Some(lease) = cfg.session_writer_lease.as_ref() {
         if lease.canonical_session_id().map(|id| id.as_uuid()) != Some(uuid) {
             return Err(
@@ -1216,13 +1443,40 @@ async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), St
             })?
             .into_shared()
     };
-    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(HostFileSystem::new(cfg.cwd.clone()));
-    let (_, content, loaded) =
-        session::jsonl::load_routed_session_from_path_with_source(&path, uuid, fs)
-            .await
-            .map_err(|error| format!("selected transcript is not resumable: {error}"))?;
+    let claimed = authority
+        .read_checked()
+        .map_err(|error| format!("selected transcript changed after writer claim: {error}"))?;
+    if claimed != preflight.as_bytes() {
+        return Err("selected transcript changed after writer claim".into());
+    }
+    let content = preflight;
+    let path = authority.path();
+    let loaded = if cfg.restore_draft {
+        // The ordinary transcript loader deliberately excludes zero-message
+        // files. Drafts use the same captured source and strict validation,
+        // without broadening historical-session discovery or resume.
+        session::jsonl::route_lines(&content)
+    } else {
+        session::jsonl::loader::route_captured_session_source(&path, uuid, &content)
+            .map_err(|error| format!("selected transcript is not resumable: {error}"))?
+    };
+    validate_captured_transcript(&path, uuid, &content, &loaded, cfg.restore_draft)?;
+    // The source can change between the preflight and the writer claim.
+    validate_selected_session_mode(&content, uuid, expected)?;
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &uuid.to_string());
-    if messages.is_empty() && !loaded.mobile_empty_sessions.contains(&uuid.to_string()) {
+    if cfg.restore_draft
+        && !harness_runtime::desktop::session_state::is_mode_only_draft(&content, &uuid.to_string())
+    {
+        return Err("draft transcript is not valid mode-only metadata".into());
+    }
+    if messages.is_empty()
+        && !loaded.mobile_empty_sessions.contains(&uuid.to_string())
+        && !(cfg.restore_draft
+            && harness_runtime::desktop::session_state::is_mode_only_draft(
+                &content,
+                &uuid.to_string(),
+            ))
+    {
         return Err("selected transcript has no resumable conversation".into());
     }
     if let Some(workspace) = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
@@ -1249,8 +1503,72 @@ async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), St
         source_session_id: uuid.to_string(),
         content: content.into(),
     });
+    cfg.session_transcript_path = Some(path);
+    cfg.session_transcript_authority = Some(authority);
     cfg.session_writer_lease = Some(lease);
     Ok(())
+}
+
+/// Existing drafts are checked before taking writer authority. A missing file
+/// is a new draft and its requested mode is established during assembly.
+async fn prepare_draft_boot_session(cfg: &mut DesktopConfig) -> Result<(), String> {
+    if !cfg.restore_draft {
+        return Ok(());
+    }
+    if cfg.session_transcript_path.is_some() || cfg.session_resume_snapshot.is_some() {
+        return Err("draft restore cannot override a selected transcript".into());
+    }
+    // DesktopConfig uses the same explicit mode for creation and resume
+    // admission. Keep it intact for prepare_selected_boot_session and SDK
+    // assembly to verify against an existing draft before any startup effects.
+    cfg.initial_conversation_mode
+        .ok_or("draft restore requires an explicit creation mode")?;
+    let uuid = uuid::Uuid::parse_str(
+        cfg.session_id_override
+            .as_deref()
+            .ok_or("draft restore requires a session UUID")?,
+    )
+    .map_err(|_| "draft restore requires a valid session UUID")?;
+    let path = session::jsonl::session_path(
+        &cfg.lingxi_home,
+        &cfg.cwd.to_string_lossy(),
+        &uuid.to_string(),
+    );
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => {
+            cfg.session_transcript_path = Some(path);
+            return prepare_selected_boot_session(cfg).await;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("draft transcript is unavailable".into()),
+    }
+    let lease = if let Some(lease) = cfg.session_writer_lease.as_ref() {
+        if lease.canonical_session_id().map(|id| id.as_uuid()) != Some(uuid) {
+            return Err("draft writer authority does not match the session UUID".into());
+        }
+        lease.clone()
+    } else {
+        lingxi_core::host::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"))
+            .claim_session_id(&uuid.to_string(), std::process::id())
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AlreadyExists => {
+                    "bridge session id is already active".to_string()
+                }
+                _ => "bridge session writer authority is unavailable".to_string(),
+            })?
+            .into_shared()
+    };
+    cfg.session_writer_lease = Some(lease);
+    // Recheck after the claim in case another owner published this draft
+    // between the existence check and acquiring authority.
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => {
+            cfg.session_transcript_path = Some(path);
+            prepare_selected_boot_session(cfg).await
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("draft transcript is unavailable".into()),
+    }
 }
 
 fn initialize_live_session(
@@ -1485,6 +1803,56 @@ pub async fn list_sessions_json_in_scope(
     list_sessions_json_from_in_scope(cwd, &lingxi_home, session_id, scope).await
 }
 
+/// Describe the exact source selected by Desktop, without choosing a UUID winner.
+pub async fn list_selected_session_json_in_scope(
+    cwd: &Path,
+    session_id: &str,
+    source: &Path,
+    scope: session::jsonl::SessionDiscoveryScope,
+) -> Result<String, String> {
+    let lingxi_home =
+        brand_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
+    list_selected_session_json_from_in_scope(cwd, &lingxi_home, session_id, source, scope).await
+}
+
+async fn list_selected_session_json_from_in_scope(
+    cwd: &Path,
+    lingxi_home: &Path,
+    session_id: &str,
+    source: &Path,
+    scope: session::jsonl::SessionDiscoveryScope,
+) -> Result<String, String> {
+    let session_id = lingxi_core::types::SessionId::parse_prefixed(session_id)
+        .map(|id| id.as_uuid())
+        .ok_or_else(|| "session catalog requires a valid session id".to_string())?;
+    let described = match session::jsonl::describe_session_source(
+        lingxi_home,
+        &cwd.to_string_lossy(),
+        scope,
+        source,
+        session_id,
+    )
+    .await
+    {
+        Ok(described) => described,
+        // A source outside this particular scope may still belong to a wider
+        // requested scope. Return no row without resolving the UUID again.
+        Err(session::jsonl::LoaderError::SessionNotFound { .. }) => {
+            return Ok(serde_json::json!({ "version": 1, "sessions": [] }).to_string());
+        }
+        Err(error) => {
+            tracing::warn!(%error, "bridge-server: selected session source is unavailable");
+            return Err("selected session source is unavailable".into());
+        }
+    };
+    if described.metadata.uuid != session_id || described.metadata.path.as_path() != source {
+        return Err("selected session source changed".into());
+    }
+    let row = lower_catalog_row(&described.metadata, described.empty_session)?;
+    serde_json::to_string(&serde_json::json!({ "version": 1, "sessions": [row] }))
+        .map_err(|_| "failed to encode session catalog".to_string())
+}
+
 async fn list_sessions_json_from(
     cwd: &Path,
     lingxi_home: &Path,
@@ -1626,43 +1994,50 @@ async fn list_sessions_json_from_with_scope(
         } else {
             false
         };
-        let lowered = client::adapter::lowering::lower_session_metadata(&row);
-        let mut value = serde_json::to_value(lowered)
-            .map_err(|_| "failed to encode session catalog".to_string())?;
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "empty_session".to_string(),
-                serde_json::Value::Bool(empty_session),
-            );
-            if let Some(workspace_path) = row.workspace_path.as_deref() {
-                object.insert(
-                    "workspace_path".into(),
-                    serde_json::Value::String(workspace_path.into()),
-                );
-            }
-            if let Some(title) = row.custom_or_ai_title.as_deref() {
-                object.insert(
-                    "resume_title".into(),
-                    serde_json::Value::String(title.into()),
-                );
-            }
-            if let Some(model) = row.resume_model.as_deref() {
-                object.insert(
-                    "resume_model".to_string(),
-                    serde_json::Value::String(lingxi_core::host::qualified_model_ref(
-                        model,
-                        row.resume_model_profile.as_deref(),
-                    )),
-                );
-            }
-        }
-        sessions.push(value);
+        sessions.push(lower_catalog_row(&row, empty_session)?);
     }
     serde_json::to_string(&serde_json::json!({
         "version": 1,
         "sessions": sessions,
     }))
     .map_err(|_| "failed to encode session catalog".to_string())
+}
+
+fn lower_catalog_row(
+    row: &session::jsonl::SessionMetadata,
+    empty_session: bool,
+) -> Result<serde_json::Value, String> {
+    let lowered = client::adapter::lowering::lower_session_metadata(row);
+    let mut value = serde_json::to_value(lowered)
+        .map_err(|_| "failed to encode session catalog".to_string())?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "empty_session".to_string(),
+            serde_json::Value::Bool(empty_session),
+        );
+        if let Some(workspace_path) = row.workspace_path.as_deref() {
+            object.insert(
+                "workspace_path".into(),
+                serde_json::Value::String(workspace_path.into()),
+            );
+        }
+        if let Some(title) = row.custom_or_ai_title.as_deref() {
+            object.insert(
+                "resume_title".into(),
+                serde_json::Value::String(title.into()),
+            );
+        }
+        if let Some(model) = row.resume_model.as_deref() {
+            object.insert(
+                "resume_model".to_string(),
+                serde_json::Value::String(lingxi_core::host::qualified_model_ref(
+                    model,
+                    row.resume_model_profile.as_deref(),
+                )),
+            );
+        }
+    }
+    Ok(value)
 }
 
 /// Assemble a fully-bound [`BridgeConnection`] from a resolved [`DesktopConfig`].
@@ -1709,15 +2084,20 @@ pub async fn assemble_with_account_credentials(
     let media_handoffs =
         Arc::new(harness_runtime::desktop::DesktopMediaAgentHandoffQueue::default());
     cfg.media_agent_handoffs = Some(media_handoffs.clone());
+    prepare_draft_boot_session(&mut cfg).await?;
     prepare_selected_boot_session(&mut cfg).await?;
-    let cold_resume = crate::workspace_commands::ColdBootResume::capture(&cfg)?;
+    let cold_resume = if cfg.restore_draft {
+        None
+    } else {
+        crate::workspace_commands::ColdBootResume::capture(&cfg)?
+    };
     let provider_credentials_ephemeral = matches!(
         cfg.credential_storage_policy,
         lingxi_core::host::CredentialStoragePolicy::NativeOrMemory
     );
     let enable_automation_scheduler = cfg.enable_automation_scheduler;
     let initial_workspace_trusted = cfg.host_workspace_trusted == Some(true);
-    let initial_session_resumed = cfg.session_resume_snapshot.is_some();
+    let initial_session_resumed = !cfg.restore_draft && cfg.session_resume_snapshot.is_some();
     let initial_add_dirs = cfg
         .add_dir
         .iter()
@@ -1793,7 +2173,11 @@ pub async fn assemble_with_account_credentials(
         SettingsContext {
             plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
             fusion_layers: Some(Arc::new({
-                let config = cfg.clone();
+                let mut config = cfg.clone();
+                // Settings reloads outlive individual session mounts. The
+                // bootstrap lease belongs to the hydrated session, not this
+                // configuration snapshot.
+                config.session_writer_lease = None;
                 move || harness_runtime::desktop::fusion_settings_layers_for_config(&config)
             })),
             paths,
@@ -2246,7 +2630,7 @@ pub async fn assemble_with_account_credentials(
                 match cloud_audio.register_attached_session(
                     &permit,
                     profile_name.clone(),
-                    format!("profile:{profile_name}"),
+                    lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
                     audio_provider.clone(),
                 ) {
                     Ok(generation) => {
@@ -2368,9 +2752,15 @@ fn spawn_mcp_startup_publisher(
     router: Arc<EngineCommandRouter>,
     sink: Arc<dyn client::adapter::ClientEventSink>,
 ) {
+    // Waiting for startup progress must not keep a closed session (and its
+    // writer authority) alive. Hold the router only while publishing an update.
+    let router = Arc::downgrade(&router);
     tokio::spawn(async move {
         while progress.changed().await.is_ok() {
             let settled = progress.borrow_and_update().pending == 0;
+            let Some(router) = router.upgrade() else {
+                break;
+            };
             router.publish_mcp_startup_progress(sink.as_ref()).await;
             if settled {
                 break;
@@ -2652,8 +3042,15 @@ mod tests {
     fn selected_workspace_boot_path_is_private_absolute_and_matches_the_stable_uuid() {
         let id = "11111111-2222-4333-8444-555555abcdef";
         let source = format!("/persisted source/{}.jsonl", id.to_uppercase());
-        let args =
-            BridgeArgs::parse(["--session-id", id, "--session-transcript-path", &source]).unwrap();
+        let args = BridgeArgs::parse([
+            "--session-id",
+            id,
+            "--session-transcript-path",
+            &source,
+            "--expected-conversation-mode",
+            "code",
+        ])
+        .unwrap();
         assert_eq!(args.session_transcript_path, Some(PathBuf::from(&source)));
         for flags in [
             vec!["--session-transcript-path", source.as_str()],
@@ -2679,6 +3076,367 @@ mod tests {
         ] {
             assert!(BridgeArgs::parse(flags).is_err());
         }
+    }
+
+    #[test]
+    fn selected_catalog_lookup_requires_an_exact_id_and_explicit_scope() {
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let source = format!("/catalog/{}.jsonl", id.to_uppercase());
+        let args = BridgeArgs::parse([
+            "--list-sessions-json",
+            "--session-id",
+            id,
+            "--session-transcript-path",
+            &source,
+            "--session-scope",
+            "current",
+        ])
+        .unwrap();
+        assert_eq!(args.session_transcript_path, Some(PathBuf::from(&source)));
+        assert_eq!(
+            args.session_scope,
+            Some(session::jsonl::SessionDiscoveryScope::Current)
+        );
+        for flags in [
+            vec![
+                "--list-sessions-json",
+                "--session-transcript-path",
+                source.as_str(),
+                "--session-scope",
+                "all",
+            ],
+            vec![
+                "--list-sessions-json",
+                "--session-id",
+                id,
+                "--session-transcript-path",
+                source.as_str(),
+            ],
+            vec![
+                "--list-sessions-json",
+                "--session-id",
+                id,
+                "--session-transcript-path",
+                "/catalog/11111111-2222-4333-8444-555555555555.jsonl",
+                "--session-scope",
+                "all",
+            ],
+            vec![
+                "--list-sessions-json",
+                "--session-id",
+                id,
+                "--session-transcript-path",
+                source.as_str(),
+                "--session-scope",
+                "all",
+                "--expected-conversation-mode",
+                "code",
+            ],
+        ] {
+            assert!(BridgeArgs::parse(flags).is_err());
+        }
+    }
+
+    #[test]
+    fn draft_restore_flag_requires_an_owned_runtime_session() {
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let parsed = BridgeArgs::parse([
+            "--session-id",
+            id,
+            "--restore-draft",
+            "--initial-conversation-mode",
+            "code",
+        ])
+        .unwrap();
+        assert!(parsed.restore_draft);
+        assert!(resolve_desktop_config(&parsed).unwrap().restore_draft);
+        assert!(BridgeArgs::parse(["--restore-draft"]).is_err());
+        assert!(BridgeArgs::parse([
+            "--session-id",
+            id,
+            "--restore-draft",
+            "--list-sessions-json"
+        ])
+        .is_err());
+        assert!(BridgeArgs::parse([
+            "--session-id",
+            id,
+            "--restore-draft",
+            "--session-transcript-path",
+            &format!("/tmp/{id}.jsonl")
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn durable_draft_title_requires_a_new_owned_draft() {
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        for mode in ["chat", "code"] {
+            let args = BridgeArgs::parse([
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                mode,
+                "--durable-draft-title",
+                "Local App",
+            ])
+            .unwrap();
+            assert_eq!(args.durable_draft_title.as_deref(), Some("Local App"));
+            assert_eq!(
+                resolve_desktop_config(&args)
+                    .unwrap()
+                    .durable_draft_title
+                    .as_deref(),
+                Some("Local App")
+            );
+        }
+        for flags in [
+            vec!["--durable-draft-title"],
+            vec!["--durable-draft-title", "Local App"],
+            vec!["--session-id", id, "--durable-draft-title", "Local App"],
+            vec![
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "code",
+                "--durable-draft-title",
+                "Local App",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--durable-draft-title",
+                "Local App",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "code",
+                "--expected-conversation-mode",
+                "chat",
+                "--durable-draft-title",
+                "Local App",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "chat",
+                "--list-sessions-json",
+                "--durable-draft-title",
+                "Local App",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "code",
+                "--durable-draft-title",
+                "  ",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "code",
+                "--scheduled-durable-anchor",
+            ],
+        ] {
+            assert!(BridgeArgs::parse(flags).is_err());
+        }
+        assert!(resolve_desktop_config(&BridgeArgs::default())
+            .unwrap()
+            .durable_draft_title
+            .is_none());
+    }
+
+    #[test]
+    fn initial_conversation_mode_is_a_private_owned_draft_argument() {
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        for (value, expected) in [
+            ("chat", ConversationMode::Chat),
+            ("code", ConversationMode::Code),
+        ] {
+            let parsed = BridgeArgs::parse([
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                value,
+            ])
+            .unwrap();
+            assert_eq!(parsed.initial_conversation_mode, Some(expected));
+            assert_eq!(
+                resolve_desktop_config(&parsed)
+                    .unwrap()
+                    .initial_conversation_mode,
+                Some(expected)
+            );
+        }
+        for flags in [
+            vec!["--initial-conversation-mode", "chat"],
+            vec!["--session-id", id, "--initial-conversation-mode", "chat"],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "invalid",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "chat",
+                "--list-sessions-json",
+            ],
+        ] {
+            assert!(BridgeArgs::parse(flags).is_err());
+        }
+        assert_eq!(
+            resolve_desktop_config(&BridgeArgs::default())
+                .unwrap()
+                .initial_conversation_mode,
+            None
+        );
+    }
+
+    #[test]
+    fn draft_initial_and_expected_modes_must_agree() {
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        for (initial, expected) in [("code", "chat"), ("chat", "code")] {
+            let error = BridgeArgs::parse([
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                initial,
+                "--expected-conversation-mode",
+                expected,
+            ])
+            .unwrap_err();
+            assert!(error.contains("initial and expected conversation modes must match"));
+        }
+        for (value, mode) in [
+            ("chat", ConversationMode::Chat),
+            ("code", ConversationMode::Code),
+        ] {
+            let parsed = BridgeArgs::parse([
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                value,
+                "--expected-conversation-mode",
+                value,
+            ])
+            .unwrap();
+            assert_eq!(parsed.initial_conversation_mode, Some(mode));
+            assert_eq!(parsed.expected_conversation_mode, Some(mode));
+            assert_eq!(
+                resolve_desktop_config(&parsed)
+                    .unwrap()
+                    .initial_conversation_mode,
+                Some(mode)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn draft_boot_captures_valid_metadata_under_the_session_writer_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let home = root.path().join("home");
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let content = format!(
+            "{}\n",
+            serde_json::json!({"type":"fixed-session-mode", "sessionId":id,
+            "sessionMode":"chat", "instructionEpoch":3})
+        );
+        std::fs::write(&path, &content).unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = cwd;
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.restore_draft = true;
+        cfg.initial_conversation_mode = Some(ConversationMode::Chat);
+        prepare_draft_boot_session(&mut cfg).await.unwrap();
+        assert_eq!(cfg.session_transcript_path.as_ref(), Some(&path));
+        assert_eq!(
+            cfg.session_resume_snapshot
+                .as_ref()
+                .unwrap()
+                .content
+                .as_ref(),
+            content
+        );
+        assert_eq!(cfg.session_writer_lease.as_ref().unwrap().session_id(), id);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        drop(cfg);
+        assert!(LiveSessionDir::at_live(home.join("sessions"))
+            .claim_session_id(id, std::process::id())
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn draft_boot_rejects_corrupt_or_message_bearing_files_without_changing_them() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let home = root.path().join("home");
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mode = serde_json::json!({"type":"fixed-session-mode", "sessionId":id,
+            "sessionMode":"chat", "instructionEpoch":3});
+        for content in [
+            format!("{mode}\n{{broken\n"),
+            format!(
+                "{mode}\n{}\n",
+                serde_json::json!({"type":"user","sessionId":id,"message":{}})
+            ),
+        ] {
+            std::fs::write(&path, &content).unwrap();
+            let mut cfg = DesktopConfig::default();
+            cfg.cwd = cwd.clone();
+            cfg.lingxi_home = home.clone();
+            cfg.session_id_override = Some(id.into());
+            cfg.restore_draft = true;
+            cfg.initial_conversation_mode = Some(ConversationMode::Chat);
+            assert!(prepare_draft_boot_session(&mut cfg).await.is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
+    }
+
+    #[tokio::test]
+    async fn new_draft_without_a_transcript_remains_new_with_a_writer_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = root.path().into();
+        cfg.lingxi_home = root.path().join("home");
+        cfg.session_id_override = Some("11111111-2222-4333-8444-555555abcdef".into());
+        cfg.restore_draft = true;
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
+        prepare_draft_boot_session(&mut cfg).await.unwrap();
+        assert!(cfg.session_transcript_path.is_none());
+        assert!(cfg.session_resume_snapshot.is_none());
+        assert!(cfg.session_writer_lease.is_some());
     }
 
     #[test]
@@ -2788,12 +3546,16 @@ mod tests {
     fn write_workspace_catalog_row(home: &Path, cwd: &Path, id: &str) -> PathBuf {
         let path = session::jsonl::session_path(home, &cwd.to_string_lossy(), id);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let header = serde_json::json!({
+            "type":"fixed-session-mode", "sessionId":id,
+            "sessionMode":"code", "instructionEpoch":0,
+        });
         let row = serde_json::json!({
             "type":"user", "uuid":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "parentUuid":null,
             "sessionId":id, "timestamp":"2026-10-21T00:00:00.000Z", "cwd":cwd,
             "isSidechain":false, "message":{"role":"user","content":"workspace catalog"},
         });
-        std::fs::write(&path, format!("{row}\n")).unwrap();
+        std::fs::write(&path, format!("{header}\n{row}\n")).unwrap();
         path
     }
 
@@ -2819,9 +3581,14 @@ mod tests {
         cfg.lingxi_home = home.clone();
         cfg.session_id_override = Some(id.into());
         cfg.session_transcript_path = Some(selected.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
         prepare_selected_boot_session(&mut cfg).await.unwrap();
         assert_eq!(cfg.cwd, cwd);
-        assert_eq!(cfg.session_transcript_path.as_ref(), Some(&selected));
+        assert_eq!(
+            cfg.session_transcript_path.as_ref(),
+            Some(&std::fs::canonicalize(&selected).unwrap())
+        );
+        assert!(cfg.session_transcript_authority.is_some());
         let snapshot = cfg.session_resume_snapshot.as_ref().unwrap();
         assert_eq!(snapshot.source_session_id, id);
         assert_eq!(snapshot.content.as_ref(), selected_content);
@@ -2841,6 +3608,202 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_boot_rejects_mode_mismatch_before_writer_claim() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let path = write_workspace_catalog_row(&home, &cwd, id);
+        let original = std::fs::read(&path).unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = cwd;
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.session_transcript_path = Some(path.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Chat);
+        let error = prepare_selected_boot_session(&mut cfg).await.unwrap_err();
+        assert!(error.contains("session_mode_mismatch"));
+        assert!(cfg.session_writer_lease.is_none());
+        assert!(!home.join("sessions").exists());
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selected_boot_rejects_linked_catalog_bucket_before_claim() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir_all(home.join("projects")).unwrap();
+        std::fs::create_dir(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let outside_home = root.path().join("outside");
+        let outside = write_workspace_catalog_row(&outside_home, &cwd, id);
+        let original = std::fs::read(&outside).unwrap();
+        symlink(outside.parent().unwrap(), home.join("projects/linked")).unwrap();
+        let selected = home.join("projects/linked").join(format!("{id}.jsonl"));
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = cwd;
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.session_transcript_path = Some(selected);
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
+        assert!(prepare_selected_boot_session(&mut cfg).await.is_err());
+        assert!(cfg.session_writer_lease.is_none());
+        assert!(!home.join("sessions").exists());
+        assert_eq!(std::fs::read(outside).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn selected_boot_snapshot_requires_matching_source_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let selected = write_workspace_catalog_row(&home, &cwd, id);
+        let content = std::fs::read_to_string(&selected).unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = cwd;
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.session_transcript_path = Some(selected);
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
+        cfg.session_resume_snapshot =
+            Some(harness_runtime::desktop::DesktopSessionResumeSnapshot {
+                source_session_id: id.into(),
+                content: content.clone().into(),
+            });
+        assert!(prepare_selected_boot_session(&mut cfg).await.is_err());
+        assert!(cfg.session_writer_lease.is_none());
+        assert!(!home.join("sessions").exists());
+    }
+
+    #[tokio::test]
+    async fn selected_boot_rejects_same_bytes_replaced_after_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let selected = write_workspace_catalog_row(&home, &cwd, id);
+        let original = std::fs::read(&selected).unwrap();
+        let replacement = selected.with_file_name("replacement.jsonl");
+        let retired = selected.with_file_name("retired.jsonl");
+        std::fs::write(&replacement, &original).unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = cwd;
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.session_transcript_path = Some(selected.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
+        let selected_for_swap = selected.clone();
+        let retired_for_swap = retired.clone();
+        let result = prepare_selected_boot_session_after_capture(&mut cfg, move || {
+            std::fs::rename(&selected_for_swap, &retired_for_swap).unwrap();
+            std::fs::rename(&replacement, &selected_for_swap).unwrap();
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(cfg.session_writer_lease.is_none());
+        assert!(cfg.session_transcript_authority.is_none());
+        assert_eq!(std::fs::read(&selected).unwrap(), original);
+        assert_eq!(std::fs::read(retired).unwrap(), original);
+        assert!(LiveSessionDir::at_live(home.join("sessions"))
+            .claim_session_id(id, std::process::id())
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn selected_boot_rejects_complete_json_without_record_terminator() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let selected = write_workspace_catalog_row(&home, &cwd, id);
+        let mut content = std::fs::read_to_string(&selected).unwrap();
+        assert_eq!(content.pop(), Some('\n'));
+        std::fs::write(&selected, &content).unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = cwd;
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.session_transcript_path = Some(selected.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
+        let error = prepare_selected_boot_session(&mut cfg).await.unwrap_err();
+        assert!(error.contains("incomplete final record"), "{error}");
+        assert!(cfg.session_writer_lease.is_none());
+        assert!(!home.join("sessions").exists());
+        assert_eq!(std::fs::read_to_string(selected).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn selected_empty_session_rejects_missing_anchor_cwd_before_claim() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+            serde_json::json!({"type":"custom-title","sessionId":id,"customTitle":"scheduled","mobileEmptySession":1})
+        );
+        std::fs::write(&path, &content).unwrap();
+        let loaded = session::jsonl::route_lines(&content);
+        assert!(validate_captured_transcript(
+            &path,
+            uuid::Uuid::parse_str(id).unwrap(),
+            &content,
+            &loaded,
+            false
+        )
+        .is_err());
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = cwd;
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.session_transcript_path = Some(path.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
+        assert!(prepare_selected_boot_session(&mut cfg).await.is_err());
+        assert!(cfg.session_writer_lease.is_none());
+        assert!(!home.join("sessions").exists());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn selected_empty_session_accepts_matching_durable_workspace_anchor() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+            serde_json::json!({"type":"custom-title","sessionId":id,"customTitle":"scheduled","mobileEmptySession":1,"cwd":cwd})
+        );
+        std::fs::write(&path, &content).unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = cwd;
+        cfg.lingxi_home = home;
+        cfg.session_id_override = Some(id.into());
+        cfg.session_transcript_path = Some(path.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
+        prepare_selected_boot_session(&mut cfg).await.unwrap();
+        assert!(cfg.session_transcript_authority.is_some());
+        assert!(cfg.session_writer_lease.is_some());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+    }
+
+    #[tokio::test]
     async fn selected_boot_workspace_rejects_missing_empty_and_wrong_uuid_before_registry() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
@@ -2851,6 +3814,7 @@ mod tests {
         cfg.lingxi_home = home.clone();
         cfg.session_id_override = Some(id.into());
         cfg.session_transcript_path = Some(selected.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
         assert!(prepare_selected_boot_session(&mut cfg).await.is_err());
         assert!(!home.exists());
         std::fs::write(&selected, "").unwrap();
@@ -2882,6 +3846,7 @@ mod tests {
         cfg.lingxi_home = home.clone();
         cfg.session_id_override = Some(id.into());
         cfg.session_transcript_path = Some(selected.clone());
+        cfg.initial_conversation_mode = Some(ConversationMode::Code);
         let error = prepare_selected_boot_session(&mut cfg).await.unwrap_err();
         assert!(error.contains("refresh its metadata and trust"));
         assert!(cfg.session_writer_lease.is_none());
@@ -2890,7 +3855,11 @@ mod tests {
         std::fs::remove_dir(&recorded).unwrap();
         prepare_selected_boot_session(&mut cfg).await.unwrap();
         assert_eq!(cfg.cwd, launch);
-        assert_eq!(cfg.session_transcript_path.as_ref(), Some(&selected));
+        assert_eq!(
+            cfg.session_transcript_path.as_ref(),
+            Some(&std::fs::canonicalize(&selected).unwrap())
+        );
+        assert!(cfg.session_transcript_authority.is_some());
         assert_eq!(
             cfg.session_resume_snapshot
                 .as_ref()
@@ -2982,6 +3951,175 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reverse["sessions"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn selected_catalog_source_preserves_same_uuid_copy_and_scope() {
+        use session::jsonl::SessionDiscoveryScope as Scope;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let current = root.join("current");
+        let other = root.join("other");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let source_a = write_workspace_catalog_row(&home, &current, id);
+        let source_b = write_workspace_catalog_row(&home, &other, id);
+        let a_bytes = std::fs::read(&source_a).unwrap();
+        let b_content = std::fs::read_to_string(&source_b)
+            .unwrap()
+            .replace("workspace catalog", "selected other source");
+        std::fs::write(&source_b, &b_content).unwrap();
+
+        let current_row: serde_json::Value = serde_json::from_str(
+            &list_selected_session_json_from_in_scope(
+                &current,
+                &home,
+                id,
+                &source_a,
+                Scope::Current,
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            current_row["sessions"][0]["path"],
+            source_a.to_str().unwrap()
+        );
+        assert_eq!(current_row["sessions"][0]["mode"], "code");
+        assert_eq!(current_row["sessions"][0]["empty_session"], false);
+        let outside_current: serde_json::Value = serde_json::from_str(
+            &list_selected_session_json_from_in_scope(
+                &current,
+                &home,
+                id,
+                &source_b,
+                Scope::Current,
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(outside_current["sessions"].as_array().unwrap().is_empty());
+
+        let other_row: serde_json::Value = serde_json::from_str(
+            &list_selected_session_json_from_in_scope(&current, &home, id, &source_b, Scope::All)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(other_row["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(other_row["sessions"][0]["path"], source_b.to_str().unwrap());
+        assert_eq!(
+            other_row["sessions"][0]["workspace_path"],
+            other.to_str().unwrap()
+        );
+        assert_eq!(other_row["sessions"][0]["title"], "selected other source");
+        assert_eq!(std::fs::read_to_string(&source_b).unwrap(), b_content);
+
+        session::jsonl::record_session_alias(&home, source_b.parent().unwrap(), &current)
+            .await
+            .unwrap();
+        let linked_row: serde_json::Value = serde_json::from_str(
+            &list_selected_session_json_from_in_scope(
+                &current,
+                &home,
+                id,
+                &source_b,
+                Scope::Current,
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            linked_row["sessions"][0]["path"],
+            source_b.to_str().unwrap()
+        );
+
+        std::fs::remove_file(&source_b).unwrap();
+        assert!(list_selected_session_json_from_in_scope(
+            &current,
+            &home,
+            id,
+            &source_b,
+            Scope::All
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read(&source_a).unwrap(), a_bytes);
+    }
+
+    #[tokio::test]
+    async fn selected_catalog_source_validates_empty_anchor_without_writes() {
+        use session::jsonl::SessionDiscoveryScope as Scope;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+            serde_json::json!({"type":"custom-title","sessionId":id,"customTitle":"scheduled","mobileEmptySession":1})
+        );
+        std::fs::write(&path, &content).unwrap();
+        assert!(
+            list_selected_session_json_from_in_scope(&cwd, &home, id, &path, Scope::Current)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        assert!(!home.join("sessions").exists());
+
+        let anchored = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+            serde_json::json!({"type":"custom-title","sessionId":id,"customTitle":"scheduled","mobileEmptySession":1,"cwd":cwd})
+        );
+        std::fs::write(&path, &anchored).unwrap();
+        let row: serde_json::Value = serde_json::from_str(
+            &list_selected_session_json_from_in_scope(&cwd, &home, id, &path, Scope::Current)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(row["sessions"][0]["path"], path.to_str().unwrap());
+        assert_eq!(row["sessions"][0]["empty_session"], true);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), anchored);
+        assert!(!home.join("sessions").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selected_catalog_source_rejects_linked_bucket() {
+        use session::jsonl::SessionDiscoveryScope as Scope;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let outside = root.join("outside");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let real = write_workspace_catalog_row(&outside, &cwd, id);
+        let original = std::fs::read(&real).unwrap();
+        let projects = home.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let linked_bucket = projects.join(real.parent().unwrap().file_name().unwrap());
+        std::os::unix::fs::symlink(real.parent().unwrap(), &linked_bucket).unwrap();
+        let selected = linked_bucket.join(format!("{id}.jsonl"));
+        assert!(
+            list_selected_session_json_from_in_scope(&cwd, &home, id, &selected, Scope::All)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(real).unwrap(), original);
+        assert!(!home.join("sessions").exists());
     }
 
     #[tokio::test]
@@ -3881,6 +5019,7 @@ mod tests {
             __desktop_config.defer_session_start = false;
             __desktop_config.connect_mcp_in_background = false;
             __desktop_config.session_transcript_path = None;
+            __desktop_config.session_transcript_authority = None;
             __desktop_config.session_resume_snapshot = None;
             __desktop_config.session_resume_cost = None;
             __desktop_config.max_structured_output_retries = 5;

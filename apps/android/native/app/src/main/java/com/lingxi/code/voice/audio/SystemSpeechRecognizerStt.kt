@@ -28,6 +28,11 @@ interface RealtimeSpeechSession {
     fun close()
 }
 
+/** Stop accepting input and close only after an admitted realtime turn drains. */
+internal interface NavigationDrainingRealtimeSession : RealtimeSpeechSession {
+    fun finishForNavigation()
+}
+
 /**
  * Android system `SpeechRecognizer` wrapped as [SttProvider].
  *

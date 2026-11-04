@@ -16,6 +16,7 @@ export {
   conversationFromMessages,
   emptyConversation,
   reduceEvent,
+  slashCommandEchoesRequest,
 } from '@lingxi/electron/renderer/bridge/conversation';
 export type { ConversationState } from '@lingxi/electron/renderer/bridge/conversation';
 

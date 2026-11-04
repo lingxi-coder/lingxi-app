@@ -43,10 +43,11 @@ enum class CronRunStatus {
     Cancelled,
     Skipped,
     Interrupted,
+    OutcomeUnknown,
     ;
 
     val isTerminal: Boolean
-        get() = this in setOf(Succeeded, Failed, TimedOut, Cancelled, Skipped, Interrupted)
+        get() = this in setOf(Succeeded, Failed, TimedOut, Cancelled, Skipped, Interrupted, OutcomeUnknown)
 }
 
 data class CronRunRecord(
@@ -66,6 +67,9 @@ data class CronRunRecord(
     val errorMessage: String? = null,
     val manual: Boolean = false,
     val sessionId: String? = null,
+    val sessionTranscriptPath: String? = null,
+    val sessionMode: String? = null,
+    val sessionScopeKey: String? = null,
     val model: String? = null,
     val notificationPolicy: String = "all",
     val notificationDelivered: Boolean = false,
@@ -115,6 +119,6 @@ internal data class CronTaskExecutionBatch(
 internal fun shouldNotifyCronRun(policy: String, status: CronRunStatus): Boolean =
     status.isTerminal && when (policy) {
         "all" -> true
-        "failed" -> status in setOf(CronRunStatus.Failed, CronRunStatus.TimedOut, CronRunStatus.Interrupted)
+        "failed" -> status in setOf(CronRunStatus.Failed, CronRunStatus.TimedOut, CronRunStatus.Interrupted, CronRunStatus.OutcomeUnknown)
         else -> false
     }

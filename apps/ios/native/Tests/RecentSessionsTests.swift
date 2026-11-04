@@ -46,7 +46,8 @@ final class RecentSessionsTests: XCTestCase {
             mode: mode,
             modifiedAt: daysAgo.map { now.addingTimeInterval(-$0 * 86_400) },
             relativeTime: "",
-            messageCount: 1
+            messageCount: 1,
+            transcriptPath: "/sessions/\(id).jsonl"
         )
     }
 

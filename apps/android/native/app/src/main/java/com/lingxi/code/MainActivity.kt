@@ -79,6 +79,14 @@ class MainActivity : ComponentActivity() {
     private lateinit var deviceReadPermissions: DeviceReadPermissionController
     private val linkInbox: com.lingxi.code.navigation.DeepLinkInbox by viewModels()
     private fun enqueueCanonicalLink(intent: Intent, restoringActivity: Boolean = false) {
+        if (intent.getBooleanExtra(com.lingxi.code.conversation.ConversationNotificationRoute.EXTRA_NOTIFICATION_OWNER, false)) {
+            if (!restoringActivity) {
+                com.lingxi.code.conversation.ConversationNotificationRoute.parse(intent)?.let {
+                    pendingConversationLaunch.value = it
+                }
+            }
+            return
+        }
         val raw = intent.dataString
         if (raw == null) return
         val notice = when {
@@ -282,15 +290,20 @@ class MainActivity : ComponentActivity() {
             }
             var terminalSessionId by rememberSaveable { mutableStateOf("interactive") }
             var terminalInitCommand by rememberSaveable { mutableStateOf<String?>(null) }
+            var terminalCwd by rememberSaveable { mutableStateOf("") }
+            var terminalOwnerKey by rememberSaveable { mutableStateOf("") }
             var terminalLaunchGeneration by rememberSaveable { mutableIntStateOf(0) }
-            val openTerminal: (String, String?) -> Unit = { sessionId, initCommand ->
+            val openTerminal: (String, String?, String, String) -> Unit = { sessionId, initCommand, cwd, ownerKey ->
                 terminalSessionId = sessionId.ifBlank { "interactive" }
                 terminalInitCommand = initCommand
+                terminalCwd = cwd
+                terminalOwnerKey = ownerKey
                 terminalLaunchGeneration += 1
                 terminalOpen = true
                 settingsOpen = false
             }
             var preparedNativeLink by remember { mutableStateOf<com.lingxi.code.navigation.DeepLink?>(null) }
+            var preparedNativeSource by remember { mutableStateOf<com.lingxi.code.conversation.ConversationSource?>(null) }
             var requestedFeatureLink by remember { mutableStateOf<com.lingxi.code.navigation.DeepLink?>(null) }
             var deepLinkBlocked by remember { mutableStateOf(false) }
             var pendingImportRaw by rememberSaveable { mutableStateOf<String?>(null) }
@@ -317,7 +330,26 @@ class MainActivity : ComponentActivity() {
                         parts.first() == "remote" -> com.lingxi.code.remote.RemoteRoute.fromLink(link)?.let(openRemote) ?: run { handled = false }
                         link.params["workspace"] != null && parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal") && preparedNativeLink != link -> { requestedFeatureLink = link; awaitingFeature = true }
                         parts.first() in setOf("session", "new", "project", "apps", "market", "runtime", "import") -> { requestedFeatureLink = link; awaitingFeature = true }
-                        parts.first() == "terminal" -> openTerminal(id, link.payload["command"] as? String)
+                        parts.first() == "terminal" -> {
+                            if (link.params["workspace"] == null) {
+                                val cwd = com.lingxi.code.project.MobileUserStorage.directories(applicationContext).configGuestPath
+                                openTerminal(id, link.payload["command"] as? String, cwd, "runtime-link")
+                            } else {
+                                val source = preparedNativeSource
+                                val workspace = source?.workspaceState?.value
+                                val activation = source?.activeSessionState?.value
+                                if (source == null || source !== activeConversationSource ||
+                                    source.recoverySpec?.workspaceKey != link.params["workspace"] ||
+                                    workspace == null || activation == null || workspace.cwd.isBlank() ||
+                                    com.lingxi.code.model.canonicalSessionId(workspace.sessionId) !=
+                                    com.lingxi.code.model.canonicalSessionId(activation.sessionId)) {
+                                    handled = false
+                                } else {
+                                    val owner = com.lingxi.code.model.canonicalSessionId(activation.sessionId)
+                                    openTerminal(id, link.payload["command"] as? String, workspace.cwd, "conversation:$owner")
+                                }
+                            }
+                        }
                         parts.first() == "settings" -> {
                             val pages = mapOf("general" to SettingsRoutes.GENERAL, "account" to SettingsRoutes.ACCOUNT, "appearance" to SettingsRoutes.APPEARANCE, "notifications" to SettingsRoutes.NOTIFICATIONS, "voice" to SettingsRoutes.VOICE, "custom-providers" to SettingsRoutes.CUSTOM_PROVIDERS, "fusion" to SettingsRoutes.FUSION, "permissions" to SettingsRoutes.ENGINE_PERMISSIONS, "tools-agent" to SettingsRoutes.TOOLS_AGENT, "skills" to SettingsRoutes.ENGINE_SKILLS, "mcp" to SettingsRoutes.ENGINE_MCP, "hooks" to SettingsRoutes.HOOKS, "plugins" to SettingsRoutes.PLUGINS, "diagnostics" to SettingsRoutes.DIAGNOSTICS, "about" to SettingsRoutes.ABOUT, "projects" to SettingsRoutes.PROJECTS, "archived-chats" to SettingsRoutes.ARCHIVED, "language" to SettingsRoutes.LANGUAGE, "input" to SettingsRoutes.INPUT, "privacy" to SettingsRoutes.PRIVACY, "permission-mode" to SettingsRoutes.PERMISSION_MODE, "open-source" to SettingsRoutes.OPEN_SOURCE, "linux-runtime" to SettingsRoutes.LINUX_RUNTIME, "typescript-lsp" to SettingsRoutes.TYPESCRIPT_LSP, "computer-use" to SettingsRoutes.COMPUTER_USE, "dream" to SettingsRoutes.DREAM, "cron" to SettingsRoutes.CRON, "provider-credentials" to SettingsRoutes.PROVIDER_ACCOUNTS)
                             pages[id]?.let { settingsInitialRoute = it; settingsOpen = true } ?: run { handled = false }
@@ -336,7 +368,7 @@ class MainActivity : ComponentActivity() {
                         else -> handled = false
                     }
                     if (!handled) android.widget.Toast.makeText(applicationContext, "This link destination is unavailable in this build", android.widget.Toast.LENGTH_LONG).show()
-                    if (!awaitingFeature) { preparedNativeLink = null; raw?.let(linkInbox::complete) }
+                    if (!awaitingFeature) { preparedNativeLink = null; preparedNativeSource = null; raw?.let(linkInbox::complete) }
                 }
             }
             LaunchedEffect(requestedConversationLaunch) {
@@ -424,7 +456,7 @@ class MainActivity : ComponentActivity() {
                         onConversationBusyChanged = { activeConversationBusy = it },
                         requestedDeepLink = requestedFeatureLink,
                         onDeepLinkBlockingChanged = { deepLinkBlocked = it },
-                        onDeepLinkNativeReady = { link -> preparedNativeLink = link },
+                        onDeepLinkNativeReady = { link, source -> preparedNativeSource = source; preparedNativeLink = link },
                         onDeepLinkImportReady = { link ->
                             pendingImportRaw = com.lingxi.code.navigation.DeepLink.build(link.route, link.params, link.payload)
                             settingsOpen = true
@@ -449,16 +481,32 @@ class MainActivity : ComponentActivity() {
                             onDeepLinkImportDismiss = { canonicalLinks.firstOrNull()?.let(linkInbox::complete); pendingImportRaw = null; settingsOpen = false },
                             onOpenScheduledSession = { run ->
                                 run.sessionId?.let { sessionId ->
-                                    pendingConversationLaunch.value = ConversationLaunchRequest(
-                                        sessionId = sessionId,
-                                        turnId = null,
-                                        workspaceKey = run.projectId?.let { "project.$it" } ?: "scheduled",
-                                        sessionMode = desktopProjectStore.state.value.projects
-                                            .firstOrNull { it.record.id == run.projectId }?.sessions
-                                            ?.firstOrNull { it.sessionId == sessionId.removePrefix("sess:") }?.mode
-                                            ?: com.lingxi.code.model.SessionMode.Code,
-                                    )
-                                    settingsOpen = false
+                                    scope.launch {
+                                        val workspace = run.sessionScopeKey
+                                        val id = com.lingxi.code.model.canonicalSessionId(sessionId)
+                                        val receiptMode = com.lingxi.code.model.SessionMode.entries.firstOrNull { it.wireValue == run.sessionMode }
+                                        val owners = runCatching {
+                                            com.lingxi.code.project.ScopeStateStore(applicationContext).let { store ->
+                                                store.validate()
+                                                store.readSessionOwners()
+                                            }
+                                        }.getOrElse {
+                                            android.widget.Toast.makeText(applicationContext, getString(R.string.chat_resume_session_failed), android.widget.Toast.LENGTH_LONG).show()
+                                            return@launch
+                                        }
+                                        val owner = owners[id]
+                                        if (workspace.isNullOrBlank() || receiptMode == null || run.sessionTranscriptPath.isNullOrBlank() ||
+                                            owner != com.lingxi.code.project.ScopeStateStore.SessionOwner(workspace, receiptMode)) {
+                                            android.widget.Toast.makeText(applicationContext, getString(R.string.chat_resume_session_failed), android.widget.Toast.LENGTH_LONG).show()
+                                            return@launch
+                                        }
+                                        pendingConversationLaunch.value = ConversationLaunchRequest(
+                                            sessionId = sessionId, turnId = null,
+                                            workspaceKey = workspace, sessionMode = receiptMode,
+                                            transcriptPath = run.sessionTranscriptPath,
+                                        )
+                                        settingsOpen = false
+                                    }
                                 }
                             },
                             projectStore = desktopProjectStore,
@@ -510,7 +558,8 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             onOpenTerminal = {
-                                openTerminal(it.sessionId, it.initCommand)
+                                val cwd = com.lingxi.code.project.MobileUserStorage.directories(applicationContext).configGuestPath
+                                openTerminal(it.sessionId, it.initCommand, cwd, "runtime-settings")
                             },
                         )
                     }
@@ -556,7 +605,7 @@ class MainActivity : ComponentActivity() {
                         enter = slideInVertically(initialOffsetY = { it }),
                         exit = slideOutVertically(targetOffsetY = { it }),
                     ) {
-                        key(terminalLaunchGeneration) {
+                        if (terminalCwd.isNotBlank() && terminalOwnerKey.isNotBlank()) key(terminalLaunchGeneration) {
                             val terminalGateway = remember(
                                 terminalLaunchGeneration,
                                 settingsState.linuxRuntime.selectedMode,
@@ -564,14 +613,20 @@ class MainActivity : ComponentActivity() {
                                 createTerminalGateway(
                                     applicationContext,
                                     settingsState.linuxRuntime.selectedMode,
+                                    terminalCwd,
+                                    terminalOwnerKey,
                                 )
                             }
                             TerminalRoute(
                                 args = TerminalRouteArgs(
                                     sessionId = terminalSessionId,
+                                    cwd = terminalCwd,
                                     initCommand = terminalInitCommand,
                                 ),
-                                instanceKey = terminalLaunchGeneration.toString(),
+                                instanceKey = com.lingxi.code.terminal.terminalOwnerViewKey(
+                                    terminalSessionId, terminalOwnerKey, terminalCwd, settingsState.linuxRuntime.selectedMode.name,
+                                ),
+                                launchGeneration = terminalLaunchGeneration,
                                 gateway = terminalGateway,
                                 onBack = { terminalOpen = false },
                                 onOpenUrl = { url ->

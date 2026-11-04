@@ -100,8 +100,13 @@ struct RemoteFilesView: View {
     }
     private func client() throws -> IosRemoteControlClient {
         try Task.checkCancellation()
-        guard manager.uid == ownerUID, manager.connection?.hostId == hostID else { throw RemoteFfiError.NotConnected }
+        guard let ownerUID, manager.connectionTicket(hostID: hostID, uid: ownerUID) != nil else { throw RemoteFfiError.NotConnected }
         return try manager.activeClient()
+    }
+
+    private func admitRequest() throws -> IosRemoteControlClient {
+        guard let ownerUID, let ticket = manager.connectionTicket(hostID: hostID, uid: ownerUID) else { throw RemoteFfiError.NotConnected }
+        return try manager.admitSessionRequest(hostID: hostID, uid: ownerUID, ticket: ticket)
     }
     private func cacheRoot() throws -> URL {
         let scope = "\(ownerUID ?? "")\0\(hostID)\0\(sessionID)"
@@ -113,7 +118,9 @@ struct RemoteFilesView: View {
     }
     private func refresh() async {
         do {
-            let result = try await client().listFiles(sessionId: sessionID)
+            let active = try admitRequest()
+            defer { manager.finishSessionRequest() }
+            let result = try await active.listFiles(sessionId: sessionID)
             _ = try client()
             files = result
         }
@@ -121,17 +128,17 @@ struct RemoteFilesView: View {
     }
     private func upload() {
         guard !busy, enabled, let selected else { return }
+        guard let active = try? admitRequest() else { problem = String(localized: "remote_err_generic"); return }
         busy = true; problem = nil; committed = 0; status = String(localized: "remote_file_preparing")
         operation = Task {
-            defer { busy = false; transferID = nil }
+            defer { busy = false; transferID = nil; manager.finishSessionRequest() }
             do {
-                let active = try client()
                 transferID = selected.path
                 let file: RemoteFileFfi
                 if let prepared { file = prepared }
                 else { file = try await active.prepareFile(sessionId: sessionID, path: selected.path, name: selected.lastPathComponent); prepared = file }
                 transferID = file.transferId; total = file.size; status = String(localized: "remote_file_uploading")
-                let receipt = try await client().uploadFile(file: file, path: selected.path)
+                let receipt = try await active.uploadFile(file: file, path: selected.path)
                 _ = try client()
                 files.removeAll { $0.transferId == receipt.transferId }; files.append(receipt)
                 self.selected = nil; prepared = nil
@@ -141,16 +148,17 @@ struct RemoteFilesView: View {
     }
     private func download(_ file: RemoteFileFfi) {
         guard !busy, enabled else { return }
+        guard let active = try? admitRequest() else { problem = String(localized: "remote_err_generic"); return }
         busy = true; problem = nil; committed = 0; total = file.size; transferID = file.transferId
         operation = Task {
             status = String(localized: "remote_file_downloading")
-            defer { busy = false; transferID = nil }
+            defer { busy = false; transferID = nil; manager.finishSessionRequest() }
             do {
                 guard file.name == (file.name as NSString).lastPathComponent, file.name != ".", file.name != ".." else { throw CocoaError(.fileReadInvalidFileName) }
                 let directory = try cacheRoot().appendingPathComponent(file.transferId, isDirectory: true)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let path = directory.appendingPathComponent(file.name)
-                _ = try await client().downloadFile(file: file, path: path.path)
+                _ = try await active.downloadFile(file: file, path: path.path)
                 _ = try client()
                 exported = path
             } catch { problem = error.localizedDescription }
@@ -158,10 +166,11 @@ struct RemoteFilesView: View {
     }
     private func send(_ file: RemoteFileFfi) {
         guard !busy, enabled else { return }
+        guard let active = try? admitRequest() else { problem = String(localized: "remote_err_generic"); return }
         busy = true
         operation = Task {
-            defer { busy = false }
-            do { try await client().sendPromptWithFiles(sessionId: sessionID, text: file.name, images: [], fileRefs: [file.fileRef]) }
+            defer { busy = false; manager.finishSessionRequest() }
+            do { try await active.sendPromptWithFiles(sessionId: sessionID, text: file.name, images: [], fileRefs: [file.fileRef]) }
             catch { problem = error.localizedDescription }
         }
     }

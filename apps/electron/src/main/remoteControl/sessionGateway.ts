@@ -213,8 +213,12 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       case 'prompt.send': {
         const runtime = this.attachedRuntime(state, params);
         const attachment = state.attached.get(runtime.sessionId);
+        const authorizeOwner = () => {
+          if (state.closed || this.disposed || state.attached.get(runtime.sessionId) !== attachment) throw new RemoteRpcError('not_approved', 'prompt attachment changed');
+          if (this.attachedRuntime(state, params) !== runtime) throw new RemoteRpcError('not_approved', 'prompt runtime changed');
+        };
         const refs = (params as Json)?.['file_refs'];
-        if (refs === undefined) return this.deps.commands.promptSend(runtime, viewer, params);
+        if (refs === undefined) return this.deps.commands.promptSend(runtime, viewer, params, undefined, authorizeOwner);
         if (!Array.isArray(refs) || refs.length > 4 || refs.some(ref => typeof ref !== 'string')
           || typeof (params as Json)['text'] !== 'string' || /^\s*\//u.test((params as Json)['text'] as string)) {
           throw new RemoteRpcError('invalid_params', 'invalid file attachments');
@@ -223,14 +227,17 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         if (!store) throw new RemoteRpcError('invalid_params', 'files unavailable');
         const owner = this.fileOwner(viewer);
         const workspace = runtime.engineWorkspacePath ?? runtime.projectPath;
-        const authorize = () => {
-          if (state.closed || this.disposed || state.attached.get(runtime.sessionId) !== attachment) throw new RemoteRpcError('not_approved', 'file attachment changed');
-          if (this.attachedRuntime(state, params) !== runtime) throw new RemoteRpcError('not_approved', 'file runtime changed');
+        const authorizeFileOwner = () => {
+          authorizeOwner();
           if ((runtime.engineWorkspacePath ?? runtime.projectPath) !== workspace) throw new RemoteRpcError('not_approved', 'file workspace changed');
+        };
+        const authorize = () => {
+          authorizeFileOwner();
+          if (refs.length > 0 && runtime.turnActive) throw new RemoteRpcError('invalid_params', 'files cannot be sent while a turn is running');
         };
         const references: PromptFileReference[] = [];
         try {
-          return await this.deps.commands.promptSend(runtime, viewer, params, { authorize, resolve: async input => {
+          return await this.deps.commands.promptSend(runtime, viewer, params, { authorize, authorizeOwner: authorizeFileOwner, resolve: async input => {
             authorize();
             for (const id of refs) {
               references.push(await store.promptReference(owner, runtime.sessionId, id, workspace, authorize));

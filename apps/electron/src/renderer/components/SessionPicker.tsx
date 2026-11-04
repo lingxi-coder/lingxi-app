@@ -54,6 +54,7 @@ export function restoreSessionPickerFocus(opener: HTMLElement | null, fallback: 
 
 export interface SessionPickerProps {
   projectPath?: string;
+  mode: 'chat' | 'code';
   initialQuery?: string;
   activeSessionId?: string;
   suspended?: boolean;
@@ -63,7 +64,7 @@ export interface SessionPickerProps {
   onClose(): void;
 }
 
-export function SessionPicker({ projectPath, initialQuery = '', activeSessionId, suspended = false, listProjectSessions, openSession, onOpened, onClose }: SessionPickerProps) {
+export function SessionPicker({ projectPath, mode, initialQuery = '', activeSessionId, suspended = false, listProjectSessions, openSession, onOpened, onClose }: SessionPickerProps) {
   const { locale } = useI18n();
   const dialog = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -84,7 +85,7 @@ export function SessionPicker({ projectPath, initialQuery = '', activeSessionId,
   const listId = useId();
   const titleId = useId();
   const descriptionId = useId();
-  const rows = useMemo(() => sessionPickerRows(sessions, query), [sessions, query, locale]);
+  const rows = useMemo(() => sessionPickerRows(sessions.filter((session) => session.mode === mode), query), [sessions, query, locale, mode]);
   const selectedIndex = Math.max(0, rows.findIndex((session) => session.path === selectedPath));
   const selected = rows[selectedIndex];
   const selectedOptionId = selected ? `${listId}-${selectedIndex}` : undefined;
@@ -105,9 +106,8 @@ export function SessionPicker({ projectPath, initialQuery = '', activeSessionId,
     setOpeningUuid(sessionId);
     setError('');
     try {
-      const opened = await openSession(projectPath, sessionId, row
-        ? { scope, transcriptPath: row.path }
-        : { scope: 'repository' });
+      if (!row) throw new Error(tr('desktop_picker_open_error'));
+      const opened = await openSession(projectPath, sessionId, { scope, transcriptPath: row.path });
       if (!mounted.current) return;
       if (!opened) throw new Error(tr('desktop_picker_open_error'));
       onOpened();
@@ -144,7 +144,7 @@ export function SessionPicker({ projectPath, initialQuery = '', activeSessionId,
       setLoaded(true);
       setSelectedPath(undefined);
       if (catalog.error) { setError(catalog.error); return; }
-      const exactRow = autoResume ? resumeArgumentRow(initialArgument.current, catalog.sessions) : undefined;
+      const exactRow = autoResume ? resumeArgumentRow(initialArgument.current, catalog.sessions.filter((session) => session.mode === mode)) : undefined;
       if (exactRow) await openChat(exactRow.uuid, exactRow);
       else if (autoResume) {
         const fallbackId = resumeArgumentSessionId(initialArgument.current);
@@ -155,7 +155,7 @@ export function SessionPicker({ projectPath, initialQuery = '', activeSessionId,
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [listProjectSessions, openChat, projectPath, scope]);
+  }, [listProjectSessions, mode, openChat, projectPath, scope]);
 
   useEffect(() => {
     void loadSessions();

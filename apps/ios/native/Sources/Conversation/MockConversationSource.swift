@@ -15,7 +15,7 @@ import harness_runtimeFFI
 @MainActor
 final class MockConversationSource: ConversationSource {
     let model = ConversationModel(messages: MockData.messagesDefault)
-    let sessionMode: SessionMode
+    var sessionMode: SessionMode { model.sessionMode }
     private var cannedReplyDelay: TimeInterval = 1.1
     #if canImport(harness_runtimeFFI)
         private var mockProviderCatalog: [ProviderCatalogEntry] = []
@@ -30,10 +30,32 @@ final class MockConversationSource: ConversationSource {
     private var turnSpeechSequence: UInt64 = 0
 
     init(sessionMode: SessionMode = .code) {
-        self.sessionMode = sessionMode
+        model.sessionMode = sessionMode
     }
 
     #if DEBUG
+        /// Supply an exact, isolated owner for the UI navigation fixture. This
+        /// is a mock workspace, not evidence that a Linux runtime is available.
+        func prepareUIOwnerProbeWorkspace(sessionID: String? = nil, cwd: String? = nil, transcriptPath: String? = nil,
+                                          enabled: Bool = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_OWNER_PROBE"] == "1") {
+            guard enabled else { return }
+            if let sessionID, UUID(uuidString: sessionID) != nil { model.activeSessionId = sessionID }
+            guard UUID(uuidString: model.activeSessionId) != nil else { return }
+            let workspace = cwd ?? LXISHGuestPaths.conversationWorkspace(for: model.sessionMode)
+            model.workspaceState = SessionWorkspaceState(sessionId: model.activeSessionId, cwd: workspace,
+                projectRoot: workspace, additionalDirectories: [],
+                transcriptPath: transcriptPath ?? "\(workspace)/ui-test-\(model.activeSessionId).jsonl")
+        }
+
+        func authenticatedWorkspaceState(sessionID: String, mode: SessionMode) async -> SessionWorkspaceState? {
+            guard ProcessInfo.processInfo.environment["LINGXI_UI_TEST_OWNER_PROBE"] == "1",
+                  model.sessionMode == mode,
+                  canonicalSessionID(model.activeSessionId) == canonicalSessionID(sessionID),
+                  let workspace = model.workspaceState,
+                  canonicalSessionID(workspace.sessionId) == canonicalSessionID(sessionID) else { return nil }
+            return workspace
+        }
+
         static func uiTestFixture(
             sessionMode: SessionMode = .code,
             cancelledRun: Bool = false,
@@ -47,7 +69,7 @@ final class MockConversationSource: ConversationSource {
             }
             if let fixture = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_FILES"],
                fixture.hasPrefix("ui-files-"), fixture.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) {
-                let paths = WorkspaceDirectoryPaths.current()
+                let paths = WorkspaceDirectoryPaths.current(mode: sessionMode)
                 let directory = paths.home.appendingPathComponent(fixture, isDirectory: true)
                 do {
                     try FileManager.default.createDirectory(at: directory.appendingPathComponent("target"), withIntermediateDirectories: true)
@@ -226,6 +248,16 @@ final class MockConversationSource: ConversationSource {
             source.model.activeSessionId = "ui-session"
             // Fixture launches start closed; persistence has isolated model tests.
             source.model.expandedToolCalls = []
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_LOCAL_APP_REQUIRES_CODE"] == "1" {
+                let result = ConversationToolResultDisplay(headline: "Failed", headlineKind: .failed,
+                    headlineArgs: [], diff: nil,
+                    body: "local_app_development_requires_code: Local App development requires a Code session.",
+                    bodyLines: 1, bodyTruncated: false, collapsed: true)
+                let trace = ConversationToolTrace(id: "ui-local-app-requires-code", tool: "LocalApp", status: .failed,
+                                                  inputSummary: nil, elapsedMs: nil, display: result)
+                source.model.messages = []
+                source.model.items = [.toolCall(trace)]
+            }
             if multiAgent {
                 // The prompt a subagent is DISPATCHED with arrives as the first
                 // user bubble of its child transcript, and real ones run to
@@ -460,18 +492,19 @@ final class MockConversationSource: ConversationSource {
         }
         let path = try await WorkspaceDirectoryRepository().canonicalDirectory(path)
         model.workspaceState = SessionWorkspaceState(sessionId: model.activeSessionId, cwd: path,
-            projectRoot: model.workspaceState?.projectRoot ?? LXISHGuestPaths.workspaceRoot,
+            projectRoot: model.workspaceState?.projectRoot ?? LXISHGuestPaths.conversationWorkspace(for: sessionMode),
             additionalDirectories: model.workspaceState?.additionalDirectories ?? [],
             transcriptPath: model.workspaceState?.transcriptPath ?? "")
     }
 
     @discardableResult
-    func send(_ text: String) -> ConversationTurnToken? {
-        send(text, images: [])
+    func send(_ text: String) async -> ConversationTurnToken? {
+        await send(text, images: [])
     }
 
     @discardableResult
-    func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
+    func send(_ text: String, images: [ImageRefDto]) async -> ConversationTurnToken? {
+        guard !Task.isCancelled else { return nil }
         guard !model.isSelectedAgentReadOnly else { return nil }
         if model.streaming {
             guard let activeTurnToken else { return nil }
@@ -542,13 +575,15 @@ final class MockConversationSource: ConversationSource {
             initial.streamed = true
             model.messages.append(initial)
             model.items.append(.message(initial))
+            let ownerProbe = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_OWNER_PROBE"] == "1"
             Task { @MainActor [weak self] in
                 var paragraphs: [String] = []
-                for index in 1...80 {
-                    try? await Task.sleep(for: .milliseconds(300))
+                for index in 1...(ownerProbe ? Int.max : 80) {
+                    try? await Task.sleep(for: ownerProbe ? .seconds(2) : .milliseconds(300))
                     guard let self, !Task.isCancelled,
                           self.turnToken == generation, self.activeTurnToken == token else { return }
                     paragraphs.append("Scroll delta \(index). A streamed paragraph keeps growing in this same message.")
+                    if ownerProbe, paragraphs.count > 80 { paragraphs.removeFirst() }
                     var reply = Message(id: messageID, role: .ai,
                         text: paragraphs.joined(separator: "\n\n") + "\n\nScroll stream tail \(index)")
                     reply.streamed = true
@@ -577,8 +612,8 @@ final class MockConversationSource: ConversationSource {
         sourceCodeUnits: [UInt16]?,
         images: [ImageRefDto],
         selectedSlashCommand: ConversationSlashCommand?
-    ) -> ConversationTurnToken? {
-        send(text, images: images)
+    ) async -> ConversationTurnToken? {
+        await send(text, images: images)
     }
 
     func cancel() {

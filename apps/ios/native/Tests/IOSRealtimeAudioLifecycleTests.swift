@@ -2,6 +2,52 @@ import XCTest
 @testable import LingxiCode
 
 final class IOSRealtimeAudioLifecycleTests: XCTestCase {
+    func testToolPermissionSurvivesProviderCompletionAndContinuation() {
+        var ownership = IOSRealtimeTurnOwnership()
+        ownership.beginInput()
+        XCTAssertTrue(ownership.hasPendingWork, "The input is owned before the native start callback arrives")
+        ownership.beginAgentTurn(turnID: "agent-1")
+        ownership.beginToolWork()
+        XCTAssertTrue(ownership.hasPendingWork, "A permission-gated tool outlives its provider response")
+        // The same native Agent turn owns every provider continuation.
+        ownership.markActive()
+        XCTAssertFalse(ownership.completeAgentTurn(turnID: "stale-agent"), "A stale terminal cannot release the continuation")
+        XCTAssertTrue(ownership.hasPendingWork)
+        XCTAssertTrue(ownership.completeAgentTurn(turnID: "agent-1"))
+        XCTAssertFalse(ownership.hasPendingWork)
+        ownership.beginInput()
+        XCTAssertFalse(ownership.completeAgentTurn(turnID: "agent-1"), "A late terminal cannot release a new input")
+        ownership.beginAgentTurn(turnID: nil)
+        XCTAssertFalse(ownership.completeAgentTurn(turnID: nil), "An uncorrelated terminal cannot release the owner")
+        ownership.beginAgentTurn(turnID: "agent-1")
+        XCTAssertFalse(ownership.completeAgentTurn(turnID: "agent-1"), "Agent turn IDs cannot be reused")
+        ownership.beginAgentTurn(turnID: "agent-2")
+        XCTAssertTrue(ownership.completeAgentTurn(turnID: "agent-2"))
+    }
+
+    func testNavigationWaitsForSubmittedTurnAndPlaybackToDrain() {
+        XCTAssertTrue(IOSRealtimeAudioDrainPolicy.canClose(turnInFlight: false,
+            hasUnconfirmedToolWork: false,
+            pendingPlayback: false, pendingAcknowledgements: false))
+        XCTAssertFalse(IOSRealtimeAudioDrainPolicy.canClose(turnInFlight: true,
+            hasUnconfirmedToolWork: false,
+            pendingPlayback: false, pendingAcknowledgements: false))
+        // A provider response can finish while an Agent tool is waiting for
+        // permission; only an authoritative Agent terminal can release it.
+        XCTAssertFalse(IOSRealtimeAudioDrainPolicy.canClose(turnInFlight: false,
+            hasUnconfirmedToolWork: true,
+            pendingPlayback: false, pendingAcknowledgements: false))
+        XCTAssertFalse(IOSRealtimeAudioDrainPolicy.canClose(turnInFlight: false,
+            hasUnconfirmedToolWork: false,
+            pendingPlayback: true, pendingAcknowledgements: false))
+        XCTAssertFalse(IOSRealtimeAudioDrainPolicy.canClose(turnInFlight: false,
+            hasUnconfirmedToolWork: false,
+            pendingPlayback: false, pendingAcknowledgements: true))
+        XCTAssertTrue(IOSRealtimeAudioDrainPolicy.canClose(turnInFlight: false,
+            hasUnconfirmedToolWork: false,
+            pendingPlayback: false, pendingAcknowledgements: false))
+    }
+
     func testCallbackMailboxPreservesOrderedEvents() async throws {
         let listener = IOSRealtimeAudioListenerAdapter()
         await listener.onEvent(eventJson: #"{"type":"session_ready"}"#)
@@ -44,12 +90,14 @@ private final class RealtimeStopDevice: IOSRealtimeAudioDeviceDriving {
     var onPlaybackCompleted: ((String?) -> Void)?
     var hasPendingOutput = false
     var currentPlaybackItemID: String?
+    var startCalls = 0
     var stopCalls = 0
     private var stopContinuation: CheckedContinuation<Bool, Never>?
 
     func owns(_ event: VoiceAudioSessionCoordinator.Invalidation) async -> Bool { false }
     func start(inputSampleRateHz: UInt32, outputSampleRateHz: UInt32) async throws -> AsyncThrowingStream<Data, Error> {
-        AsyncThrowingStream { $0.finish() }
+        startCalls += 1
+        return AsyncThrowingStream { $0.finish() }
     }
     func stop() async -> Bool {
         stopCalls += 1
@@ -65,7 +113,174 @@ private final class RealtimeStopDevice: IOSRealtimeAudioDeviceDriving {
     func interruptPlayback(itemID: String?) -> UInt64 { 0 }
 }
 
+#if DEBUG
+private actor RealtimeSessionCalls {
+    private(set) var commits = 0
+    private(set) var closes = 0
+    private(set) var aborts = 0
+    func committed() { commits += 1 }
+    func closed() { closes += 1 }
+    func aborted() { aborts += 1 }
+    func snapshot() -> (Int, Int, Int) { (commits, closes, aborts) }
+}
+
+private final class RealtimeCommitSession: IosRealtimeAudioSession, @unchecked Sendable {
+    let calls = RealtimeSessionCalls()
+    required init(unsafeFromHandle handle: UInt64) { super.init(unsafeFromHandle: handle) }
+    init() { super.init(noHandle: .init()) }
+    override func commitInput() async throws { await calls.committed() }
+    override func close() async throws { await calls.closed() }
+    override func abort() async { await calls.aborted() }
+}
+
+private final class RealtimeTestEngine: MobileEngineHandle, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { super.init(unsafeFromHandle: handle) }
+    init() { super.init(noHandle: .init()) }
+}
+
+@MainActor
+private final class RealtimeOpenGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var arrived = false
+    func wait() async { arrived = true; await withCheckedContinuation { continuation = $0 } }
+    func release() { continuation?.resume(); continuation = nil }
+}
+#endif
+
 extension IOSRealtimeAudioLifecycleTests {
+    #if DEBUG
+    @MainActor
+    func testReservedStartupKeepsOriginalEngineAndRouteAcrossDetachAndReplacement() async throws {
+        let provider = IOSAudioProviderService.shared
+        let firstID = "realtime-start-a-\(UUID().uuidString)"
+        let secondID = "realtime-start-b-\(UUID().uuidString)"
+        let first = RealtimeTestEngine()
+        let second = RealtimeTestEngine()
+        let attachmentA = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: UUID().uuidString.lowercased(), generation: 1))
+        let attachmentB = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: UUID().uuidString.lowercased(), generation: 1))
+        let ownerA = IOSAudioOwner.attached(attachment: attachmentA, logicalOwner: .session(sessionID: "session-a"))
+        defer { provider.clearSessionContext(ownerID: firstID); provider.clearSessionContext(ownerID: secondID) }
+        provider.claimSessionContext(ownerID: firstID)
+        XCTAssertTrue(provider.attach(engine: first, ownerID: firstID, engineAttachmentIdentity: attachmentA))
+        XCTAssertTrue(provider.setSessionContext(sessionID: "session-a", profileID: "profile-a", accountScope: "account-a",
+            ownerID: firstID, engineAttachmentIdentity: attachmentA, engine: first))
+        let gate = RealtimeOpenGate()
+        let device = RealtimeStopDevice()
+        let session = RealtimeCommitSession()
+        var openedWithFirst = false
+        let service = IOSRealtimeAudioService(device: device, observeInvalidation: false, openOverride: { engine, owner, _ in
+            openedWithFirst = engine === first && owner == ownerA && provider.sessionContext(for: owner)?.profileId == "profile-a"
+            await gate.wait()
+            return session
+        })
+        service.attach(engine: first, ownerID: firstID)
+        XCTAssertTrue(service.reserveStart(owner: ownerA))
+        // These are the two operations performed by setSettingsActive(false),
+        // followed by the replacement source's normal selection and attach.
+        provider.releaseSessionContextSelection(ownerID: firstID)
+        service.detach(ownerID: firstID)
+        provider.claimSessionContext(ownerID: secondID)
+        XCTAssertTrue(provider.attach(engine: second, ownerID: secondID, engineAttachmentIdentity: attachmentB))
+        XCTAssertTrue(provider.setSessionContext(sessionID: "session-b", profileID: "profile-b", accountScope: "account-b",
+            ownerID: secondID, engineAttachmentIdentity: attachmentB, engine: second))
+        service.attach(engine: second, ownerID: secondID)
+        XCTAssertTrue(service.boundEngineForTesting === first)
+        let snapshot = AudioConfigurationSnapshot(configuration: AudioConfigurationV4(
+            recognition: .init(source: .system), speech: .init(source: .system)), revision: 1)
+        let starting = Task { try await service.start(snapshot: snapshot) }
+        while !gate.arrived { await Task.yield() }
+        XCTAssertTrue(openedWithFirst)
+        XCTAssertEqual(device.stopCalls, 0, "A pending start is not drained before it completes")
+        gate.release()
+        try await starting.value
+        while device.stopCalls == 0 { await Task.yield() }
+        device.finishStop(true)
+        while service.isActive { await Task.yield() }
+        XCTAssertTrue(service.boundEngineForTesting === second)
+    }
+
+    @MainActor
+    func testSubmitTapBeforeNavigationKeepsTurnUntilTerminal() async {
+        let device = RealtimeStopDevice()
+        let session = RealtimeCommitSession()
+        let service = IOSRealtimeAudioService(device: device, observeInvalidation: false)
+        service.installSessionForTesting(session)
+        service.commitInput()
+        service.finishCurrentTurnAndClose()
+        let clock = ContinuousClock()
+        let commitDeadline = clock.now.advanced(by: .seconds(1))
+        var beforeTerminal = await session.calls.snapshot()
+        while beforeTerminal.0 == 0, clock.now < commitDeadline {
+            await Task.yield()
+            beforeTerminal = await session.calls.snapshot()
+        }
+        XCTAssertEqual(beforeTerminal.0, 1)
+        XCTAssertEqual(beforeTerminal.1, 0)
+        XCTAssertEqual(beforeTerminal.2, 0)
+        XCTAssertEqual(device.stopCalls, 0)
+
+        await service.receiveForTesting(#"{"type":"agent_response_started","turnId":"tapped"}"#)
+        await service.receiveForTesting(#"{"type":"agent_turn_completed","turnId":"tapped"}"#)
+        let stopDeadline = clock.now.advanced(by: .seconds(1))
+        while device.stopCalls == 0, clock.now < stopDeadline { await Task.yield() }
+        XCTAssertEqual(device.stopCalls, 1)
+        guard device.stopCalls == 1 else { return }
+        device.finishStop(true)
+        let closeDeadline = clock.now.advanced(by: .seconds(1))
+        while service.isActive, clock.now < closeDeadline { await Task.yield() }
+        XCTAssertFalse(service.isActive)
+        let afterTerminal = await session.calls.snapshot()
+        XCTAssertEqual(afterTerminal.0, 1)
+        XCTAssertEqual(afterTerminal.1, 1)
+        XCTAssertEqual(afterTerminal.2, 0)
+    }
+
+    @MainActor
+    func testQueuedCloseRechecksAnAgentTurnThatStartsBeforeStop() async {
+        let device = RealtimeStopDevice()
+        let service = IOSRealtimeAudioService(device: device, observeInvalidation: false)
+        service.requestCloseAfterDrainForTesting()
+        await service.receiveForTesting(#"{"type":"agent_response_started","turnId":"new-agent"}"#)
+        for _ in 0 ..< 10 { await Task.yield() }
+        XCTAssertEqual(device.stopCalls, 0)
+        await service.receiveForTesting(#"{"type":"agent_turn_completed","turnId":"new-agent"}"#)
+        while device.stopCalls == 0 { await Task.yield() }
+        device.finishStop(true)
+        while service.phase != .idle { await Task.yield() }
+    }
+
+    @MainActor
+    func testDuplicateSessionReadyDoesNotRestartDeviceDuringTurn() async {
+        let device = RealtimeStopDevice()
+        let service = IOSRealtimeAudioService(device: device, observeInvalidation: false)
+        let ready = #"{"type":"session_ready","inputFormat":{"encoding":"pcm16","channels":1,"sampleRateHz":24000},"outputFormat":{"encoding":"pcm16","channels":1,"sampleRateHz":24000}}"#
+        await service.receiveForTesting(ready)
+        while device.startCalls == 0 { await Task.yield() }
+        await service.receiveForTesting(#"{"type":"agent_response_started","turnId":"agent-1"}"#)
+        await service.receiveForTesting(ready)
+        for _ in 0 ..< 10 { await Task.yield() }
+        XCTAssertEqual(device.startCalls, 1)
+        XCTAssertEqual(service.phase, .thinking)
+        let stopping = Task { await service.stop(abort: true) }
+        while device.stopCalls == 0 { await Task.yield() }
+        device.finishStop(true)
+        let stopped = await stopping.value
+        XCTAssertTrue(stopped)
+    }
+
+    @MainActor
+    func testLateInputTranscriptDoesNotReopenCompletedAgentTurn() async {
+        let service = IOSRealtimeAudioService(device: RealtimeStopDevice(), observeInvalidation: false)
+        await service.receiveForTesting(#"{"type":"agent_response_started","turnId":"agent-1"}"#)
+        await service.receiveForTesting(#"{"type":"turn_completed","turnId":null}"#)
+        await service.receiveForTesting(#"{"type":"agent_turn_completed","turnId":"agent-1"}"#)
+        XCTAssertEqual(service.phase, .listening)
+        await service.receiveForTesting(#"{"type":"transcript","role":"user","final":true,"text":"late words"}"#)
+        XCTAssertEqual(service.phase, .listening)
+        XCTAssertEqual(service.caption, "late words")
+    }
+    #endif
+
     @MainActor
     func testUnconfirmedStopKeepsAdmissionClosedAndCanBeRetried() async throws {
         let device = RealtimeStopDevice()

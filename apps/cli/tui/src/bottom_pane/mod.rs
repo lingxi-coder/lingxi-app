@@ -228,7 +228,7 @@ pub enum BottomPaneOutcome {
     /// — surfaced up through `ChatOutcome::SwitchSession` → `AppExit`. The
     /// whole picker view stack has already been cleared by [`ViewStack::apply`]
     /// by the time this surfaces.
-    SwitchSession(uuid::Uuid),
+    SwitchSession(crate::resume::ResumeSelection),
     /// The agents view selected a session. Unlike `/resume`, the CLI must
     /// resolve live ownership and attach/restart safely before deciding whether
     /// a transcript remount is allowed.
@@ -1564,6 +1564,11 @@ impl BottomPane {
     /// restoration and preserving Unicode scalar boundaries.
     pub fn restore_composer_text(&mut self, text: &str) {
         self.composer.replace_all(text);
+    }
+
+    /// Restore exact source units, including isolated UTF-16 units.
+    pub fn restore_composer_source_units(&mut self, units: &[u16]) {
+        self.composer.replace_all_source_units(units);
     }
 
     /// The completion popup, when open.
@@ -3104,7 +3109,10 @@ mod tests {
         );
         // A /resume pick clears the picker (the owner unwinds + re-mounts).
         assert_eq!(
-            drive(ViewOutcome::SwitchSession(uuid::Uuid::new_v4())),
+            drive(ViewOutcome::SwitchSession(crate::resume::ResumeSelection {
+                uuid: uuid::Uuid::new_v4(),
+                transcript_path: "/test/session.jsonl".into(),
+            })),
             0,
             "SwitchSession clears the picker stack"
         );

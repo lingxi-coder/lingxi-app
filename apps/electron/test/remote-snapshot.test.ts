@@ -211,3 +211,19 @@ test('records are paged in snapshots too, in sequence order', () => {
   assert.equal(seqs.length, 12);
   assert.deepEqual(all.map((frame) => frame.phase).filter((phase, i, list) => list.indexOf(phase) === i), ['begin', 'records', 'end']);
 });
+
+
+test('snapshot mode comes from the current session base', () => {
+  const runtime = new FakeRuntime();
+  runtime.resume();
+  runtime.base = { ...runtime.base!, event: { ...runtime.base!.event, mode: 'code' } as any };
+  assert.equal((frames(runtime)[0] as any).session_mode, 'code');
+  runtime.base = { ...runtime.base!, event: { ...runtime.base!.event, mode: 'chat' } as any };
+  assert.equal((frames(runtime)[0] as any).session_mode, 'chat');
+});
+
+test('an admitted draft exposes its confirmed mode without a transcript base', () => {
+  const runtime = new FakeRuntime();
+  const begin = buildSnapshot({ ...runtime.remoteView(), sessionMode: 'chat' })[0] as any;
+  assert.equal(begin.session_mode, 'chat');
+});

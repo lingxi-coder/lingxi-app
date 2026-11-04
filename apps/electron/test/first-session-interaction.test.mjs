@@ -69,7 +69,7 @@ test('first prompt reveals and focuses the session before persistence', async ()
       });
     });
 
-    for (const key of ['emptyDraftHidden', 'immediateFocus', 'staleRefresh', 'savedOnce', 'focusNotStolen', 'beyondFiveVisible']) assert.equal(result[key], true, key);
+    for (const key of ['emptyDraftVisible', 'immediateFocus', 'staleRefresh', 'savedOnce', 'focusNotStolen', 'beyondFiveVisible']) assert.equal(result[key], true, key);
 
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');

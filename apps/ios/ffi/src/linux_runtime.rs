@@ -488,7 +488,7 @@ impl IosMobileLinuxRuntimeHandle {
         request: MobileLinuxCommandRequestFfi,
     ) -> Result<MobileLinuxCommandResultFfi, MobileLinuxOperationFfiError> {
         self.runtime
-            .run(command_request_from_ffi(request))
+            .run(command_request_from_ffi(request)?)
             .await
             .map(command_result_to_ffi)
             .map_err(mobile_linux_error_to_ffi)
@@ -513,7 +513,7 @@ impl IosMobileLinuxRuntimeHandle {
         });
         match self
             .runtime
-            .run_streaming(command_request_from_ffi(request), bridge.clone())
+            .run_streaming(command_request_from_ffi(request)?, bridge.clone())
             .await
         {
             Ok(result) => Ok(command_result_to_ffi(result)),
@@ -543,7 +543,7 @@ impl IosMobileLinuxRuntimeHandle {
         request: MobileLinuxCommandRequestFfi,
     ) -> Result<MobileLinuxTaskFfi, MobileLinuxOperationFfiError> {
         self.runtime
-            .spawn_background(command_request_from_ffi(request))
+            .spawn_background(command_request_from_ffi(request)?)
             .await
             .map(|handle| MobileLinuxTaskFfi {
                 id: handle.id,
@@ -625,7 +625,7 @@ impl IosMobileLinuxRuntimeHandle {
         request: MobileLinuxPtyOpenRequestFfi,
     ) -> Result<MobileLinuxPtySessionFfi, MobileLinuxOperationFfiError> {
         self.runtime
-            .open_pty(pty_request_from_ffi(request))
+            .open_pty(pty_request_from_ffi(request)?)
             .await
             .map(|handle| MobileLinuxPtySessionFfi {
                 id: handle.id,

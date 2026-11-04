@@ -62,7 +62,7 @@ struct LingxiCodeApp: App {
             }
                 .onOpenURL { _ = GIDSignIn.sharedInstance.handle($0) }
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == ScenePhase.active { PushRegistration.shared.refresh() }
+                    if phase == ScenePhase.active, !IsolatedSimulatorTesting.enabled { PushRegistration.shared.refresh() }
                 }
                 .environment(app)
                 .environment(voice)

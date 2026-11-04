@@ -27,7 +27,7 @@ final class ProjectStoreTests: XCTestCase {
     func testUITestProjectAndSessionIndexDoesNotModifyUserIndex() async throws {
         let normal = ProjectStore.forRuntime(managedRoot: managedRoot.path, environment: [:])
         let userProject = try await normal.createInternal(name: "User project")
-        try await normal.recordStartedSession(projectId: nil, sessionId: "real-session", title: "Real")
+        try await normal.recordStartedSession(projectId: nil, sessionId: "real-session", title: "Real", transcriptPath: "/catalog/real-session.jsonl")
 
         let uiTest = ProjectStore.forRuntime(
             managedRoot: managedRoot.path, environment: ["LINGXI_UI_TESTING": "1"]
@@ -35,7 +35,7 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertTrue(uiTest.projects.isEmpty)
         XCTAssertTrue(uiTest.globalSessions.isEmpty)
         let testProject = try await uiTest.createInternal(name: "UI test project")
-        try await uiTest.recordStartedSession(projectId: nil, sessionId: "ui-files-session", title: "Fixture")
+        try await uiTest.recordStartedSession(projectId: nil, sessionId: "ui-files-session", title: "Fixture", transcriptPath: "/catalog/ui-files-session.jsonl")
 
         let reopened = ProjectStore.forRuntime(managedRoot: managedRoot.path, environment: [:])
         XCTAssertEqual(reopened.projects.map(\.id), [userProject.id])

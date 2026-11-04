@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { createRoot } from 'react-dom/client';
 
 import { BetaTopBar } from '../../src/renderer/components/BetaDesktop';
@@ -83,7 +84,10 @@ function Fixture() {
   } : {} }), [showSides]);
   const bridge = {
     activeSession: { projectPath: '/Users/tester/Projects/LingXi-Next', sessionId: sessionKey },
-    bootstrap: { workspace: { path: '/Users/tester/Projects/LingXi-Next', trusted: true } },
+    bootstrap: { workspace: { path: '/Users/tester/Projects/LingXi-Next', trusted: true },
+      conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: ['/Users/tester/Projects/LingXi-Next'],
+        selectedProject: '/Users/tester/Projects/LingXi-Next',
+        activeSession: { projectPath: '/Users/tester/Projects/LingXi-Next', sessionId: sessionKey } }) },
     cost: { input_tokens: 18_420, output_tokens: 3_184 },
     usage: { inputTokens: 18_420, outputTokens: 3_184, cacheReadTokens: 0, cacheCreationTokens: 0 },
     conversation: {

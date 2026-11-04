@@ -71,6 +71,8 @@ class RemoteControlManagerTest {
         var onStateRead: (() -> Unit)? = null
         var stopWatchingGate: CompletableDeferred<Unit>? = null
         var forgetGate: CompletableDeferred<Unit>? = null
+        var sessionWriteGate: CompletableDeferred<Unit>? = null
+        val sessionWriteHosts = mutableListOf<String?>()
         var listGate: CompletableDeferred<List<RemoteLocalAppFfi>>? = null
         override suspend fun listApps() = checkNotNull(listGate).await()
         var openGate: CompletableDeferred<RemoteLocalAppOpenFfi>? = null
@@ -94,11 +96,19 @@ class RemoteControlManagerTest {
         override suspend fun setSessionForeground(sessionId: String, foreground: Boolean) { calls += "foreground:$sessionId:$foreground" }
         override suspend fun loadOlderMessages(sessionId: String) { calls += "older:$sessionId" }
         override suspend fun fetchImage(sessionId: String, imageRef: String) = RemoteImageFfi("image/png", byteArrayOf())
-        override suspend fun sendPrompt(sessionId: String, text: String, images: List<RemotePromptImageFfi>) { calls += "send:$sessionId:$text" }
+        override suspend fun sendPrompt(sessionId: String, text: String, images: List<RemotePromptImageFfi>) {
+            sessionWriteGate?.await()
+            sessionWriteHosts += state?.hostId
+            calls += "send:$sessionId:$text"
+        }
         override suspend fun retryPrompt(sessionId: String, promptId: String) { calls += "retry:$sessionId:$promptId" }
         override suspend fun dismissPrompt(sessionId: String, promptId: String) { calls += "dismiss:$sessionId:$promptId" }
         override suspend fun cancelTurn(sessionId: String) { calls += "cancel:$sessionId" }
-        override suspend fun respondPermission(sessionId: String, requestId: ULong, allow: Boolean) { calls += "permission:$sessionId:$requestId:$allow" }
+        override suspend fun respondPermission(sessionId: String, requestId: ULong, allow: Boolean) {
+            sessionWriteGate?.await()
+            sessionWriteHosts += state?.hostId
+            calls += "permission:$sessionId:$requestId:$allow"
+        }
         override suspend fun answerQuestion(sessionId: String, requestId: ULong, answers: Map<String, String>) {}
         override suspend fun cancelQuestion(sessionId: String, requestId: ULong) {}
         override suspend fun setModel(sessionId: String, model: String) {}
@@ -724,6 +734,91 @@ class RemoteControlManagerTest {
         assertTrue(job.isCompleted)
         assertTrue(runCatching { port.sendPrompt("old account", emptyList()) }.isFailure)
         assertTrue(harness.clients.last().calls.none { it.startsWith("send:") })
+    }
+
+    @Test fun admittedWritesFinishOnTheirHostBeforeAComputerSwitchEvenIfCallerLeaves() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        harness.manager.connect("host-a")
+        val port = harness.manager.sessionPort("host-a", "same-session")
+        val gate = CompletableDeferred<Unit>()
+        client.sessionWriteGate = gate
+        val send = launch { port.sendPrompt("hello", emptyList()) }
+        val approval = launch { port.respondPermission(1uL, true) }
+        runCurrent()
+        val switching = launch { harness.manager.connect("host-b") }
+        runCurrent()
+        assertEquals("host-a", client.connectionState()?.hostId)
+        assertFalse(client.calls.contains("connect:host-b"))
+        send.cancel()
+        approval.cancel()
+        gate.complete(Unit)
+        switching.join()
+        runCurrent()
+        assertEquals(listOf("host-a", "host-a"), client.sessionWriteHosts)
+        assertEquals("host-b", client.connectionState()?.hostId)
+        assertTrue(client.calls.indexOf("send:same-session:hello") < client.calls.indexOf("connect:host-b"))
+        assertTrue(client.calls.indexOf("permission:same-session:1:true") < client.calls.indexOf("connect:host-b"))
+        assertTrue(runCatching { port.sendPrompt("stale", emptyList()) }.isFailure)
+    }
+
+    @Test fun closingTheOverlayWaitsForAnAdmittedSendBeforeDisconnecting() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        harness.manager.connect("host-a")
+        val gate = CompletableDeferred<Unit>()
+        client.sessionWriteGate = gate
+        val send = launch { harness.manager.sessionPort("host-a", "s1").sendPrompt("hello", emptyList()) }
+        runCurrent()
+        harness.manager.closeConnection()
+        runCurrent()
+        assertFalse(client.calls.contains("disconnect"))
+        gate.complete(Unit)
+        send.join()
+        runCurrent()
+        assertEquals(listOf("host-a"), client.sessionWriteHosts)
+        assertTrue(client.calls.indexOf("send:s1:hello") < client.calls.indexOf("disconnect"))
+    }
+
+    @Test fun departingWaitsForPermissionAndAReplacementCancelsTheOldDetach() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        val port = harness.manager.sessionPort("host-a", "s1")
+        val old = launch { port.follow().collect {} }
+        runCurrent()
+        val gate = CompletableDeferred<Unit>()
+        client.sessionWriteGate = gate
+        val approval = launch { port.respondPermission(1uL, true) }
+        runCurrent()
+        old.cancel()
+        runCurrent()
+        assertFalse(client.calls.contains("detach:s1"))
+        val replacement = launch { port.follow().collect {} }
+        runCurrent()
+        gate.complete(Unit)
+        approval.join()
+        runCurrent()
+        assertTrue(client.calls.contains("permission:s1:1:true"))
+        assertFalse(client.calls.contains("detach:s1"))
+        replacement.cancel()
+        runCurrent()
+        assertEquals(1, client.calls.count { it == "detach:s1" })
+    }
+
+    @Test fun reopeningARetainedOwnerReattachesItsHostAndSession() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        val following = launch { harness.manager.followSession("host-a", "same-session").collect {} }
+        runCurrent()
+        harness.manager.connect("host-b")
+        harness.manager.reattachSession("host-a", "same-session", "u1")
+        assertEquals("host-a", client.connectionState()?.hostId)
+        assertEquals(listOf("connect:host-a", "attach:same-session", "connect:host-b", "connect:host-a", "attach:same-session"), client.calls)
+        following.cancel()
     }
 
     @Test fun anAccountThatChangesDuringBuildNeverPublishesTheOldClient() = runTest(UnconfinedTestDispatcher()) {

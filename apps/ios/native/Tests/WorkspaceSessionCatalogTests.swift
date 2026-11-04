@@ -4,6 +4,26 @@ import XCTest
 
 @MainActor
 final class WorkspaceSessionCatalogTests: XCTestCase {
+    func testRecentProjectionRetainsTheDisplayedPhysicalSource() {
+        let id = "11111111-2222-4333-8444-555555555555"
+        var active = live(id)
+        active.transcriptPath = "/sessions/original/\(id).jsonl"
+        let cachedCopy = ProjectSessionSummary(sessionId: id, title: "A different source", messageCount: 1,
+            relativeTime: "Now", updatedAt: Date(), mode: .chat,
+            transcriptPath: "/sessions/copy/\(id).jsonl")
+        let liveRows = WorkspaceGroupBuilder.mergedSessionRows(live: [active], cached: [cachedCopy])
+        let cachedRows = WorkspaceGroupBuilder.mergedSessionRows(live: [], cached: [cachedCopy])
+        for (rows, expected) in [(liveRows, active.transcriptPath), (cachedRows, cachedCopy.transcriptPath)] {
+            let seed = WorkspaceGroupSeed(scope: .global, kind: .global, title: "Global", subtitle: nil,
+                                          updatedAt: nil, sessions: rows)
+            let recent = RecentSessionsBuilder.groups(seeds: [seed], filter: .chat, query: "", pinnedAt: [:])
+                .flatMap(\.sessions)
+            XCTAssertEqual(recent.count, 1)
+            XCTAssertEqual(recent.first?.transcriptPath, expected)
+            XCTAssertEqual(recent.first?.scope, .global)
+        }
+    }
+
     func testPendingSessionIsVisibleWhileLiveCatalogIsStale() {
         let pending = cached("pending", pending: true)
         let rows = WorkspaceGroupBuilder.mergedSessionRows(live: [], cached: [pending])

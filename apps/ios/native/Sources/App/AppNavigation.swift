@@ -80,9 +80,14 @@ extension AppRoute: Identifiable {
 @Observable
 @MainActor
 final class AppNavigationModel {
-    var path: [AppRoute] = []
+    private(set) var presentationRevision: UInt64 = 0
+    var path: [AppRoute] = [] {
+        didSet { if path != oldValue { presentationRevision &+= 1 } }
+    }
     /// The installed app running full screen, if any.
-    var runningAppID: String?
+    var runningAppID: String? {
+        didSet { if runningAppID != oldValue { presentationRevision &+= 1 } }
+    }
     /// The sidebar's recents filter chip. A list filter only — it never decides
     /// which mode the live conversation is in.
     var drawerFilter: RecentsFilter = .all
@@ -93,7 +98,9 @@ final class AppNavigationModel {
     /// independent from iPad column visibility so choosing a session on iPad
     /// preserves the user's split layout.
     var compactColumn: NavigationSplitViewColumn = .detail
-    var settingsOpen = false
+    var settingsOpen = false {
+        didSet { if settingsOpen != oldValue { presentationRevision &+= 1 } }
+    }
     var settingsPath: [SettingsPage] = []
 
     /// Reveals the sidebar from the toolbar, deep links or app actions.
@@ -202,6 +209,14 @@ final class AppNavigationModel {
     func openTeams(invite: String? = nil) { pushPage(.teams(invite: invite)) }
 
     func openLocalApp(_ appID: String) { pushPage(.localApp(id: appID)) }
+
+    func mayPresent(capturedRevision: UInt64, on route: AppRoute) -> Bool {
+        presentationRevision == capturedRevision && path.last == route && !settingsOpen && runningAppID == nil
+    }
+
+    func mayPresentImportedApp(capturedRevision: UInt64) -> Bool {
+        mayPresent(capturedRevision: capturedRevision, on: .apps)
+    }
 
     func openMarketApp(_ appID: String) {
         pushPage(.marketApp(id: appID))

@@ -89,7 +89,7 @@ impl HeadlessHostServices for CliHeadlessServices {
 }
 
 /// Compose the process adapter and hand complete session ownership to Harness.
-pub(crate) async fn run(argv: &Argv, permission_mode: permission::PermissionMode) -> i32 {
+pub(crate) async fn run(argv: &Argv, mut permission_mode: permission::PermissionMode) -> i32 {
     use harness_runtime::headless::config::{
         HeadlessConfig, HeadlessOptions, InputFormat, OutputFormat, SessionStart,
     };
@@ -98,22 +98,41 @@ pub(crate) async fn run(argv: &Argv, permission_mode: permission::PermissionMode
     use harness_runtime::headless::{HeadlessSignal, HeadlessSignals};
 
     let mut desktop = crate::init::resolve_desktop_config(argv, permission_mode);
-    let background_forker = Arc::new(crate::bg_session_forker::CliBgSessionForker::new(
-        desktop.lingxi_home.clone(),
-        desktop.lingxi_home.clone(),
-        crate::background_launch::BackgroundLaunchOptions::from_argv(argv),
-        permission_mode,
-    ));
-    desktop.bg_session_forker = Some(background_forker.clone());
     let session_start = if argv.continue_session {
-        SessionStart::Continue {
+        let rows = match crate::run::load_resume_rows().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                eprintln!("lingxi-cli: {error}");
+                return crate::exit_codes::RUNTIME_ERROR;
+            }
+        };
+        let Some(row) = rows.first() else {
+            eprintln!("lingxi-cli: No conversation found to continue");
+            return crate::exit_codes::RUNTIME_ERROR;
+        };
+        desktop.session_transcript_path = Some(row.path.clone());
+        SessionStart::Resume {
+            session_id: row.uuid,
+            resume_session_at: None,
+            resume_drops_turn: None,
             fork: argv.fork_session,
         }
     } else if let Some(resume) = argv.resume.as_deref() {
-        let session_id = match lingxi_core::types::SessionId::parse_prefixed(resume.trim()) {
-            Some(session_id) => session_id.as_uuid(),
-            None => match crate::run::resolve_resume_title(resume.trim()).await {
-                Ok(Some(session_id)) => session_id,
+        let (session_id, path) = match lingxi_core::types::SessionId::parse_prefixed(resume.trim())
+        {
+            Some(session_id) => {
+                let session_id = session_id.as_uuid();
+                match crate::init::resolve_unique_cli_resume_path(&desktop.lingxi_home, session_id)
+                {
+                    Ok(path) => (session_id, path),
+                    Err(error) => {
+                        eprintln!("lingxi-cli: {error}");
+                        return crate::exit_codes::RUNTIME_ERROR;
+                    }
+                }
+            }
+            None => match crate::run::resolve_resume_title_source(resume.trim()).await {
+                Ok(Some(row)) => (row.uuid, row.path),
                 Ok(None) => {
                     eprintln!("lingxi-cli: No conversation found to resume");
                     return crate::exit_codes::RUNTIME_ERROR;
@@ -124,6 +143,7 @@ pub(crate) async fn run(argv: &Argv, permission_mode: permission::PermissionMode
                 }
             },
         };
+        desktop.session_transcript_path = Some(path);
         SessionStart::Resume {
             session_id,
             resume_session_at: argv.resume_session_at.clone(),
@@ -133,6 +153,69 @@ pub(crate) async fn run(argv: &Argv, permission_mode: permission::PermissionMode
     } else {
         SessionStart::New
     };
+    if let SessionStart::Resume {
+        session_id, fork, ..
+    } = &session_start
+    {
+        let Some(path) = desktop.session_transcript_path.clone() else {
+            eprintln!("lingxi-cli: selected resume source is unavailable");
+            return crate::exit_codes::RUNTIME_ERROR;
+        };
+        let captured = match crate::init::capture_selected_cli_source(
+            &desktop.lingxi_home,
+            *session_id,
+            &path,
+            Some(lingxi_core::host::session_context::ConversationMode::Code),
+        ) {
+            Ok(captured) => captured,
+            Err(error) => {
+                eprintln!("lingxi-cli: resume source capture failed: {error}");
+                return crate::exit_codes::RUNTIME_ERROR;
+            }
+        };
+        if !*fork {
+            let cwd = match crate::init::selected_resume_workspace(&captured) {
+                Ok(cwd) => cwd,
+                Err(error) => {
+                    eprintln!("lingxi-cli: resume workspace changed: {error}");
+                    return crate::exit_codes::RUNTIME_ERROR;
+                }
+            };
+            let (target_mode, notice) =
+                crate::permission_settings::resolve_permission_mode_at(argv, &cwd);
+            if let Err(error) =
+                crate::permission_settings::enforce_permission_mode_safety(argv, target_mode).await
+            {
+                eprintln!("{error}");
+                return crate::exit_codes::RUNTIME_ERROR;
+            }
+            if let Some(notice) = notice {
+                eprintln!("{notice}");
+            }
+            permission_mode = target_mode;
+        }
+        desktop = match configure_selected_resume(
+            argv,
+            permission_mode,
+            desktop,
+            *session_id,
+            *fork,
+            captured,
+        ) {
+            Ok(desktop) => desktop,
+            Err(error) => {
+                eprintln!("lingxi-cli: resume source changed: {error}");
+                return crate::exit_codes::RUNTIME_ERROR;
+            }
+        };
+    }
+    let background_forker = Arc::new(crate::bg_session_forker::CliBgSessionForker::new(
+        desktop.lingxi_home.clone(),
+        desktop.lingxi_home.clone(),
+        crate::background_launch::BackgroundLaunchOptions::from_argv(argv),
+        permission_mode,
+    ));
+    desktop.bg_session_forker = Some(background_forker.clone());
     let is_slash_prompt = argv
         .prompt
         .as_deref()
@@ -247,4 +330,135 @@ pub(crate) async fn run(argv: &Argv, permission_mode: permission::PermissionMode
     signal_listener.abort();
     let _ = signal_listener.await;
     result.code
+}
+
+/// Resolve project configuration from the same captured source that the SDK
+/// will mount. A fork is created in the launch workspace, so retains its config.
+fn configure_selected_resume(
+    argv: &Argv,
+    permission_mode: permission::PermissionMode,
+    launch: harness_runtime::desktop::DesktopConfig,
+    session_id: uuid::Uuid,
+    fork: bool,
+    captured: crate::init::PublishedBranchSource,
+) -> Result<harness_runtime::desktop::DesktopConfig, crate::init::InitError> {
+    let mut desktop = if fork {
+        launch
+    } else {
+        let cwd = crate::init::selected_resume_workspace(&captured)?;
+        let mut resumed =
+            crate::init::resolve_resumed_desktop_config_at(argv, permission_mode, cwd);
+        // Keep the catalog root used to authenticate this exact source.
+        resumed.lingxi_home = launch.lingxi_home;
+        resumed
+    };
+    desktop.session_transcript_path = Some(captured.authority.path());
+    crate::init::install_published_branch(&mut desktop, session_id, captured)?;
+    Ok(desktop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn selected_headless_resume_loads_target_project_but_fork_keeps_launch_project() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let launch_cwd = root_path.join("launch");
+        let target_cwd = root_path.join("target");
+        let home = root_path.join("home");
+        std::fs::create_dir_all(&launch_cwd).unwrap();
+        std::fs::create_dir_all(&target_cwd).unwrap();
+        for (cwd, marker) in [(&launch_cwd, "launch"), (&target_cwd, "target")] {
+            std::fs::create_dir_all(cwd.join(branding::DOT_DIR)).unwrap();
+            std::fs::write(
+                cwd.join(branding::DOT_DIR).join("settings.json"),
+                serde_json::json!({
+                    "providers": {"resume-provider": {"type":"openai", "baseUrl":format!("https://{marker}.invalid/v1"), "apiKeyEnv":"UNUSED_TEST_KEY"}},
+                    "routing": {"projectMarker":marker},
+                    "plansDirectory":format!("{marker}-plans")
+                }).to_string(),
+            ).unwrap();
+            std::fs::write(cwd.join(".mcp.json"), "{\"mcpServers\":{}}").unwrap();
+        }
+        let id = uuid::Uuid::new_v4();
+        let path = crate::init::captured_resume_path_tests::transcript(
+            &home,
+            &target_cwd,
+            id,
+            "target input",
+            "2026-11-02T00:00:00Z",
+            "code",
+        );
+        let argv = Argv::try_parse_from([
+            "lingxi-cli",
+            "-p",
+            "--setting-sources",
+            "project",
+            "--add-dir",
+            "relative",
+        ])
+        .unwrap();
+        for fork in [false, true] {
+            let mut launch = crate::init::resolve_desktop_config_at(
+                &argv,
+                permission::PermissionMode::Default,
+                launch_cwd.clone(),
+            );
+            launch.lingxi_home = home.clone();
+            let captured = crate::init::capture_selected_cli_source(
+                &home,
+                id,
+                &path,
+                Some(lingxi_core::host::session_context::ConversationMode::Code),
+            )
+            .unwrap();
+            let content = captured.content.clone();
+            let cfg = configure_selected_resume(
+                &argv,
+                permission::PermissionMode::Default,
+                launch,
+                id,
+                fork,
+                captured,
+            )
+            .unwrap();
+            let expected = if fork { &launch_cwd } else { &target_cwd };
+            assert_eq!(&cfg.cwd, expected);
+            assert_eq!(cfg.mcp_paths[0], expected.join(".mcp.json"));
+            let marker = if fork { "launch" } else { "target" };
+            assert_eq!(
+                cfg.provider_profiles.as_ref().unwrap()["resume-provider"]["baseUrl"],
+                format!("https://{marker}.invalid/v1")
+            );
+            assert_eq!(cfg.routing.as_ref().unwrap()["projectMarker"], marker);
+            assert_eq!(cfg.plans_directory, Some(format!("{marker}-plans")));
+            assert_eq!(cfg.lingxi_home, home);
+            assert_eq!(cfg.session_transcript_path.as_ref(), Some(&path));
+            assert_eq!(
+                cfg.session_transcript_authority
+                    .as_ref()
+                    .unwrap()
+                    .read_checked()
+                    .unwrap(),
+                content.as_bytes()
+            );
+            assert_eq!(
+                cfg.session_resume_snapshot
+                    .as_ref()
+                    .unwrap()
+                    .content
+                    .as_ref(),
+                content
+            );
+            if !fork {
+                assert_eq!(
+                    cfg.add_dir,
+                    vec![std::env::current_dir().unwrap().join("relative")]
+                );
+            }
+        }
+    }
 }

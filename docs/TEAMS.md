@@ -116,7 +116,16 @@ the local conversation and do not need its engine; a pending invite survives the
 login page. The Web removes the code from its address bar after capturing it and
 uses `no-referrer` on invitation/Teams pages.
 
-Desktop/Web share `packages/teams/TeamsPanel.tsx`. Membership administration uses
+Web and Desktop show `packages/teams` as three workspace views, `TeamSidebar`,
+`TeamConversationView` and `TeamDetailsDrawer`, all reading one `TeamsWorkspace` that the
+page or window opens for the signed-in account (`useTeamsWorkspace`). The Web page
+(`apps/web/src/pages/TeamsPage.tsx`, `src/teams/TeamsWorkspaceView.tsx`) lays them out as
+sidebar, conversation and details, and under 760px wide shows the sidebar or the
+conversation one at a time; `src/teams/teams-web.css` sets the workspace's `--teams-*`
+colors from the site's theme. The Desktop puts `TeamSidebar` in the sidebar's Teams mode and
+the other two on the Teams page (`apps/electron/src/renderer/components/TeamsSidebar.tsx`,
+`TeamsMain.tsx`). The window keeps the workspace open so that the rail's Teams button can
+count unread messages before the page is shown. Membership administration uses
 authenticated HTTP, with SDK listeners invalidating its views. Ordinary message
 views consume SDK snapshots directly. Web and native clients use their existing
 Firebase account. Desktop main owns the account lifecycle, HTTP credentials and
@@ -178,8 +187,8 @@ prove the server has no messages.
 
 `CommandStorage` (IndexedDB on Web/Desktop) and the native atomic command files
 persist only pending HTTP command identities, payloads, claim/attempt metadata
-and acknowledgement receipts. Known obsolete history fields are removed from
-existing records while exact pending command IDs are retained. No ordinary
+and acknowledgement receipts. Only those fields are read from a stored record;
+anything else in it is ignored and dropped by the next write. No ordinary
 message body, conversation replica or message cursor is written there. Bot
 execution journals, immutable snapshots and result receipts remain separate.
 Unread is `max(0,lastSeq-lastReadSeq)`; marking read is explicit.
@@ -256,14 +265,49 @@ Each mutation is one transaction with exactly three coupled documents:
 
 1. Update the conversation's `lastChangeSeq` by one and set
    `lastChange: {id: changeId, seq: lastChangeSeq}`. For creation only, also
-   increment `lastSeq` and set `lastMessage: {id: messageId, seq: lastSeq, at}`.
+   increment `lastSeq` and set
+   `lastMessage: {id: messageId, seq: lastSeq, at, author, preview}`, where
+   `author` is a copy of the message's own `author` (`{kind, uid, botKey?}`).
 2. Create/update the message and its latest change identity.
 3. Create the immutable change receipt. Its ID must not already exist.
 
 Rules use `getAfter` to require the other writes. Neither a cursor nor a receipt
 can be committed without its matching message mutation. Edits/recalls preserve
-`lastSeq`, so they do not increase unread counts. `lastMessage` is an identity
-pointer, not a cached plaintext preview; clients resolve the current message.
+`lastSeq`, so they do not increase unread counts.
+
+`lastMessage` also feeds conversation lists (last activity time, sender and a
+one-line excerpt), so a list never loads message history:
+
+- `preview` is the message text with whitespace runs (newlines included)
+  collapsed to single spaces, trimmed and cut to at most 120 Unicode code points,
+  never in the middle of a surrogate pair. Bot replies, status lines and
+  questions preview as their text; a whitespace-only message previews as `''`.
+- An edit or recall of the message that is currently `lastMessage.id` updates the
+  pointer in the same transaction: an edit refreshes `preview`, a recall sets
+  `preview: ''` and `recalled: true`. `id`, `seq`, `at` and `author` never change,
+  and edits/recalls of older messages leave the pointer alone. A newer message
+  replaces the pointer as a whole, so `recalled` never carries over.
+- The excerpt is readable by exactly the members who can read the message, and a
+  recall blanks it like the body.
+- A conversation without messages has `lastMessage: null`. Once it has one, the
+  pointer is always whole: `id, seq, at, author, preview` and, after a recall,
+  `recalled: true`. Clients accept no other shape. A pointer that is not whole is a
+  data error: the conversation listeners end with `INVALID_DATA`, and nothing is
+  shown half-parsed. A pointer is never completed by a client write.
+  `apps/firebase/scripts/teams-migrate-last-message.mjs` rebuilds the pointers
+  written before previews existed from their messages (dry run by default; it
+  refuses to run unless `FIRESTORE_EMULATOR_HOST` is set or a project is named with
+  `--i-understand-this-writes-production`). Run it against a database before the
+  clients that read it are released.
+- Rules accept exactly `id, seq, at, author, preview` on creation (`author` must
+  equal the created message's author) and, for an edit/recall, only a `preview` /
+  `recalled` change of the newest message, and only when its pointer is already
+  whole; a recall must blank the preview. The
+  120 limit is counted in code points with an RE2 repetition, because
+  `string.size()` counts UTF-16 units. Rules cannot recompute the excerpt from the
+  text, so a direct SDK write is held to shape and length only. The shipped
+  clients mutate through the HTTP route, which runs the same transaction as the
+  Admin SDK.
 
 Ordinary clients listen directly to the full selected message query. The SDK
 maintains its own persistent cache and resume state; there is no application
@@ -298,8 +342,8 @@ Responses for GPT-6 Luna. The native catalog supplies the resolved protocol,
 endpoint, sanitized singleton provider profile and exact credential slot; the
 main process checks that configuration is unchanged after asynchronous lookup.
 Unsupported platforms or credential routes fail explicitly. Persona/Skill text
-and the complete selected route are saved as an immutable snapshot. Old bindings
-without that route require an explicit owner rebind; pending saved results can
+and the complete selected route are saved as an immutable snapshot. A binding
+without that route requires an explicit owner rebind; pending saved results can
 still retry delivery without model credentials or execution. Owner folders,
 MCP connections, plugins, startup helpers,
 ordinary Bot memory and ambient credentials are not inherited.

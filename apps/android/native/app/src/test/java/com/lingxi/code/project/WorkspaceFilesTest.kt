@@ -10,7 +10,7 @@ import java.nio.file.Files
 
 class WorkspaceFilesTest {
     @get:Rule val temporary = TemporaryFolder()
-    private fun repo() = WorkspaceDirectoryRepository(temporary.root, "/home/brand", "/home/brand/work", "/home/brand/work/projects", File(temporary.root, ".config"))
+    private fun repo() = WorkspaceDirectoryRepository(temporary.root, "/home/brand", "/home/brand/work", "/home/brand/work/projects", File(temporary.root, ".config"), listOf("/home/brand/work", "/home/brand/work/projects"))
     private fun write(path: String, value: String) = File(temporary.root, path).apply { parentFile!!.mkdirs(); writeText(value) }
     @Test fun recursiveSearchSkipsLinksAndSortsNaturally() = runBlocking {
         val repo = repo()

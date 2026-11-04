@@ -9,7 +9,7 @@ function fixture(): { runtime: SessionRuntime; internal: any; child: EventEmitte
   const child = new EventEmitter();
   const calls: string[] = [];
   const events: any[] = [];
-  Object.assign(internal, { child, desiredRunning: true, state: { status: 'connected' }, sessionHasHistory: true });
+  Object.assign(internal, { child, desiredRunning: true, state: { status: 'connected' }, sessionHasHistory: true, ownedTranscriptPath: '/workspace/original.jsonl' });
   internal.broadcastClientEvent = (event: any): void => { events.push(event); };
   internal.stopBridge = async (): Promise<void> => { calls.push('stop'); internal.child = null; ++internal.generation; };
   internal.startInternal = async (publish: boolean): Promise<void> => { assert.equal(publish, false); calls.push('start'); internal.child = new EventEmitter(); };
@@ -152,6 +152,114 @@ test('an explicit restart resets the automatic recovery retry budget', async () 
   await f.runtime.dispose();
 });
 
+test('a refused metadata stop preserves an already scheduled recovery', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  f.internal.metadataOperations = 1;
+  f.internal.managedChildExited(f.child, 1, null, true);
+  await assert.rejects(f.runtime.stop(), /metadata operation/);
+  assert.equal(f.internal.desiredRunning, true);
+  assert.notEqual(f.internal.recoveryTimer, undefined);
+  t.mock.timers.tick(250);
+  await f.runtime.waitForLifecycle();
+  assert.deepEqual(f.calls, ['stop', 'start', 'restore']);
+  f.internal.metadataOperations = 0;
+  await f.runtime.dispose();
+});
+
+test('automatic recovery verifies the fixed draft mode before publishing connected', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  let release!: () => void;
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  f.internal.restoreDraftSessionModeIfNeeded = async (): Promise<void> => {
+    f.calls.push('mode');
+    entered();
+    await new Promise<void>(resolve => { release = resolve; });
+  };
+  f.internal.managedChildExited(f.child, 1, null, true);
+  t.mock.timers.tick(250);
+  await started;
+  assert.equal(f.runtime.connectionState.status, 'restarting');
+  release();
+  await f.runtime.waitForLifecycle();
+  assert.deepEqual(f.calls, ['stop', 'start', 'restore', 'mode']);
+  assert.equal(f.runtime.connectionState.status, 'connected');
+  await f.runtime.dispose();
+});
+
+test('a reconnect-only waiter cannot accept a replacement automatic recovery', async () => {
+  const f = fixture();
+  f.internal.automaticRecovery = Promise.resolve();
+  f.internal.liveConnectionRecovered = false;
+  await assert.rejects(f.runtime.start({ reconnectOnly: true }), /exact transcript/);
+  f.internal.automaticRecovery = undefined;
+  await f.runtime.dispose();
+});
+
+
+test('a refused metadata restart preserves an already scheduled recovery and its budget', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  f.internal.recoveryAttempts.push(Date.now());
+  f.internal.metadataOperations = 1;
+  f.internal.managedChildExited(f.child, 1, null, true);
+  await assert.rejects(f.runtime.restart(), /metadata operation/);
+  assert.equal(f.internal.desiredRunning, true);
+  assert.notEqual(f.internal.recoveryTimer, undefined);
+  assert.equal(f.internal.recoveryAttempts.length, 1);
+  t.mock.timers.tick(500);
+  await f.runtime.waitForLifecycle();
+  assert.deepEqual(f.calls, ['stop', 'start', 'restore']);
+  f.internal.metadataOperations = 0;
+  await f.runtime.dispose();
+});
+
+
+test('start during recovery backoff restores the exact owner before becoming ready', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  f.internal.managedChildExited(f.child, 1, null, true);
+  await f.runtime.start();
+  assert.deepEqual(f.calls, ['stop', 'start', 'restore']);
+  assert.equal(f.runtime.needsSessionResume, false);
+  assert.equal(f.runtime.connectionState.status, 'connected');
+  t.mock.timers.tick(1000);
+  await f.runtime.waitForLifecycle();
+  assert.deepEqual(f.calls, ['stop', 'start', 'restore']);
+  await f.runtime.dispose();
+});
+
+test('a reconnect-only backoff probe rejects replacement without canceling recovery', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  f.internal.managedChildExited(f.child, 1, null, true);
+  await assert.rejects(f.runtime.start({ reconnectOnly: true }), /exact transcript/);
+  assert.notEqual(f.internal.recoveryTimer, undefined);
+  t.mock.timers.tick(250);
+  await f.runtime.waitForLifecycle();
+  assert.deepEqual(f.calls, ['stop', 'start', 'restore']);
+  assert.equal(f.runtime.connectionState.status, 'connected');
+  await f.runtime.dispose();
+});
+
+
+test('automatic recovery never starts a replacement for history without an exact source', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  f.internal.ownedTranscriptPath = undefined;
+  f.internal.managedChildExited(f.child, 1, null, true);
+  for (const delay of [250, 500, 1000]) {
+    t.mock.timers.tick(delay);
+    await f.runtime.waitForLifecycle();
+  }
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.internal.recoveryAttempts.length, 3);
+  assert.equal(f.runtime.connectionState.status, 'error');
+  await assert.rejects(SessionRuntime.prototype.restoreOwnedSessionIfNeeded.call(f.runtime), /exact transcript/);
+  await f.runtime.dispose();
+});
 test('automatic recovery publishes connected only after Side Chat restoration settles', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const f = fixture();

@@ -1,4 +1,5 @@
 import { fixtureAccountSnapshot, providerAccountsMock } from './provider-accounts-mock';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../../src/renderer/global.css';
@@ -37,8 +38,12 @@ const scheduledRuns = [{ id: 'run-1', status: 'succeeded', scheduledAt: 17000000
 const accountApi = providerAccountsMock();
 const bridge = {
   providerAccounts: accountApi,
+  providerSettings: { providers: {}, routing: {} },
   activeSession: { projectPath: '/test/project', sessionId: 'session-a' }, connected: true, sessionLoading: false,
-  bootstrap: { workspace: { path: '/test/project', trusted: true }, settings: { projects: ['/test/project'] }, providerAccountSnapshot: fixtureAccountSnapshot([]), projectCatalogs: {} },
+  bootstrap: { workspace: { path: '/test/project', trusted: true }, settings: { projects: ['/test/project'] },
+    conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: ['/test/project'], selectedProject: '/test/project',
+      activeSession: { projectPath: '/test/project', sessionId: 'session-a' } }),
+    providerAccountSnapshot: fixtureAccountSnapshot([]), projectCatalogs: {} },
   settingsSnapshotEvent: { effective_json: '{}', provenance_json: '{}', layers_json: '{"user":{},"project":{},"local":{}}' },
   refreshSettingsSnapshot: noop,
   mcpConfigurationSnapshotEvent: { snapshot_json: JSON.stringify({ scopes: [{ scope: 'user', path: '/test/.lingxi.json', revision_sha256: 'r1', raw_json: '{"mcpServers":{"known":{"command":"echo","args":["ok"]}}}' }] }) },
@@ -47,7 +52,7 @@ const bridge = {
   mcpAdmin: async command => { calls.push({ domain: 'mcp', command }); },
   skillAdmin: async command => { calls.push({ domain: 'skill', command }); },
   pluginAdmin: async command => { calls.push({ domain: 'plugin', command }); return { details_json: 'Ready for confirmation' }; },
-  updateProviderSettings: async (scope, patch) => { calls.push({ domain: 'provider', command: { scope, patch } }); },
+  updateProviderSettings: async patch => { calls.push({ domain: 'provider', command: patch }); },
   desktop: { providerModelCatalog: [], modelDetails: [] },
   scheduledScopes: [{ id: 'global', label: 'None' }],
   manageScheduled: async (scope, command) => { calls.push({ domain: 'cron', command }); return [scheduledJob]; },

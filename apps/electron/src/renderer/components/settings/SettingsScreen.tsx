@@ -396,10 +396,13 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
         ?? [];
       let latest: (typeof sessions)[number] | undefined;
       for (const entry of sessions) {
+        const owner = bridge.bootstrap?.conversationSpaces.sessions.find((candidate) => candidate.sessionId === entry.uuid);
+        if (entry.mode !== bridge.bootstrap?.conversationSpaces.activeMode || (owner && owner.projectId !== path)) continue;
         if (!latest || entry.modified_rfc3339 > latest.modified_rfc3339) latest = entry;
       }
-      if (latest) await bridge.openSession(path, latest.uuid);
-      else await bridge.newSession(path);
+      if (latest) {
+        if (!await bridge.openSession(path, latest.uuid, { scope: 'current', transcriptPath: latest.path })) throw new Error(tr('desktop_link_project_conversation_error'));
+      } else await bridge.newSession(path);
       setOpen(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : tr('desktop_shell_switch_project_error'));

@@ -213,8 +213,7 @@ private struct CronTaskEditorView: View {
     }
     private var target: Binding<String> {
         Binding(get: { repository.draft.automation.targetSessionId ?? "" }, set: { id in
-            repository.draft.automation.targetSessionId = id.isEmpty ? nil : id
-            if let session = repository.sessionChoices.first(where: { $0.id == id }) { repository.draft.scopeID = session.scopeID }
+            repository.selectTarget(id)
         })
     }
     private var reasoning: Binding<String> {

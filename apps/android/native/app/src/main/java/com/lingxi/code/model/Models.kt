@@ -42,8 +42,9 @@ data class ProjectSession(
     val preview: String,
     val pinned: Boolean = false,
     val msgs: Int,
-    val mode: SessionMode = SessionMode.Code,
+    val mode: SessionMode,
     val updatedAtEpochMillis: Long = 0L,
+    val transcriptPath: String? = null,
 )
 
 data class Project(
@@ -520,9 +521,9 @@ object MockData {
             color = Color(red = 0.4340f, green = 0.5865f, blue = 1.0000f), // oklch(70% 0.18 268)
             desc = "多端 UI · 14 文件 · 8 记忆",
             sessions = listOf(
-                ProjectSession("s1", "设计灵犀 iPhone 版", "刚刚", "类 Claude 移动端布局", pinned = true, msgs = 8),
-                ProjectSession("p1s2", "iPad 横屏推演", "昨天", "Pencil 标注入口", msgs = 14),
-                ProjectSession("p1s3", "深色色板校准", "5月3日", "oklch 节点对齐", msgs = 22),
+                ProjectSession("s1", "设计灵犀 iPhone 版", "刚刚", "类 Claude 移动端布局", pinned = true, msgs = 8, mode = SessionMode.Code),
+                ProjectSession("p1s2", "iPad 横屏推演", "昨天", "Pencil 标注入口", msgs = 14, mode = SessionMode.Code),
+                ProjectSession("p1s3", "深色色板校准", "5月3日", "oklch 节点对齐", msgs = 22, mode = SessionMode.Code),
             ),
         ),
         Project(
@@ -530,8 +531,8 @@ object MockData {
             color = Color(red = 0.0000f, green = 0.7601f, blue = 0.7664f), // oklch(72% 0.16 195)
             desc = "目标对齐 · 6 文件 · 3 记忆",
             sessions = listOf(
-                ProjectSession("p2s1", "整理 Q2 OKR 草案", "5 小时前", "已对齐三方", msgs = 24),
-                ProjectSession("p2s2", "周报自动化模板", "昨天", "从多源聚合", msgs = 6),
+                ProjectSession("p2s1", "整理 Q2 OKR 草案", "5 小时前", "已对齐三方", msgs = 24, mode = SessionMode.Code),
+                ProjectSession("p2s2", "周报自动化模板", "昨天", "从多源聚合", msgs = 6, mode = SessionMode.Code),
             ),
         ),
         Project(
@@ -539,8 +540,8 @@ object MockData {
             color = Color(red = 0.2085f, green = 0.7571f, blue = 0.4656f), // oklch(72% 0.16 155)
             desc = "Bug 排查 · 23 文件 · 12 记忆",
             sessions = listOf(
-                ProjectSession("p3s1", "WebSocket 重连排查", "昨天", "指数退避方案", msgs = 31),
-                ProjectSession("p3s2", "PRD v2 评审反馈", "周一", "12 评论 4 待办", msgs = 18),
+                ProjectSession("p3s1", "WebSocket 重连排查", "昨天", "指数退避方案", msgs = 31, mode = SessionMode.Code),
+                ProjectSession("p3s2", "PRD v2 评审反馈", "周一", "12 评论 4 待办", msgs = 18, mode = SessionMode.Code),
             ),
         ),
     )

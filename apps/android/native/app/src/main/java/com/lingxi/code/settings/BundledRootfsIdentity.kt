@@ -19,7 +19,9 @@ data class RootfsArtifactIdentity(
     }
 }
 
-internal fun bundledRootfsIdentity(pinsJson: String, manifestJson: String, abi: String): RootfsArtifactIdentity {
+internal data class RootfsBrandIdentity(val brandId: String, val linuxUser: String, val configDirName: String)
+
+internal fun bundledRootfsIdentity(pinsJson: String, manifestJson: String, abi: String, brand: RootfsBrandIdentity): RootfsArtifactIdentity {
     val pins = JSONObject(pinsJson)
     check(pins.getInt("schema_version") == 2) { "Unsupported bundled rootfs pins schema" }
     check(pins.getString("source_toolchain_pins_sha256").matches(Regex("[a-f0-9]{64}"))) {
@@ -36,6 +38,13 @@ internal fun bundledRootfsIdentity(pinsJson: String, manifestJson: String, abi: 
         sizeBytes = release.getLong("size_bytes"),
     )
     val manifest = JSONObject(manifestJson)
+    val profile = manifest.optJSONObject("brand_profile")
+    check(profile != null && profile.keys().asSequence().toSet() == setOf("brand_id", "linux_user", "config_dir_name") &&
+        profile.opt("brand_id") is String && profile.opt("linux_user") is String && profile.opt("config_dir_name") is String &&
+        profile.optString("brand_id") == brand.brandId &&
+        profile.optString("linux_user") == brand.linuxUser && profile.optString("config_dir_name") == brand.configDirName) {
+        "Bundled rootfs manifest belongs to a different brand"
+    }
     val manifestAbi = if (abi == "arm64-v8a") "arm64" else "x86_64"
     check(manifest.getString("platform") == "android" && manifest.getString("runtime") == "android-proot") {
         "Bundled rootfs manifest targets a different runtime"

@@ -378,8 +378,10 @@ test('tool rows use compact adjacency hooks and a system-font transcript type sc
   assert.deepEqual(runTypes, ['tool']);
 
   const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
-  assert.match(css, /\.transcript-row \+ \.transcript-row\s*\{[^}]*margin-top:\s*1\.5rem;/s);
+  assert.match(css, /\.transcript-row \+ \.transcript-row\s*\{[^}]*margin-top:\s*1rem;/s);
   assert.match(css, /data-row-type='tool-group'[^}]*data-row-type='thinking'[^}]*margin-top:\s*\.75rem;/s);
+  assert.match(css, /data-row-type='tool-group'[^}]*data-row-type='agents'[^}]*margin-top:\s*\.125rem;/s);
+  assert.match(css, /data-message-role='user'\] \+ \.transcript-row\s*\{[^}]*margin-top:\s*1\.5rem;/s);
 
   const tool = render(React.createElement(ToolCall, { item: READ, onSetOpen: () => {} }));
   assert.match(tool, /font-size:13px/);

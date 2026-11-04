@@ -166,6 +166,8 @@ test('logout targets only its account and leaves the account visible for reconne
   let snapshot = await f.service.command({ action: 'add', expectedRevision: 0, providerId: 'openai', executionBindingId: 'openai', authKind: 'api_key' }, 'first');
   snapshot = await f.service.command({ action: 'add', expectedRevision: snapshot.configRevision, providerId: 'openai', executionBindingId: 'openai', authKind: 'api_key' }, 'second');
   const [a,b] = snapshot.accounts;
+  await assert.rejects(f.service.command({ action: 'logout', expectedRevision: snapshot.configRevision - 1, accountId: a.accountId }), /changed/);
+  assert.equal(f.storage.values.has(a.credentialRef.secretRef), true, 'a stale revision cannot clear the credential');
   snapshot = await f.service.command({ action: 'logout', expectedRevision: snapshot.configRevision, accountId: a.accountId });
   assert.equal(snapshot.accounts.length, 2);
   assert.equal(f.storage.values.has(a.credentialRef.secretRef), false);

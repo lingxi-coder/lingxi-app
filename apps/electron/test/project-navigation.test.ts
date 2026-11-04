@@ -42,11 +42,20 @@ function bridgeFixture() {
     uuid: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
     title: `Session ${index + 1}`,
     modified_rfc3339: `2026-08-${String(sessionDays[index]).padStart(2, '0')}T00:00:00Z`,
-    message_count: index + 1,
+    message_count: index + 1, mode: 'code',
     path: `/tmp/session-${index + 1}.jsonl`,
   }));
   return {
     bootstrap: {
+      conversationSpaces: {
+        activeMode: 'code', globalWorkspaces: { chat: '/tmp/global-chat', code: '/tmp/global-code' },
+        projects: { [projectPath]: ['code'], [pinnedProjectPath]: ['code'] },
+        navigation: { chat: { projectId: null }, code: { projectId: projectPath } },
+        sessions: [
+          ...sessions.map(session => ({ projectPath, projectId: projectPath, sessionId: session.uuid, mode: 'code' })),
+          { projectPath: pinnedProjectPath, projectId: pinnedProjectPath, sessionId: '11111111-1111-4111-8111-111111111111', mode: 'code' },
+        ], drafts: [],
+      },
       settings: {
         version: 1,
         activeProject: projectPath,
@@ -590,16 +599,12 @@ test('setup stays out of the transcript while project and provider controls rema
   assert.doesNotMatch(readFileSync(join(process.cwd(), 'src/preload/index.ts'), 'utf8'), /lingxi:trust:set|setWorkspaceTrusted/);
   assert.doesNotMatch(readFileSync(join(process.cwd(), 'src/main/host.ts'), 'utf8'), /CH_TRUST_SET|lingxi:trust:set/);
   assert.match(desktopSource, /aria-label=\{tr\('desktop_chat_add_project'\)\}/);
-  // Provider controls moved out of `BetaDesktop.tsx`'s old settings modal
-  // (retired in Task 20, cutting `<SettingsSection title="Providers">` from
-  // this file entirely) into `ProviderCredentials.tsx`, reached through
-  // `SettingsScreen`. The regression this test guards against — provider
-  // controls disappearing along with `SetupCard` — is checked at their
-  // current address instead of their old one.
-  assert.match(
-    readFileSync(join(process.cwd(), 'src/renderer/components/settings/pages/ProviderCredentials.tsx'), 'utf8'),
-    /<Card title=\{tr\('model_detail_provider'\)\}>/,
-  );
+  // The provider directory and account controls remain reachable through
+  // Settings even though setup no longer occupies the conversation panel.
+  const providers = readFileSync(join(process.cwd(), 'src/renderer/components/settings/pages/ProviderCredentials.tsx'), 'utf8');
+  assert.match(providers, /<h2>\{tr\('model_detail_provider'\)\}<\/h2>/);
+  assert.match(providers, /<ProviderAccounts\b/);
+  assert.match(readFileSync(join(process.cwd(), 'src/renderer/components/settings/SettingsScreen.tsx'), 'utf8'), /'provider-credentials': ProviderCredentials/);
 });
 
 test('session interaction prompts are scoped to the main panel instead of covering global navigation', () => {
@@ -622,4 +627,13 @@ test('sidebar uses indeterminate progress for main turns and background agents',
     assert.doesNotMatch(markup, /role="progressbar"[^>]*aria-valuenow/);
     assert.doesNotMatch(markup, /aria-label="Running" title="Running"/);
   }
+});
+
+test('space navigation remains available during a turn without changing the conversation mode', () => {
+  const bridge = bridgeFixture() as any;
+  const markup = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) },
+    React.createElement(BetaSidebar, { bridge, onOpenSettings: () => undefined })));
+  assert.match(markup, /role="tab" aria-selected="true"[^>]*>Code<\/button>/);
+  assert.match(markup, /role="tab" aria-selected="false"[^>]*>Chat<\/button>/);
+  assert.doesNotMatch(markup, /Next: Chat/);
 });

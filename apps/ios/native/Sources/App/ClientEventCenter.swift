@@ -20,7 +20,8 @@ final class ClientEventCenter {
             handlers[subscription.id] = nil
         }
 
-        func publish(_ event: ClientEvent) {
+        func publish(_ event: ClientEvent, owner: AnyObject, selectedOwner: AnyObject) {
+            guard owner === selectedOwner else { return }
             let snapshot = Array(handlers.values)
             for handler in snapshot { handler(event) }
         }

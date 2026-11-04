@@ -188,11 +188,18 @@ pub struct AndroidEngineLaunchConfigFfi {
     pub api_base: String,
     pub model: String,
     pub session_mode: SessionModeDto,
+    /// Restore this exact session during construction; None creates a new one.
+    pub initial_session_id: Option<String>,
+    /// Exact catalog-selected transcript for that session, required on restore.
+    pub initial_session_transcript_path: Option<String>,
+    /// A scheduled controller does not create or own a conversation.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub scheduler_controller: bool,
     pub vision_delegation_enabled: bool,
     pub app_files_root: String,
-    /// Optional Android Project workspace. When present it must resolve to
-    /// `<app_files_root>/projects/<lowercase UUID>/workspace`; global `.lingxi`
-    /// state continues to live under `app_files_root`.
+    /// Optional workspace inside the Linux user home, in guest or native
+    /// coordinates. When absent, a conversation uses its fixed-mode default
+    /// and a scheduler controller uses the explicit scheduled directory.
     pub project_cwd: Option<String>,
     pub provider_config: Option<AndroidProviderConfigFfi>,
     pub mobile_linux: Option<AndroidMobileLinuxConfigFfi>,
@@ -205,9 +212,25 @@ pub struct AndroidEngineLaunchConfigFfi {
 #[cfg(feature = "uniffi")]
 pub(super) fn android_project_cwd(
     managed_root: &str,
-    project_cwd: Option<&str>,
+    project_cwd: &str,
 ) -> Result<std::path::PathBuf, MobileEngineError> {
     let directories = harness_runtime::mobile::mobile_user_directories(managed_root.to_string())?;
     directories.prepare()?;
-    directories.resolve_cwd(project_cwd).map(|(host, _)| host)
+    directories
+        .resolve_explicit_cwd(project_cwd)
+        .map(|(host, _)| host)
+}
+
+#[cfg(feature = "uniffi")]
+pub(super) fn android_engine_cwd(
+    directories: &harness_runtime::mobile::MobileUserDirectories,
+    project_cwd: Option<&str>,
+    mode: SessionModeDto,
+    scheduler_controller: bool,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), MobileEngineError> {
+    if scheduler_controller && project_cwd.is_none() {
+        directories.resolve_explicit_cwd(&directories.scheduled_cwd)
+    } else {
+        directories.resolve_cwd(project_cwd, mode)
+    }
 }

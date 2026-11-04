@@ -129,19 +129,20 @@ struct ConversationLiveActivityReconciliationPlan: Equatable {
         guard let targetSnapshot else {
             return ConversationLiveActivityReconciliationPlan(
                 matchedActivityID: nil,
-                staleActivityIDs: activities.map(\.activityID),
+                staleActivityIDs: currentActivityID.map { [$0] } ?? [],
                 shouldStartNew: false
             )
         }
         let matches = activities.filter { $0.sessionID == targetSnapshot.sessionID }
-        let matchedActivityID =
-            matches.first(where: { $0.activityID == currentActivityID })?.activityID
+        let matchedActivityID = matches.first(where: { $0.activityID == currentActivityID })?.activityID
             ?? matches.first?.activityID
+        var stale = matches.map(\.activityID).filter { $0 != matchedActivityID }
+        if let currentActivityID, currentActivityID != matchedActivityID, !stale.contains(currentActivityID) {
+            stale.append(currentActivityID)
+        }
         return ConversationLiveActivityReconciliationPlan(
             matchedActivityID: matchedActivityID,
-            staleActivityIDs: activities
-                .map(\.activityID)
-                .filter { $0 != matchedActivityID },
+            staleActivityIDs: stale,
             shouldStartNew: matchedActivityID == nil
         )
     }
@@ -157,23 +158,26 @@ extension Notification.Name {
 }
 
 struct ConversationSystemActivityReporter: ConversationActivityReporting {
+    let ownerID: String
+
     @MainActor
-    private static let continuedProcessing = ConversationContinuedProcessingController()
+    private static var continuedProcessing: [String: ConversationContinuedProcessingController] = [:]
 
     @MainActor
     private static let liveActivity = ConversationLiveActivityController()
 
     @MainActor
     func sync(snapshot: ConversationBackgroundSnapshot, scenePhase: ScenePhase) {
-        let liveSnapshot = snapshot.preferredLiveActivitySnapshot
-        Self.continuedProcessing.sync(snapshot: snapshot)
-        Self.liveActivity.sync(snapshot: liveSnapshot, scenePhase: scenePhase)
+        let controller = Self.continuedProcessing[ownerID] ?? ConversationContinuedProcessingController()
+        Self.continuedProcessing[ownerID] = controller
+        controller.sync(snapshot: snapshot)
+        Self.liveActivity.sync(ownerID: ownerID, snapshot: snapshot.preferredLiveActivitySnapshot, scenePhase: scenePhase)
     }
 
     @MainActor
     func clear() {
-        Self.continuedProcessing.clear()
-        Self.liveActivity.clear()
+        Self.continuedProcessing.removeValue(forKey: ownerID)?.clear()
+        Self.liveActivity.clear(ownerID: ownerID)
     }
 }
 
@@ -301,21 +305,21 @@ final class ConversationContinuedProcessingController {
 
 @MainActor
 final class ConversationLiveActivityController {
-    func sync(snapshot: ConversationLiveActivitySnapshot?, scenePhase _: ScenePhase) {
+    func sync(ownerID: String, snapshot: ConversationLiveActivitySnapshot?, scenePhase _: ScenePhase) {
         guard #available(iOS 18.0, *) else { return }
         if #available(iOS 26.0, *) {
             // iOS 26 routes the active lease through BGContinuedProcessingTask.
             // Any lingering Live Activity from a prior app version is orphaned
             // state and should be cleared rather than mirrored.
-            Task { await ActivityKitConversationDriver.shared.sync(snapshot: nil) }
+            Task { await ActivityKitConversationDriver.shared.sync(ownerID: ownerID, snapshot: nil) }
             return
         }
-        Task { await ActivityKitConversationDriver.shared.sync(snapshot: snapshot) }
+        Task { await ActivityKitConversationDriver.shared.sync(ownerID: ownerID, snapshot: snapshot) }
     }
 
-    func clear() {
+    func clear(ownerID: String) {
         guard #available(iOS 18.0, *) else { return }
-        Task { await ActivityKitConversationDriver.shared.sync(snapshot: nil) }
+        Task { await ActivityKitConversationDriver.shared.sync(ownerID: ownerID, snapshot: nil) }
     }
 }
 
@@ -324,81 +328,48 @@ final class ConversationLiveActivityController {
     private actor ActivityKitConversationDriver {
         static let shared = ActivityKitConversationDriver()
 
-        private var activity: Activity<ConversationLiveActivityAttributes>?
-        private var sessionID: String?
+        private var activitiesByOwner: [String: Activity<ConversationLiveActivityAttributes>] = [:]
 
-        func sync(snapshot: ConversationLiveActivitySnapshot?) async {
+        func sync(ownerID: String, snapshot: ConversationLiveActivitySnapshot?) async {
             let activities = Array(Activity<ConversationLiveActivityAttributes>.activities)
             let plan = ConversationLiveActivityReconciliationPlan.make(
-                currentActivityID: activity?.id,
-                activities: activities.map {
-                    ConversationLiveActivityReconciliationPlan.Entry(
-                        activityID: $0.id,
-                        sessionID: $0.attributes.sessionID
-                    )
-                },
+                currentActivityID: activitiesByOwner[ownerID]?.id,
+                activities: activities.map { .init(activityID: $0.id, sessionID: $0.attributes.sessionID) },
                 targetSnapshot: snapshot
             )
             for stale in activities where plan.staleActivityIDs.contains(stale.id) {
                 await stale.end(nil, dismissalPolicy: .immediate)
             }
-
-            if let matchedActivityID = plan.matchedActivityID,
-               let matchedActivity = activities.first(where: {
-                   $0.id == matchedActivityID
-               })
-            {
-                activity = matchedActivity
-                sessionID = matchedActivity.attributes.sessionID
-            } else {
-                activity = nil
-                sessionID = nil
-            }
-
-            guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-                if snapshot == nil {
-                    await endCurrent(content: nil, dismissalPolicy: .immediate)
-                }
-                return
-            }
             guard let snapshot else {
-                await endCurrent(content: nil, dismissalPolicy: .immediate)
+                activitiesByOwner.removeValue(forKey: ownerID)
                 return
             }
-
-            if let activity, sessionID == snapshot.sessionID {
+            let current = plan.matchedActivityID.flatMap { id in activities.first { $0.id == id } }
+            guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+            if let current {
+                activitiesByOwner[ownerID] = current
                 if snapshot.status.isTerminal {
-                    await endCurrent(
-                        content: content(for: snapshot),
-                        dismissalPolicy: snapshot.status == .completed
-                            ? .after(.now.addingTimeInterval(300))
-                            : .default
-                    )
+                    await current.end(content(for: snapshot), dismissalPolicy: snapshot.status == .completed
+                        ? .after(.now.addingTimeInterval(300)) : .default)
+                    activitiesByOwner.removeValue(forKey: ownerID)
                 } else {
-                    await activity.update(content(for: snapshot))
+                    await current.update(content(for: snapshot))
                 }
                 return
             }
-
             do {
-                let started = try Activity<ConversationLiveActivityAttributes>.request(
+                let activity = try Activity<ConversationLiveActivityAttributes>.request(
                     attributes: ConversationLiveActivityAttributes(sessionID: snapshot.sessionID),
-                    content: content(for: snapshot),
-                    pushType: nil
+                    content: content(for: snapshot), pushType: nil
                 )
-                activity = started
-                sessionID = snapshot.sessionID
+                activitiesByOwner[ownerID] = activity
                 if snapshot.status.isTerminal {
-                    await endCurrent(
-                        content: content(for: snapshot),
-                        dismissalPolicy: snapshot.status == .completed
-                            ? .after(.now.addingTimeInterval(300))
-                            : .default
-                    )
+                    await activity.end(content(for: snapshot), dismissalPolicy: snapshot.status == .completed
+                        ? .after(.now.addingTimeInterval(300)) : .default)
+                    activitiesByOwner.removeValue(forKey: ownerID)
                 }
             } catch {
-                activity = nil
-                sessionID = nil
+                activitiesByOwner.removeValue(forKey: ownerID)
             }
         }
 
@@ -419,15 +390,7 @@ final class ConversationLiveActivityController {
             )
         }
 
-        private func endCurrent(
-            content: ActivityContent<ConversationLiveActivityAttributes.ContentState>?,
-            dismissalPolicy: ActivityUIDismissalPolicy
-        ) async {
-            guard let activity else { return }
-            await activity.end(content, dismissalPolicy: dismissalPolicy)
-            self.activity = nil
-            sessionID = nil
-        }
+
     }
 #endif
 

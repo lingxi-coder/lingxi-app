@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 import { isInside } from './bots/files.js';
 import { isSessionId } from './sessionIdentity.js';
+import { ConversationSpaceStore } from './conversationSpaceStore.js';
 
 import {
   MAX_REMOTE_SESSIONS,
@@ -11,9 +12,9 @@ import {
   isPermissionModeId,
   parseModelPickerVisibility,
   parseNotificationPreferences,
-  parseSidebarPreferences,
   parseSettings,
   parseVoicePreferences,
+  patchSidebarPreferences,
   publicSettings,
   setWorkspaceTrust,
   withActiveProject,
@@ -32,6 +33,7 @@ import { resolveDesktopTelemetry, type DesktopTelemetryConfig } from './telemetr
 
 export class SettingsStore {
   readonly settingsPath: string;
+  readonly conversationSpaces: ConversationSpaceStore;
   private settings: PersistedSettings;
   private audioConfigurationError: string | undefined;
   private settingsWritable = true;
@@ -49,6 +51,7 @@ export class SettingsStore {
 
   constructor(userData: string) {
     this.settingsPath = join(userData, 'settings.v1.json');
+    this.conversationSpaces = new ConversationSpaceStore(userData);
     const managed = join(userData, 'scheduled-workspace');
     let canonical = managed;
     let folder = userData;
@@ -69,6 +72,11 @@ export class SettingsStore {
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     this.userDataFolder = folder;
     this.settings = this.readSettings();
+    // A reference from an older settings file has no current space owner.
+    // Discard it instead of assigning it to a mode during startup.
+    if (this.settings.activeSession && !this.conversationSpaces.find(this.settings.activeSession)) delete this.settings.activeSession;
+    this.settings.pinnedSessions = this.settings.pinnedSessions.filter((row) => this.conversationSpaces.find(row));
+    if (this.settings.archivedSessions) this.settings.archivedSessions = this.settings.archivedSessions.filter((row) => this.conversationSpaces.find(row));
   }
 
   private readSettings(): PersistedSettings {
@@ -101,7 +109,7 @@ export class SettingsStore {
           if (row && typeof row.projectPath === 'string') referencedPaths.add(row.projectPath);
         }
       }
-      const managedPaths = this.managedWorkspacePaths();
+      const managedPaths = this.managedWorkspacePaths(settings.projects);
       for (const path of referencedPaths) {
         if (!managedPaths.has(path)) continue;
         if (settings.projects.includes(path)) continue;
@@ -139,11 +147,13 @@ export class SettingsStore {
   }
 
   getPublic(): PublicSettings {
+    const current = this.volatileActiveSession ?? this.settings.activeSession;
+    const active = current ? this.conversationSpaces.find(current) ?? current : undefined;
     const settings = publicSettings({
       ...this.settings,
-      activeSession: this.volatileActiveSession
-        ? { ...this.volatileActiveSession }
-        : this.settings.activeSession ? { ...this.settings.activeSession } : undefined,
+      activeSession: active ? { ...active } : undefined,
+      pinnedSessions: this.settings.pinnedSessions.map((row) => ({ ...row, ...this.conversationSpaces.find(row) })),
+      archivedSessions: this.settings.archivedSessions?.map((row) => ({ ...row, ...this.conversationSpaces.find(row) })),
     });
     if (settings.voice) settings.voiceRevision = this.settings.audioConfigurationRevision ?? 0;
     if (this.audioConfigurationError) settings.audioConfigurationError = this.audioConfigurationError;
@@ -238,11 +248,12 @@ export class SettingsStore {
       || !['current', 'repository', 'all'].includes(selection.scope))) throw new Error('invalid session transcript selection');
     const previous = this.settings;
     const previousDraft = this.volatileActiveSession;
-    const moved = { projectPath, sessionId: ref.sessionId };
+    const owned = this.conversationSpaces.find(ref) ?? this.conversationSpaces.find({ ...ref, projectPath });
+    const moved = { ...ref, projectPath, sessionId: ref.sessionId };
     const matches = (entry: SessionRef) => entry.sessionId === ref.sessionId && entry.projectPath === ref.projectPath;
     const relocate = <T extends SessionRef>(entry: T): T => matches(entry) ? { ...entry, projectPath } : entry;
-    const next = this.isManagedWorkspace(projectPath) ? { ...previous } : withAddedProject(previous, projectPath);
-    next.activeProject = projectPath;
+    const next = owned || this.isManagedWorkspace(projectPath) ? { ...previous } : withAddedProject(previous, projectPath);
+    next.activeProject = owned ? owned.projectId ?? previous.activeProject : projectPath;
     // Unsent drafts have no transcript to restore after a process restart.
     // Move their visible owner without making the volatile UUID durable.
     next.activeSession = previousDraft && matches(previousDraft) ? previous.activeSession : moved;
@@ -258,7 +269,9 @@ export class SettingsStore {
       if (selected) next.sessionTranscriptSelections.push({ ...selected, ...moved });
     }
     next.remoteSessions = next.remoteSessions?.map(relocate);
-    if (next.sidebar && ref.projectPath !== projectPath) {
+    // An owned conversation remains in the same logical project when its cwd
+    // changes, so its manual sidebar position stays in that project as well.
+    if (next.sidebar && !owned && ref.projectPath !== projectPath) {
       const orders = { ...next.sidebar.manualSessionOrder };
       const oldOrder = orders[ref.projectPath] ?? [];
       const index = oldOrder.indexOf(ref.sessionId);
@@ -272,10 +285,18 @@ export class SettingsStore {
     }
     this.settings = next;
     this.volatileActiveSession = previousDraft && matches(previousDraft) ? moved : undefined;
-    try { this.persist(); }
+    let relocatedOwner = false;
+    try {
+      if (owned && owned.projectPath !== projectPath) {
+        this.conversationSpaces.relocate(owned, projectPath);
+        relocatedOwner = true;
+      }
+      this.persist();
+    }
     catch (error) {
       this.settings = previous;
       this.volatileActiveSession = previousDraft;
+      if (relocatedOwner) this.conversationSpaces.relocate(moved, owned!.projectPath);
       throw error;
     }
   }
@@ -285,18 +306,41 @@ export class SettingsStore {
     return selected ? { ...selected } : undefined;
   }
 
+  /** Save a verified source without changing the selected project or session. */
+  rememberSessionTranscriptSelection(ref: SessionRef, selection: Omit<SessionTranscriptSelection, keyof SessionRef>): void {
+    if (!isSessionId(ref.sessionId) || !isAbsolute(ref.projectPath) || !isAbsolute(selection.catalogProjectPath)
+      || selection.catalogProjectPath.length > 32_768 || selection.catalogProjectPath.includes('\0')
+      || !isAbsolute(selection.transcriptPath) || selection.transcriptPath.length > 32_768
+      || selection.transcriptPath.includes('\0') || basename(selection.transcriptPath).toLowerCase() !== `${ref.sessionId.toLowerCase()}.jsonl`
+      || !['current', 'repository', 'all'].includes(selection.scope)) throw new Error('invalid session transcript selection');
+    const previous = this.settings;
+    if (previous.sessionTranscriptSelections?.some((entry) => entry.sessionId.toLowerCase() === ref.sessionId.toLowerCase()
+      && entry.projectPath !== ref.projectPath)) throw new Error('The session already has a different saved owner.');
+    const old = this.getSessionTranscriptSelection(ref);
+    if (old) {
+      if (old.transcriptPath !== selection.transcriptPath) throw new Error('The session already has a different saved source.');
+      return;
+    }
+    this.settings = { ...previous, sessionTranscriptSelections: [...(previous.sessionTranscriptSelections ?? []),
+      { projectPath: ref.projectPath, sessionId: ref.sessionId.toLowerCase(), ...selection }] };
+    try { this.persist(); } catch (error) { this.settings = previous; throw error; }
+  }
+
   /** Validate host capacity before asking the engine to migrate files. */
-  assertSessionRelocationAllowed(projectPath: string): void {
+  assertSessionRelocationAllowed(projectPath: string, ref?: SessionRef): void {
     if (!this.settingsWritable) throw new Error(this.audioConfigurationError ?? 'Device settings cannot be safely updated.');
-    withAddedProject(this.settings, projectPath);
+    if (!ref || !this.conversationSpaces.find(ref)) withAddedProject(this.settings, projectPath);
   }
 
   get scheduledWorkspace(): string {
     return this.managedWorkspace;
   }
 
-  private managedWorkspacePaths(): Set<string> {
-    return new Set([this.scheduledWorkspace, ...[...this.scheduledSessionWorkspaces.values()].map(row => row.projectPath)]);
+  private managedWorkspacePaths(projects: readonly string[] = this.settings?.projects ?? []): Set<string> {
+    return new Set([this.scheduledWorkspace, ...Object.values(this.conversationSpaces.globalWorkspaces), ...this.conversationSpaces.trustedWorkspaces(),
+      ...this.conversationSpaces.snapshot().sessions.filter((row) => row.projectId === null || projects.includes(row.projectId))
+        .map((row) => row.projectPath),
+      ...[...this.scheduledSessionWorkspaces.values()].map(row => row.projectPath)]);
   }
 
   isManagedWorkspace(path: string): boolean {
@@ -359,7 +403,7 @@ export class SettingsStore {
     const matches = (item: SessionRef) => item.projectPath === ref.projectPath && item.sessionId === ref.sessionId;
     this.settings = { ...previous, archivedSessions: (previous.archivedSessions ?? []).filter((item) => !matches(item)) };
     if (archived) {
-      this.settings.archivedSessions!.push({ ...ref, ...(title ? { title: title.slice(0, 512) } : {}), archivedAt: new Date().toISOString() });
+      this.settings.archivedSessions!.push({ ...ref, ...this.conversationSpaces.find(ref), ...(title ? { title: title.slice(0, 512) } : {}), archivedAt: new Date().toISOString() });
       this.settings.pinnedSessions = previous.pinnedSessions.filter((item) => !matches(item));
       if (this.settings.activeSession && matches(this.settings.activeSession)) delete this.settings.activeSession;
       if (this.volatileActiveSession && matches(this.volatileActiveSession)) this.volatileActiveSession = undefined;
@@ -455,7 +499,7 @@ export class SettingsStore {
       else delete this.settings.modelPickerVisibility;
     }
     if ('sidebar' in patch) {
-      this.settings.sidebar = parseSidebarPreferences(patch.sidebar, this.settings.projects);
+      this.settings.sidebar = patchSidebarPreferences(this.settings.sidebar, patch.sidebar, this.settings.projects);
     }
     if (typeof patch.collapseThoughtsByDefault === 'boolean') {
       this.settings.collapseThoughtsByDefault = patch.collapseThoughtsByDefault;

@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'settings-transaction-electron.mjs');
 
-test('Settings can close during pending credential persistence and ignores the late result', async () => {
+test('settings owner teardown during pending credential persistence ignores the late result', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-settings-transaction-vite-'));
   const vite = await createServer({
     root: fixtureRoot,

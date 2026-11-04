@@ -444,9 +444,20 @@ export function validateClientCommand(value: unknown, workspace?: string): Valid
         ? { type, raw, images }
         : { type, raw, images, turn_id: integer(input['turn_id'], 'slash command turn id', 1) };
     }
-    case 'list_sessions':
-      exactKeys(input, ['type', 'limit']);
-      return input['limit'] == null ? { type } : { type, limit: integer(input['limit'], 'limit', 1, 200) };
+    case 'list_sessions': {
+      exactKeys(input, ['type', 'limit', 'mode']);
+      const limit = input['limit'] == null ? undefined : integer(input['limit'], 'limit', 1, 200);
+      const mode = input['mode'] == null ? undefined : enumValue(input['mode'], 'conversation mode', ['chat', 'code'] as const);
+      return { type, ...(limit === undefined ? {} : { limit }), ...(mode === undefined ? {} : { mode }) };
+    }
+    case 'prepare_session_handoff':
+      exactKeys(input, ['type', 'request_id', 'target_mode']);
+      return { type, request_id: string(input['request_id'], 'handoff request id', 128),
+        target_mode: enumValue(input['target_mode'], 'handoff target mode', ['chat', 'code'] as const) };
+    case 'cancel_session_handoff':
+    case 'retry_session_handoff':
+      exactKeys(input, ['type', 'request_id']);
+      return { type, request_id: string(input['request_id'], 'handoff request id', 128) };
     case 'ui_attach': {
       exactKeys(input, ['type', 'surface', 'client_id']);
       const surface = enumValue(input['surface'], 'UI surface', ['desktop', 'mobile', 'vscode']);

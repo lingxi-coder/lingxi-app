@@ -2,6 +2,66 @@ import SwiftUI
 import OSLog
 import harness_runtimeFFI
 
+/// Owns the bindings captured when an asynchronous send was requested. The
+/// revision detects edits that return to the same value before admission.
+@MainActor
+struct CapturedComposerDraft {
+    private let draft: Binding<String>
+    private let units: Binding<[UInt16]?>
+    private let attachment: Binding<ComposerAttachment?>
+    private let revision: () -> UInt64?
+    private let originalText: String
+    private let originalDraft: [UInt16]
+    private let originalUnits: [UInt16]?
+    private let originalAttachment: ComposerAttachment?
+    private let originalRevision: UInt64?
+
+    init(draft: Binding<String>, units: Binding<[UInt16]?>,
+         attachment: Binding<ComposerAttachment?>, submittedUnits: [UInt16]?,
+         revision: @escaping () -> UInt64?) {
+        self.draft = draft
+        self.units = units
+        self.attachment = attachment
+        self.revision = revision
+        originalText = draft.wrappedValue
+        originalDraft = Array(draft.wrappedValue.utf16)
+        originalUnits = submittedUnits
+        originalAttachment = attachment.wrappedValue
+        originalRevision = revision()
+    }
+
+    @discardableResult
+    func clearIfUnchanged() -> Bool {
+        guard let originalRevision, revision() == originalRevision,
+              Array(draft.wrappedValue.utf16) == originalDraft,
+              units.wrappedValue == originalUnits,
+              attachment.wrappedValue == originalAttachment else { return false }
+        draft.wrappedValue = ""
+        units.wrappedValue = nil
+        attachment.wrappedValue = nil
+        return true
+    }
+
+    /// Restore only into the same untouched, empty owner draft that this
+    /// submission cleared. Revision also detects edit-then-erase ABA.
+    @discardableResult
+    func restoreIfUnchanged(afterClearRevision: UInt64?, model: ConversationModel,
+                            chip: VisualizationContextChip?, chipRevision: UInt64,
+                            submitted: ConversationUnsentPrompt) -> Bool {
+        guard let afterClearRevision, revision() == afterClearRevision,
+              draft.wrappedValue.isEmpty, units.wrappedValue == nil,
+              attachment.wrappedValue == nil, model.visualizationChip == nil,
+              submitted.mayRestoreCapturedDraft, submitted.visualizationContext == chip,
+              submitted.chipRevisionAtCapture == chipRevision,
+              model.visualizationChipRevision == submitted.chipRevisionAfterAdmission else { return false }
+        draft.wrappedValue = originalText
+        units.wrappedValue = originalUnits
+        attachment.wrappedValue = originalAttachment
+        model.visualizationChip = chip
+        return true
+    }
+}
+
 // MARK: - ChatView — main conversation surface
 struct ChatView: View {
     #if canImport(harness_runtimeFFI)
@@ -28,6 +88,7 @@ struct ChatView: View {
     /// An existing (not brand-new) session can be archived.
     var canArchive = false
     var onSelectNewChatMode: (SessionMode) -> Void = { _ in }
+    var onSelectSessionMode: (SessionMode) -> Void = { _ in }
     var onPickWorkspace: () -> Void = {}
     var onContinueInOtherMode: () -> Void = {}
     var onTogglePinned: () -> Void = {}
@@ -45,16 +106,27 @@ struct ChatView: View {
     let source: any ConversationSource
     var onOpenSessionDetails: () -> Void = {}
     var onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil
+    var onRetryAuthoringBinding: () -> Void = {}
     @ObservedObject private var convo: ConversationModel
+    private var displayedSessionMode: SessionMode { source.isTemporaryConversation ? convo.sessionMode : sessionMode }
+    private var usesLocalAccountCatalog: Bool {
+        #if canImport(harness_runtimeFFI)
+        !(source is RemoteConversationSource)
+        #else
+        true
+        #endif
+    }
 
     @State private var latestMessageRequestRevision: UInt64 = 0
     @State private var pendingAgentDetailID: String?
+    @State private var pendingSubmissionOwners = Set<ObjectIdentifier>()
 
     // Composer draft, HOISTED up to RootView (the iOS analog of Android
     // RootScreen's `draft`) so a hold-to-talk transcription can route its
     // recognized text into the input AND so the root can persist it across the
     // app being backgrounded. ChatView binds to it; it no longer owns it.
     @Binding var draft: String
+    private let draftRevision: () -> UInt64?
     @State private var localDraftSourceCodeUnits: [UInt16]? = nil
     private var externalDraftSourceCodeUnitsBinding: Binding<[UInt16]?>?
     private var draftSourceCodeUnitsBinding: Binding<[UInt16]?> {
@@ -95,6 +167,7 @@ struct ChatView: View {
 
     /// Root-owned state machine shared by ordinary dictation and Flow Mode.
     let voiceInteraction: VoiceInteractionController
+    private let voiceEventsManagedByHost: Bool
     var onOpenVoiceSettings: () -> Void = {}
     private let cameraCapture = CameraCapture()
     @State private var composerFocused = false
@@ -109,16 +182,19 @@ struct ChatView: View {
          draft: Binding<String>,
          voiceInteraction: VoiceInteractionController,
          source: any ConversationSource,
+         draftRevision: @escaping () -> UInt64?,
          draftSourceCodeUnits: Binding<[UInt16]?>? = nil,
          attachmentBinding: Binding<ComposerAttachment?>? = nil,
          projectName: String? = nil,
          sessionMode: SessionMode = .code,
          workspaceName: String = "",
          workspaceKey: String = "global",
+         voiceEventsManagedByHost: Bool = false,
          onDraftMediaChanged: @escaping (Bool) -> Void = { _ in },
          isPinned: Bool = false,
          canArchive: Bool = false,
          onSelectNewChatMode: @escaping (SessionMode) -> Void = { _ in },
+         onSelectSessionMode: @escaping (SessionMode) -> Void = { _ in },
          onPickWorkspace: @escaping () -> Void = {},
          onContinueInOtherMode: @escaping () -> Void = {},
          onTogglePinned: @escaping () -> Void = {},
@@ -129,7 +205,8 @@ struct ChatView: View {
          onNewChat: (() -> Void)? = nil,
          onOpenVoiceSettings: @escaping () -> Void = {},
          onOpenSessionDetails: @escaping () -> Void = {},
-         onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil) {
+         onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil,
+         onRetryAuthoringBinding: @escaping () -> Void = {}) {
         self.session = session
         self.projectName = projectName
         self.sessionMode = sessionMode
@@ -140,6 +217,7 @@ struct ChatView: View {
         self.isPinned = isPinned
         self.canArchive = canArchive
         self.onSelectNewChatMode = onSelectNewChatMode
+        self.onSelectSessionMode = onSelectSessionMode
         self.onPickWorkspace = onPickWorkspace
         self.onContinueInOtherMode = onContinueInOtherMode
         self.onTogglePinned = onTogglePinned
@@ -149,12 +227,15 @@ struct ChatView: View {
         self.onArchive = onArchive
         self.onNewChat = onNewChat
         self._draft = draft
+        self.draftRevision = draftRevision
         self.voiceInteraction = voiceInteraction
+        self.voiceEventsManagedByHost = voiceEventsManagedByHost
         self.source = source
         self.attachmentBinding = attachmentBinding
         self.onOpenVoiceSettings = onOpenVoiceSettings
         self.onOpenSessionDetails = onOpenSessionDetails
         self.onOpenShellTask = onOpenShellTask
+        self.onRetryAuthoringBinding = onRetryAuthoringBinding
         self.convo = source.model
     }
 
@@ -171,7 +252,8 @@ struct ChatView: View {
 
     @ViewBuilder
     private var conversationContent: some View {
-        let visibleAvailableModels = providerRepository.visibleModelReferences(convo.availableModels)
+        let visibleAvailableModels = usesLocalAccountCatalog
+            ? providerRepository.visibleModelReferences(convo.availableModels) : convo.availableModels
         ZStack {
             t.windowBg.ignoresSafeArea()
             VStack(spacing: 0) {
@@ -186,6 +268,11 @@ struct ChatView: View {
                 }
                 messageList(showsSelectedAgent: false)
                 runtimeFooter
+                if convo.authoringBindingPending && convo.authoringBindingRetryAvailable {
+                    Button("common_retry", action: onRetryAuthoringBinding)
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .accessibilityIdentifier("conversation.retry-authoring-binding")
+                }
                 if let guidance = AudioSetupGuidance.forPhase(voiceInteraction.phase, message: voiceInteraction.statusDetail) {
                     AudioSetupBanner(guidance: guidance, onConfigure: onOpenVoiceSettings, onDismiss: voiceInteraction.close)
                 } else if voiceInteraction.isPresented {
@@ -193,11 +280,36 @@ struct ChatView: View {
                         controller: voiceInteraction,
                         onConfigure: onOpenVoiceSettings
                     )
+                } else if source.hasActiveRealtimeAudio {
+                    HStack {
+                        ProgressView()
+                        Text("voice_status_thinking")
+                        Spacer()
+                        Button("composer_stop", action: stop)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .accessibilityIdentifier("voice.retained-turn")
+                }
+                if let engine = source as? EngineConversationSource {
+                    ForEach(convo.unsentPrompts.filter { engine.ownsUnsentPrompt($0) }) { prompt in
+                        HStack {
+                            if !prompt.images.isEmpty { Image(systemName: "photo") }
+                            Text(prompt.text).lineLimit(2)
+                            Spacer()
+                            Button("remote_restore_unsent") { restoreUnsent(prompt, using: engine) }
+                                .disabled(!draft.isEmpty || draftSourceCodeUnitsBinding.wrappedValue != nil ||
+                                          attachment != nil || convo.visualizationChip != nil)
+                        }
+                        .font(.caption).padding(.horizontal, 14).padding(.vertical, 6)
+                    }
                 }
                 if showsNewChatBar {
                     NewChatBar(
-                        mode: sessionMode,
+                        mode: displayedSessionMode,
+                        workspaceKey: workspaceKey,
                         workspaceName: workspaceName,
+                        modeSelectionDisabled: convo.sessionTransitionPending,
                         onSelectMode: onSelectNewChatMode,
                         onPickWorkspace: onPickWorkspace
                     )
@@ -209,6 +321,7 @@ struct ChatView: View {
                          // pick, the source submits `SetModel(id)` with a real id.
                          availableModels: convo.availableModels,
                          availableModelDetails: convo.availableModelDetails,
+                         usesLocalAccountCatalog: usesLocalAccountCatalog,
                          activeModelId: convo.activeModelId,
                          activeModelDisplay: convo.activeModelSource,
                          contextUsage: convo.sessionTransitionPending ? nil : convo.contextUsage,
@@ -252,6 +365,8 @@ struct ChatView: View {
                          promptSuggestionSourceCodeUnits: convo.promptSuggestionSourceCodeUnits,
                          promptSuggestionNotice: convo.promptSuggestionNotice,
                          suggestionTurnKey: "\(convo.activeSessionId):\(convo.promptSuggestionUuid ?? "")",
+                         historySessionKey: convo.activeSessionId,
+                         historyMessages: convo.sessionTransitionPending ? [] : convo.messages.filter { $0.role == .user }.map(\.text),
                          onSuggestionFeedback: { action in
                              if let uuid = convo.promptSuggestionUuid {
                                  source.promptSuggestionFeedback(sessionId: convo.activeSessionId, uuid: uuid, action: action)
@@ -260,11 +375,14 @@ struct ChatView: View {
                          slashCommands: convo.slashCommands,
                          slashCommandsLoaded: convo.slashCommandsLoaded,
                          slashCommandPending: convo.slashCommandPending,
-                         streaming: convo.streaming,
+                         streaming: convo.streaming || source.hasActiveRealtimeAudio,
                          showDiscardRecovery: convo.hasInactiveDurableRecovery,
                          isCancelling: convo.isCancelling,
                          sendEnabled: !convo.sessionTransitionPending
                              && !convo.slashCommandPending
+                             && !pendingSubmissionOwners.contains(ObjectIdentifier(source))
+                             && !source.hasActiveRealtimeAudio
+                             && source.isAvailableForPrompts
                              && voiceInteraction.mode != .flow,
                          onStop: stop,
                          onCameraClick: captureFromCamera,
@@ -283,7 +401,7 @@ struct ChatView: View {
                          voiceInteractionMode: voiceInteraction.mode,
                          modelOpen: $modelPickerOpen,
                          controlsOpen: $permissionSheetOpen,
-                         showsPermissionChip: sessionMode == .code)
+                         showsPermissionChip: true)
                     .preserveConversationDraft()
                 }
             }
@@ -304,7 +422,8 @@ struct ChatView: View {
     }
 
     var body: some View {
-        let visibleAvailableModels = providerRepository.visibleModelReferences(convo.availableModels)
+        let visibleAvailableModels = usesLocalAccountCatalog
+            ? providerRepository.visibleModelReferences(convo.availableModels) : convo.availableModels
         conversationContent
         .overlay(alignment: .top) {
             if let rejectionID = convo.compactRejectionID {
@@ -328,6 +447,7 @@ struct ChatView: View {
         .animation(.easeOut(duration: 0.25), value: connectivity.isOffline)
         .animation(.spring(response: 0.3, dampingFraction: 0.86), value: voiceInteraction.isPresented)
         .onAppear {
+            voiceInteraction.handleContextRestored()
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
@@ -371,7 +491,7 @@ struct ChatView: View {
             voiceInteraction.handleContextChange()
         }
         .onReceive(convo.turnSpeechUpdates) { update in
-            voiceInteraction.handleTurnSpeechUpdate(update)
+            if !voiceEventsManagedByHost { voiceInteraction.handleTurnSpeechUpdate(update) }
         }
         .onChange(of: convo.visualizationFollowup) { _, followup in
             // A widget's "ask about this": seed the draft and carry its chip
@@ -385,7 +505,7 @@ struct ChatView: View {
         }
         .onChange(of: convo.turnCompletion) { _, completion in
             guard let completion else { return }
-            voiceInteraction.handleTurnCompletion(completion)
+            if !voiceEventsManagedByHost { voiceInteraction.handleTurnCompletion(completion) }
         }
         .sheet(item: pendingQuestion) { question in
             AskUserQuestionCard(
@@ -406,12 +526,13 @@ struct ChatView: View {
         .sheet(isPresented: $sessionPanelOpen, onDismiss: runSessionPanelFollowUp) {
             SessionPanelSheet(
                 title: sessionTitle,
-                mode: sessionMode,
+                mode: displayedSessionMode,
+                canSwitchMode: !source.isTemporaryConversation && !convo.sessionTransitionPending,
                 workspaceName: workspaceName,
                 messageCount: convo.messages.count,
                 modelName: activeModelName,
                 effortLabel: effortLabel,
-                permissionLabel: sessionMode == .code ? permissionLabel : nil,
+                permissionLabel: permissionLabel,
                 isPinned: isPinned,
                 canPin: !convo.isNew,
                 canArchive: canArchive && !convo.isNew,
@@ -504,7 +625,7 @@ struct ChatView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(sessionTitle)
                     .accessibilityHint(String(localized: "chat_session_panel_a11y"))
-                    .accessibilityValue("\(sessionTitle), \(sessionMode.title) · \(workspaceName)")
+                    .accessibilityValue("\(sessionTitle), \(displayedSessionMode.title) · \(workspaceName)")
                     .accessibilityIdentifier("conversation.project-context")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
@@ -584,6 +705,7 @@ struct ChatView: View {
         case .togglePinned: onTogglePinned()
         case .makeScheduled: onMakeScheduled()
         case .terminal: onOpenTerminal()
+        case let .setMode(mode): onSelectSessionMode(mode)
         case .continueInOtherMode: onContinueInOtherMode()
         case .archive: onArchive()
         }
@@ -955,10 +1077,10 @@ struct ChatView: View {
     }
 
     private func newChat() {
-        voiceInteraction.handleContextChange()
         if let onNewChat {
             onNewChat()
         } else {
+            voiceInteraction.handleContextChange()
             source.startNewConversation()
         }
     }
@@ -977,8 +1099,9 @@ struct ChatView: View {
                 convo.error = ConversationError(kind: .rejected, message: String(localized: "side_chat_creation_text_only"))
                 return false
             }
-            let submittedDraft = draft
-            let submittedSourceCodeUnits = sourceCodeUnits
+            let capturedDraft = CapturedComposerDraft(draft: $draft, units: draftSourceCodeUnitsBinding,
+                attachment: attachmentBinding ?? $localAttachment, submittedUnits: sourceCodeUnits,
+                revision: draftRevision)
             let inputSourceCodeUnits = SideChatCommand.inputSourceCodeUnits(
                 raw: txt,
                 sourceCodeUnits: sourceCodeUnits
@@ -989,39 +1112,76 @@ struct ChatView: View {
                 inputSourceCodeUnits: input.isEmpty ? nil : inputSourceCodeUnits
             ) { success in
                 if success {
-                    if Array(draft.utf16) == Array(submittedDraft.utf16),
-                       draftSourceCodeUnitsBinding.wrappedValue == submittedSourceCodeUnits {
-                        draft = ""
-                        draftSourceCodeUnitsBinding.wrappedValue = nil
-                    }
+                    capturedDraft.clearIfUnchanged()
                     sideChatSheetOpen = true
                 }
             }
             return false
         }
         #endif
-        let images = attachment.map { [ImageRefDto(mediaType: $0.mediaType, base64: $0.base64)] } ?? []
-        guard let token = source.send(
-            txt,
-            sourceCodeUnits: sourceCodeUnits,
-            images: images,
-            selectedSlashCommand: selectedSlashCommand
-        ) else { return false }
-        draft = ""
-        draftSourceCodeUnitsBinding.wrappedValue = nil
-        // The source owns the durable transcript now; remove only after it has
-        // accepted the turn so a failed send leaves the attachment retryable.
-        attachment = nil
-        voiceInteraction.registerAutomaticPlaybackCandidate(token)
-        // Sending is an explicit re-engagement: a reader who had scrolled up to
-        // re-read something must not have their own prompt land off screen. The
-        // re-arm happens only after the turn was accepted.
-        latestMessageRequestRevision &+= 1
-        return true
+        let owner = source
+        let ownerID = ObjectIdentifier(owner)
+        guard pendingSubmissionOwners.insert(ownerID).inserted else { return false }
+        let previousTurn = owner.model.activeTurnToken
+        let capturedChip = owner.model.visualizationChip
+        let capturedChipRevision = owner.model.visualizationChipRevision
+        let submittedAttachment = attachment
+        let capturedDraft = CapturedComposerDraft(draft: $draft, units: draftSourceCodeUnitsBinding,
+            attachment: attachmentBinding ?? $localAttachment, submittedUnits: sourceCodeUnits,
+            revision: draftRevision)
+        let images = submittedAttachment.map { [ImageRefDto(mediaType: $0.mediaType, base64: $0.base64)] } ?? []
+        Task { @MainActor in
+            let token = await owner.send(txt, sourceCodeUnits: sourceCodeUnits, images: images,
+                                         selectedSlashCommand: selectedSlashCommand)
+            pendingSubmissionOwners.remove(ownerID)
+            guard let token else { return }
+            let cleared = capturedDraft.clearIfUnchanged()
+            let afterClearRevision = draftRevision()
+            if previousTurn == nil, let engine = owner as? EngineConversationSource {
+                let ownerModel = owner.model
+                engine.registerRejectedPromptRestorer(for: token) { submitted in
+                    cleared && capturedDraft.restoreIfUnchanged(afterClearRevision: afterClearRevision,
+                        model: ownerModel, chip: capturedChip, chipRevision: capturedChipRevision,
+                        submitted: submitted)
+                }
+            }
+            voiceInteraction.registerAutomaticPlaybackCandidate(token, audioOwner: owner.voiceAudioOwner)
+            latestMessageRequestRevision &+= 1
+        }
+        // The asynchronous admission owns the captured bindings; Composer
+        // must not clear them before its checkpoint has been committed.
+        return false
+    }
+
+    private func restoreUnsent(_ prompt: ConversationUnsentPrompt, using engine: EngineConversationSource) {
+        guard engine.ownsUnsentPrompt(prompt), draft.isEmpty, draftSourceCodeUnitsBinding.wrappedValue == nil,
+              attachment == nil, convo.visualizationChip == nil,
+              prompt.images.count <= 1 else { return }
+        var restoredAttachment: ComposerAttachment?
+        if let imageRef = prompt.images.first {
+            guard let bytes = Data(base64Encoded: imageRef.base64), let image = UIImage(data: bytes) else { return }
+            restoredAttachment = ComposerAttachment(image: image, width: Int(image.size.width),
+                height: Int(image.size.height), mediaType: imageRef.mediaType, base64: imageRef.base64)
+        }
+        draft = prompt.text
+        draftSourceCodeUnitsBinding.wrappedValue = prompt.sourceCodeUnits
+        (attachmentBinding ?? $localAttachment).wrappedValue = restoredAttachment
+        convo.visualizationChip = prompt.visualizationContext
+        engine.removeUnsentPrompt(prompt.id)
     }
 
     // PR-4 item 2: interrupt the in-flight turn.
-    private func stop() { source.cancel() }
+    private func stop() {
+        if source.hasActiveRealtimeAudio {
+            if voiceInteraction.mode == .flow {
+                voiceInteraction.close()
+            } else {
+                Task { await IOSRealtimeAudioService.shared.stop(abort: true) }
+            }
+        } else {
+            source.cancel()
+        }
+    }
 
     // MARK: capability affordances (mirror Android RootScreen)
 
@@ -1030,7 +1190,7 @@ struct ChatView: View {
     private func startVoiceHold() {
         captureStatus = nil
         composerFocused = false
-        voiceInteraction.startDictation(onTranscript: appendVoiceTranscript)
+        voiceInteraction.startDictation(audioOwner: source.voiceAudioOwner, onTranscript: appendVoiceTranscript)
     }
 
     /// Finger lift ends the request that has been recording since press-down;
@@ -1057,7 +1217,7 @@ struct ChatView: View {
         guard !convo.sessionTransitionPending else { return }
         cancelVoiceHold()
         composerFocused = false
-        voiceInteraction.startFlow(source: source)
+        voiceInteraction.startFlow(source: source, onRejectedTranscript: appendVoiceTranscript)
     }
 
     private func cancelVoiceHold() {
@@ -1065,8 +1225,10 @@ struct ChatView: View {
     }
 
     private func appendVoiceTranscript(_ text: String) {
-        draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? text : "\(draft) \(text)"
+        let updated = PromptSuggestionDraftSource.appendingTranscript(
+            text, to: draft, sourceCodeUnits: draftSourceCodeUnitsBinding.wrappedValue)
+        draft = updated.text
+        draftSourceCodeUnitsBinding.wrappedValue = updated.sourceCodeUnits
     }
 
     /// Attach button: drive an on-device camera capture (falling back to the

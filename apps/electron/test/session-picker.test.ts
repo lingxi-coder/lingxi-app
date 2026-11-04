@@ -37,12 +37,13 @@ test('a resume argument selects a UUID or one normalized resume title and preser
   assert.equal(resumeArgumentSessionId('', sessions), undefined);
 });
 
-test('a UUID pasted outside the loaded catalog uses the canonical engine identity', async () => {
+test('a UUID outside the loaded catalog cannot open without an exact transcript', async () => {
   const id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
   assert.equal(resumeArgumentSessionId(` ${id.toUpperCase()} `), id);
   const h = pickerHarness(id.toUpperCase());
   await h.context.loadSessions();
-  assert.deepEqual(h.resumed, [['/current', id, { scope: 'repository' }]]);
+  assert.deepEqual(h.resumed, []);
+  assert.ok(h.state.error);
 });
 
 test('display titles and untitled first prompts never substitute for the raw resume title', () => {
@@ -102,7 +103,7 @@ function pickerHarness(query = '') {
   const context: any = {
     useCallback: (fn: unknown) => fn, mounted: { current: true }, opening: { current: false },
     requestGeneration: { current: 0 }, firstRequest: { current: true }, initialArgument: { current: query },
-    projectPath: '/current', scope: 'repository', resumeArgumentSessionId, resumeArgumentRow,
+    projectPath: '/current', mode: 'code', scope: 'repository', resumeArgumentSessionId, resumeArgumentRow,
     listProjectSessions: async (...args: unknown[]) => { listed.push(args); return { projectPath: '/current', sessions }; },
     openSession: async (...args: unknown[]) => { resumed.push(structuredClone(args)); return true; },
     onOpened: () => { state.opened++; }, onClose: () => { state.closed++; },
@@ -128,12 +129,13 @@ test('UUID resume reads Repository metadata first and opens the newest matching 
   assert.equal(h.state.closed, 1);
 });
 
-test('a UUID absent from Repository metadata uses the explicit slash fallback without a transcript path', async () => {
+test('a UUID absent from Repository metadata does not fall back without a transcript path', async () => {
   const h = pickerHarness(firstId);
   h.context.listProjectSessions = async (...args: unknown[]) => { h.listed.push(args); return { sessions: [] }; };
   await h.context.loadSessions();
   assert.deepEqual(h.listed, [['/current', 'repository']]);
-  assert.deepEqual(h.resumed, [['/current', firstId, { scope: 'repository' }]]);
+  assert.deepEqual(h.resumed, []);
+  assert.ok(h.state.error);
 });
 
 test('a failed metadata read does not fall back to opening a different copy by UUID', async () => {
@@ -172,7 +174,7 @@ test('failed UUID opens retain their explicit error and allow another attempt', 
   assert.equal(h.state.closed, 0);
   assert.equal(h.context.opening.current, false);
   h.context.openSession = async () => true;
-  await h.context.openChat(secondId);
+  await h.context.openChat(secondId, sessions[1]);
   assert.equal(h.state.closed, 1);
 });
 
@@ -296,7 +298,7 @@ test('App picker events retain the current project path, query and original focu
   const opener = new Element();
   const context: any = {
     sessionNavigationBlocked: () => false,
-    cancelLocalAppNavigation() {},
+    cancelLocalAppNavigation() {}, localAppBridge: { current: { handoffPending: false } },
     sessionPickerProject: '/current', sessionPickerSequence: { current: 0 }, sessionPickerRequest: { current: null },
     document: { activeElement: opener }, HTMLElement: Element, setSessionPicker: () => {},
   };

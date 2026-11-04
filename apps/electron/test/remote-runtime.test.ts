@@ -422,9 +422,10 @@ function stubbedManager() {
   };
   SessionRuntime.prototype.resumeOwnedSession = async function () {};
   const manager = new SessionRuntimeManager({
+    resolveSavedTranscript: async (ref: { sessionId: string }) => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }),
     launchConfig: (candidate) => ({ workspace: '/workspace', sessionId: candidate?.sessionId, trusted: true }),
   } as never);
-  const refs = [SESSION_A, SESSION_B, SESSION_C, SESSION_D].map((sessionId) => ({ projectPath: '/workspace', sessionId }));
+  const refs = [SESSION_A, SESSION_B, SESSION_C, SESSION_D].map((sessionId) => ({ projectPath: '/workspace', sessionId, mode: 'code' as const }));
   return {
     manager,
     refs,

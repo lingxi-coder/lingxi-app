@@ -71,6 +71,7 @@ pub mod provider_accounts;
 pub mod provider_settings;
 pub mod router;
 pub mod server;
+pub mod session_metadata;
 mod workspace_commands;
 pub use configuration_admin::settings_bridge;
 pub use configuration_admin::skills_admin;

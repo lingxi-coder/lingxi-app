@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,7 +47,6 @@ import com.lingxi.code.model.Cron
 import com.lingxi.code.model.Project
 import com.lingxi.code.model.ProjectSession
 import com.lingxi.code.model.SessionMode
-import com.lingxi.code.model.SessionRef
 import com.lingxi.code.settings.SettingsRow
 import com.lingxi.code.settings.SettingsSection
 import com.lingxi.code.theme.LingXiTheme
@@ -211,15 +211,18 @@ fun ProjectPage(
     onBack: () -> Unit,
     /** Start a conversation here; the mode is the filter chip's, or null to keep the current one. */
     onNewSession: (SessionMode?) -> Unit,
-    onOpenSession: (SessionRef) -> Unit,
+    onOpenSession: (ProjectSession) -> Unit,
     onOpenCron: (String) -> Unit,
     onReimport: () -> Unit,
     onExport: () -> Unit,
     onReauthorize: () -> Unit,
+    onRecoverAuthoring: (() -> Unit)? = null,
+    canStartAuthoring: () -> Boolean = { false },
     modifier: Modifier = Modifier,
 ) {
     val t = LingXiTheme.palette
     var filter by remember { mutableStateOf(RecentsFilter.All) }
+    var requiresCode by remember { mutableStateOf(false) }
     val sessions = remember(project, filter) { projectSessionsFor(project, filter) }
     Column(
         modifier = modifier
@@ -258,6 +261,11 @@ fun ProjectPage(
                     style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
+            }
+            onRecoverAuthoring?.let { recover ->
+                TextButton(onClick = { if (canStartAuthoring()) recover() else requiresCode = true }) {
+                    Text(stringResource(R.string.local_app_authoring_recover))
+                }
             }
 
             Row(
@@ -311,7 +319,7 @@ fun ProjectPage(
                                 SessionMode.Chat -> stringResource(R.string.session_mode_chat)
                                 SessionMode.Code -> stringResource(R.string.session_mode_code)
                             },
-                            onTap = { onOpenSession(SessionRef(session.id, session.title)) },
+                            onTap = { onOpenSession(session) },
                             modifier = Modifier
                                 .testTag(UiTags.drawerSession(session.id))
                                 .background(if (session.id == activeSession) t.surfaceActive else androidx.compose.ui.graphics.Color.Transparent),
@@ -358,6 +366,7 @@ fun ProjectPage(
             }
         }
     }
+    com.lingxi.code.apps.RequiresCodeDialog(requiresCode) { requiresCode = false }
 }
 
 @Composable

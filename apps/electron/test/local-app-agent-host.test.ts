@@ -8,12 +8,15 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { build } from 'esbuild';
 import { LocalAppStore } from './fixtures/local-app-store.ts';
 import { LocalAppRuntime } from '../src/main/local-apps/runtime.ts';
 import { LocalAppAgentBroker } from '../src/main/local-apps/agentBroker.ts';
 import { parseManifest } from '../src/main/local-apps/manifest.ts';
 import type { LocalAppAgentCatalog, LocalAppAgentSettings } from '../src/shared/localAppAgent.ts';
+import type { DesktopAuthoringRef } from '../src/shared/localApps.ts';
+import { AuthoringSourceIntents } from '../src/main/local-apps/authoringSourceIntents.ts';
 
 const require = createRequire(import.meta.url);
 const model = { providerId: 'configured', modelId: 'vision', label: 'Vision', canSelect: true, supportsAttachments: true, supportsVision: true, supportsStructuredOutput: true };
@@ -50,8 +53,12 @@ class TestWindow extends EventEmitter {
 async function loadHost(mockElectron: unknown): Promise<any> {
   const result = await bundledHost;
   const module = { exports: {} };
-  runInNewContext(result.outputFiles[0]!.text, { module, exports: module.exports, require: (id: string) => id === 'electron' ? mockElectron : require(id),
-    Buffer, process, console, structuredClone, URL, Response, Headers, fetch, AbortController, setTimeout, clearTimeout });
+  const sandbox: Record<string, unknown> = { module, exports: module.exports, require: (id: string) => id === 'electron' ? mockElectron : require(id),
+    Buffer, process, console, structuredClone, URL, Response, Request, Headers, fetch, crypto: globalThis.crypto,
+    ReadableStream, WritableStream, TransformStream, TextEncoder, TextDecoder, Blob, FormData, Event, EventTarget, MessageEvent, DOMException,
+    AbortController, AbortSignal, setTimeout, clearTimeout };
+  sandbox.global = sandbox;
+  runInNewContext(result.outputFiles[0]!.text, sandbox);
   return (module.exports as any).LocalAppHost;
 }
 async function fixture(t: { after(fn: () => Promise<void>): void }) {
@@ -63,8 +70,9 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   const window = { webContents: contents, isDestroyed: () => false, close() {}, destroy() {}, show() {}, focus() {} };
   const LocalAppHost = await loadHost({ BrowserWindow: TestWindow, ipcMain: { removeHandler() {} },
     dialog: { showMessageBox: async () => ({ response: 1 }) }, session: { fromPartition: () => ({ clearStorageData: async () => {}, clearCache: async () => {}, setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, protocol: { handle() {} } }) } });
-  const host = new LocalAppHost({ core: { onDisconnected() {} }, configHome: root, preload: '/unused', mainWindow: () => window, edit: async () => {}, agentCatalog: async () => structuredClone(catalog) });
+  const host = new LocalAppHost({ core: { onDisconnected() {} }, configHome: root, appProjectsRoot: join(root, '.apps'), currentConversationMode: () => 'code', preload: '/unused', mainWindow: () => window, edit: async () => {}, agentCatalog: async () => structuredClone(catalog) });
   host.store = new LocalAppStore(join(root, 'fixture-apps')); host.runtime.store = host.store;
+  host.store.publicationIntent = async () => undefined;
   const row = await host.store.publish({ name: 'Agent test', html: '<!doctype html>' });
   row.manifest = parseManifest({ schema: 2, targets: [{ platform: 'macos', environment: 'web' }], name: row.name, entry: { type: 'static', path: 'index.html' }, agent: { tools: [builtin.id, mcp.id], skills: [{ id: 'nutrition', path: 'skills/nutrition/SKILL.md' }] } });
   row.releaseDigest = 'd'.repeat(64);
@@ -83,6 +91,65 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   return { root, host, row, owner, event, contents, mainFrame, catalog, sent };
 }
 
+function mockNativeAuthoring(host: any) {
+  const sources = new Map<string, string>();
+  const owners = new Map<string, string>();
+  const grants = new Map<string, { sourceId: string; authoring: DesktopAuthoringRef; sessionMode: 'code'; ownerAppId?: string }>();
+  const calls: Array<{ authoring: DesktopAuthoringRef; setCurrent: boolean; requestId: string }> = [];
+  let beforeRegister: (authoring: DesktopAuthoringRef) => Promise<void> = async () => {};
+  host.store.ensureAuthoringSource = async (path: string, _project: unknown, requestId: string, targetAppId?: string) => {
+    if (targetAppId && owners.has(path) && owners.get(path) !== targetAppId) throw new Error('Source belongs to another app');
+    const sourceId = sources.get(path) ?? randomUUID(); sources.set(path, sourceId);
+    return { sourceId, sourceDirectory: path, sourcePath: path, requestId, ...(targetAppId ? { targetAppId } : {}) };
+  };
+  host.store.findAuthoringSource = async (path: string) => {
+    const sourceId = sources.get(path);
+    return sourceId ? { sourceId, sourceDirectory: path, sourcePath: path, ...(owners.has(path) ? { ownerAppId: owners.get(path) } : {}) } : null;
+  };
+  host.store.getAuthoringGrant = async (path: string, _project: unknown, sessionId: string) => {
+    const grant = grants.get(`${path}:${sessionId}`);
+    if (!grant) throw Object.assign(new Error('No owner receipt'), { code: 'notFound' });
+    return structuredClone(grant);
+  };
+  host.store.registerAuthoring = async (sourceId: string, _requestId: string, authoring: DesktopAuthoringRef, setCurrent: boolean) => {
+    calls.push({ authoring: structuredClone(authoring), setCurrent, requestId: _requestId });
+    await beforeRegister(authoring);
+    if (authoring.appId) owners.set(authoring.sourceDirectory, authoring.appId);
+    grants.set(`${authoring.sourceDirectory}:${authoring.authoringSessionId}`, {
+      sourceId, authoring: structuredClone(authoring), sessionMode: 'code', ownerAppId: authoring.appId,
+    });
+    if (setCurrent && authoring.appId) await host.store.bindAuthoring(authoring.appId, authoring);
+    return { ...structuredClone(authoring), sessionMode: 'code' };
+  };
+  return { calls, grants, sources, setBeforeRegister: (callback: typeof beforeRegister) => { beforeRegister = callback; } };
+}
+
+test('admitted Code authoring keeps its exact parked session and cannot replace a newer App owner', async t => {
+  const { root, host, row } = await fixture(t);
+  const a = join(root, 'parked-a'), b = join(root, 'active-b');
+  await fs.mkdir(a); await fs.mkdir(b);
+  const sourceA = await fs.realpath(a), sourceB = await fs.realpath(b);
+  const sessionA = randomUUID(), sessionB = randomUUID();
+  host.options.resolveAuthoringBinding = async (_id: unknown, ref: { projectPath: string; sessionId: string }) => ({
+    sourceDirectory: ref.projectPath, projectRef: { kind: 'desktopPath', path: ref.projectPath }, authoringSessionId: ref.sessionId,
+  });
+  const native = mockNativeAuthoring(host);
+  const operation = host.beginAuthoringSession({ name: row.name, appId: row.id, setCurrent: true });
+  await operation.allocate({ projectPath: sourceA, sessionId: sessionA });
+  await operation.recordSource({ scope: 'current', transcriptPath: join(root, `${sessionA}.jsonl`) });
+  const pending = await host.request({ action: 'pendingAuthoringSessions' });
+  assert.equal(pending.length, 1);
+  host.options.currentConversationMode = () => 'chat';
+  await host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath: sourceB, sessionId: sessionB }, setCurrent: true }, undefined, { kind: 'native', mode: 'code' });
+  await operation.finish({ projectPath: sourceA, sessionId: sessionA });
+  assert.deepEqual(native.calls.map(call => [call.authoring.authoringSessionId, call.setCurrent]), [[sessionB, true], [sessionA, false]]);
+  assert.equal((await host.store.get(row.id)).authoring.authoringSessionId, sessionB);
+  assert.equal((await host.getAuthoringSession(pending[0].requestId)).state, 'ready');
+  await assert.rejects(host.request({ action: 'resumeAuthoringSession', requestId: pending[0].requestId }), /local_app_development_requires_code|Code/);
+  await host.completeAuthoringSession({ projectPath: sourceA, sessionId: sessionA });
+  assert.equal((await host.request({ action: 'pendingAuthoringSessions' })).length, 0);
+});
+
 test('manifest Agent declaration contains tool requirements only and never authorizes execution', () => {
   const base = { schema: 2, targets: [{ platform: 'macos', environment: 'web' }], name: 'Photo', entry: { type: 'static', path: 'index.html' } };
   assert.deepEqual(parseManifest({ ...base, agent: { tools: ['builtin:Read'] } }).agent, { tools: ['builtin:Read'], skills: [] });
@@ -100,6 +167,528 @@ test('publishing a revision preserves host-selected Agent settings without impor
   assert.equal(updated.revision, 2);
   assert.deepEqual(JSON.parse(JSON.stringify(updated.agent)), settings);
   assert.equal(updated.manifest.agent, undefined);
+});
+
+test('authoring verification and publish hold the app lock against a concurrent rebind', async t => {
+  const { root, host, row } = await fixture(t);
+  const requestedA = join(root, 'source-a'), requestedB = join(root, 'source-b');
+  await fs.mkdir(requestedA); await fs.mkdir(requestedB);
+  const sourceA = await fs.realpath(requestedA), sourceB = await fs.realpath(requestedB);
+  const sessionA = randomUUID(), sessionB = randomUUID();
+  const bindingA = { workspaceId: randomUUID(), sourceDirectory: sourceA,
+    projectRef: { kind: 'desktopPath' as const, path: sourceA }, authoringSessionId: sessionA, appId: row.id };
+  const bindingB = { workspaceId: randomUUID(), sourceDirectory: sourceB,
+    projectRef: { kind: 'desktopPath' as const, path: sourceB }, authoringSessionId: sessionB, appId: row.id };
+  await host.store.bindAuthoring(row.id, bindingA);
+  const sourceId = randomUUID();
+  let verificationStarted!: () => void, releaseVerification!: () => void;
+  const verifying = new Promise<void>(resolve => { verificationStarted = resolve; });
+  const gate = new Promise<void>(resolve => { releaseVerification = resolve; });
+  host.store.findAuthoringSource = async () => { verificationStarted(); await gate; return { sourceId, sourceDirectory: sourceA, sourcePath: sourceA }; };
+  host.store.getAuthoringGrant = async () => ({ sourceId, authoring: bindingA, sessionMode: 'code', ownerAppId: row.id });
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) => {
+    assert.equal(session.sessionId, sessionA);
+    return { sourceDirectory: sourceA, projectRef: { kind: 'desktopPath', path: sourceA }, authoringSessionId: sessionA };
+  };
+  const publishing = host.request({ action: 'publish', id: row.id, expectedRevision: row.revision,
+    html: '<!doctype html><title>Author A</title>', source_path: sourceA,
+    source_session: { projectPath: sourceA, sessionId: sessionA, requestId: randomUUID() } });
+  let rebindStarted = false;
+  let rebinding: Promise<void> | undefined;
+  try {
+    await verifying;
+    rebinding = host.runtime.exclusive(row.id, async () => {
+      rebindStarted = true;
+      await host.store.bindAuthoring(row.id, bindingB);
+    });
+    await Promise.resolve();
+    assert.equal(rebindStarted, false, 'the selected owner cannot change between verification and publication');
+  } finally {
+    releaseVerification();
+  }
+  const published = await publishing;
+  await rebinding;
+  assert.equal(published.revision, 2);
+  assert.equal((await host.store.get(row.id)).authoring.authoringSessionId, sessionB,
+    'a later explicit rebind remains current after the admitted publication');
+});
+
+test('a late authoring verification retains its receipt without replacing the newer owner', async t => {
+  const { root, host, row } = await fixture(t);
+  const requestedA = join(root, 'late-a'), requestedB = join(root, 'late-b');
+  await fs.mkdir(requestedA); await fs.mkdir(requestedB);
+  const sourceA = await fs.realpath(requestedA), sourceB = await fs.realpath(requestedB);
+  const sessionA = randomUUID(), sessionB = randomUUID();
+  const native = mockNativeAuthoring(host);
+  let started!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) => {
+    if (session.sessionId === sessionA) { started(); await gate; }
+    return { sourceDirectory: session.projectPath, projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId };
+  };
+  const a = host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath: sourceA, sessionId: sessionA }, setCurrent: true });
+  try {
+    await waiting;
+    await host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath: sourceB, sessionId: sessionB }, setCurrent: true });
+  } finally { release(); }
+  await a;
+  assert.deepEqual(native.calls.map(call => [call.authoring.authoringSessionId, call.setCurrent]), [[sessionB, true], [sessionA, false]]);
+  assert.ok(native.grants.has(`${sourceA}:${sessionA}`), 'the older operation still owns a durable receipt');
+  assert.equal((await host.store.get(row.id)).authoring.authoringSessionId, sessionB);
+});
+
+test('a rejected Chat authoring owner cannot supersede an already admitted Code owner', async t => {
+  const { root, host, row } = await fixture(t);
+  const path = await fs.realpath(root), codeSession = randomUUID(), chatSession = randomUUID();
+  const native = mockNativeAuthoring(host);
+  let started!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) => {
+    if (session.sessionId === chatSession) throw new Error('Switch to Code');
+    started(); await gate;
+    return { sourceDirectory: session.projectPath, projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId };
+  };
+  const admitted = host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath: path, sessionId: codeSession }, setCurrent: true });
+  await waiting;
+  await assert.rejects(host.request({ action: 'bindAuthoring', id: row.id,
+    session: { projectPath: path, sessionId: chatSession }, setCurrent: true }), /Switch to Code/);
+  release(); await admitted;
+  assert.equal(native.calls[0].authoring.authoringSessionId, codeSession);
+  assert.equal(native.calls[0].setCurrent, true);
+});
+
+test('an admitted authoring registration finishes before the newer owner and cold repair keeps current', async t => {
+  const { root, host, row } = await fixture(t);
+  const requestedA = join(root, 'queued-a'), requestedB = join(root, 'queued-b');
+  await fs.mkdir(requestedA); await fs.mkdir(requestedB);
+  const sourceA = await fs.realpath(requestedA), sourceB = await fs.realpath(requestedB);
+  const sessionA = randomUUID(), sessionB = randomUUID(), repairedSession = randomUUID();
+  const native = mockNativeAuthoring(host);
+  let started!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  native.setBeforeRegister(async authoring => { if (authoring.authoringSessionId === sessionA) { started(); await gate; } });
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) =>
+    ({ sourceDirectory: session.projectPath, projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId });
+  const a = host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath: sourceA, sessionId: sessionA }, setCurrent: true });
+  let b!: Promise<unknown>;
+  try {
+    await waiting;
+    const firstQueue = host.runtime.queues.get(row.id);
+    b = host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath: sourceB, sessionId: sessionB }, setCurrent: true });
+    await until(() => host.runtime.queues.get(row.id) !== firstQueue);
+    assert.equal(native.calls.length, 1, 'the newer mutation waits for the admitted SDK call');
+  } finally { release(); }
+  await Promise.all([a, b]);
+  await host.request({ action: 'bindAuthoring', id: row.id,
+    session: { projectPath: sourceB, sessionId: repairedSession }, setCurrent: false });
+  assert.deepEqual(native.calls.map(call => [call.authoring.authoringSessionId, call.setCurrent]),
+    [[sessionA, true], [sessionB, true], [repairedSession, false]]);
+  assert.equal((await host.store.get(row.id)).authoring.authoringSessionId, sessionB);
+});
+
+test('publication uses the originating receipt after a rebind, and a later rebind wins during publication', async t => {
+  const { root, host, row } = await fixture(t);
+  const requestedA = join(root, 'publish-a'), requestedB = join(root, 'publish-b');
+  await fs.mkdir(requestedA); await fs.mkdir(requestedB);
+  const sourceA = await fs.realpath(requestedA), sourceB = await fs.realpath(requestedB);
+  const sessionA = randomUUID(), sessionB = randomUUID(), sessionC = randomUUID();
+  const native = mockNativeAuthoring(host);
+  let pauseA: (() => Promise<void>) | undefined;
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) => {
+    if (session.sessionId === sessionA && pauseA) await pauseA();
+    return { sourceDirectory: session.projectPath, projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId };
+  };
+  const bind = (projectPath: string, sessionId: string) => host.request({ action: 'bindAuthoring', id: row.id,
+    session: { projectPath, sessionId }, setCurrent: true });
+  await bind(sourceA, sessionA); await bind(sourceB, sessionB);
+  const publications: Array<{ authoring: DesktopAuthoringRef; setCurrent: boolean }> = [];
+  const publish = host.store.publish.bind(host.store);
+  host.store.publish = async (input: any) => {
+    if (input.nativeAuthoring) {
+      publications.push(input.nativeAuthoring);
+      if (input.nativeAuthoring.setCurrent) await host.store.bindAuthoring(row.id, input.nativeAuthoring.authoring);
+    }
+    return publish(input);
+  };
+  await host.request({ action: 'publish', id: row.id, expectedRevision: 1, html: '<!doctype html>one',
+    source_session: { projectPath: sourceA, sessionId: sessionA, requestId: randomUUID() } });
+  assert.equal(publications[0]?.authoring.authoringSessionId, sessionA, 'the publisher is not inferred from current B');
+  assert.equal((await host.store.get(row.id)).authoring.authoringSessionId, sessionB, 'publishing does not change the preferred authoring owner');
+
+  let started!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  pauseA = async () => { started(); await gate; };
+  const a = host.request({ action: 'publish', id: row.id, expectedRevision: 2, html: '<!doctype html>two',
+    source_session: { projectPath: sourceA, sessionId: sessionA, requestId: randomUUID() } });
+  let c!: Promise<unknown>;
+  try {
+    await waiting;
+    c = bind(sourceB, sessionC);
+    await c;
+  } finally { release(); }
+  await Promise.all([a, c]);
+  assert.equal(publications[1]?.authoring.authoringSessionId, sessionA);
+  assert.equal(publications[1]?.setCurrent, false, 'the admitted publication does not replace the later explicit owner');
+  assert.ok(native.grants.has(`${sourceA}:${sessionA}`));
+  assert.equal((await host.store.get(row.id)).authoring.authoringSessionId, sessionC);
+});
+
+test('Chat rejects all Local App development requests before touching source or library state', async t => {
+  const { host, row } = await fixture(t);
+  host.options.currentConversationMode = () => 'chat';
+  let writes = 0;
+  host.options.resolveAuthoringBinding = async () => { writes++; throw new Error('unexpected owner lookup'); };
+  host.store.get = async () => { writes++; throw new Error('unexpected library read'); };
+  host.options.edit = async () => { writes++; };
+  for (const action of ['prepareAuthoring', 'bindAuthoring', 'publish', 'read', 'edit', 'restoreSource', 'remix', 'marketPublish']) {
+    await assert.rejects(host.request({ action, id: row.id }), /local_app_development_requires_code|Code/);
+  }
+  assert.equal(writes, 0);
+});
+
+test('an admitted Code authoring registration completes under its captured owner after switching to Chat', async t => {
+  const { root, host, row } = await fixture(t);
+  const projectPath = join(root, 'owned-code-source'); await fs.mkdir(projectPath);
+  const path = await fs.realpath(projectPath), sessionId = randomUUID();
+  const native = mockNativeAuthoring(host);
+  let mode = 'code'; host.options.currentConversationMode = () => mode;
+  let started!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) => {
+    started(); await gate;
+    return { sourceDirectory: session.projectPath, projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId };
+  };
+  const admitted = host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath: path, sessionId }, setCurrent: true });
+  await waiting;
+  mode = 'chat';
+  await assert.rejects(host.request({ action: 'restoreSource', id: row.id }), /local_app_development_requires_code|Code/);
+  release();
+  await admitted;
+  assert.equal(native.calls[0]?.authoring.authoringSessionId, sessionId);
+  assert.equal((await host.store.get(row.id)).authoring.authoringSessionId, sessionId);
+});
+
+test('tool source read verifies the originating owner; installed app listing and status omit source context', async t => {
+  const { root, host, row } = await fixture(t);
+  const path = await fs.realpath(root), chatSession = randomUUID(), codeSession = randomUUID();
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) => {
+    if (session.sessionId === chatSession) throw new Error('Switch to Code');
+    return { sourceDirectory: session.projectPath, projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId };
+  };
+  await host.store.bindAuthoring(row.id, { workspaceId: randomUUID(), sourceDirectory: path,
+    projectRef: { kind: 'desktopPath', path }, authoringSessionId: codeSession, appId: row.id });
+  const tool = { kind: 'tool' };
+  await assert.rejects(host.request({ action: 'read', id: row.id,
+    source_session: { projectPath: path, sessionId: chatSession, mode: 'code' } }, undefined, tool), /Switch to Code/);
+  const listed = await host.request({ action: 'list', source_session: { projectPath: path, sessionId: chatSession } }, undefined, tool);
+  const status = await host.request({ action: 'status', id: row.id }, undefined, tool);
+  assert.equal(listed.apps[0].authoring, undefined);
+  assert.equal(status.authoring, undefined);
+  assert.equal(status.sourceSnapshotPath, undefined);
+  const read = await host.request({ action: 'read', id: row.id,
+    source_session: { projectPath: path, sessionId: codeSession, mode: 'code' } }, undefined, tool);
+  assert.ok(read.sourceSnapshotPath);
+  host.options.currentConversationMode = () => 'chat';
+  const chatList = await host.request({ action: 'list' });
+  assert.equal(chatList.apps[0].authoring, undefined);
+});
+
+test('pending publications remain visible in Chat but recovery requires Code and retains its admitted operation', async t => {
+  const { host, row } = await fixture(t);
+  const requestId = randomUUID();
+  let mode = 'chat'; host.options.currentConversationMode = () => mode;
+  const pending = { requestId, appId: row.id, sourceDirectory: '/private/source', expectedRevision: 2, state: 'pending' };
+  let lookup = 0;
+  host.store.pendingPublications = async () => [pending];
+  host.store.publicationIntent = async () => { lookup++; return pending; };
+  let started!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  host.store.resumePublication = async (value: string) => { assert.equal(value, requestId); started(); await gate; return row; };
+  const listed = await host.request({ action: 'pendingPublications' });
+  assert.equal(listed[0].requestId, requestId);
+  assert.equal(listed[0].sourceDirectory, undefined);
+  await assert.rejects(host.request({ action: 'resumePublication', requestId }), /local_app_development_requires_code|Code/);
+  assert.equal(lookup, 0);
+  mode = 'code';
+  const admitted = host.request({ action: 'resumePublication', requestId });
+  await waiting; mode = 'chat'; release();
+  assert.equal((await admitted).id, row.id);
+});
+
+test('source copy recovery reuses its saved request and never changes a newer preferred owner', async t => {
+  const { root, host, row } = await fixture(t);
+  const sourcePath = join(await fs.realpath(root), 'restored-source');
+  const saved = await host.authoringSourceIntents.createCopy({ purpose: 'restoreSource', appId: row.id, revision: row.revision, sourcePath });
+  host.authoringSourceIntents = new AuthoringSourceIntents(join(root, 'local-apps', 'v2'));
+  const calls: any[] = [];
+  host.store.core.request = async (input: any) => {
+    calls.push(input); await fs.mkdir(sourcePath, { recursive: true });
+    return { requestId: input.requestId, sourceId: randomUUID(), sourceDirectory: sourcePath, sourcePath, targetAppId: row.id };
+  };
+  let mode = 'chat', edit: any;
+  host.options.currentConversationMode = () => mode;
+  host.options.edit = async (request: any) => { edit = request; };
+  const visible = await host.request({ action: 'pendingSourceCopies' });
+  assert.equal(visible[0].requestId, saved.requestId);
+  assert.equal(visible[0].sourcePath, undefined);
+  await assert.rejects(host.request({ action: 'resumeSourceCopy', requestId: saved.requestId }), /Code/);
+  assert.equal(calls.length, 0);
+  mode = 'code';
+  await host.request({ action: 'resumeSourceCopy', requestId: saved.requestId });
+  assert.equal(calls[0].op, 'copyAuthoringSource');
+  assert.equal(calls[0].requestId, saved.requestId);
+  assert.equal(calls[0].sourcePath, sourcePath);
+  assert.equal(edit.authoringRequestId, saved.requestId);
+  assert.equal(edit.authoringSetCurrent, false);
+  assert.equal((await host.authoringSourceIntents.getCopy(saved.requestId)).state, 'ready');
+});
+
+test('an explicit remix creates one new source and a cold continuation preserves its saved identity', async t => {
+  const { host, row } = await fixture(t);
+  const targetId = `a${'2'.repeat(32)}`, sourceId = randomUUID(), calls: any[] = [];
+  const originalGet = host.store.get.bind(host.store);
+  host.store.get = async (id: string) => id === targetId ? { ...row, id: targetId, name: 'Custom app' } : originalGet(id);
+  host.store.core.request = async (input: any) => {
+    assert.equal(input.op, 'remixAuthoringSource'); calls.push(input);
+    await fs.mkdir(input.sourcePath, { recursive: true });
+    return { requestId: input.requestId, sourceId, sourceDirectory: input.sourcePath, sourcePath: input.sourcePath,
+      record: { appId: targetId, latestRevision: 1 }, release: { appId: targetId, revision: 1 } };
+  };
+  const edits: any[] = [];
+  host.options.edit = async (request: any) => { edits.push(request); };
+  await host.request({ action: 'remix', id: row.id });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].appId, row.id);
+  assert.equal(calls[0].revision, row.revision);
+  assert.equal(edits[0].id, targetId);
+  assert.equal(edits[0].authoringSetCurrent, true);
+  const requestId = edits[0].authoringRequestId;
+  assert.equal((await host.authoringSourceIntents.getCopy(requestId)).targetAppId, targetId);
+  await host.request({ action: 'resumeSourceCopy', requestId });
+  assert.equal(calls.length, 1, 'a confirmed copy is not created again');
+  assert.equal(edits[1].id, targetId);
+  assert.equal(edits[1].authoringRequestId, requestId);
+  assert.equal(edits[1].authoringSetCurrent, false, 'cold repair cannot replace a newer preferred owner');
+});
+
+test('ordinary Code projects can publish generically but managed sources require a native receipt', async t => {
+  const { root, host, row } = await fixture(t);
+  const ordinary = join(root, 'ordinary'), managed = join(root, '.apps', 'new');
+  await fs.mkdir(ordinary); await fs.mkdir(managed, { recursive: true });
+  const sessionId = randomUUID(), ordinaryPath = await fs.realpath(ordinary), managedPath = await fs.realpath(managed);
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) =>
+    ({ sourceDirectory: session.projectPath, projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId });
+  host.store.findAuthoringSource = async () => null;
+  const inputs: any[] = [];
+  host.store.publish = async (input: any) => { inputs.push(input); return row; };
+  const request = (projectPath: string) => ({ action: 'publish', name: 'App', html: '<p>App</p>',
+    source_session: { projectPath, sessionId, requestId: randomUUID() } });
+  await host.request(request(ordinaryPath));
+  assert.equal(inputs[0].nativeAuthoring, undefined);
+  assert.equal(inputs[0].publication.sourceDirectory, ordinaryPath);
+  await assert.rejects(host.request(request(managedPath)), /managed Local App source.*receipt/);
+  assert.equal(inputs.length, 1);
+});
+
+test('a committed first publication can replay its own request without allowing a second new app', async t => {
+  const { root, host, row } = await fixture(t);
+  const path = await fs.realpath(root), sessionId = randomUUID(), requestId = randomUUID(), sourceId = randomUUID();
+  const authoring = { workspaceId: randomUUID(), sourceDirectory: path, projectRef: { kind: 'desktopPath', path }, authoringSessionId: sessionId };
+  host.options.resolveAuthoringBinding = async () => ({ sourceDirectory: path, projectRef: { kind: 'desktopPath', path }, authoringSessionId: sessionId });
+  host.store.findAuthoringSource = async () => ({ sourceId, sourceDirectory: path, sourcePath: path, ownerAppId: row.id });
+  host.store.getAuthoringGrant = async () => ({ sourceId, authoring, sessionMode: 'code', ownerAppId: row.id });
+  host.store.publicationIntent = async (id: string) => id === requestId
+    ? { requestId, sourceDirectory: path, authoringSessionId: sessionId, native: { sourceId, setCurrent: true } } : undefined;
+  host.store.core.request = async () => null;
+  const calls: any[] = [];
+  host.store.publish = async (input: any) => { calls.push(input); return row; };
+  const request = (id: string) => ({ action: 'publish', name: 'App', html: '<p>App</p>',
+    source_session: { projectPath: path, sessionId, requestId: id } });
+  await host.request(request(requestId));
+  assert.equal(calls[0].publication.requestId, requestId);
+  await assert.rejects(host.request(request(randomUUID())), /belongs to another application/);
+  assert.equal(calls.length, 1);
+});
+
+test('a committed publication replays its historical Code receipt after its source was removed', async t => {
+  const { root, host, row } = await fixture(t);
+  const path = join(await fs.realpath(root), 'source-now-missing'), sessionId = randomUUID(), requestId = randomUUID(), sourceId = randomUUID();
+  const publisher = { workspaceId: randomUUID(), sourceDirectory: path,
+    projectRef: { kind: 'desktopPath', path }, authoringSessionId: sessionId };
+  host.options.resolveAuthoringBinding = async () => { throw new Error('Do not reopen the missing source'); };
+  host.options.currentConversationMode = () => 'chat';
+  host.store.publicationIntent = async () => ({ requestId, sourceDirectory: path, authoringSessionId: sessionId,
+    native: { sourceId, setCurrent: true }, state: 'completed' });
+  let lookups = 0;
+  host.store.core.request = async (input: any) => {
+    lookups++;
+    assert.equal(input.op, 'getPublication'); assert.equal(input.requestId, requestId);
+    return { sourceId, publisher, record: { appId: row.id } };
+  };
+  let observed: any;
+  host.store.publish = async (input: any) => { observed = input; return row; };
+  const result = await host.request({ action: 'publish', name: 'App', html: '<p>original</p>',
+    source_session: { projectPath: path, sessionId, mode: 'code', requestId } }, undefined, { kind: 'tool' });
+  assert.equal(result.id, row.id);
+  assert.equal(observed.nativeAuthoring.sourceId, sourceId);
+  assert.equal(observed.nativeAuthoring.authoring.authoringSessionId, sessionId);
+  assert.equal(observed.publication.requestId, requestId);
+  await assert.rejects(host.request({ action: 'publish', name: 'App', html: '<p>original</p>',
+    source_session: { projectPath: path, sessionId, mode: 'chat', requestId } }, undefined, { kind: 'tool' }), /local_app_development_requires_code|Code/);
+  assert.equal(lookups, 1, 'Chat cannot even look up a historical Code publication');
+});
+
+test('a durable Code tool publication retains source A after its session changes cwd to B', async t => {
+  const { root, host, row } = await fixture(t);
+  const path = join(root, 'original-source'); await fs.mkdir(path);
+  const source = await fs.realpath(path), sessionId = randomUUID(), requestId = randomUUID();
+  const native = mockNativeAuthoring(host);
+  host.options.resolveAuthoringBinding = async (_id: unknown, ref: { projectPath: string; sessionId: string }) => ({
+    sourceDirectory: ref.projectPath, projectRef: { kind: 'desktopPath', path: ref.projectPath }, authoringSessionId: ref.sessionId,
+  });
+  await host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath: source, sessionId }, setCurrent: true });
+  const sourceId = native.sources.get(source)!;
+  host.options.resolveAuthoringBinding = async () => { throw new Error('The session cwd is now B'); };
+  let state = 'pending';
+  host.store.publicationIntent = async (id: string) => id === requestId ? ({ requestId, state, sourceDirectory: source,
+    authoringSessionId: sessionId, appId: row.id, native: { sourceId, setCurrent: false } }) : undefined;
+  host.store.core.request = async (input: any) => { assert.equal(input.op, 'getPublication'); return null; };
+  const writes: any[] = [];
+  host.store.publish = async (input: any) => { writes.push(input); return row; };
+  const input = { action: 'publish', id: row.id, expectedRevision: 1, html: '<p>captured A</p>', source_path: source,
+    source_session: { projectPath: source, sessionId, mode: 'code', requestId } };
+  await host.request(input, undefined, { kind: 'tool' });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].publication.sourceDirectory, source);
+  assert.equal(writes[0].publication.authoringSessionId, sessionId);
+  assert.equal(writes[0].publication.requestId, requestId);
+  assert.equal(writes[0].nativeAuthoring.sourceId, sourceId);
+  for (const bad of [
+    { ...input, source_session: { ...input.source_session, mode: 'chat' } },
+    { ...input, source_session: { ...input.source_session, sessionId: randomUUID() } },
+    { ...input, source_session: { ...input.source_session, projectPath: join(root, 'other') } },
+    { ...input, id: `a${'f'.repeat(32)}` },
+  ]) await assert.rejects(host.request(bad, undefined, { kind: 'tool' }));
+  state = 'preparing';
+  await assert.rejects(host.request(input, undefined, { kind: 'tool' }), /cwd is now B/);
+  state = 'pending';
+  await assert.rejects(host.request(input, undefined, { kind: 'native', mode: 'code' }), /cwd is now B/);
+  await assert.rejects(host.request(input, undefined, { kind: 'native', mode: 'chat' }), /local_app_development_requires_code|Code/);
+  native.sources.set(source, randomUUID());
+  await assert.rejects(host.request(input, undefined, { kind: 'tool' }), /receipt/);
+  assert.equal(writes.length, 1, 'only the original captured owner reaches the publisher');
+});
+
+test('a registered source cannot publish through an unrelated or mismatched session receipt', async t => {
+  const { root, host, row } = await fixture(t);
+  const requested = join(root, 'protected-source'); await fs.mkdir(requested);
+  const projectPath = await fs.realpath(requested), ownerSession = randomUUID(), unrelatedSession = randomUUID();
+  const native = mockNativeAuthoring(host);
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) =>
+    ({ sourceDirectory: session.projectPath, projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId });
+  await host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath, sessionId: ownerSession }, setCurrent: true });
+  let published = false;
+  host.store.publish = async () => { published = true; throw new Error('Unexpected publication'); };
+  await assert.rejects(host.request({ action: 'publish', id: row.id, expectedRevision: row.revision,
+    html: '<!doctype html>unrelated', source_session: { projectPath, sessionId: unrelatedSession, requestId: randomUUID() } }), /No owner receipt/);
+  await assert.rejects(host.request({ action: 'publish', name: 'Duplicate', html: '<!doctype html>duplicate',
+    source_session: { projectPath, sessionId: unrelatedSession, requestId: randomUUID() } }), /No owner receipt/);
+  const grant = native.grants.get(`${projectPath}:${ownerSession}`)!;
+  grant.ownerAppId = `a${'f'.repeat(32)}`;
+  await assert.rejects(host.request({ action: 'publish', id: row.id, expectedRevision: row.revision,
+    html: '<!doctype html>wrong app', source_session: { projectPath, sessionId: ownerSession, requestId: randomUUID() } }), /belongs to another application/);
+  assert.equal(published, false);
+  assert.equal((await host.store.get(row.id)).authoring.authoringSessionId, ownerSession);
+});
+
+test('captured Local App navigation cannot activate after a newer rebind is admitted', async t => {
+  const { root, host, row } = await fixture(t);
+  const requestedA = join(root, 'capture-a'), requestedB = join(root, 'capture-b');
+  await fs.mkdir(requestedA); await fs.mkdir(requestedB);
+  const sourceA = await fs.realpath(requestedA), sourceB = await fs.realpath(requestedB);
+  const sessionA = randomUUID(), sessionB = randomUUID();
+  mockNativeAuthoring(host);
+  let started!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) => {
+    if (session.sessionId === sessionB) { started(); await gate; }
+    return { sourceDirectory: session.projectPath, projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId };
+  };
+  await host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath: sourceA, sessionId: sessionA }, setCurrent: true });
+  const captured = await host.captureAuthoringSession(row.id, { projectPath: sourceA, sessionId: sessionA }, host.authoringVersions.get(row.id));
+  const replacement = host.request({ action: 'bindAuthoring', id: row.id,
+    session: { projectPath: sourceB, sessionId: sessionB }, setCurrent: true });
+  let activated = false;
+  try {
+    await waiting;
+    const committing = captured.commit(() => { activated = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(activated, false, 'navigation waits for the newer source verification');
+    release();
+    await assert.rejects(committing, /authoring source changed/);
+  } finally { release(); }
+  await replacement;
+  assert.equal(activated, false);
+  assert.equal((await host.store.get(row.id)).authoring.authoringSessionId, sessionB);
+});
+
+test('a rejected replacement does not prevent the captured authoring owner from activating', async t => {
+  const { root, host, row } = await fixture(t);
+  const source = await fs.realpath(root), sessionA = randomUUID(), sessionB = randomUUID();
+  mockNativeAuthoring(host);
+  let started!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) => {
+    if (session.sessionId === sessionB) { started(); await gate; throw new Error('Switch to Code'); }
+    return { sourceDirectory: source, projectRef: { kind: 'desktopPath', path: source }, authoringSessionId: sessionA };
+  };
+  await host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath: source, sessionId: sessionA }, setCurrent: true });
+  const captured = await host.captureAuthoringSession(row.id, { projectPath: source, sessionId: sessionA }, host.authoringVersions.get(row.id));
+  const replacement = assert.rejects(host.request({ action: 'bindAuthoring', id: row.id,
+    session: { projectPath: source, sessionId: sessionB }, setCurrent: true }), /Switch to Code/);
+  await waiting;
+  let activated = false;
+  const committing = captured.commit(() => { activated = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(activated, false);
+  release(); await replacement; await committing;
+  assert.equal(activated, true);
+});
+
+test('an explicit source restore keeps current until the saved copy intent becomes a Code receipt', async t => {
+  const { root, host, row } = await fixture(t);
+  const original = join(root, 'restore-original'); await fs.mkdir(original);
+  const projectPath = await fs.realpath(original), originalSession = randomUUID(), restoredSession = randomUUID();
+  const native = mockNativeAuthoring(host);
+  host.options.resolveAuthoringBinding = async (_appId: string | undefined, session: { projectPath: string; sessionId: string }) =>
+    ({ sourceDirectory: session.projectPath, projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId });
+  await host.request({ action: 'bindAuthoring', id: row.id, session: { projectPath, sessionId: originalSession }, setCurrent: true });
+  let edit: any;
+  host.options.edit = async (request: unknown) => { edit = request; };
+  host.store.core.request = async (request: any) => {
+    assert.equal(request.op, 'copyAuthoringSource');
+    await fs.mkdir(request.sourcePath, { recursive: true });
+    const sourceId = randomUUID(); native.sources.set(request.sourcePath, sourceId);
+    return { requestId: request.requestId, sourceId, sourceDirectory: request.sourcePath, sourcePath: request.sourcePath, targetAppId: row.id };
+  };
+  await host.request({ action: 'restoreSource', id: row.id });
+  assert.equal((await host.store.get(row.id)).authoring.authoringSessionId, originalSession, 'copy alone does not change current');
+  assert.equal(edit.authoringSetCurrent, true);
+  const copy = await host.authoringSourceIntents.getCopy(edit.authoringRequestId);
+  assert.equal(copy.state, 'ready');
+  await host.request({ action: 'bindAuthoring', id: row.id, setCurrent: true, sourceRequestId: copy.requestId,
+    session: { projectPath: copy.sourcePath, sessionId: restoredSession } });
+  assert.equal(native.calls.at(-1)?.requestId, copy.requestId, 'the receipt reuses the persisted copy operation');
+  assert.equal((await host.authoringSourceIntents.getCopy(copy.requestId)).state, 'completed');
+  assert.equal((await host.store.get(row.id)).authoring.authoringSessionId, restoredSession);
 });
 
 test('host derives Agent identity from exact main frame and running invocation', async t => {

@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use client::protocol::commands::ImageRefDto;
 use client::protocol::controls::{ConversationControlsDto, ReasoningSelectionDto};
 use client::protocol::events::ClientEvent;
+use client::protocol::listings::SessionModeDto;
 use client::protocol::message::MessageDto;
 use client::protocol::permission::PermissionResponseDto;
 use serde::de::DeserializeOwned;
@@ -49,6 +50,9 @@ const RESET_SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
 const HISTORY_PAGE: u32 = 100;
 /// Live records kept while a snapshot is still being assembled.
 const MAX_BUFFERED_EVENTS: usize = 5000;
+/// Bound records held while the desktop has not identified the fixed mode.
+const MAX_MODE_WAIT_EVENTS: usize = 128;
+const MAX_MODE_WAIT_BYTES: usize = 4 * 1024 * 1024;
 /// Longest name shown of a Bot, in characters.
 const BOT_NAME_CHARS: usize = 60;
 /// Images a prompt may carry.
@@ -162,6 +166,8 @@ pub struct OutgoingPrompt {
 pub struct SessionState {
     /// The session.
     pub session_id: String,
+    /// Conversation mode from the authoritative snapshot or later live events.
+    pub session_mode: Option<SessionModeDto>,
     /// Where it stands.
     pub status: SessionStatus,
     /// Why the attach failed.
@@ -192,6 +198,7 @@ impl SessionState {
     fn new(session_id: &str) -> Self {
         Self {
             session_id: session_id.to_owned(),
+            session_mode: None,
             status: SessionStatus::Loading,
             error: None,
             messages: Vec::new(),
@@ -219,23 +226,55 @@ struct Cursor(RemoteCursor);
 
 struct Assembly {
     epoch: String,
+    session_mode: Option<SessionModeDto>,
     first: u64,
     messages: Vec<MessageDto>,
     records: Vec<RemoteSeqRecord>,
+    mode_wait_pages: usize,
+    mode_wait_bytes: usize,
 }
 
 struct Core {
     state: SessionState,
+    approval_response: ApprovalResponse,
+    mode_conflicted: bool,
     active: bool,
     attach_id: u64,
     cursor: Option<Cursor>,
     assembly: Option<Assembly>,
     held: Vec<RemoteSeqRecord>,
+    held_pending: Option<RemotePending>,
+    held_mode_bytes: usize,
+    mode_base_pages: usize,
+    mode_base_bytes: usize,
     held_dropped_through: Option<u64>,
     awaiting_attach: bool,
+    snapshot_finished_during_attach: bool,
     foreground: bool,
     seen_turns: Vec<u64>,
     reset_timer: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApprovalResponse {
+    Available,
+    InFlight,
+    Consumed,
+}
+
+impl Core {
+    /// The unknown-mode base is staged privately until its owner is known.
+    /// Do not clone its potentially large transcript into listener queues.
+    fn visible_state(&self) -> SessionState {
+        if self.state.session_mode.is_none() && !is_team_approval(&self.state.session_id) {
+            let mut state = SessionState::new(&self.state.session_id);
+            state.status = self.state.status;
+            state.error = self.state.error.clone();
+            state
+        } else {
+            self.state.clone()
+        }
+    }
 }
 
 struct SessionInner {
@@ -275,13 +314,20 @@ impl SessionController {
         let inner = Arc::new(SessionInner {
             core: Mutex::new(Core {
                 state: SessionState::new(&session_id),
+                approval_response: ApprovalResponse::Available,
+                mode_conflicted: false,
                 active: false,
                 attach_id: 0,
                 cursor: None,
                 assembly: None,
                 held: Vec::new(),
+                held_pending: None,
+                held_mode_bytes: 0,
+                mode_base_pages: 0,
+                mode_base_bytes: 0,
                 held_dropped_through: None,
                 awaiting_attach: false,
+                snapshot_finished_during_attach: false,
                 foreground: true,
                 seen_turns: Vec::new(),
                 reset_timer: None,
@@ -319,7 +365,16 @@ impl SessionController {
 
     /// The current state.
     pub fn state(&self) -> SessionState {
-        self.inner.core.lock().expect("core").state.clone()
+        self.inner.core.lock().expect("core").visible_state()
+    }
+
+    /// Admit an operation that requires a live, mode-confirmed conversation.
+    /// Approval capabilities never carry authority over conversation files.
+    pub fn require_conversation_access(&self) -> Result<(), RpcError> {
+        require_writable(
+            &self.inner.core.lock().expect("core"),
+            self.inner.io.connected(),
+        )
     }
 
     /// The name of the Bot that handed over the prompt of turn `turn_id`, cleaned
@@ -327,6 +382,9 @@ impl SessionController {
     /// Prompts older than the held records have no origin to look up.
     pub fn prompt_bot_name(&self, turn_id: u64) -> Option<String> {
         let core = self.inner.core.lock().expect("core");
+        if core.state.session_mode.is_none() {
+            return None;
+        }
         core.state
             .records
             .iter()
@@ -411,6 +469,7 @@ impl SessionController {
         let mut core = self.inner.core.lock().expect("core");
         core.attach_id += 1;
         core.assembly = None;
+        core.held_pending = None;
         core.awaiting_attach = false;
         if matches!(
             core.state.status,
@@ -444,19 +503,49 @@ impl SessionController {
 
     /// A `session.snapshot` notification.
     pub fn handle_snapshot(&self, params: SessionSnapshotParams) {
+        let session_id = match &params {
+            SessionSnapshotParams::Begin { session_id, .. }
+            | SessionSnapshotParams::Messages { session_id, .. }
+            | SessionSnapshotParams::Records { session_id, .. }
+            | SessionSnapshotParams::End { session_id, .. } => session_id,
+        };
+        if session_id != &self.inner.session_id {
+            return;
+        }
         let mut core = self.inner.core.lock().expect("core");
+        if core.mode_conflicted {
+            return;
+        }
         match params {
             SessionSnapshotParams::Begin {
                 epoch,
+                session_mode,
                 first_message_index,
                 ..
             } => {
+                if (is_team_approval(&self.inner.session_id)
+                    && (session_mode.is_some() || first_message_index != 0))
+                    || core
+                        .state
+                        .session_mode
+                        .zip(session_mode)
+                        .is_some_and(|(known, incoming)| known != incoming)
+                {
+                    self.inner.reject_mode_conflict(&mut core);
+                    return;
+                }
                 core.assembly = Some(Assembly {
                     epoch,
+                    session_mode,
                     first: first_message_index,
                     messages: Vec::new(),
                     records: Vec::new(),
+                    mode_wait_pages: 0,
+                    mode_wait_bytes: 0,
                 });
+                core.held_pending = None;
+                core.mode_base_pages = 0;
+                core.mode_base_bytes = 0;
                 if let Some(timer) = core.reset_timer.take() {
                     timer.abort();
                 }
@@ -466,11 +555,25 @@ impl SessionController {
                 });
             }
             SessionSnapshotParams::Messages { messages, .. } => {
+                if is_team_approval(&self.inner.session_id) && !messages.is_empty() {
+                    self.inner.reject_mode_conflict(&mut core);
+                    return;
+                }
+                if !self.inner.charge_snapshot_page(&mut core, &messages) {
+                    return;
+                }
                 if let Some(assembly) = &mut core.assembly {
                     assembly.messages.extend(messages);
                 }
             }
             SessionSnapshotParams::Records { records, .. } => {
+                if is_team_approval(&self.inner.session_id) && !records.is_empty() {
+                    self.inner.reject_mode_conflict(&mut core);
+                    return;
+                }
+                if !self.inner.charge_snapshot_page(&mut core, &records) {
+                    return;
+                }
                 if let Some(assembly) = &mut core.assembly {
                     assembly.records.extend(records);
                 }
@@ -482,6 +585,43 @@ impl SessionController {
                 controls,
                 ..
             } => {
+                if !self
+                    .inner
+                    .charge_snapshot_page(&mut core, &(&pending, &turn, &controls))
+                {
+                    return;
+                }
+                let Some(assembly) = core.assembly.as_ref() else {
+                    return;
+                };
+                if assembly.epoch != cursor.epoch {
+                    self.inner.resnapshot(&mut core);
+                    return;
+                }
+                let mode = merge_mode(core.state.session_mode, assembly.session_mode)
+                    .and_then(|mode| records_mode(mode, &assembly.records, &self.inner.session_id))
+                    .and_then(|mode| {
+                        held_mode(mode, &core.held, cursor.seq, &self.inner.session_id)
+                    });
+                let Ok(session_mode) = mode else {
+                    self.inner.reject_mode_conflict(&mut core);
+                    return;
+                };
+                let approval = is_team_approval(&self.inner.session_id);
+                if approval
+                    && (session_mode.is_some()
+                        || cursor.seq != 0
+                        || !assembly.messages.is_empty()
+                        || !assembly.records.is_empty()
+                        || !core.held.is_empty()
+                        || !approval_pending_only(&pending)
+                        || turn.running
+                        || turn.turn_id.is_some()
+                        || controls.is_some())
+                {
+                    self.inner.reject_mode_conflict(&mut core);
+                    return;
+                }
                 if core
                     .held_dropped_through
                     .is_some_and(|seq| seq > cursor.seq)
@@ -493,6 +633,14 @@ impl SessionController {
                 let Some(assembly) = core.assembly.take() else {
                     return;
                 };
+                let pending = core.held_pending.take().unwrap_or(pending);
+                if session_mode.is_none() && !approval {
+                    core.mode_base_pages += assembly.mode_wait_pages;
+                    core.mode_base_bytes += assembly.mode_wait_bytes;
+                } else {
+                    core.mode_base_pages = 0;
+                    core.mode_base_bytes = 0;
+                }
                 let mut records = assembly.records;
                 records.sort_by_key(|r| r.seq);
                 core.seen_turns = records
@@ -502,7 +650,6 @@ impl SessionController {
                         _ => None,
                     })
                     .collect();
-                let _ = assembly.epoch;
                 if core.cursor.as_ref().map(|c| c.0.epoch.as_str()) != Some(cursor.epoch.as_str()) {
                     self.inner.images.lock().expect("images").clear();
                 }
@@ -512,7 +659,12 @@ impl SessionController {
                 let first = assembly.first;
                 let messages = assembly.messages;
                 self.inner.commit(&mut core, move |s| {
-                    s.status = SessionStatus::Live;
+                    s.status = if session_mode.is_some() || approval {
+                        SessionStatus::Live
+                    } else {
+                        SessionStatus::Loading
+                    };
+                    s.session_mode = session_mode;
                     s.error = None;
                     s.messages = messages;
                     s.first_message_index = first;
@@ -525,8 +677,11 @@ impl SessionController {
                     s.outgoing
                         .retain(|p| p.turn_id.is_none_or(|t| !seen.contains(&t)));
                 });
-                self.inner.flush_held(&mut core);
+                if session_mode.is_some() || approval {
+                    self.inner.flush_held(&mut core);
+                }
                 let awaiting = core.awaiting_attach;
+                core.snapshot_finished_during_attach = awaiting;
                 drop(core);
                 if !awaiting {
                     self.inner.send_presence();
@@ -538,29 +693,73 @@ impl SessionController {
     /// A `session.event` notification.
     pub fn handle_event(&self, item: RemoteSeqRecord) {
         let mut core = self.inner.core.lock().expect("core");
+        if core.mode_conflicted {
+            return;
+        }
+        if is_team_approval(&self.inner.session_id) {
+            self.inner.reject_mode_conflict(&mut core);
+            return;
+        }
         if core.assembly.is_some()
             || core.awaiting_attach
-            || core.state.status == SessionStatus::Loading
+            || (core.state.status == SessionStatus::Loading && core.state.session_mode.is_none())
         {
-            if core.held.len() < MAX_BUFFERED_EVENTS {
-                core.held.push(item);
-            } else {
-                // A later event may have a sparse sequence, so no gap check can
-                // repair this loss after we advance the cursor. Start from a new
-                // base once the current snapshot/attach has finished instead.
-                core.held_dropped_through = Some(
-                    core.held_dropped_through
-                        .map_or(item.seq, |seq| seq.max(item.seq)),
-                );
+            self.inner.hold_event(&mut core, item);
+            if !core.mode_conflicted && core.assembly.is_none() && !core.awaiting_attach {
+                if let Some(after_seq) = core.cursor.as_ref().map(|cursor| cursor.0.seq) {
+                    match held_mode(None, &core.held, after_seq, &self.inner.session_id) {
+                        Ok(Some(mode)) => {
+                            core.mode_base_pages = 0;
+                            core.mode_base_bytes = 0;
+                            let pending = core.held_pending.take();
+                            self.inner.commit(&mut core, |s| {
+                                s.session_mode = Some(mode);
+                                s.status = SessionStatus::Live;
+                                if let Some(pending) = pending {
+                                    s.pending = pending;
+                                    s.answered_elsewhere = false;
+                                }
+                            });
+                            self.inner.flush_held(&mut core);
+                            drop(core);
+                            self.inner.send_presence();
+                        }
+                        Ok(None) => {}
+                        Err(()) => self.inner.reject_mode_conflict(&mut core),
+                    }
+                }
             }
             return;
         }
+        let was_loading = core.state.status == SessionStatus::Loading;
         self.inner.apply_live(&mut core, item);
+        let became_live = was_loading && core.state.status == SessionStatus::Live;
+        drop(core);
+        if became_live {
+            self.inner.send_presence();
+        }
     }
 
     /// A `session.pending` notification.
     pub fn handle_pending(&self, pending: RemotePending) {
         let mut core = self.inner.core.lock().expect("core");
+        if core.mode_conflicted {
+            return;
+        }
+        if is_team_approval(&self.inner.session_id) && !approval_pending_only(&pending) {
+            self.inner.reject_mode_conflict(&mut core);
+            return;
+        }
+        if !self.inner.charge_pending_update(&mut core, &pending) {
+            return;
+        }
+        if self.inner.waiting_for_mode(&core) {
+            // Do not enqueue another full clone of a potentially large unknown
+            // snapshot for each pending update. Publish the newest one once
+            // this session's mode has been confirmed.
+            core.held_pending = Some(pending);
+            return;
+        }
         self.inner.commit(&mut core, |s| {
             s.pending = pending;
             s.answered_elsewhere = false;
@@ -570,9 +769,16 @@ impl SessionController {
     /// A `session.reset` notification: the base changed; a new snapshot follows.
     pub fn handle_reset(&self) {
         let mut core = self.inner.core.lock().expect("core");
+        if core.mode_conflicted {
+            return;
+        }
         core.cursor = None;
         self.inner.images.lock().expect("images").clear();
         core.held.clear();
+        core.held_pending = None;
+        core.held_mode_bytes = 0;
+        core.mode_base_pages = 0;
+        core.mode_base_bytes = 0;
         core.held_dropped_through = None;
         core.assembly = None;
         core.seen_turns.clear();
@@ -607,6 +813,9 @@ impl SessionController {
     /// A `session.closed` notification.
     pub fn handle_closed(&self) {
         let mut core = self.inner.core.lock().expect("core");
+        if core.mode_conflicted {
+            return;
+        }
         core.attach_id += 1;
         self.inner
             .commit(&mut core, |s| s.status = SessionStatus::Closed);
@@ -616,10 +825,10 @@ impl SessionController {
     // Commands
     // -----------------------------------------------------------------------
 
-    /// Send a prompt. While a turn runs the desktop takes plain text only, so images
-    /// are left out then; unsupported types and more than four images are dropped.
-    pub async fn send_prompt(&self, text: &str, images: Vec<ImageRefDto>) {
-        self.send_prompt_with_files(text, images, Vec::new()).await;
+    /// Send a prompt. A running turn accepts text only; callers retain rejected
+    /// images and file receipts for a later idle turn.
+    pub async fn send_prompt(&self, text: &str, images: Vec<ImageRefDto>) -> Result<(), RpcError> {
+        self.send_prompt_with_files(text, images, Vec::new()).await
     }
 
     /// Send already verified file receipts through the usual prompt lifecycle.
@@ -628,41 +837,52 @@ impl SessionController {
         text: &str,
         images: Vec<ImageRefDto>,
         file_refs: Vec<String>,
-    ) {
-        let running = self.state().turn.running;
-        let attachments: Vec<ImageRefDto> = if running {
-            Vec::new()
-        } else {
-            images
-                .into_iter()
-                .filter(|i| is_supported_image_media_type(&i.media_type))
-                .take(MAX_IMAGE_ATTACHMENTS)
-                .collect()
-        };
-        if text.trim().is_empty() && attachments.is_empty() && file_refs.is_empty() {
-            return;
-        }
-        let prompt = OutgoingPrompt {
-            id: random_id(),
-            text: text.to_owned(),
-            images: attachments,
-            file_refs: file_refs.into_iter().take(4).collect(),
-            status: OutgoingStatus::Sending,
-            turn_id: None,
-            error: None,
-        };
-        {
+    ) -> Result<(), RpcError> {
+        let prompt = {
             let mut core = self.inner.core.lock().expect("core");
-            let prompt = prompt.clone();
-            self.inner.commit(&mut core, |s| s.outgoing.push(prompt));
-        }
+            require_writable(&core, self.inner.io.connected())?;
+            if core.state.turn.running && (!images.is_empty() || !file_refs.is_empty()) {
+                return Err(RpcError::new(
+                    RemoteErrorCode::Forbidden,
+                    "Attachments cannot be sent while a turn is running.",
+                ));
+            }
+            if images.len() > MAX_IMAGE_ATTACHMENTS
+                || images
+                    .iter()
+                    .any(|image| !is_supported_image_media_type(&image.media_type))
+                || file_refs.len() > 4
+            {
+                return Err(RpcError::new(
+                    RemoteErrorCode::InvalidParams,
+                    "The prompt contains unsupported or too many attachments.",
+                ));
+            }
+            if text.trim().is_empty() && images.is_empty() && file_refs.is_empty() {
+                return Ok(());
+            }
+            let prompt = OutgoingPrompt {
+                id: random_id(),
+                text: text.to_owned(),
+                images,
+                file_refs,
+                status: OutgoingStatus::Sending,
+                turn_id: None,
+                error: None,
+            };
+            self.inner
+                .commit(&mut core, |s| s.outgoing.push(prompt.clone()));
+            prompt
+        };
         self.inner.dispatch_prompt(&prompt).await;
+        Ok(())
     }
 
     /// Send a failed prompt again with the same request id, so the desktop can tell it is a repeat.
-    pub async fn retry_prompt(&self, id: &str) {
+    pub async fn retry_prompt(&self, id: &str) -> Result<(), RpcError> {
         let prompt = {
             let mut core = self.inner.core.lock().expect("core");
+            require_writable(&core, self.inner.io.connected())?;
             let Some(prompt) = core
                 .state
                 .outgoing
@@ -670,8 +890,16 @@ impl SessionController {
                 .find(|p| p.id == id && p.status == OutgoingStatus::Failed)
                 .cloned()
             else {
-                return;
+                return Ok(());
             };
+            if core.state.turn.running
+                && (!prompt.images.is_empty() || !prompt.file_refs.is_empty())
+            {
+                return Err(RpcError::new(
+                    RemoteErrorCode::Forbidden,
+                    "Attachments cannot be sent while a turn is running.",
+                ));
+            }
             self.inner.update_outgoing(&mut core, id, |p| {
                 p.status = OutgoingStatus::Sending;
                 p.error = None;
@@ -679,6 +907,7 @@ impl SessionController {
             prompt
         };
         self.inner.dispatch_prompt(&prompt).await;
+        Ok(())
     }
 
     /// Remove a prompt from the outgoing list.
@@ -690,7 +919,11 @@ impl SessionController {
 
     /// Cancel the running turn.
     pub async fn cancel_turn(&self) -> Result<(), RpcError> {
-        let turn_id = self.state().turn.turn_id;
+        let turn_id = {
+            let core = self.inner.core.lock().expect("core");
+            require_writable(&core, self.inner.io.connected())?;
+            core.state.turn.turn_id
+        };
         let mut params = json!({ "session_id": self.inner.session_id });
         if let Some(turn_id) = turn_id {
             params["turn_id"] = json!(turn_id);
@@ -783,6 +1016,10 @@ impl SessionController {
     }
 
     async fn command(&self, method: &str, params: Value) -> Result<(), RpcError> {
+        require_writable(
+            &self.inner.core.lock().expect("core"),
+            self.inner.io.connected(),
+        )?;
         self.inner
             .io
             .request(method, Some(params), None)
@@ -794,7 +1031,10 @@ impl SessionController {
     pub async fn load_older(&self) {
         let (first, epoch) = {
             let mut core = self.inner.core.lock().expect("core");
-            if !core.state.has_older || core.state.loading_older {
+            if require_writable(&core, self.inner.io.connected()).is_err()
+                || !core.state.has_older
+                || core.state.loading_older
+            {
                 return;
             }
             let first = core.state.first_message_index;
@@ -819,6 +1059,7 @@ impl SessionController {
         let mut core = self.inner.core.lock().expect("core");
         if core.state.first_message_index != first
             || core.cursor.as_ref().map(|c| c.0.epoch.as_str()) != epoch.as_deref()
+            || core.mode_conflicted
         {
             return; // A new snapshot owns the transcript and its paging state now.
         }
@@ -839,6 +1080,16 @@ impl SessionController {
     pub async fn fetch_image(&self, image_ref: &str) -> Result<String, RpcError> {
         let epoch = {
             let core = self.inner.core.lock().expect("core");
+            require_writable(&core, self.inner.io.connected())?;
+            if !image_ref
+                .strip_prefix(self.inner.session_id.as_str())
+                .is_some_and(|suffix| suffix.starts_with(':'))
+            {
+                return Err(RpcError::new(
+                    RemoteErrorCode::Forbidden,
+                    "The image belongs to a different remote session.",
+                ));
+            }
             if let Some(url) = self.inner.images.lock().expect("images").get(image_ref) {
                 return Ok(url.clone());
             }
@@ -865,7 +1116,9 @@ impl SessionController {
         }
         let url = format!("data:{};base64,{}", result.media_type, result.base64);
         let core = self.inner.core.lock().expect("core");
-        if core.cursor.as_ref().map(|c| c.0.epoch.as_str()) != epoch.as_deref() {
+        if require_writable(&core, self.inner.io.connected()).is_err()
+            || core.cursor.as_ref().map(|c| c.0.epoch.as_str()) != epoch.as_deref()
+        {
             return Err(RpcError::new(
                 RemoteErrorCode::Closed,
                 "session changed while fetching image",
@@ -907,12 +1160,239 @@ fn controls_from_records(records: &[RemoteSeqRecord]) -> Option<ConversationCont
     controls
 }
 
+fn require_writable(core: &Core, connected: bool) -> Result<(), RpcError> {
+    if !is_team_approval(&core.state.session_id)
+        && connected
+        && !core.mode_conflicted
+        && core.state.status == SessionStatus::Live
+        && core.state.session_mode.is_some()
+    {
+        Ok(())
+    } else {
+        Err(RpcError::new(
+            RemoteErrorCode::Closed,
+            "The remote session does not have a confirmed mode.",
+        ))
+    }
+}
+
+// The desktop reserves this exact namespace for single-use Team approvals.
+// The nonce is randomBytes(24).toString("base64url"), hence exactly 32 chars.
+fn is_team_approval(session_id: &str) -> bool {
+    session_id
+        .strip_prefix("team-approval:")
+        .is_some_and(|nonce| {
+            nonce.len() == 32
+                && nonce
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        })
+}
+
+fn approval_pending_only(pending: &RemotePending) -> bool {
+    pending.questions.is_empty() && pending.computer_access.is_empty()
+}
+
+fn require_permission_response(
+    core: &Core,
+    connected: bool,
+    request_id: u64,
+) -> Result<(), RpcError> {
+    if is_team_approval(&core.state.session_id)
+        && connected
+        && !core.mode_conflicted
+        && core.state.status == SessionStatus::Live
+        && core.state.session_mode.is_none()
+        && core.approval_response == ApprovalResponse::Available
+        && core
+            .state
+            .pending
+            .permissions
+            .iter()
+            .any(|permission| permission.request_id == request_id)
+    {
+        Ok(())
+    } else {
+        require_writable(core, connected)
+    }
+}
+
+fn merge_mode(
+    known: Option<SessionModeDto>,
+    incoming: Option<SessionModeDto>,
+) -> Result<Option<SessionModeDto>, ()> {
+    if known.zip(incoming).is_some_and(|(a, b)| a != b) {
+        Err(())
+    } else {
+        Ok(known.or(incoming))
+    }
+}
+
+fn lifecycle_mode(record: &RemoteRecord, owner: &str) -> Option<SessionModeDto> {
+    match record {
+        RemoteRecord::Event { event, .. } => match event.known() {
+            Some(ClientEvent::SessionStarted { session_id, mode })
+            | Some(ClientEvent::SessionResumed {
+                session_id, mode, ..
+            }) if session_id == owner => Some(*mode),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn records_mode(
+    mut mode: Option<SessionModeDto>,
+    records: &[RemoteSeqRecord],
+    owner: &str,
+) -> Result<Option<SessionModeDto>, ()> {
+    for item in records {
+        mode = merge_mode(mode, lifecycle_mode(&item.record, owner))?;
+    }
+    Ok(mode)
+}
+
+// Mirror flush_held's ordering and duplicate handling, without advancing the
+// cursor or publishing any of a snapshot if one of its held events conflicts.
+fn held_mode(
+    mut mode: Option<SessionModeDto>,
+    records: &[RemoteSeqRecord],
+    after_seq: u64,
+    owner: &str,
+) -> Result<Option<SessionModeDto>, ()> {
+    let mut records: Vec<_> = records.iter().collect();
+    records.sort_by_key(|item| item.seq);
+    let mut last_seq = after_seq;
+    for item in records {
+        if item.seq > last_seq {
+            mode = merge_mode(mode, lifecycle_mode(&item.record, owner))?;
+            last_seq = item.seq;
+        }
+    }
+    Ok(mode)
+}
+
+// Count the wire representation without allocating a second copy of a large
+// record, stopping serialization as soon as the remaining budget is exceeded.
+fn bounded_size<T: serde::Serialize + ?Sized>(value: &T, limit: usize) -> Option<usize> {
+    struct Counter {
+        remaining: usize,
+        count: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.remaining {
+                return Err(std::io::Error::other("mode wait budget exceeded"));
+            }
+            self.remaining -= bytes.len();
+            self.count += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter {
+        remaining: limit,
+        count: 0,
+    };
+    serde_json::to_writer(&mut counter, value)
+        .ok()
+        .map(|_| counter.count)
+}
+
 impl SessionInner {
+    fn waiting_for_mode(&self, core: &Core) -> bool {
+        !is_team_approval(&self.session_id)
+            && core.state.session_mode.is_none()
+            && core
+                .assembly
+                .as_ref()
+                .is_none_or(|assembly| assembly.session_mode.is_none())
+    }
+
+    fn charge_mode_wait<T: serde::Serialize + ?Sized>(
+        &self,
+        core: &mut Core,
+        value: &T,
+    ) -> Option<usize> {
+        let pages = core.mode_base_pages
+            + core.held.len()
+            + core
+                .assembly
+                .as_ref()
+                .map_or(0, |assembly| assembly.mode_wait_pages);
+        let bytes = core.mode_base_bytes
+            + core.held_mode_bytes
+            + core
+                .assembly
+                .as_ref()
+                .map_or(0, |assembly| assembly.mode_wait_bytes);
+        let size = (pages < MAX_MODE_WAIT_EVENTS)
+            .then(|| bounded_size(value, MAX_MODE_WAIT_BYTES.saturating_sub(bytes)))
+            .flatten();
+        if size.is_none() {
+            self.reject_mode_wait_overflow(core);
+        }
+        size
+    }
+
+    fn charge_snapshot_page<T: serde::Serialize + ?Sized>(
+        &self,
+        core: &mut Core,
+        page: &T,
+    ) -> bool {
+        if core.assembly.is_none() || !self.waiting_for_mode(core) {
+            return true;
+        }
+        let Some(size) = self.charge_mode_wait(core, page) else {
+            return false;
+        };
+        let assembly = core.assembly.as_mut().expect("snapshot assembly");
+        assembly.mode_wait_pages += 1;
+        assembly.mode_wait_bytes += size;
+        true
+    }
+
+    fn charge_pending_update(&self, core: &mut Core, pending: &RemotePending) -> bool {
+        if !self.waiting_for_mode(core) {
+            return true;
+        }
+        let Some(size) = self.charge_mode_wait(core, pending) else {
+            return false;
+        };
+        core.mode_base_pages += 1;
+        core.mode_base_bytes += size;
+        true
+    }
+
+    fn hold_event(&self, core: &mut Core, item: RemoteSeqRecord) {
+        if self.waiting_for_mode(core) {
+            let Some(size) = self.charge_mode_wait(core, &item) else {
+                return;
+            };
+            core.held_mode_bytes += size;
+        }
+        if core.held.len() < MAX_BUFFERED_EVENTS {
+            core.held.push(item);
+        } else {
+            // A later event may have a sparse sequence, so no gap check can
+            // repair this loss after we advance the cursor. Start from a new base.
+            core.held_dropped_through = Some(
+                core.held_dropped_through
+                    .map_or(item.seq, |seq| seq.max(item.seq)),
+            );
+        }
+    }
+
     /// Change the state and queue it for the listeners. The caller holds the core lock,
     /// so listener order is the order of changes.
     fn commit(&self, core: &mut Core, change: impl FnOnce(&mut SessionState)) {
         change(&mut core.state);
-        let _ = self.delivery.send(core.state.clone());
+        if core.approval_response == ApprovalResponse::Consumed {
+            core.state.pending.permissions.clear();
+        }
+        let _ = self.delivery.send(core.visible_state());
     }
 
     fn update_outgoing(&self, core: &mut Core, id: &str, change: impl FnOnce(&mut OutgoingPrompt)) {
@@ -924,7 +1404,13 @@ impl SessionInner {
     }
 
     fn send_presence(self: &Arc<Self>) {
-        let foreground = self.core.lock().expect("core").foreground;
+        let foreground = {
+            let core = self.core.lock().expect("core");
+            if require_writable(&core, self.io.connected()).is_err() {
+                return;
+            }
+            core.foreground
+        };
         let inner = Arc::clone(self);
         tokio::spawn(async move {
             inner
@@ -945,7 +1431,7 @@ impl SessionInner {
     async fn attach_once(self: &Arc<Self>) -> bool {
         let (id, resume) = {
             let mut core = self.core.lock().expect("core");
-            if !core.active || !self.io.connected() {
+            if !core.active || core.mode_conflicted || !self.io.connected() {
                 return false;
             }
             core.attach_id += 1;
@@ -954,8 +1440,11 @@ impl SessionInner {
             }
             core.assembly = None;
             core.held.clear();
+            core.held_pending = None;
+            core.held_mode_bytes = 0;
             core.held_dropped_through = None;
             core.awaiting_attach = true;
+            core.snapshot_finished_during_attach = false;
             self.commit(&mut core, |s| {
                 s.status = SessionStatus::Loading;
                 s.error = None;
@@ -988,6 +1477,7 @@ impl SessionInner {
                 {
                     core.cursor = None;
                     core.held.clear();
+                    core.held_mode_bytes = 0;
                     core.held_dropped_through = None;
                     return true;
                 }
@@ -996,17 +1486,79 @@ impl SessionInner {
                     core.cursor = None;
                     return true;
                 }
+                let after_seq = core.cursor.as_ref().expect("validated cursor").0.seq;
+                let mode = held_mode(
+                    core.state.session_mode,
+                    &core.held,
+                    after_seq,
+                    &self.session_id,
+                );
+                let Ok(mode) = mode else {
+                    self.reject_mode_conflict(&mut core);
+                    return false;
+                };
+                let pending = core.held_pending.take().unwrap_or(pending);
+                if is_team_approval(&self.session_id) && !approval_pending_only(&pending) {
+                    self.reject_mode_conflict(&mut core);
+                    return false;
+                }
+                if mode.is_some() {
+                    core.mode_base_pages = 0;
+                    core.mode_base_bytes = 0;
+                }
                 self.commit(&mut core, |s| {
-                    s.status = SessionStatus::Live;
+                    s.session_mode = mode;
+                    s.status = if mode.is_some() || is_team_approval(&s.session_id) {
+                        SessionStatus::Live
+                    } else {
+                        SessionStatus::Loading
+                    };
                     s.pending = pending;
                 });
-                self.flush_held(&mut core);
+                if mode.is_some() || is_team_approval(&self.session_id) {
+                    self.flush_held(&mut core);
+                }
                 drop(core);
                 self.send_presence();
             }
             Ok(SessionAttachResult::Snapshot { epoch }) => {
-                let complete = core.state.status == SessionStatus::Live
+                let complete = core.snapshot_finished_during_attach
                     && core.cursor.as_ref().is_some_and(|c| c.0.epoch == epoch);
+                core.snapshot_finished_during_attach = false;
+                if complete {
+                    let after_seq = core.cursor.as_ref().expect("validated cursor").0.seq;
+                    if core.held_dropped_through.is_some_and(|seq| seq > after_seq) {
+                        self.resnapshot(&mut core);
+                        return false;
+                    }
+                    let mode = held_mode(
+                        core.state.session_mode,
+                        &core.held,
+                        after_seq,
+                        &self.session_id,
+                    );
+                    let Ok(mode) = mode else {
+                        self.reject_mode_conflict(&mut core);
+                        return false;
+                    };
+                    core.held_dropped_through = None;
+                    if mode.is_some() || is_team_approval(&self.session_id) {
+                        core.mode_base_pages = 0;
+                        core.mode_base_bytes = 0;
+                        let pending = core.held_pending.take();
+                        if core.state.session_mode != mode || pending.is_some() {
+                            self.commit(&mut core, |s| {
+                                s.session_mode = mode;
+                                s.status = SessionStatus::Live;
+                                if let Some(pending) = pending {
+                                    s.pending = pending;
+                                    s.answered_elsewhere = false;
+                                }
+                            });
+                        }
+                        self.flush_held(&mut core);
+                    }
+                }
                 drop(core);
                 if complete {
                     // The snapshot was complete before the reply was handled.
@@ -1028,11 +1580,58 @@ impl SessionInner {
         false
     }
 
+    fn reject_mode_conflict(&self, core: &mut Core) {
+        self.reject_mode(
+            core,
+            "SESSION_MODE_MISMATCH",
+            "The remote session reported a different fixed mode.",
+        );
+    }
+
+    fn reject_mode_wait_overflow(&self, core: &mut Core) {
+        self.reject_mode(
+            core,
+            "SESSION_MODE_OVERFLOW",
+            "Remote session data exceeded the mode confirmation limit.",
+        );
+    }
+
+    fn reject_mode(&self, core: &mut Core, code: &str, message: &str) {
+        core.mode_conflicted = true;
+        core.attach_id += 1;
+        core.awaiting_attach = false;
+        core.assembly = None;
+        core.held.clear();
+        core.held_pending = None;
+        core.held_mode_bytes = 0;
+        core.mode_base_pages = 0;
+        core.mode_base_bytes = 0;
+        core.held_dropped_through = None;
+        if let Some(timer) = core.reset_timer.take() {
+            timer.abort();
+        }
+        self.commit(core, |state| {
+            state.status = SessionStatus::Error;
+            state.loading_older = false;
+            state.error = Some(SessionError {
+                code: code.into(),
+                message: message.into(),
+            });
+        });
+    }
+
     fn flush_held(&self, core: &mut Core) {
         let mut held = std::mem::take(&mut core.held);
+        core.held_mode_bytes = 0;
         held.sort_by_key(|r| r.seq);
+        let before = core.cursor.as_ref().map(|cursor| cursor.0.seq);
         for item in held {
-            self.apply_live(core, item);
+            self.apply_live_inner(core, item, false);
+        }
+        if !core.mode_conflicted && core.cursor.as_ref().map(|cursor| cursor.0.seq) != before {
+            // Publishing one consolidated state avoids retaining a full clone of
+            // the growing transcript for every record in a buffered burst.
+            self.commit(core, |_| {});
         }
     }
 
@@ -1042,6 +1641,8 @@ impl SessionInner {
         core.cursor = None;
         core.assembly = None;
         core.held.clear();
+        core.held_pending = None;
+        core.held_mode_bytes = 0;
         core.held_dropped_through = None;
         self.commit(core, |s| {
             s.status = SessionStatus::Loading;
@@ -1054,11 +1655,28 @@ impl SessionInner {
     }
 
     fn apply_live(&self, core: &mut Core, item: RemoteSeqRecord) {
+        self.apply_live_inner(core, item, true);
+    }
+
+    fn apply_live_inner(&self, core: &mut Core, item: RemoteSeqRecord, publish: bool) {
+        if core.state.status == SessionStatus::Error {
+            return;
+        }
         let Some(cursor) = &core.cursor else { return };
         if item.seq <= cursor.0.seq {
             return; // already covered
         }
         let epoch = cursor.0.epoch.clone();
+        let session_mode = lifecycle_mode(&item.record, &self.session_id);
+        if core
+            .state
+            .session_mode
+            .zip(session_mode)
+            .is_some_and(|(known, incoming)| known != incoming)
+        {
+            self.reject_mode_conflict(core);
+            return;
+        }
         core.cursor = Some(Cursor(RemoteCursor {
             epoch,
             seq: item.seq,
@@ -1067,8 +1685,14 @@ impl SessionInner {
             core.seen_turns.push(*turn_id);
         }
         let record = item.record.clone();
-        self.commit(core, move |s| {
+        let apply = move |s: &mut SessionState| {
             s.records.push(item);
+            if let Some(mode) = session_mode {
+                s.session_mode = Some(mode);
+                if s.status == SessionStatus::Loading {
+                    s.status = SessionStatus::Live;
+                }
+            }
             match &record {
                 RemoteRecord::Prompt { turn_id, .. } => {
                     s.outgoing.retain(|p| p.turn_id != Some(*turn_id));
@@ -1099,7 +1723,12 @@ impl SessionInner {
                 },
                 _ => {}
             }
-        });
+        };
+        if publish {
+            self.commit(core, apply);
+        } else {
+            apply(&mut core.state);
+        }
     }
 
     async fn dispatch_prompt(&self, prompt: &OutgoingPrompt) {
@@ -1139,15 +1768,137 @@ impl SessionInner {
     }
 
     /// First answer wins: losing the race to another device is not an error, only a quiet note.
-    async fn answer(&self, method: &str, params: Value) -> Result<(), RpcError> {
+    async fn answer(self: &Arc<Self>, method: &str, params: Value) -> Result<(), RpcError> {
+        let reservation = {
+            let mut core = self.core.lock().expect("core");
+            if method == methods::PERMISSION_RESPOND {
+                let request_id = params
+                    .get("request_id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        RpcError::new(RemoteErrorCode::Closed, "permission is unavailable")
+                    })?;
+                require_permission_response(&core, self.io.connected(), request_id)?;
+                if is_team_approval(&self.session_id) {
+                    core.approval_response = ApprovalResponse::InFlight;
+                    Some(ApprovalReservation {
+                        inner: Arc::clone(self),
+                        armed: true,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                require_writable(&core, self.io.connected())?;
+                None
+            }
+        };
+        if let Some(reservation) = reservation {
+            // The caller may cancel after the RPC has been sent. Keep its
+            // reservation until the transport resolves, because cancelling a
+            // local response waiter does not cancel the host's request.
+            let inner = Arc::clone(self);
+            let method = method.to_owned();
+            return tokio::spawn(async move {
+                inner
+                    .finish_answer(&method, params, Some(reservation))
+                    .await
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(RpcError::new(
+                    RemoteErrorCode::Closed,
+                    "permission response task failed",
+                ))
+            });
+        }
+        self.finish_answer(method, params, None).await
+    }
+
+    async fn finish_answer(
+        &self,
+        method: &str,
+        params: Value,
+        reservation: Option<ApprovalReservation>,
+    ) -> Result<(), RpcError> {
         match self.io.request(method, Some(params), None).await {
-            Ok(_) => Ok(()),
-            Err(error) if error.code == RemoteErrorCode::NotPending => {
-                let mut core = self.core.lock().expect("core");
-                self.commit(&mut core, |s| s.answered_elsewhere = true);
+            Ok(_) => {
+                if let Some(mut reservation) = reservation {
+                    reservation.consume(false);
+                }
                 Ok(())
             }
-            Err(error) => Err(error),
+            Err(error) if error.code == RemoteErrorCode::NotPending => {
+                if let Some(mut reservation) = reservation {
+                    reservation.consume(true);
+                } else {
+                    let mut core = self.core.lock().expect("core");
+                    self.commit(&mut core, |s| s.answered_elsewhere = true);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(mut reservation) = reservation {
+                    if matches!(
+                        error.code,
+                        RemoteErrorCode::Timeout
+                            | RemoteErrorCode::Closed
+                            | RemoteErrorCode::Internal
+                    ) {
+                        // Delivery may already have occurred. Do not permit an
+                        // opposite answer merely because the reply was lost.
+                        reservation.consume(false);
+                    } else {
+                        reservation.release();
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+/// A failed request may be retried; a delivered answer consumes the
+/// capability even if a stale snapshot later repeats its pending request.
+struct ApprovalReservation {
+    inner: Arc<SessionInner>,
+    armed: bool,
+}
+
+impl ApprovalReservation {
+    fn release(&mut self) {
+        let mut core = self.inner.core.lock().expect("core");
+        if core.approval_response == ApprovalResponse::InFlight {
+            core.approval_response = ApprovalResponse::Available;
+        }
+        self.armed = false;
+    }
+
+    fn consume(&mut self, answered_elsewhere: bool) {
+        let mut core = self.inner.core.lock().expect("core");
+        core.approval_response = ApprovalResponse::Consumed;
+        self.inner.commit(&mut core, |state| {
+            if answered_elsewhere {
+                state.answered_elsewhere = true;
+            }
+        });
+        self.armed = false;
+    }
+}
+
+impl Drop for ApprovalReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut core = self
+                .inner
+                .core
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if core.approval_response == ApprovalResponse::InFlight {
+                // Task failure leaves delivery unknown, so fail closed.
+                core.approval_response = ApprovalResponse::Consumed;
+                self.inner.commit(&mut core, |_| {});
+            }
         }
     }
 }

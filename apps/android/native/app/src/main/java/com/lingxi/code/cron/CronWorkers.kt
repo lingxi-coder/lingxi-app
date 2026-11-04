@@ -377,26 +377,17 @@ class CronExecutionWorker internal constructor(
             repository.refresh()
             throw cancel
         } catch (error: Throwable) {
-            if (error is CronPermanentExecutionException || !isRetryableCronFailure(error.message)) {
+            if (error is CronPermanentExecutionException) {
                 terminalFailure(
                     existing,
                     error.message
                         ?: com.lingxi.code.theme.LocaleWrapper.getString(applicationContext, R.string.cron_execution_failed_default_android),
                 )
-            } else if (runAttemptCount + 1 < MAX_EXECUTION_ATTEMPTS) {
-                history.markRetry(
-                    id,
-                    runAttemptCount + 1,
-                    error.message
-                        ?: com.lingxi.code.theme.LocaleWrapper.getString(applicationContext, R.string.cron_temporary_network_error),
-                )
-                repository.refresh()
-                Result.retry()
             } else {
-                terminalFailure(
-                    existing,
-                    error.message ?: com.lingxi.code.theme.LocaleWrapper.getString(applicationContext, R.string.cron_retries_exhausted),
-                )
+                // Once native execution was entered, a thrown error does not
+                // prove the model or a tool did not run. Only an explicit SDK
+                // retryable result may put this occurrence back in the queue.
+                terminalUnknown(existing, error.message)
             }
         } finally {
             withContext(NonCancellable) {
@@ -433,7 +424,9 @@ class CronExecutionWorker internal constructor(
                     }
                 }
             }.getOrNull()
-            history.attachExecution(queued.runId, sessionId = fired.sessionId, model = actualModel)
+            history.attachExecution(queued.runId, sessionId = fired.sessionId, model = actualModel,
+                sessionTranscriptPath = fired.sessionTranscriptPath, sessionMode = fired.sessionMode,
+                sessionScopeKey = fired.sessionScopeKey)
             when (val status = fired.status) {
                 CronFireStatusDto.Ok -> {
                     history.markTerminal(
@@ -442,6 +435,11 @@ class CronExecutionWorker internal constructor(
                         resultText = fired.resultText?.ifBlank { null }
                             ?: com.lingxi.code.theme.LocaleWrapper.getString(applicationContext, R.string.chat_status_completed),
                     )
+                    postTerminal(history.record(queued.runId))
+                    if (queued.runId == requested.runId) requestedResult = Result.success()
+                }
+                is CronFireStatusDto.OutcomeUnknown -> {
+                    history.markTerminal(queued.runId, CronRunStatus.OutcomeUnknown, errorMessage = status.message)
                     postTerminal(history.record(queued.runId))
                     if (queued.runId == requested.runId) requestedResult = Result.success()
                 }
@@ -523,6 +521,14 @@ class CronExecutionWorker internal constructor(
         return Result.success()
     }
 
+    private suspend fun terminalUnknown(record: CronRunRecord, message: String?): Result {
+        history.markTerminal(record.runId, CronRunStatus.OutcomeUnknown,
+            errorMessage = message ?: "Execution outcome was not confirmed; this occurrence will not be replayed")
+        postTerminal(history.record(record.runId))
+        repository.refresh()
+        return Result.success()
+    }
+
     private fun postTerminal(record: CronRunRecord?) {
         record?.let { repository.postPendingNotifications(it.runId) }
     }
@@ -534,28 +540,3 @@ class CronExecutionWorker internal constructor(
         private const val MAX_EXECUTION_ATTEMPTS = 5
     }
 }
-
-internal fun isRetryableCronFailure(message: String?): Boolean {
-    val normalized = message?.lowercase() ?: return false
-    return RETRYABLE_MARKERS.any(normalized::contains)
-}
-
-private val RETRYABLE_MARKERS = listOf(
-    "http 429",
-    "status 429",
-    "too many requests",
-    "rate limit",
-    "http 500",
-    "http 502",
-    "http 503",
-    "http 504",
-    "status 500",
-    "status 502",
-    "status 503",
-    "status 504",
-    "temporarily unavailable",
-    "connection reset",
-    "connection failed",
-    "timeout",
-    "timed out",
-)

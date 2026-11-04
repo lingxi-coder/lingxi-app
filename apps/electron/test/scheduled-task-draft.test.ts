@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { validateClientCommand } from '../src/main/validation';
 import { scheduledTaskCron, scheduledTaskInput, scheduledTaskFromJob, scheduledTaskAdvice, localScheduledTimezone, type ScheduledTaskDraft } from '../src/renderer/bridge/scheduledTaskDraft';
 
 const draft: ScheduledTaskDraft = { title: 'Weekly summary', instructions: 'Report completed changes and blockers.',
@@ -84,4 +85,24 @@ test('editor never sends server-owned run history or dedicated chat ownership', 
   assert.equal(Object.hasOwn(input.automation!, 'ownedSessionId'), false);
   assert.equal(Object.hasOwn(input.automation!, 'runs'), false);
   assert.equal(automation.ownedSessionId, 'owned-chat');
+});
+
+
+test('editing a saved task drops every host-owned source and owner field before validation', () => {
+  const automation = { version: 2, status: 'active' as const, model: 'openai/test', reasoning: { type: 'automatic' as const },
+    runMode: 'selected_session' as const, targetSessionId: 'target-chat', notificationPolicy: 'all' as const,
+    targetSessionTranscriptPath: '/old/source.jsonl', targetSessionMode: 'chat', targetSessionScopeKey: 'global',
+    ownedSessionTranscriptPath: '/owned/source.jsonl', ownedSessionMode: 'code', ownedSessionScopeKey: '/project',
+    sessionMode: 'chat', sessionScopeKey: 'global' };
+  const input = scheduledTaskInput({ ...draft, automation });
+  for (const key of ['targetSessionTranscriptPath', 'targetSessionMode', 'targetSessionScopeKey',
+    'ownedSessionTranscriptPath', 'ownedSessionMode', 'ownedSessionScopeKey', 'sessionMode', 'sessionScopeKey']) {
+    assert.equal(Object.hasOwn(input.automation!, key), false, key);
+  }
+  assert.equal(input.automation!.targetSessionId, 'target-chat');
+  assert.equal(automation.targetSessionTranscriptPath, '/old/source.jsonl');
+  const reread = scheduledTaskFromJob({ id: 'saved', cron: input.cron, prompt: input.prompt,
+    recurring: true, durable: true, permanent: false, created_at: 1, automation } as any);
+  const edited = scheduledTaskInput({ ...reread, title: 'Updated task' });
+  assert.doesNotThrow(() => validateClientCommand({ type: 'cron_manage', request_id: 'edit', request: { action: 'update', id: 'saved', ...edited } }));
 });

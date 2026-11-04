@@ -16,7 +16,11 @@ import { canonicalJson, LocalAppAgentError, sameAgentGrant, validateAgentSetting
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, LOCAL_APP_SCHEME } from '../../shared/localApps.js';
 import { CH_LOCAL_APP_NATIVE } from '../../shared/localAppNative.js';
 import { appId, atomicJson, containedFile } from './store.js';
-import { CoreLocalAppStore } from './coreStore.js';
+import { CoreLocalAppStore, type DesktopAuthoringGrant, type DesktopAuthoringSourceProof } from './coreStore.js';
+import { AuthoringSourceIntents, type CopyIntent } from './authoringSourceIntents.js';
+import { AuthoringSessionIntents, validateNewAuthoringIntent, type AuthoringSessionIntent, type AuthoringSessionSource } from './authoringSessionIntents.js';
+import type { LocalAppNewSessionIntent } from '../../shared/localApps.js';
+import type { PublicationIntent } from './publicationIntents.js';
 import type { LocalAppCoreTransport } from './coreClient.js';
 import { LocalAppMarketClient, type MarketPublication } from './marketClient.js';
 import { LocalAppServiceBroker } from './serviceBroker.js';
@@ -408,11 +412,14 @@ function mediaTypeForPath(path: string): string { return FILE_TYPES[path.slice(p
 
 export interface LocalAppHostOptions extends RuntimeOptions {
   configHome: string;
+  appProjectsRoot: string;
   onRemoteAccessEnded?: () => void;
   core: LocalAppCoreTransport;
   accountToken?: () => Promise<string>;
   accountId?: () => string | undefined;
-  resolveAuthoringBinding?: (appId: string | undefined, session: { projectPath: string; sessionId: string }) => Promise<Omit<DesktopAuthoringRef, 'workspaceId' | 'appId'>>;
+  /** Trusted, host-owned current mode; captured once when an IPC request arrives. */
+  currentConversationMode: () => 'chat' | 'code' | undefined;
+  resolveAuthoringBinding?: (appId: string | undefined, session: { projectPath: string; sessionId: string }, source?: AuthoringSessionSource) => Promise<Omit<DesktopAuthoringRef, 'workspaceId' | 'appId'>>;
   onRunEnded?: (appId: string, runId: string, reason: string) => Promise<void> | void;
   preload: string;
   mainWindow: () => BrowserWindow | undefined;
@@ -420,8 +427,9 @@ export interface LocalAppHostOptions extends RuntimeOptions {
   agentCatalog?: () => Promise<LocalAppAgentCatalog>;
   onMcpChanged?: () => void;
 }
-interface PendingAuthoringEntry { authoring: DesktopAuthoringRef; registeredAtMs: number; state: 'pending' | 'consumed'; appId?: string }
 interface SourceSessionRef { projectPath: string; sessionId: string }
+type LocalAppRequestOrigin = { kind: 'native'; mode: 'chat' | 'code' | undefined; authoringOrder?: number; recoverExplicitBinding?: boolean; authoringSource?: AuthoringSessionSource } | { kind: 'tool' };
+const DEVELOPMENT_ACTIONS = new Set(['prepareAuthoring', 'bindAuthoring', 'publish', 'read', 'edit', 'restoreSource', 'remix', 'marketPublish', 'resumePublication', 'resumeSourceCopy', 'resumeAuthoringSession']);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function absoluteCanonicalPath(value: unknown): value is string {
   return typeof value === 'string' && isAbsolute(value) && !value.includes('\0')
@@ -480,14 +488,20 @@ export class LocalAppHost {
   private readonly backgroundAgentOwners = new Map<string, { revision: number; invocationId: string }>();
   private readonly navigationEpoch = new Map<number, number>();
   private readonly agentQuestions = new Map<string, { view: LocalAppAgentQuestion; appId: string; resolve: (answers: Record<string, string> | null) => void }>();
-  private readonly pendingAuthoring = new Map<string, PendingAuthoringEntry>();
-  private pendingAuthoringTail: Promise<void> = Promise.resolve();
-  private readonly pendingAuthoringPath: string;
+  private authoringSourceTail: Promise<void> = Promise.resolve();
+  private readonly authoringSourceIntents: AuthoringSourceIntents;
+  private readonly authoringSessionIntents: AuthoringSessionIntents;
+  private readonly authoringIntents = new Map<string, symbol>();
+  private readonly authoringVersions = new Map<string, number>();
+  private readonly authoringOrders = new Map<string, number>();
+  private readonly authoringVerifications = new Map<string, Set<Promise<void>>>();
+  private authoringSequence = 0;
   private readonly mcp: LocalAppMcpManager;
   private readonly mcpGateway: LocalAppMcpGateway;
   constructor(private readonly options: LocalAppHostOptions) {
     this.store = new CoreLocalAppStore(join(options.configHome, 'local-apps', 'v2'), options.core);
-    this.pendingAuthoringPath = join(this.store.root, 'authoring-pending.v1.json');
+    this.authoringSourceIntents = new AuthoringSourceIntents(this.store.root);
+    this.authoringSessionIntents = new AuthoringSessionIntents(this.store.root);
     this.market = new LocalAppMarketClient(this.store, options.accountToken ?? (() => Promise.reject(new Error('Sign in before publishing to the market'))), undefined, undefined, options.accountId);
     this.marketLinkInstaller = new MarketLinkInstaller({
       list: () => this.store.list(),
@@ -523,45 +537,115 @@ export class LocalAppHost {
       this.changed();
     });
   }
-  private async withPendingAuthoringLock<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.pendingAuthoringTail;
+  private async withAuthoringSourceLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.authoringSourceTail;
     let release!: () => void;
-    this.pendingAuthoringTail = new Promise<void>(resolve => { release = resolve; });
+    this.authoringSourceTail = new Promise<void>(resolve => { release = resolve; });
     await previous;
     try { return await operation(); } finally { release(); }
   }
-  private async persistPendingAuthoring(): Promise<void> {
-    await atomicJson(this.pendingAuthoringPath, { version: 1, entries: [...this.pendingAuthoring.values()] });
+  /** Called only by the Host after its Code-mode admission, before runtime boot. */
+  beginAuthoringSession(input: LocalAppNewSessionIntent): {
+    allocate(ref: SourceSessionRef): Promise<void>; recordSource(source: AuthoringSessionSource): Promise<void>; finish(ref: SourceSessionRef): Promise<void>;
+  } {
+    const intent = validateNewAuthoringIntent(input);
+    const order = intent.appId && intent.setCurrent ? ++this.authoringSequence : undefined;
+    let saved: AuthoringSessionIntent | undefined;
+    return {
+      allocate: async ref => { saved = await this.authoringSessionIntents.create(ref, intent); this.changed(); },
+      recordSource: async source => {
+        if (!saved) throw new Error('The Local App session owner is unavailable');
+        saved = await this.authoringSessionIntents.recordSource(saved.requestId, source);
+      },
+      finish: async ref => {
+        if (!saved || saved.projectPath !== ref.projectPath || saved.sessionId !== ref.sessionId) throw new Error('The Local App session owner changed');
+        await this.finishAuthoringSession(saved, order);
+      },
+    };
   }
-  private async loadPendingAuthoring(): Promise<void> {
-    let value: unknown;
-    try { value = JSON.parse(await fs.readFile(this.pendingAuthoringPath, 'utf8')); }
+  async getAuthoringSession(requestId: string): Promise<AuthoringSessionIntent> {
+    const saved = await this.authoringSessionIntents.get(requestId);
+    if (!saved || saved.state === 'completed') throw new Error('The pending Local App session is unavailable');
+    return saved;
+  }
+  async recordAuthoringSessionSource(requestId: string, source: AuthoringSessionSource): Promise<AuthoringSessionIntent> {
+    return this.authoringSessionIntents.recordSource(requestId, source);
+  }
+  async finishAuthoringSession(saved: AuthoringSessionIntent, order?: number): Promise<void> {
+    if (!saved.source) throw new Error('The Local App session source has not been confirmed');
+    const session = { projectPath: saved.projectPath, sessionId: saved.sessionId };
+    const action = saved.appId
+      ? { action: 'bindAuthoring', id: saved.appId, session, setCurrent: order !== undefined && saved.setCurrent,
+        ...(saved.sourceRequestId ? { sourceRequestId: saved.sourceRequestId } : {}) }
+      : { action: 'prepareAuthoring', session };
+    await this.request(action, undefined, { kind: 'native', mode: 'code', authoringOrder: order,
+      recoverExplicitBinding: order === undefined && saved.setCurrent, authoringSource: saved.source });
+    await this.authoringSessionIntents.ready(saved.requestId);
+    this.changed();
+  }
+  async completeAuthoringSession(ref: SourceSessionRef): Promise<void> {
+    await this.authoringSessionIntents.complete(ref); this.changed();
+  }
+  private beginAuthoringIntent(id: string, order = ++this.authoringSequence): { current: () => boolean; finish: () => void } {
+    const token = Symbol('authoring intent');
+    if (order < (this.authoringOrders.get(id) ?? 0)) return { current: () => false, finish: () => {} };
+    this.authoringOrders.set(id, order);
+    this.authoringVersions.set(id, (this.authoringVersions.get(id) ?? 0) + 1);
+    this.authoringIntents.set(id, token);
+    return { current: () => this.authoringIntents.get(id) === token,
+      finish: () => { if (this.authoringIntents.get(id) === token) this.authoringIntents.delete(id); } };
+  }
+  private trackAuthoringVerification(id: string): () => void {
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const entries = this.authoringVerifications.get(id) ?? new Set<Promise<void>>();
+    entries.add(pending); this.authoringVerifications.set(id, entries);
+    return () => { entries.delete(pending); if (!entries.size) this.authoringVerifications.delete(id); release(); };
+  }
+  private checkAuthoringSource(proof: DesktopAuthoringSourceProof, sourceDirectory: string, requestId?: string, targetAppId?: string): void {
+    if (!proof || !UUID_PATTERN.test(proof.sourceId) || proof.sourceDirectory !== sourceDirectory || proof.sourcePath !== sourceDirectory
+      || (requestId !== undefined && (proof.requestId !== requestId || proof.targetAppId !== targetAppId))) {
+      throw new Error('The Local App source proof does not match the selected Project');
+    }
+  }
+  private checkAuthoringGrant(grant: DesktopAuthoringGrant, sourceId: string, session: SourceSessionRef): void {
+    if (!grant || grant.sourceId !== sourceId || grant.sessionMode !== 'code' || !completeDesktopAuthoring(grant.authoring)
+      || grant.authoring.sourceDirectory !== session.projectPath || grant.authoring.projectRef.path !== session.projectPath
+      || grant.authoring.authoringSessionId !== session.sessionId) {
+      throw new Error('The Local App authoring receipt does not match its source session');
+    }
+  }
+  private async existingAuthoringGrant(sourceDirectory: string, session: SourceSessionRef): Promise<DesktopAuthoringGrant | undefined> {
+    try { return await this.store.getAuthoringGrant(sourceDirectory, { kind: 'desktopPath', path: session.projectPath }, session.sessionId); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw new Error(`Could not read Local App authoring registrations: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    if (!value || typeof value !== 'object' || Array.isArray(value)
-      || (value as Record<string, unknown>).version !== 1 || !Array.isArray((value as Record<string, unknown>).entries)) {
-      throw new Error('Local App authoring registrations are invalid; refusing to overwrite them');
-    }
-    for (const raw of (value as { entries: unknown[] }).entries) {
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Local App authoring registration is invalid');
-      const entry = raw as Record<string, unknown>;
-      if (!completeDesktopAuthoring(entry.authoring) || (entry.state !== 'pending' && entry.state !== 'consumed')
-        || entry.authoring.appId !== undefined
-        || (entry.state === 'pending' && entry.appId !== undefined)
-        || (entry.state === 'consumed' && (typeof entry.appId !== 'string' || !/^a[a-f0-9]{32}$/.test(entry.appId)))
-        || typeof entry.registeredAtMs !== 'number' || !Number.isSafeInteger(entry.registeredAtMs)
-        || this.pendingAuthoring.has(entry.authoring.authoringSessionId)) {
-        throw new Error('Local App authoring registration is invalid; refusing to overwrite it');
-      }
-      this.pendingAuthoring.set(entry.authoring.authoringSessionId, { authoring: entry.authoring, registeredAtMs: entry.registeredAtMs,
-        state: entry.state, ...(typeof entry.appId === 'string' ? { appId: entry.appId } : {}) });
+      if ((error as { code?: unknown })?.code === 'notFound') return;
+      throw error;
     }
   }
-  private async resolveNativeAuthoring(sessionRef: SourceSessionRef): Promise<Omit<DesktopAuthoringRef, 'workspaceId' | 'appId'>> {
+  private async completeSourceCopy(saved: CopyIntent): Promise<CopyIntent> {
+    if (saved.state !== 'pending') return saved;
+    const request = saved.purpose === 'restoreSource'
+      ? { op: 'copyAuthoringSource', requestId: saved.requestId, appId: saved.appId, revision: saved.revision,
+        sourcePath: saved.sourcePath, projectRef: { kind: 'desktopPath', path: saved.sourcePath } }
+      : { op: 'remixAuthoringSource', requestId: saved.requestId, appId: saved.appId, revision: saved.revision, sourcePath: saved.sourcePath };
+    const result = await this.store.core.request<{ requestId: string; sourceId: string; sourceDirectory: string; sourcePath: string;
+      targetAppId?: string; record?: { appId: string; latestRevision: number }; release?: { appId: string; revision: number } }>(request, { waitForCompletion: true });
+    const targetAppId = saved.purpose === 'restoreSource' ? result.targetAppId : result.record?.appId;
+    const canonicalSource = await fs.realpath(saved.sourcePath);
+    if (result.requestId !== saved.requestId || result.sourceDirectory !== canonicalSource || result.sourcePath !== canonicalSource
+      || canonicalSource !== saved.sourcePath || !UUID_PATTERN.test(result.sourceId)
+      || typeof targetAppId !== 'string' || !/^a[a-f0-9]{32}$/.test(targetAppId)
+      || (saved.purpose === 'restoreSource' && targetAppId !== saved.appId)
+      || (saved.purpose === 'remix' && (targetAppId === saved.appId || result.release?.appId !== targetAppId
+        || !Number.isSafeInteger(result.release.revision) || result.release.revision < 1
+        || result.record?.latestRevision !== result.release.revision))) {
+      throw new Error('The Local App source copy did not match its saved intent');
+    }
+    return this.authoringSourceIntents.recordCopy(saved.requestId, result.sourceId, targetAppId);
+  }
+  private async resolveNativeAuthoring(sessionRef: SourceSessionRef, source?: AuthoringSessionSource): Promise<Omit<DesktopAuthoringRef, 'workspaceId' | 'appId'>> {
     if (!this.options.resolveAuthoringBinding) throw new Error('Desktop cannot verify the selected app Code session');
-    const resolved = await this.options.resolveAuthoringBinding(undefined, sessionRef);
+    const resolved = await this.options.resolveAuthoringBinding(undefined, sessionRef, source);
     const [sourceDirectory, projectPath, projectRefPath] = await Promise.all([
       fs.realpath(resolved.sourceDirectory), fs.realpath(sessionRef.projectPath), fs.realpath(resolved.projectRef.path),
     ]);
@@ -571,46 +655,23 @@ export class LocalAppHost {
     }
     return { sourceDirectory, projectRef: { kind: 'desktopPath', path: projectPath }, authoringSessionId: sessionRef.sessionId };
   }
-  private async prepareNativeAuthoring(sessionRef: SourceSessionRef): Promise<DesktopAuthoringRef> {
-    const resolved = await this.resolveNativeAuthoring(sessionRef);
-    return this.withPendingAuthoringLock(async () => {
-      const bound = (await this.store.list()).find(row => completeDesktopAuthoring(row.authoring)
-        && row.authoring.sourceDirectory === resolved.sourceDirectory);
-      if (bound) throw new Error(`This Local App source is already bound to ${bound.id}; continue developing that application instead`);
-      const sameSource = [...this.pendingAuthoring.values()].find(entry => entry.authoring.sourceDirectory === resolved.sourceDirectory);
-      if (sameSource?.state === 'consumed') {
-        throw new Error(`This Local App source already belongs to ${sameSource.appId}; continue developing that application instead`);
-      }
-      if (sameSource && sameSource.authoring.authoringSessionId !== sessionRef.sessionId) {
-        throw new Error('This Local App source already has a pending authoring session');
-      }
-      const previous = this.pendingAuthoring.get(sessionRef.sessionId);
-      if (previous?.state === 'consumed') throw new Error(`This Code session already published ${previous.appId}`);
-      if (previous && (previous.authoring.sourceDirectory !== resolved.sourceDirectory
-        || previous.authoring.projectRef.path !== resolved.projectRef.path)) {
-        throw new Error('This Code session is already bound to a different Local App source');
-      }
+  private async prepareNativeAuthoring(sessionRef: SourceSessionRef, source?: AuthoringSessionSource): Promise<DesktopAuthoringRef> {
+    const resolved = await this.resolveNativeAuthoring(sessionRef, source);
+    return this.withAuthoringSourceLock(async () => {
+      const requestId = await this.authoringSourceIntents.sourceRequestId({ purpose: 'create', sourceDirectory: resolved.sourceDirectory,
+        projectPath: resolved.projectRef.path, sessionId: resolved.authoringSessionId });
+      const proof = await this.store.ensureAuthoringSource(resolved.sourceDirectory, resolved.projectRef, requestId);
+      this.checkAuthoringSource(proof, resolved.sourceDirectory, requestId);
+      const session = { projectPath: resolved.projectRef.path, sessionId: resolved.authoringSessionId };
+      const previous = await this.existingAuthoringGrant(resolved.sourceDirectory, session);
+      if (previous) this.checkAuthoringGrant(previous, proof.sourceId, session);
+      if (previous?.ownerAppId) throw new Error(`This Local App source already belongs to ${previous.ownerAppId}; continue developing that application instead`);
       const authoring: DesktopAuthoringRef = { ...resolved, workspaceId: previous?.authoring.workspaceId ?? randomUUID() };
-      if (!completeDesktopAuthoring(authoring) || authoring.appId !== undefined) throw new Error('Desktop produced an invalid pending app authoring binding');
-      const entry: PendingAuthoringEntry = { authoring, registeredAtMs: previous?.registeredAtMs ?? Date.now(), state: 'pending' };
-      this.pendingAuthoring.set(sessionRef.sessionId, entry);
-      try { await this.persistPendingAuthoring(); }
-      catch (error) {
-        if (previous) this.pendingAuthoring.set(sessionRef.sessionId, previous);
-        else this.pendingAuthoring.delete(sessionRef.sessionId);
-        throw error;
-      }
-      return structuredClone(authoring);
+      const saved = await this.store.registerAuthoring(proof.sourceId, requestId, authoring, true);
+      this.checkAuthoringGrant({ sourceId: proof.sourceId, authoring: saved, sessionMode: saved.sessionMode }, proof.sourceId, session);
+      if (saved.workspaceId !== authoring.workspaceId) throw new Error('The Local App authoring receipt changed during registration');
+      return saved;
     });
-  }
-  private async markPendingAuthoringConsumed(sessionId: string, appId: string): Promise<void> {
-    const entry = this.pendingAuthoring.get(sessionId);
-    if (!entry) return;
-    this.pendingAuthoring.set(sessionId, { ...entry, state: 'consumed', appId });
-    // Once Core has committed the application, its record is authoritative.
-    // Keeping this tombstone prevents a restart or lost HTTP response from
-    // interpreting the same native source as a fresh unbound publication.
-    await this.persistPendingAuthoring().catch(() => undefined);
   }
   private async verifySourcePath(input: Record<string, unknown>, sourceDirectory: string): Promise<void> {
     if (input.source_path === undefined) return;
@@ -621,52 +682,83 @@ export class LocalAppHost {
       throw new Error('The staged app source must remain inside its native authoring Project');
     }
   }
-  private async publishAuthoring(input: Record<string, unknown>, appIdValue: string | undefined): Promise<{
-    authoring?: DesktopAuthoringRef; sourceSession?: SourceSessionRef; pendingSessionId?: string;
-  }> {
-    const sourceSession = sourceSessionRef(input.source_session);
-    if (appIdValue === undefined) {
-      if (!sourceSession) return {};
-      const entry = this.pendingAuthoring.get(sourceSession.sessionId);
-      if (!entry) {
-        // Ordinary LocalApp publication remains available in existing chats,
-        // but it receives no authoring authority. If this source is awaiting
-        // or already consumed by Native Create, its owner must use that flow.
-        let resolved: Omit<DesktopAuthoringRef, 'workspaceId' | 'appId'> | undefined;
-        try { resolved = await this.resolveNativeAuthoring(sourceSession); } catch { return {}; }
-        const sibling = [...this.pendingAuthoring.values()].find(row => row.authoring.sourceDirectory === resolved!.sourceDirectory);
-        if (sibling?.state === 'consumed') throw new Error(`This Local App source already belongs to ${sibling.appId}; continue developing that application instead`);
-        if (sibling) throw new Error('This Local App source already has a pending Native Create registration');
-        return {};
+  private async publishAuthoring(input: Record<string, unknown>, appIdValue: string | undefined,
+    resolved: Omit<DesktopAuthoringRef, 'workspaceId' | 'appId'>, requestId: string): Promise<DesktopAuthoringGrant | undefined> {
+    const app = appIdValue === undefined ? undefined : await this.store.get(appIdValue);
+    const proof = await this.store.findAuthoringSource(resolved.sourceDirectory);
+    if (!proof) {
+      if (app?.authoring) throw new Error('Modify this application from its registered source Code session');
+      let managedRoot: string | undefined;
+      try { managedRoot = await fs.realpath(this.options.appProjectsRoot); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (managedRoot) {
+        const child = relative(managedRoot, resolved.sourceDirectory);
+        if (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child)) {
+          throw new Error('The managed Local App source has no verified authoring receipt');
+        }
       }
-      if (entry.state === 'consumed') throw new Error(`This Local App source already belongs to ${entry.appId}; use Continue developing instead of publishing another app`);
-      const resolved = await this.resolveNativeAuthoring(sourceSession);
-      await this.verifySourcePath(input, resolved.sourceDirectory);
-      if (entry.authoring.sourceDirectory !== resolved.sourceDirectory
-        || entry.authoring.projectRef.path !== resolved.projectRef.path
-        || entry.authoring.authoringSessionId !== resolved.authoringSessionId) {
-        throw new Error('No native Local App authoring registration exists for this Code session');
-      }
-      const bound = (await this.store.list()).find(row => completeDesktopAuthoring(row.authoring)
-        && (row.authoring.sourceDirectory === entry.authoring.sourceDirectory || row.authoring.workspaceId === entry.authoring.workspaceId));
-      if (bound) {
-        await this.markPendingAuthoringConsumed(sourceSession.sessionId, bound.id);
-        throw new Error(`This Local App source was already published as ${bound.id}; use Continue developing instead of publishing another app`);
-      }
-      return { authoring: structuredClone(entry.authoring), sourceSession, pendingSessionId: sourceSession.sessionId };
+      return;
     }
-    const app = await this.store.get(appIdValue);
-    if (!completeDesktopAuthoring(app.authoring)) return {};
-    if (!sourceSession) throw new Error('Modify this application from its saved source Code session');
-    const resolved = await this.resolveNativeAuthoring(sourceSession);
+    this.checkAuthoringSource(proof, resolved.sourceDirectory);
     await this.verifySourcePath(input, resolved.sourceDirectory);
-    if (app.authoring.appId !== appIdValue
-      || app.authoring.sourceDirectory !== resolved.sourceDirectory
-      || app.authoring.projectRef.path !== resolved.projectRef.path
-      || app.authoring.authoringSessionId !== sourceSession.sessionId) {
-      throw new Error('Modify this application from its saved source Code session');
+    const session = { projectPath: resolved.projectRef.path, sessionId: resolved.authoringSessionId };
+    const grant = await this.store.getAuthoringGrant(resolved.sourceDirectory, resolved.projectRef, session.sessionId);
+    this.checkAuthoringGrant(grant, proof.sourceId, session);
+    const prior = appIdValue === undefined && grant.ownerAppId !== undefined
+      ? await this.store.publicationIntent(requestId) : undefined;
+    const sameFirstPublication = prior?.appId === undefined && prior?.native?.sourceId === proof.sourceId
+      && prior.sourceDirectory === resolved.sourceDirectory && prior.authoringSessionId === session.sessionId;
+    if ((appIdValue === undefined && grant.ownerAppId !== undefined && !sameFirstPublication)
+      || (appIdValue !== undefined && grant.ownerAppId !== appIdValue)) {
+      throw new Error('The Local App authoring receipt belongs to another application');
     }
-    return { authoring: structuredClone(app.authoring), sourceSession };
+    return grant;
+  }
+  /** Capture the app's current native source owner before selecting its session. */
+  async captureAuthoringSession(appIdValue: unknown, requested: SourceSessionRef, expectedVersion: number): Promise<{
+    sourceDirectory: string; commit<T>(operation: () => T): Promise<T>;
+  }> {
+    const id = appId(appIdValue);
+    const version = this.authoringVersions.get(id) ?? 0;
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion !== version) throw new Error('The Local App authoring owner changed');
+    const read = async (): Promise<{ sourceDirectory: string; sourceId: string; workspaceId: string }> => {
+      if (this.unavailable || this.shuttingDown) throw new Error('The Local App host is unavailable');
+      const row = await this.store.get(id);
+      const authoring = row.authoring;
+      if (!completeDesktopAuthoring(authoring) || authoring.appId !== id
+        || authoring.authoringSessionId !== requested.sessionId || authoring.projectRef.path !== requested.projectPath
+        || authoring.sourceDirectory !== authoring.projectRef.path) {
+        throw new Error('The selected Local App authoring owner changed');
+      }
+      const proof = await this.store.findAuthoringSource(authoring.sourceDirectory);
+      if (!proof) throw new Error('The Local App source has no verified authoring receipt');
+      this.checkAuthoringSource(proof, authoring.sourceDirectory);
+      const grant = await this.store.getAuthoringGrant(authoring.sourceDirectory, authoring.projectRef, authoring.authoringSessionId);
+      this.checkAuthoringGrant(grant, proof.sourceId, requested);
+      if (grant.ownerAppId !== id || grant.authoring.workspaceId !== authoring.workspaceId) {
+        throw new Error('The Local App authoring receipt no longer matches its current owner');
+      }
+      return { sourceDirectory: authoring.sourceDirectory, sourceId: proof.sourceId, workspaceId: authoring.workspaceId };
+    };
+    const captured = await this.runtime.exclusive(id, async () => {
+      const result = await read();
+      if ((this.authoringVersions.get(id) ?? 0) !== version) throw new Error('The Local App authoring owner changed');
+      return result;
+    });
+    return { sourceDirectory: captured.sourceDirectory, commit: async <T>(operation: () => T): Promise<T> =>
+      this.runtime.exclusive(id, async () => {
+        for (;;) {
+          const pending = [...(this.authoringVerifications.get(id) ?? [])];
+          if (pending.length) { await Promise.all(pending); continue; }
+          const current = await read();
+          if (this.authoringVerifications.get(id)?.size) continue;
+          if ((this.authoringVersions.get(id) ?? 0) !== version || current.sourceDirectory !== captured.sourceDirectory
+            || current.sourceId !== captured.sourceId || current.workspaceId !== captured.workspaceId) {
+            throw new Error('The Local App authoring source changed');
+          }
+          return operation();
+        }
+      }) };
   }
   private async runEnded(appId: string, runId: string, reason: string): Promise<void> {
     this.remoteGateway?.revokeApp(appId, runId);
@@ -788,10 +880,13 @@ export class LocalAppHost {
     }, 80);
   }
   async initialize(): Promise<void> {
-    await this.loadPendingAuthoring();
     await fs.mkdir(this.store.importsRoot, { recursive: true, mode: 0o700 });
     await this.mcpGateway.initialize();
-    ipcMain.handle(CH_LOCAL_APPS, (event, input) => { this.assertMain(event); return this.request(input); });
+    ipcMain.handle(CH_LOCAL_APPS, (event, input) => {
+      this.assertMain(event);
+      const mode = this.options.currentConversationMode();
+      return this.request(input, undefined, { kind: 'native', mode });
+    });
     ipcMain.handle(CH_LOCAL_APP_NATIVE, (event, input) => this.native(event, input));
     // Model tools use this authenticated local-only endpoint. No account or
     // provider credentials are passed to it or to application children.
@@ -807,7 +902,7 @@ export class LocalAppHost {
         const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         if (!['publish', 'list', 'read', 'start', 'stop', 'status', 'logs', 'agent_catalog'].includes(input.action)) throw new Error('Unsupported LocalApp tool action');
         controller.signal.throwIfAborted();
-        const result = await this.request(input, controller.signal);
+        const result = await this.request(input, controller.signal, { kind: 'tool' });
         response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result ?? { ok: true }));
       } catch (error) { response.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) })); }
     });
@@ -1138,7 +1233,8 @@ export class LocalAppHost {
     if (method === 'agent.chats.cancel') return broker.cancelChat(owner, String(args.chatId), signal);
     throw new Error('Unknown application Agent API');
   }
-  private async editAuthoring(row: DesktopLocalApp): Promise<void> {
+  private async editAuthoring(row: DesktopLocalApp, setCurrent = false, isCurrent: () => boolean = () => true): Promise<void> {
+    const authoringVersion = this.authoringVersions.get(row.id) ?? 0;
     const sourceDirectory = row.authoring?.sourceDirectory;
     let canonicalSource: string | undefined;
     if (sourceDirectory) {
@@ -1148,35 +1244,110 @@ export class LocalAppHost {
       } catch { /* native prepareAuthoring reports a source that has disappeared */ }
     }
     if (!canonicalSource) {
-      await this.options.edit({ id: row.id, name: row.name,
+      if (isCurrent()) await this.options.edit({ id: row.id, name: row.name,
         ...(row.authoring ? { authoring: structuredClone(row.authoring) } : {}),
-        authoringSourceMissing: Boolean(sourceDirectory), authoringAction: 'sourceMissing' });
+        authoringSourceMissing: Boolean(sourceDirectory), authoringAction: 'sourceMissing', authoringVersion });
       return;
     }
     const authoring = isDesktopAuthoringRef(row.authoring) ? row.authoring : undefined;
     const sessionBindings: Record<string, { workspaceId: string; sourceDirectory: string; projectRef: { kind: 'desktopPath'; path: string }; mode: 'code' }> = {};
     if (authoring && this.options.resolveAuthoringBinding) {
+      let resolved: Omit<DesktopAuthoringRef, 'workspaceId' | 'appId'> | undefined;
       try {
-        const resolved = await this.options.resolveAuthoringBinding(row.id, {
+        resolved = await this.options.resolveAuthoringBinding(row.id, {
           projectPath: authoring.projectRef.path, sessionId: authoring.authoringSessionId,
         });
-        if (resolved.sourceDirectory === canonicalSource && resolved.projectRef.path === canonicalSource) {
-          sessionBindings[authoring.authoringSessionId] = { workspaceId: authoring.workspaceId,
-            sourceDirectory: authoring.sourceDirectory, projectRef: authoring.projectRef, mode: 'code' };
+      } catch { /* A missing session cannot be resumed. */ }
+      if (resolved && resolved.sourceDirectory === canonicalSource && resolved.projectRef.path === canonicalSource
+        && resolved.authoringSessionId === authoring.authoringSessionId) {
+        const proof = await this.store.findAuthoringSource(canonicalSource);
+        if (proof) {
+          this.checkAuthoringSource(proof, canonicalSource);
+          const session = { projectPath: canonicalSource, sessionId: authoring.authoringSessionId };
+          const grant = await this.existingAuthoringGrant(canonicalSource, session);
+          if (grant) this.checkAuthoringGrant(grant, proof.sourceId, session);
+          if (grant?.ownerAppId === row.id && grant.authoring.workspaceId === authoring.workspaceId) {
+            sessionBindings[authoring.authoringSessionId] = { workspaceId: authoring.workspaceId,
+              sourceDirectory: authoring.sourceDirectory, projectRef: authoring.projectRef, mode: 'code' };
+          }
         }
-      } catch { /* a stale or non-Code session is explicitly rebound in the renderer */ }
+      }
     }
     const prepared = await this.store.core.request<{ action: 'sourceMissing' | 'rebindRequired' | 'resumeSession' | 'createSession'; sourceDirectory: string; authoring?: DesktopAuthoringRef; authoringSessionId?: string }>({
       op: 'prepareAuthoring', appId: row.id, sessionBindings, sourceExists: true,
     });
-    await this.options.edit({ id: row.id, name: row.name,
+    if (isCurrent()) await this.options.edit({ id: row.id, name: row.name,
       authoring: prepared.authoring ?? { sourceDirectory: prepared.sourceDirectory || canonicalSource },
-      authoringSourceMissing: false, authoringAction: prepared.action });
+      authoringSourceMissing: false, authoringAction: prepared.action, authoringSetCurrent: setCurrent, authoringVersion });
   }
-  async request(input: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  async request(input: Record<string, unknown>, signal?: AbortSignal, origin: LocalAppRequestOrigin = {
+    kind: 'native', mode: this.options.currentConversationMode(),
+  }): Promise<unknown> {
     if (this.unavailable) throw this.unavailable;
     if (!input || typeof input !== 'object') throw new Error('Invalid Local App request');
     const action = String(input.action);
+    if (origin.kind !== 'native' && (action === 'pendingAuthoringSessions' || action === 'resumeAuthoringSession')) {
+      throw new Error('Local App session recovery is available only in Desktop');
+    }
+    if (origin.kind === 'native' && DEVELOPMENT_ACTIONS.has(action) && origin.mode !== 'code') {
+      throw new Error(nativeTr('local_app_development_requires_code'));
+    }
+    // The model adapter injects the originating session from its trusted turn;
+    // resolve it now, before waiting on app locks or writing any source state.
+    let originatingAuthoring: Omit<DesktopAuthoringRef, 'workspaceId' | 'appId'> | undefined;
+    let publicationRequestId: string | undefined;
+    let priorPublication: PublicationIntent | undefined;
+    let committedAuthoring: DesktopAuthoringGrant | null | undefined;
+    if (action === 'publish' || (origin.kind === 'tool' && action === 'read')) {
+      const session = sourceSessionRef(input.source_session);
+      if (!session) throw new Error(nativeTr('local_app_development_requires_code'));
+      if (origin.kind === 'tool' && (input.source_session as Record<string, unknown>).mode !== 'code') {
+        throw new Error(nativeTr('local_app_development_requires_code'));
+      }
+      // Start the trusted owner lookup immediately, while the original
+      // session may still be the displayed live draft. A durable pending
+      // tool request may also use its captured Code owner after a later /cd.
+      const resolution = this.resolveNativeAuthoring(session).then(value => ({ value }), error => ({ error }));
+      if (action === 'publish') {
+        const requestId = (input.source_session as Record<string, unknown>).requestId;
+        if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId)) throw new Error('A durable Local App publication request is required');
+        publicationRequestId = requestId;
+        priorPublication = await this.store.publicationIntent(requestId);
+        if (priorPublication) {
+          if (priorPublication.sourceDirectory !== session.projectPath || priorPublication.authoringSessionId !== session.sessionId
+            || priorPublication.appId !== input.id) throw new Error('The Local App publication request conflicts with its saved owner');
+          const receipt = await this.store.core.request<{ sourceId?: string | null; publisher?: DesktopAuthoringRef | null; record: { appId: string } } | null>({ op: 'getPublication', requestId });
+          if (receipt) {
+            if (!/^a[a-f0-9]{32}$/.test(receipt.record?.appId ?? '')
+              || (priorPublication.appId !== undefined && priorPublication.appId !== receipt.record.appId)) {
+              throw new Error('The Local App publication receipt does not match its saved intent');
+            }
+            if (priorPublication.native) {
+              const publisher = receipt.publisher;
+              if (receipt.sourceId !== priorPublication.native.sourceId || !completeDesktopAuthoring(publisher)
+                || publisher.sourceDirectory !== priorPublication.sourceDirectory || publisher.projectRef.path !== priorPublication.sourceDirectory
+                || publisher.authoringSessionId !== priorPublication.authoringSessionId) {
+                throw new Error('The Local App publication receipt does not match its saved owner');
+              }
+              committedAuthoring = { sourceId: receipt.sourceId, authoring: publisher, sessionMode: 'code', ownerAppId: receipt.record.appId };
+            } else {
+              if (receipt.sourceId != null || receipt.publisher != null) throw new Error('The Local App publication receipt has an unexpected authoring owner');
+              committedAuthoring = null;
+            }
+          }
+        }
+      }
+      const admittedToolReplay = origin.kind === 'tool' && priorPublication?.state === 'pending'
+        && (input.source_session as Record<string, unknown>).mode === 'code';
+      if (priorPublication && (committedAuthoring !== undefined || admittedToolReplay)) {
+        originatingAuthoring = { sourceDirectory: priorPublication.sourceDirectory,
+          projectRef: { kind: 'desktopPath', path: priorPublication.sourceDirectory }, authoringSessionId: priorPublication.authoringSessionId };
+      } else {
+        const result = await resolution;
+        if ('error' in result) throw result.error;
+        originatingAuthoring = result.value;
+      }
+    }
     if (action === 'remote-settings') return this.remoteSettings();
     if (action === 'remote-configuration') return this.remoteConfiguration();
     if (action === 'remote-access') { if (typeof input.enabled !== 'boolean') throw new Error('Invalid remote access setting'); await this.setRemoteAccess(appId(input.id), input.enabled); return; }
@@ -1193,31 +1364,119 @@ export class LocalAppHost {
       if (existing && existing.revision !== input.expectedRevision) throw new Error('Application changed; refresh before updating');
       const row = await this.market.install(input.remoteId, existing); if (existing) { this.invalidateRemoteOpenings(existing.id); this.remoteGateway?.revokeApp(existing.id); } this.changed(); return row;
     }
-    if (action === 'list') return { action, apps: await this.list() };
+    if (action === 'list') {
+      const apps = await this.list();
+      return { action, apps: origin.kind === 'native' && origin.mode === 'code' ? apps
+        : apps.map(({ authoring: _authoring, authoringSourceMissing: _missing, authoringAction: _action, ...app }) => app) };
+    }
+    if (action === 'pendingPublications') {
+      const pending = await this.store.pendingPublications();
+      return origin.kind === 'native' && origin.mode === 'code' ? pending
+        : pending.map(({ sourceDirectory: _sourceDirectory, ...entry }) => entry);
+    }
+    if (action === 'pendingSourceCopies') {
+      return (await this.authoringSourceIntents.pendingCopies()).map(({ requestId, appId, revision, purpose }) => ({ requestId, appId, revision, purpose }));
+    }
+    if (action === 'pendingAuthoringSessions') {
+      return (await this.authoringSessionIntents.pending()).map(({ requestId, appId, name }) => ({ requestId, appId, name }));
+    }
+    if (action === 'resumeAuthoringSession') {
+      if (typeof input.requestId !== 'string' || !UUID_PATTERN.test(input.requestId)) throw new Error('Invalid Local App session intent');
+      const saved = await this.getAuthoringSession(input.requestId);
+      await this.options.edit({ id: saved.appId ?? '', name: saved.name, authoringSessionIntentId: saved.requestId });
+      return;
+    }
+    if (action === 'resumePublication') {
+      if (typeof input.requestId !== 'string' || !UUID_PATTERN.test(input.requestId)) throw new Error('Invalid Local App publication request');
+      const saved = await this.store.publicationIntent(input.requestId);
+      if (!saved || saved.state === 'completed') throw new Error('The pending Local App publication is no longer available');
+      const row = await this.runtime.exclusive(saved.appId ?? '__publish_new__', () => this.store.resumePublication(saved.requestId));
+      this.invalidateRemoteOpenings(row.id); this.remoteGateway?.revokeApp(row.id); this.changed();
+      return row;
+    }
+    if (action === 'resumeSourceCopy') {
+      if (typeof input.requestId !== 'string' || !UUID_PATTERN.test(input.requestId)) throw new Error('Invalid Local App source operation');
+      return this.withAuthoringSourceLock(async () => {
+        const saved = await this.authoringSourceIntents.getCopy(input.requestId as string);
+        if (!saved || saved.state === 'completed') throw new Error('The pending Local App source operation is no longer available');
+        const ready = await this.completeSourceCopy(saved);
+        const row = await this.store.get(ready.targetAppId!);
+        await this.options.edit({ id: ready.targetAppId!, name: row.name, authoring: { sourceDirectory: ready.sourcePath },
+          authoringAction: 'rebindRequired', authoringSetCurrent: false, authoringRequestId: ready.requestId });
+      });
+    }
     if (action === 'prepareAuthoring') {
       const session = sourceSessionRef(input.session);
       if (!session) throw new Error('Choose the new Local App Code session before creating its draft');
-      return await this.prepareNativeAuthoring(session);
+      return await this.prepareNativeAuthoring(session, origin.kind === 'native' ? origin.authoringSource : undefined);
     }
     if (action === 'bindAuthoring') {
-      const id = appId(input.id), sessionRef = input.session as { projectPath?: unknown; sessionId?: unknown } | undefined;
-      if (!sessionRef || typeof sessionRef.projectPath !== 'string' || typeof sessionRef.sessionId !== 'string' || !this.options.resolveAuthoringBinding) throw new Error('Choose an app Code session before binding its source');
-      const before = await this.store.get(id);
-      const resolved = await this.options.resolveAuthoringBinding(id, { projectPath: sessionRef.projectPath, sessionId: sessionRef.sessionId });
-      if (resolved.authoringSessionId !== sessionRef.sessionId) throw new Error('The selected app authoring session is no longer available');
-      const binding: DesktopAuthoringRef = {
-        workspaceId: isDesktopAuthoringRef(before.authoring) && before.authoring.sourceDirectory === resolved.sourceDirectory && before.authoring.projectRef.path === resolved.projectRef.path
-          ? before.authoring.workspaceId : randomUUID(),
-        ...resolved,
-        appId: id,
-      };
-      await this.runtime.exclusive(id, async () => {
-        const current = await this.store.get(id);
-        if (current.revision !== before.revision || current.releaseDigest !== before.releaseDigest) throw new Error('Application changed while its authoring session was being verified');
-        await this.store.bindAuthoring(id, binding);
-      });
-      this.changed();
-      return binding;
+      const id = appId(input.id), sessionRef = sourceSessionRef(input.session);
+      if (!sessionRef || typeof input.setCurrent !== 'boolean') throw new Error('Choose an app Code session and its authoring intent');
+      if (input.sourceRequestId !== undefined && (typeof input.sourceRequestId !== 'string' || !UUID_PATTERN.test(input.sourceRequestId))) {
+        throw new Error('Invalid Local App source operation');
+      }
+      const order = input.setCurrent ? (origin.kind === 'native' ? origin.authoringOrder : undefined) ?? ++this.authoringSequence : undefined;
+      const finishVerification = input.setCurrent ? this.trackAuthoringVerification(id) : undefined;
+      let intent: ReturnType<LocalAppHost['beginAuthoringIntent']> | undefined;
+      try {
+        let resolved: Omit<DesktopAuthoringRef, 'workspaceId' | 'appId'>;
+        try {
+          resolved = await this.resolveNativeAuthoring(sessionRef, origin.kind === 'native' ? origin.authoringSource : undefined);
+          intent = input.setCurrent ? this.beginAuthoringIntent(id, order) : undefined;
+        } finally { finishVerification?.(); }
+        const operation = { purpose: 'rebind' as const, sourceDirectory: resolved.sourceDirectory,
+          projectPath: resolved.projectRef.path, sessionId: resolved.authoringSessionId, appId: id };
+        let requestId: string;
+        let found: DesktopAuthoringSourceProof | null = null;
+        const copy = input.sourceRequestId === undefined ? undefined : await this.authoringSourceIntents.getCopy(input.sourceRequestId as string);
+        if (input.sourceRequestId !== undefined && (!copy || copy.state === 'pending'
+          || copy.targetAppId !== id || copy.sourcePath !== resolved.sourceDirectory)) {
+          throw new Error('The Local App source operation does not match this authoring session');
+        }
+        if (copy) {
+          requestId = copy.requestId;
+          found = await this.store.findAuthoringSource(resolved.sourceDirectory);
+          if (!found) throw new Error('The Local App source proof is unavailable');
+          this.checkAuthoringSource(found, resolved.sourceDirectory);
+          if (found.sourceId !== copy.sourceId || (found.ownerAppId !== undefined && found.ownerAppId !== id)) {
+            throw new Error('The Local App source proof changed');
+          }
+        } else if (input.setCurrent || (origin.kind === 'native' && origin.recoverExplicitBinding)) {
+          requestId = await this.authoringSourceIntents.sourceRequestId(operation);
+        } else {
+          found = await this.store.findAuthoringSource(resolved.sourceDirectory);
+          if (!found) throw new Error('Choose the Local App source explicitly before repairing its authoring session');
+          this.checkAuthoringSource(found, resolved.sourceDirectory);
+          if (found.ownerAppId !== undefined && found.ownerAppId !== id) throw new Error('The Local App source belongs to another application');
+          const existingIntent = await this.authoringSourceIntents.findSourceRequestId(operation);
+          if (found.ownerAppId !== id && !existingIntent) throw new Error('Choose the Local App source explicitly before repairing its authoring session');
+          requestId = existingIntent ?? await this.authoringSourceIntents.sourceRequestId({ ...operation, purpose: 'repair' });
+        }
+        const proof = copy ? found! : await this.store.ensureAuthoringSource(resolved.sourceDirectory, resolved.projectRef, requestId, id);
+        if (!copy) this.checkAuthoringSource(proof, resolved.sourceDirectory, requestId, id);
+        if (found && proof.sourceId !== found.sourceId) throw new Error('The Local App source identity changed during authoring recovery');
+        const session = { projectPath: resolved.projectRef.path, sessionId: resolved.authoringSessionId };
+        const saved = await this.runtime.exclusive(id, async () => {
+          const current = await this.store.get(id);
+          const previous = await this.existingAuthoringGrant(resolved.sourceDirectory, session);
+          if (previous) this.checkAuthoringGrant(previous, proof.sourceId, session);
+          if (previous?.ownerAppId !== undefined && previous.ownerAppId !== id) throw new Error('The Local App authoring receipt belongs to another application');
+          const binding: DesktopAuthoringRef = { ...resolved, appId: id,
+            workspaceId: previous?.authoring.workspaceId
+              ?? (isDesktopAuthoringRef(current.authoring) && current.authoring.sourceDirectory === resolved.sourceDirectory
+                && current.authoring.projectRef.path === resolved.projectRef.path ? current.authoring.workspaceId : randomUUID()) };
+          const registered = await this.store.registerAuthoring(proof.sourceId, requestId, binding, intent?.current() === true);
+          this.checkAuthoringGrant({ sourceId: proof.sourceId, authoring: registered, sessionMode: registered.sessionMode }, proof.sourceId, session);
+          if (registered.workspaceId !== binding.workspaceId || (registered.appId !== undefined && registered.appId !== id)) {
+            throw new Error('The Local App authoring receipt changed during registration');
+          }
+          if (copy) await this.authoringSourceIntents.completeCopy(copy.requestId);
+          return registered;
+        });
+        this.changed();
+        return saved;
+      } finally { intent?.finish(); }
     }
     if (action === 'agent-questions') return [...this.agentQuestions.values()].map(question => question.view);
     if (action === 'agent-answer') {
@@ -1247,20 +1506,20 @@ export class LocalAppHost {
         ...(typeof input.staged_path === 'string' ? { staged_path: input.staged_path } : {}),
         ...(typeof input.expectedRevision === 'number' ? { expectedRevision: input.expectedRevision } : {}),
       };
-      const row = await this.withPendingAuthoringLock(async () => {
-        const verified = await this.publishAuthoring(input, typeof input.id === 'string' ? appId(input.id) : undefined);
-        const published = await this.runtime.exclusive(key, () => this.store.publish({ ...publish,
-          ...(verified.authoring ? { authoring: verified.authoring } : {}) }));
-        if (verified.authoring) {
-          if (!completeDesktopAuthoring(published.authoring) || published.authoring.sourceDirectory !== verified.authoring.sourceDirectory
-            || published.authoring.authoringSessionId !== verified.authoring.authoringSessionId
-            || published.authoring.appId !== published.id) {
-            throw new Error('The Local App library did not persist the verified authoring binding');
-          }
-          if (verified.pendingSessionId) await this.markPendingAuthoringConsumed(verified.pendingSessionId, published.id);
-        }
-        return published;
-      });
+      const row = await this.withAuthoringSourceLock(() => this.runtime.exclusive(key, async () => {
+          const verified = committedAuthoring === undefined
+            ? await this.publishAuthoring(input, typeof input.id === 'string' ? appId(input.id) : undefined, originatingAuthoring!, publicationRequestId!)
+            : committedAuthoring ?? undefined;
+          // Publishing an existing app records its actual publisher; only an
+          // explicit rebind changes that app's preferred authoring owner.
+          const setCurrent = priorPublication?.native?.setCurrent ?? (input.id === undefined);
+          const published = await this.store.publish({ ...publish,
+            publication: { requestId: publicationRequestId!, sourceDirectory: originatingAuthoring!.sourceDirectory,
+              authoringSessionId: originatingAuthoring!.authoringSessionId },
+            ...(committedAuthoring !== undefined ? { publicationReplayOnly: true } : {}),
+            ...(verified ? { nativeAuthoring: { ...verified, setCurrent } } : {}) });
+          return published;
+        }));
       this.invalidateRemoteOpenings(row.id); this.remoteGateway?.revokeApp(row.id);
       this.changed();
       return { action, id: row.id, revision: row.revision, name: row.name, summary: row.summary, runtime: 'desktop', warnings: [], opensFrom: 'chat card or Apps library' };
@@ -1289,9 +1548,17 @@ export class LocalAppHost {
       return;
     }
     if (action === 'restoreSource' || action === 'remix') {
-      const row = await this.store.get(id), sourcePath = await this.authoringCopyPath(row.name);
-      const result = await this.store.core.request<{ appId?: string; record?: { appId: string } }>({ op: action === 'remix' ? 'remix' : 'restoreAuthoring', appId: id, revision: row.revision, sourcePath, authoring: { sourceDirectory: sourcePath } });
-      this.changed(); await this.editAuthoring(await this.store.get(result.record?.appId ?? result.appId ?? id)); return;
+      const intent = this.beginAuthoringIntent(id);
+      try {
+        const row = await this.store.get(id), sourcePath = await this.authoringCopyPath(row.name);
+        const copy = await this.authoringSourceIntents.createCopy({ purpose: action, appId: id, revision: row.revision, sourcePath });
+        const ready = await this.completeSourceCopy(copy);
+        const target = await this.store.get(ready.targetAppId!);
+        this.changed();
+        if (intent.current()) await this.options.edit({ id: ready.targetAppId!, name: target.name, authoring: { sourceDirectory: ready.sourcePath },
+          authoringAction: 'rebindRequired', authoringSetCurrent: true, authoringRequestId: ready.requestId });
+        return;
+      } finally { intent.finish(); }
     }
     if (action === 'marketPublish') {
       const metadata = input.metadata as MarketPublication;
@@ -1305,7 +1572,11 @@ export class LocalAppHost {
         return await this.market.publish(prepared, metadata);
       } finally { await fs.rm(prepared.directory, { recursive: true, force: true }); }
     }
-    if (action === 'read' || action === 'status') {
+    if (action === 'status') {
+      const { authoring: _authoring, authoringSourceMissing: _missing, authoringAction: _action, ...row } = this.runtime.status(await this.store.get(id));
+      return { action, ...row };
+    }
+    if (action === 'read') {
       const row = this.runtime.status(await this.store.get(id));
       const sourceSnapshotPath = this.store.revisionPath(id, row.revision);
       let sourceDirectory = row.authoring?.sourceDirectory;
@@ -1398,7 +1669,14 @@ export class LocalAppHost {
         partition.flushStorageData();
         await this.runtime.remove(id);
       });
-    } else if (action === 'edit') { const row = await this.store.get(id); if (row.marketOrigin && !row.authoring?.sourceDirectory) throw new Error('Create a permitted custom copy before developing a market application'); await this.editAuthoring(row); }
+    } else if (action === 'edit') {
+      const intent = this.beginAuthoringIntent(id);
+      try {
+        const row = await this.store.get(id);
+        if (row.marketOrigin && !row.authoring?.sourceDirectory) throw new Error('Create a permitted custom copy before developing a market application');
+        if (intent.current()) await this.editAuthoring(row, false, intent.current);
+      } finally { intent.finish(); }
+    }
     else throw new Error('Unknown Local App action');
     this.changed(); return { action, id };
   }
@@ -1418,8 +1696,8 @@ export class LocalAppHost {
     } finally { release(); }
   }
   private async authoringCopyPath(name: string): Promise<string> {
-    const root = join(this.options.configHome, '.apps'); await fs.mkdir(root, { recursive: true, mode: 0o700 });
-    return join(root, `${name.replace(/[^\p{L}\p{N} _-]/gu, '').slice(0, 50) || 'Application'}-${randomUUID().slice(0, 8)}`);
+    const root = this.options.appProjectsRoot; await fs.mkdir(root, { recursive: true, mode: 0o700 });
+    return join(await fs.realpath(root), `${name.replace(/[^\p{L}\p{N} _-]/gu, '').slice(0, 50) || 'Application'}-${randomUUID().slice(0, 8)}`);
   }
   private cancelOpening(id: string): Promise<void> {
     this.openingEpochs.set(id, (this.openingEpochs.get(id) ?? 0) + 1);

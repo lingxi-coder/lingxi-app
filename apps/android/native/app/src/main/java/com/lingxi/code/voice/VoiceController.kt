@@ -25,9 +25,15 @@ import com.lingxi.code.voice.audio.RealtimeSpeechSession
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -98,6 +104,10 @@ object VoiceCaptureStore {
 
     internal fun reset() {
         _state.value = VoiceCaptureUiState()
+    }
+
+    internal fun permissionRequestCompleted() {
+        _state.update { if (it.phase == VoiceCapturePhase.PermissionRequired) VoiceCaptureUiState() else it }
     }
 }
 
@@ -382,10 +392,12 @@ internal fun cancelActiveHeldVoiceSession() {
  * @return Pair of (onHoldStart, onHoldRelease) for [VoiceFlowOverlay]'s gesture.
  */
 @Composable
-fun rememberVoiceCapture(
+internal fun rememberVoiceCapture(
     onTranscript: (String) -> Unit,
     onPartialTranscript: (String) -> Unit = {},
     onError: (String, String) -> Unit = { _, _ -> },
+    bindOwner: (AudioOwnerKey) -> Unit = {},
+    audioAdmission: Mutex? = null,
 ): Pair<() -> Unit, () -> Unit> {
     val context = androidx.compose.ui.platform.LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -397,6 +409,7 @@ fun rememberVoiceCapture(
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
+        VoiceCaptureStore.permissionRequestCompleted()
         if (!granted) currentOnError.value("permissionDenied", "Microphone permission denied")
     }
 
@@ -411,7 +424,8 @@ fun rememberVoiceCapture(
             },
             onPartialTranscript = { currentOnPartial.value(it) },
             openRealtimeSession = { language, callbacks ->
-                ServiceRealtimeListenSession(coroutineScope, callbacks) { serviceCallbacks ->
+                ServiceRealtimeListenSession(coroutineScope, callbacks, audioAdmission,
+                    drain = { AndroidAudioServiceProvider.perform(context, owner, DeviceAudioOperation.EndOwner) }) { serviceCallbacks ->
                     AndroidAudioServiceProvider.openRealtimeListen(context, owner, language, serviceCallbacks)
                 }
             },
@@ -438,10 +452,13 @@ fun rememberVoiceCapture(
         onDispose {
             HeldVoiceSessionRegistry.detach(capture)
             capture.dispose()
+            com.lingxi.code.voice.audio.AndroidAudioSessionContext.release(owner)
         }
     }
 
     val onHoldStart: () -> Unit = {
+        com.lingxi.code.voice.audio.AndroidAudioSessionContext.reserve(owner)
+        bindOwner(owner)
         capture.ensurePermission()
         if (capture.isPermitted()) capture.start()
     }
@@ -463,17 +480,40 @@ fun rememberVoiceCapture(
 internal class ServiceRealtimeListenSession(
     scope: CoroutineScope,
     callbacks: RealtimeSpeechCallbacks,
+    private val audioAdmission: Mutex? = null,
+    private val drain: suspend () -> Unit = {},
     private val openServiceSession: suspend (RealtimeSpeechCallbacks) -> RealtimeSpeechSession,
 ) : RealtimeSpeechSession {
+    private val callbacks = callbacks
+    private val stateLock = Any()
+    private val closed = CompletableDeferred<Unit>()
     @Volatile private var terminal = false
     @Volatile private var stopRequested = false
     @Volatile private var nativeSession: RealtimeSpeechSession? = null
-    private val job: Job = scope.launch {
+    private var waitingForAdmission = audioAdmission != null
+    private val job: Job = scope.launch(start = CoroutineStart.LAZY) {
+        var admissionHeld = false
         try {
-            val session = openServiceSession(callbacks)
+            audioAdmission?.lock()
+            admissionHeld = audioAdmission != null
+            val shouldOpen = synchronized(stateLock) {
+                waitingForAdmission = false
+                !terminal && !stopRequested
+            }
+            if (!shouldOpen) return@launch
+            val session = openServiceSession(object : RealtimeSpeechCallbacks {
+                override fun onReady() = callbacks.onReady()
+                override fun onPartial(text: String) = callbacks.onPartial(text)
+                override fun onFinal(text: String) = callbacks.onFinal(text)
+                override fun onError(code: String, message: String, retriable: Boolean) = callbacks.onError(code, message, retriable)
+                override fun onClosed() {
+                    try { callbacks.onClosed() } finally { closed.complete(Unit) }
+                }
+            })
             nativeSession = session
             if (stopRequested) session.stop()
             if (terminal) session.cancel()
+            if (admissionHeld) closed.await()
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             if (!terminal) {
                 terminal = true
@@ -502,16 +542,29 @@ internal class ServiceRealtimeListenSession(
                 )
                 callbacks.onClosed()
             }
+        } finally {
+            if (admissionHeld) {
+                try { withContext(NonCancellable) { drain() } }
+                finally { audioAdmission?.unlock() }
+            }
         }
     }
+    init { job.start() }
 
     override fun stop() {
-        stopRequested = true
-        nativeSession?.stop()
+        val cancelWaiting = synchronized(stateLock) {
+            stopRequested = true
+            if (waitingForAdmission && !terminal) { terminal = true; true } else false
+        }
+        if (cancelWaiting) {
+            job.cancel()
+            callbacks.onFinal("")
+            callbacks.onClosed()
+        } else nativeSession?.stop()
     }
 
     override fun cancel() {
-        terminal = true
+        synchronized(stateLock) { terminal = true }
         nativeSession?.cancel()
         job.cancel()
     }

@@ -13,7 +13,8 @@ class WorkspaceDirectoryRepositoryTest {
     private fun repository(): WorkspaceDirectoryRepository {
         File(temp.root, "workspace/projects").mkdirs()
         return WorkspaceDirectoryRepository(temp.root, "/home/brand", "/home/brand/workspace",
-            "/home/brand/workspace/projects", File(temp.root, ".config"))
+            "/home/brand/workspace/projects", File(temp.root, ".config"),
+            listOf("/home/brand/workspace", "/home/brand/workspace/projects"))
     }
     @Test fun createPickEditUnlinkPreservesFilesAndCanonicalIdentity() {
         val repo = repository()
@@ -85,6 +86,48 @@ class WorkspaceDirectoryRepositoryTest {
         Files.createSymbolicLink(File(config, "workspace-locations.properties").toPath(), original.toPath())
         fails(R.string.workspace_browser_outside_home) { repo.save("/home/brand/workspace", "workspace") }
         assertEquals("keep", original.readText())
+    }
+    @Test fun managedWorkspacesInsideConfigurationAreWritableButTheirRootsAndSecretsStayProtected() {
+        val config = File(temp.root, ".brand").apply { mkdir() }
+        val roots = listOf("chat", "code", "projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee/workspace", "workspaces/6d0793ab-3426-4c84-8b38-c0ab3896dcee/run")
+        roots.forEach { File(config, it).mkdirs() }
+        File(config, "scheduled").mkdir()
+        File(config, "provider").mkdir()
+        File(config, ".apps").mkdir()
+        val projectIndex = File(config, "projects/index.json").apply { writeText("keep") }
+        val projectManifest = File(config, "projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee/project.json").apply { writeText("keep") }
+        val guestRoots = roots.map { "/home/brand/.brand/$it" }
+        val repo = WorkspaceDirectoryRepository(temp.root, "/home/brand", guestRoots[0], "/home/brand/.brand/projects", config, guestRoots)
+
+        guestRoots.forEach { root ->
+            assertTrue(repo.resolve(repo.create(root, "content")).isDirectory)
+            fails(R.string.workspace_browser_in_use) { repo.rename(root, "renamed", emptyList()) }
+            fails(R.string.workspace_browser_in_use) { repo.delete(root, emptyList()) }
+        }
+        for (restricted in listOf("/home/brand/.brand", "/home/brand/.brand/provider", "/home/brand/.brand/.apps", "/home/brand/.brand/scheduled",
+            "/home/brand/.brand/projects", "/home/brand/.brand/projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee")) {
+            fails(R.string.workspace_browser_in_use) { repo.create(restricted, "not-allowed") }
+        }
+        fails(R.string.workspace_browser_in_use) { repo.delete("/home/brand/.brand/projects/index.json", emptyList()) }
+        fails(R.string.workspace_browser_in_use) { repo.delete("/home/brand/.brand/projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee/project.json", emptyList()) }
+        fails(R.string.workspace_browser_in_use) { repo.delete("/home/brand/.brand", emptyList()) }
+        assertEquals("keep", projectIndex.readText())
+        assertEquals("keep", projectManifest.readText())
+    }
+
+    @Test fun symlinksCannotTurnConfigurationIntoAContentWorkspace() {
+        val config = File(temp.root, ".brand").apply { mkdir() }
+        val chat = File(config, "chat").apply { mkdir() }
+        val provider = File(config, "provider").apply { mkdir() }
+        val repo = WorkspaceDirectoryRepository(temp.root, "/home/brand", "/home/brand/.brand/chat",
+            "/home/brand/.brand/projects", config, listOf("/home/brand/.brand/chat"))
+        Files.createSymbolicLink(File(chat, "private").toPath(), provider.toPath())
+        fails(R.string.workspace_browser_in_use) { repo.create("/home/brand/.brand/chat/private", "not-allowed") }
+        File(chat, "private").delete()
+        chat.delete()
+        Files.createSymbolicLink(chat.toPath(), provider.toPath())
+        fails(R.string.workspace_browser_in_use) { repo.create("/home/brand/.brand/chat", "not-allowed") }
+        assertTrue(provider.listFiles()!!.isEmpty())
     }
     private fun fails(resource: Int, action: () -> Unit) {
         try { action(); fail("Expected protected operation to fail") }

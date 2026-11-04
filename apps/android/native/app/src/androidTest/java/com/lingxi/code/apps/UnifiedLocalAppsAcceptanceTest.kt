@@ -36,7 +36,7 @@ class UnifiedLocalAppsAcceptanceTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile(MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/picker-acceptance-${UUID.randomUUID()}")
+        val source = apps.hostFile(MobileUserStorage.directories(context).codeGuestCwd.trimEnd('/') + "/picker-acceptance-${UUID.randomUUID()}")
         check(File(context.filesDir, "local-app-acceptance-fixtures/static").copyRecursively(source))
         File(source, "index.html").writeText("""
             <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -47,7 +47,7 @@ class UnifiedLocalAppsAcceptanceTest {
               } catch(error) { document.getElementById('result').textContent=String(error); }
             });</script>
         """.trimIndent())
-        val published = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
+        val published = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
         val record = published.getJSONObject("record").appRecord()
         val filename = "LingXi-External-Browser-${UUID.randomUUID()}.jpg"
         val bytes = File(context.filesDir, "local-app-acceptance-fixtures/test-photo.jpg").readBytes()
@@ -121,9 +121,9 @@ class UnifiedLocalAppsAcceptanceTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile(MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/background-acceptance-${UUID.randomUUID()}")
+        val source = apps.hostFile(MobileUserStorage.directories(context).codeGuestCwd.trimEnd('/') + "/background-acceptance-${UUID.randomUUID()}")
         check(File(context.filesDir, "local-app-acceptance-fixtures/python").copyRecursively(source))
-        val value = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
+        val value = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
         val record = value.getJSONObject("record").appRecord()
         val release = value.getJSONObject("release").appRelease()
         apps.grant(record.id, release.digest)
@@ -204,7 +204,10 @@ class UnifiedLocalAppsAcceptanceTest {
                 assertTrue(http(first, "", entry = true).second.decodeToString().contains("NATIVE-MARKET-V1"))
                 val layout = apps.request("layout", installed.id) as JSONObject
                 val note = File(layout.getString("dataPath"), "native-update-note").apply { writeText("retain across market releases") }
-                val remix = apps.restoreSource(installed.id, true); created.add(remix.id)
+                val remixRequest = AuthoringRequest(UUID.randomUUID().toString(), "remix", installed.name,
+                    UUID.randomUUID().toString(), UUID.randomUUID().toString(), installed.id, revision = installed.currentRevision)
+                AuthoringIntentStore(context).saveRequest(remixRequest, com.lingxi.code.model.SessionMode.Code)
+                val remix = apps.restoreAuthoringDirectory(remixRequest, com.lingxi.code.model.SessionMode.Code).record; created.add(remix.id)
                 remix.authoring?.sourceDirectory?.let { sources.add(apps.hostFile(it)) }
                 assertNotEquals(installed.id, remix.id)
                 assertEquals(remote, remix.marketOrigin?.remixedFrom)
@@ -265,7 +268,7 @@ class UnifiedLocalAppsAcceptanceTest {
         assertTrue("Install or enable an HTTP browser before this acceptance", browserPackages.isNotEmpty())
         NativeAppActivityHost(android.content.Intent(context, MainActivity::class.java).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)).use {
             suspend fun publish(): AppRecord {
-                val guest = MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/browser-acceptance-${UUID.randomUUID()}"
+                val guest = MobileUserStorage.directories(context).codeGuestCwd.trimEnd('/') + "/browser-acceptance-${UUID.randomUUID()}"
                 val source = apps.hostFile(guest)
                 check(fixture.copyRecursively(source)); sources.add(source)
                 File(source, "dist/index.html").writeText("""
@@ -276,7 +279,7 @@ class UnifiedLocalAppsAcceptanceTest {
                       document.body.textContent=previous===null?'first-load':previous;
                     </script>
                 """.trimIndent())
-                val result = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
+                val result = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
                 return result.getJSONObject("record").appRecord().also { created.add(it.id) }
             }
             fun visibleText(text: String): Boolean = instrumentation.uiAutomation.rootInActiveWindow
@@ -305,7 +308,7 @@ class UnifiedLocalAppsAcceptanceTest {
                     org.apache.commons.compress.archivers.zip.ZipFile.builder().setFile(exported.archive).get().use { zip ->
                         assertEquals(exported.files.toSet(), zip.entries.asSequence().map { it.name }.toSet())
                     }
-                    val imported = apps.importArchive(android.net.Uri.fromFile(exported.archive))
+                    val imported = apps.importArchive(android.net.Uri.fromFile(exported.archive), com.lingxi.code.model.SessionMode.Code)
                     created.add(imported.id)
                     assertNotEquals(first.id, imported.id)
                     assertNull(imported.marketOrigin)
@@ -349,13 +352,12 @@ class UnifiedLocalAppsAcceptanceTest {
         NativeAppActivityHost(android.content.Intent(context, MainActivity::class.java).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)).use {
             instrumentation.waitForIdleSync()
             suspend fun publish(name: String): AppRecord {
-                val guest = MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/acceptance-${UUID.randomUUID()}"
+                val guest = MobileUserStorage.directories(context).codeGuestCwd.trimEnd('/') + "/acceptance-${UUID.randomUUID()}"
                 val source = apps.hostFile(guest)
                 check(File(fixtures, name).copyRecursively(source))
                 sources.add(source)
-                val value = apps.request("publish") {
+                val value = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish") {
                     put("sourcePath", source.absolutePath); put("expectedRevision", 0)
-                    put("authoring", JSONObject().put("sourceDirectory", guest))
                 } as JSONObject
                 return value.getJSONObject("record").appRecord().also { created.add(it.id) }
             }
@@ -363,35 +365,7 @@ class UnifiedLocalAppsAcceptanceTest {
                 val static = publish("static")
                 val staticLaunch = apps.start(static.id)
                 assertTrue(http(staticLaunch, "", entry = true).second.decodeToString().contains("html"))
-                val sourceDirectory = static.authoring!!.sourceDirectory
-                val authoring = JSONObject()
-                    .put("workspaceId", UUID.randomUUID().toString())
-                    .put("sourceDirectory", sourceDirectory)
-                    .put("projectRef", JSONObject().put("kind", "mobileProject").put("projectId", UUID.randomUUID().toString()))
-                    .put("authoringSessionId", UUID.randomUUID().toString())
-                    .put("appId", static.id)
-                val legacyBinding = apps.request("prepareAuthoring", static.id) {
-                    put("sourceExists", true); put("sessionBindings", JSONObject())
-                } as JSONObject
-                assertEquals("rebindRequired", legacyBinding.getString("action"))
-                apps.request("bindAuthoring", static.id) { put("authoring", authoring) }
-                val sessionContext = JSONObject().put("workspaceId", authoring.getString("workspaceId"))
-                    .put("sourceDirectory", sourceDirectory).put("projectRef", authoring.getJSONObject("projectRef")).put("mode", "code")
-                val resumed = apps.request("prepareAuthoring", static.id) {
-                    put("sourceExists", true)
-                    put("sessionBindings", JSONObject().put(authoring.getString("authoringSessionId"), sessionContext))
-                } as JSONObject
-                assertEquals("resumeSession", resumed.getString("action"))
-                assertEquals(authoring.getString("authoringSessionId"), resumed.getString("authoringSessionId"))
-                val movedSession = apps.request("prepareAuthoring", static.id) {
-                    put("sourceExists", true)
-                    put("sessionBindings", JSONObject().put(authoring.getString("authoringSessionId"), sessionContext.put("mode", "chat")))
-                } as JSONObject
-                assertEquals("createSession", movedSession.getString("action"))
                 sources.first().deleteRecursively()
-                assertEquals("sourceMissing", (apps.request("prepareAuthoring", static.id) {
-                    put("sourceExists", false); put("sessionBindings", JSONObject())
-                } as JSONObject).getString("action"))
                 assertEquals(200, http(staticLaunch, "", entry = true).first)
                 android.util.Log.i("LocalAppAcceptance", "STATIC_SOURCE_INDEPENDENCE PASS appId=${static.id}")
 
@@ -403,12 +377,12 @@ class UnifiedLocalAppsAcceptanceTest {
                 }
                 val linux = buildAndroidMobileLinuxRuntimeHandle(LinuxRuntimeBridge.configForWorkspace(context, mode))
                 assertEquals(MobileLinuxRootfsStateFfi.READY, linux.boot().state)
+                val directories = MobileUserStorage.directories(context)
                 val tools = linux.runCommand(MobileLinuxCommandRequestFfi(
                     command = "/bin/sh", args = listOf("-lc", "set -e; id -u; printf '%s\\n' \"\$HOME\"; command -v python3; command -v node; command -v npm"),
-                    cwd = null, env = emptyList(), stdin = null, timeoutMs = 30_000uL, allowNetwork = false, mounts = emptyList(),
+                    cwd = directories.configGuestPath, env = emptyList(), stdin = null, timeoutMs = 30_000uL, allowNetwork = false, mounts = emptyList(),
                 ))
                 assertEquals(tools.stderr, 0, tools.exitCode)
-                val directories = MobileUserStorage.directories(context)
                 assertTrue(tools.stdout, tools.stdout.startsWith("1000\n${directories.guestHome}\n"))
 
                 val python = publish("python")
@@ -435,7 +409,7 @@ class UnifiedLocalAppsAcceptanceTest {
                 assertArrayEquals(bytes, File(layout.getString("dataPath"), "acceptance.bin").readBytes())
                 val socket = binaryWebSocket(js, bytes)
                 val pty = linux.openPty(MobileLinuxPtyOpenRequestFfi(
-                    command = "/bin/sh", args = listOf("-i"), cwd = null, env = emptyList(),
+                    command = "/bin/sh", args = listOf("-i"), cwd = directories.configGuestPath, env = emptyList(),
                     size = MobileLinuxPtySizeFfi(cols = 80u, rows = 24u), mounts = emptyList(),
                 ))
                 try {
@@ -444,7 +418,7 @@ class UnifiedLocalAppsAcceptanceTest {
                     assertEquals("NODE-READY", http(js, "/health").second.decodeToString())
                     assertEquals(200, http(staticLaunch, "", entry = true).first)
                     val command = linux.runCommand(MobileLinuxCommandRequestFfi(
-                        command = "/bin/sh", args = listOf("-lc", "printf ordinary-command-still-alive"), cwd = null,
+                        command = "/bin/sh", args = listOf("-lc", "printf ordinary-command-still-alive"), cwd = directories.configGuestPath,
                         env = emptyList(), stdin = null, timeoutMs = 10_000uL, allowNetwork = false, mounts = emptyList(),
                     ))
                     assertEquals(0, command.exitCode); assertEquals("ordinary-command-still-alive", command.stdout)

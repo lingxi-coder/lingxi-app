@@ -17,8 +17,8 @@ enum ConversationNotificationRoute {
     static func userInfo(
         sessionID: String,
         turnID: UInt64?,
-        workspaceKey: String = "global",
-        sessionMode: SessionMode = .code,
+        workspaceKey: String,
+        sessionMode: SessionMode,
         eventClass: ConversationNotificationEventClass
     ) -> [AnyHashable: Any] {
         var userInfo: [AnyHashable: Any] = [
@@ -44,22 +44,18 @@ enum ConversationNotificationRoute {
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             !sessionID.isEmpty
         else { return nil }
-        if let raw = userInfo["lingxi.url"] as? String {
-            guard let url = URL(string: raw), let target = CanonicalDeepLink.parse(url), target.parts[0] == "session" else { return nil }
-            return .openConversation(sessionID: target.parts[1], turnID: (userInfo[turnIDKey] as? String).flatMap(UInt64.init),
-                workspaceKey: target.params["workspace"], mode: target.params["mode"].flatMap(SessionMode.init(rawValue:)) ?? .code)
-        }
-        let turnID = (userInfo[turnIDKey] as? String).flatMap(UInt64.init)
-        let workspaceKey = (userInfo[workspaceKeyKey] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let mode = (userInfo[sessionModeKey] as? String)
-            .flatMap(SessionMode.init(rawValue:)) ?? .code
-        return .openConversation(
-            sessionID: sessionID,
-            turnID: turnID,
-            workspaceKey: workspaceKey?.isEmpty == false ? workspaceKey : nil,
-            mode: mode
-        )
+        guard let raw = userInfo["lingxi.url"] as? String,
+              let url = URL(string: raw), let target = CanonicalDeepLink.parse(url),
+              target.parts[0] == "session",
+              canonicalSessionID(target.parts[1]) == canonicalSessionID(sessionID),
+              let workspace = target.params["workspace"],
+              ConversationScope(workspaceKey: workspace) != nil,
+              workspace == (userInfo[workspaceKeyKey] as? String),
+              let mode = target.params["mode"].flatMap(SessionMode.init(rawValue:)),
+              mode.rawValue == (userInfo[sessionModeKey] as? String) else { return nil }
+        return .openConversation(sessionID: target.parts[1],
+            turnID: (userInfo[turnIDKey] as? String).flatMap(UInt64.init),
+            workspaceKey: workspace, mode: mode)
     }
 }
 
@@ -103,8 +99,8 @@ struct ConversationBackgroundSnapshot: Equatable {
         pendingPermissions: [ConversationPendingPermission] = [],
         backgroundTasks: [BackgroundTaskSnapshot],
         requiresExecutionLease: Bool,
-        workspaceKey: String = "global",
-        sessionMode: SessionMode = .code
+        workspaceKey: String,
+        sessionMode: SessionMode
     ) {
         self.sessionID = sessionID
         self.turnToken = turnToken
@@ -128,8 +124,8 @@ struct ConversationNotificationPayload {
         sessionID: String,
         turnID: UInt64?,
         eventClass: ConversationNotificationEventClass,
-        workspaceKey: String = "global",
-        sessionMode: SessionMode = .code,
+        workspaceKey: String,
+        sessionMode: SessionMode,
         // Distinguishes notifications that share a session, turn and class.
         // Background tasks all posted with `turnID: nil`, so every task in a
         // session collapsed onto ONE identifier and `post`'s delivered-set
@@ -284,10 +280,10 @@ final class ConversationBackgroundAlertController {
         self.preferences = preferences
     }
 
-    static func live() -> ConversationBackgroundAlertController {
+    static func live(ownerID: String = "default") -> ConversationBackgroundAlertController {
         ConversationBackgroundAlertController(
             scheduler: UserNotificationConversationScheduler(),
-            activityReporter: liveConversationActivityReporter()
+            activityReporter: liveConversationActivityReporter(ownerID: ownerID)
         )
     }
 
@@ -422,8 +418,8 @@ final class ConversationBackgroundAlertController {
     func markRecoverablePause(
         sessionID: String,
         turnToken: ConversationTurnToken?,
-        workspaceKey: String = "global",
-        sessionMode: SessionMode = .code
+        workspaceKey: String,
+        sessionMode: SessionMode
     ) {
         guard scenePhase != .active else { return }
         post(
@@ -530,8 +526,8 @@ final class ConversationBackgroundAlertController {
     }
 }
 
-func liveConversationActivityReporter() -> ConversationActivityReporting {
-    ConversationSystemActivityReporter()
+func liveConversationActivityReporter(ownerID: String = "default") -> ConversationActivityReporting {
+    ConversationSystemActivityReporter(ownerID: ownerID)
 }
 
 extension ConversationBackgroundSnapshot {

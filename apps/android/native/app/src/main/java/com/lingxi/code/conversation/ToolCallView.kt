@@ -101,7 +101,9 @@ internal fun ToolCallView(
     val display = call.display
     val title = toolCallTitle(call)
     val isSkill = call.header?.verb == ToolVerbUi.Skill || call.tool.equals("Skill", ignoreCase = true)
-    val headline = display?.let { resultHeadline(it) }
+    val requiresCode = display != null && isLocalAppCodeRequired(call.tool, call.status, display.headline, display.body)
+    val headline = if (requiresCode) stringResource(R.string.local_app_development_requires_code)
+        else display?.let { resultHeadline(it) }
     val statusLabel = toolCallStatusLabel(call.status)
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
@@ -442,6 +444,8 @@ internal fun toolCallStatusColor(status: AgentToolStatus): Color {
 internal fun ToolResultContent(call: ToolCallUi) {
     val display = call.display ?: return
     val t = LingXiTheme.palette
+    val requiresCode = isLocalAppCodeRequired(call.tool, call.status, display.headline, display.body)
+    val localizedRefusal = if (requiresCode) stringResource(R.string.local_app_development_requires_code) else null
     Column(
         modifier = Modifier.padding(start = 16.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -449,7 +453,7 @@ internal fun ToolResultContent(call: ToolCallUi) {
         display.diff?.takeIf { it.rows.isNotEmpty() }?.let { DiffView(diff = it) }
         display.body?.takeIf { it.isNotEmpty() }?.let { body ->
             Text(
-                text = body,
+                text = localizedRefusal ?: body,
                 color = t.text2,
                 fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                 lineHeight = 17.sp,

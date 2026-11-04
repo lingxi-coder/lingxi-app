@@ -9,7 +9,7 @@
       "route": "remote/Hk3xQ9vR2mT7wL1pZ8cN4a/abc"
     },
     {
-      "url": "lingxi://session/abc?workspace=project.a",
+      "url": "lingxi://session/abc?workspace=project.a&mode=chat",
       "route": "session/abc"
     },
     {
@@ -25,7 +25,7 @@
       "route": "new"
     },
     {
-      "url": "lingxi://session/AbC?workspace=project.a&message=123e4567-e89b-12d3-a456-426614174000",
+      "url": "lingxi://session/AbC?workspace=project.a&mode=code&message=123e4567-e89b-12d3-a456-426614174000",
       "route": "session/AbC"
     },
     {
@@ -101,9 +101,10 @@
       "route": "import/provider"
     },
     {
-      "url": "lingxi://session/CasePreserved?message=123E4567-E89B-12D3-A456-426614174000",
+      "url": "lingxi://session/CasePreserved?mode=chat&message=123E4567-E89B-12D3-A456-426614174000",
       "route": "session/CasePreserved",
       "params": {
+        "mode": "chat",
         "message": "123e4567-e89b-12d3-a456-426614174000"
       }
     },
@@ -117,6 +118,9 @@
     }
   ],
   "invalid": [
+    "lingxi://session/abc",
+    "https://lingxios.net/open/session/abc?workspace=global",
+    "lingxi://session/abc?mode=Chat",
     "https://lingxios.net.evil/open/new",
     "lingxi://new?mode=chat&mode=code",
     "lingxi://new?unknown=x",

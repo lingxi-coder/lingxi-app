@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -24,6 +24,12 @@ function deferred<T = void>(): { promise: Promise<T>; resolve(value?: T): void; 
     rejectPromise = reject;
   });
   return { promise, resolve: (value?: T) => resolvePromise(value as T), reject: rejectPromise };
+}
+
+function fakeConversationSpaces() {
+  return { snapshot: () => ({ activeMode: 'chat', projects: {}, sessions: [],
+    navigation: { chat: { projectId: null }, code: { projectId: null } }, globalWorkspaces: { chat: '/global/chat', code: '/global/code' } }),
+    find: () => undefined };
 }
 
 test('workspace preview is bounded UTF-8 and rejects traversal, binary content, and symlinks', () => {
@@ -206,6 +212,8 @@ test('session clear uses dedicated IPC and re-checks active work plus pending in
   const settings = new SettingsStore(userData);
   settings.addProject(project);
   settings.activateProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
+  settings.conversationSpaces.setMode('code');
   settings.setActiveSession({ projectPath: project, sessionId });
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const ipc = {
@@ -249,7 +257,7 @@ test('session clear uses dedicated IPC and re-checks active work plus pending in
 
     assert.equal(closeCalls, 1);
     assert.equal(newCalls, 1);
-    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId: replacementId });
+    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, projectId: project, sessionId: replacementId, mode: 'code' });
   } finally {
     host.dispose();
     rmSync(userData, { recursive: true, force: true });
@@ -277,16 +285,34 @@ test('session clear accepts Claude Code name syntax and labels the session being
   const settings = new SettingsStore(userData);
   settings.addProject(project);
   settings.activateProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
+  settings.conversationSpaces.setMode('code');
   settings.setActiveSession({ projectPath: project, sessionId });
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const ipc = {
     handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
     removeHandler: (channel: string) => { handlers.delete(channel); },
   };
+  const events: string[] = [];
+  let leases = 0;
   const runtime = {
     projectPath: project,
+    sessionMode: 'code' as const,
     connectionState: { status: 'connected' as const },
     getWorkspaceState: async () => ({ cwd: project, additional_directories: [], transcript_path: transcriptPath }),
+    captureSessionMetadataOwner: async (path: string, mode: string) => {
+      assert.equal(path, transcriptPath);
+      assert.equal(mode, 'code');
+      assert.equal(leases, 1);
+      events.push('capture');
+      return { apply: async (action: string, title?: string) => {
+        assert.equal(action, 'rename');
+        assert.equal(title, 'investigation');
+        assert.equal(leases, 1);
+        events.push('rename');
+        appendFileSync(path, `${JSON.stringify({ type: 'custom-title', customTitle: title, sessionId })}\n`);
+      }, release: async () => {} };
+    },
     pendingInteractions: 0,
     pendingAskUserQuestions: [],
   };
@@ -296,8 +322,14 @@ test('session clear accepts Claude Code name syntax and labels the session being
     get: (requestedSessionId: string) => requestedSessionId === sessionId ? runtime : undefined,
     hasActiveWork: () => false,
     isProjectClosing: () => false,
-    closeSession: async () => undefined,
-    newSession: async () => ({ projectPath: project, sessionId: replacementId }),
+    retainBackgroundSession: (ref: { sessionId: string }) => {
+      assert.equal(ref.sessionId, sessionId);
+      leases++;
+      events.push('lease');
+      return () => { leases--; events.push('release'); };
+    },
+    closeSession: async () => { events.push('close'); },
+    newSession: async () => { events.push('new'); return { projectPath: project, sessionId: replacementId }; },
   };
   const catalog = {
     find: async () => row,
@@ -314,8 +346,11 @@ test('session clear accepts Claude Code name syntax and labels the session being
 
   try {
     await clear!({ sender, senderFrame: frame }, sessionId, 'investigation');
-    assert.match(readFileSync(transcriptPath, 'utf8'), /"customTitle":"investigation"/);
-    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId: replacementId });
+    assert.deepEqual(JSON.parse(readFileSync(transcriptPath, 'utf8').trim().split('\n').at(-1)!),
+      { type: 'custom-title', customTitle: 'investigation', sessionId });
+    assert.deepEqual(events, ['lease', 'capture', 'rename', 'release', 'close', 'new']);
+    assert.equal(leases, 0);
+    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, projectId: project, sessionId: replacementId, mode: 'code' });
   } finally {
     host.dispose();
     rmSync(userData, { recursive: true, force: true });
@@ -342,7 +377,7 @@ test('adding the first project uses the real settings store, trusts it, and star
     const canonical = realpathSync.native(workspace);
     assert.deepEqual(calls, [`new:${canonical}`]);
     assert.equal(result.trusted, true);
-    assert.deepEqual(settings.getPublic().activeSession, { projectPath: canonical, sessionId });
+    assert.deepEqual(settings.getPublic().activeSession, { projectPath: canonical, projectId: canonical, sessionId, mode: 'chat' });
     assert.equal(JSON.parse(readFileSync(settings.settingsPath, 'utf8')).activeSession, undefined);
   } finally {
     rmSync(userData, { recursive: true, force: true });
@@ -402,6 +437,7 @@ test('failed session resume does not change the selected project or active sessi
   const targetSession = '22222222-3333-4444-8555-666666666666';
   settings.addProject(first);
   settings.addProject(target);
+  settings.conversationSpaces.register({ projectPath: target, projectId: target, sessionId: targetSession, mode: 'code' });
   settings.activateProject(first);
   settings.setActiveSession({ projectPath: first, sessionId: firstSession });
   const bridge = {
@@ -409,17 +445,19 @@ test('failed session resume does not change the selected project or active sessi
     isProjectClosing: () => false,
     openSession: async () => { throw new Error('resume failed'); },
   };
+  const targetRow = { uuid: targetSession, title: 'Target', modified_rfc3339: '', message_count: 1, mode: 'code', path: join(target, `${targetSession}.jsonl`) };
   const catalog = {
-    list: async () => ({ sessions: [{ uuid: targetSession, title: 'Target', modified_rfc3339: '', message_count: 1, path: 'target.jsonl' }] }),
+    list: async () => ({ sessions: [targetRow] }),
     find: async (_projectPath: string, requestedId: string) => requestedId === targetSession
-      ? { uuid: targetSession, title: 'Target', modified_rfc3339: '', message_count: 1, path: 'target.jsonl' }
+      ? targetRow
       : undefined,
+    select: async () => targetRow,
     invalidate: () => undefined,
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
   try {
     await assert.rejects(
-      host.openSessionAndActivate({ projectPath: target, sessionId: targetSession }),
+      host.openSessionAndActivate({ projectPath: target, sessionId: targetSession }, { scope: 'current', transcriptPath: targetRow.path }),
       /resume failed/,
     );
     assert.equal(settings.getPublic().activeProject, first);
@@ -442,6 +480,8 @@ test('navigation mutations execute in invocation order and the last open wins', 
   const settings = new SettingsStore(userData);
   settings.addProject(projectA);
   settings.addProject(projectB);
+  settings.conversationSpaces.register({ projectPath: projectA, projectId: projectA, sessionId: sessionA, mode: 'code' });
+  settings.conversationSpaces.register({ projectPath: projectB, projectId: projectB, sessionId: sessionB, mode: 'code' });
   settings.setTrust(projectA, true);
   settings.setTrust(projectB, true);
   const gates = new Map([[sessionA, deferred<void>()], [sessionB, deferred<void>()]]);
@@ -455,22 +495,24 @@ test('navigation mutations execute in invocation order and the last open wins', 
       await gates.get(ref.sessionId)?.promise;
     },
   };
-  const catalog = {
-    find: async (_projectPath: string, sessionId: string) => ({
+  const row = (projectPath: string, sessionId: string) => ({
       uuid: sessionId,
       title: sessionId,
       modified_rfc3339: '',
-      message_count: 1,
-      path: `${sessionId}.jsonl`,
-    }),
+      message_count: 1, mode: 'code',
+      path: join(projectPath, `${sessionId}.jsonl`),
+    });
+  const catalog = {
+    find: async (projectPath: string, sessionId: string) => row(projectPath, sessionId),
+    select: async (projectPath: string, sessionId: string) => row(projectPath, sessionId),
     invalidate: () => undefined,
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
 
   try {
-    const first = host.openSessionAndActivate({ projectPath: projectA, sessionId: sessionA });
+    const first = host.openSessionAndActivate({ projectPath: projectA, sessionId: sessionA }, { scope: 'current', transcriptPath: row(projectA, sessionA).path });
     await new Promise<void>((resolve) => setImmediate(resolve));
-    const second = host.openSessionAndActivate({ projectPath: projectB, sessionId: sessionB });
+    const second = host.openSessionAndActivate({ projectPath: projectB, sessionId: sessionB, projectId: projectB, mode: 'code' }, { scope: 'current', transcriptPath: row(projectB, sessionB).path });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.deepEqual(calls, [sessionA]);
 
@@ -482,7 +524,7 @@ test('navigation mutations execute in invocation order and the last open wins', 
     await second;
 
     assert.equal(settings.getPublic().activeProject, projectB);
-    assert.deepEqual(settings.getPublic().activeSession, { projectPath: projectB, sessionId: sessionB });
+    assert.deepEqual(settings.getPublic().activeSession, { projectPath: projectB, sessionId: sessionB, projectId: projectB, mode: 'code' });
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectoryA, { recursive: true, force: true });
@@ -497,6 +539,8 @@ test('historical startup opens the catalog session before persisting it active',
   const sessionId = '33333333-4444-4555-8666-777777777777';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
+  settings.conversationSpaces.setMode('code');
   const calls: string[] = [];
   const bridge = {
     runtimeSummaries: [],
@@ -505,7 +549,7 @@ test('historical startup opens the catalog session before persisting it active',
     openSession: async (ref: { sessionId: string }) => { calls.push(`open:${ref.sessionId}`); },
     newSession: async () => { throw new Error('must restore history instead of creating'); },
   };
-  const restoredRow = { uuid: sessionId, title: 'History', modified_rfc3339: '', message_count: 2, path: join(project, `${sessionId}.jsonl`) };
+  const restoredRow = { uuid: sessionId, title: 'History', modified_rfc3339: '', message_count: 2, mode: 'code', path: join(project, `${sessionId}.jsonl`) };
   const catalog = {
     list: async () => ({ sessions: [restoredRow] }),
     select: async () => restoredRow,
@@ -515,7 +559,7 @@ test('historical startup opens the catalog session before persisting it active',
   try {
     await host.restoreProjectSession(project);
     assert.deepEqual(calls, [`open:${sessionId}`]);
-    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId });
+    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, projectId: project, sessionId, mode: 'code' });
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectory, { recursive: true, force: true });
@@ -539,7 +583,7 @@ test('history-less startup keeps the host-created session volatile until first p
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
   try {
     await host.restoreProjectSession(project);
-    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId });
+    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, projectId: project, sessionId, mode: 'chat' });
     assert.equal(JSON.parse(readFileSync(settings.settingsPath, 'utf8')).activeSession, undefined);
   } finally {
     rmSync(userData, { recursive: true, force: true });
@@ -558,11 +602,11 @@ test('session open rejects a UUID absent from the selected project catalog', asy
     settings,
     { get: () => undefined, isProjectClosing: () => false, openSession: async () => { opened = true; } } as any,
     new DiagnosticBuffer(),
-    { list: async () => ({ sessions: [] }), find: async () => undefined } as any,
+    { list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined } as any,
   );
   try {
     await assert.rejects(
-      host.openSessionAndActivate({ projectPath: project, sessionId: '44444444-5555-4666-8777-888888888888' }),
+      host.openSessionAndActivate({ projectPath: project, sessionId: '44444444-5555-4666-8777-888888888888' }, { scope: 'current', transcriptPath: join(project, '44444444-5555-4666-8777-888888888888.jsonl') }),
       /does not belong/,
     );
     assert.equal(opened, false);
@@ -579,11 +623,14 @@ test('session open accepts a matching UUID outside the bounded project list', as
   const sessionId = '55555555-6666-4777-8888-999999999999';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let opened: {
     ref: { projectPath: string; sessionId: string };
     empty?: boolean;
     resumeModel?: string;
   } | undefined;
+  const row = { uuid: sessionId, title: 'Old session', modified_rfc3339: '', message_count: 1, mode: 'code',
+    path: join(project, `${sessionId}.jsonl`), resume_model: 'openrouter/cohere/north-mini-code:free' };
   const host = new HostController(
     settings,
     {
@@ -600,25 +647,19 @@ test('session open accepts a matching UUID outside the bounded project list', as
     {
       list: async () => ({ sessions: [] }),
       find: async (_projectPath: string, requestedId: string) => requestedId === sessionId
-        ? {
-          uuid: sessionId,
-          title: 'Old session',
-          modified_rfc3339: '',
-          message_count: 1,
-          path: 'old.jsonl',
-          resume_model: 'openrouter/cohere/north-mini-code:free',
-        }
+        ? row
         : undefined,
+      select: async () => row,
     } as any,
   );
   try {
-    await host.openSessionAndActivate({ projectPath: project, sessionId });
+    await host.openSessionAndActivate({ projectPath: project, sessionId }, { scope: 'current', transcriptPath: row.path });
     assert.deepEqual(opened, {
-      ref: { projectPath: project, sessionId },
+      ref: { projectPath: project, projectId: project, sessionId, mode: 'code' },
       empty: false,
       resumeModel: 'openrouter/cohere/north-mini-code:free',
     });
-    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId });
+    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, projectId: project, sessionId, mode: 'code' });
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectory, { recursive: true, force: true });
@@ -632,7 +673,10 @@ test('host passes zero-count catalog rows to the empty-session open path', async
   const sessionId = '88888888-9999-4aaa-8bbb-cccccccccccc';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let opened: { ref: { projectPath: string; sessionId: string }; empty?: boolean } | undefined;
+  const row = { uuid: sessionId, title: 'Empty', modified_rfc3339: '', message_count: 0, mode: 'code',
+    path: join(project, `${sessionId}.jsonl`), empty_session: true };
   const host = new HostController(
     settings,
     {
@@ -644,12 +688,13 @@ test('host passes zero-count catalog rows to the empty-session open path', async
     new DiagnosticBuffer(),
     {
       list: async () => ({ sessions: [] }),
-      find: async () => ({ uuid: sessionId, title: 'Empty', modified_rfc3339: '', message_count: 0, path: 'empty.jsonl', empty_session: true }),
+      find: async () => row,
+      select: async () => row,
     } as any,
   );
   try {
-    await host.openSessionAndActivate({ projectPath: project, sessionId });
-    assert.deepEqual(opened, { ref: { projectPath: project, sessionId }, empty: true });
+    await host.openSessionAndActivate({ projectPath: project, sessionId }, { scope: 'current', transcriptPath: row.path });
+    assert.deepEqual(opened, { ref: { projectPath: project, projectId: project, sessionId, mode: 'code' }, empty: true });
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectory, { recursive: true, force: true });
@@ -663,7 +708,10 @@ test('zero-visible historical rows still use resume_session path', async () => {
   const sessionId = '89898989-9999-4aaa-8bbb-cccccccccccc';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let emptyMode: boolean | undefined;
+  const row = { uuid: sessionId, title: sessionId.slice(0, 8), modified_rfc3339: '', message_count: 0,
+    mode: 'code', path: join(project, `${sessionId}.jsonl`), empty_session: false };
   const host = new HostController(
     settings,
     {
@@ -674,18 +722,12 @@ test('zero-visible historical rows still use resume_session path', async () => {
     } as any,
     new DiagnosticBuffer(),
     {
-      find: async () => ({
-        uuid: sessionId,
-        title: sessionId.slice(0, 8),
-        modified_rfc3339: '',
-        message_count: 0,
-        path: 'system-only.jsonl',
-        empty_session: false,
-      }),
+      find: async () => row,
+      select: async () => row,
     } as any,
   );
   try {
-    await host.openSessionAndActivate({ projectPath: project, sessionId });
+    await host.openSessionAndActivate({ projectPath: project, sessionId }, { scope: 'current', transcriptPath: row.path });
     assert.equal(emptyMode, false);
   } finally {
     rmSync(userData, { recursive: true, force: true });
@@ -700,12 +742,13 @@ test('opening an already-connected runtime does not require a persisted catalog 
   const sessionId = '99999999-aaaa-4bbb-8ccc-dddddddddddd';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
+  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let catalogLookups = 0;
   let opened = false;
   const host = new HostController(
     settings,
     {
-      get: () => ({ projectPath: project, connectionState: { status: 'connected' } }),
+      get: () => ({ projectPath: project, sessionMode: 'code', connectionState: { status: 'connected' } }),
       isProjectClosing: () => false,
       runtimeSummaries: [],
       openSession: async () => { opened = true; },
@@ -720,7 +763,7 @@ test('opening an already-connected runtime does not require a persisted catalog 
     await host.openSessionAndActivate({ projectPath: project, sessionId });
     assert.equal(opened, true);
     assert.equal(catalogLookups, 0);
-    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId });
+    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, projectId: project, sessionId, mode: 'code' });
     assert.equal((await (host as any).bootstrap()).workspace.trusted, true);
   } finally {
     rmSync(userData, { recursive: true, force: true });
@@ -733,6 +776,7 @@ test('bootstrap surfaces an explicit recovery state when the persisted workspace
   const workspace = '/missing/workspace';
   const missing = Object.assign(new Error('workspace path is not a directory'), { code: 'ENOENT' });
   const settings = {
+    conversationSpaces: fakeConversationSpaces(),
     getWorkspace: () => workspace,
     getTrust: () => { throw missing; },
     getPublic: () => ({ version: 1, activeProject: workspace, projects: [workspace], pinnedSessions: [] }),
@@ -766,6 +810,7 @@ test('bootstrap surfaces an explicit recovery state when the persisted workspace
 test('bootstrap replays pending AskUserQuestion requests after a renderer reload', async () => {
   const diagnostics = new DiagnosticBuffer();
   const settings = {
+    conversationSpaces: fakeConversationSpaces(),
     getWorkspace: () => '/workspace',
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
     getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' } }),
@@ -801,10 +846,12 @@ test('project session catalogs are patched independently and preserved in bootst
     title,
     modified_rfc3339: '2026-08-26T00:00:00Z',
     message_count: 1,
+    mode: 'code',
     path: `/sessions/${uuid}.jsonl`,
     empty_session: false,
   });
   const settings = {
+    conversationSpaces: { ...fakeConversationSpaces(), findBySessionId: () => ({ mode: 'code', projectId: projectA }) },
     isSessionArchived: () => false,
     getWorkspace: () => projectA,
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
@@ -842,6 +889,7 @@ test('host catalog generations keep only the newest deferred response', async ()
     invalidate: () => undefined,
   };
   const settings = {
+    conversationSpaces: { ...fakeConversationSpaces(), findBySessionId: () => ({ mode: 'code', projectId: projectPath }) },
     isSessionArchived: () => false,
     getWorkspace: () => projectPath,
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
@@ -855,6 +903,7 @@ test('host catalog generations keep only the newest deferred response', async ()
     title,
     modified_rfc3339: '2026-08-26T00:00:00Z',
     message_count: 1,
+    mode: 'code',
     path: '/session.jsonl',
     empty_session: false,
   });
@@ -871,6 +920,7 @@ test('host catalog generations keep only the newest deferred response', async ()
 
 test('bootstrap returns the canonical provider account snapshot', async () => {
   const settings = {
+    conversationSpaces: fakeConversationSpaces(),
     getWorkspace: () => '/workspace',
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
     getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),

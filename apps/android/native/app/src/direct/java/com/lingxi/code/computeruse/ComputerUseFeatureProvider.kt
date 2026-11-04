@@ -36,6 +36,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.TimeoutCancellationException
 import org.json.JSONArray
 import org.json.JSONObject
@@ -47,6 +48,7 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
+    private val engineOwners = ComputerUseOwnerRegistry()
     private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
     private const val MAX_NODES = 500
     private const val MAX_DEPTH = 50
@@ -318,6 +320,11 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
     }
 
     override fun engineHost(): AndroidComputerUseHost = this
+
+    override fun activeEngineOwners(): Set<String> = engineOwners.owners()
+
+    override fun engineHost(ownerKey: String): AndroidComputerUseHost =
+        OwnerScopedComputerUseHost(this, ownerKey, engineOwners)
 
     internal fun onAccessibilityConnected(service: LingXiAccessibilityService) {
         accessibility = service
@@ -626,7 +633,7 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         return try {
             val result = requireNotNull(audioController) {
                 "Computer Use audio controller is unavailable"
-            }.listen(language, timeoutMs)
+            }.listen(requireComputerUseAudioOwner(), language, timeoutMs)
             touch()
             audit.append(
                 "device_audio",
@@ -682,7 +689,7 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         return try {
             val result = requireNotNull(audioController) {
                 "Computer Use audio controller is unavailable"
-            }.speak(text, voice, speed)
+            }.speak(requireComputerUseAudioOwner(), text, voice, speed)
             touch()
             audit.append(
                 "device_audio",
@@ -713,7 +720,7 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
     override suspend fun stopAudio() {
         requireActive()
         try {
-            audioController?.stopAndWait()
+            audioController?.stopAndWait(requireComputerUseAudioOwner())
         } catch (error: CancellationException) {
             throw error
         } catch (error: AndroidComputerUseFfiException) {
@@ -1756,3 +1763,7 @@ internal fun AudioOperationException.toComputerUseAudioFfiException(): AndroidCo
     )
     else -> AndroidComputerUseFfiException.Other("${kind.name.lowercase()}: ${message ?: "音频操作失败"}")
 }
+
+private suspend fun requireComputerUseAudioOwner(): String =
+    currentCoroutineContext()[ComputerUseCallOwner]?.value
+        ?: throw AudioOperationException(DeviceAudioErrorKind.Unavailable, "The originating Computer Use owner is unavailable.")

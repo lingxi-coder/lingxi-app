@@ -44,7 +44,7 @@ test('native copy is complete in five languages and preserves argument positions
 test('native common labels match the canonical catalogs without bundling all mobile copy', () => {
   for (const locale of locales) {
     const canonical = JSON.parse(readFileSync(new URL(`../../../resources/translations/${locale}.json`, import.meta.url), 'utf8'));
-    for (const key of ['common_cancel', 'common_delete', 'permission_allow', 'permission_deny']) {
+    for (const key of ['common_cancel', 'common_delete', 'permission_allow', 'permission_deny', 'local_app_development_requires_code']) {
       assert.equal(nativeCatalog[key]![locale], canonical[key]);
     }
   }

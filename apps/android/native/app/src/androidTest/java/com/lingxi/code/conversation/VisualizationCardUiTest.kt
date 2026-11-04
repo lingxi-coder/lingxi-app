@@ -202,6 +202,7 @@ class VisualizationCardUiTest {
         )
         val engine = requireNotNull(NativeEngineFactory.build(
             context = context,
+            sessionMode = com.lingxi.code.model.SessionMode.Code,
             apiBase = "https://invalid.example",
 
             model = "",

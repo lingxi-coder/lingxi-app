@@ -1,8 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="conversation_handoff_ready">이어가기 초안이 준비되었습니다</string>
+    <string name="conversation_reconnect_disconnected">세션이 연결되지 않았습니다. 설정에서 다시 연결하세요.</string>
+    <string name="conversation_reconnect_release_pending">이전 세션을 종료하는 중입니다. 잠시 후 다시 시도하세요.</string>
+    <string name="conversation_state_unavailable">대화 상태를 불러올 수 없습니다. 지원되지 않는 형식이거나 데이터가 손상되었습니다.</string>
+    <string name="image_preview_save">이미지 저장</string>
+    <string name="image_preview_save_failed">이미지를 저장하지 못했습니다. 다시 시도하세요.</string>
+    <string name="image_preview_saved">이미지를 저장했습니다</string>
+    <string name="image_preview_failed">이 이미지를 표시할 수 없습니다</string>
+    <string name="image_preview_loading">이미지 불러오는 중…</string>
+    <string name="image_preview_zoom_in">확대</string>
+    <string name="image_preview_zoom_out">축소</string>
+    <string name="image_preview_fit">화면에 맞추기</string>
     <string name="chat_compact_during_turn">채팅 진행 중에는 압축할 수 없습니다</string>
     <string name="chat_message_copy">복사</string>
     <string name="chat_message_copied">복사됨</string>
+    <string name="chat_recovery_replay_truncated">일부 응답이 일시적으로 표시되지 않습니다. 작업이 끝난 후 대화를 다시 열면 전체 기록을 볼 수 있습니다.</string>
     <string name="app_intent_ask_description">Siri, 단축어 또는 다른 앱에서 전달된 텍스트를 새 대화로 가져옵니다.</string>
     <string name="app_intent_ask_title">灵犀에게 질문하기</string>
     <string name="app_intent_initial_command_param_title">미리 입력할 명령</string>
@@ -188,6 +201,7 @@
     <string name="chat_plan_title">할 일 목록</string>
     <string name="chat_provider_engine_unavailable">현재 미리보기 환경에는 사용 가능한 Provider 엔진이 없습니다.</string>
     <string name="chat_redacted_thinking">[접힌 생각 과정]</string>
+    <string name="chat_restore_unsent_message">전송되지 않은 메시지 복원</string>
     <string name="chat_result_added_label">%1$d줄 추가</string>
     <string name="chat_result_added_removed_label">%1$d줄 추가, %2$d줄 삭제</string>
     <string name="chat_result_files_found_label">파일 %1$d개 발견</string>
@@ -275,6 +289,7 @@
     <string name="chat_tool_verb_task">위임</string>
     <string name="chat_tool_verb_todo">할 일 목록 업데이트</string>
     <string name="chat_tool_verb_update">수정</string>
+    <string name="chat_turn_preparing_retry">대화를 준비하고 있습니다. 잠시 후 다시 시도해 주세요.</string>
     <string name="chat_usage_cache">캐시</string>
     <string name="chat_usage_cache_read">캐시 적중</string>
     <string name="chat_usage_cache_write">캐시 쓰기</string>
@@ -441,6 +456,7 @@
     <string name="cron_scope_label">범위</string>
     <string name="cron_section_scheduling">예약</string>
     <string name="cron_started_at_label">시작 시각</string>
+    <string name="cron_status_outcome_unknown">결과 알 수 없음</string>
     <string name="cron_status_queued">대기열에 있음</string>
     <string name="cron_status_recent_failed">최근 실패</string>
     <string name="cron_status_recent_succeeded">최근 성공</string>
@@ -722,6 +738,9 @@
     <string name="provider_llm_blurb">灵犀는 클라우드 LLM을 직접 호출하지 않으며, 추가한 제공업체가 추론을 수행합니다. 키는 기기에서만 암호화되어 저장됩니다.</string>
     <string name="provider_no_providers_added">아직 추가된 제공업체가 없습니다</string>
     <string name="provider_search_blurb">AI가 실시간 웹 검색에 접근하도록 하려면 검색 제공업체를 선택해 \"웹 검색\" 모드를 활성화하세요.</string>
+    <string name="remote_restore_unsent">보내지 않은 메시지 복원</string>
+    <string name="remote_session_reload_required">대화 데이터가 너무 많습니다. 대화를 다시 열어 불러오세요.</string>
+    <string name="remote_team_approval">팀 도구 승인</string>
     <string name="session_details_agent_count">에이전트</string>
     <string name="session_details_agents">에이전트</string>
     <string name="session_details_agents_subtitle">이 세션의 협업 에이전트</string>
@@ -741,12 +760,17 @@
     <string name="session_details_tasks_subtitle">도구 호출 및 셸 명령</string>
     <string name="session_details_title">세션 세부 정보</string>
     <string name="session_details_workspace">작업 공간</string>
+    <string name="session_handoff_open_source">원본 %1$s 대화 열기</string>
+    <string name="session_handoff_preparing">대화 요약을 준비하는 중…</string>
     <string name="session_index_save_failed_fmt">세션 인덱스 저장 실패: %1$s</string>
     <string name="session_index_save_new_failed_fmt">새 세션 인덱스 저장 실패: %1$s</string>
     <string name="session_mode_chat">Chat</string>
     <string name="session_mode_code">Code</string>
+    <string name="session_mode_chat_description">범용 어시스턴트</string>
+    <string name="session_mode_code_description">소프트웨어 개발 어시스턴트</string>
     <string name="session_panel_make_scheduled">예약 작업으로 만들기</string>
     <string name="session_panel_mode_hint">모드를 바꾸면 새 대화로 분기해 이어갑니다</string>
+    <string name="session_reconnect_still_releasing">이전 대화를 종료하는 중입니다. 잠시 후 다시 시도하세요.</string>
     <string name="session_relative_days_ago_fmt">%1$d일 전</string>
     <string name="session_relative_hours_ago_fmt">%1$d시간 전</string>
     <string name="session_relative_minutes_ago_fmt">%1$d분 전</string>
@@ -2548,6 +2572,16 @@
     <string name="chat_agent_report_pending">종료됨, 보고서 전달 대기 중</string>
     <string name="chat_agent_report_delivered">보고서 전달됨</string>
     <string name="chat_agent_execution_ended">실행 종료</string>
+    <string name="local_app_authoring_recover">앱 개발 재개</string>
+    <string name="local_app_authoring_name_invalid">이름을 80자 이내로 입력하세요.</string>
+    <string name="local_app_development_requires_code">Chat 모드에서는 Local App을 개발할 수 없습니다. 계속하려면 Code 모드로 전환하세요.</string>
+    <string name="local_app_publication_pending">완료되지 않은 앱 게시</string>
+    <string name="local_app_publication_recover">게시 재개</string>
+    <string name="local_app_publication_review_prepared">게시할 내용 검토</string>
+    <string name="local_app_market_remix">편집 가능한 사본 만들기</string>
+    <string name="local_app_market_remix_confirm">이 버전에서 편집 가능한 소스 사본을 만들까요?</string>
+    <string name="side_chat_expired_read_only">이 사이드 채팅은 만료되었습니다. 아래 내용은 확인하고 복사할 수 있습니다.</string>
+    <string name="side_chat_delivery_unconfirmed">전송 상태가 확인되지 않았습니다</string>
     <string name="chat_tool_calls_count">%1$d 회</string>
     <string name="chat_tool_running_count">%1$d 개 실행 중</string>
     <string name="chat_tool_calls_unsuccessful">호출이 성공하지 못함</string>

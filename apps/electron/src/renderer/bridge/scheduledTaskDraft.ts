@@ -59,7 +59,19 @@ export function scheduledTaskInput(draft: ScheduledTaskDraft) {
   if (draft.automation && !draft.automation.model.trim()) throw new Error('Choose a model before saving.');
   if (draft.automation?.runMode === 'selected_session' && !draft.automation.targetSessionId) throw new Error('Choose a target chat.');
   const automation = draft.automation ? { ...draft.automation, name: draft.title.trim().replace(/\s*\n\s*/g, ' ') } : undefined;
-  if (automation) { delete automation.runs; delete automation.ownedSessionId; }
+  if (automation) {
+    delete automation.runs;
+    delete automation.ownedSessionId;
+    delete automation.ownedSessionTranscriptPath;
+    delete automation.ownedSessionMode;
+    delete automation.ownedSessionScopeKey;
+    // Capture fresh metadata at the host, rather than replaying a form's source.
+    delete automation.targetSessionTranscriptPath;
+    delete automation.targetSessionMode;
+    delete automation.targetSessionScopeKey;
+    delete automation.sessionMode;
+    delete automation.sessionScopeKey;
+  }
   return { ...(automation ? { automation } : {}), ...(expires_at === undefined ? { no_expiry: true } : { expires_at }), cron: scheduledTaskCron(draft), prompt: `# ${draft.title.trim().replace(/\s*\n\s*/g, ' ')}\n\n${draft.instructions.trim()}`,
     recurring: draft.recurring ?? true, durable: draft.durable ?? true };
 }

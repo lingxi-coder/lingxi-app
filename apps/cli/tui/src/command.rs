@@ -620,10 +620,10 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/context",
         aliases: &[],
-        description: "Visualize current context usage as a colored grid",
+        description: "Visualize context usage or inspect the context manifest",
         dynamic_description: None,
-        hint: "[all]",
-        args: ArgSpec::None,
+        hint: "[manifest]",
+        args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_context,
     },
@@ -1272,6 +1272,8 @@ mod tests {
     #[test]
     fn resolve_rejects_unknown_and_non_slash_input() {
         assert!(resolve("/frobnicate").is_none());
+        assert!(resolve("/mode chat").is_none());
+        assert_eq!(resolve("/context manifest").map(|(_, args)| args), Some("manifest"));
         assert!(resolve("help").is_none());
         assert!(resolve("").is_none());
     }

@@ -42,6 +42,7 @@ object HeadlessEngineFactory {
         return NativeEngineFactory.build(
             context = appContext,
             scenario = NativeEngineScenario.ScheduledHeadless,
+            sessionMode = com.lingxi.code.model.SessionMode.Code,
             apiBase = environment.apiBase,
             model = environment.model.ifBlank { providerLaunch.defaultModel },
             providerProfilesJson = providerLaunch.providerProfilesJson,

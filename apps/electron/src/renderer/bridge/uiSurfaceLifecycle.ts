@@ -4,8 +4,7 @@ type UiSurfaceCommandHost = {
   command(sessionId: string, command: AllowedClientCommand): Promise<void>;
 };
 
-/** Serialize mount/unmount commands so switching sessions detaches the old
- * surface before attaching it to the new session, including async IPC delay. */
+/** Serialize surface commands, including asynchronous IPC and disposal. */
 export class UiSurfaceLifecycleQueue {
   private tail: Promise<void> = Promise.resolve();
 

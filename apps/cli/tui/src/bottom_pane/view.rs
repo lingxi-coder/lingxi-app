@@ -133,7 +133,7 @@ pub enum ViewOutcome {
     /// (`RataApp::run` → `run_app`) returns an `AppExit::SwitchSession(uuid)` so
     /// the runtime is re-mounted in-process against that session (the JSONL
     /// writer is retargeted) — NEVER an in-place `resume_session` swap.
-    SwitchSession(uuid::Uuid),
+    SwitchSession(crate::resume::ResumeSelection),
     /// The agents view selected a live-or-durable session. This uses a distinct
     /// ownership-aware unwind path: a live background row attaches to its
     /// authenticated endpoint, while a transcript is remounted only after the

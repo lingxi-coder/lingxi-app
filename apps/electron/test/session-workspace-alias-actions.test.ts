@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import {
-  CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT, CH_SESSION_RENAME, CH_SESSION_TOUCH,
+  CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT, CH_SESSION_METADATA_CAPTURE, CH_SESSION_RENAME, CH_SESSION_TOUCH,
   HostController, type WorkspaceDialogs,
 } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
@@ -22,22 +22,37 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
   mkdirSync(alias); mkdirSync(source); mkdirSync(store);
   const settings = new SettingsStore(join(root, 'settings'));
   settings.addProject(alias);
+  settings.conversationSpaces.setMode('code');
   if (options.savedSource !== false) settings.addProject(source);
   const ref = Object.freeze({ projectPath: alias, sessionId });
   const sourceRef = { projectPath: source, sessionId };
+  settings.conversationSpaces.register({ ...sourceRef, mode: 'code', projectId: options.savedSource === false ? alias : source });
   if (options.savedSource !== false) settings.setActiveSession(sourceRef);
   const path = join(store, `${sessionId}.jsonl`), untouchedPath = join(alias, 'unrelated.jsonl');
   const original = `${JSON.stringify({ type: 'user', sessionId, cwd: source, message: { role: 'user', content: 'Saved chat' } })}\n`;
   writeFileSync(path, original); writeFileSync(untouchedPath, 'A remains unchanged\n');
   utimesSync(path, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'));
+  const capture = () => {
+    const identity = statSync(path);
+    return async (action: string, title?: string) => {
+      const current = statSync(path);
+      if (identity.dev !== current.dev || identity.ino !== current.ino) throw new Error('captured source changed');
+      if (action === 'rename') appendFileSync(path, `${JSON.stringify({ type: 'custom-title', customTitle: title, sessionId })}\n`);
+      if (action === 'touch') utimesSync(path, new Date(), new Date());
+    };
+  };
+  let coldCapture: ReturnType<typeof capture> | undefined;
   const calls = {
     find: [] as SessionRef[], background: [] as SessionRef[], started: [] as SessionRef[],
     select: [] as (SessionRef & { scope: string })[], transcriptPaths: [] as (string | undefined)[],
     closed: [] as SessionRef[], replacements: [] as string[], trust: [] as string[], events: [] as string[],
   };
   const runtime = {
-    projectPath: source, sessionId, connectionState: { status: 'connected' }, hasActiveWork: false,
+    projectPath: source, sessionId, sessionMode: 'code' as const, connectionState: { status: 'connected' }, hasActiveWork: false,
     async getWorkspaceState() { return { cwd: this.projectPath, additional_directories: [], transcript_path: path }; },
+    async captureSessionMetadataOwner(selected: string, mode: string) {
+      assert.equal(selected, path); assert.equal(mode, 'code'); return { apply: capture(), release: async () => {} };
+    },
     beginArchive() {
       if (this.hasActiveWork) throw new Error('Wait for active work before archiving this chat.');
       return () => undefined;
@@ -53,20 +68,21 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
     get: (id: string) => runtimes.get(id),
     isProjectClosing: () => false,
     registerWindow() {}, registerIpc() {},
+    retainBackgroundSession: () => () => {},
     async withBackgroundSession(ref: SessionRef, _empty: boolean, _model: string | undefined, operation: (owner: typeof runtime) => Promise<unknown>, transcriptPath?: string) {
       calls.background.push({ ...ref });
       calls.transcriptPaths.push(transcriptPath);
       const existing = runtimes.get(ref.sessionId);
       if (existing) assert.equal(ref.projectPath, existing.projectPath, 'metadata must reuse the authoritative runtime');
       else {
-        assert.equal(settings.hasProject(ref.projectPath), true, 'trust must persist before engine startup');
+        assert.equal(settings.isTrustedWorkspace(ref.projectPath), true, 'trust must persist before engine startup');
         calls.events.push(`start:${ref.projectPath}`); calls.started.push({ ...ref });
         runtimes.set(ref.sessionId, runtime);
       }
       return operation(runtime);
     },
     async closeSession(ref: SessionRef) {
-      assert.equal(ref.projectPath, runtimes.get(ref.sessionId)?.projectPath);
+      if (runtimes.has(ref.sessionId)) assert.equal(ref.projectPath, runtimes.get(ref.sessionId)?.projectPath);
       calls.closed.push({ ...ref }); runtimes.delete(ref.sessionId);
     },
     async newSession(project: string) {
@@ -82,8 +98,10 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
       workspace_path: hint };
   };
   const catalog = {
+    async captureMetadataSource(_projectPath: string, _id: string, selected: string) { assert.equal(selected, path); coldCapture = capture(); return 'receipt'; },
+    async mutateMetadataSource(_projectPath: string, receipt: string, action: string, title?: string) { assert.equal(receipt, 'receipt'); await coldCapture!(action, title); },
     async find(projectPath: string, id: string) { calls.find.push({ projectPath, sessionId: id }); return id === sessionId ? row() : undefined; },
-    async select(projectPath: string, id: string, selection: { scope: string }) {
+    async select(projectPath: string, id: string, selection: { scope: string; transcriptPath?: string }) {
       calls.select.push({ projectPath, sessionId: id, scope: selection.scope });
       return id === sessionId ? row() : undefined;
     },
@@ -98,11 +116,26 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any,
     { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler: (name: string) => handlers.delete(name) } as any,
     undefined, undefined, undefined, dialogs);
+  host.attachScheduled({ dispose() {}, isControllerSession: () => false, manage: async (scope: string, request: { action: string }) => {
+    calls.events.push(`scheduled:${scope}:${request.action}`);
+    return [{ id: 'owned', automation: { status: 'active', runMode: 'selected_session', targetSessionId: sessionId,
+      targetSessionTranscriptPath: path, targetSessionMode: 'code', targetSessionScopeKey: scope } },
+    { id: 'other', automation: { status: 'active', runMode: 'selected_session', targetSessionId: replacementId,
+      targetSessionTranscriptPath: path, targetSessionMode: 'code', targetSessionScopeKey: scope } }];
+  } } as any);
   (host as any).bootstrap = () => ({ settings: settings.getPublic(), projectCatalogs: Object.fromEntries((host as any).catalogs) });
   const frame = { url: 'http://127.0.0.1:4242' };
   const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
   host.registerWindow(sender as any, frame.url); host.registerIpc();
-  const invoke = (channel: string, ...extra: unknown[]) => handlers.get(channel)!({ sender, senderFrame: frame }, ref.projectPath, ref.sessionId, ...extra);
+  const event = { sender, senderFrame: frame };
+  const invoke = async (channel: string, ...extra: unknown[]) => {
+    const selected = { scope: 'current', transcriptPath: path };
+    if (channel === CH_SESSION_TOUCH) return handlers.get(channel)!(event, ref.projectPath, ref.sessionId, selected);
+    const captured = await handlers.get(CH_SESSION_METADATA_CAPTURE)!(event, ref.projectPath, ref.sessionId, selected);
+    return channel === CH_SESSION_RENAME
+      ? handlers.get(channel)!(event, ref.projectPath, ref.sessionId, extra[0], captured)
+      : handlers.get(channel)!(event, ref.projectPath, ref.sessionId, captured);
+  };
   t.after(() => { host.dispose(); rmSync(root, { recursive: true, force: true }); });
   return { root, alias, source, ref, sourceRef, path, untouchedPath, original, settings, runtime, runtimes, calls, catalog, dialogs, host, invoke,
     setHint: (value: string) => { hint = value; } };
@@ -125,6 +158,27 @@ test('alias rename writes the live source transcript without starting, replacing
   assert.equal((f.host as any).catalogs.get(f.source).sessions[0].title, 'Renamed in B');
 });
 
+test('cold metadata changes select the saved exact source instead of a same-UUID sibling', async t => {
+  const f = fixture(t, { running: false });
+  const owner = { ...f.sourceRef, mode: 'code' as const, projectId: f.source };
+  f.settings.conversationSpaces.register(owner);
+  f.settings.rememberSessionTranscriptSelection(owner, { catalogProjectPath: f.source, scope: 'current', transcriptPath: f.path });
+  const siblingDir = join(f.root, 'sibling'); mkdirSync(siblingDir);
+  const sibling = join(siblingDir, `${sessionId}.jsonl`); writeFileSync(sibling, f.original);
+  f.catalog.find = async () => { throw new Error('UUID winner must not be used'); };
+  f.catalog.select = async (projectPath, id, selection) => {
+    assert.equal(projectPath, f.source);
+    assert.equal(id, sessionId);
+    assert.deepEqual(selection, { scope: 'current', transcriptPath: f.path });
+    return { uuid: sessionId, title: 'Saved chat', path: f.path, workspace_path: f.source,
+      modified_rfc3339: '', message_count: 1, mode: 'code', empty_session: false };
+  };
+  await (f.host as any).persistSessionTitle(owner, 'Selected source');
+  assert.match(readFileSync(f.path, 'utf8'), /Selected source/);
+  assert.equal(readFileSync(sibling, 'utf8'), f.original);
+  assert.deepEqual(f.calls.background, []);
+});
+
 test('alias touch updates only the source transcript and leaves active work in place', async (t) => {
   const f = fixture(t);
   f.runtime.hasActiveWork = true;
@@ -145,8 +199,8 @@ test('alias archive records B ownership and filters the archived UUID from B and
   await f.invoke(CH_SESSION_ARCHIVE);
   assert.equal(f.settings.isSessionArchived(f.sourceRef), true);
   assert.equal(f.settings.isSessionArchived(f.ref), false);
-  assert.deepEqual(f.calls.background, [f.sourceRef]);
-  assert.deepEqual(f.calls.closed, [f.sourceRef]);
+  assert.deepEqual(f.calls.background, []);
+  assert.deepEqual(f.calls.closed.map(({ projectPath, sessionId }) => ({ projectPath, sessionId })), [f.sourceRef]);
   assert.deepEqual(f.calls.replacements, [f.source]);
   assert.equal((f.host as any).catalogs.get(f.source).sessions.length, 0);
   assert.equal((f.host as any).catalogs.get(f.alias).sessions.length, 0);
@@ -154,30 +208,31 @@ test('alias archive records B ownership and filters the archived UUID from B and
   assert.deepEqual(f.ref, { projectPath: f.alias, sessionId });
 });
 
-test('cold alias archive trusts and registers the actual source before starting it', async (t) => {
+test('cold alias archive uses its registered scope and exact source without starting a chat runtime', async (t) => {
   const f = fixture(t, { running: false, savedSource: false });
   await f.invoke(CH_SESSION_ARCHIVE);
   assert.deepEqual(f.calls.find, []);
   assert.deepEqual(f.calls.select, [{ ...f.ref, scope: 'current' }]);
-  assert.deepEqual(f.calls.transcriptPaths, [f.path]);
-  assert.deepEqual(f.calls.trust, [f.source]);
-  assert.deepEqual(f.calls.events, [`trust:${f.source}`, `start:${f.source}`]);
-  assert.deepEqual(f.calls.started, [f.sourceRef]);
-  assert.equal(f.settings.hasProject(f.source), true);
+  assert.deepEqual(f.calls.transcriptPaths, []);
+  assert.deepEqual(f.calls.trust, []);
+  assert.deepEqual(f.calls.events, [`scheduled:${f.alias}:list`, `scheduled:${f.alias}:pause`]);
+  assert.deepEqual(f.calls.started, []);
+  assert.equal(f.settings.isTrustedWorkspace(f.source), true);
+  assert.equal(f.settings.hasProject(f.source), false);
   assert.equal(f.settings.isSessionArchived(f.sourceRef), true);
   assert.equal(f.settings.isSessionArchived(f.ref), false);
 });
 
-test('alias archive preflight inspects the source runtime and returns only its dependent jobs', async (t) => {
+test('alias archive preflight uses the logical scheduler and returns only its dependent jobs', async (t) => {
   for (const running of [false, true]) {
     const f = fixture(t, { running, savedSource: running });
     const before = readFileSync(f.settings.settingsPath, 'utf8');
     const result = await f.invoke(CH_SESSION_ARCHIVE_PREFLIGHT);
     assert.deepEqual(result.map((job: { id: string }) => job.id), ['owned']);
-    assert.deepEqual(f.calls.background, [f.sourceRef]);
-    assert.deepEqual(f.calls.started, running ? [] : [f.sourceRef]);
-    assert.deepEqual(f.calls.trust, running ? [] : [f.source]);
-    assert.deepEqual(f.calls.transcriptPaths, running ? [undefined] : [f.path]);
+    assert.deepEqual(f.calls.background, []);
+    assert.deepEqual(f.calls.started, []);
+    assert.deepEqual(f.calls.trust, []);
+    assert.deepEqual(f.calls.transcriptPaths, []);
     assert.deepEqual(f.calls.closed, []); assert.deepEqual(f.calls.replacements, []);
     assert.equal(f.settings.isSessionArchived(f.sourceRef), false);
     assert.equal(readFileSync(f.path, 'utf8'), f.original);
@@ -188,17 +243,28 @@ test('alias archive preflight inspects the source runtime and returns only its d
   }
 });
 
-test('canceling source trust leaves archive and preflight data and engines untouched', async (t) => {
+test('rejecting a selected source leaves archive and preflight data and engines untouched', async (t) => {
   for (const channel of [CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT]) {
     const f = fixture(t, { running: false, savedSource: false });
     const before = readFileSync(f.settings.settingsPath, 'utf8');
-    f.dialogs.trustDirectory = async () => false;
-    await assert.rejects(f.invoke(channel), /cancelled/);
+    f.catalog.select = async () => { throw new Error('selected source unavailable'); };
+    await assert.rejects(f.invoke(channel), /selected source unavailable/);
     assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
     assert.equal(readFileSync(f.path, 'utf8'), f.original);
     assert.deepEqual(f.calls.background, []); assert.deepEqual(f.calls.started, []);
     assert.deepEqual(f.calls.closed, []); assert.equal(f.runtimes.size, 0);
   }
+});
+
+test('a cold alias cannot change the registered source owner while archiving', async (t) => {
+  const f = fixture(t, { running: false, savedSource: false });
+  const before = readFileSync(f.settings.settingsPath, 'utf8');
+  f.setHint(f.alias);
+  await assert.rejects(f.invoke(CH_SESSION_ARCHIVE), /owner changed/i);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), before);
+  assert.equal(readFileSync(f.path, 'utf8'), f.original);
+  assert.deepEqual(f.calls.events, []); assert.deepEqual(f.calls.started, []);
+  assert.equal(f.settings.isSessionArchived(f.sourceRef), false);
 });
 
 test('missing or rejected source metadata cannot change settings, transcripts or the live engine', async (t) => {
@@ -246,6 +312,7 @@ test('cold metadata keeps the stored transcript authoritative when the workspace
 test('live metadata follows the exact active copy even when its logical workspace has a different copy', async (t) => {
   const f = fixture(t);
   f.runtime.projectPath = f.alias;
+  f.settings.conversationSpaces.relocate(f.sourceRef, f.alias);
   f.runtime.hasActiveWork = true;
   const otherPath = join(f.alias, `${sessionId}.jsonl`);
   writeFileSync(otherPath, f.original.replace('Saved chat', 'Unselected A chat'));
@@ -317,6 +384,8 @@ function scopedCatalog(f: ReturnType<typeof fixture>, globalDuplicates: boolean)
     });
     return child;
   }) as any });
+  catalog.captureMetadataSource = f.catalog.captureMetadataSource;
+  catalog.mutateMetadataSource = f.catalog.mutateMetadataSource;
   (f.host as any).sessionCatalog = catalog;
   return { catalog, requests, otherPath };
 }
@@ -339,13 +408,13 @@ test('cold rename and touch use fresh Current alias selection rather than the CL
   }
 });
 
-test('cold archive and preflight carry the exact Current alias transcript through background startup', async (t) => {
+test('cold archive and preflight keep the exact Current alias without starting a chat runtime', async (t) => {
   for (const channel of [CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT]) {
     const f = fixture(t, { running: false, savedSource: false });
     const adapter = scopedCatalog(f, true);
     await f.invoke(channel);
-    assert.deepEqual(f.calls.transcriptPaths, [f.path]);
-    assert.deepEqual(f.calls.started, [f.sourceRef]);
+    assert.deepEqual(f.calls.transcriptPaths, []);
+    assert.deepEqual(f.calls.started, []);
     assert.equal(adapter.requests[0][adapter.requests[0].indexOf('--session-scope') + 1], 'current');
     if (channel === CH_SESSION_ARCHIVE) {
       assert.equal(f.settings.isSessionArchived(f.sourceRef), true);

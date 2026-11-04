@@ -6,7 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.settings.LinuxRuntimeMode
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -16,17 +16,18 @@ class ConversationNotificationRouteInstrumentedTest {
     @Test
     fun cancelIntentTargetsPrivateServiceAndUsesOnStartDispatchAction() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val spec = ConversationRecoverySpec(
+            projectId = null,
+            hostPath = null,
+            sessionMode = SessionMode.Code,
+            linuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
+            workspaceKey = "global",
+        )
         val intent = ConversationNotificationRoute.cancelIntent(
             context = context,
             sessionId = "session-a",
             turnId = 42L,
-            recoverySpec = ConversationRecoverySpec(
-                projectId = null,
-                hostPath = null,
-                sessionMode = SessionMode.Code,
-                linuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
-                workspaceKey = "global",
-            ),
+            recoverySpec = spec,
         )
 
         assertEquals(ConversationTurnService.ACTION_CANCEL, intent.action)
@@ -35,7 +36,12 @@ class ConversationNotificationRouteInstrumentedTest {
         assertEquals(42L, intent.getLongExtra(ConversationTurnService.EXTRA_TURN_ID, -1L))
         assertEquals("code", intent.getStringExtra(ConversationTurnService.EXTRA_SESSION_MODE))
         assertEquals("global", intent.getStringExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY))
-        assertNull(intent.data)
+        assertEquals("lingxi-internal", intent.data?.scheme)
+        assertEquals("conversation-stop", intent.data?.authority)
+        assertEquals(listOf("session-a", "42", spec.runtimeGeneration), intent.data?.pathSegments)
+        val otherOwner = ConversationNotificationRoute.cancelIntent(context, "session-a", 42L,
+            spec.copy(runtimeGeneration = java.util.UUID.randomUUID().toString()))
+        assertFalse(intent.filterEquals(otherOwner))
 
         val pending = PendingIntent.getService(
             context,

@@ -2,6 +2,21 @@ import XCTest
 @testable import LingxiCode
 
 final class SettingsGroupsTests: XCTestCase {
+    func testRuntimeCapabilityDoesNotEnableTerminalBeforeRootfsIsReady() {
+        var state = LinuxRuntimeState()
+        state.available = true
+        state.terminalSupported = true
+        for status in [LinuxRuntimeRootfsState.missing, .corrupt, .installing, .unsupported] {
+            state.rootfsState = status
+            XCTAssertFalse(state.availableForExecution)
+            XCTAssertFalse(state.canOpenTerminal)
+        }
+        state.rootfsState = .ready
+        XCTAssertTrue(state.canOpenTerminal)
+        state.available = false
+        XCTAssertFalse(state.canOpenTerminal)
+    }
+
     private var phoneEntries: [DesktopSettingsEntry] {
         DesktopSettingsEntry.all.filter(\.availableOnMobile)
     }

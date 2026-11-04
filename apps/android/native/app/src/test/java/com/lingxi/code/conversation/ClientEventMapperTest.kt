@@ -653,6 +653,23 @@ class ClientEventMapperTest {
     }
 
     @Test
+    fun resumedLocalAppFailureRetainsRawReasonForLocalizedRenderer() {
+        val raw = "local_app_development_requires_code: switch to Code"
+        val transcript = transcriptFromDtos(listOf(
+            MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(
+                MessageBlockDto.ToolUse(id = "app-1", tool = "LocalApp", inputJson = "{}", header = currentToolHeaderFixture()),
+            )),
+            MessageDto(transcriptUuid = null, role = "user", blocks = listOf(
+                MessageBlockDto.ToolResult(id = "app-1", tool = "LocalApp", resultJson = "\"$raw\"", isError = true,
+                    display = currentToolDisplayFixture(headline = "Failed", body = raw)),
+            )),
+        ))
+        val call = transcript.single().blocks.filterIsInstance<MessageContent.Tool>().single().call
+        assertTrue(isLocalAppCodeRequired(call.tool, call.status, call.display?.headline, call.display?.body))
+        assertEquals(raw, call.display?.body)
+    }
+
+    @Test
     fun transcriptFromDtos_orphanResult_attachesToThePrecedingTurn_notAUserBubble() {
         // A compacted / torn transcript window can start with a result whose call
         // is gone. It still belongs to the turn before it.

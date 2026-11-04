@@ -24,11 +24,20 @@ use uuid::Uuid;
 pub struct ResumeRow {
     /// Session UUID — the value Enter resolves to.
     pub uuid: Uuid,
+    /// Exact transcript displayed for this row, retained through selection.
+    pub transcript_path: std::path::PathBuf,
     /// Title (already truncated to ≤ 50 chars + ellipsis by the loader).
     pub title: String,
     /// Dim metadata line shown under the title: `<relative time ago> · <N>
     /// messages` (claude-code `formatLogMetadata`). Built by the caller.
     pub metadata_label: String,
+}
+
+/// The selected UUID and its exact displayed source travel together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeSelection {
+    pub uuid: Uuid,
+    pub transcript_path: std::path::PathBuf,
 }
 
 /// Relative-time-ago string (claude-code `formatRelativeTimeAgo` with
@@ -170,12 +179,12 @@ impl ResumeState {
 }
 
 /// What [`handle_resume_key`] tells the loop to do next.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeOutcome {
     /// Keep the picker open (selection moved, or an inert key).
     Stay,
-    /// Resume the session with this UUID (Enter on a real row).
-    Resume(Uuid),
+    /// Resume the exact displayed source (Enter on a real row).
+    Resume(ResumeSelection),
     /// Close the picker (Esc, or Enter on empty-state).
     Cancel,
 }
@@ -211,8 +220,11 @@ pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcom
             }
             ResumeOutcome::Stay
         }
-        KeyCode::Enter => match state.selected_uuid() {
-            Some(uuid) => ResumeOutcome::Resume(uuid),
+        KeyCode::Enter => match state.selected_row() {
+            Some(row) => ResumeOutcome::Resume(ResumeSelection {
+                uuid: row.uuid,
+                transcript_path: row.transcript_path.clone(),
+            }),
             // Only the true empty-state (no sessions at all) cancels on Enter.
             // A search query that filters every row to nothing is a no-op —
             // closing the picker on a stray Enter would lose the user's search.
@@ -345,14 +357,17 @@ pub fn resume_lines(state: &ResumeState, theme: &Theme) -> Vec<Line<'static>> {
 }
 
 /// Run the interactive resume picker on the alternate screen. Returns the
-/// selected session uuid, or `None` on cancel/empty-state. Blocking terminal
-/// IO — callers on an async runtime should `spawn_blocking` it (like the chat
-/// `run_app`).
+/// selected session, exact displayed path, and its capture made at Enter; or
+/// `None` on cancel/empty-state. Blocking terminal IO — callers on an async
+/// runtime should `spawn_blocking` it (like the chat `run_app`).
 ///
 /// # Errors
 /// Propagates the first terminal setup/draw/read IO error (the terminal is
 /// restored before returning on the happy path).
-pub fn run_resume_picker(rows: Vec<ResumeRow>) -> std::io::Result<Option<Uuid>> {
+pub fn run_resume_picker<T>(
+    rows: Vec<ResumeRow>,
+    mut capture: impl FnMut(&ResumeSelection) -> std::io::Result<T>,
+) -> std::io::Result<Option<(ResumeSelection, T)>> {
     use crossterm::event::{Event, KeyEventKind};
 
     // Resolve the active theme the same way the chat app does (OSC-11 detection
@@ -364,7 +379,7 @@ pub fn run_resume_picker(rows: Vec<ResumeRow>) -> std::io::Result<Option<Uuid>> 
 
     let mut state = ResumeState::new(rows);
     let mut terminal = crate::setup_terminal()?;
-    let outcome = (|| -> std::io::Result<Option<Uuid>> {
+    let outcome = (|| -> std::io::Result<Option<(ResumeSelection, T)>> {
         loop {
             terminal.draw(|f| {
                 let area = ratatui::layout::Rect {
@@ -391,7 +406,10 @@ pub fn run_resume_picker(rows: Vec<ResumeRow>) -> std::io::Result<Option<Uuid>> 
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     match handle_resume_key(&mut state, key) {
                         ResumeOutcome::Stay => {}
-                        ResumeOutcome::Resume(uuid) => return Ok(Some(uuid)),
+                        ResumeOutcome::Resume(selection) => {
+                            let captured = capture(&selection)?;
+                            return Ok(Some((selection, captured)));
+                        }
                         ResumeOutcome::Cancel => return Ok(None),
                     }
                 }
@@ -411,6 +429,7 @@ mod tests {
     fn row(title: &str) -> ResumeRow {
         ResumeRow {
             uuid: Uuid::new_v4(),
+            transcript_path: "/test/session.jsonl".into(),
             title: title.to_string(),
             metadata_label: "1 minute ago \u{00b7} 3 messages".to_string(),
         }
@@ -473,14 +492,21 @@ mod tests {
     }
 
     #[test]
-    fn enter_resumes_selected_uuid() {
+    fn enter_resumes_exact_selected_row_with_duplicate_uuid() {
         let rows = vec![row("a"), row("b")];
         let want = rows[1].uuid;
+        let mut rows = rows;
+        rows[0].uuid = want;
+        rows[0].transcript_path = "/first/session.jsonl".into();
+        rows[1].transcript_path = "/second/session.jsonl".into();
         let mut s = ResumeState::new(rows);
         let _ = handle_resume_key(&mut s, key(KeyCode::Down));
         assert_eq!(
             handle_resume_key(&mut s, key(KeyCode::Enter)),
-            ResumeOutcome::Resume(want)
+            ResumeOutcome::Resume(ResumeSelection {
+                uuid: want,
+                transcript_path: "/second/session.jsonl".into(),
+            })
         );
     }
 

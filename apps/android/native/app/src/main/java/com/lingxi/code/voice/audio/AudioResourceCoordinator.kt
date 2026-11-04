@@ -30,9 +30,11 @@ internal data class AudioOwnerKey(
     enum class Kind { Session, Ui, System }
 
     companion object {
+        private const val COMPUTER_USE_PREFIX = "computer-use-engine:"
         fun session(sessionId: String) = AudioOwnerKey(Kind.Session, sessionId)
         fun ui(instanceId: String) = AudioOwnerKey(Kind.Ui, instanceId)
         fun system(instanceId: String) = AudioOwnerKey(Kind.System, instanceId)
+        fun computerUse(engineOwner: String) = ui(COMPUTER_USE_PREFIX + engineOwner)
         fun attached(
             kind: Kind,
             logicalOwnerId: String,
@@ -44,6 +46,8 @@ internal data class AudioOwnerKey(
             attachment = AudioOwnerAttachmentIdentity(hostId, generation),
         )
     }
+
+    fun requiresEngineBinding(): Boolean = kind == Kind.Ui && id.startsWith(COMPUTER_USE_PREFIX)
 }
 
 internal data class AudioOperationIdentity(

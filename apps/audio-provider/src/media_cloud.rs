@@ -460,7 +460,8 @@ impl AudioProviderCloudRegistry {
         })?;
         if parent.parent.is_some()
             || parent.profile_name != profile_name
-            || parent.account_scope != account_scope
+            || (account_scope != lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+                && parent.account_scope != account_scope)
         {
             return Err(AudioError::new(
                 AudioErrorKind::InvalidRequest,
@@ -1462,6 +1463,50 @@ mod attachment_route_tests {
                 "openai",
                 lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
             )
+            .is_ok());
+    }
+
+    #[test]
+    fn scheduled_child_inherits_parent_selected_account_from_unbound_intent() {
+        let registry = AudioProviderCloudRegistry::new("wav");
+        let host = MediaAttachmentHost::new();
+        let parent = host.attach(Arc::new(EmptyMediaService)).unwrap();
+        let child = parent.fork_child().unwrap();
+        let parent_permit = parent.authorize_owner(&session_owner("parent")).unwrap();
+        let child_permit = child.authorize_owner(&session_owner("child")).unwrap();
+        let scope = serde_json::to_string(&llm_runtime::accounts::AccountResourceScope {
+            store_scope: "fixture".into(),
+            account_id: "selected".into(),
+            identity_generation: 3,
+        })
+        .unwrap();
+        registry
+            .register_attached_session(&parent_permit, "openai", &scope, provider())
+            .unwrap();
+        assert!(registry
+            .register_scheduled_child_session(
+                &parent_permit,
+                &child_permit,
+                "openai",
+                "another-account",
+                Arc::new(|| true),
+            )
+            .is_err());
+        registry
+            .register_scheduled_child_session(
+                &parent_permit,
+                &child_permit,
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+                Arc::new(|| true),
+            )
+            .unwrap();
+        assert_eq!(
+            registry.session_identity_for_owner(child_permit.owner()),
+            Some(("openai".into(), scope.clone()))
+        );
+        assert!(registry
+            .provider_for_attached_session(child.id(), "child", "openai", &scope)
             .is_ok());
     }
 

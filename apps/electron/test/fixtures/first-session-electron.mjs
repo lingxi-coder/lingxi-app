@@ -16,7 +16,7 @@ try {
   };
   await wait('window.firstSessionFixture?.ready');
   const selector = '[data-session-id="new-session"]';
-  const result = { emptyDraftHidden: await run(`!document.querySelector('${selector}')`) };
+  const result = { emptyDraftVisible: await run(`document.querySelectorAll('${selector}').length === 1 && document.querySelector('${selector}').textContent.includes('Draft')`) };
   await run(`document.querySelector('button[title="/fixture"]').click()`);
   await run(`document.querySelector('#send').click()`);
   await wait(`document.querySelector('${selector}') === document.activeElement`);

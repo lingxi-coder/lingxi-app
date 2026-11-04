@@ -1,42 +1,11 @@
-import type { SessionRowDto } from '@lingxi/bridge-client';
 import { tr } from '../i18n/locale';
 import { botMemoryProblem, type BotMemoryController } from '../bridge/botMemory';
 import { routineRow, type BotRoutinesController } from '../bridge/botRoutines';
 import type { BotSkillsController } from '../bridge/botSkills';
 import { taskRow, type BotTasksController } from '../bridge/botTasks';
 import { relativeActivity } from '../bridge/botSession';
-import { formatSessionMetadata } from '../bridge/sessionPresentation';
 import { BotConfirm, BotDialog, problemText, useObservable } from './BotFields';
 import { DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
-
-/** The chats of a Bot, as `listSessions` last answered. */
-export type BotChats =
-  | { status: 'loading' }
-  | { status: 'ready'; sessions: readonly SessionRowDto[] }
-  | { status: 'failed'; message: string };
-
-export function BotChatsPanel({ chats, opening, disabled, onOpen, onRetry }: {
-  chats: BotChats;
-  /** The chat being opened: its id, or `'new'`. */
-  opening: string | undefined;
-  disabled: boolean;
-  onOpen(sessionId: string): void;
-  onRetry(): void;
-}) {
-  if (chats.status === 'loading') return <p role="status" className="bots-muted">{tr('bots_chats_loading')}</p>;
-  if (chats.status === 'failed') {
-    return <div role="alert" className="bots-problem">{tr('bots_chats_failed', chats.message)} <button type="button" onClick={onRetry}>{tr('common_retry')}</button></div>;
-  }
-  if (chats.sessions.length === 0) return <p className="bots-empty-line">{tr('bots_chats_empty')}</p>;
-  return <ul className="bots-rows" aria-label={tr('bots_tab_chats')}>
-    {chats.sessions.map((session) => <li key={session.uuid}>
-      <button type="button" className="bots-chat-row" disabled={disabled || opening !== undefined} aria-busy={opening === session.uuid || undefined} onClick={() => onOpen(session.uuid)}>
-        <span className="bots-row-title">{session.title.trim() || tr('remote_untitled')}</span>
-        <span className="bots-muted">{opening === session.uuid ? tr('bots_chat_opening') : formatSessionMetadata(session.modified_rfc3339, session.message_count)}</span>
-      </button>
-    </li>)}
-  </ul>;
-}
 
 /** The tasks that run as the Bot. Making and changing one is done on the Scheduled page, which this sends the owner to. */
 export function BotRoutinesPanel({ controller, scopeId, onNew, onOpen }: {

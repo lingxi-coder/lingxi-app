@@ -3,30 +3,13 @@ package com.lingxi.code.cron
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
-import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.UUID
 
 internal const val MAX_CRON_RUNS_PER_TASK = 20
 internal const val MAX_CRON_RUNS_TOTAL = 500
 internal const val MAX_CRON_RESULT_BYTES = 256 * 1024
-
-/**
- * Cap on the generated-session sidecar.
- *
- * 🚨 The sidecar deliberately outlives run-history retention, but "outlives" is
- * not "forever": it is rebuilt from the union of itself and the retained records
- * on EVERY run-state transition — roughly six per run — and each rebuild
- * re-parses, re-sorts, re-encodes, fsyncs and reads the whole file back to
- * verify its checksum. Without a cap a task on a 15-minute schedule adds ~35,000
- * rows a year, so the per-transition cost grows without bound for the life of
- * the install. The cap is generous relative to `MAX_CRON_RUNS_TOTAL` because a
- * session outlives the run that created it.
- */
-internal const val MAX_CRON_SESSION_ROWS = 2_000
 
 /**
  * App-private, atomic run-history index. History is intentionally separate from
@@ -37,11 +20,16 @@ internal class CronRunHistoryStore(
     private val historyRoot: File,
     private val now: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString().lowercase() },
+    private val atomicWriter: com.lingxi.code.project.ProjectAtomicWriter = com.lingxi.code.project.DefaultProjectAtomicWriter(),
 ) {
     private val indexFile = File(historyRoot, "index.json")
     private val backupFile = File(historyRoot, "index.last-good.json")
     private val sessionsFile = File(historyRoot, "sessions.json")
-    private val lock = Any()
+    // Serialize history read/modify/write without holding the navigation gate.
+    // Newly introduced receipts separately reserve their UUIDs below.
+    private val lock = historyLock
+    private var receiptWriteToken: Long? = null
+    private val rootKey = historyRoot.absoluteFile.normalize().path
 
     init {
         historyRoot.mkdirs()
@@ -53,11 +41,96 @@ internal class CronRunHistoryStore(
     fun generatedSessions(): List<CronRunRecord> = synchronized(lock) {
         (readSessionIndex() + readLocked()).filter { it.sessionId != null }
             .sortedByDescending(CronRunRecord::triggeredAtMs)
-            .distinctBy { it.scopeId to it.sessionId }
+            .distinctBy(CronRunRecord::sessionIdentityKey)
     }
 
-    private fun readSessionIndex(): List<CronRunRecord> =
-        sessionsFile.takeIf(File::isFile)?.let { runCatching { decode(it.readText(Charsets.UTF_8)) }.getOrNull() }.orEmpty()
+    private fun readSessionIndex(): List<CronRunRecord> = readRequiredWhenObserved(sessionsFile, observedSessionIndexes)
+
+    /** Read both sources before any new owner claim; never repair or hide damage. */
+    fun validatedOwnerReceipts(): List<CronRunRecord> {
+        val gate = com.lingxi.code.conversation.SessionAdmissionGate
+        while (true) {
+            val version = gate.receiptVersion()
+            val read = runCatching {
+                val history = readLocked()
+                val sessions = readSessionIndex()
+                check(sessionsFile.isFile || history.none { it.sessionId != null }) { "scheduled session index is missing" }
+                validateReceipts(history + sessions)
+            }
+            if (version == gate.receiptVersion()) return read.getOrThrow()
+        }
+    }
+
+    /** Fence only newly mirrored UUIDs while their durable files are staged. */
+    internal fun <T> withReceiptReservations(discovered: List<CronRunRecord>, cronToken: Long? = null, block: () -> T): T = synchronized(lock) {
+        // Keep conflicting existing receipts visible for recovery. Validation at
+        // the admission boundary will reject them without erasing evidence.
+        val existing = (readSessionIndex() + readLocked()).filter { it.sessionId != null }
+            .mapTo(mutableSetOf(), CronRunRecord::sessionIdentityKey)
+        val newReceipts = validateReceipts(discovered).filter { it.sessionIdentityKey() !in existing }
+        if (newReceipts.isEmpty()) return@synchronized block()
+        check(receiptWriteToken == null) { "Nested scheduled receipt publication" }
+        val gate = com.lingxi.code.conversation.SessionAdmissionGate
+        val identities = newReceipts.mapTo(mutableSetOf()) { receipt ->
+            com.lingxi.code.conversation.SessionAdmissionGate.ReceiptIdentity(
+                com.lingxi.code.model.canonicalSessionId(checkNotNull(receipt.sessionId)),
+                checkNotNull(receipt.sessionScopeKey), com.lingxi.code.model.sessionModeFromWireValue(checkNotNull(receipt.sessionMode)),
+                checkNotNull(receipt.sessionTranscriptPath))
+        }
+        val token = checkNotNull(gate.beginReceiptWrite(identities, cronToken)) { "Scheduled owner is being claimed" }
+        receiptWriteToken = token
+        try {
+            block()
+        } finally {
+            receiptWriteToken = null
+            gate.finishReceiptWrite(token)
+        }
+    }
+
+    private fun validateReceipts(records: List<CronRunRecord>): List<CronRunRecord> {
+        records.forEach { run ->
+            val parts = listOf(run.sessionId, run.sessionTranscriptPath, run.sessionMode, run.sessionScopeKey)
+            check(parts.all { it == null } || parts.all { it != null }) { "scheduled session receipt is incomplete" }
+        }
+        val receipts = records.filter { it.sessionId != null }
+        receipts.forEach { run ->
+            validateCronOwnerIdentity(CronOwnerIdentity(checkNotNull(run.sessionId),
+                checkNotNull(run.sessionTranscriptPath), checkNotNull(run.sessionMode), checkNotNull(run.sessionScopeKey)))
+        }
+        receipts.groupBy { com.lingxi.code.model.canonicalSessionId(checkNotNull(it.sessionId)) }.forEach { (id, group) ->
+            check(group.map { Triple(it.sessionScopeKey, it.sessionMode, it.sessionTranscriptPath) }.distinct().size == 1) {
+                "scheduled session $id has conflicting owners or transcript identities"
+            }
+        }
+        return receipts.distinctBy(CronRunRecord::sessionIdentityKey)
+    }
+
+    /** Reconcile committed SDK runs, including a crash before Android mirrored them. */
+    fun mergeSdkOwnerReceipts(discovered: List<CronRunRecord>) = synchronized(lock) {
+        val history = readLocked()
+        val previous = readSessionIndex()
+        check(sessionsFile.isFile || history.none { it.sessionId != null }) { "scheduled session index is missing" }
+        val validated = validateReceipts(history + previous + discovered)
+        val known = previous.mapTo(mutableSetOf(), CronRunRecord::sessionIdentityKey)
+        if (validated.none { it.sessionIdentityKey() !in known }) return@synchronized
+        if (!indexFile.exists()) writeLocked(history)
+        val combined = (previous + history.filter { it.sessionId != null } + discovered).sortedByDescending(CronRunRecord::triggeredAtMs)
+            .distinctBy(CronRunRecord::sessionIdentityKey).map { it.copy(resultText = null, errorMessage = null) }
+        atomicWrite(sessionsFile, encode(combined))
+        observedSessionIndexes += rootKey
+    }
+
+    private fun readRequiredWhenObserved(target: File, observed: MutableSet<String>): List<CronRunRecord> {
+        val exists = target.exists() || Files.isSymbolicLink(target.toPath())
+        if (!exists) {
+            check(rootKey !in observed) { "scheduled index ${target.name} is missing" }
+            return emptyList()
+        }
+        check(target.isFile && !Files.isSymbolicLink(target.toPath())) { "scheduled index ${target.name} is unavailable" }
+        val records = decode(target.readText(Charsets.UTF_8))
+        observed += rootKey
+        return records
+    }
 
 
     fun record(runId: String): CronRunRecord? =
@@ -177,8 +250,19 @@ internal class CronRunHistoryStore(
             cancelled
         }
 
-    fun attachExecution(runId: String, sessionId: String? = null, model: String? = null, notificationPolicy: String? = null): CronRunRecord? = update(runId) {
-        it.copy(sessionId = sessionId ?: it.sessionId, model = model ?: it.model, notificationPolicy = notificationPolicy ?: it.notificationPolicy)
+    fun attachExecution(runId: String, sessionId: String? = null, model: String? = null, notificationPolicy: String? = null,
+        sessionTranscriptPath: String? = null, sessionMode: String? = null, sessionScopeKey: String? = null): CronRunRecord? = update(runId) {
+        if (it.sessionId != null) {
+            require(sessionId == null || com.lingxi.code.model.canonicalSessionId(sessionId) == com.lingxi.code.model.canonicalSessionId(it.sessionId))
+            require(sessionTranscriptPath == null || sessionTranscriptPath == it.sessionTranscriptPath)
+            require(sessionMode == null || sessionMode == it.sessionMode)
+            require(sessionScopeKey == null || sessionScopeKey == it.sessionScopeKey)
+        }
+        val next = it.copy(sessionId = sessionId ?: it.sessionId, model = model ?: it.model, notificationPolicy = notificationPolicy ?: it.notificationPolicy,
+            sessionTranscriptPath = sessionTranscriptPath ?: it.sessionTranscriptPath,
+            sessionMode = sessionMode ?: it.sessionMode, sessionScopeKey = sessionScopeKey ?: it.sessionScopeKey)
+        validateReceipts(listOf(next))
+        next
     }
 
     /** Reserve delivery durably before posting; process recovery never repeats a notification. */
@@ -235,82 +319,54 @@ internal class CronRunHistoryStore(
         if (index < 0) return@synchronized null
         val nextRecord = transform(current[index])
         val next = current.toMutableList().also { it[index] = nextRecord }
-        writeLocked(next)
+        withReceiptReservations(listOf(nextRecord)) { writeLocked(next) }
         nextRecord
     }
 
     private fun readLocked(): List<CronRunRecord> {
-        val primaryText = indexFile.takeIf(File::isFile)
-            ?.let { runCatching { it.readText(Charsets.UTF_8) }.getOrNull() }
-        val primary = primaryText?.let { runCatching { decode(it) }.getOrNull() }
-        if (primary != null) return primary
-
-        val backupText = backupFile.takeIf(File::isFile)
-            ?.let { runCatching { it.readText(Charsets.UTF_8) }.getOrNull() }
-        val backup = backupText?.let { runCatching { decode(it) }.getOrNull() }
-            ?: return emptyList()
-        if (indexFile.exists()) {
-            val quarantine = File(
-                historyRoot,
-                "index.corrupt.${System.currentTimeMillis()}.json",
-            )
-            runCatching {
-                Files.move(
-                    indexFile.toPath(),
-                    quarantine.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING,
-                )
-            }
+        if (!indexFile.exists() && !Files.isSymbolicLink(indexFile.toPath())) {
+            check(!backupFile.exists() && !sessionsFile.exists()) { "scheduled history index is missing" }
         }
-        runCatching { atomicWrite(indexFile, backupText) }
-        return backup
+        return readRequiredWhenObserved(indexFile, observedHistoryIndexes)
     }
 
     private fun writeLocked(records: List<CronRunRecord>) {
         historyRoot.mkdirs()
+        val previousSessions = readSessionIndex()
         val retained = retainCronHistory(records)
         val text = encode(retained)
         decode(text)
-        // The primary index goes first and unguarded: it carries the run-state
-        // transition this call exists to persist. The sessions sidecar is a
-        // derived convenience, so it is written after and its failure must not
-        // strand a run as `Running` forever.
+        // A sidecar write failure is surfaced, retaining the already-written
+        // primary and all old session identities for explicit recovery.
         atomicWrite(indexFile, text)
-        val sessions = (records.filter { it.sessionId != null } + readSessionIndex())
+        val sessions = (records.filter { it.sessionId != null } + previousSessions)
             .sortedByDescending(CronRunRecord::triggeredAtMs)
-            .distinctBy { it.scopeId to it.sessionId }
-            .take(MAX_CRON_SESSION_ROWS)
+            .distinctBy(CronRunRecord::sessionIdentityKey)
             .map { it.copy(resultText = null, errorMessage = null) }
-        runCatching { atomicWrite(sessionsFile, encode(sessions)) }
+        atomicWrite(sessionsFile, encode(sessions))
+        observedHistoryIndexes += rootKey
+        observedSessionIndexes += rootKey
         // A second atomic file gives checksum-verified recovery if external
         // storage corruption damages the primary after its rename.
         runCatching { atomicWrite(backupFile, text) }
     }
 
+    companion object {
+        private val historyLock = Any()
+        private val observedHistoryIndexes = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        private val observedSessionIndexes = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    }
+
     private fun atomicWrite(target: File, text: String) {
-        val temp = File(historyRoot, ".${target.name}.${UUID.randomUUID()}.tmp")
-        try {
-            FileOutputStream(temp).use { output ->
-                output.write(text.toByteArray(Charsets.UTF_8))
-                output.fd.sync()
+        val token = receiptWriteToken
+        if (token == null) atomicWriter.write(target, text) { staged -> decode(staged) }
+        else atomicWriter.writeGuarded(target, text, { staged -> decode(staged) }) { commit ->
+            val gate = com.lingxi.code.conversation.SessionAdmissionGate
+            synchronized(gate.lock) {
+                check(gate.permitsReceiptWrite(token)) { "Scheduled owner changed before publication" }
+                commit()
+                gate.noteReceiptPublication(token)
             }
-            decode(temp.readText(Charsets.UTF_8))
-            try {
-                Files.move(
-                    temp.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING,
-                )
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(
-                    temp.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING,
-                )
-            }
-        } finally {
-            temp.delete()
         }
     }
 
@@ -338,6 +394,9 @@ internal class CronRunHistoryStore(
                             .put("resultText", run.resultText)
                             .put("errorMessage", run.errorMessage)
                             .put("sessionId", run.sessionId)
+                            .put("sessionTranscriptPath", run.sessionTranscriptPath)
+                            .put("sessionMode", run.sessionMode)
+                            .put("sessionScopeKey", run.sessionScopeKey)
                             .put("model", run.model)
                             .put("notificationPolicy", run.notificationPolicy)
                             .put("notificationDelivered", run.notificationDelivered)
@@ -388,6 +447,9 @@ internal class CronRunHistoryStore(
                 errorMessage = run.nullableString("errorMessage"),
                 manual = run.optBoolean("manual", false),
                 sessionId = run.nullableString("sessionId"),
+                sessionTranscriptPath = run.nullableString("sessionTranscriptPath"),
+                sessionMode = run.nullableString("sessionMode"),
+                sessionScopeKey = run.nullableString("sessionScopeKey"),
                 model = run.nullableString("model"),
                 notificationPolicy = run.optString("notificationPolicy", "all"),
                 // A record written before this field existed has already been
@@ -400,6 +462,9 @@ internal class CronRunHistoryStore(
         }.distinctBy(CronRunRecord::runId)
     }
 }
+
+private fun CronRunRecord.sessionIdentityKey() =
+    listOf(scopeId, sessionId, sessionTranscriptPath, sessionMode, sessionScopeKey)
 
 private fun sha256(value: String): String =
     MessageDigest.getInstance("SHA-256")

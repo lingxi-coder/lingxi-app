@@ -74,7 +74,7 @@ export type {
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '31.1.0';
+export const CLIENT_PROTOCOL_VERSION = '32.1.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -284,6 +284,9 @@ export interface CronRunDto {
   model: string;
   reasoning: ReasoningSelectionDto;
   sessionId?: string;
+  sessionTranscriptPath?: string;
+  sessionMode?: string;
+  sessionScopeKey?: string;
   summary?: string;
   error?: string;
 }
@@ -295,8 +298,16 @@ export interface CronAutomationDto {
   model: string;
   reasoning: ReasoningSelectionDto;
   runMode: 'new_session' | 'selected_session' | 'task_session';
+  sessionMode?: string;
+  sessionScopeKey?: string;
   targetSessionId?: string;
+  targetSessionTranscriptPath?: string;
+  targetSessionMode?: string;
+  targetSessionScopeKey?: string;
   ownedSessionId?: string;
+  ownedSessionTranscriptPath?: string;
+  ownedSessionMode?: string;
+  ownedSessionScopeKey?: string;
   notificationPolicy: 'all' | 'failed' | 'none';
   runs?: CronRunDto[];
 }
@@ -1157,7 +1168,7 @@ export interface ComputerAccessResponseDto {
 // listings.rs
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Which capability profile a mobile session runs under (listings.rs `SessionModeDto`). */
+/** The conversation profile selected for a session (listings.rs `SessionModeDto`). */
 export type SessionModeDto = 'chat' | 'code';
 
 /** One resumable-session row (listings.rs `SessionRowDto`). */

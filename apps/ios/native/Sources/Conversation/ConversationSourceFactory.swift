@@ -32,6 +32,8 @@ enum ConversationSourceFactory {
         var visionDelegationEnabled: Bool = true
         var mobileLinux: TerminalRuntimeConfig? = nil
         var projectMountGrants: [String] = []
+        var initialSessionId: String? = nil
+        var initialSessionTranscriptPath: String? = nil
         #if canImport(harness_runtimeFFI)
         var mediaHostComposition: IOSNativeMediaHostComposition? = nil
         #endif
@@ -146,6 +148,8 @@ enum ConversationSourceFactory {
                     mobileLinux: options.mobileLinux,
                     projectMountGrants: options.projectMountGrants)
                 config.additionalWorkspaceDirectories = options.additionalWorkspaceDirectories
+                config.initialSessionId = options.initialSessionId
+                config.initialSessionTranscriptPath = options.initialSessionTranscriptPath
                 let source = EngineConversationSource(config: config, mediaHostComposition: options.mediaHostComposition)
                 source.model.providerConfigured = options.providerConfigured
                 return source

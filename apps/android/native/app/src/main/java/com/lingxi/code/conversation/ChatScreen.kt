@@ -44,6 +44,7 @@ import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -143,8 +144,9 @@ fun ChatScreen(
     onOpenSideChats: (() -> Unit)? = null,
     showTopBar: Boolean = true,
     showNewChatControls: Boolean = true,
-    /** New-chat mode bar: start a fresh conversation in this mode. */
+    /** Select the current conversation's mode from the new-chat bar. */
     onSelectNewChatMode: (SessionMode) -> Unit = {},
+    modeSelectionEnabled: Boolean = true,
     /** New-chat workspace capsule: choose where the conversation runs. */
     onPickWorkspace: () -> Unit = {},
     onMicClick: () -> Unit = {},
@@ -166,6 +168,10 @@ fun ChatScreen(
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
+    hasUnsentDraft: Boolean = false,
+    canRestoreUnsentDraft: Boolean = false,
+    onRestoreUnsentDraft: () -> Unit = {},
+    onRetryAuthoring: (() -> Unit)? = null,
     attachments: List<ComposerAttachment> = emptyList(),
     onRemoveAttachmentAt: (Int) -> Unit = {},
     onShare: (String) -> Unit = {},
@@ -481,10 +487,22 @@ fun ChatScreen(
                     workspaceName = workspaceName,
                     onSelectMode = onSelectNewChatMode,
                     onPickWorkspace = onPickWorkspace,
+                    modeSelectionEnabled = modeSelectionEnabled,
                 )
+            }
+            if (hasUnsentDraft) {
+                TextButton(onClick = onRestoreUnsentDraft, enabled = canRestoreUnsentDraft) {
+                    Text(stringResource(R.string.chat_restore_unsent_message))
+                }
+            }
+            onRetryAuthoring?.let { retry ->
+                TextButton(onClick = retry) { Text(stringResource(R.string.common_retry)) }
             }
             Composer(
                 text = draft,
+                historySessionKey = state.session.id,
+                historyMessages = if (state.sessionTransitioning) emptyList() else state.messages
+                    .filter { it.role == com.lingxi.code.model.Role.User }.map { it.text },
                 slashCommands = state.slashCommands,
                 promptSuggestion = state.promptSuggestion,
                 promptSuggestionNotice = state.promptSuggestionNotice,

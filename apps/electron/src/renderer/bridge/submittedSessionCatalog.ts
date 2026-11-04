@@ -13,6 +13,8 @@ export function firstSubmittedSession(
   saved: SessionRowDto | undefined,
 ): SubmittedSession | undefined {
   if (!ref || (saved && saved.message_count > 0)) return undefined;
+  const mode = ref.mode ?? saved?.mode;
+  if (!mode) return undefined;
   return {
     projectPath: ref.projectPath,
     row: {
@@ -20,7 +22,7 @@ export function firstSubmittedSession(
       title: text.trim().replace(/\s+/g, ' ').slice(0, 120),
       modified_rfc3339: new Date().toISOString(),
       message_count: 1,
-      mode: saved?.mode ?? 'code',
+      mode,
       path: saved?.path ?? '',
     },
   };

@@ -18,6 +18,11 @@ data class CronAutomation(val json: String = "{}") {
     val model: String get() = parsed.optString("model", "")
     val runMode: String get() = parsed.optString("runMode", "new_session")
     val targetSessionId: String get() = parsed.optString("targetSessionId", "").let { if (it == "null") "" else it }
+    val targetSessionTranscriptPath: String get() = parsed.optString("targetSessionTranscriptPath", "").let { if (it == "null") "" else it }
+    val targetSessionMode: String get() = parsed.optString("targetSessionMode", "").let { if (it == "null") "" else it }
+    val targetSessionScopeKey: String get() = parsed.optString("targetSessionScopeKey", "").let { if (it == "null") "" else it }
+    val sessionMode: String get() = parsed.optString("sessionMode", "").let { if (it == "null") "" else it }
+    val sessionScopeKey: String get() = parsed.optString("sessionScopeKey", "").let { if (it == "null") "" else it }
     val notificationPolicy: String get() = parsed.optString("notificationPolicy", "all")
     val reasoningJson: String get() {
         val source = parsed.optJSONObject("reasoning") ?: JSONObject().put("type", "automatic")
@@ -45,8 +50,10 @@ data class CronAutomation(val json: String = "{}") {
     fun change(key: String, newValue: Any?): CronAutomation =
         CronAutomation(value().put("version", maxOf(parsed.optInt("version", 2), 2)).put(key, newValue).toString())
     fun withReasoning(selection: ReasoningSelectionDto): CronAutomation = change("reasoning", reasoningJson(selection))
+    fun clearOwnedSession(): CronAutomation = change("ownedSessionId", null).change("ownedSessionTranscriptPath", null)
+        .change("ownedSessionMode", null).change("ownedSessionScopeKey", null)
     fun copied(): CronAutomation = change("status", "active").change("statusReason", null)
-        .change("ownedSessionId", null).change("targetSessionId", null).change("runMode", "new_session")
+        .clearOwnedSession().clearTarget().change("runMode", "new_session")
         .change("runs", org.json.JSONArray())
     companion object {
         fun from(task: CronTaskDto): CronAutomation = CronAutomation(task.automationJson ?: "{}")
@@ -72,6 +79,9 @@ internal data class NativeCronTerminal(
     val status: CronRunStatus,
     val model: String?,
     val sessionId: String?,
+    val sessionTranscriptPath: String?,
+    val sessionMode: String?,
+    val sessionScopeKey: String?,
     val summary: String?,
     val error: String?,
     val finishedAtMs: Long?,
@@ -108,10 +118,12 @@ internal fun CronAutomation.terminalFor(record: CronRunRecord): NativeCronTermin
             "failed" -> CronRunStatus.Failed
             "cancelled" -> CronRunStatus.Cancelled
             "interrupted" -> CronRunStatus.Interrupted
+            "outcome_unknown" -> CronRunStatus.OutcomeUnknown
             else -> return@firstNotNullOfOrNull null
         }
         fun optional(key: String): String? = run.optString(key).takeIf { it.isNotBlank() && it != "null" }
-        NativeCronTerminal(status, optional("model"), optional("sessionId"), optional("summary"), optional("error"),
+        NativeCronTerminal(status, optional("model"), optional("sessionId"), optional("sessionTranscriptPath"),
+            optional("sessionMode"), optional("sessionScopeKey"), optional("summary"), optional("error"),
             run.optLong("finishedAt").takeIf { it > 0 })
     }
 }

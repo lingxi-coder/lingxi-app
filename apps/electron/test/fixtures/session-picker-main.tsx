@@ -1,4 +1,5 @@
 import { fixtureAccountSnapshot } from './provider-accounts-mock';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
 import { createRoot } from 'react-dom/client';
 import { App } from '../../src/renderer/App';
@@ -42,6 +43,8 @@ function snapshot() {
       activeSession: active, pinnedSessions: [], archivedSessions: [], theme: 'light',
       sidebar: { organization: 'list', chatSort: 'updated', manualSessionOrder: {} } },
     workspace: { path: active.projectPath, trusted: true }, connection: { status: 'connected' },
+    conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: refs.map(ref => ref.projectPath),
+      selectedProject: active.projectPath, activeSession: active, sessions: refs }),
     runtimes: refs.map(ref => ({ ...ref, connection: { status: 'connected' }, turnActive: false,
       pendingInteractions: 0, pendingAskUserQuestions: 0 })),
     projectCatalogs: Object.fromEntries(refs.map((ref, index) => [ref.projectPath, { sessions: [rows[index]] }])),

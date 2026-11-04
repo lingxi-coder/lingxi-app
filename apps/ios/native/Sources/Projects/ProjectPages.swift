@@ -8,6 +8,7 @@ struct ProjectsPage: View {
     @Bindable var projectStore: ProjectStore
     /// Pin time per workspace key (`project.<id>`).
     let workspacePinnedAt: [String: Date]
+    let mode: SessionMode
     let onOpenProject: (String) -> Void
 
     @State private var createName = ""
@@ -15,7 +16,7 @@ struct ProjectsPage: View {
     @State private var showFolderPicker = false
 
     private var projects: [ProjectSnapshot] {
-        RecentSessionsBuilder.sortedProjects(projectStore.projects, pinnedAt: workspacePinnedAt)
+        RecentSessionsBuilder.sortedProjects(projectStore.projects.filter { $0.record.visibleModes.contains(mode) }, pinnedAt: workspacePinnedAt)
     }
 
     var body: some View {
@@ -43,7 +44,7 @@ struct ProjectsPage: View {
                                         .foregroundStyle(t.text4)
                                 }
                             }
-                            Text("\(project.record.syncState.label) · \(project.sessions.filter { !$0.isArchived }.count)")
+                            Text("\(project.record.syncState.label) · \(project.sessions.filter { !$0.isArchived && $0.mode == mode }.count)")
                                 .font(.caption)
                                 .foregroundStyle(t.text4)
                                 .lineLimit(1)
@@ -98,7 +99,7 @@ struct ProjectsPage: View {
         let name = createName
         Task { @MainActor in
             do {
-                let project = try await projectStore.createInternal(name: name)
+                let project = try await projectStore.createInternal(name: name, mode: mode)
                 onOpenProject(project.id)
             } catch {
                 projectStore.errorMessage = error.localizedDescription
@@ -112,7 +113,7 @@ struct ProjectsPage: View {
             guard let url = urls.first else { return }
             Task { @MainActor in
                 do {
-                    let project = try await projectStore.importExternal(name: url.lastPathComponent, directoryURL: url)
+                    let project = try await projectStore.importExternal(name: url.lastPathComponent, directoryURL: url, mode: mode)
                     onOpenProject(project.id)
                 } catch {
                     projectStore.errorMessage = error.localizedDescription
@@ -132,38 +133,43 @@ struct ProjectPage: View {
     @Bindable var projectStore: ProjectStore
     let projectID: String
     let activeScope: ConversationScope
+    let mode: SessionMode
     let cronState: CronRepositoryState
     let isPinned: Bool
     let activeSession: String
     let onTogglePinned: () -> Void
     /// nil while the list shows every mode: the caller keeps its current mode.
     let onNewSession: (SessionMode?) -> Void
-    let onOpenSession: (SessionMode, String) -> Void
+    let onOpenSession: (SessionMode, String, String?) -> Void
     /// `(scopeID, taskID)`; `(nil, nil)` opens the full task list.
     let onOpenCron: (String?, String?) -> Void
     let onOpenTerminal: () -> Void
+    let onRecoverAuthoring: () -> Void
 
     @ObservedObject private var convo: ConversationModel
-    @State private var filter: RecentsFilter = .all
     @State private var showFolderPicker = false
+    @State private var selectedAuthoringIntent: LocalAppAuthoringIntent?
 
     init(
         projectStore: ProjectStore,
         projectID: String,
         activeScope: ConversationScope,
+        mode: SessionMode,
         source: any ConversationSource,
         cronState: CronRepositoryState,
         isPinned: Bool,
         activeSession: String,
         onTogglePinned: @escaping () -> Void,
         onNewSession: @escaping (SessionMode?) -> Void,
-        onOpenSession: @escaping (SessionMode, String) -> Void,
+        onOpenSession: @escaping (SessionMode, String, String?) -> Void,
         onOpenCron: @escaping (String?, String?) -> Void,
-        onOpenTerminal: @escaping () -> Void
+        onOpenTerminal: @escaping () -> Void,
+        onRecoverAuthoring: @escaping () -> Void = {}
     ) {
         self.projectStore = projectStore
         self.projectID = projectID
         self.activeScope = activeScope
+        self.mode = mode
         self.cronState = cronState
         self.isPinned = isPinned
         self.activeSession = activeSession
@@ -172,6 +178,7 @@ struct ProjectPage: View {
         self.onOpenSession = onOpenSession
         self.onOpenCron = onOpenCron
         self.onOpenTerminal = onOpenTerminal
+        self.onRecoverAuthoring = onRecoverAuthoring
         convo = source.model
     }
 
@@ -188,6 +195,17 @@ struct ProjectPage: View {
             }
         }
         .background(t.windowBg.ignoresSafeArea())
+        .task(id: "\(projectID):\(projectStore.localAppIntentRevision)") {
+            do {
+                let intent = try await projectStore.selectedLocalAppAuthoringIntent(projectID: projectID)
+                guard !Task.isCancelled else { return }
+                selectedAuthoringIntent = intent
+            } catch {
+                guard !Task.isCancelled else { return }
+                selectedAuthoringIntent = nil
+                projectStore.errorMessage = error.localizedDescription
+            }
+        }
         .navigationTitle(project?.record.name ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -219,14 +237,16 @@ struct ProjectPage: View {
     @ViewBuilder
     private func content(_ project: ProjectSnapshot) -> some View {
         // The bound project's live catalog is fresher than the cached index.
-        let live = activeScope == .project(projectID) ? convo.engineSessions : []
-        let scopeRows = WorkspaceGroupBuilder.mergedSessionRows(live: live, cached: project.sessions)
-        let rows = RecentSessionsBuilder.sessions(in: scopeRows, filter: filter)
+        let scope = ConversationScope.project(projectID)
+        let live = activeScope == scope ? convo.engineSessions.filter { projectStore.allowsSession($0.id, in: scope) } : []
+        let cached = project.sessions.filter { projectStore.allowsSession($0.sessionId, in: scope) }
+        let scopeRows = WorkspaceGroupBuilder.mergedSessionRows(live: live, cached: cached)
+        let rows = RecentSessionsBuilder.sessions(in: scopeRows, filter: mode == .chat ? .chat : .code)
         let tasks = cronState.tasks.filter { $0.scope.projectID == projectID }
         List {
             Section {
                 HStack(spacing: 8) {
-                    Button { onNewSession(filter.mode) } label: {
+                    Button { onNewSession(mode) } label: {
                         Label("chat_new_chat", systemImage: "square.and.pencil")
                             .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity)
@@ -257,19 +277,19 @@ struct ProjectPage: View {
             }
 
             Section {
-                Picker("", selection: $filter) {
-                    ForEach(RecentsFilter.allCases, id: \.self) { Text($0.title).tag($0) }
+                if LocalAppAuthoringRecoveryVisibility.shouldOffer(intent: selectedAuthoringIntent, project: project) {
+                    Button(action: onRecoverAuthoring) {
+                        Label("local_app_authoring_recover", systemImage: "arrow.clockwise")
+                    }
+                    .accessibilityIdentifier("project.resume-authoring")
                 }
-                .pickerStyle(.segmented)
-                .listRowBackground(Color.clear)
-                .accessibilityIdentifier("project.filter")
                 if rows.isEmpty {
                     Text("drawer_no_sessions")
                         .font(.footnote)
                         .foregroundStyle(t.text4)
                 }
                 ForEach(rows) { row in
-                    Button { onOpenSession(row.mode, row.id) } label: {
+                    Button { onOpenSession(row.mode, row.id, row.transcriptPath) } label: {
                         HStack(spacing: 10) {
                             row.mode.glyph(t, size: 15)
                             VStack(alignment: .leading, spacing: 3) {
@@ -335,5 +355,13 @@ struct ProjectPage: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+    }
+}
+
+enum LocalAppAuthoringRecoveryVisibility {
+    static func shouldOffer(intent: LocalAppAuthoringIntent?, project: ProjectSnapshot) -> Bool {
+        guard let intent, intent.projectId == project.record.id else { return false }
+        guard let sessionID = intent.authoringSessionId else { return true }
+        return !project.sessions.contains { canonicalSessionID($0.sessionId) == canonicalSessionID(sessionID) }
     }
 }

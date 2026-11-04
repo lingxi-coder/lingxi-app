@@ -1014,13 +1014,31 @@ fn prompt_record(seq: u64, turn: u64, origin: &str, from_bot_name: Option<Value>
 
 fn hold_records(controller: &SessionController, records: Vec<Value>) {
     for part in [
-        json!({ "phase": "begin", "session_id": "s1", "epoch": "e1", "first_message_index": 0 }),
+        json!({ "phase": "begin", "session_id": "s1", "epoch": "e1", "first_message_index": 0, "session_mode": "code" }),
         json!({ "phase": "records", "session_id": "s1", "records": records }),
         json!({ "phase": "end", "session_id": "s1", "cursor": { "epoch": "e1", "seq": 20 },
                 "pending": {}, "turn": { "running": false } }),
     ] {
         controller.handle_snapshot(serde_json::from_value(part).unwrap());
     }
+}
+
+#[tokio::test]
+async fn bot_name_lookup_does_not_expose_an_unknown_mode_snapshot() {
+    let rig = Rig::new();
+    let controller = rig.client.session("s1");
+    for part in [
+        json!({ "phase": "begin", "session_id": "s1", "epoch": "e1", "first_message_index": 0 }),
+        json!({ "phase": "records", "session_id": "s1", "records": [prompt_record(1, 1, "bot", Some(json!("Researcher")))] }),
+        json!({ "phase": "end", "session_id": "s1", "cursor": { "epoch": "e1", "seq": 1 }, "pending": {}, "turn": { "running": false } }),
+    ] {
+        controller.handle_snapshot(serde_json::from_value(part).unwrap());
+    }
+    assert_eq!(controller.prompt_bot_name(1), None);
+    controller.handle_event(serde_json::from_value(json!({
+        "seq":2,"record":{"type":"event","event":{"type":"session_started","session_id":"s1","mode":"code"}}
+    })).unwrap());
+    assert_eq!(controller.prompt_bot_name(1).as_deref(), Some("Researcher"));
 }
 
 #[tokio::test(start_paused = true)]

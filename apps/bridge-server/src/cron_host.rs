@@ -52,7 +52,14 @@ impl HostCronRequests {
         }
     }
 
-    async fn mark_started(&self, run_id: &str, session_id: &str) {
+    async fn mark_started(
+        &self,
+        run_id: &str,
+        session_id: &str,
+        transcript_path: &str,
+        session_mode: &str,
+        session_scope_key: Option<&str>,
+    ) {
         let mut pending = self.pending.lock().await;
         if let Some(request) = pending.get_mut(run_id) {
             request.handed_off = true;
@@ -69,6 +76,9 @@ impl HostCronRequests {
                             .as_millis() as u64,
                     );
                     run.session_id = Some(session_id.into());
+                    run.session_transcript_path = Some(transcript_path.into());
+                    run.session_mode = Some(session_mode.into());
+                    run.session_scope_key = session_scope_key.map(str::to_owned);
                 }
             }
         }
@@ -147,6 +157,9 @@ pub(crate) fn requested_task(
             model: automation.model.clone(),
             reasoning: automation.reasoning.clone(),
             session_id: None,
+            session_transcript_path: None,
+            session_mode: None,
+            session_scope_key: None,
             summary: None,
             error: None,
         }];
@@ -174,7 +187,14 @@ impl HostCronFirer {
             requests,
         }
     }
-    pub async fn started(&self, id: &str, session_id: &str) {
+    pub async fn started(
+        &self,
+        id: &str,
+        session_id: &str,
+        transcript_path: &str,
+        session_mode: &str,
+        session_scope_key: Option<&str>,
+    ) {
         // Bind and publish its acknowledgement under the cancellation lock.
         // A cancellation that wins first must reject a later bind; one that
         // follows an accepted bind must retain ownership until host completion.
@@ -188,15 +208,42 @@ impl HostCronFirer {
                 // The same host can recover the original promise/result after
                 // reconnect. A host without that claim cache sees the bound
                 // marker and must refuse to execute this attempt a second time.
-                self.requests.mark_started(id, session_id).await;
                 let fs = crate::HostFileSystem::new(self.cwd.clone());
-                cron::automation::bind_automation_run_session(
+                let bound = cron::automation::bind_automation_run_session_with_source(
                     &fs,
                     &self.cwd,
                     &run.request,
                     session_id,
+                    transcript_path,
+                    session_mode,
+                    session_scope_key,
                 )
-                .await
+                .await;
+                if bound.is_ok() {
+                    // Publish a replayable receipt only after the exact source
+                    // has been durably bound to this claim.
+                    let Some(canonical) = lingxi_core::types::SessionId::parse_prefixed(session_id)
+                        .map(|value| value.as_uuid().to_string())
+                    else {
+                        self.sink
+                            .emit(ClientEvent::CronRunBound {
+                                run_id: id.into(),
+                                error: Some("Bound session identity is invalid".into()),
+                            })
+                            .await;
+                        return;
+                    };
+                    self.requests
+                        .mark_started(
+                            id,
+                            &canonical,
+                            transcript_path,
+                            session_mode,
+                            session_scope_key,
+                        )
+                        .await;
+                }
+                bound
             }
             None => Err("Scheduled run is no longer awaiting execution".into()),
         };
@@ -223,6 +270,9 @@ impl HostCronFirer {
                     .filter(|s| !s.is_empty())
                     .map(|session_id| cron::automation::AutomationRunResult {
                         session_id,
+                        session_transcript_path: None,
+                        session_mode: None,
+                        session_scope_key: None,
                         summary: summary.unwrap_or_default(),
                     })
                     .ok_or_else(|| "Host returned no execution session".into()),

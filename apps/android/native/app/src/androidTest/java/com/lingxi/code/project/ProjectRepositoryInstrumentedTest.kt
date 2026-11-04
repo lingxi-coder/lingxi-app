@@ -42,7 +42,7 @@ class ProjectRepositoryInstrumentedTest {
     @Test
     fun createAndReloadUsesStableUuidWorkspaceLayout() {
         val repository = repository()
-        val created = repository.createInternal("代码项目")
+        val created = repository.createInternal("代码项目", com.lingxi.code.model.SessionMode.Code)
         val projectDir = File(testRoot, created.record.id)
 
         assertTrue(isLowercaseUuid(created.record.id))
@@ -69,8 +69,8 @@ class ProjectRepositoryInstrumentedTest {
             "10000000-0000-4000-8000-000000000002",
         )
         val repository = repository(newId = { ids[counter++] })
-        val first = repository.createInternal("损坏项目")
-        val second = repository.createInternal("正常项目")
+        val first = repository.createInternal("损坏项目", com.lingxi.code.model.SessionMode.Code)
+        val second = repository.createInternal("正常项目", com.lingxi.code.model.SessionMode.Code)
         File(testRoot, "${first.record.id}/$PROJECT_MANIFEST_FILE").writeText("{broken")
 
         val restored = repository.load()
@@ -80,8 +80,8 @@ class ProjectRepositoryInstrumentedTest {
     @Test
     fun projectAndGlobalSessionIndexesStayIsolated() {
         val repository = repository()
-        val first = repository.createInternal("一")
-        val second = repository.createInternal("二")
+        val first = repository.createInternal("一", com.lingxi.code.model.SessionMode.Code)
+        val second = repository.createInternal("二", com.lingxi.code.model.SessionMode.Code)
         val firstRows = listOf(session("session-a"), session("session-b"))
         val secondRows = listOf(session("session-c"))
         val globalRows = listOf(session("legacy-global"))
@@ -108,12 +108,13 @@ class ProjectRepositoryInstrumentedTest {
     @Test
     fun sessionStartedIsIndexedBeforeEngineCatalogContainsIt() {
         val repository = repository()
-        val project = repository.createInternal("Started")
+        val project = repository.createInternal("Started", com.lingxi.code.model.SessionMode.Code)
 
         val state = repository.recordStartedSession(
             projectId = project.record.id,
             sessionId = "engine-session-1",
             title = "新对话",
+            mode = com.lingxi.code.model.SessionMode.Code,
         )
 
         val reloaded = state.projects.single { it.record.id == project.record.id }
@@ -131,6 +132,7 @@ class ProjectRepositoryInstrumentedTest {
             projectId = null,
             sessionId = "sess:$uuid",
             title = "新对话",
+            mode = com.lingxi.code.model.SessionMode.Code,
         )
 
         assertEquals(uuid, state.globalSessions.single().sessionId)
@@ -144,12 +146,12 @@ class ProjectRepositoryInstrumentedTest {
     @Test
     fun multipleEmptySessionsRemainIndexedAndKeepTheirStableIds() {
         val repository = repository()
-        val project = repository.createInternal("空会话清理")
+        val project = repository.createInternal("空会话清理", com.lingxi.code.model.SessionMode.Code)
         val first = "19587a33-0725-48db-abca-8a2aed345f6b"
         val second = "29587a33-0725-48db-abca-8a2aed345f6b"
 
-        repository.recordStartedSession(project.record.id, first, "旧空会话")
-        val state = repository.recordStartedSession(project.record.id, second, "新会话")
+        repository.recordStartedSession(project.record.id, first, "旧空会话", com.lingxi.code.model.SessionMode.Code)
+        val state = repository.recordStartedSession(project.record.id, second, "新会话", com.lingxi.code.model.SessionMode.Code)
 
         val restored = state.projects.single()
         assertEquals(listOf(second, first), restored.sessions.map { it.sessionId })
@@ -160,13 +162,14 @@ class ProjectRepositoryInstrumentedTest {
     @Test
     fun legacyPrefixedSessionIndexLoadsAsBareUuid() {
         val repository = repository()
-        val project = repository.createInternal("旧版索引")
+        val project = repository.createInternal("旧版索引", com.lingxi.code.model.SessionMode.Code)
         val uuid = "19587a33-0725-48db-abca-8a2aed345f6b"
 
         repository.recordStartedSession(
             projectId = project.record.id,
             sessionId = "sess:$uuid",
             title = "旧版会话",
+            mode = com.lingxi.code.model.SessionMode.Code,
         )
 
         val restored = repository().load().projects.single()
@@ -182,7 +185,7 @@ class ProjectRepositoryInstrumentedTest {
         }
         val repository = repository(newId = { id }, writer = writer)
 
-        val failed = runCatching { repository.createInternal("失败") }
+        val failed = runCatching { repository.createInternal("失败", com.lingxi.code.model.SessionMode.Code) }
 
         assertTrue(failed.isFailure)
         assertFalse(File(testRoot, id).exists())
@@ -198,7 +201,7 @@ class ProjectRepositoryInstrumentedTest {
     @Test
     fun workspaceSymlinkIsQuarantinedAndNestedLinksAreUnsafe() {
         val repository = repository()
-        val project = repository.createInternal("链接安全")
+        val project = repository.createInternal("链接安全", com.lingxi.code.model.SessionMode.Code)
         val workspace = project.workspace.hostDirectory
         val outside = File(testRoot, "outside-workspace").also { assertTrue(it.mkdirs()) }
         val secret = File(outside, "secret.txt").also { it.writeText("secret") }
@@ -222,5 +225,6 @@ class ProjectRepositoryInstrumentedTest {
         messageCount = 1,
         relativeTime = "刚刚",
         updatedAtEpochMillis = System.currentTimeMillis(),
+        mode = com.lingxi.code.model.SessionMode.Code,
     )
 }

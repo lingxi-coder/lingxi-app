@@ -24,6 +24,7 @@ export interface TaskOutputState {
 export interface DesktopState {
   readonly sessions: SessionRowDto[];
   readonly activeSessionId: string | null;
+  readonly sessionMode: { sessionId: string; active: SessionRowDto['mode'] } | null;
   readonly models: string[];
   readonly modelDetails: ModelDetailsDto[];
   readonly providerModelCatalog: ProviderModelCatalogEntryDto[];
@@ -60,6 +61,7 @@ export function emptyDesktopState(): DesktopState {
   return {
     sessions: [],
     activeSessionId: null,
+    sessionMode: null,
     models: [],
     modelDetails: [],
     providerModelCatalog: [],
@@ -101,7 +103,7 @@ function mergeSessionCatalog(
 function startSession(
   state: DesktopState,
   sessionId: string,
-  mode: SessionRowDto['mode'] = 'code',
+  mode: SessionRowDto['mode'],
 ): DesktopState {
   const existing = state.sessions.find((session) => session.uuid === sessionId);
   const sessions = existing
@@ -116,7 +118,9 @@ function startSession(
         // the first turn creates the durable JSONL transcript.
         path: '',
       }, ...state.sessions];
-  return { ...state, sessions, activeSessionId: sessionId, conversationControls: null, currentModelSource: null };
+  return { ...state, sessions, activeSessionId: sessionId,
+    sessionMode: { sessionId, active: mode },
+    conversationControls: null, currentModelSource: null };
 }
 
 export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): DesktopState {
@@ -126,9 +130,11 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
     case 'session_started':
       return startSession({ ...state, lastCost: null, status: null, apiRetry: null, storagePaused: false }, event.session_id, event.mode);
     case 'session_resumed':
-      return { ...state, activeSessionId: event.session_id, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null, storagePaused: false };
+      return { ...state, activeSessionId: event.session_id,
+        sessionMode: { sessionId: event.session_id, active: event.mode },
+        conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null, storagePaused: false };
     case 'session_ended':
-      return { ...state, activeSessionId: null, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null, storagePaused: false };
+      return { ...state, activeSessionId: null, sessionMode: null, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null, storagePaused: false };
     case 'session_storage_state':
       return { ...state, storagePaused: event.disk_full };
     case 'model_list':

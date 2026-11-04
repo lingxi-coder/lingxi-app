@@ -1,4 +1,16 @@
 import Foundation
+import CryptoKit
+
+/// Verify the immutable downloaded artifact without extracting it. The native
+/// remix importer validates the ZIP structure, signed inventory and paths.
+enum MarketRemixArchive {
+    static func readVerified(_ url: URL, size: Int, sha256: String) throws -> Data {
+        let bytes = try Data(contentsOf: url)
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        guard bytes.count == size, digest == sha256 else { throw MarketFailure("HASH_MISMATCH") }
+        return bytes
+    }
+}
 
 struct MarketVersion: Codable, Equatable, Identifiable, Sendable {
     let id: String; let appId: String; let sequence: Int
@@ -9,12 +21,37 @@ struct MarketApp: Codable, Equatable, Identifiable, Sendable {
     let id: String; let name: String; let summary: String; let category: String
     let platforms: [String]; let coverUrl: String?; let currentVersion: MarketVersion?
 }
-struct MarketDistribution: Codable, Sendable {
+struct MarketDistribution: Decodable, Sendable {
     struct File: Codable, Sendable { let path: String; let sizeBytes: Int; let sha256: String; let executable: Bool }
     struct Artifact: Codable, Sendable { let format: String; let filename: String; let sizeBytes: Int; let sha256: String; let downloadUrl: URL }
     let schema: Int; let appId: String; let versionId: String; let sequence: Int; let releaseDigest: String
     let manifest: UnifiedAppManifest; let files: [File]; let dependencies: [File]; let artifact: Artifact
     let executionConsentRequired: Bool
+    // Keep the signed JSON values as well as their typed UI projections.
+    // In particular, explicit null and omitted fields are distinct inputs.
+    let signedManifest: LocalAppJSON
+    let signedFiles: LocalAppJSON
+    let signedDependencies: LocalAppJSON
+
+    private enum CodingKeys: String, CodingKey {
+        case schema, appId, versionId, sequence, releaseDigest, manifest, files, dependencies, artifact, executionConsentRequired
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try values.decode(Int.self, forKey: .schema)
+        appId = try values.decode(String.self, forKey: .appId)
+        versionId = try values.decode(String.self, forKey: .versionId)
+        sequence = try values.decode(Int.self, forKey: .sequence)
+        releaseDigest = try values.decode(String.self, forKey: .releaseDigest)
+        manifest = try values.decode(UnifiedAppManifest.self, forKey: .manifest)
+        files = try values.decode([File].self, forKey: .files)
+        dependencies = try values.decode([File].self, forKey: .dependencies)
+        artifact = try values.decode(Artifact.self, forKey: .artifact)
+        executionConsentRequired = try values.decode(Bool.self, forKey: .executionConsentRequired)
+        signedManifest = try values.decode(LocalAppJSON.self, forKey: .manifest)
+        signedFiles = try values.decode(LocalAppJSON.self, forKey: .files)
+        signedDependencies = try values.decode(LocalAppJSON.self, forKey: .dependencies)
+    }
 }
 struct MarketUpdate: Codable, Equatable, Sendable {
     let appId: String; let status: String; let currentVersionId: String?; let currentSequence: Int?

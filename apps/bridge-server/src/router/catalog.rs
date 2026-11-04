@@ -340,7 +340,7 @@ impl EngineCommandRouter {
             // runtime (plan §2). No engine handle for these in the foundation —
             // routing them is additive and does not change this seam's shape.
             ListingKindDto::Sessions => {
-                self.emit_session_list(DEFAULT_SESSION_LIST_LIMIT, sink)
+                self.emit_session_list(DEFAULT_SESSION_LIST_LIMIT, None, sink)
                     .await;
             }
             ListingKindDto::Settings => {

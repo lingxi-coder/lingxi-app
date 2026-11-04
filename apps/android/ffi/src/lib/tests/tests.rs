@@ -217,11 +217,20 @@ impl PermissionRequestSink for RecordingPermissionSink {
     }
 }
 
-fn build_handle(root: &std::path::Path) -> Arc<harness_runtime::mobile::MobileEngineHandle> {
+pub(super) fn build_handle(
+    root: &std::path::Path,
+) -> Arc<harness_runtime::mobile::MobileEngineHandle> {
+    build_handle_with_config(root, |_| {})
+}
+
+pub(super) fn build_handle_with_config(
+    root: &std::path::Path,
+    configure: impl FnOnce(&mut MobileConfig),
+) -> Arc<harness_runtime::mobile::MobileEngineHandle> {
     let platform: Arc<dyn Platform> = Arc::new(HostFakePlatform::new(root.to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
-    let cfg = MobileConfig {
+    let mut cfg = MobileConfig {
         build_info: harness_runtime::mobile::BuildInfo::new(
             env!("CARGO_PKG_VERSION"),
             option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
@@ -230,6 +239,7 @@ fn build_handle(root: &std::path::Path) -> Arc<harness_runtime::mobile::MobileEn
         lingxi_home: root.join(".lingxi"),
         ..MobileConfig::default()
     };
+    configure(&mut cfg);
     harness_runtime::mobile::build_mobile_engine(cfg, platform, listener, perm_sink)
         .expect("shared build_mobile_engine failed")
 }
@@ -329,31 +339,93 @@ fn android_project_cwd_uses_the_linux_user_home_and_accepts_multiple_directories
     std::fs::create_dir_all(&a).unwrap();
     std::fs::create_dir_all(&b).unwrap();
     assert_eq!(
-        super::android_project_cwd(managed.to_str().unwrap(), None).unwrap(),
-        std::path::Path::new(&directories.default_cwd)
+        super::android_project_cwd(managed.to_str().unwrap(), &directories.scheduled_cwd).unwrap(),
+        std::path::Path::new(&directories.scheduled_cwd)
             .canonicalize()
             .unwrap()
     );
     for directory in [&a, &b] {
         assert_eq!(
-            super::android_project_cwd(managed.to_str().unwrap(), directory.to_str()).unwrap(),
+            super::android_project_cwd(managed.to_str().unwrap(), directory.to_str().unwrap())
+                .unwrap(),
             directory.canonicalize().unwrap()
         );
     }
     assert_eq!(
-        super::android_project_cwd(
-            managed.to_str().unwrap(),
-            Some("/home/lingxi/other-worktree")
-        )
-        .unwrap(),
+        super::android_project_cwd(managed.to_str().unwrap(), "/home/lingxi/other-worktree")
+            .unwrap(),
         b.canonicalize().unwrap()
     );
-    assert!(super::android_project_cwd(managed.to_str().unwrap(), temp.path().to_str()).is_err());
+    assert!(
+        super::android_project_cwd(managed.to_str().unwrap(), temp.path().to_str().unwrap())
+            .is_err()
+    );
     #[cfg(unix)]
     {
         let escape = std::path::Path::new(&directories.projects).join("escape");
         std::os::unix::fs::symlink(temp.path(), &escape).unwrap();
-        assert!(super::android_project_cwd(managed.to_str().unwrap(), escape.to_str()).is_err());
+        assert!(
+            super::android_project_cwd(managed.to_str().unwrap(), escape.to_str().unwrap())
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn android_engine_cwd_uses_fixed_mode_and_explicit_scheduler_or_project() {
+    use harness_runtime::mobile::SessionModeDto;
+
+    let temp = tempfile::tempdir().unwrap();
+    let directories = harness_runtime::mobile::mobile_user_directories(
+        temp.path().join("runtime").display().to_string(),
+    )
+    .unwrap();
+    directories.prepare().unwrap();
+    let project = std::path::Path::new(&directories.projects).join("project-a");
+    std::fs::create_dir_all(&project).unwrap();
+
+    for (mode, host, guest) in [
+        (
+            SessionModeDto::Chat,
+            &directories.chat_cwd,
+            &directories.chat_guest_cwd,
+        ),
+        (
+            SessionModeDto::Code,
+            &directories.code_cwd,
+            &directories.code_guest_cwd,
+        ),
+    ] {
+        let selected =
+            super::configuration::android_engine_cwd(&directories, None, mode, false).unwrap();
+        assert_eq!(
+            selected.0,
+            std::path::Path::new(host).canonicalize().unwrap()
+        );
+        assert_eq!(selected.1, std::path::PathBuf::from(guest));
+        let explicit =
+            super::configuration::android_engine_cwd(&directories, project.to_str(), mode, false)
+                .unwrap();
+        assert_eq!(explicit.0, project.canonicalize().unwrap());
+        assert_eq!(
+            explicit.1,
+            std::path::Path::new(&directories.projects_guest_path).join("project-a")
+        );
+        let controller =
+            super::configuration::android_engine_cwd(&directories, None, mode, true).unwrap();
+        assert_eq!(
+            controller.0,
+            std::path::Path::new(&directories.scheduled_cwd)
+                .canonicalize()
+                .unwrap()
+        );
+        assert_eq!(
+            controller.1,
+            std::path::PathBuf::from(&directories.scheduled_guest_cwd)
+        );
+        assert!(
+            super::configuration::android_engine_cwd(&directories, Some(""), mode, false).is_err()
+        );
     }
 }
 

@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { desktopHost } from '../bridge/bridgeConnection';
+import { localAppErrorMessage } from '../bridge/localAppErrors';
+import { tr } from '../i18n/locale';
 import type { DesktopLocalApp, LocalAppMarketPublication } from '../../shared/localApps';
 function api() { const value = desktopHost()?.localApps; if (!value) throw new Error('Application host is unavailable'); return value; }
-const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-export function LocalAppPublish({ app, onClose }: { app: DesktopLocalApp; onClose: () => void }) {
+export function LocalAppPublish({ app, onClose, canDevelop }: { app: DesktopLocalApp; onClose: () => void; canDevelop: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [result, setResult] = useState('');
   const [fields, setFields] = useState<LocalAppMarketPublication>({ name: app.name, summary: app.summary, description: '', category: 'other', notes: '' });
   useEffect(() => { dialog.current?.showModal(); }, []);
   const set = (field: keyof LocalAppMarketPublication, value: string) => setFields(previous => ({ ...previous, [field]: value }));
   return <dialog ref={dialog} className="local-app-publish" aria-labelledby="local-app-publish-title" onCancel={event => { if (busy) event.preventDefault(); }} onClose={onClose}>
-    <form onSubmit={async event => { event.preventDefault(); if (busy) return; setBusy(true); setError(''); try { const receipt = await api().marketPublish(app.id, fields, app.revision); if (receipt) setResult(`Source submitted: ${receipt.status || 'validation queued'}. Use Manage publications to review progress, visibility and review feedback.`); } catch (error) { setError(message(error)); } finally { setBusy(false); } }}>
+    <form onSubmit={async event => { event.preventDefault(); if (busy) return; if (!canDevelop) { setError(tr('local_app_development_requires_code')); return; } setBusy(true); setError(''); try { const receipt = await api().marketPublish(app.id, fields, app.revision); if (receipt) setResult(`Source submitted: ${receipt.status || 'validation queued'}. Use Manage publications to review progress, visibility and review feedback.`); } catch (error) { setError(localAppErrorMessage(error)); } finally { setBusy(false); } }}>
       <h2 id="local-app-publish-title">Publish source to the market</h2><p>Only files explicitly listed in this release are exported. You will review the file list before upload. Publishing here does not change your local runtime permissions.</p>
       <label>Name<input required maxLength={60} value={fields.name} onChange={e => set('name', e.target.value)}/></label>
       <label>Summary<input required maxLength={160} value={fields.summary} onChange={e => set('summary', e.target.value)}/></label>

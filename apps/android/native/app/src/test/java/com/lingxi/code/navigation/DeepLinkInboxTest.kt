@@ -36,14 +36,14 @@ class DeepLinkInboxTest {
     @Test fun `cold and warm links remain FIFO across recreation and consume only their own head`() {
         val saved = SavedStateHandle()
         val inbox = DeepLinkInbox(saved)
-        assertTrue(inbox.enqueue("lingxi://session/first"))
-        assertTrue(inbox.enqueue("lingxi://session/second"))
-        assertTrue(inbox.enqueue("lingxi://session/first"))
+        assertTrue(inbox.enqueue("lingxi://session/first?mode=chat"))
+        assertTrue(inbox.enqueue("lingxi://session/second?mode=code"))
+        assertTrue(inbox.enqueue("lingxi://session/first?mode=chat"))
         val recreated = DeepLinkInbox(saved)
-        recreated.complete("lingxi://session/second")
-        assertEquals(listOf("lingxi://session/first", "lingxi://session/second"), recreated.links.value)
-        recreated.complete("lingxi://session/first")
-        assertEquals(listOf("lingxi://session/second"), recreated.links.value)
+        recreated.complete("lingxi://session/second?mode=code")
+        assertEquals(listOf("lingxi://session/first?mode=chat", "lingxi://session/second?mode=code"), recreated.links.value)
+        recreated.complete("lingxi://session/first?mode=chat")
+        assertEquals(listOf("lingxi://session/second?mode=code"), recreated.links.value)
     }
     @Test fun `bounded queue rejects overflow without losing the oldest request`() {
         val inbox = DeepLinkInbox(SavedStateHandle())

@@ -11,7 +11,7 @@ function runtime(store: SettingsStore) {
   const commands: ClientCommand[] = [];
   const client = Object.assign(new EventEmitter(), { sendCommand: (command: ClientCommand) => { commands.push(command); } });
   const instance = new SessionRuntime({
-    projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555',
+    projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555', expectedSessionMode: 'code',
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
     getSavedPermissionMode: () => store.getLastPermissionMode(),
     onPermissionModeSelected: mode => store.setLastPermissionMode(mode),
@@ -70,7 +70,8 @@ test('history hydration reapplies the saved mode after restoring an old plan sta
     const store = new SettingsStore(dir); store.setLastPermissionMode('acceptEdits');
     const { instance, client, commands } = runtime(store);
     const resumed = instance.resumeOwnedSession();
-    client.emit('event', { type: 'session_resumed', session_id: instance.sessionId, mode: 'plan', messages: [] });
+    client.emit('event', { type: 'session_resumed', session_id: instance.sessionId, mode: 'code', messages: [] });
+    acknowledge(client, 'plan');
     client.emit('event', { type: 'model_changed', model: 'model' });
     await new Promise(resolve => setImmediate(resolve));
     const relevantCommands = permissionModeCommands(commands);

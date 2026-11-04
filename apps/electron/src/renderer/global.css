@@ -137,7 +137,8 @@ body {
 .desktop-rail-button:active { scale: .94; }
 .desktop-rail-settings { margin-top: auto; }
 .desktop-rail-button:disabled { opacity: .45; cursor: default; }
-.desktop-rail-changes { position: relative; }
+.desktop-rail-changes,
+.desktop-rail-teams { position: relative; }
 .desktop-rail-count {
   position: absolute;
   top: 0;
@@ -153,6 +154,11 @@ body {
   line-height: 16px;
   font-variant-numeric: tabular-nums;
   text-align: center;
+}
+/* Messages waiting in Teams are not changes to review: the badge wears the colors the Teams unread badges do (set from the theme on the shell). */
+.desktop-rail-count[data-kind='unread'] {
+  background: var(--teams-badge-bg, var(--desktop-accent));
+  color: var(--teams-badge-fg, #fff);
 }
 .desktop-rail-button:focus-visible,
 .sidebar-header-icon:focus-visible,
@@ -230,6 +236,34 @@ body {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+/* Teams: the open conversation fills the page, and the panel with the team's details sits beside it at the width the owner chose. */
+.teams-page {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.teams-conversation {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.teams-conversation > .tw-conv { flex: 1 1 0; height: auto; min-height: 0; }
+.teams-page > .tw-drawer { height: auto; }
+.teams-sidebar > .tw-sidebar { flex: 1 1 0; height: auto; min-height: 0; }
+/* A narrow window has no room for the conversation and the panel side by side (the page is the window less the rail and a sidebar of the usual width):
+   the panel then lies over the right edge of the conversation, at the width it has, and leaves the conversation its own. */
+@media (max-width: 1100px) {
+  .teams-page { position: relative; }
+  .teams-page > .tw-drawer {
+    position: absolute;
+    inset: 0 0 0 auto;
+    z-index: 4;
+    box-shadow: -12px 0 28px rgb(0 0 0 / 16%);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .desktop-sidebar, .desktop-sidebar-brand, .desktop-rail-button { transition: none; }

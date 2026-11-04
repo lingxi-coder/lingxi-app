@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Observation
 
 private struct ActiveCronOccurrenceKey: Hashable {
@@ -15,6 +16,173 @@ private let inProcessAttemptBudget = 3
 /// failure becomes terminal. Matches Android `MAX_EXECUTION_ATTEMPTS`.
 private let maxScheduledExecutionAttempts = 5
 
+/// The generated-session index is part of the owner catalog, not a cache to
+/// silently rebuild after corruption. Existing live owners never use this to
+/// stop their work; it gates only new claims.
+@MainActor
+final class CronSessionOwnershipIndex {
+    private let appSandboxRoot: String
+    private let preferences: ProjectScopedPreferences
+    private var observed: Bool
+    private var blockedReason: String?
+    private let storage: CronOwnerIndexStorage
+
+    init(appSandboxRoot: String, preferences: ProjectScopedPreferences, writer: ProjectAtomicWriting = DefaultProjectAtomicWriter()) {
+        self.appSandboxRoot = appSandboxRoot
+        self.preferences = preferences
+        self.observed = preferences.hasObservedScheduledSessionIndex
+        self.storage = CronOwnerIndexStorage(writer: writer)
+    }
+
+    func claims() throws -> [String: SessionOwnerEvidence] {
+        if let blockedReason { throw ProjectRepositoryError.invalidSessionOwnership(blockedReason) }
+        do {
+            let result = try Self.readClaims(appSandboxRoot: appSandboxRoot, observed: observed || preferences.hasObservedScheduledSessionIndex,
+                                             scopeClaims: preferences.sessionScopeClaims)
+            if !observed { preferences.markScheduledSessionIndexObserved(); observed = true }
+            return result
+        }
+        catch { throw ProjectRepositoryError.invalidSessionOwnership("scheduled: \(error.localizedDescription)") }
+    }
+
+    func blockNewClaims(_ reason: String) { blockedReason = "scheduled: \(reason)" }
+
+    func claimsOffMain() async throws -> [String: SessionOwnerEvidence] {
+        if let blockedReason { throw ProjectRepositoryError.invalidSessionOwnership(blockedReason) }
+        let result = try await storage.claims(appSandboxRoot: appSandboxRoot,
+            observed: observed || preferences.hasObservedScheduledSessionIndex, scopeClaims: preferences.sessionScopeClaims)
+        if !observed { preferences.markScheduledSessionIndexObserved(); observed = true }
+        if let blockedReason { throw ProjectRepositoryError.invalidSessionOwnership(blockedReason) }
+        return result
+    }
+
+    /// Merge receipts written by the native scheduler before host history was
+    /// updated. Do not resolve conflicting UUIDs by timestamp or cwd.
+    func mergeReceipts(_ incoming: [CronGeneratedSession]) async throws {
+        if let blockedReason { throw ProjectRepositoryError.invalidSessionOwnership(blockedReason) }
+        let root = appSandboxRoot
+        let wasObserved = observed || preferences.hasObservedScheduledSessionIndex
+        let scopeClaims = preferences.sessionScopeClaims
+        try await storage.merge(incoming, appSandboxRoot: root, observed: wasObserved, scopeClaims: scopeClaims)
+        if !observed { preferences.markScheduledSessionIndexObserved(); observed = true }
+        if let blockedReason { throw ProjectRepositoryError.invalidSessionOwnership(blockedReason) }
+    }
+
+    nonisolated fileprivate static func mergeReceiptsOnStorageExecutor(_ incoming: [CronGeneratedSession],
+        appSandboxRoot: String, observed: Bool, scopeClaims: [String: ConversationScope]?, writer: ProjectAtomicWriting) throws {
+        _ = try readClaims(appSandboxRoot: appSandboxRoot, observed: observed, scopeClaims: scopeClaims)
+        let file = URL(fileURLWithPath: appSandboxRoot).appendingPathComponent("cron/sessions.json")
+        let expected = try ownerCatalogExpectation(file)
+        var owners = try readClaims(appSandboxRoot: appSandboxRoot, observed: true, scopeClaims: scopeClaims)
+        guard try ownerCatalogExpectation(file) == expected, let bytes = expected.bytes else {
+            throw ProjectRepositoryError.invalidProjectData
+        }
+        try UniqueJSONKeyGuard.validate(bytes)
+        var rows = try JSONDecoder().decode([CronGeneratedSession].self, from: bytes)
+        var changed = false
+        for row in incoming {
+            let id = canonicalSessionID(row.id)
+            guard !id.isEmpty, let key = row.sessionScopeKey, let scope = ConversationScope(workspaceKey: key),
+                  scope.projectID == row.projectID, let mode = row.sessionMode,
+                  let path = row.sessionTranscriptPath, !path.isEmpty, (path as NSString).isAbsolutePath else {
+                throw ProjectRepositoryError.invalidSessionOwnership("scheduled: invalid native session receipt")
+            }
+            let owner = SessionOwnerEvidence(scope: scope, mode: mode, transcriptPath: path)
+            if let existing = owners[id], existing != owner {
+                throw ProjectRepositoryError.invalidSessionOwnership("scheduled: \(id): \(ProjectRepositoryError.conflictingSessionScope.localizedDescription)")
+            }
+            owners[id] = owner
+            if !rows.contains(where: { canonicalSessionID($0.id) == id }) {
+                rows.append(row)
+                changed = true
+            }
+        }
+        guard changed else {
+            try synchronizeOwnerCatalog(file, expectedBytes: bytes)
+            return
+        }
+        let data = try JSONEncoder().encode(rows)
+        try writer.writeData(data, to: file, expected: expected, validate: { staged in
+            _ = try JSONDecoder().decode([CronGeneratedSession].self, from: staged)
+        }, commit: { try $0() })
+        try synchronizeOwnerCatalog(file, expectedBytes: data)
+    }
+
+    nonisolated fileprivate static func readClaims(appSandboxRoot: String, observed: Bool,
+        scopeClaims: [String: ConversationScope]?) throws -> [String: SessionOwnerEvidence] {
+        let directory = URL(fileURLWithPath: appSandboxRoot).appendingPathComponent("cron", isDirectory: true)
+        let file = directory.appendingPathComponent("sessions.json")
+        let receipts = try CronRunHistoryStore.storedSessionReceipts(fileURL: directory.appendingPathComponent("history.json"))
+        if try !ownerCatalogFileExists(file) {
+            guard !observed,
+                  let existing = scopeClaims, !existing.values.contains(.scheduled),
+                  receipts.isEmpty else {
+                throw ProjectRepositoryError.missingSessionIndex
+            }
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let fd = file.path.withCString { open($0, O_WRONLY | O_CREAT | O_EXCL, 0o600) }
+            if fd < 0 {
+                guard errno == EEXIST else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            } else {
+                let bytes = Array("[]".utf8)
+                let written = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+                let failure = errno
+                close(fd)
+                guard written == bytes.count else { throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO) }
+            }
+        }
+        guard let bytes = try ownerCatalogExpectation(file).bytes else { throw ProjectRepositoryError.missingSessionIndex }
+        try UniqueJSONKeyGuard.validate(bytes)
+        let rows = try JSONDecoder().decode([CronGeneratedSession].self, from: bytes)
+        var owners: [String: SessionOwnerEvidence] = [:]
+        func add(id rawID: String, projectID: String?, key: String?, mode: SessionMode?, path: String?) throws {
+            let id = canonicalSessionID(rawID)
+            guard !id.isEmpty, let key, let scope = ConversationScope(workspaceKey: key),
+                  scope.projectID == projectID, let mode,
+                  let path, !path.isEmpty, (path as NSString).isAbsolutePath else {
+                throw ProjectRepositoryError.conflictingSessionScope
+            }
+            let owner = SessionOwnerEvidence(scope: scope, mode: mode, transcriptPath: path)
+            guard owners[id].map({ $0 == owner }) ?? true else {
+                throw ProjectRepositoryError.conflictingSessionScope
+            }
+            owners[id] = owner
+        }
+        for row in rows {
+            try add(id: row.id, projectID: row.projectID, key: row.sessionScopeKey,
+                    mode: row.sessionMode, path: row.sessionTranscriptPath)
+        }
+        // A result is durable in history before the generated index refreshes.
+        // Include that receipt so a concurrent owner cannot claim its UUID.
+        for run in receipts {
+            guard let id = run.sessionID else { continue }
+            try add(id: id, projectID: run.projectID, key: run.sessionScopeKey,
+                    mode: run.sessionMode, path: run.sessionTranscriptPath)
+        }
+        return owners
+    }
+}
+
+/// Serializes receipt publication off the main actor. The caller retains the
+/// corresponding UUID reservation until the write and revalidation finish.
+private actor CronOwnerIndexStorage {
+    private let writer: ProjectAtomicWriting
+    private var observedInProcess = false
+    init(writer: ProjectAtomicWriting) { self.writer = writer }
+    func claims(appSandboxRoot: String, observed: Bool, scopeClaims: [String: ConversationScope]?) throws -> [String: SessionOwnerEvidence] {
+        let result = try CronSessionOwnershipIndex.readClaims(appSandboxRoot: appSandboxRoot,
+            observed: observed || observedInProcess, scopeClaims: scopeClaims)
+        observedInProcess = true
+        return result
+    }
+    func merge(_ receipts: [CronGeneratedSession], appSandboxRoot: String, observed: Bool,
+               scopeClaims: [String: ConversationScope]?) throws {
+        try CronSessionOwnershipIndex.mergeReceiptsOnStorageExecutor(receipts, appSandboxRoot: appSandboxRoot,
+            observed: observed || observedInProcess, scopeClaims: scopeClaims, writer: writer)
+        observedInProcess = true
+    }
+}
+
 @MainActor
 @Observable
 final class CronRepository {
@@ -23,10 +191,27 @@ final class CronRepository {
     var routePath: [CronRoute]
     var modelChoices: [String] = []
     var modelDetails: [String: ModelRuntimeDetails] = [:]
-    var sessionChoices: [CronSessionChoice] = []
+    var editorMode: SessionMode = .code
+    @ObservationIgnored var sessionChoiceProvider: ((SessionMode) -> [CronSessionChoice])?
+    @ObservationIgnored var sessionChoiceFailure: String?
+    @ObservationIgnored var startupOwnerIndex: CronSessionOwnershipIndex?
+    @ObservationIgnored var startupOwnerCatalogPreflight: (() throws -> Void)?
+    @ObservationIgnored var startupOwnerScopes: (() throws -> [CronScope])?
+    @ObservationIgnored var startupReceiptValidator: ((CronGeneratedSession) throws -> Void)?
+    private(set) var ownerAdmissionReady = false
+    @ObservationIgnored private var ownerAdmissionTask: Task<Void, Error>?
+    @ObservationIgnored private var ownerAdmissionTaskID: UUID?
+    @ObservationIgnored private var admittedOwnerScopes: Set<CronScope>?
+    var ownerAdmissionIsCurrent: Bool {
+        guard ownerAdmissionReady else { return false }
+        guard let startupOwnerScopes else { return true }
+        guard let scopes = try? startupOwnerScopes() else { return false }
+        return Set(scopes) == admittedOwnerScopes
+    }
+    var sessionChoices: [CronSessionChoice] { sessionChoiceProvider?(editorMode) ?? [] }
     var defaultModel: String?
     var defaultReasoning = CronReasoning()
-    var onOpenSession: ((String?, String) -> Void)?
+    var onOpenSession: ((CronRunRecord) -> Void)?
     private(set) var savedDraft = CronTaskDraft.create()
     var hasUnsavedChanges: Bool { draft != savedDraft }
 
@@ -48,6 +233,7 @@ final class CronRepository {
     @ObservationIgnored private var activeDueOccurrences = Set<ActiveCronOccurrenceKey>()
     @ObservationIgnored private var activeManualRetries = Set<String>()
     @ObservationIgnored private var activeExecutionRunIDs = Set<String>()
+    @ObservationIgnored private var generatedIndexReady = false
 
     init(
         appSandboxRoot: String,
@@ -100,6 +286,84 @@ final class CronRepository {
         await reconcile(reason: "launch")
     }
 
+    func invalidateOwnerAdmission() { ownerAdmissionReady = false }
+
+    /// Scan every durable native reservation ledger before an interactive
+    /// native owner starts. Task deletion and run pruning cannot erase owners.
+    func prepareOwnerAdmission() async throws {
+        if ownerAdmissionIsCurrent { return }
+        ownerAdmissionReady = false
+        if let ownerAdmissionTask {
+            let pendingID = ownerAdmissionTaskID
+            try await ownerAdmissionTask.value
+            if !ownerAdmissionIsCurrent {
+                if ownerAdmissionTaskID == pendingID {
+                    self.ownerAdmissionTask = nil
+                    ownerAdmissionTaskID = nil
+                }
+                try await prepareOwnerAdmission()
+            }
+            return
+        }
+        let taskID = UUID()
+        let task = Task { @MainActor in
+            try self.startupOwnerCatalogPreflight?()
+            guard let index = self.startupOwnerIndex else {
+                throw ProjectRepositoryError.invalidSessionOwnership("scheduled: owner index unavailable")
+            }
+            var receipts: [CronGeneratedSession] = []
+            let scopes = try await self.scopesForOwnerAdmission()
+            for scope in scopes {
+                try Task.checkCancellation()
+                let label = scope.projectID.map { "project.\($0)" } ?? "scheduled"
+                do {
+                    let store = try await self.storeProvider.storeForAdmission(for: scope, appSandboxRoot: self.appSandboxRoot)
+                    for owner in try await store.listOwnerReservations() {
+                        receipts.append(CronGeneratedSession(id: owner.sessionId, projectID: scope.projectID,
+                            title: owner.sessionId, updatedAtMs: 0,
+                            sessionTranscriptPath: owner.sessionTranscriptPath, sessionMode: owner.sessionMode,
+                            sessionScopeKey: owner.sessionScopeKey))
+                    }
+                } catch is CancellationError { throw CancellationError() }
+                catch { throw ProjectRepositoryError.invalidSessionOwnership("\(label): \(error.localizedDescription)") }
+            }
+            try self.startupOwnerCatalogPreflight?()
+            guard Set(scopes) == Set(try await self.scopesForOwnerAdmission()) else {
+                throw ProjectRepositoryError.invalidSessionOwnership("projects-index: scheduler scopes changed during admission")
+            }
+            for receipt in receipts { try self.startupReceiptValidator?(receipt) }
+            try await index.mergeReceipts(receipts)
+            try self.startupOwnerCatalogPreflight?()
+            guard Set(scopes) == Set(try await self.scopesForOwnerAdmission()) else {
+                throw ProjectRepositoryError.invalidSessionOwnership("projects-index: scheduler scopes changed during admission")
+            }
+            self.admittedOwnerScopes = Set(scopes)
+            self.ownerAdmissionReady = true
+        }
+        ownerAdmissionTask = task
+        ownerAdmissionTaskID = taskID
+        do {
+            try await task.value
+            if ownerAdmissionTaskID == taskID {
+                ownerAdmissionTask = nil
+                ownerAdmissionTaskID = nil
+            }
+            if !ownerAdmissionIsCurrent { try await prepareOwnerAdmission() }
+        } catch {
+            if ownerAdmissionTaskID == taskID {
+                ownerAdmissionTask = nil
+                ownerAdmissionTaskID = nil
+            }
+            state.errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+
+    private func scopesForOwnerAdmission() async throws -> [CronScope] {
+        if let startupOwnerScopes { return try startupOwnerScopes() }
+        return await normalizedScopes()
+    }
+
     func handleSceneBecameActive() async {
         await reconcile(reason: "foreground")
     }
@@ -119,6 +383,40 @@ final class CronRepository {
 
     func refresh() async {
         await loadState(lastReconciledAtMs: state.scheduling.lastReconciledAtMs)
+    }
+
+    static func persistedGeneratedSessions(appSandboxRoot: String) throws -> [CronGeneratedSession] {
+        let file = URL(fileURLWithPath: appSandboxRoot).appendingPathComponent("cron/sessions.json")
+        guard try ownerCatalogFileExists(file) else { throw ProjectRepositoryError.missingSessionIndex }
+        let data = try Data(contentsOf: file)
+        try UniqueJSONKeyGuard.validate(data)
+        return try JSONDecoder().decode([CronGeneratedSession].self, from: data)
+    }
+
+    static func scheduledTranscriptPath(appSandboxRoot: String, sessionID: String, mode: SessionMode) throws -> String {
+        let matches = try persistedGeneratedSessions(appSandboxRoot: appSandboxRoot).filter {
+            canonicalSessionID($0.id) == canonicalSessionID(sessionID)
+        }
+        guard matches.count == 1, let match = matches.first,
+              match.sessionScopeKey == ConversationScope.scheduled.workspaceKey, match.sessionMode == mode,
+              let path = match.sessionTranscriptPath, !path.isEmpty, (path as NSString).isAbsolutePath else {
+            throw ProjectRepositoryError.missingSessionTranscriptPath
+        }
+        return path
+    }
+
+    func scheduledTranscriptPath(sessionID: String, mode: SessionMode) throws -> String {
+        try Self.scheduledTranscriptPath(appSandboxRoot: appSandboxRoot, sessionID: sessionID, mode: mode)
+    }
+
+    func generatedSessionsForAdmission() -> [CronGeneratedSession]? {
+        guard generatedIndexReady else { return nil }
+        do { return try Self.persistedGeneratedSessions(appSandboxRoot: appSandboxRoot) }
+        catch {
+            generatedIndexReady = false
+            state.errorMessage = "scheduled: \(error.localizedDescription)"
+            return nil
+        }
     }
 
     /// - Parameter prompt: instructions to start the form with ("make this a
@@ -161,23 +459,85 @@ final class CronRepository {
         routePath.removeAll()
     }
 
+    func selectTarget(_ id: String) {
+        let matches = sessionChoices.filter { canonicalSessionID($0.id) == canonicalSessionID(id) }
+        guard !id.isEmpty, matches.count == 1, let choice = matches.first else {
+            draft.automation.targetSessionId = nil
+            draft.automation.targetSessionTranscriptPath = nil
+            draft.automation.targetSessionMode = nil
+            draft.automation.targetSessionScopeKey = nil
+            return
+        }
+        draft.scopeID = choice.scopeID
+        draft.automation.targetSessionId = choice.id
+        draft.automation.targetSessionTranscriptPath = choice.transcriptPath
+        draft.automation.targetSessionMode = choice.mode
+        draft.automation.targetSessionScopeKey = choice.owner.workspaceKey
+    }
+
     func saveDraft() async {
         do {
             state.errorMessage = nil
-            let scope = try requireScope(draft.scopeID)
+            let requestedDraft = draft
+            let requestedMode = editorMode
+            let scope = try requireScope(requestedDraft.scopeID)
             let store = try await storeProvider.store(for: scope, appSandboxRoot: appSandboxRoot)
+            guard draft == requestedDraft, editorMode == requestedMode else {
+                throw CronExecutionError(kind: .validation, message: "The task changed while it was being saved. Review it and try again.", statusOverride: .failed)
+            }
             guard draft.automation.version == 2 else {
                 throw CronExecutionError(kind: .validation, message: "Update the app before editing this task’s settings.", statusOverride: .failed)
             }
             guard let model = draft.automation.model, !model.isEmpty else {
                 throw CronExecutionError(kind: .validation, message: "Choose a model before saving.", statusOverride: .failed)
             }
+            if draft.automation.runMode != .taskSession { draft.automation.clearOwnedSession() }
             if draft.automation.runMode == .selectedSession {
-                guard let target = sessionChoices.first(where: { $0.id == draft.automation.targetSessionId && $0.scopeID == draft.scopeID }) else {
-                    throw CronExecutionError(kind: .validation, message: "Choose an available chat in this project.", statusOverride: .failed)
+                let targets = sessionChoices.filter {
+                    canonicalSessionID($0.id) == canonicalSessionID(draft.automation.targetSessionId ?? "") &&
+                    $0.scopeID == draft.scopeID && $0.mode == editorMode &&
+                    $0.mode == draft.automation.targetSessionMode &&
+                    $0.owner.workspaceKey == draft.automation.targetSessionScopeKey &&
+                    $0.transcriptPath == draft.automation.targetSessionTranscriptPath
+                }
+                guard targets.count == 1, let target = targets.first else {
+                    throw CronExecutionError(kind: .validation,
+                        message: sessionChoiceFailure ?? "Choose an available chat in this project.", statusOverride: .failed)
                 }
                 draft.automation.targetSessionId = target.id
-            } else { draft.automation.targetSessionId = nil }
+                draft.automation.sessionMode = nil
+                draft.automation.sessionScopeKey = nil
+            } else {
+                if draft.automation.runMode == .taskSession, draft.automation.ownedSessionId != nil,
+                   draft.automation.sessionMode != editorMode {
+                    throw CronExecutionError(kind: .validation, message: "This task's chat belongs to a different mode.", statusOverride: .failed)
+                }
+                let owner = scope.projectID.map(ConversationScope.project) ?? .scheduled
+                if draft.automation.runMode == .taskSession, draft.automation.ownedSessionId != nil,
+                   draft.automation.sessionScopeKey != owner.workspaceKey {
+                    throw CronExecutionError(kind: .validation, message: "This task's chat belongs to a different space.", statusOverride: .failed)
+                }
+                if draft.automation.runMode == .taskSession {
+                    if let owned = draft.automation.ownedSessionId {
+                        guard UUID(uuidString: canonicalSessionID(owned)) != nil,
+                              let path = draft.automation.ownedSessionTranscriptPath, !path.isEmpty,
+                              (path as NSString).isAbsolutePath,
+                              draft.automation.ownedSessionMode == editorMode,
+                              draft.automation.ownedSessionScopeKey == owner.workspaceKey else {
+                            throw CronExecutionError(kind: .validation, message: "This task's chat source is incomplete or has changed.", statusOverride: .failed)
+                        }
+                    } else if draft.automation.ownedSessionTranscriptPath != nil || draft.automation.ownedSessionMode != nil ||
+                                draft.automation.ownedSessionScopeKey != nil {
+                        throw CronExecutionError(kind: .validation, message: "This task's chat source is incomplete.", statusOverride: .failed)
+                    }
+                }
+                draft.automation.sessionMode = editorMode
+                draft.automation.sessionScopeKey = owner.workspaceKey
+                draft.automation.targetSessionId = nil
+                draft.automation.targetSessionTranscriptPath = nil
+                draft.automation.targetSessionMode = nil
+                draft.automation.targetSessionScopeKey = nil
+            }
             if draft.automation.status == .active { draft.automation.statusReason = nil }
             _ = try await store.saveConfigured(draft: draft)
             state.lastActionMessage = String(localized: "cron_task_updated")
@@ -235,14 +595,19 @@ final class CronRepository {
         draft.automation.status = .active
         draft.automation.statusReason = nil
         draft.automation.runs = []
-        draft.automation.ownedSessionId = nil
+        draft.automation.clearOwnedSession()
+        draft.automation.sessionMode = nil
+        draft.automation.sessionScopeKey = nil
         draft.automation.targetSessionId = nil
+        draft.automation.targetSessionTranscriptPath = nil
+        draft.automation.targetSessionMode = nil
+        draft.automation.targetSessionScopeKey = nil
         draft.automation.runMode = .newSession
         savedDraft = .create(scopeID: draft.scopeID)
     }
 
     func openResultSession(_ run: CronRunRecord) {
-        if let id = run.sessionID { onOpenSession?(run.projectID, id) }
+        if run.sessionID != nil { onOpenSession?(run) }
     }
 
     func deleteTask(scopeID: String, taskID: String) async {
@@ -277,6 +642,7 @@ final class CronRepository {
     func runNow(scopeID: String, taskID: String) async {
         do {
             try Task.checkCancellation()
+            if startupOwnerIndex != nil { try await prepareOwnerAdmission() }
             state.errorMessage = nil
             let scope = try requireScope(scopeID)
             let task = try await requireTask(scopeID: scopeID, taskID: taskID)
@@ -323,7 +689,9 @@ final class CronRepository {
                 resultText: outcome.resultText,
                 errorMessage: outcome.errorMessage,
                 errorKind: outcome.errorKind,
-                sessionID: outcome.sessionID, actualModel: outcome.actualModel ?? task.configuration.model
+                sessionID: outcome.sessionID, sessionTranscriptPath: outcome.sessionTranscriptPath,
+                sessionMode: outcome.sessionMode, sessionScopeKey: outcome.sessionScopeKey,
+                actualModel: outcome.actualModel ?? task.configuration.model
             )
             if let record {
                 try await notifyTerminalRun(record, fallbackPolicy: task.configuration.notificationPolicy)
@@ -344,6 +712,7 @@ final class CronRepository {
         let lastReconciledAtMs = now()
         do {
             try Task.checkCancellation()
+            if startupOwnerIndex != nil { try await prepareOwnerAdmission() }
             let scopes = await normalizedScopes()
             try Task.checkCancellation()
             try await reconcilePersistedRuns(scopes: scopes)
@@ -440,6 +809,16 @@ final class CronRepository {
                 state.loading = false
                 return
             }
+            let generated: [CronGeneratedSession]
+            var generatedError: String?
+            do {
+                generated = try updateGeneratedSessions(history: history)
+                generatedIndexReady = true
+            } catch {
+                generated = []
+                generatedIndexReady = false
+                generatedError = "scheduled: \(error.localizedDescription)"
+            }
             state = CronRepositoryState(
                 loading: false,
                 tasks: tasks,
@@ -448,7 +827,7 @@ final class CronRepository {
                     ? activeScopeID
                     : (scopes.first?.scopeID ?? globalCronScopeID),
                 history: history,
-                generatedSessions: try updateGeneratedSessions(history: history),
+                generatedSessions: generated,
                 scheduling: CronSchedulingSnapshot(
                     mode: scheduler.mode,
                     nextEarliestAtMs: nextFire,
@@ -456,7 +835,7 @@ final class CronRepository {
                     note: scheduler.note,
                     backgroundTaskIdentifier: backgroundTaskIdentifier
                 ),
-                errorMessage: state.errorMessage,
+                errorMessage: generatedError ?? state.errorMessage,
                 lastActionMessage: state.lastActionMessage
             )
         } catch is CancellationError {
@@ -510,36 +889,47 @@ final class CronRepository {
     }
 
     private func updateGeneratedSessions(history: [CronRunRecord]) throws -> [CronGeneratedSession] {
-        let file = URL(fileURLWithPath: appSandboxRoot).appendingPathComponent("cron/sessions.json")
-        var rows: [CronGeneratedSession] = []
-        // `try?` for the same reason as `notifyConfigurationPauses`: this call is
-        // an ARGUMENT to the `CronRepositoryState(...)` initializer, so a throw
-        // here means `state` is never assigned at all and every freshly loaded
-        // task, run and scheduling value computed above it is discarded. The
-        // rebuild below re-derives every row that still has a run in history, so
-        // an unreadable cache costs at most the titles of sessions whose runs
-        // have already been pruned.
-        if FileManager.default.fileExists(atPath: file.path),
-           let data = try? Data(contentsOf: file),
-           let decoded = try? JSONDecoder().decode([CronGeneratedSession].self, from: data) {
-            rows = decoded
+        // Never let a UI refresh rewrite owner evidence after any catalog or
+        // history receipt becomes unreadable or contradicts the existing index.
+        if let startupOwnerIndex {
+            try startupOwnerCatalogPreflight?()
+            _ = try startupOwnerIndex.claims()
         }
-        // `uniqueKeysWithValues:` TRAPS on a duplicate key — it is a precondition
-        // failure, not a thrown error, so the surrounding `do`/`catch` cannot
-        // contain it. These rows come off disk, where an interrupted rename or a
-        // restored backup can leave two entries sharing an id; last writer wins.
-        var byID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
+        let file = URL(fileURLWithPath: appSandboxRoot).appendingPathComponent("cron/sessions.json")
+        let expected = try ownerCatalogExpectation(file)
+        let exists = expected.bytes != nil
+        let rows: [CronGeneratedSession]
+        if let bytes = expected.bytes {
+            try UniqueJSONKeyGuard.validate(bytes)
+            rows = try JSONDecoder().decode([CronGeneratedSession].self, from: bytes)
+        } else {
+            guard !generatedIndexReady, !history.contains(where: { $0.sessionID != nil }) else {
+                throw ProjectRepositoryError.missingSessionIndex
+            }
+            rows = []
+        }
+        // A conflicting source stays visible as an ambiguity; timestamps cannot
+        // choose ownership or authorize a different transcript for the UUID.
+        func key(_ row: CronGeneratedSession) -> String {
+            [canonicalSessionID(row.id), row.sessionScopeKey ?? "", row.sessionMode?.rawValue ?? "",
+             row.sessionTranscriptPath ?? ""].joined(separator: "\u{0}")
+        }
+        var byID = Dictionary(rows.map { (key($0), $0) }, uniquingKeysWith: { $0.updatedAtMs >= $1.updatedAtMs ? $0 : $1 })
         for run in history {
             guard let id = run.sessionID else { continue }
             let timestamp = run.finishedAtMs ?? run.triggeredAtMs
-            if byID[id].map({ $0.updatedAtMs >= timestamp }) == true { continue }
-            byID[id] = CronGeneratedSession(id: id, projectID: run.projectID, title: String(run.prompt.prefix(200)), updatedAtMs: timestamp)
+            let row = CronGeneratedSession(id: id, projectID: run.projectID, title: String(run.prompt.prefix(200)),
+                updatedAtMs: timestamp, sessionTranscriptPath: run.sessionTranscriptPath,
+                sessionMode: run.sessionMode, sessionScopeKey: run.sessionScopeKey)
+            let sourceKey = key(row)
+            if byID[sourceKey].map({ $0.updatedAtMs >= timestamp }) == true { continue }
+            byID[sourceKey] = row
         }
         let updated = byID.values.sorted { $0.updatedAtMs > $1.updatedAtMs }
-        if rows != updated {
-            try DefaultProjectAtomicWriter().writeData(JSONEncoder().encode(updated), to: file) { staged in
+        if !exists || rows != updated {
+            try DefaultProjectAtomicWriter().writeData(JSONEncoder().encode(updated), to: file, expected: expected, validate: { staged in
                 _ = try JSONDecoder().decode([CronGeneratedSession].self, from: staged)
-            }
+            }, commit: { try $0() })
         }
         return updated
     }
@@ -569,7 +959,6 @@ final class CronRepository {
         var scopedTasks: [CronScopedTask] = []
         for scope in scopes {
             let store = try await storeProvider.store(for: scope, appSandboxRoot: appSandboxRoot)
-            try await store.migrateLegacyTasks(defaultModel: defaultModel, reasoning: defaultReasoning)
             let tasks = try await store.list()
             scopedTasks.append(contentsOf: tasks.map { task in
                 let key = keyFor(scopeID: scope.scopeID, taskID: task.id)
@@ -643,27 +1032,16 @@ final class CronRepository {
                 guard !ownsRun(run),
                       let task = tasks.first(where: { $0.id == run.taskID }), task.automation != nil else { continue }
                 try await historyStore.snapshotNotificationPolicy(runID: run.runID, policy: task.configuration.notificationPolicy)
-                var nativeRun = task.configuration.runs.last {
-                    (run.manual ? ($0.manualOccurrenceAt ?? $0.scheduledAt) : $0.scheduledAt) == run.scheduledAtMs
-                }
-                // Pre-identity manual runs used a later native timestamp. Recover
-                // only the sole started host run with one unambiguous legacy
-                // terminal result; never infer an execution for a queued claim.
-                if nativeRun == nil, run.manual, run.status == .running,
-                   unfinished.filter({ $0.manual && $0.scopeID == run.scopeID && $0.taskID == run.taskID }).count == 1 {
-                    let earliest = max(run.triggeredAtMs, run.startedAtMs ?? run.triggeredAtMs)
-                    let legacy = task.configuration.runs.filter {
-                        $0.id.hasPrefix("\(task.id)-manual-") &&
-                            !$0.id.hasPrefix("\(task.id)-manual-at-") &&
-                            $0.manualOccurrenceAt == nil && $0.status.isTerminal && $0.scheduledAt >= earliest
-                    }
-                    if legacy.count == 1 { nativeRun = legacy[0] }
+                let nativeRun = task.configuration.runs.last {
+                    run.manual ? $0.manualOccurrenceAt == run.scheduledAtMs : $0.scheduledAt == run.scheduledAtMs
                 }
                 if let nativeRun, nativeRun.status.isTerminal {
                     if let recovered = try await historyStore.markTerminal(runID: run.runID, status: nativeRun.status,
                         resultText: nativeRun.summary, errorMessage: nativeRun.error,
                         errorKind: nativeRun.status == .succeeded ? nil : .system,
-                        sessionID: nativeRun.sessionId, actualModel: nativeRun.model) {
+                        sessionID: nativeRun.sessionId, sessionTranscriptPath: nativeRun.sessionTranscriptPath,
+                        sessionMode: nativeRun.sessionMode, sessionScopeKey: nativeRun.sessionScopeKey,
+                        actualModel: nativeRun.model) {
                         try await notifyTerminalRun(recovered, fallbackPolicy: task.configuration.notificationPolicy)
                     }
                 } else if run.status == .queued && task.status != .active {
@@ -700,7 +1078,9 @@ final class CronRepository {
             }
             if let finished = try await historyStore.markTerminal(runID: run.runID, status: outcome.status,
                 resultText: outcome.resultText, errorMessage: outcome.errorMessage, errorKind: outcome.errorKind,
-                sessionID: outcome.sessionID, actualModel: outcome.actualModel ?? task.configuration.model) {
+                sessionID: outcome.sessionID, sessionTranscriptPath: outcome.sessionTranscriptPath,
+                sessionMode: outcome.sessionMode, sessionScopeKey: outcome.sessionScopeKey,
+                actualModel: outcome.actualModel ?? task.configuration.model) {
                 try await notifyTerminalRun(finished, fallbackPolicy: task.configuration.notificationPolicy)
             }
         }
@@ -712,7 +1092,6 @@ final class CronRepository {
             try Task.checkCancellation()
             let store = try await storeProvider.store(for: scope, appSandboxRoot: appSandboxRoot)
             try Task.checkCancellation()
-            try await store.migrateLegacyTasks(defaultModel: defaultModel, reasoning: defaultReasoning)
             let tasks = try await store.list().reduce(into: [String: CronTaskRecord]()) { partialResult, task in
                 partialResult[task.id] = task
             }
@@ -831,11 +1210,7 @@ final class CronRepository {
     ) async throws {
         try Task.checkCancellation()
         try await historyStore.snapshotNotificationPolicy(runID: runID, policy: task.configuration.notificationPolicy)
-        // The budget applies to v2 automations too. `migrateLegacyTasks` stamps
-        // an `automation` onto every task on every `refresh()`, so gating this on
-        // `task.automation == nil` made the cap 1 for everything and re-created
-        // the exact failure the contract above names. Android runs the same
-        // 5-attempt budget for v2 rows (`CronWorkers.kt` MAX_EXECUTION_ATTEMPTS).
+        // Configured automations use the same five-attempt execution budget.
         let attempted = try await executeWithRetry(
             runID: runID,
             startAttempt: startAttempt,
@@ -872,7 +1247,9 @@ final class CronRepository {
             resultText: attempted.outcome.resultText,
             errorMessage: attempted.outcome.errorMessage,
             errorKind: attempted.outcome.errorKind,
-            sessionID: attempted.outcome.sessionID, actualModel: attempted.outcome.actualModel ?? task.configuration.model
+            sessionID: attempted.outcome.sessionID, sessionTranscriptPath: attempted.outcome.sessionTranscriptPath,
+            sessionMode: attempted.outcome.sessionMode, sessionScopeKey: attempted.outcome.sessionScopeKey,
+            actualModel: attempted.outcome.actualModel ?? task.configuration.model
         )
         try Task.checkCancellation()
         _ = try await store.acknowledgeOccurrence(taskID: task.id, scheduledAtMs: scheduledAtMs)
@@ -924,7 +1301,10 @@ final class CronRepository {
         var spentHere = 0
         while true {
             try Task.checkCancellation()
-            _ = try await historyStore.markRunning(runID: runID, attempt: attempt)
+            guard let running = try await historyStore.markRunning(runID: runID, attempt: attempt),
+                  running.runID == runID, running.status == .running, running.attempt == attempt else {
+                throw CronExecutionError(kind: .system, message: "cron run history is unavailable or no longer pending", statusOverride: .failed)
+            }
             try Task.checkCancellation()
             do {
                 last = try await operation()

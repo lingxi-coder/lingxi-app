@@ -12,6 +12,7 @@ final class LingxiCodeUITests: XCTestCase {
         // intentionally verify the zh-Hans product copy.
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)"]
         app.launchEnvironment["LINGXI_UI_TESTING"] = "1"
+        app.launchEnvironment["LINGXI_ISOLATED_SIM_TEST"] = "1"
         app.launch()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
     }
@@ -186,6 +187,29 @@ final class LingxiCodeUITests: XCTestCase {
         screenshot.name = "iOS-CodexTimeline"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    func testCollapsedLocalAppRejectionExposesTheFullSwitchInstruction() {
+        app.terminate()
+        app.launchArguments = ["-AppleLanguages", "(en)"]
+        app.launchEnvironment["LINGXI_UI_TEST_LOCAL_APP_REQUIRES_CODE"] = "1"
+        app.launch()
+        let summary = app.buttons["conversation.summary-menu"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 10), app.debugDescription)
+        summary.tap()
+        app.buttons["conversation.summary.category.tools"].tap()
+        let sheet = app.otherElements["conversation.summary-sheet.tools"]
+        let batch = sheet.buttons["conversation.timeline.tool-batch.timeline-tools:ui-local-app-requires-code"]
+        XCTAssertTrue(batch.waitForExistence(timeout: 5), app.debugDescription)
+        batch.tap()
+        let result = sheet.buttons["conversation.tool-call.ui-local-app-requires-code.toggle"]
+        XCTAssertTrue(result.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(result.label.contains("Chat mode does not support Local App development. Switch to Code mode to continue."),
+                      result.label)
+        let image = XCTAttachment(screenshot: app.screenshot())
+        image.name = "Collapsed-Local-App-requires-Code"
+        image.lifetime = .keepAlways
+        add(image)
     }
 
     func testComposerTracksKeyboardAndKeepsVoiceModesSeparate() {
@@ -676,17 +700,16 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 5), app.debugDescription)
     }
 
-    /// The sidebar has two entries (scheduled tasks, projects) and one recents
-    /// list with a mode filter — no per-mode tabs and no per-project cards. A
-    /// project is created on the projects page and starts its sessions from
-    /// its own page.
-    func testSidebarEntriesCreateProjectAndStartSession() {
+    /// A project starts its sessions from its own page, while New Chat from
+    /// that conversation opens a fresh global owner in the same mode.
+    func testSidebarEntriesCreateProjectAndStartSession() throws {
+        let header = app.buttons["conversation.project-context"]
+        XCTAssertTrue(header.waitForExistence(timeout: 8), app.debugDescription)
+        let initialContext = try XCTUnwrap(header.value as? String)
+
         openDrawer()
         XCTAssertTrue(app.buttons["drawer.entry.cron"].exists)
         XCTAssertTrue(app.buttons["drawer.entry.projects"].exists)
-        XCTAssertTrue(app.buttons["drawer.filter.all"].exists)
-        XCTAssertTrue(app.buttons["drawer.filter.chat"].exists)
-        XCTAssertTrue(app.buttons["drawer.filter.code"].exists)
 
         app.buttons["drawer.entry.projects"].tap()
         let create = app.buttons["projects.create"]
@@ -713,6 +736,158 @@ final class LingxiCodeUITests: XCTestCase {
 
         app.buttons["project.new-session"].tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
+        let projectShown = expectation(for: NSPredicate(format: "value CONTAINS %@", projectName),
+                                       evaluatedWith: header)
+        wait(for: [projectShown], timeout: 10)
+        let projectScope = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "newchat.scope.project.")).firstMatch
+        XCTAssertTrue(projectScope.waitForExistence(timeout: 10), app.debugDescription)
+        let projectContext = try XCTUnwrap(header.value as? String)
+        let projectMode = try XCTUnwrap(projectContext.components(separatedBy: " · ").first?.components(separatedBy: ", ").last)
+        let fixtureReply = app.staticTexts["Hello! I'm ready to help with your software engineering tasks."]
+        let projectOwnerReady = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: fixtureReply)
+        XCTAssertEqual(XCTWaiter.wait(for: [projectOwnerReady], timeout: 10), .completed, app.debugDescription)
+
+        let projectDraft = "draft belonging to the project"
+        let input = app.textViews["composer.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
+        input.tap()
+        input.typeText(projectDraft)
+        app.buttons["composer.keyboard.dismiss"].tap()
+        app.buttons["conversation.new-chat"].tap()
+
+        let globalScope = app.descendants(matching: .any)["newchat.scope.global"]
+        XCTAssertTrue(globalScope.waitForExistence(timeout: 10), app.debugDescription)
+        let globalShown = expectation(for: NSPredicate { _, _ in
+            guard let value = header.value as? String else { return false }
+            return value.contains(", \(projectMode) · ") && !value.contains(projectName)
+        }, evaluatedWith: header)
+        let globalResult = XCTWaiter.wait(for: [globalShown], timeout: 10)
+        XCTAssertEqual(globalResult, .completed,
+                       "Initial: \(initialContext); project: \(projectContext); after New Chat: \(String(describing: header.value))")
+        XCTAssertEqual(app.textViews["composer.input"].value as? String ?? "", "", app.debugDescription)
+    }
+
+    func testOwnerGateRemainsSharedAfterViewRecreation() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_GATE_PROBE"] = "1"
+        app.launch()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
+
+        // Editing recreates the view while preserving the hosted session.
+        let input = app.textViews["composer.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
+        input.tap()
+        input.typeText("gate-owned draft")
+        let heldDraft = input.value as? String ?? ""
+        XCTAssertTrue(heldDraft.contains("gate-owned draft"), app.debugDescription)
+        app.buttons["composer.keyboard.dismiss"].tap()
+
+        let probe = app.staticTexts["test.gate.probe"]
+        app.buttons["test.gate.hold"].tap()
+        let blocked = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "blocked"), object: probe)
+        XCTAssertEqual(XCTWaiter.wait(for: [blocked], timeout: 5), .completed, app.debugDescription)
+        app.buttons["conversation.new-chat"].tap()
+        XCTAssertEqual(input.value as? String, heldDraft, app.debugDescription)
+
+        app.buttons["test.gate.release"].tap()
+        let admitted = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "admitted"), object: probe)
+        XCTAssertEqual(XCTWaiter.wait(for: [admitted], timeout: 5), .completed, app.debugDescription)
+        app.buttons["conversation.new-chat"].tap()
+        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (input.value as? String ?? "").isEmpty
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 10), .completed, app.debugDescription)
+    }
+
+    func testModeNavigationKeepsTheOriginalOwnerTurnRunning() throws {
+        // This fixture drives the real UI and owner routing with a mock stream;
+        // native engine and model behavior are covered by separate tests.
+        app.terminate()
+        app.launchArguments = ["-AppleLanguages", "(en)"]
+        app.launchEnvironment["LINGXI_UI_TEST_OWNER_PROBE"] = "1"
+        app.launchEnvironment["LINGXI_UI_TEST_TRANSCRIPT_SCROLL"] = "1"
+        app.launch()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
+
+        let current = app.staticTexts["test.owner.current"]
+        XCTAssertTrue(current.waitForExistence(timeout: 5), app.debugDescription)
+        let previous = current.label.components(separatedBy: "|")
+        app.buttons["conversation.new-chat"].tap()
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let fields = current.label.components(separatedBy: "|")
+            return fields.count == 4 && fields[3] == "ready" &&
+                UUID(uuidString: fields[2]) != nil && (previous.count != 4 || fields[1] != previous[1])
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 12), .completed, app.debugDescription)
+        let initial = current.label.components(separatedBy: "|")
+        guard initial.count == 4 else { XCTFail(app.debugDescription); return }
+        let originalMode = initial[0]
+        let originalEntry = initial[1]
+        let originalSession = initial[2]
+        XCTAssertTrue(originalMode == "chat" || originalMode == "code")
+        let otherMode = originalMode == "chat" ? "code" : "chat"
+
+        let input = app.textViews["composer.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
+        input.tap()
+        input.typeText("Stream scroll probe")
+        app.buttons["composer.send"].tap()
+        let original = app.staticTexts["test.owner.\(originalEntry)"]
+        XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)
+        let running = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let fields = original.label.components(separatedBy: "|")
+            return fields.count == 6 && fields[2] == "running" && (Int(fields[5]) ?? -1) >= 1
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [running], timeout: 8), .completed, app.debugDescription)
+        let turn = original.label.components(separatedBy: "|")
+        guard turn.count == 6 else { XCTFail(app.debugDescription); return }
+        XCTAssertEqual(turn[0], originalMode)
+        XCTAssertEqual(turn[1], originalSession)
+        XCTAssertNotEqual(turn[3], "0")
+
+        func selectMode(_ mode: String) {
+            app.buttons["conversation.project-context"].tap()
+            let picker = app.buttons["session-panel.mode"]
+            XCTAssertTrue(picker.waitForExistence(timeout: 5), app.debugDescription)
+            picker.tap()
+            let title = mode == "chat" ? "Chat" : "Code"
+            let choice = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "\(title) — ")).firstMatch
+            XCTAssertTrue(choice.waitForExistence(timeout: 5), app.debugDescription)
+            choice.tap()
+        }
+
+        selectMode(otherMode)
+        let switched = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let fields = current.label.components(separatedBy: "|")
+            return fields.count == 4 && fields[0] == otherMode && fields[1] != originalEntry
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [switched], timeout: 10), .completed, app.debugDescription)
+        let hidden = original.label.components(separatedBy: "|")
+        guard hidden.count == 6, let hiddenTail = Int(hidden[5]) else { XCTFail(app.debugDescription); return }
+        XCTAssertEqual(Array(hidden[0...4]), Array(turn[0...4]))
+        let advanced = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let fields = original.label.components(separatedBy: "|")
+            return fields.count == 6 && Array(fields[0...4]) == Array(turn[0...4]) &&
+                (Int(fields[5]) ?? -1) > hiddenTail
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 8), .completed, app.debugDescription)
+        let advancedFields = original.label.components(separatedBy: "|")
+        let advancedTail = try XCTUnwrap(Int(advancedFields.last ?? ""))
+
+        selectMode(originalMode)
+        let returned = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let fields = current.label.components(separatedBy: "|")
+            return fields.count == 4 && fields[0] == originalMode && fields[1] == originalEntry && fields[2] == originalSession
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [returned], timeout: 10), .completed, app.debugDescription)
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Scroll stream tail ")).firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 8), app.debugDescription)
+        let suffix = tail.label.components(separatedBy: "Scroll stream tail ").last ?? ""
+        let displayedTail = try XCTUnwrap(Int(suffix.prefix(while: { $0.isNumber })))
+        XCTAssertGreaterThanOrEqual(displayedTail, advancedTail)
+        XCTAssertEqual(Array(original.label.components(separatedBy: "|").prefix(5)), Array(turn.prefix(5)))
+        app.buttons["composer.stop"].tap()
     }
 
     /// The drawer supports edge opening while leaving the chat visible.
@@ -724,7 +899,7 @@ final class LingxiCodeUITests: XCTestCase {
         origin.press(forDuration: 0.05, thenDragTo: target)
 
         XCTAssertTrue(
-            app.buttons["drawer.filter.chat"].waitForExistence(timeout: 8),
+            app.buttons["drawer.entry.projects"].waitForExistence(timeout: 8),
             app.debugDescription
         )
 
@@ -929,7 +1104,7 @@ final class LingxiCodeUITests: XCTestCase {
         // Scheduled tasks are an unconditional sidebar entry, so what this leg
         // can honestly pin is that the provider round-trip leaves the sidebar
         // intact.
-        XCTAssertTrue(app.buttons["drawer.filter.chat"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["drawer.entry.projects"].exists, app.debugDescription)
         XCTAssertTrue(app.buttons["drawer.entry.cron"].exists, app.debugDescription)
     }
 
@@ -940,7 +1115,7 @@ final class LingxiCodeUITests: XCTestCase {
         app.terminate()
         let title = "修复 iOS 导航栏与会话标题同步"
         app.launchEnvironment["LINGXI_UI_TEST_SESSION_TITLE"] = title
-        app.launchArguments += ["-conversation.global.code.active-session", "ui-named-session"]
+        app.launchArguments += ["-conversation.spaces.global.code.active-session", "ui-named-session"]
         app.launch()
         let header = app.buttons["conversation.project-context"]
         XCTAssertTrue(header.waitForExistence(timeout: 12), app.debugDescription)
@@ -1235,8 +1410,8 @@ final class LingxiCodeUITests: XCTestCase {
 
     /// Compact layout has an explicit trigger; iPad keeps its system control.
     private func openDrawer() {
-        let chatsTab = app.buttons["drawer.filter.chat"]
-        if chatsTab.exists && chatsTab.isHittable { return }
+        let projectsEntry = app.buttons["drawer.entry.projects"]
+        if projectsEntry.exists && projectsEntry.isHittable { return }
 
         let compactTrigger = app.buttons["drawer.open"]
         let trigger = compactTrigger.exists ? compactTrigger : app.navigationBars.firstMatch.buttons.element(boundBy: 0)
@@ -1244,7 +1419,7 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(waitUntilHittable(trigger, timeout: 5), app.debugDescription)
         trigger.tap()
 
-        if !chatsTab.waitForExistence(timeout: 5),
+        if !projectsEntry.waitForExistence(timeout: 5),
            trigger.exists,
            waitUntilHittable(trigger, timeout: 2) {
             // The UI-test fixture can finish its initial source refresh between
@@ -1252,8 +1427,8 @@ final class LingxiCodeUITests: XCTestCase {
             // Retry only while the original trigger is still actually hittable.
             trigger.tap()
         }
-        XCTAssertTrue(chatsTab.waitForExistence(timeout: 8), app.debugDescription)
-        XCTAssertTrue(waitUntilHittable(chatsTab, timeout: 5), app.debugDescription)
+        XCTAssertTrue(projectsEntry.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(projectsEntry, timeout: 5), app.debugDescription)
     }
 
     /// The transcript identifies the chat column without depending on chrome.

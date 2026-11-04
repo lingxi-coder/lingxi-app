@@ -65,6 +65,7 @@ function removalFixture(t: TestContext) {
       mkdirSync(path);
       writeFileSync(join(path, 'keep.txt'), name);
       settings.addProject(path);
+      settings.conversationSpaces.addProject(path, 'chat');
       return path;
     },
   };

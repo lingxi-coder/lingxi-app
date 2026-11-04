@@ -130,7 +130,7 @@ test('newSession keeps the generated runtime/session id and does not send a seco
     assert.equal(launch.sessionId, this.sessionId);
   };
   try {
-    const created = await manager.newSession('/workspace');
+    const created = await manager.newSession('/workspace', undefined, { mode: 'code', projectId: '/workspace' });
     assert.deepEqual(created, launchRef);
     assert.equal(commands.length, 0);
   } finally {
@@ -148,14 +148,15 @@ test('newSession reuses one unsent draft per project until the first prompt cros
     (this as any).activeWorkspace = projectPath;
     (this as any).activeWorkspaceTrusted = true;
     (this as any).state = { status: 'connected' };
+    (this as any).draftModeRestorationRequired = false; // This fixture substitutes a ready engine.
   };
   const manager = new SessionRuntimeManager({
     launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
     onFirstPromptSent: (ref) => { commits.push(ref.sessionId); },
   });
   try {
-    const first = await manager.newSession(projectPath);
-    const second = await manager.newSession(projectPath);
+    const first = await manager.newSession(projectPath, undefined, { mode: 'code', projectId: projectPath });
+    const second = await manager.newSession(projectPath, undefined, { mode: 'code', projectId: projectPath });
     assert.equal(second.sessionId, first.sessionId);
 
     const runtime = manager.require(first) as SessionRuntime & { client: { sendPrompt: () => void } | null };
@@ -166,8 +167,8 @@ test('newSession reuses one unsent draft per project until the first prompt cros
     assert.equal(prompts, 2);
     assert.deepEqual(commits, [first.sessionId]);
 
-    const third = await manager.newSession(projectPath);
-    const fourth = await manager.newSession(projectPath);
+    const third = await manager.newSession(projectPath, undefined, { mode: 'code', projectId: projectPath });
+    const fourth = await manager.newSession(projectPath, undefined, { mode: 'code', projectId: projectPath });
     assert.notEqual(third.sessionId, first.sessionId);
     assert.equal(fourth.sessionId, third.sessionId);
   } finally {
@@ -192,15 +193,15 @@ test('newSession deduplicates concurrent draft creation and closeSession clears 
     launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
   });
   try {
-    const first = manager.newSession(projectPath);
-    const second = manager.newSession(projectPath);
+    const first = manager.newSession(projectPath, undefined, { mode: 'code', projectId: projectPath });
+    const second = manager.newSession(projectPath, undefined, { mode: 'code', projectId: projectPath });
     gate.resolve();
     const [created, duplicate] = await Promise.all([first, second]);
     assert.equal(starts, 1);
     assert.equal(duplicate.sessionId, created.sessionId);
 
     await manager.closeSession(created);
-    const next = await manager.newSession(projectPath);
+    const next = await manager.newSession(projectPath, undefined, { mode: 'code', projectId: projectPath });
     assert.notEqual(next.sessionId, created.sessionId);
   } finally {
     SessionRuntime.prototype.start = originalStart;
@@ -217,6 +218,7 @@ test('first-prompt commit failures keep the draft recoverable and retry without 
     (this as any).activeWorkspace = projectPath;
     (this as any).activeWorkspaceTrusted = true;
     (this as any).state = { status: 'connected' };
+    (this as any).draftModeRestorationRequired = false; // This fixture substitutes a ready engine.
   };
   const manager = new SessionRuntimeManager({
     diagnostics,
@@ -227,19 +229,19 @@ test('first-prompt commit failures keep the draft recoverable and retry without 
     },
   });
   try {
-    const first = await manager.newSession(projectPath);
+    const first = await manager.newSession(projectPath, undefined, { mode: 'code', projectId: projectPath });
     const runtime = manager.require(first) as SessionRuntime & { client: { sendPrompt: () => void } | null };
     (runtime as any).client = { sendPrompt: () => undefined };
 
     assert.doesNotThrow(() => runtime.sendPrompt('hello'));
     assert.match(diagnostics.snapshot().at(-1)?.message ?? '', /failed to commit draft session/);
 
-    const recoverable = await manager.newSession(projectPath);
+    const recoverable = await manager.newSession(projectPath, undefined, { mode: 'code', projectId: projectPath });
     assert.equal(recoverable.sessionId, first.sessionId);
 
     assert.doesNotThrow(() => runtime.sendPrompt('retry commit'));
     assert.equal(commitAttempts, 2);
-    const next = await manager.newSession(projectPath);
+    const next = await manager.newSession(projectPath, undefined, { mode: 'code', projectId: projectPath });
     assert.notEqual(next.sessionId, first.sessionId);
   } finally {
     SessionRuntime.prototype.start = originalStart;
@@ -250,6 +252,7 @@ test('first-prompt commit failures keep the draft recoverable and retry without 
 test('session runtime manager launches a restored session with its catalog model hint', async () => {
   const ref = {
     projectPath: '/workspace',
+    mode: 'code' as const,
     sessionId: '11111111-2222-4333-8444-555555555556',
   };
   const launchHints: Array<string | undefined> = [];
@@ -260,7 +263,7 @@ test('session runtime manager launches a restored session with its catalog model
     (this as any).state = { status: 'connected' };
   };
   SessionRuntime.prototype.resumeOwnedSession = async function () {};
-  const manager = new SessionRuntimeManager({
+  const manager = new SessionRuntimeManager({ resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }),
     launchConfig: (_candidate, modelHint) => {
       launchHints.push(modelHint);
       return { workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true, model: modelHint };
@@ -523,11 +526,11 @@ test('failed historical resume removes only the newly-created runtime', async ()
   SessionRuntime.prototype.resumeOwnedSession = async function () {
     throw new Error('transcript is corrupt');
   };
-  const manager = new SessionRuntimeManager({
+  const manager = new SessionRuntimeManager({ resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }),
     launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
   });
   try {
-    await assert.rejects(manager.openSession({ projectPath: '/workspace', sessionId }), /transcript is corrupt/);
+    await assert.rejects(manager.openSession({ projectPath: '/workspace', sessionId, mode: 'code' }), /transcript is corrupt/);
     assert.equal(manager.get(sessionId), undefined);
   } finally {
     SessionRuntime.prototype.start = originalStart;
@@ -537,15 +540,15 @@ test('failed historical resume removes only the newly-created runtime', async ()
 });
 
 test('opening another session leaves the running session alive', async () => {
-  const runningRef = { projectPath: '/workspace-a', sessionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' };
-  const nextRef = { projectPath: '/workspace-b', sessionId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' };
+  const runningRef = { projectPath: '/workspace-a', mode: 'code' as const, sessionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' };
+  const nextRef = { projectPath: '/workspace-b', mode: 'code' as const, sessionId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' };
   const originalStart = SessionRuntime.prototype.start;
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
   SessionRuntime.prototype.start = async function () {
     (this as any).state = { status: 'connected' };
   };
   SessionRuntime.prototype.resumeOwnedSession = async function () {};
-  const manager = new SessionRuntimeManager({
+  const manager = new SessionRuntimeManager({ resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }),
     launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
   });
   try {
@@ -693,6 +696,7 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
   const launchDir = temporaryDirectory();
   const ref = {
     projectPath: '/workspace',
+    mode: 'code' as const,
     sessionId: '77777777-aaaa-4bbb-8ccc-dddddddddddd',
   };
   writeFileSync(join(launchDir, '43124.lock'), JSON.stringify({
@@ -705,10 +709,11 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
   }), { mode: 0o600 });
   const originalConnect = BridgeClient.prototype.connect;
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  const startupCommands: unknown[] = [];
   let launchCalls = 0;
   let telemetryRevocations = 0;
   BridgeClient.prototype.connect = async function () {
-    this.sendCommand = assertAudioContextCommand;
+    this.sendCommand = (command) => { startupCommands.push(command); };
     this.disableTelemetry = async () => { telemetryRevocations += 1; };
     return {
       server_name: 'lingxi-bridge-server/0.9.0',
@@ -717,7 +722,7 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
     } as any;
   };
   SessionRuntime.prototype.resumeOwnedSession = async function () {};
-  const manager = new SessionRuntimeManager({
+  const manager = new SessionRuntimeManager({ resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }),
     bridgeRoot,
     listProcessCommands: () => [{
       pid: process.pid,
@@ -732,6 +737,9 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
 
   try {
     const runtime = await manager.openSession(ref);
+    assert.equal(startupCommands.length, 2);
+    assertAudioContextCommand(startupCommands[0]);
+    assert.deepEqual(startupCommands[1], { type: 'get_context_manifest' });
     assert.equal(launchCalls, 0);
     assert.equal(telemetryRevocations, 1, 'a newly adopted process honors default-off device policy');
     assert.equal(runtime.connectionState.status, 'connected');
@@ -751,15 +759,15 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
 
 test('idle session runtimes use a bounded least-recently-used cache', async () => {
   const refs = [
-    { projectPath: '/workspace', sessionId: '10000000-0000-4000-8000-000000000001' },
-    { projectPath: '/workspace', sessionId: '10000000-0000-4000-8000-000000000002' },
-    { projectPath: '/workspace', sessionId: '10000000-0000-4000-8000-000000000003' },
+    { projectPath: '/workspace', mode: 'code' as const, sessionId: '10000000-0000-4000-8000-000000000001' },
+    { projectPath: '/workspace', mode: 'code' as const, sessionId: '10000000-0000-4000-8000-000000000002' },
+    { projectPath: '/workspace', mode: 'code' as const, sessionId: '10000000-0000-4000-8000-000000000003' },
   ];
   const originalStart = SessionRuntime.prototype.start;
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
   SessionRuntime.prototype.start = async function () { (this as any).state = { status: 'connected' }; };
   SessionRuntime.prototype.resumeOwnedSession = async function () {};
-  const manager = new SessionRuntimeManager({
+  const manager = new SessionRuntimeManager({ resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }),
     maxCachedRuntimes: 2,
     launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
   });
@@ -781,15 +789,15 @@ test('idle session runtimes use a bounded least-recently-used cache', async () =
 
 test('background-running and active sessions are pinned above the idle cache limit', async () => {
   const refs = [
-    { projectPath: '/workspace', sessionId: '20000000-0000-4000-8000-000000000001' },
-    { projectPath: '/workspace', sessionId: '20000000-0000-4000-8000-000000000002' },
-    { projectPath: '/workspace', sessionId: '20000000-0000-4000-8000-000000000003' },
+    { projectPath: '/workspace', mode: 'code' as const, sessionId: '20000000-0000-4000-8000-000000000001' },
+    { projectPath: '/workspace', mode: 'code' as const, sessionId: '20000000-0000-4000-8000-000000000002' },
+    { projectPath: '/workspace', mode: 'code' as const, sessionId: '20000000-0000-4000-8000-000000000003' },
   ];
   const originalStart = SessionRuntime.prototype.start;
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
   SessionRuntime.prototype.start = async function () { (this as any).state = { status: 'connected' }; };
   SessionRuntime.prototype.resumeOwnedSession = async function () {};
-  const manager = new SessionRuntimeManager({
+  const manager = new SessionRuntimeManager({ resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }),
     maxCachedRuntimes: 2,
     launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
   });
@@ -823,7 +831,7 @@ test('background-running and active sessions are pinned above the idle cache lim
 });
 
 test('openSession deduplicates concurrent opens by UUID and rejects a different project', async () => {
-  const ref = { projectPath: '/workspace-a', sessionId: 'cccccccc-dddd-4eee-8fff-000000000000' };
+  const ref = { mode: 'code' as const, projectPath: '/workspace-a', sessionId: 'cccccccc-dddd-4eee-8fff-000000000000' };
   const resumeModel = 'openrouter/cohere/north-mini-code:free';
   const gate = deferred<void>();
   const originalStart = SessionRuntime.prototype.start;
@@ -838,7 +846,7 @@ test('openSession deduplicates concurrent opens by UUID and rejects a different 
   SessionRuntime.prototype.resumeOwnedSession = async function () {
     resumes += 1;
   };
-  const manager = new SessionRuntimeManager({
+  const manager = new SessionRuntimeManager({ resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }),
     launchConfig: (candidate) => ({ workspace: candidate.projectPath, sessionId: candidate.sessionId, trusted: true }),
   });
   try {
@@ -858,6 +866,7 @@ test('openSession deduplicates concurrent opens by UUID and rejects a different 
       resumeModel,
       'deduplicated or rejected opens cannot replace the model selected by the owning open',
     );
+    await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(starts, 1);
     assert.equal(resumes, 0);
     gate.resolve();
@@ -884,7 +893,7 @@ test('opening a validated empty session keeps its UUID runtime without sending r
     launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
   });
   try {
-    const runtime = await manager.openSession({ projectPath: '/workspace', sessionId }, true);
+    const runtime = await manager.openSession({ projectPath: '/workspace', sessionId, mode: 'code' }, true);
     assert.equal(runtime.sessionId, sessionId);
     assert.equal(resumes, 0);
   } finally {
@@ -915,7 +924,7 @@ test('closeProject removes runtimes from routing before asynchronous disposal', 
     assert.equal(manager.get(ref.sessionId), undefined);
     assert.equal(manager.isProjectClosing(projectPath), true);
     assert.throws(() => manager.require(ref), /not open/);
-    await assert.rejects(manager.newSession(projectPath), /project is closing/);
+    await assert.rejects(manager.newSession(projectPath, undefined, { mode: 'code', projectId: projectPath }), /project is closing/);
     assert.throws(() => manager.openSession({ projectPath, sessionId: 'eeeeeeee-ffff-4000-8111-222222222222' }), /project is closing/);
     assert.equal(runtime.projectPath, projectPath);
     gate.resolve();
@@ -1742,13 +1751,13 @@ test('disposing a runtime during delayed start cancels its identity before rolli
 });
 
 test('foreground open activates a session already opening for archive preflight', async () => {
-  const ref = { projectPath: '/workspace', sessionId: 'cccccccc-dddd-4eee-8fff-000000000001' };
+  const ref = { mode: 'code' as const, projectPath: '/workspace', sessionId: 'cccccccc-dddd-4eee-8fff-000000000001' };
   const gate = deferred<void>();
   const originalStart = SessionRuntime.prototype.start;
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
   SessionRuntime.prototype.start = async function () { await gate.promise; (this as any).state = { status: 'connected' }; };
   SessionRuntime.prototype.resumeOwnedSession = async function () {};
-  const manager = new SessionRuntimeManager({ launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }) });
+  const manager = new SessionRuntimeManager({ resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }), launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }) });
   try {
     const background = manager.openSession(ref, false, undefined, false);
     const foreground = manager.openSession(ref);
@@ -1763,12 +1772,12 @@ test('foreground open activates a session already opening for archive preflight'
 });
 
 test('background session leases survive cache pressure and trim after archive preflight', async () => {
-  const refs = [1, 2, 3].map((n) => ({ projectPath: '/workspace', sessionId: `cccccccc-dddd-4eee-8fff-00000000000${n}` }));
+  const refs = [1, 2, 3].map((n) => ({ projectPath: '/workspace', mode: 'code' as const, sessionId: `cccccccc-dddd-4eee-8fff-00000000000${n}` }));
   const originalStart = SessionRuntime.prototype.start;
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
   SessionRuntime.prototype.start = async function () { (this as any).state = { status: 'connected' }; };
   SessionRuntime.prototype.resumeOwnedSession = async function () {};
-  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1, launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }) });
+  const manager = new SessionRuntimeManager({ resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }), maxCachedRuntimes: 1, launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }) });
   try {
     await manager.openSession(refs[0]!);
     for (const ref of refs.slice(1)) {
@@ -1789,18 +1798,19 @@ test('background session leases survive cache pressure and trim after archive pr
 
 test('successful scheduled creation commits the draft owner, while rejection keeps it reusable', async () => {
   const originalStart = SessionRuntime.prototype.start;
-  const commits: string[] = [];
+  const commits: Array<{ sessionId: string; active: boolean }> = [];
   SessionRuntime.prototype.start = async function () {
     (this as any).activeWorkspace = '/workspace';
     (this as any).activeWorkspaceTrusted = true;
     (this as any).state = { status: 'connected' };
+    (this as any).draftModeRestorationRequired = false; // This fixture substitutes a ready engine.
   };
   const manager = new SessionRuntimeManager({
     launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }),
-    onFirstPromptSent: (ref) => { commits.push(ref.sessionId); },
+    onFirstPromptSent: (ref, active) => { commits.push({ sessionId: ref.sessionId, active }); },
   });
   try {
-    const ref = await manager.newSession('/workspace');
+    const ref = await manager.newSession('/workspace', undefined, { mode: 'code', projectId: '/workspace' });
     const runtime = manager.require(ref);
     const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
     client.sendCommand = () => {};
@@ -1812,12 +1822,12 @@ test('successful scheduled creation commits the draft owner, while rejection kee
     client.emit('event', { type: 'cron_result', request_id: 'rejected', jobs: [], error: 'Save failed' });
     await assert.rejects(rejected, /Save failed/);
     assert.deepEqual(commits, []);
-    assert.equal((await manager.newSession('/workspace')).sessionId, ref.sessionId);
+    assert.equal((await manager.newSession('/workspace', undefined, { mode: 'code', projectId: '/workspace' })).sessionId, ref.sessionId);
     const accepted = create('accepted');
     client.emit('event', { type: 'cron_result', request_id: 'accepted', jobs: [] });
     await accepted;
-    assert.deepEqual(commits, [ref.sessionId]);
-    const next = await manager.newSession('/workspace');
+    assert.deepEqual(commits, [{ sessionId: ref.sessionId, active: true }]);
+    const next = await manager.newSession('/workspace', undefined, { mode: 'code', projectId: '/workspace' });
     assert.notEqual(next.sessionId, ref.sessionId);
     const nextRuntime = manager.require(next);
     const nextClient = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
@@ -1828,8 +1838,9 @@ test('successful scheduled creation commits the draft owner, while rejection kee
     await manager.openSession(ref);
     nextClient.emit('event', { type: 'cron_result', request_id: 'background', jobs: [] });
     await backgroundCreate;
-    assert.deepEqual(commits, [ref.sessionId], 'background completion must not replace the active selection');
-    assert.notEqual((await manager.newSession('/workspace')).sessionId, next.sessionId, 'background success still commits its draft');
+    assert.deepEqual(commits, [{ sessionId: ref.sessionId, active: true }, { sessionId: next.sessionId, active: false }]);
+    assert.equal((manager as any).activeSessionId, ref.sessionId, 'background completion must not replace the active selection');
+    assert.notEqual((await manager.newSession('/workspace', undefined, { mode: 'code', projectId: '/workspace' })).sessionId, next.sessionId, 'background success still commits its draft');
   } finally {
     SessionRuntime.prototype.start = originalStart;
     await manager.dispose();
@@ -2007,8 +2018,9 @@ for (const stage of ['credentials', 'catalog', 'binding'] as const) {
  * which blocks credential writes, Codex login, engine restart and every
  * rewriting git operation on that session.
  */
-function scheduledRuntime() {
-  const runtime = new SessionRuntime({ sessionId: '11111111-2222-4333-8444-555555555555', projectPath: '/fixture' } as any);
+function scheduledRuntime(mode?: 'chat' | 'code') {
+  const runtime = new SessionRuntime({ sessionId: '11111111-2222-4333-8444-555555555555', projectPath: '/fixture' } as any, mode);
+  (runtime as any).draftModeRestorationRequired = false;
   const sent: unknown[] = [];
   const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void; cancel(): void };
   client.sendCommand = (command) => { sent.push(command); };
@@ -2027,6 +2039,22 @@ function scheduledRuntime() {
   } as any);
   return { runtime, client, sent, work };
 }
+
+test('an admitted scheduled turn retires the mode-only draft launch', async () => {
+  const state = scheduledRuntime('chat');
+  await dispatched(state);
+  assert.equal(state.runtime.sessionMode, 'chat');
+  assert.equal((state.runtime as any).draftSessionMode, undefined);
+  state.client.emit('event', { type: 'scheduled_run_finished', run_id: 'run-1', summary: 'done' });
+  assert.equal(await state.work, 'done');
+});
+
+test('a scheduled send failure leaves the draft mode available for retry', async () => {
+  const state = scheduledRuntime('chat');
+  state.client.sendCommand = () => { throw new Error('send failed'); };
+  await assert.rejects(state.work, /send failed/);
+  assert.equal((state.runtime as any).draftSessionMode, 'chat');
+});
 
 /** Park until the dispatch has actually gone out, so the latch is really set. */
 async function dispatched(state: ReturnType<typeof scheduledRuntime>) {
@@ -2078,13 +2106,13 @@ test('cron_run_bound settles the binding wait the scheduler blocks on', async ()
   (runtime as any).client = client;
   (runtime as any).wireClient(client, 0);
 
-  const bound = runtime.markCronRunStarted('bind-1', 'session-1');
+  const bound = runtime.markCronRunStarted('bind-1', 'session-1', { transcriptPath: '/fixture/session-1.jsonl', mode: 'code', scopeKey: '/fixture' });
   assert.equal((runtime as any).pendingRunBindings.size, 1);
   client.emit('event', { type: 'cron_run_bound', run_id: 'bind-1' });
   await bound;
   assert.equal((runtime as any).pendingRunBindings.size, 0);
 
-  const refused = runtime.markCronRunStarted('bind-2', 'session-1');
+  const refused = runtime.markCronRunStarted('bind-2', 'session-1', { transcriptPath: '/fixture/session-1.jsonl', mode: 'code', scopeKey: '/fixture' });
   client.emit('event', { type: 'cron_run_bound', run_id: 'bind-2', error: 'that session is gone' });
   await assert.rejects(refused, /that session is gone/);
   assert.equal((runtime as any).pendingRunBindings.size, 0);
@@ -2098,13 +2126,13 @@ test('cron_run_bound settles the binding wait the scheduler blocks on', async ()
  * kills the engine process it is still running inside.
  */
 test('a session with a coordinator worker still running survives cache pressure', async () => {
-  const refs = [1, 2].map((n) => ({ projectPath: '/workspace', sessionId: `eeeeeeee-ffff-4aaa-8bbb-00000000000${n}` }));
+  const refs = [1, 2].map((n) => ({ projectPath: '/workspace', mode: 'code' as const, sessionId: `eeeeeeee-ffff-4aaa-8bbb-00000000000${n}` }));
   const originalStart = SessionRuntime.prototype.start;
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
   SessionRuntime.prototype.start = async function () { (this as any).state = { status: 'connected' }; };
   SessionRuntime.prototype.resumeOwnedSession = async function () {};
   const open = async () => {
-    const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1, launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }) });
+    const manager = new SessionRuntimeManager({ resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }), maxCachedRuntimes: 1, launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }) });
     const first = await manager.openSession(refs[0]!);
     const client = audioContextEventClient();
     (first as any).wireClient(client, (first as any).generation);

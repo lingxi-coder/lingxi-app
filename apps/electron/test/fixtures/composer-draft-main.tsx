@@ -1,4 +1,5 @@
 import { fixtureAccountSnapshot } from './provider-accounts-mock';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -43,6 +44,9 @@ const audioOperationTypes: AudioOperationDto['type'][] = [];
 let settlePendingAudioListen: ((result: AudioOperationResultDto) => void) | undefined;
 let audioCancelCount = 0;
 let audioFinishCount = 0;
+const audioLeases = new Map<string, string>();
+const audioOwnerEvents: Array<{ action: string; sessionId?: string; leaseId?: string }> = [];
+type AudioOwner = { sessionId: string; leaseId: string };
 
 function supportedAudioSnapshot() {
   const snapshot = defaultNativeAudioSnapshot();
@@ -55,7 +59,9 @@ function supportedAudioSnapshot() {
   return snapshot;
 }
 
-function executeAudioOperation(operation: AudioOperationDto): Promise<NativeAudioOperationResponse> {
+function executeAudioOperation(operation: AudioOperationDto, _revision?: number, _configuration?: unknown, owner?: AudioOwner): Promise<NativeAudioOperationResponse> {
+  if (owner && audioLeases.get(owner.sessionId) !== owner.leaseId) throw new Error('Fixture audio execution has no owner');
+  if (owner) audioOwnerEvents.push({ action: operation.type, ...owner });
   audioOperationTypes.push(operation.type);
   if (operation.type === 'listen') {
     return new Promise((resolve) => {
@@ -73,13 +79,17 @@ function executeAudioOperation(operation: AudioOperationDto): Promise<NativeAudi
   return Promise.resolve({ snapshot: supportedAudioSnapshot(), result });
 }
 
-function cancelAudioOperation(): Promise<void> {
+function cancelAudioOperation(owner?: AudioOwner): Promise<void> {
+  if (owner && audioLeases.get(owner.sessionId) !== owner.leaseId) throw new Error('Fixture audio cancellation has no owner');
+  if (owner) audioOwnerEvents.push({ action: 'cancel', ...owner });
   audioCancelCount += 1;
   settlePendingAudioListen?.({ type: 'failed', error: { kind: 'cancelled', message: 'fixture audio was cancelled' } });
   return Promise.resolve();
 }
 
-function finishAudioListen(): Promise<void> {
+function finishAudioListen(owner?: AudioOwner): Promise<void> {
+  if (owner && audioLeases.get(owner.sessionId) !== owner.leaseId) throw new Error('Fixture audio finish has no owner');
+  if (owner) audioOwnerEvents.push({ action: 'finish', ...owner });
   audioFinishCount += 1;
   settlePendingAudioListen?.({ type: 'transcript', text: 'dictated text', language: 'en-US' });
   return Promise.resolve();
@@ -143,7 +153,7 @@ if (!window.lingxi) (window as unknown as { lingxi: { audio: unknown } }).lingxi
 };
 
 function bridgeFixture(sessionId: string | null, running: boolean, backgroundStatus: string | undefined, isCancelling: boolean, models: string[], connected: boolean, sessionLoading: boolean) {
-  const activeSession = sessionId ? { projectPath, sessionId } : null;
+  const activeSession = sessionId ? { projectPath, sessionId, mode: 'code' as const, projectId: projectPath } : null;
   return {
     // Whether anything is up to take a command — all the model control is
     // gated on, and independent of the `ready` that gates SENDING.
@@ -157,6 +167,16 @@ function bridgeFixture(sessionId: string | null, running: boolean, backgroundSta
     audioExecute: executeAudioOperation,
     audioCancel: cancelAudioOperation,
     audioFinishListen: finishAudioListen,
+    audioRetainFlow: async (owner: string, lease: string, retain: boolean) => {
+      if (retain) {
+        if (audioLeases.size > 0) throw new Error('Fixture audio is already owned');
+        audioLeases.set(owner, lease);
+      } else {
+        if (audioLeases.get(owner) !== lease) throw new Error('Fixture audio lease does not match');
+        audioLeases.delete(owner);
+      }
+      audioOwnerEvents.push({ action: retain ? 'retain' : 'release', sessionId: owner, leaseId: lease });
+    },
     activeSession,
     bootstrap: {
       revision: 1,
@@ -168,6 +188,8 @@ function bridgeFixture(sessionId: string | null, running: boolean, backgroundSta
         pinnedSessions: [],
       },
       workspace: { path: projectPath, trusted: true },
+      conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: [projectPath], selectedProject: projectPath,
+        activeSession: activeSession ?? undefined }),
       activeSession,
       runtimes: [],
       projectCatalogs: { [projectPath]: { sessions: [] } },
@@ -243,6 +265,7 @@ function Fixture() {
   const [sessionId, setSessionId] = useState<string | null>('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
   const [sessionLoading, setSessionLoading] = useState(false);
   const [running, setRunning] = useState(false);
+  const [historyItems, setHistoryItems] = useState<import('../../src/renderer/model/runItem').RunItem[]>([]);
   const [suggestionState, setSuggestionState] = useState({ enabled: true, notice: null as string | null });
   const [suggestion, setSuggestion] = useState<{ text: string; turn: number; sessionId: string }>();
   const [backgroundStatuses, setBackgroundStatuses] = useState<Record<string, string | undefined>>({});
@@ -257,6 +280,7 @@ function Fixture() {
 
   useEffect(() => {
     window.__composerDraftTest = {
+      setHistoryItems,
       switchSession: setSessionId,
       setSessionLoading,
       setFusionDefault,
@@ -274,11 +298,12 @@ function Fixture() {
       sendPending: () => sendPending,
       lastSentPrompt: () => lastSentPrompt,
       resolveSend: () => resolvePendingSend?.(),
-      clearAudioRequests: () => { audioRequests.length = 0; audioOperationTypes.length = 0; },
+      clearAudioRequests: () => { audioRequests.length = 0; audioOperationTypes.length = 0; audioOwnerEvents.length = 0; },
       audioRequestTypes: () => audioRequests.map((request) => request.type),
       audioOperationTypes: () => [...audioOperationTypes],
       audioCancelCount: () => audioCancelCount,
       audioFinishCount: () => audioFinishCount,
+      audioOwnerEvents: () => [...audioOwnerEvents],
       setModels: (next) => setModels(next === 'all' ? ALL_MODELS : next),
       modelRefreshCount: () => modelRefreshCount,
       setReady,
@@ -312,7 +337,7 @@ function Fixture() {
               fusionAdmin: async () => undefined,
               updatePromptSuggestionContext: async (context: Record<string, unknown>) => { suggestionContexts.push(context); },
               promptSuggestionFeedback: async (sessionId: string, uuid: string, action: string) => { suggestionFeedback.push({ sessionId, uuid, action }); },
-              conversation: { ...emptyConversation(), sessionKey: sessionId, suggestionTurn: suggestion?.turn ?? 0,
+              conversation: { ...emptyConversation(), items: historyItems, sessionKey: sessionId, suggestionTurn: suggestion?.turn ?? 0,
                 promptSuggestionEnabled: suggestionState.enabled, promptSuggestionNotice: suggestionState.notice,
                 promptSuggestion: suggestion?.text && suggestion?.sessionId === sessionId ? { type: 'prompt_suggestion', suggestion: suggestion.text, session_id: sessionId, uuid: `suggestion-${suggestion.turn}` } : undefined },
             } as never}
@@ -331,6 +356,7 @@ function Fixture() {
 declare global {
   interface Window {
     __composerDraftTest?: {
+      setHistoryItems(items: import('../../src/renderer/model/runItem').RunItem[]): void;
       setSuggestion(text: string, turn: number, sessionId: string): void;
       setSuggestionState(enabled: boolean, notice: string | null): void;
       suggestionFeedback(): Array<{ sessionId: string; uuid: string; action: string }>;
@@ -356,6 +382,7 @@ declare global {
       audioOperationTypes(): AudioOperationDto['type'][];
       audioCancelCount(): number;
       audioFinishCount(): number;
+      audioOwnerEvents(): Array<{ action: string; sessionId?: string; leaseId?: string }>;
       setModels(models: string[] | 'all'): void;
       modelRefreshCount(): number;
       setReady(ready: boolean): void;

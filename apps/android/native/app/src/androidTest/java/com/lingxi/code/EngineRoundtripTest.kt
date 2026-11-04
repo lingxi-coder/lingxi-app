@@ -84,6 +84,7 @@ class EngineRoundtripTest {
         val targetContext = InstrumentationRegistry.getInstrumentation().targetContext
         return NativeEngineFactory.build(
             context = targetContext,
+            sessionMode = com.lingxi.code.model.SessionMode.Code,
             apiBase = System.getenv("ANTHROPIC_BASE_URL") ?: "https://api.anthropic.com",
             model = model,
             routingJson = routingJson,

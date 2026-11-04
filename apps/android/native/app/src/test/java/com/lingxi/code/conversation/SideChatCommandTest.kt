@@ -6,6 +6,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SideChatCommandTest {
+    @Test fun onlyExplicitSideRejectionRestoresInput() {
+        assertTrue(isKnownSideChatRejection(SideChatNotAdmittedException("background")))
+        assertTrue(isKnownSideChatRejection(com.lingxi.code.bindings.client.ClientException.Rejected("side chat is busy")))
+        assertFalse(isKnownSideChatRejection(com.lingxi.code.bindings.client.ClientException.Rejected("task failed after admission")))
+        assertFalse(isKnownSideChatRejection(IllegalStateException("unknown outcome")))
+    }
     @Test fun backgroundFencesPendingCreateEvenAfterForegroundReturns() {
         val gate = SideChatForegroundGate()
         val pendingCreate = gate.capture()
@@ -15,15 +21,6 @@ class SideChatCommandTest {
         gate.resume()
         assertFalse(gate.maySubmit(pendingCreate))
         assertTrue(gate.maySubmit(gate.capture()))
-    }
-
-    @Test fun failedSideImageSendRestoresRamComposer() {
-        val restored = restoreSideComposerAfterFailure("", null, "describe this", "submitted image")
-        assertEquals("describe this", restored.first)
-        assertEquals("submitted image", restored.second)
-        val edited = restoreSideComposerAfterFailure("new draft", "new image", "old draft", "old image")
-        assertEquals("new draft", edited.first)
-        assertEquals("new image", edited.second)
     }
 
     @Test fun rejectedSideCreationRetainsDraftAndAttachment() {

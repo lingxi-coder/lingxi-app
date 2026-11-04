@@ -1,4 +1,5 @@
 import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BetaSidebar } from '../../src/renderer/components/BetaDesktop';
@@ -15,10 +16,26 @@ setLanguagePreference('en');
 function Fixture() {
   const sidebarAttempts = useRef(0);
   const [sidebarCalls, setSidebarCalls] = useState(0);
+  const metadata = useRef({ captures: 0, preflights: [] as string[], archives: [] as string[], renames: [] as string[], releases: [] as string[] });
   const bridge = {
-    bootstrap: { settings: { projects: ['/fixture'], pinnedSessions: [], activeProject: '/fixture' }, workspace: { path: '/fixture' }, projectCatalogs: { '/fixture': { sessions: [{ uuid: 'fixture-session', title: 'Sidebar chat' }] } } },
-    sessionRuntimeStatus: () => undefined, preflightSessionArchive: async () => [],
-    archiveSession: async () => { setSidebarCalls(value => value + 1); if (sidebarAttempts.current++ === 0) throw new Error('Fixture archive failure'); },
+    bootstrap: {
+      settings: { projects: ['/fixture'], pinnedSessions: [], activeProject: '/fixture' },
+      workspace: { path: '/fixture' },
+      conversationSpaces: fixtureConversationSpaces({ mode: 'chat', projects: ['/fixture'], selectedProject: '/fixture' }),
+      projectCatalogs: { '/fixture': { sessions: [{ uuid: 'fixture-session', title: 'Sidebar chat', mode: 'chat', path: '/fixture/transcript.jsonl' }] } },
+    },
+    sessionRuntimeStatus: () => undefined, listProjectSessions: async () => ({ sessions: [] }),
+    prepareSessionMetadata: async (_project: string, _id: string, selection: { scope: string; transcriptPath: string }) => {
+      metadata.current.captures++;
+      return { ...selection, sourceToken: `token-${metadata.current.captures}` };
+    },
+    releaseSessionMetadata: async (selection: { sourceToken: string }) => { metadata.current.releases.push(selection.sourceToken); },
+    preflightSessionArchive: async (_project: string, _id: string, selection: { sourceToken: string }) => { metadata.current.preflights.push(selection.sourceToken); return []; },
+    archiveSession: async (_project: string, _id: string, selection: { sourceToken: string }) => {
+      metadata.current.archives.push(selection.sourceToken); setSidebarCalls(value => value + 1);
+      if (sidebarAttempts.current++ === 0) throw new Error('Fixture archive failure');
+    },
+    renameSession: async (_project: string, _id: string, _title: string, selection: { sourceToken: string }) => { metadata.current.renames.push(selection.sourceToken); },
   } as unknown as UseBridge;
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -30,7 +47,7 @@ function Fixture() {
     configure: ({ loading = false, busy = false, error = '' } = {}) => {
       setLoading(loading); setBusy(busy); setError(error);
     },
-    state: () => ({ open, confirms, closes, sidebarCalls }),
+    state: () => ({ open, confirms, closes, sidebarCalls, metadata: metadata.current }),
   } });
   return <div className="desktop-shell" style={{ display: 'flex', position: 'relative', width: '100vw', height: '100vh' }}><BetaSidebar bridge={bridge} onOpenSettings={() => {}} /><main className="desktop-main" style={{ padding: 40, flex: 1, position: 'relative' }}>
     <h1>Project chat</h1><button id="opener" onClick={() => setOpen(true)}>Archive chat</button>

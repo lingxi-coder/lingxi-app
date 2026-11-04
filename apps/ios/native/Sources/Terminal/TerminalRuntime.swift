@@ -103,15 +103,14 @@ extension TerminalRuntimeDescriptor {
         requestedCwd: TerminalRouteCwd? = nil,
         requestedSessionID: String? = nil
     ) -> TerminalRuntimeDescriptor {
-        let manifest = LXISHRuntimeBundleMetadata.current()
+        let manifest = try? LXISHRuntimeBundleMetadata.current()
         // A shell does not belong to a project. With no project open the
-        // terminal falls back to the runtime's own persistent workspace — the
-        // same one Settings uses — instead of refusing to start. A fresh UUID
-        // here would have minted a throwaway workspace on every launch.
+        // terminal selects the runtime's persistent projects mount; the
+        // independently verified bundle still determines availability.
         let workspaceID = LXISHDefaultWorkspace.stableID()
         let workspaceHostPath = LXISHDefaultWorkspace.hostPath()
         let workspaceGuestPath = project?.workspace.guestPath
-            ?? LXISHDefaultWorkspace.guestHome
+            ?? LXISHDefaultWorkspace.guestWorkspace
         // Same directory the Linux runtime page installs into. The old fallback
         // hung off `appSandboxRoot`, which carries a `LingxiCode` component the
         // Settings path does not, so a terminal opened before Settings looked
@@ -127,7 +126,7 @@ extension TerminalRuntimeDescriptor {
         // failure mode this constant exists to kill.
         let managedRoot = LXISHDefaultWorkspace.managedRootPath()
 
-        let config = TerminalRuntimeConfig(
+        let config = manifest.map { manifest in TerminalRuntimeConfig(
             mode: .mobileLinux,
             managedRoot: managedRoot,
             workspaceHostPath: workspaceHostPath,
@@ -136,7 +135,7 @@ extension TerminalRuntimeDescriptor {
             rootfsVersion: manifest.rootfsVersion,
             archiveSha256: manifest.archiveSha256,
             authorizationFile: LXISHRuntimeBundleResources.authorizationManifestURL()?.path
-        )
+        ) }
 
         let requestedResolution = resolveRequestedCwd(
             requestedCwd,
@@ -144,11 +143,9 @@ extension TerminalRuntimeDescriptor {
         )
 
         return TerminalRuntimeDescriptor(
-            // nil config = the container itself is unavailable. Covers BOTH
-            // degenerate branches of the shared helpers: a missing workspace
-            // container AND `managedRootPath()`'s empty-string failure (no
-            // Application Support) — an empty managed root must never reach
-            // the FFI as if it were a real directory.
+            // A missing/mismatched bundle, workspace or managed root leaves
+            // the runtime unavailable rather than constructing an installable
+            // configuration with guessed metadata.
             config: (workspaceHostPath.isEmpty || managedRoot.isEmpty) ? nil : config,
             workspace: TerminalWorkspaceDescriptor(
                 hostPath: project?.workspace.hostURL.path ?? workspaceHostPath,
@@ -218,7 +215,7 @@ extension TerminalRuntimeDescriptor {
     ) -> (cwd: String?, errorMessage: String?) {
         guard let requestedCwd else {
             return (
-                workspaceGuestPath.isEmpty ? LXISHDefaultWorkspace.guestHome : workspaceGuestPath,
+                workspaceGuestPath.isEmpty ? LXISHDefaultWorkspace.guestWorkspace : workspaceGuestPath,
                 nil
             )
         }

@@ -37,6 +37,14 @@ export { isPermissionModeId } from '../shared/permission.js';
 
 export const MAX_PROJECTS = 50;
 export const MAX_PINNED_SESSIONS = 100;
+/** How many Bots the sidebar remembers as open; far above any list a person keeps. */
+const MAX_EXPANDED_BOTS = 200;
+/**
+ * The widths the Teams details panel may be saved at. The panel keeps itself inside its own, narrower range when it
+ * draws; this only turns away what cannot be a width at all (a string, NaN, a few pixels, a few screens).
+ */
+const MIN_TEAMS_DRAWER_WIDTH = 200;
+const MAX_TEAMS_DRAWER_WIDTH = 1200;
 export const MAX_REMOTE_SESSIONS = 256;
 export const MAX_DIAGNOSTICS = 200;
 export const MAX_DIAGNOSTIC_LENGTH = 2_000;
@@ -395,7 +403,34 @@ export function parseSidebarPreferences(value: unknown, projects: readonly strin
       if (seen.size > 0) manualSessionOrder[projectPath] = [...seen];
     }
   }
-  return { organization, chatSort, manualSessionOrder };
+  // Like the organization and the sort, the mode is Home unless it is one of ours.
+  const mode = input['mode'] === 'bots' || input['mode'] === 'teams' ? input['mode'] : 'home';
+  const preferences: SidebarPreferences = { organization, chatSort, manualSessionOrder, mode };
+  // `expandedBots` and `teamsDrawerWidth` stay unset until the owner first sets them, and a value that is not one of ours leaves them unset.
+  if (Array.isArray(input['expandedBots'])) {
+    const expanded = new Set<string>();
+    for (const botId of input['expandedBots']) {
+      const bounded = boundedString(botId, 128);
+      if (bounded) expanded.add(bounded);
+      if (expanded.size >= MAX_EXPANDED_BOTS) break;
+    }
+    preferences.expandedBots = [...expanded];
+  }
+  const drawerWidth = input['teamsDrawerWidth'];
+  if (typeof drawerWidth === 'number' && Number.isFinite(drawerWidth)) {
+    const width = Math.round(drawerWidth);
+    if (width >= MIN_TEAMS_DRAWER_WIDTH && width <= MAX_TEAMS_DRAWER_WIDTH) preferences.teamsDrawerWidth = width;
+  }
+  return preferences;
+}
+
+/**
+ * Apply a sidebar update over what is saved. The keys the update leaves out keep their saved value, so the part of the
+ * app that saves the sidebar mode, the open Bots or the Teams panel width need not know the organization and sort, and the
+ * reverse. Anything that is not an object resets the preferences to the defaults.
+ */
+export function patchSidebarPreferences(saved: SidebarPreferences | undefined, update: unknown, projects: readonly string[]): SidebarPreferences {
+  return parseSidebarPreferences(isPlainObject(update) ? { ...saved, ...update } : update, projects);
 }
 
 function cloneSidebarPreferences(value: SidebarPreferences): SidebarPreferences {
@@ -405,6 +440,9 @@ function cloneSidebarPreferences(value: SidebarPreferences): SidebarPreferences 
     manualSessionOrder: Object.fromEntries(
       Object.entries(value.manualSessionOrder).map(([projectPath, sessionIds]) => [projectPath, [...sessionIds]]),
     ),
+    mode: value.mode,
+    ...(value.expandedBots ? { expandedBots: [...value.expandedBots] } : {}),
+    ...(value.teamsDrawerWidth !== undefined ? { teamsDrawerWidth: value.teamsDrawerWidth } : {}),
   };
 }
 
@@ -718,6 +756,11 @@ export function buildBridgeArguments(config: {
   sessionId?: string;
   listSessionsJson?: boolean;
   sessionTranscriptPath?: string;
+  restoreDraft?: boolean;
+  durableDraftTitle?: string;
+  /** Device default for a newly allocated draft, applied before startup hooks. */
+  initialConversationMode?: 'chat' | 'code';
+  expectedConversationMode?: 'chat' | 'code';
   sessionScope?: 'current' | 'repository' | 'all';
   additionalDirectories?: readonly string[];
   promptDirectories?: readonly string[];
@@ -740,12 +783,17 @@ export function buildBridgeArguments(config: {
   if (config.listSessionsJson) {
     return ['--cwd', config.workspace, '--list-sessions-json',
       ...(config.sessionScope ? ['--session-scope', config.sessionScope] : []),
-      ...(config.sessionId ? ['--session-id', config.sessionId] : [])];
+      ...(config.sessionId ? ['--session-id', config.sessionId] : []),
+      ...(config.sessionTranscriptPath ? ['--session-transcript-path', config.sessionTranscriptPath] : [])];
   }
   const args = ['--cwd', config.workspace, '--bridge-dir', config.bridgeDir];
   if (config.appVersion) args.push('--app-version', config.appVersion);
   if (config.sessionId) args.push('--session-id', config.sessionId);
   if (config.sessionTranscriptPath) args.push('--session-transcript-path', config.sessionTranscriptPath);
+  if (config.restoreDraft) args.push('--restore-draft');
+  if (config.durableDraftTitle) args.push('--durable-draft-title', config.durableDraftTitle);
+  if (config.initialConversationMode) args.push('--initial-conversation-mode', config.initialConversationMode);
+  if (config.expectedConversationMode) args.push('--expected-conversation-mode', config.expectedConversationMode);
   if (config.initialProjectRoot) args.push('--session-project-root', config.initialProjectRoot);
   if (config.configHome) args.push('--session-config-home', config.configHome);
   if (config.globalConfigPath) args.push('--session-global-config-path', config.globalConfigPath);

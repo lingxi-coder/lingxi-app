@@ -9,8 +9,14 @@ try {
     if (await window.webContents.executeJavaScript('!!window.runtimeLifecycleFixture')) break;
     await new Promise(resolve => setTimeout(resolve, 20));
   }
-  console.log(JSON.stringify(await window.webContents.executeJavaScript('window.runtimeLifecycleFixture.run()')));
-} catch (error) { console.error(error); process.exitCode = 1; }
-finally { window.destroy(); app.quit(); }
+  const result = await window.webContents.executeJavaScript('window.runtimeLifecycleFixture.run()');
+  // Flush the assertion result before force-exiting this fixture. It has no
+  // application shutdown work, and macOS helper teardown can otherwise hang.
+  await new Promise(resolve => process.stdout.write(`${JSON.stringify(result)}\n`, resolve));
+  process.exit(0);
+} catch (error) {
+  await new Promise(resolve => process.stderr.write(`${String(error)}\n`, resolve));
+  process.exit(1);
+}
 }
 void main().catch(error => { console.error(error); app.exit(1); });

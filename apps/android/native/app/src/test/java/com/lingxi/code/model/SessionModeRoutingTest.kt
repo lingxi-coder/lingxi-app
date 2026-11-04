@@ -1,6 +1,10 @@
 package com.lingxi.code.model
 
-import com.lingxi.code.isBoundToScopeMode
+import com.lingxi.code.isBoundToScope
+import com.lingxi.code.isRestorableSession
+import com.lingxi.code.shouldAttemptModeRestore
+import com.lingxi.code.shouldPersistActiveSession
+import com.lingxi.code.sessionLinkModeMatchesOwner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -9,64 +13,61 @@ import org.junit.Test
 class SessionModeRoutingTest {
 
     @Test
-    fun `in-place resume requires both workspace and mode to match`() {
+    fun `in-place resume requires the same workspace regardless of mode`() {
         val workspace = ConversationScope.Project("notes")
 
         assertTrue(
-            isBoundToScopeMode(
+            isBoundToScope(
                 boundScope = workspace,
-                boundMode = SessionMode.Chat,
                 targetScope = workspace,
-                targetMode = SessionMode.Chat,
             ),
         )
         assertFalse(
-            isBoundToScopeMode(
-                boundScope = workspace,
-                boundMode = SessionMode.Code,
-                targetScope = workspace,
-                targetMode = SessionMode.Chat,
-            ),
-        )
-        assertFalse(
-            isBoundToScopeMode(
+            isBoundToScope(
                 boundScope = ConversationScope.Global,
-                boundMode = SessionMode.Chat,
                 targetScope = workspace,
-                targetMode = SessionMode.Chat,
             ),
         )
     }
 
     @Test
-    fun `persisted session stays resumable before its catalog row arrives`() {
-        val target = persistedSessionTarget(
-            sessionId = "session-chat",
-            catalogRow = null,
-        ) ?: throw AssertionError("a stored session id must remain a resume target")
-
-        assertEquals("session-chat", target.ref.id)
-        assertEquals("", target.ref.title)
-        assertTrue(
-            "resume-empty is safe for both empty and populated transcripts and avoids guessing",
-            target.resumeEmpty,
+    fun `pending mode survives cold restore by session and workspace identity`() {
+        val sessionId = "19587a33-0725-48db-abca-8a2aed345f6b"
+        val row = SessionRow(
+            uuid = sessionId, title = "Chat", messageCount = 1,
+            relativeTime = "", mode = SessionMode.Chat,
         )
+        // The owning project stays fixed even if a different session changes its cwd.
+        assertTrue(isRestorableSession("sess:$sessionId", row.uuid))
+        assertTrue(sessionLinkModeMatchesOwner(SessionMode.Chat, row.mode, null, false))
+        assertFalse(sessionLinkModeMatchesOwner(SessionMode.Code, row.mode, null, false))
+        assertFalse(isRestorableSession("session-b", row.uuid))
     }
 
     @Test
-    fun `catalog metadata enriches a persisted session target`() {
-        val target = persistedSessionTarget(
-            sessionId = "session-code",
-            catalogRow = SessionRow(
-                uuid = "session-code",
-                title = "Build release",
-                messageCount = 4,
-                relativeTime = "刚刚",
-                mode = SessionMode.Code,
-            ),
-        ) ?: throw AssertionError("expected a resume target")
-
-        assertEquals(SessionRef("session-code", "Build release"), target.ref)
-        assertFalse(target.resumeEmpty)
+    fun `new session is not replaced while its selected mode is being confirmed`() {
+        val key = "project.notes#chat"
+        assertFalse(shouldAttemptModeRestore(false, false, false, SessionMode.Code, SessionMode.Chat, key, null))
+        assertFalse(shouldAttemptModeRestore(true, false, false, SessionMode.Chat, SessionMode.Code, key, null))
+        assertFalse(shouldAttemptModeRestore(true, false, false, SessionMode.Chat, SessionMode.Chat, key, key))
+        assertTrue(shouldAttemptModeRestore(true, false, false, SessionMode.Chat, SessionMode.Chat, key, null))
     }
+
+    @Test
+    fun `an unknown owner mode cannot be persisted as code`() {
+        val key = "global#code"
+        assertFalse(shouldPersistActiveSession(true, "session", null, SessionMode.Code, key, key))
+        assertTrue(shouldPersistActiveSession(true, "session", SessionMode.Code, SessionMode.Code, key, key))
+    }
+
+    @Test
+    fun `session links require a mode matching their known owner`() {
+        assertFalse(sessionLinkModeMatchesOwner(null, SessionMode.Chat, SessionMode.Chat, true))
+        assertFalse(sessionLinkModeMatchesOwner(SessionMode.Code, SessionMode.Chat, null, false))
+        assertFalse(sessionLinkModeMatchesOwner(SessionMode.Chat, null, null, true))
+        assertTrue(sessionLinkModeMatchesOwner(SessionMode.Chat, SessionMode.Chat, SessionMode.Chat, true))
+        // Scheduled sessions without a UI index are checked by expectedMode on engine resume.
+        assertTrue(sessionLinkModeMatchesOwner(SessionMode.Chat, null, null, false))
+    }
+
 }

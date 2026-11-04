@@ -6,7 +6,7 @@ import { Composer } from './Composer';
 import { Controls } from './Controls';
 import { requestErrorStringKey } from './failureText';
 import { PendingPrompts } from './Prompts';
-import { knownBots, type RemoteClient, type SessionState } from './remoteClient';
+import { isTeamApproval, knownBots, type RemoteClient, type SessionState } from './remoteClient';
 import { TranscriptView } from './Transcript';
 import { t } from './strings';
 import { displayText } from './text';
@@ -65,6 +65,7 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
   }, [state.transcript, state.outgoing, state.pending]);
 
   const live = state.status === 'live' && connection.phase === 'ready';
+  const approval = isTeamApproval(sessionId);
   const running = state.turn.running || state.transcript.conversation.running;
 
   return (
@@ -83,7 +84,7 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
       {connection.phase !== 'ready' ? <p className="rc-banner" role="status">{t(locale, 'reconnecting')}</p> : null}
       {state.status === 'offline' && connection.phase === 'ready' ? <p className="rc-banner" role="status">{t(locale, 'sessionOffline')}</p> : null}
 
-      <Controls locale={locale} client={client} controller={controller} controls={state.controls} disabled={!live} />
+      {!approval ? <Controls locale={locale} client={client} controller={controller} controls={state.controls} disabled={!live} /> : null}
 
       <div
         className="rc-scroll"
@@ -97,22 +98,23 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
         {state.status === 'error' ? <p className="rc-note rc-danger" role="alert">{errorText(locale, state)}</p> : null}
         {state.status === 'closed' ? <p className="rc-note" role="status">{t(locale, 'sessionClosed')}</p> : null}
         {state.hasOlder ? (
-          <button type="button" className="button secondary rc-older" disabled={state.loadingOlder} onClick={() => void controller.loadOlder()}>
+          <button type="button" className="button secondary rc-older" disabled={!live || state.loadingOlder} onClick={() => void controller.loadOlder()}>
             {state.loadingOlder ? t(locale, 'loadingOlder') : t(locale, 'loadOlder')}
           </button>
         ) : null}
-        <TranscriptView locale={locale} transcript={state.transcript} running={running} deviceName={deviceName} fetchImage={(ref) => controller.fetchImage(ref)} />
+        {!approval ? <TranscriptView locale={locale} transcript={state.transcript} running={running} deviceName={deviceName} fetchImage={(ref) => controller.fetchImage(ref)} /> : null}
         {state.outgoing.map((prompt) => (
           <div key={prompt.id} className="rc-user">
             <div className={`rc-bubble rc-outgoing${prompt.status === 'failed' ? ' rc-failed' : ''}`}>
               {prompt.text ? <p className="rc-plain">{prompt.text}</p> : null}
               {prompt.images.length > 0 ? <p className="rc-note">{prompt.images.length} × {t(locale, 'imageAlt')}</p> : null}
+              {(prompt.files?.length ?? 0) > 0 ? <p className="rc-note">{prompt.files!.length} × {locale === 'zh' ? '文件' : 'file'}</p> : null}
               <p className="rc-note">
                 {prompt.status === 'sending' ? t(locale, 'sending') : t(locale, 'sendFailed')}
                 {prompt.status === 'failed' ? (
                   <>
                     {' '}
-                    <button type="button" className="rc-link" onClick={() => void controller.retryPrompt(prompt.id)}>{t(locale, 'sendRetry')}</button>
+                    <button type="button" className="rc-link" disabled={!live || (running && (prompt.images.length > 0 || (prompt.files?.length ?? 0) > 0))} onClick={() => void controller.retryPrompt(prompt.id).catch(() => undefined)}>{t(locale, 'sendRetry')}</button>
                     {' '}
                     <button type="button" className="rc-link" onClick={() => controller.dismissPrompt(prompt.id)}>{t(locale, 'dismiss')}</button>
                   </>
@@ -123,9 +125,12 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
         ))}
       </div>
 
-      <PendingPrompts locale={locale} controller={controller} pending={state.pending} answeredElsewhere={state.answeredElsewhere} />
-      <Files key={sessionId} client={client} session={sessionId} locale={locale} disabled={!live || connection.transport !== 'webrtc'}
-        onAttach={file => setAttachments(current => [...current.filter(f => f.ref !== file.ref), file].slice(-4))} />
+      <PendingPrompts locale={locale} controller={controller} pending={state.pending} answeredElsewhere={state.answeredElsewhere} disabled={!live} />
+      {!approval ? <><Files key={sessionId} client={client} session={sessionId} locale={locale} disabled={!live || connection.transport !== 'webrtc'}
+        attachmentLimitReached={attachments.length >= 4}
+        onAttach={file => setAttachments(current => current.some(f => f.ref === file.ref)
+          ? current.map(f => f.ref === file.ref ? file : f)
+          : current.length < 4 ? [...current, file] : current)} />
       {attachments.length ? <ul>{attachments.map(file => <li key={file.ref}>{file.name}{' '}
         <button type="button" aria-label={locale === 'zh' ? '移除文件' : 'Remove file'} onClick={() => setAttachments(current => current.filter(f => f.ref !== file.ref))}>×</button>
       </li>)}</ul> : null}
@@ -134,9 +139,15 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
         running={running}
         disabled={!live}
         hasFiles={attachments.length > 0}
-        onSend={(text, images) => { void controller.sendPrompt(text, images, attachments.map(f => f.ref)); setAttachments([]); }}
+        onSend={(text, images) => {
+          try {
+            void controller.sendPrompt(text, images, running ? [] : attachments.map(f => f.ref));
+            if (!running) setAttachments([]);
+            return true;
+          } catch { return false; }
+        }}
         onStop={() => void controller.cancelTurn().catch(() => undefined)}
-      />
+      /></> : null}
     </div>
   );
 }

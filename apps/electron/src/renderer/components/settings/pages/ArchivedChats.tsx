@@ -17,7 +17,10 @@ export function ArchivedChats({ bridge, onClose }: PageContentProps) {
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
-  const records = bridge.bootstrap?.settings.archivedSessions ?? [];
+  const mode = bridge.bootstrap?.conversationSpaces.activeMode ?? 'chat';
+  const spaces = bridge.bootstrap?.conversationSpaces;
+  const records = (bridge.bootstrap?.settings.archivedSessions ?? []).filter((row) => row.mode === mode
+    && (row.projectId == null || spaces?.projects[row.projectId]?.includes(mode)));
   const rows = archivedChatRows(records, query);
   const restore = async (row: ArchivedSessionRecord) => {
     if (busy) return;

@@ -1,6 +1,5 @@
 use super::argv;
 use super::ax_screen_reader;
-use super::bypass_env;
 use super::command_line_output::commander_error;
 use super::command_line_output::commander_help;
 use super::commands;
@@ -474,18 +473,17 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // refused bypass exits before the runtime is constructed, and the resolved
     // mode threads into `DesktopConfig.permission_mode`.
     let (permission_mode, permission_notice) = resolve_permission_mode(&parsed);
-    if parsed.restricted_enabled()
-        && (permission_mode == permission::PermissionMode::BypassPermissions
-            || parsed.dangerously_skip_permissions
-            || parsed.allow_dangerously_skip_permissions)
-    {
-        eprintln!("bypassPermissions not supported in restricted mode");
-        return exit_codes::RUNTIME_ERROR;
-    }
-    if permission_mode == permission::PermissionMode::BypassPermissions
-        || parsed.dangerously_skip_permissions
-    {
-        if let Err(msg) = permission::enforce_bypass_safety(&bypass_env::RealBypassEnv::new()).await
+    // A public non-fork resume runs in the selected session's
+    // workspace. Its mode and bypass safety check must use that workspace,
+    // which is only known after the transcript has been captured.
+    let defer_selected_resume_mode = parsed.command.is_none()
+        && parsed.teammate_launch_file.is_none()
+        && !parsed.fork_session
+        && (parsed.resume.is_some() || parsed.continue_session);
+    if !defer_selected_resume_mode {
+        if let Err(msg) =
+            crate::permission_settings::enforce_permission_mode_safety(&parsed, permission_mode)
+                .await
         {
             eprintln!("{msg}");
             return exit_codes::RUNTIME_ERROR;
@@ -725,8 +723,10 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         if let Some(notice) = startup_deprecation_notice(&parsed) {
             eprintln!("{notice}");
         }
-        if let Some(notice) = &permission_notice {
-            eprintln!("{notice}");
+        if !defer_selected_resume_mode {
+            if let Some(notice) = &permission_notice {
+                eprintln!("{notice}");
+            }
         }
         return crate::headless_host::run(&parsed, permission_mode).await;
     }
@@ -794,8 +794,10 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // bounded stderr channel as the deprecation/migration notices (no UI
     // notification-queue substrate); `None` in the common case, so startup is
     // byte-identical when no bypass was disabled.
-    if let Some(notice) = &permission_notice {
-        eprintln!("{notice}");
+    if !defer_selected_resume_mode {
+        if let Some(notice) = &permission_notice {
+            eprintln!("{notice}");
+        }
     }
 
     let make_sink = || -> Arc<dyn output::OutputSink> {
@@ -819,21 +821,8 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // path is honored. `--continue --resume <id>` is rejected upstream
     // (lib.rs:315 cross-flag rule), so the two never collide here.
     if parsed.continue_session {
-        let mut resumed_argv = parsed.clone();
-        if let Some(effort) = run::inherited_resume_effort(&parsed).await {
-            resumed_argv.effort = Some(effort);
-        }
         let sink = make_sink();
-        let adapter: Arc<dyn lingxi_core::host::OutputStream> =
-            Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
-        let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("lingxi-cli: {e}");
-                return exit_codes::RUNTIME_ERROR;
-            }
-        };
-        return run::run_continue(&resumed_argv, &runtime, sink.as_ref()).await;
+        return run::run_continue(&parsed, sink.as_ref()).await;
     }
 
     // --resume routes through run::run_resume, which itself splits (M7-12):
@@ -841,21 +830,8 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     //   (none) + TTY      → iocraft Resume screen
     //   (none) + --no-tui → M5-08 stdio picker (unchanged fallback)
     if parsed.resume.is_some() {
-        let mut resumed_argv = parsed.clone();
-        if let Some(effort) = run::inherited_resume_effort(&parsed).await {
-            resumed_argv.effort = Some(effort);
-        }
         let sink = make_sink();
-        let adapter: Arc<dyn lingxi_core::host::OutputStream> =
-            Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
-        let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("lingxi-cli: {e}");
-                return exit_codes::RUNTIME_ERROR;
-            }
-        };
-        return run::run_resume(&resumed_argv, &runtime, sink.as_ref()).await;
+        return run::run_resume(&parsed, sink.as_ref()).await;
     }
 
     // (M4 cc2.1.198) `--from-pr [value]` — the binary opens the SAME resume

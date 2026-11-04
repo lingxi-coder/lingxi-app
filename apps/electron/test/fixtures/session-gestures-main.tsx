@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { createRoot } from 'react-dom/client';
 import { BetaSidebar } from '../../src/renderer/components/BetaDesktop';
 import type { UseBridge } from '../../src/renderer/bridge/bridgeTypes.js';
@@ -9,7 +10,7 @@ import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 
 setLanguagePreference('en');
 
-const sessions = ['alpha', 'beta', 'gamma'].map((uuid, index) => ({ uuid, title: uuid, modified_rfc3339: `2026-09-${22 - index}T00:00:00Z`, message_count: 1 }));
+const sessions = ['alpha', 'beta', 'gamma'].map((uuid, index) => ({ uuid, title: uuid, modified_rfc3339: `2026-09-${22 - index}T00:00:00Z`, message_count: 1, mode: 'code' as const, path: `/fixture/${uuid}.jsonl` }));
 const events = { opened: [] as string[], preferences: [] as unknown[], touched: [] as string[], sessions };
 Object.assign(window, { sessionGesturesFixture: events });
 function Fixture() {
@@ -20,9 +21,11 @@ function Fixture() {
     sessionLoading: false,
     bootstrap: {
       settings: { projects: ['/fixture'], pinnedSessions: [{ projectPath: '/pinned', sessionId: 'pinned', title: 'pinned' }], activeProject: '/fixture', sidebar },
-      workspace: { path: '/fixture' }, projectCatalogs: { '/fixture': { sessions: catalogSessions }, '/pinned': { sessions: [{ uuid: 'pinned', title: 'pinned' }] } },
+      workspace: { path: '/fixture' },
+      conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: ['/fixture'], selectedProject: '/fixture' }),
+      projectCatalogs: { '/fixture': { sessions: catalogSessions }, '/pinned': { sessions: [{ uuid: 'pinned', title: 'pinned', mode: 'code' }] } },
     },
-    sessionRuntimeStatus: () => ({ connection: { status: 'connected' } }),
+    sessionRuntimeStatus: () => ({ connection: { status: 'connected' } }), listProjectSessions: async () => ({ sessions: [] }),
     openSession: async (_project: string, id: string) => { events.opened.push(id); },
     updateSidebarPreferences: async (next: typeof sidebar) => { events.preferences.push(next); setSidebar(next); },
     touchSession: async (_project: string, id: string) => {

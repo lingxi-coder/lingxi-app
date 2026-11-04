@@ -665,10 +665,12 @@ where
                 command,
                 body,
                 hook_messages,
+                skill,
             } => Some(ModelTurn::Skill(orchestrator::skill_prompt_inputs(
                 command,
                 body,
                 hook_messages,
+                skill,
             ))),
             // Native CLI keeps malformed slash input as the exact user prompt.
             // For an unknown command, the runner separately stages Native's

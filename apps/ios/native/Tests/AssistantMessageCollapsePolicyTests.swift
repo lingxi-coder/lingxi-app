@@ -4,6 +4,52 @@ import XCTest
 @testable import LingxiCode
 
 final class AssistantMessageCollapsePolicyTests: XCTestCase {
+    @MainActor
+    func testCollapsedLocalAppCodeRequirementFitsTheWholeLocalizedMessage() {
+        let raw = "local_app_development_requires_code: Local App development requires a Code session."
+        func trace(_ tool: String) -> ConversationToolTrace {
+            let display = ConversationToolResultDisplay(headline: "Failed", headlineKind: .failed,
+                headlineArgs: [], diff: nil, body: raw, bodyLines: 1, bodyTruncated: false, collapsed: true)
+            return ConversationToolTrace(id: tool, tool: tool, status: .failed,
+                                         inputSummary: nil, elapsedMs: nil, display: display)
+        }
+        let constrained = CGSize(width: 120, height: 1_000)
+        let localized = UIHostingController(rootView: ToolCallView(trace: trace("LocalApp"), compact: true))
+        let ordinary = UIHostingController(rootView: ToolCallView(trace: trace("Read"), compact: true))
+        let localizedSize = localized.sizeThatFits(in: constrained)
+        let ordinarySize = ordinary.sizeThatFits(in: constrained)
+        XCTAssertGreaterThan(localizedSize.height, ordinarySize.height,
+                             "The collapsed switch-to-Code instruction must wrap rather than be truncated")
+    }
+
+    func testFailedLocalAppRequiresCodeIsLocalizedFromHeadlineOrRestoredBody() {
+        let raw = "local_app_development_requires_code: Local App development requires a Code session. Switch to Code to continue."
+        for headline in [raw, "Failed"] {
+            let display = ConversationToolResultDisplay(headline: headline, headlineKind: .failed,
+                headlineArgs: [], diff: nil, body: raw, bodyLines: 1, bodyTruncated: false, collapsed: true)
+            var trace = ConversationToolTrace(id: "local", tool: "LocalApp", status: .failed,
+                                              inputSummary: nil, elapsedMs: nil, display: display)
+            let localized = String(localized: "local_app_development_requires_code")
+            XCTAssertEqual(ToolDisplayText.headline(display, trace: trace), localized)
+            XCTAssertEqual(ToolDisplayText.body(display, trace: trace), localized)
+            XCTAssertEqual(trace.display?.body, raw, "Rendering must not rewrite transcript diagnostics")
+            trace.tool = "OtherTool"
+            XCTAssertEqual(ToolDisplayText.headline(display, trace: trace), headline)
+            XCTAssertEqual(ToolDisplayText.body(display, trace: trace), raw)
+            trace.tool = "LocalApp"
+            trace.status = .completed
+            XCTAssertEqual(ToolDisplayText.headline(display, trace: trace), headline)
+            XCTAssertEqual(ToolDisplayText.body(display, trace: trace), raw)
+        }
+        let blockedPath = "path blocked: /tmp/not_local_app_development_requires_code/file"
+        let display = ConversationToolResultDisplay(headline: blockedPath, headlineKind: .failed,
+            headlineArgs: [], diff: nil, body: blockedPath, bodyLines: 1, bodyTruncated: false, collapsed: false)
+        let trace = ConversationToolTrace(id: "blocked", tool: "LocalApp", status: .failed,
+                                          inputSummary: nil, elapsedMs: nil, display: display)
+        XCTAssertEqual(ToolDisplayText.headline(display, trace: trace), blockedPath)
+        XCTAssertEqual(ToolDisplayText.body(display, trace: trace), blockedPath)
+    }
+
     func testLLMActivityStateDistinguishesHiddenRunningStoppingAndPaused() {
         XCTAssertEqual(
             ConversationLLMActivityState.resolve(

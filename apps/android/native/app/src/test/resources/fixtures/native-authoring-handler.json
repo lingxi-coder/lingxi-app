@@ -1,0 +1,622 @@
+{
+  "schema": 1,
+  "create": {
+    "request": {
+      "op": "createAuthoring",
+      "requestId": "b4125735-8357-46ed-a57e-83de0a618550",
+      "name": "Contract fixture"
+    },
+    "response": {
+      "ok": true,
+      "value": {
+        "requestId": "b4125735-8357-46ed-a57e-83de0a618550",
+        "sourceId": "fdafe011-6c13-47a8-aacf-5e8aa90b5a93",
+        "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+        "sourcePath": "/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/.tmpHY0Ur6/user/.lingxi/.apps/Contract-fixture-100c7d0f"
+      }
+    }
+  },
+  "sourceProof": {
+    "request": {
+      "op": "prepareAuthoringSource",
+      "sourceId": "fdafe011-6c13-47a8-aacf-5e8aa90b5a93",
+      "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f"
+    },
+    "response": {
+      "ok": true,
+      "value": {
+        "sourceId": "fdafe011-6c13-47a8-aacf-5e8aa90b5a93",
+        "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+        "sourcePath": "/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/.tmpHY0Ur6/user/.lingxi/.apps/Contract-fixture-100c7d0f"
+      }
+    }
+  },
+  "register": {
+    "request": {
+      "op": "registerAuthoring",
+      "requestId": "b4125735-8357-46ed-a57e-83de0a618550",
+      "sourceId": "fdafe011-6c13-47a8-aacf-5e8aa90b5a93",
+      "sessionMode": "code",
+      "setCurrent": true,
+      "authoring": {
+        "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+        "workspaceId": "1f1a6467-a119-4ad9-9613-5f4bc34669ad",
+        "projectRef": {
+          "kind": "mobileProject",
+          "projectId": "084edf35-3a17-44e7-a7dc-f58c1d7f3b1f"
+        },
+        "authoringSessionId": "08c40f1c-489c-4461-99c8-250aa9a8a3fe"
+      }
+    },
+    "response": {
+      "ok": true,
+      "value": {
+        "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+        "workspaceId": "1f1a6467-a119-4ad9-9613-5f4bc34669ad",
+        "projectRef": {
+          "kind": "mobileProject",
+          "projectId": "084edf35-3a17-44e7-a7dc-f58c1d7f3b1f"
+        },
+        "authoringSessionId": "08c40f1c-489c-4461-99c8-250aa9a8a3fe",
+        "sessionMode": "code",
+        "sourceId": "fdafe011-6c13-47a8-aacf-5e8aa90b5a93"
+      }
+    }
+  },
+  "get": {
+    "request": {
+      "op": "getAuthoringGrant",
+      "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+      "projectId": "084edf35-3a17-44e7-a7dc-f58c1d7f3b1f",
+      "authoringSessionId": "08c40f1c-489c-4461-99c8-250aa9a8a3fe",
+      "sessionMode": "code"
+    },
+    "response": {
+      "ok": true,
+      "value": {
+        "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+        "workspaceId": "1f1a6467-a119-4ad9-9613-5f4bc34669ad",
+        "projectRef": {
+          "kind": "mobileProject",
+          "projectId": "084edf35-3a17-44e7-a7dc-f58c1d7f3b1f"
+        },
+        "authoringSessionId": "08c40f1c-489c-4461-99c8-250aa9a8a3fe",
+        "sessionMode": "code",
+        "sourceId": "fdafe011-6c13-47a8-aacf-5e8aa90b5a93"
+      }
+    }
+  },
+  "prepare": {
+    "request": {
+      "op": "prepareAuthoring",
+      "appId": "a080b7b81b9534e649e24bc026d99a5a9",
+      "sessionBindings": {
+        "08c40f1c-489c-4461-99c8-250aa9a8a3fe": {
+          "workspaceId": "1f1a6467-a119-4ad9-9613-5f4bc34669ad",
+          "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+          "projectRef": {
+            "kind": "mobileProject",
+            "projectId": "084edf35-3a17-44e7-a7dc-f58c1d7f3b1f"
+          },
+          "mode": "code"
+        }
+      }
+    },
+    "response": {
+      "ok": true,
+      "value": {
+        "action": "resumeSession",
+        "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+        "authoring": {
+          "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+          "workspaceId": "1f1a6467-a119-4ad9-9613-5f4bc34669ad",
+          "projectRef": {
+            "kind": "mobileProject",
+            "projectId": "084edf35-3a17-44e7-a7dc-f58c1d7f3b1f"
+          },
+          "authoringSessionId": "08c40f1c-489c-4461-99c8-250aa9a8a3fe",
+          "appId": "a080b7b81b9534e649e24bc026d99a5a9"
+        },
+        "authoringSessionId": "08c40f1c-489c-4461-99c8-250aa9a8a3fe",
+        "sourceId": "fdafe011-6c13-47a8-aacf-5e8aa90b5a93",
+        "sourcePath": "/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/.tmpHY0Ur6/user/.lingxi/.apps/Contract-fixture-100c7d0f"
+      }
+    }
+  },
+  "sourceMissing": {
+    "request": {
+      "op": "prepareAuthoring",
+      "appId": "a080b7b81b9534e649e24bc026d99a5a9",
+      "sessionBindings": {
+        "08c40f1c-489c-4461-99c8-250aa9a8a3fe": {
+          "workspaceId": "1f1a6467-a119-4ad9-9613-5f4bc34669ad",
+          "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+          "projectRef": {
+            "kind": "mobileProject",
+            "projectId": "084edf35-3a17-44e7-a7dc-f58c1d7f3b1f"
+          },
+          "mode": "code"
+        }
+      }
+    },
+    "response": {
+      "ok": true,
+      "value": {
+        "action": "sourceMissing",
+        "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+        "authoring": {
+          "sourceDirectory": "/home/user/.lingxi/.apps/Contract-fixture-100c7d0f",
+          "workspaceId": "1f1a6467-a119-4ad9-9613-5f4bc34669ad",
+          "projectRef": {
+            "kind": "mobileProject",
+            "projectId": "084edf35-3a17-44e7-a7dc-f58c1d7f3b1f"
+          },
+          "authoringSessionId": "08c40f1c-489c-4461-99c8-250aa9a8a3fe",
+          "appId": "a080b7b81b9534e649e24bc026d99a5a9"
+        }
+      }
+    }
+  },
+  "installedRemix": {
+    "request": {
+      "op": "remixAuthoringSource",
+      "requestId": "62070533-838b-457e-8822-226d5b7d8e28",
+      "appId": "a96d1c682bac2480d925f5415bbec3357",
+      "revision": 1
+    },
+    "response": {
+      "ok": true,
+      "value": {
+        "requestId": "62070533-838b-457e-8822-226d5b7d8e28",
+        "sourceId": "4cf7e8cf-6078-4690-bb7b-4bb53bc95fb8",
+        "sourceDirectory": "/home/user/.lingxi/.apps/remix-239e16ec-20ad-4da4-a2e6-87a6a26c917b",
+        "sourcePath": "/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/.tmpHY0Ur6/user/.lingxi/.apps/remix-239e16ec-20ad-4da4-a2e6-87a6a26c917b",
+        "record": {
+          "appId": "afe6f6449f61a42ddae235fec28629edb",
+          "name": "Original",
+          "summary": "",
+          "currentRevision": 1,
+          "latestRevision": 1,
+          "authoringSourceIds": [
+            "4cf7e8cf-6078-4690-bb7b-4bb53bc95fb8"
+          ],
+          "originPort": 52388,
+          "dataSchemaVersion": 1,
+          "executionGrants": [],
+          "createdAtMs": 1793702483286,
+          "updatedAtMs": 1793702483319,
+          "removed": false
+        },
+        "release": {
+          "appId": "afe6f6449f61a42ddae235fec28629edb",
+          "revision": 1,
+          "digest": "630628709e87a9fc5816c1f8c459da435865f21b7821f92700165a86b8ee64f8",
+          "manifest": {
+            "schema": 2,
+            "name": "Original",
+            "summary": "",
+            "entry": {
+              "type": "static",
+              "path": "index.html"
+            },
+            "install": [],
+            "build": [],
+            "processes": [],
+            "capabilities": [],
+            "targets": [
+              {
+                "platform": "ios",
+                "environment": "web",
+                "architecture": null,
+                "runtimeVersion": null,
+                "runtimeAbi": null,
+                "channels": [],
+                "capabilities": []
+              }
+            ],
+            "remix": {
+              "allowed": true,
+              "license": "MIT"
+            }
+          },
+          "files": [
+            {
+              "path": "index.html",
+              "sha256": "41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d",
+              "bytes": 6,
+              "executable": false
+            },
+            {
+              "path": "lingxi-app.json",
+              "sha256": "02bb5afc1865d20da7a7e59a2d72c5898a8bd20721b121ce4c92ee2bb26cc003",
+              "bytes": 470,
+              "executable": false
+            }
+          ],
+          "createdAtMs": 1793702483303
+        }
+      }
+    }
+  },
+  "marketMissing": {
+    "request": {
+      "op": "importRemixSource",
+      "requestId": "0c247dbd-4e9c-4d17-bd3c-1fc724409885",
+      "archivePath": "/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/.tmpHY0Ur6/user/.lingxi/local-app-imports/market-0c247dbd-4e9c-4d17-bd3c-1fc724409885/source.zip",
+      "archiveSha256": "a1d8d7ede3a0594eaaf7464a867408c906eb4a6d63149b45ecf66476f2f4669e",
+      "archiveBytes": 668,
+      "manifest": {
+        "schema": 2,
+        "name": "Market fixture",
+        "dataSchema": null,
+        "entry": {
+          "type": "static",
+          "path": "index.html"
+        },
+        "targets": [
+          {
+            "platform": "ios",
+            "environment": "web"
+          }
+        ],
+        "remix": {
+          "allowed": true,
+          "license": "MIT"
+        }
+      },
+      "files": [
+        {
+          "path": "lingxi-app.json",
+          "sizeBytes": 192,
+          "sha256": "6d49901a7d9bc7e8e145ef1abf9c3455695c95511b6817efe4e23ed85b60d1a4",
+          "executable": false
+        },
+        {
+          "path": "index.html",
+          "sizeBytes": 42,
+          "sha256": "f46dc76f5df4cc26b3169e92cf058882051a296758a705176ba259c7a1c79570",
+          "executable": false
+        },
+        {
+          "path": ".gitignore",
+          "sizeBytes": 7,
+          "sha256": "181314065df2f2fdaf920b1a8b5311daa216a2d6489a06ada5b49cc514d89417",
+          "executable": false
+        },
+        {
+          "path": ".well-known/security.txt",
+          "sizeBytes": 31,
+          "sha256": "1b49129282fc3f4ecc302c73c5cad0762dd0596532e9e411e14678b693286d7f",
+          "executable": false
+        }
+      ],
+      "dependencies": [],
+      "marketOrigin": {
+        "appId": "market-app",
+        "releaseId": "v1",
+        "digest": "cd9ab47432c508a4ba56720ddfa45598d88da2c6954d170f83c692392896773d"
+      }
+    },
+    "response": {
+      "ok": false,
+      "error": {
+        "code": "archiveMissing",
+        "message": "the original Market archive is missing"
+      }
+    }
+  },
+  "marketImport": {
+    "request": {
+      "op": "importRemixSource",
+      "requestId": "0c247dbd-4e9c-4d17-bd3c-1fc724409885",
+      "archivePath": "/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/.tmpHY0Ur6/user/.lingxi/local-app-imports/market-0c247dbd-4e9c-4d17-bd3c-1fc724409885/source.zip",
+      "archiveSha256": "a1d8d7ede3a0594eaaf7464a867408c906eb4a6d63149b45ecf66476f2f4669e",
+      "archiveBytes": 668,
+      "manifest": {
+        "schema": 2,
+        "name": "Market fixture",
+        "dataSchema": null,
+        "entry": {
+          "type": "static",
+          "path": "index.html"
+        },
+        "targets": [
+          {
+            "platform": "ios",
+            "environment": "web"
+          }
+        ],
+        "remix": {
+          "allowed": true,
+          "license": "MIT"
+        }
+      },
+      "files": [
+        {
+          "path": "lingxi-app.json",
+          "sizeBytes": 192,
+          "sha256": "6d49901a7d9bc7e8e145ef1abf9c3455695c95511b6817efe4e23ed85b60d1a4",
+          "executable": false
+        },
+        {
+          "path": "index.html",
+          "sizeBytes": 42,
+          "sha256": "f46dc76f5df4cc26b3169e92cf058882051a296758a705176ba259c7a1c79570",
+          "executable": false
+        },
+        {
+          "path": ".gitignore",
+          "sizeBytes": 7,
+          "sha256": "181314065df2f2fdaf920b1a8b5311daa216a2d6489a06ada5b49cc514d89417",
+          "executable": false
+        },
+        {
+          "path": ".well-known/security.txt",
+          "sizeBytes": 31,
+          "sha256": "1b49129282fc3f4ecc302c73c5cad0762dd0596532e9e411e14678b693286d7f",
+          "executable": false
+        }
+      ],
+      "dependencies": [],
+      "marketOrigin": {
+        "appId": "market-app",
+        "releaseId": "v1",
+        "digest": "cd9ab47432c508a4ba56720ddfa45598d88da2c6954d170f83c692392896773d"
+      }
+    },
+    "response": {
+      "ok": true,
+      "value": {
+        "requestId": "0c247dbd-4e9c-4d17-bd3c-1fc724409885",
+        "sourceId": "4b0d304d-4c5d-4d38-8d02-620b02b8978e",
+        "sourceDirectory": "/home/user/.lingxi/.apps/remix-d7e3f1b3-93ae-4362-afc8-52c95f94914f",
+        "sourcePath": "/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/.tmpHY0Ur6/user/.lingxi/.apps/remix-d7e3f1b3-93ae-4362-afc8-52c95f94914f",
+        "record": {
+          "appId": "ab29a655d1c7143a1aaf1ceed34a3dc30",
+          "name": "Market fixture",
+          "summary": "",
+          "currentRevision": 1,
+          "latestRevision": 1,
+          "authoringSourceIds": [
+            "4b0d304d-4c5d-4d38-8d02-620b02b8978e"
+          ],
+          "marketOrigin": {
+            "appId": "market-app",
+            "releaseId": "v1",
+            "digest": "cd9ab47432c508a4ba56720ddfa45598d88da2c6954d170f83c692392896773d",
+            "remixedFrom": "market-app"
+          },
+          "originPort": 36429,
+          "dataSchemaVersion": 1,
+          "executionGrants": [],
+          "createdAtMs": 1793702483421,
+          "updatedAtMs": 1793702483485,
+          "removed": false
+        },
+        "release": {
+          "appId": "ab29a655d1c7143a1aaf1ceed34a3dc30",
+          "revision": 1,
+          "digest": "fbb58113ba733b84304c547869096a87fe4190e83662731f2a1af0c608fbc3a7",
+          "manifest": {
+            "schema": 2,
+            "name": "Market fixture",
+            "summary": "",
+            "entry": {
+              "type": "static",
+              "path": "index.html"
+            },
+            "install": [],
+            "build": [],
+            "processes": [],
+            "capabilities": [],
+            "targets": [
+              {
+                "platform": "ios",
+                "environment": "web",
+                "architecture": null,
+                "runtimeVersion": null,
+                "runtimeAbi": null,
+                "channels": [],
+                "capabilities": []
+              }
+            ],
+            "remix": {
+              "allowed": true,
+              "license": "MIT"
+            }
+          },
+          "files": [
+            {
+              "path": ".gitignore",
+              "sha256": "181314065df2f2fdaf920b1a8b5311daa216a2d6489a06ada5b49cc514d89417",
+              "bytes": 7,
+              "executable": false
+            },
+            {
+              "path": ".well-known/security.txt",
+              "sha256": "1b49129282fc3f4ecc302c73c5cad0762dd0596532e9e411e14678b693286d7f",
+              "bytes": 31,
+              "executable": false
+            },
+            {
+              "path": "index.html",
+              "sha256": "f46dc76f5df4cc26b3169e92cf058882051a296758a705176ba259c7a1c79570",
+              "bytes": 42,
+              "executable": false
+            },
+            {
+              "path": "lingxi-app.json",
+              "sha256": "c2a63ba66015fbbc59e9e3af8af1de400ca8007ae219644b1d7a5caab027a46f",
+              "bytes": 476,
+              "executable": false
+            }
+          ],
+          "createdAtMs": 1793702483470,
+          "marketOrigin": {
+            "appId": "market-app",
+            "releaseId": "v1",
+            "digest": "cd9ab47432c508a4ba56720ddfa45598d88da2c6954d170f83c692392896773d",
+            "remixedFrom": "market-app"
+          }
+        }
+      }
+    }
+  },
+  "marketReplay": {
+    "request": {
+      "op": "importRemixSource",
+      "requestId": "0c247dbd-4e9c-4d17-bd3c-1fc724409885",
+      "archivePath": "/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/.tmpHY0Ur6/user/.lingxi/local-app-imports/market-0c247dbd-4e9c-4d17-bd3c-1fc724409885/source.zip",
+      "archiveSha256": "a1d8d7ede3a0594eaaf7464a867408c906eb4a6d63149b45ecf66476f2f4669e",
+      "archiveBytes": 668,
+      "manifest": {
+        "schema": 2,
+        "name": "Market fixture",
+        "dataSchema": null,
+        "entry": {
+          "type": "static",
+          "path": "index.html"
+        },
+        "targets": [
+          {
+            "platform": "ios",
+            "environment": "web"
+          }
+        ],
+        "remix": {
+          "allowed": true,
+          "license": "MIT"
+        }
+      },
+      "files": [
+        {
+          "path": "lingxi-app.json",
+          "sizeBytes": 192,
+          "sha256": "6d49901a7d9bc7e8e145ef1abf9c3455695c95511b6817efe4e23ed85b60d1a4",
+          "executable": false
+        },
+        {
+          "path": "index.html",
+          "sizeBytes": 42,
+          "sha256": "f46dc76f5df4cc26b3169e92cf058882051a296758a705176ba259c7a1c79570",
+          "executable": false
+        },
+        {
+          "path": ".gitignore",
+          "sizeBytes": 7,
+          "sha256": "181314065df2f2fdaf920b1a8b5311daa216a2d6489a06ada5b49cc514d89417",
+          "executable": false
+        },
+        {
+          "path": ".well-known/security.txt",
+          "sizeBytes": 31,
+          "sha256": "1b49129282fc3f4ecc302c73c5cad0762dd0596532e9e411e14678b693286d7f",
+          "executable": false
+        }
+      ],
+      "dependencies": [],
+      "marketOrigin": {
+        "appId": "market-app",
+        "releaseId": "v1",
+        "digest": "cd9ab47432c508a4ba56720ddfa45598d88da2c6954d170f83c692392896773d"
+      }
+    },
+    "response": {
+      "ok": true,
+      "value": {
+        "requestId": "0c247dbd-4e9c-4d17-bd3c-1fc724409885",
+        "sourceId": "4b0d304d-4c5d-4d38-8d02-620b02b8978e",
+        "sourceDirectory": "/home/user/.lingxi/.apps/remix-d7e3f1b3-93ae-4362-afc8-52c95f94914f",
+        "sourcePath": "/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/.tmpHY0Ur6/user/.lingxi/.apps/remix-d7e3f1b3-93ae-4362-afc8-52c95f94914f",
+        "record": {
+          "appId": "ab29a655d1c7143a1aaf1ceed34a3dc30",
+          "name": "Market fixture",
+          "summary": "",
+          "currentRevision": 1,
+          "latestRevision": 1,
+          "authoringSourceIds": [
+            "4b0d304d-4c5d-4d38-8d02-620b02b8978e"
+          ],
+          "marketOrigin": {
+            "appId": "market-app",
+            "releaseId": "v1",
+            "digest": "cd9ab47432c508a4ba56720ddfa45598d88da2c6954d170f83c692392896773d",
+            "remixedFrom": "market-app"
+          },
+          "originPort": 36429,
+          "dataSchemaVersion": 1,
+          "executionGrants": [],
+          "createdAtMs": 1793702483421,
+          "updatedAtMs": 1793702483485,
+          "removed": false
+        },
+        "release": {
+          "appId": "ab29a655d1c7143a1aaf1ceed34a3dc30",
+          "revision": 1,
+          "digest": "fbb58113ba733b84304c547869096a87fe4190e83662731f2a1af0c608fbc3a7",
+          "manifest": {
+            "schema": 2,
+            "name": "Market fixture",
+            "summary": "",
+            "entry": {
+              "type": "static",
+              "path": "index.html"
+            },
+            "install": [],
+            "build": [],
+            "processes": [],
+            "capabilities": [],
+            "targets": [
+              {
+                "platform": "ios",
+                "environment": "web",
+                "architecture": null,
+                "runtimeVersion": null,
+                "runtimeAbi": null,
+                "channels": [],
+                "capabilities": []
+              }
+            ],
+            "remix": {
+              "allowed": true,
+              "license": "MIT"
+            }
+          },
+          "files": [
+            {
+              "path": ".gitignore",
+              "sha256": "181314065df2f2fdaf920b1a8b5311daa216a2d6489a06ada5b49cc514d89417",
+              "bytes": 7,
+              "executable": false
+            },
+            {
+              "path": ".well-known/security.txt",
+              "sha256": "1b49129282fc3f4ecc302c73c5cad0762dd0596532e9e411e14678b693286d7f",
+              "bytes": 31,
+              "executable": false
+            },
+            {
+              "path": "index.html",
+              "sha256": "f46dc76f5df4cc26b3169e92cf058882051a296758a705176ba259c7a1c79570",
+              "bytes": 42,
+              "executable": false
+            },
+            {
+              "path": "lingxi-app.json",
+              "sha256": "c2a63ba66015fbbc59e9e3af8af1de400ca8007ae219644b1d7a5caab027a46f",
+              "bytes": 476,
+              "executable": false
+            }
+          ],
+          "createdAtMs": 1793702483470,
+          "marketOrigin": {
+            "appId": "market-app",
+            "releaseId": "v1",
+            "digest": "cd9ab47432c508a4ba56720ddfa45598d88da2c6954d170f83c692392896773d",
+            "remixedFrom": "market-app"
+          }
+        }
+      }
+    }
+  }
+}

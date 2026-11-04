@@ -124,6 +124,7 @@ object UiTags {
     const val SESSION_TITLE = "tag.sessionTitle"
     const val SESSION_PANEL = "tag.sessionPanel"
     const val SESSION_PANEL_MODE = "tag.sessionPanelMode"
+    fun sessionPanelModeOption(modeKey: String): String = "tag.sessionPanelMode.$modeKey"
     const val SESSION_PANEL_PIN = "tag.sessionPanelPin"
     const val SESSION_PANEL_SCHEDULE = "tag.sessionPanelSchedule"
     const val SESSION_PANEL_ARCHIVE = "tag.sessionPanelArchive"

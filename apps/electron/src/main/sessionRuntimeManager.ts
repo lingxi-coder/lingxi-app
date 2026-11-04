@@ -53,6 +53,15 @@ export interface LiveDraftSession {
   engineCwd: string;
 }
 
+interface DraftSession extends SessionRef {
+  mode: RuntimeSessionMode;
+  projectId: string | null;
+}
+
+function draftScope(mode: RuntimeSessionMode, projectId: string | null): string {
+  return JSON.stringify([mode, projectId]);
+}
+
 /** Accept only a live, active, host-created draft with explicit runtime mode and cwd. */
 export function resolveActiveDraftSession(
   requested: SessionRef,
@@ -66,7 +75,7 @@ export function resolveActiveDraftSession(
     || !draftRef || draftRef.projectPath !== requested.projectPath || draftRef.sessionId !== requested.sessionId
     || !runtime || activeRuntimeSessionId !== requested.sessionId
     || runtime.projectPath !== requested.projectPath || runtime.sessionId !== requested.sessionId
-    || runtime.sessionMode !== 'code' || runtime.connectionState.status !== 'connected'
+    || (runtime.sessionMode !== 'code' && runtime.sessionMode !== 'chat') || runtime.connectionState.status !== 'connected'
     || typeof runtime.engineWorkspacePath !== 'string' || !runtime.engineWorkspacePath) return undefined;
   return { projectPath: runtime.projectPath, sessionId: runtime.sessionId, mode: runtime.sessionMode,
     engineCwd: runtime.engineWorkspacePath };
@@ -99,10 +108,13 @@ export interface RemoteLease {
  */
 export class SessionRuntimeManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
-  private readonly openingSessions = new Map<string, { projectPath: string; transcriptPath?: string; promise: Promise<SessionRuntime>; activate: boolean }>();
+  private readonly openingSessions = new Map<string, {
+    projectPath: string; transcriptPath?: string; mode?: RuntimeSessionMode;
+    promise: Promise<SessionRuntime>; activationModes: Set<RuntimeSessionMode | undefined>;
+  }>();
   private readonly restartingSessions = new Map<string, Set<Promise<void>>>();
   private readonly backgroundSessionLeases = new Map<string, number>();
-  private readonly draftSessions = new Map<string, SessionRef>();
+  private readonly draftSessions = new Map<string, DraftSession>();
   private readonly openingDraftSessions = new Map<string, Promise<SessionRef>>();
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
@@ -114,8 +126,11 @@ export class SessionRuntimeManager {
   private readonly sessionSettingsEnvironment = new Map<string, Record<string, string>>();
   private readonly sessionProjectRoots = new Map<string, string>();
   private readonly sessionTranscriptPaths = new Map<string, string>();
+  private readonly sourceCaptureWanted = new Map<string, { ref: SessionRef; scheduled: boolean }>();
+  private readonly sourceCapturePending = new Map<string, Promise<void>>();
   private readonly sessionConfigOwners = new Map<string, { configHome: string; globalConfigPath?: string }>();
   private readonly pendingEvictions = new Set<Promise<void>>();
+  private readonly evictingSessions = new Map<string, Promise<void>>();
   private readonly maxCachedRuntimes: number;
   private readonly runtimeCreatedListeners = new Set<(runtime: SessionRuntime) => void>();
   /** Sessions whose runtime was opened for a remote viewer and is still leased by one. */
@@ -169,6 +184,12 @@ export class SessionRuntimeManager {
     return [...this.runtimes.values()].map((runtime) => runtime.summary);
   }
 
+  get draftReferences(): SessionRef[] {
+    return [...this.draftSessions.values()].map(({ projectPath, sessionId, mode, projectId }) => ({ projectPath, sessionId, mode, projectId }));
+  }
+
+  hasOwnedDraft(ref: SessionRef): boolean { return this.findDraft(ref) !== undefined; }
+
   get replaySnapshots(): readonly SequencedRuntimeEventEnvelope<ClientEvent>[] {
     return Object.freeze([...this.runtimes.values()].flatMap((runtime) => runtime.replaySnapshot()));
   }
@@ -180,7 +201,35 @@ export class SessionRuntimeManager {
   }
 
   getActiveDraftSession(ref: SessionRef, activeRef: SessionRef | undefined): LiveDraftSession | undefined {
-    return resolveActiveDraftSession(ref, activeRef, this.draftSessions.get(ref.projectPath), this.runtimes.get(ref.sessionId), this.activeSessionId);
+    return resolveActiveDraftSession(ref, activeRef, this.findDraft(ref), this.runtimes.get(ref.sessionId), this.activeSessionId);
+  }
+
+  /** Reopen the exact UUID captured by a previously admitted durable creation. */
+  async restoreDurableDraft(ref: SessionRef, title: string): Promise<SessionRuntime> {
+    assertSessionRef(ref);
+    if (ref.mode !== 'code' || !ref.projectId || !title.trim()) throw new Error('Invalid Local App draft owner');
+    const existing = this.runtimes.get(ref.sessionId);
+    if (existing) throw new Error('The Local App draft has an unverified runtime owner');
+    const key = `${draftScope('code', ref.projectId)}:${ref.sessionId}`;
+    const draft = { ...ref, mode: 'code' as const, projectId: ref.projectId };
+    this.draftSessions.set(key, draft);
+    try { return await this.ensure(draft, true, undefined, undefined, 'code', title); }
+    catch (error) { this.draftSessions.delete(key); throw error; }
+  }
+
+  private draftKey(ref: SessionRef): string | undefined {
+    return [...this.draftSessions].find(([, draft]) => draft.projectPath === ref.projectPath && draft.sessionId === ref.sessionId)?.[0];
+  }
+
+  private findDraft(ref: SessionRef): DraftSession | undefined {
+    const key = this.draftKey(ref);
+    return key === undefined ? undefined : this.draftSessions.get(key);
+  }
+
+  async reopenOwnedDraft(ref: SessionRef, shouldActivate?: () => boolean): Promise<SessionRef> {
+    const draft = this.findDraft(ref);
+    if (!draft) throw new Error('The draft conversation is no longer available.');
+    return this.reopenDraftSession(draft, undefined, shouldActivate);
   }
 
   /**
@@ -211,6 +260,23 @@ export class SessionRuntimeManager {
     this.sessionPromptDirectories.set(sessionId, [...directories]);
   }
 
+  /** Preserve the unsent draft across a same-UUID directory remount. */
+  prepareDraftRelocation(ref: SessionRef, projectPath: string): () => void {
+    assertSessionRef(ref);
+    const draft = this.findDraft(ref);
+    if (!draft || draft.sessionId !== ref.sessionId || projectPath === ref.projectPath) return () => {};
+    const key = this.draftKey(ref)!;
+    const targetDraft = this.draftSessions.get(draftScope(draft.mode, draft.projectId));
+    if (targetDraft && targetDraft.sessionId !== ref.sessionId) {
+      throw new Error('The destination project already has an unsent draft.');
+    }
+    // The host invokes this immediately after its settings transaction, with
+    // no asynchronous boundary, before releasing the old workspace lease.
+    return () => {
+      this.draftSessions.set(key, { ...draft, projectPath });
+    };
+  }
+
   private touch(sessionId: string): void {
     if (this.runtimes.has(sessionId)) this.lastUsed.set(sessionId, ++this.accessSequence);
   }
@@ -218,6 +284,16 @@ export class SessionRuntimeManager {
   private activate(runtime: SessionRuntime): void {
     this.activeSessionId = runtime.sessionId;
     this.touch(runtime.sessionId);
+    this.trimCache();
+  }
+
+  /** Select an already owned runtime without stopping the previously visible one. */
+  activateSession(ref: SessionRef): void {
+    this.activate(this.require(ref));
+  }
+
+  clearActiveSelection(): void {
+    this.activeSessionId = null;
     this.trimCache();
   }
 
@@ -230,6 +306,8 @@ export class SessionRuntimeManager {
       || status === 'restarting'
       || status === 'connecting'
       || this.openingSessions.has(runtime.sessionId)
+      || [...this.draftSessions].some(([key, draft]) => draft.sessionId === runtime.sessionId
+        && this.openingDraftSessions.has(key))
       || this.restartingSessions.has(runtime.sessionId)
       || this.backgroundSessionLeases.has(runtime.sessionId);
   }
@@ -241,13 +319,18 @@ export class SessionRuntimeManager {
         .sort((left, right) => (this.lastUsed.get(left.sessionId) ?? 0) - (this.lastUsed.get(right.sessionId) ?? 0))[0];
       if (!victim) return;
       this.runtimes.delete(victim.sessionId);
+      this.sourceCaptureWanted.delete(victim.sessionId);
       this.visualizations.forgetSession(victim.sessionId);
       this.lastUsed.delete(victim.sessionId);
       this.sessionModelHints.delete(victim.sessionId);
       const eviction = victim.dispose()
         .catch((error) => this.opts.diagnostics?.add('warn', 'host', `session cache eviction failed: ${sanitizeDiagnostic(error)}`))
-        .finally(() => this.pendingEvictions.delete(eviction));
+        .finally(() => {
+          this.pendingEvictions.delete(eviction);
+          if (this.evictingSessions.get(victim.sessionId) === eviction) this.evictingSessions.delete(victim.sessionId);
+        });
       this.pendingEvictions.add(eviction);
+      this.evictingSessions.set(victim.sessionId, eviction);
     }
   }
 
@@ -293,13 +376,19 @@ export class SessionRuntimeManager {
   }
 
   /** Create, validate, and optionally start one session-owned runtime. */
-  async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string, sessionMode?: RuntimeSessionMode): Promise<SessionRuntime> {
+  async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string, sessionMode?: RuntimeSessionMode, durableDraftTitle?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
+    const eviction = this.evictingSessions.get(ref.sessionId);
+    if (eviction) {
+      await eviction;
+      return this.ensure(ref, start, resumeModel, remountControls, sessionMode, durableDraftTitle);
+    }
     const existing = this.runtimes.get(ref.sessionId);
     if (existing) {
+      if (durableDraftTitle) throw new Error('The new durable draft already has a runtime owner.');
       if (existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
-      if (sessionMode !== undefined && existing.sessionMode !== sessionMode) throw new Error('session runtime mode does not match the requested session');
+      if (ref.mode && existing.sessionMode && ref.mode !== existing.sessionMode) throw new Error('session mode does not match its owner');
       if (start) await existing.start();
       this.touch(existing.sessionId);
       return existing;
@@ -307,7 +396,9 @@ export class SessionRuntimeManager {
 
     if (resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     const runtimeOptions = this.runtimeOptions(ref);
-    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls }, sessionMode);
+    const draft = this.findDraft(ref);
+    const draftMode = draft?.sessionId === ref.sessionId ? draft.mode : sessionMode;
+    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls }, draftMode, durableDraftTitle);
     this.runtimes.set(ref.sessionId, runtime);
     this.touch(ref.sessionId);
     for (const listener of [...this.runtimeCreatedListeners]) this.announceRuntime(listener, runtime);
@@ -323,6 +414,7 @@ export class SessionRuntimeManager {
       return runtime;
     } catch (error) {
       this.runtimes.delete(ref.sessionId);
+      this.sourceCaptureWanted.delete(ref.sessionId);
       this.visualizations.forgetSession(ref.sessionId);
       this.lastUsed.delete(ref.sessionId);
       this.sessionModelHints.delete(ref.sessionId);
@@ -331,18 +423,28 @@ export class SessionRuntimeManager {
     }
   }
 
-  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true, transcriptPath?: string, remountControls?: string): Promise<SessionRuntime> {
+  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true, transcriptPath?: string, remountControls?: string, durableDraftTitle?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
+    if (durableDraftTitle && existing) throw new Error('The new durable draft already has a runtime owner.');
     if (existing && existing.projectPath !== ref.projectPath) {
       throw new Error('session id is owned by a different project');
     }
+    if (existing && ref.mode && existing.sessionMode && existing.sessionMode !== ref.mode) {
+      throw new Error('session mode does not match its owner');
+    }
     const pending = this.openingSessions.get(ref.sessionId);
     if (pending) {
+      if (durableDraftTitle) throw new Error('The new durable draft is already being opened.');
       if (pending.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
       if (transcriptPath && pending.transcriptPath !== transcriptPath) throw new Error('another transcript selection is being opened');
-      pending.activate ||= activate;
+      if (ref.mode && pending.mode && ref.mode !== pending.mode) throw new Error('session mode does not match its owner');
+      if (activate) pending.activationModes.add(ref.mode);
+      if (ref.mode && !pending.mode) return pending.promise.then(runtime => {
+        if (runtime.sessionMode !== ref.mode) throw new Error('session mode does not match its owner');
+        return runtime;
+      });
       return pending.promise;
     }
     const restarting = this.restartingSessions.get(ref.sessionId);
@@ -354,7 +456,7 @@ export class SessionRuntimeManager {
       const release = this.retainBackgroundSession(ref);
       return Promise.all([...restarting].map(operation => operation.catch(() => undefined))).then(() => {
         if (this.runtimes.get(ref.sessionId) !== existing) throw new Error('session runtime was replaced while opening');
-        return this.openSession(ref, empty, resumeModel, activate, transcriptPath, remountControls);
+        return this.openSession(ref, empty, resumeModel, activate, transcriptPath, remountControls, durableDraftTitle);
       }).finally(release);
     }
     if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
@@ -367,20 +469,22 @@ export class SessionRuntimeManager {
       return Promise.resolve(existing);
     }
 
-    const promise = this.openSessionInternal(ref, existing, empty, transcriptPath, remountControls).then((runtime) => {
+    const promise = this.openSessionInternal(ref, existing, empty, transcriptPath, remountControls, durableDraftTitle).then((runtime) => {
       runtime.completeWorkspaceRemount();
       if (transcriptPath) this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
-      if (this.openingSessions.get(ref.sessionId)?.activate) this.activate(runtime);
+      const requested = this.openingSessions.get(ref.sessionId)?.activationModes;
+      if (requested?.has(undefined) || (runtime.sessionMode && requested?.has(runtime.sessionMode))) this.activate(runtime);
       return runtime;
     });
     const trackedPromise = promise.finally(() => {
       if (this.openingSessions.get(ref.sessionId)?.promise === trackedPromise) this.openingSessions.delete(ref.sessionId);
     });
-    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, transcriptPath, promise: trackedPromise, activate });
+    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, transcriptPath, mode: ref.mode,
+      promise: trackedPromise, activationModes: new Set(activate ? [ref.mode] : []) });
     return trackedPromise;
   }
 
-  private async openSessionInternal(ref: SessionRef, existing: SessionRuntime | undefined, empty: boolean, transcriptPath?: string, remountControls?: string): Promise<SessionRuntime> {
+  private async openSessionInternal(ref: SessionRef, existing: SessionRuntime | undefined, empty: boolean, transcriptPath?: string, remountControls?: string, durableDraftTitle?: string): Promise<SessionRuntime> {
     let runtime: SessionRuntime | undefined;
     const previousTranscriptPath = this.sessionTranscriptPaths.get(ref.sessionId);
     try {
@@ -389,12 +493,58 @@ export class SessionRuntimeManager {
         existing?.rememberTranscriptSelection(transcriptPath);
       }
       if (existing) {
+        let reconnectOnly = false;
+        if (!empty && !transcriptPath && !this.sessionTranscriptPaths.get(ref.sessionId)) {
+          let saved: { path: string; mode: RuntimeSessionMode } | undefined;
+          try { saved = await this.opts.resolveSavedTranscript?.(ref); }
+          catch (error) {
+            // A metadata failure must not strand a still-living writer and its
+            // admitted work. Reconnection authenticates that exact process.
+            this.opts.diagnostics?.add('warn', 'bridge', `session source unavailable during reconnect ${ref.sessionId}: ${sanitizeDiagnostic(error)}`);
+          }
+          if (saved) {
+            if ((ref.mode && saved.mode !== ref.mode) || (existing.sessionMode && saved.mode !== existing.sessionMode)) {
+              throw new Error('session mode does not match its saved source');
+            }
+            transcriptPath = saved.path;
+            this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
+            existing.rememberTranscriptSelection(transcriptPath);
+          } else {
+            reconnectOnly = true;
+          }
+        }
         // A disconnected transport does not authorize replacing its living
         // session process, and its old foreground latch cannot gate recovery.
-        await existing.start();
+        await existing.start(reconnectOnly ? { reconnectOnly: true } : undefined);
+        if (reconnectOnly && (!existing.recoveredLiveConnection || existing.needsSessionResume)) {
+          throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
+        }
         runtime = existing;
       } else {
-        runtime = await this.ensure(ref, true, undefined, remountControls);
+        const expectedMode = ref.mode ?? (!empty ? await this.opts.resolveSessionMode?.(ref) : undefined);
+        if (!empty && !expectedMode) throw new Error('The session mode is unavailable.');
+        if (empty && !expectedMode) throw new Error('The session creation mode is unavailable.');
+        if (!empty && !transcriptPath && !this.sessionTranscriptPaths.get(ref.sessionId)) {
+          const saved = await this.opts.resolveSavedTranscript?.(ref);
+          if (saved) {
+            if (saved.mode !== expectedMode) throw new Error('session mode does not match its saved source');
+            transcriptPath = saved.path;
+            this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
+          }
+        }
+        const selectedPath = transcriptPath ?? this.sessionTranscriptPaths.get(ref.sessionId);
+        if (!empty && !selectedPath) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
+        if (durableDraftTitle && (!empty || selectedPath)) throw new Error('A durable draft anchor requires a new chat.');
+        runtime = await this.ensure({ ...ref, ...(expectedMode ? { mode: expectedMode } : {}) }, true, undefined, remountControls,
+          empty && !selectedPath ? expectedMode : undefined, durableDraftTitle);
+        if (durableDraftTitle && this.opts.captureSessionSource) {
+          const path = await this.opts.captureSessionSource(ref, runtime, true);
+          if (this.runtimes.get(ref.sessionId) !== runtime) throw new Error('The session runtime changed while its source was being recorded.');
+          if (path) {
+            this.sessionTranscriptPaths.set(ref.sessionId, path);
+            runtime.rememberTranscriptSelection(path);
+          }
+        }
       }
       if (runtime.needsSessionResume || (!empty && !runtime.recoveredLiveConnection)) await runtime.resumeOwnedSession(transcriptPath);
       return runtime;
@@ -405,10 +555,13 @@ export class SessionRuntimeManager {
         existing?.rememberTranscriptSelection(previousTranscriptPath);
       }
       if (!existing && runtime) {
-        this.runtimes.delete(ref.sessionId);
-        this.visualizations.forgetSession(ref.sessionId);
-        this.lastUsed.delete(ref.sessionId);
-        this.sessionModelHints.delete(ref.sessionId);
+        if (this.runtimes.get(ref.sessionId) === runtime) {
+          this.runtimes.delete(ref.sessionId);
+          this.sourceCaptureWanted.delete(ref.sessionId);
+          this.visualizations.forgetSession(ref.sessionId);
+          this.lastUsed.delete(ref.sessionId);
+          this.sessionModelHints.delete(ref.sessionId);
+        }
         await runtime.dispose().catch(() => undefined);
       }
       throw error;
@@ -427,6 +580,13 @@ export class SessionRuntimeManager {
       else this.backgroundSessionLeases.delete(ref.sessionId);
       this.trimCache();
     };
+  }
+
+  async requireSavedSessionSource(ref: SessionRef): Promise<{ path: string; mode: RuntimeSessionMode }> {
+    const saved = await this.opts.resolveSavedTranscript?.(ref);
+    if (!saved) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
+    if (ref.mode && ref.mode !== saved.mode) throw new Error('session mode does not match its saved source');
+    return saved;
   }
 
   /**
@@ -469,11 +629,12 @@ export class SessionRuntimeManager {
     resumeModel: string | undefined,
     operation: (runtime: SessionRuntime) => Promise<T>,
     transcriptPath?: string,
+    durableDraftTitle?: string,
   ): Promise<T> {
     assertSessionRef(ref);
     this.backgroundSessionLeases.set(ref.sessionId, (this.backgroundSessionLeases.get(ref.sessionId) ?? 0) + 1);
     try {
-      return await operation(await this.openSession(ref, empty, resumeModel, false, transcriptPath));
+      return await operation(await this.openSession(ref, empty, resumeModel, false, transcriptPath, undefined, durableDraftTitle));
     } finally {
       const count = (this.backgroundSessionLeases.get(ref.sessionId) ?? 1) - 1;
       if (count) this.backgroundSessionLeases.set(ref.sessionId, count);
@@ -482,29 +643,36 @@ export class SessionRuntimeManager {
     }
   }
 
-  async newSession(projectPath: string, model?: string): Promise<SessionRef> {
+  async newSession(projectPath: string, model: string | undefined, ownership: { mode: RuntimeSessionMode; projectId: string | null; activate?: () => boolean; forceNew?: boolean; durableDraftTitle?: string; onAllocated?: (ref: SessionRef) => Promise<void> }): Promise<SessionRef> {
     if (typeof projectPath !== 'string' || projectPath.length === 0) throw new Error('invalid project path');
     this.assertProjectNotClosing(projectPath);
-    const pendingDraft = this.openingDraftSessions.get(projectPath);
+    if (!ownership || (ownership.mode !== 'chat' && ownership.mode !== 'code')) throw new Error('The session creation mode is unavailable.');
+    const { mode, projectId } = ownership;
+    if (projectId !== null && (typeof projectId !== 'string' || !projectId)) throw new Error('The session project owner is unavailable.');
+    const key = ownership.forceNew ? `${draftScope(mode, projectId)}:${randomUUID()}` : draftScope(mode, projectId);
+    const pendingDraft = this.openingDraftSessions.get(key);
     if (pendingDraft) return pendingDraft;
-    const draft = this.draftSessions.get(projectPath);
-    if (draft) {
-      const runtime = await this.ensure(draft, true, model, undefined, 'code');
-      this.activate(runtime);
-      return { ...draft };
-    }
-    const promise = this.allocateDraftSession(projectPath, model);
+    const draft = this.draftSessions.get(key);
+    const promise = draft ? this.reopenDraftSession(draft, model, ownership.activate)
+      : this.allocateDraftSession(projectPath, projectId, mode, key, model, ownership.activate, ownership.durableDraftTitle, ownership.onAllocated);
     const trackedPromise = promise.finally(() => {
-      if (this.openingDraftSessions.get(projectPath) === trackedPromise) this.openingDraftSessions.delete(projectPath);
+      if (this.openingDraftSessions.get(key) === trackedPromise) this.openingDraftSessions.delete(key);
+      this.scheduleCacheTrim();
     });
-    this.openingDraftSessions.set(projectPath, trackedPromise);
+    this.openingDraftSessions.set(key, trackedPromise);
     return trackedPromise;
   }
 
-  private async allocateDraftSession(projectPath: string, model?: string): Promise<SessionRef> {
+  private async reopenDraftSession(draft: DraftSession, model?: string, shouldActivate?: () => boolean): Promise<SessionRef> {
+    const runtime = await this.ensure(draft, true, model);
+    if (!shouldActivate || shouldActivate()) this.activate(runtime);
+    return { projectPath: draft.projectPath, sessionId: draft.sessionId, projectId: draft.projectId, mode: draft.mode };
+  }
+
+  private async allocateDraftSession(projectPath: string, projectId: string | null, mode: RuntimeSessionMode, key: string, model?: string, shouldActivate?: () => boolean, durableDraftTitle?: string, onAllocated?: (ref: SessionRef) => Promise<void>): Promise<SessionRef> {
     let ref: SessionRef | undefined;
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const candidate = { projectPath, sessionId: randomUUID() } satisfies SessionRef;
+      const candidate = { projectPath, projectId, mode, sessionId: randomUUID() } satisfies SessionRef;
       // UUIDv4 has enough entropy that checking every persisted transcript is
       // strictly more expensive than the collision it is trying to prevent.
       // Only live in-process ownership matters here; the bridge itself remains
@@ -517,12 +685,22 @@ export class SessionRuntimeManager {
       }
     }
     if (!ref) throw new Error('could not allocate a new session id');
-    this.draftSessions.set(projectPath, ref);
+    this.draftSessions.set(key, { ...ref, projectId, mode });
     try {
-      const runtime = await this.ensure(ref, true, model, undefined, 'code');
-      this.activate(runtime);
+      await onAllocated?.(ref);
+      const runtime = await this.ensure(ref, true, model, undefined, mode, durableDraftTitle);
+      if (!shouldActivate || shouldActivate()) this.activate(runtime);
     } catch (error) {
       this.clearDraftSession(ref);
+      const failedRuntime = this.runtimes.get(ref.sessionId);
+      if (failedRuntime) {
+        this.runtimes.delete(ref.sessionId);
+        this.sourceCaptureWanted.delete(ref.sessionId);
+        this.visualizations.forgetSession(ref.sessionId);
+        this.lastUsed.delete(ref.sessionId);
+        this.sessionModelHints.delete(ref.sessionId);
+        await failedRuntime.dispose().catch(() => undefined);
+      }
       throw error;
     }
     // The boot argument is the source of truth for a new session. Sending a
@@ -546,6 +724,8 @@ export class SessionRuntimeManager {
 
   private async restartInternal(ref: SessionRef, beforeRestart?: () => void): Promise<void> {
     const runtime = this.require(ref);
+    if (runtime.hasActiveAudio) throw new Error('Stop audio before restarting this chat.');
+    if (runtime.hasActiveMetadata) throw new Error('Wait for the session metadata operation before restarting this chat.');
     const recovering = runtime.connectionState.status !== 'connected' || runtime.isStarting;
     const opening = this.openingSessions.get(ref.sessionId);
     if (opening) {
@@ -553,6 +733,7 @@ export class SessionRuntimeManager {
       if (recovering) beforeRestart?.();
       await opening.promise;
       if (this.require(ref) !== runtime) throw new Error('session runtime was replaced while restarting');
+      if (runtime.hasActiveAudio) throw new Error('Stop audio before restarting this chat.');
       if (recovering) {
         // The open already completed transport recovery and owned restoration.
         // Joining that recovery must not replace a still-living sidecar.
@@ -562,6 +743,7 @@ export class SessionRuntimeManager {
     }
     if (runtime.connectionState.status !== 'connected' || runtime.isStarting) {
       beforeRestart?.();
+      if (runtime.hasActiveAudio) throw new Error('Stop audio before restarting this chat.');
       await runtime.start();
       beforeRestart?.();
       if (!runtime.recoveredLiveConnection || runtime.needsSessionResume) await runtime.restoreOwnedSessionIfNeeded();
@@ -583,6 +765,7 @@ export class SessionRuntimeManager {
     // instead of resolving silently — surfacing a failure for a settings or
     // credential write that actually succeeded.
     this.runtimes.delete(ref.sessionId);
+    this.sourceCaptureWanted.delete(ref.sessionId);
     this.visualizations.forgetSession(ref.sessionId);
     this.lastUsed.delete(ref.sessionId);
     this.sessionModelHints.delete(ref.sessionId);
@@ -595,14 +778,16 @@ export class SessionRuntimeManager {
     this.assertProjectNotClosing(projectPath);
     if (this.hasActiveWork(projectPath)) throw new Error('cancel active turns and pending interactions before removing a project');
     this.closingProjects.add(projectPath);
-    this.draftSessions.delete(projectPath);
-    this.openingDraftSessions.delete(projectPath);
+    for (const [key, draft] of this.draftSessions) {
+      if (draft.projectPath === projectPath) { this.draftSessions.delete(key); this.openingDraftSessions.delete(key); }
+    }
     const projectRuntimes = [...this.runtimes.values()].filter((runtime) => runtime.projectPath === projectPath);
     // Remove runtimes from the routable map before the first await. A prompt
     // arriving while disposal is in progress must fail instead of entering a
     // runtime whose child is already being torn down.
     for (const runtime of projectRuntimes) {
       this.runtimes.delete(runtime.sessionId);
+      this.sourceCaptureWanted.delete(runtime.sessionId);
       this.visualizations.forgetSession(runtime.sessionId);
     }
     for (const runtime of projectRuntimes) this.lastUsed.delete(runtime.sessionId);
@@ -636,6 +821,7 @@ export class SessionRuntimeManager {
   async dispose(): Promise<void> {
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
+    this.sourceCaptureWanted.clear();
     this.lastUsed.clear();
     this.sessionModelHints.clear();
     this.activeSessionId = null;
@@ -647,6 +833,7 @@ export class SessionRuntimeManager {
     this.openingDraftSessions.clear();
     await Promise.all(runtimes.map((runtime) => runtime.dispose().catch(() => undefined)));
     await Promise.all([...this.pendingEvictions]);
+    this.evictingSessions.clear();
     this.unregisterIpc();
     for (const webContents of [...this.targets.keys()]) this.detachWindow(webContents);
   }
@@ -658,9 +845,11 @@ export class SessionRuntimeManager {
       this.assertSender(event);
       return this.replaySnapshots;
     });
-    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown, turnId?: unknown, visualizationContext?: unknown) => {
+    ipcMain.handle(CH_SEND_PROMPT, async (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown, turnId?: unknown, visualizationContext?: unknown) => {
       this.assertSender(event);
-      return this.requireById(sessionId).sendPrompt(text, images, turnId, visualizationContext);
+      const runtime = this.requireById(sessionId);
+      await this.waitForRuntimeReadiness(runtime, event, sessionId);
+      return runtime.sendPrompt(text, images, turnId, visualizationContext);
     });
     ipcMain.handle(CH_VISUALIZATION_MOUNT, (event: IpcMainInvokeEvent, sessionId: unknown, reference: unknown, theme: unknown, locale: unknown, expanded: unknown) => {
       this.assertSender(event);
@@ -721,14 +910,7 @@ export class SessionRuntimeManager {
       // Connectivity precedes owned transcript/control recovery. Only ordinary
       // commands wait here; approvals, questions and cancellation must remain
       // available while the recovery transaction waits for those interactions.
-      do {
-        const opening = this.openingSessions.get(runtime.sessionId)?.promise;
-        const restarting = this.restartingSessions.get(runtime.sessionId) ?? [];
-        await Promise.all([opening, ...restarting, runtime.waitForLifecycle()]);
-        this.assertSender(event);
-        if (this.requireById(sessionId) !== runtime) throw new Error('session runtime was replaced');
-      } while (this.openingSessions.get(runtime.sessionId)?.promise !== undefined
-        || this.restartingSessions.has(runtime.sessionId));
+      await this.waitForRuntimeReadiness(runtime, event, sessionId);
       await runtime.dispatchCommand(command);
     });
     ipcMain.handle(CH_MOD_UI_CONTROL, (event: IpcMainInvokeEvent, sessionId: unknown, request: unknown) => {
@@ -752,11 +934,15 @@ export class SessionRuntimeManager {
       onModelChanged,
       onModelSelected,
       getSavedModel,
+      resolveSessionMode: _resolveSessionMode,
+      resolveSavedTranscript: _resolveSavedTranscript,
+      captureSessionSource: _captureSessionSource,
       getSavedPermissionMode,
       onPermissionModeSelected,
       getSavedFastMode,
       onFastModeSelected,
       onFirstPromptSent,
+      onPromptAdmitted,
       maxCachedRuntimes: _maxCachedRuntimes,
       workspaceSettings,
       ...base
@@ -765,6 +951,7 @@ export class SessionRuntimeManager {
       ...base,
       sessionId: ref.sessionId,
       projectPath: ref.projectPath,
+      expectedSessionMode: ref.mode,
       resumeTranscriptPath: this.sessionTranscriptPaths.get(ref.sessionId),
       envelopeEvents: true,
       launchConfig: async () => {
@@ -796,14 +983,20 @@ export class SessionRuntimeManager {
         this.sessionModelHints.set(ref.sessionId, model);
         onModelChanged?.(ref, model);
       },
-      onActivityChanged: () => this.scheduleCacheTrim(ref.sessionId),
+      onActivityChanged: () => {
+        this.scheduleCacheTrim(ref.sessionId);
+        if (this.sourceCaptureWanted.has(ref.sessionId)) this.captureSessionSource(ref);
+      },
+      onDurableSessionActivity: () => this.wantSessionSource(ref, true),
+      onPromptAdmitted: () => onPromptAdmitted?.(ref),
       onFirstPromptSent: () => {
+        this.wantSessionSource(ref, false);
         if (!onFirstPromptSent) {
           this.clearDraftSession(ref);
           return true;
         }
         try {
-          if (this.activeSessionId === ref.sessionId) onFirstPromptSent(ref);
+          onFirstPromptSent(ref, this.activeSessionId === ref.sessionId);
           this.clearDraftSession(ref);
           return true;
         } catch (error) {
@@ -814,9 +1007,64 @@ export class SessionRuntimeManager {
     };
   }
 
+  private wantSessionSource(ref: SessionRef, scheduled: boolean): void {
+    if (!this.opts.captureSessionSource) return;
+    try {
+      const previous = this.sourceCaptureWanted.get(ref.sessionId);
+      this.sourceCaptureWanted.set(ref.sessionId, { ref, scheduled: scheduled || previous?.scheduled === true });
+      this.captureSessionSource(ref);
+    } catch (error) {
+      this.opts.diagnostics?.add('warn', 'bridge', `failed to schedule session source recording ${ref.sessionId}: ${sanitizeDiagnostic(error)}`);
+    }
+  }
+
+  /** Metadata work must never reject an already-admitted prompt. */
+  private captureSessionSource(ref: SessionRef): void {
+    const wanted = this.sourceCaptureWanted.get(ref.sessionId), runtime = this.runtimes.get(ref.sessionId);
+    if (!wanted || !runtime || !this.opts.captureSessionSource || this.sourceCapturePending.has(ref.sessionId)) return;
+    const release = this.retainBackgroundSession(ref);
+    const operation = (async () => {
+      let failure: unknown;
+      for (const delay of [0, 150, 500, 1500]) {
+        if (delay) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        if (this.runtimes.get(ref.sessionId) !== runtime) return;
+        try {
+          const path = await this.opts.captureSessionSource!(wanted.ref, runtime, wanted.scheduled);
+          if (this.runtimes.get(ref.sessionId) !== runtime) return;
+          if (path) {
+            this.sessionTranscriptPaths.set(ref.sessionId, path);
+            runtime.rememberTranscriptSelection(path);
+          }
+          this.sourceCaptureWanted.delete(ref.sessionId);
+          return;
+        } catch (error) { failure = error; }
+      }
+      this.opts.diagnostics?.add('warn', 'bridge', `failed to record session source ${ref.sessionId}: ${sanitizeDiagnostic(failure)}`);
+    })().finally(() => {
+      if (this.sourceCapturePending.get(ref.sessionId) === operation) this.sourceCapturePending.delete(ref.sessionId);
+      release();
+    });
+    this.sourceCapturePending.set(ref.sessionId, operation);
+  }
+
   private clearDraftSession(ref: SessionRef): void {
-    const current = this.draftSessions.get(ref.projectPath);
-    if (current?.sessionId === ref.sessionId) this.draftSessions.delete(ref.projectPath);
+    const key = this.draftKey(ref);
+    if (key !== undefined) this.draftSessions.delete(key);
+  }
+
+  private async waitForRuntimeReadiness(runtime: SessionRuntime, event: IpcMainInvokeEvent, sessionId: unknown): Promise<void> {
+    const openingDraft = () => {
+      const key = this.draftKey(runtime);
+      return key === undefined ? undefined : this.openingDraftSessions.get(key);
+    };
+    do {
+      const opening = this.openingSessions.get(runtime.sessionId)?.promise;
+      const restarting = this.restartingSessions.get(runtime.sessionId) ?? [];
+      await Promise.all([openingDraft(), opening, ...restarting, runtime.waitForLifecycle()]);
+      this.assertSender(event);
+      if (this.requireById(sessionId) !== runtime) throw new Error('session runtime was replaced');
+    } while (openingDraft() !== undefined || this.openingSessions.get(runtime.sessionId)?.promise !== undefined
+      || this.restartingSessions.has(runtime.sessionId));
   }
 
   private requireById(value: unknown): SessionRuntime {

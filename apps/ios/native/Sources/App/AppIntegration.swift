@@ -31,7 +31,7 @@ enum LingxiDeepLink {
         guard url.absoluteString.utf8.count <= 32768, components.user == nil, components.password == nil,
               components.port == nil, components.percentEncodedPath.isEmpty, components.fragment == nil else { return nil }
         let items = components.queryItems ?? []
-        let allowed = host == "open_conversation" ? ["sessionId", "turnId", "workspaceKey", "sessionMode"] : ["sessionId", "initCommand"]
+        let allowed = ["sessionId", "initCommand"]
         guard Set(items.map(\.name)).count == items.count, items.allSatisfy({ allowed.contains($0.name) }) else { return nil }
         let values = Dictionary(
             items.map { ($0.name, $0.value ?? "") },
@@ -39,22 +39,6 @@ enum LingxiDeepLink {
         )
 
         switch host {
-        case "open_conversation":
-            let sessionID = values["sessionId"]?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .prefix(256)
-            guard let sessionID, !sessionID.isEmpty else { return nil }
-            let turnID = values["turnId"].flatMap { UInt64($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            let workspaceKey = values["workspaceKey"]?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .nilIfEmpty
-            let mode = values["sessionMode"].flatMap(SessionMode.init(rawValue:)) ?? .code
-            return .openConversation(
-                sessionID: String(sessionID),
-                turnID: turnID,
-                workspaceKey: workspaceKey,
-                mode: mode
-            )
         case "open_terminal":
             let sessionID = values["sessionId"]?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -74,7 +58,7 @@ enum LingxiDeepLink {
         sessionID: String,
         turnID: UInt64?,
         workspaceKey: String? = nil,
-        mode: SessionMode = .code
+        mode: SessionMode
     ) -> URL? {
         ConversationDeepLink.makeURL(
             sessionID: sessionID,
@@ -83,10 +67,6 @@ enum LingxiDeepLink {
             sessionMode: mode.rawValue
         )
     }
-}
-
-private extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 extension Notification.Name {

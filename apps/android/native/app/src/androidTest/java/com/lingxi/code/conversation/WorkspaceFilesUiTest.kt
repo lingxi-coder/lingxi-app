@@ -27,7 +27,7 @@ class WorkspaceFilesUiTest {
         File(root, ".hidden").writeText("hidden")
         File(root, "large.txt").writeBytes(ByteArray(2 * 1024 * 1024 + 1) { 65 })
         File(root, "unknown.bin").writeBytes(byteArrayOf(0, 1, 2))
-        repository = WorkspaceDirectoryRepository(root, "/home/test", "/home/test/work", "/home/test/work/projects", File(root, ".config"))
+        repository = WorkspaceDirectoryRepository(root, "/home/test", "/home/test/work", "/home/test/work/projects", File(root, ".config"), listOf("/home/test/work", "/home/test/work/projects"))
         val bitmap = android.graphics.Bitmap.createBitmap(40, 40, android.graphics.Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.BLUE) }
         File(root, "image.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
         val wav = java.nio.ByteBuffer.allocate(44 + 8000).order(java.nio.ByteOrder.LITTLE_ENDIAN)

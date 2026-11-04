@@ -83,7 +83,7 @@ async fn sessions_over_a_live_connection() {
     // The desktop streams the snapshot, then live records.
     let conn_id = host.conns()[0].conn_id.clone();
     for part in [
-        json!({ "phase": "begin", "session_id": "s1", "epoch": "e1", "first_message_index": 0 }),
+        json!({ "phase": "begin", "session_id": "s1", "epoch": "e1", "first_message_index": 0, "session_mode": "code" }),
         json!({ "phase": "messages", "session_id": "s1", "messages": [{ "role": "user", "blocks": [] }] }),
         json!({ "phase": "records", "session_id": "s1", "records": [] }),
         json!({ "phase": "end", "session_id": "s1", "cursor": { "epoch": "e1", "seq": 5 },

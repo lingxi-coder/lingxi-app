@@ -253,6 +253,13 @@ pub enum TurnEvent {
         /// Paths to restore, or `None` once this dispatch owns/consumes them.
         image_paths: Option<Vec<std::path::PathBuf>>,
     },
+    /// Resolve ownership of a composer submission at shared-runtime admission.
+    PromptAdmissionResolved {
+        /// Opaque identity of the visible, not-yet-persisted user row.
+        row_token: String,
+        /// False returns the exact text and attachments to their UI owner.
+        admitted: bool,
+    },
     /// Streaming text chunk from the assistant.
     TextDelta(String),
     /// A completed assistant thinking block (M5 live streaming). The
@@ -494,6 +501,11 @@ pub enum TurnEvent {
     CommandCatalogRefreshed {
         /// Complete registry-backed completion catalog.
         commands: Vec<CommandCatalogEntry>,
+    },
+    /// Session picker rows for one confirmed live working directory.
+    ResumeCatalogRefreshed {
+        cwd: std::path::PathBuf,
+        rows: Vec<(uuid::Uuid, std::path::PathBuf, String, String)>,
     },
     /// Full snapshot of background agents that are pending or running. Sent by
     /// the CLI task-registry poller; replaces the previous snapshot atomically.

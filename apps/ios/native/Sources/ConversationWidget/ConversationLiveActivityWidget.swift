@@ -43,7 +43,9 @@ import SwiftUI
                 .widgetURL(
                     ConversationDeepLink.makeURL(
                         sessionID: context.attributes.sessionID,
-                        turnID: context.state.turnID
+                        turnID: context.state.turnID,
+                        workspaceKey: context.state.workspaceKey,
+                        sessionMode: context.state.sessionMode
                     )
                 )
             }

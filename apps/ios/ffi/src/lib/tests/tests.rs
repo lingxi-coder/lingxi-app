@@ -52,6 +52,9 @@ fn launch_config_with_project_mounts(
         api_base: String::new(),
         model: String::new(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
+        initial_session_id: None,
+        initial_session_transcript_path: None,
+        scheduler_controller: false,
         vision_delegation_enabled: false,
         app_sandbox_root: linux.app_sandbox_root.clone(),
         project_cwd,
@@ -87,6 +90,16 @@ fn ios_project_mount_grant_maps_one_registered_local_app_source() {
     assert_eq!(mounts[0].guest_path, guest);
     assert_eq!(mounts[0].purpose, mobile_linux_api::MountPurpose::External);
     assert!(!mounts[0].read_only);
+}
+
+#[test]
+fn ios_scheduler_controller_flag_reaches_mobile_config() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let linux = user_storage_config(temp.path());
+    let mut config = launch_config_with_project_mounts(linux, None, Vec::new(), Vec::new());
+    config.scheduler_controller = true;
+    let mobile = super::ios_mobile_config_from_launch_config(&config).unwrap();
+    assert!(mobile.scheduler_controller);
 }
 
 #[test]
@@ -164,6 +177,71 @@ fn ios_project_mount_grants_reject_unregistered_and_private_config_paths() {
         vec![private_guest],
     );
     assert!(super::configuration::ios_project_mount_grants(&private_config).is_err());
+}
+
+#[test]
+fn ios_project_mount_grants_accept_only_registered_mode_workspaces() {
+    let temp = tempfile::tempdir().unwrap();
+    let linux = user_storage_config(temp.path());
+    let paths =
+        harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone()).unwrap();
+    for (host_root, guest_root) in [
+        (&paths.chat_cwd, &paths.chat_guest_cwd),
+        (&paths.code_cwd, &paths.code_guest_cwd),
+        (&paths.scheduled_cwd, &paths.scheduled_guest_cwd),
+    ] {
+        let host = std::path::Path::new(host_root).join("registered");
+        std::fs::create_dir_all(&host).unwrap();
+        let guest = format!("{guest_root}/registered");
+        let registered = launch_config_with_project_mounts(
+            linux.clone(),
+            Some(paths.projects.clone()),
+            vec![guest.clone()],
+            vec![guest.clone()],
+        );
+        let mounts = super::configuration::ios_project_mount_grants(&registered).unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].host_path, host.canonicalize().unwrap());
+        assert_eq!(mounts[0].guest_path, guest);
+        let unregistered = launch_config_with_project_mounts(
+            linux.clone(),
+            Some(paths.projects.clone()),
+            Vec::new(),
+            vec![guest],
+        );
+        assert!(super::configuration::ios_project_mount_grants(&unregistered).is_err());
+    }
+    let scheduled_root = paths.scheduled_guest_cwd.clone();
+    let config = launch_config_with_project_mounts(
+        linux.clone(),
+        Some(paths.projects.clone()),
+        vec![scheduled_root.clone()],
+        vec![scheduled_root],
+    );
+    assert!(super::configuration::ios_project_mount_grants(&config).is_err());
+    let protected = std::path::Path::new(&paths.chat_cwd).join("providers");
+    std::fs::create_dir_all(&protected).unwrap();
+    let guest = format!("{}/providers", paths.chat_guest_cwd);
+    let config = launch_config_with_project_mounts(
+        linux.clone(),
+        Some(paths.projects.clone()),
+        vec![guest.clone()],
+        vec![guest],
+    );
+    assert!(super::configuration::ios_project_mount_grants(&config).is_err());
+    #[cfg(unix)]
+    {
+        let alias = std::path::Path::new(&paths.chat_cwd).join("alias");
+        std::os::unix::fs::symlink(&paths.code_cwd, &alias).unwrap();
+        let guest = format!("{}/alias", paths.chat_guest_cwd);
+        let config = launch_config_with_project_mounts(
+            linux,
+            Some(paths.projects.clone()),
+            vec![guest.clone()],
+            vec![guest],
+        );
+        assert!(super::configuration::ios_project_mount_grants(&config).is_err());
+    }
 }
 
 #[test]
@@ -268,7 +346,7 @@ fn ios_runtime_status_uses_the_selected_brand_writable_guest_paths() {
         .contains(&"/home/atlas_guest".to_string()));
     assert!(status
         .writable_guest_paths
-        .contains(&"/home/atlas_guest/atlas".to_string()));
+        .contains(&"/home/atlas_guest/.atlas".to_string()));
     assert!(!status
         .writable_guest_paths
         .contains(&"/home/lingxi".to_string()));
@@ -416,10 +494,17 @@ impl PermissionRequestSink for RecordingPermissionSink {
 }
 
 fn build_handle(root: &std::path::Path) -> Arc<harness_runtime::mobile::MobileEngineHandle> {
+    build_handle_with_config(root, |_| {})
+}
+
+pub(super) fn build_handle_with_config(
+    root: &std::path::Path,
+    configure: impl FnOnce(&mut MobileConfig),
+) -> Arc<harness_runtime::mobile::MobileEngineHandle> {
     let platform: Arc<dyn Platform> = Arc::new(HostFakePlatform::new(root.to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
-    let cfg = MobileConfig {
+    let mut cfg = MobileConfig {
         build_info: harness_runtime::mobile::BuildInfo::new(
             env!("CARGO_PKG_VERSION"),
             option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
@@ -428,6 +513,7 @@ fn build_handle(root: &std::path::Path) -> Arc<harness_runtime::mobile::MobileEn
         lingxi_home: root.join(".lingxi"),
         ..MobileConfig::default()
     };
+    configure(&mut cfg);
     harness_runtime::mobile::build_mobile_engine(cfg, platform, listener, perm_sink)
         .expect("shared build_mobile_engine failed")
 }
@@ -516,7 +602,7 @@ fn mobile_linux_command_api_reports_unavailable_on_host_without_device_bridge() 
         .block_on(handle.run_command(super::MobileLinuxCommandRequestFfi {
             command: "/bin/sh".to_string(),
             args: vec!["-lc".to_string(), "echo hi".to_string()],
-            cwd: None,
+            cwd: Some("/home/lingxi/.lingxi/code".to_string()),
             env: std::collections::HashMap::new(),
             stdin: None,
             timeout_ms: Some(1000),
@@ -563,7 +649,7 @@ fn mobile_linux_handle_reuses_one_runtime_instance_for_multiple_calls() {
         .block_on(handle.open_pty(super::MobileLinuxPtyOpenRequestFfi {
             command: "/bin/sh".to_string(),
             args: vec![],
-            cwd: Some("/home/lingxi/lingxi/default".to_string()),
+            cwd: Some("/home/lingxi/.lingxi/code".to_string()),
             env: std::collections::HashMap::new(),
             cols: 80,
             rows: 24,
@@ -636,6 +722,47 @@ fn mobile_linux_workspace_rejects_parent_traversal_into_protected_roots() {
             ),
             Err(super::MobileLinuxOperationFfiError::InvalidRequest { .. })
         ));
+    }
+}
+
+#[test]
+fn mobile_linux_workspace_accepts_only_the_exact_managed_projects_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = user_storage_config(temp.path());
+    let directories =
+        harness_runtime::mobile::mobile_user_directories(config.managed_root.clone()).unwrap();
+    let validate = |config: &super::IosMobileLinuxConfigFfi| {
+        super::validate_mobile_linux_workspace_config(&config.app_sandbox_root, config)
+    };
+    let (host, id) = validate(&config).expect("exact projects mount");
+    assert_eq!(
+        host,
+        std::path::Path::new(&directories.projects)
+            .canonicalize()
+            .unwrap()
+    );
+    assert_eq!(id, "projects");
+
+    let mut changed = config.clone();
+    changed.stable_workspace_id = "code".into();
+    assert!(validate(&changed).is_err());
+    for protected in [
+        std::path::PathBuf::from(&directories.config_home),
+        std::path::Path::new(&directories.config_home).join("providers"),
+        std::path::Path::new(&directories.projects).join("subdirectory"),
+    ] {
+        std::fs::create_dir_all(&protected).unwrap();
+        changed = config.clone();
+        changed.workspace_host_path = protected.display().to_string();
+        assert!(validate(&changed).is_err());
+    }
+    #[cfg(unix)]
+    {
+        let alias = std::path::Path::new(&directories.config_home).join("projects-alias");
+        std::os::unix::fs::symlink(&directories.projects, &alias).unwrap();
+        changed = config;
+        changed.workspace_host_path = alias.display().to_string();
+        assert!(validate(&changed).is_err());
     }
 }
 
@@ -727,31 +854,93 @@ fn ios_project_cwd_uses_the_linux_user_home_and_accepts_multiple_directories() {
     std::fs::create_dir_all(&a).unwrap();
     std::fs::create_dir_all(&b).unwrap();
     assert_eq!(
-        super::ios_project_cwd(managed.to_str().unwrap(), None).unwrap(),
-        std::path::Path::new(&directories.default_cwd)
+        super::ios_project_cwd(managed.to_str().unwrap(), &directories.scheduled_cwd).unwrap(),
+        std::path::Path::new(&directories.scheduled_cwd)
             .canonicalize()
             .unwrap()
     );
     for directory in [&a, &b] {
         assert_eq!(
-            super::ios_project_cwd(managed.to_str().unwrap(), directory.to_str()).unwrap(),
+            super::ios_project_cwd(managed.to_str().unwrap(), directory.to_str().unwrap()).unwrap(),
             directory.canonicalize().unwrap()
         );
     }
     assert_eq!(
-        super::ios_project_cwd(
-            managed.to_str().unwrap(),
-            Some("/home/lingxi/other-worktree")
-        )
-        .unwrap(),
+        super::ios_project_cwd(managed.to_str().unwrap(), "/home/lingxi/other-worktree").unwrap(),
         b.canonicalize().unwrap()
     );
-    assert!(super::ios_project_cwd(managed.to_str().unwrap(), temp.path().to_str()).is_err());
+    assert!(
+        super::ios_project_cwd(managed.to_str().unwrap(), temp.path().to_str().unwrap()).is_err()
+    );
     #[cfg(unix)]
     {
         let escape = std::path::Path::new(&directories.projects).join("escape");
         std::os::unix::fs::symlink(temp.path(), &escape).unwrap();
-        assert!(super::ios_project_cwd(managed.to_str().unwrap(), escape.to_str()).is_err());
+        assert!(
+            super::ios_project_cwd(managed.to_str().unwrap(), escape.to_str().unwrap()).is_err()
+        );
+    }
+}
+
+#[test]
+fn ios_launch_cwd_uses_fixed_mode_and_explicit_scheduler_or_project() {
+    use harness_runtime::mobile::SessionModeDto;
+
+    let temp = tempfile::tempdir().unwrap();
+    let linux = user_storage_config(temp.path());
+    let directories =
+        harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone()).unwrap();
+    let project = std::path::Path::new(&directories.projects).join("project-a");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut config = launch_config_with_project_mounts(linux, None, Vec::new(), Vec::new());
+
+    for (mode, host, guest) in [
+        (
+            SessionModeDto::Chat,
+            &directories.chat_cwd,
+            &directories.chat_guest_cwd,
+        ),
+        (
+            SessionModeDto::Code,
+            &directories.code_cwd,
+            &directories.code_guest_cwd,
+        ),
+    ] {
+        config.session_mode = mode;
+        config.project_cwd = None;
+        config.scheduler_controller = false;
+        let selected = super::ios_mobile_config_from_launch_config(&config).unwrap();
+        assert_eq!(
+            selected.cwd,
+            std::path::Path::new(host).canonicalize().unwrap()
+        );
+        assert_eq!(selected.logical_cwd, Some(std::path::PathBuf::from(guest)));
+
+        config.project_cwd = Some(project.display().to_string());
+        let selected = super::ios_mobile_config_from_launch_config(&config).unwrap();
+        assert_eq!(selected.cwd, project.canonicalize().unwrap());
+        assert_eq!(
+            selected.logical_cwd,
+            Some(std::path::Path::new(&directories.projects_guest_path).join("project-a"))
+        );
+
+        config.project_cwd = None;
+        config.scheduler_controller = true;
+        let controller = super::ios_mobile_config_from_launch_config(&config).unwrap();
+        assert_eq!(
+            controller.cwd,
+            std::path::Path::new(&directories.scheduled_cwd)
+                .canonicalize()
+                .unwrap()
+        );
+        assert_eq!(
+            controller.logical_cwd,
+            Some(std::path::PathBuf::from(&directories.scheduled_guest_cwd))
+        );
+
+        config.scheduler_controller = false;
+        config.project_cwd = Some(String::new());
+        assert!(super::ios_mobile_config_from_launch_config(&config).is_err());
     }
 }
 
@@ -759,12 +948,18 @@ fn ios_project_cwd_uses_the_linux_user_home_and_accepts_multiple_directories() {
 fn ios_launch_config_parses_provider_json_and_project_scope() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_id = "12345678-1234-4abc-8def-1234567890ab";
+    let session_id = "11111111-2222-4333-8444-555555555555";
     let linux = user_storage_config(temp.path());
     let paths =
         harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone()).unwrap();
     let workspace = std::path::Path::new(&paths.projects)
         .join(project_id)
         .join("workspace");
+    // Catalog paths may be PRoot guest coordinates. The FFI boundary must
+    // carry them unchanged so the SDK can map them through trusted mounts.
+    let selected_transcript = std::path::PathBuf::from(format!(
+        "/home/lingxi/.lingxi/projects/selected-project/{session_id}.jsonl"
+    ));
     std::fs::create_dir_all(&workspace).expect("workspace");
 
     let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
@@ -777,6 +972,9 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
         api_base: "https://example.invalid".to_string(),
         model: "claude-test".to_string(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
+        initial_session_id: Some(session_id.to_owned()),
+        initial_session_transcript_path: Some(selected_transcript.to_string_lossy().into_owned()),
+        scheduler_controller: false,
         vision_delegation_enabled: false,
         app_sandbox_root: temp.path().to_string_lossy().into_owned(),
         project_cwd: Some(workspace.to_string_lossy().into_owned()),
@@ -800,6 +998,11 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
     );
     assert_eq!(cfg.api_base, "https://example.invalid");
     assert_eq!(cfg.default_model, "claude-test");
+    assert_eq!(cfg.initial_session_id.as_deref(), Some(session_id));
+    assert_eq!(
+        cfg.initial_session_transcript_path.as_deref(),
+        Some(selected_transcript.as_path())
+    );
     assert!(cfg.startup_catalog.is_some());
     assert!(!cfg.vision_delegation_enabled);
     assert_eq!(cfg.physical_memory_bytes, 7 * 1024_u64.pow(3));
@@ -850,6 +1053,9 @@ fn ios_host_environment_maps_stable_native_facts_without_model_state() {
         api_base: String::new(),
         model: String::new(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
+        initial_session_id: None,
+        initial_session_transcript_path: None,
+        scheduler_controller: false,
         vision_delegation_enabled: true,
         app_sandbox_root: temp.path().to_string_lossy().into_owned(),
         project_cwd: None,
@@ -904,6 +1110,9 @@ fn ios_provider_only_app_agent_uses_native_brand_config_without_mobile_linux_set
         api_base: String::new(),
         model: String::new(),
         session_mode: harness_runtime::mobile::SessionModeDto::Code,
+        initial_session_id: None,
+        initial_session_transcript_path: None,
+        scheduler_controller: false,
         vision_delegation_enabled: false,
         app_sandbox_root: temp.path().to_string_lossy().into_owned(),
         project_cwd: None,
@@ -949,19 +1158,35 @@ async fn build_ios_cron_store_round_trips_without_engine() {
     )
     .expect("build cron store");
 
+    let automation = serde_json::json!({
+        "version": 2, "status": "active", "model": "anthropic/test",
+        "reasoning": {"type": "automatic"}, "runMode": "new_session",
+        "sessionMode": "code", "sessionScopeKey": "project.test"
+    })
+    .to_string();
     let created = store
-        .create("* * * * *".to_string(), "hello".to_string(), false)
+        .create_configured(
+            "* * * * *".to_string(),
+            "hello".to_string(),
+            false,
+            automation.clone(),
+        )
         .await
         .expect("one-shot creation");
     let updated = store
-        .update(
+        .update_configured(
             created.id.clone(),
             "*/15 * * * *".to_string(),
             "updated".to_string(),
             true,
+            automation,
         )
         .await
         .expect("recurring update");
+    let saved: serde_json::Value =
+        serde_json::from_str(updated.automation_json.as_deref().unwrap()).unwrap();
+    assert_eq!(saved["sessionMode"], "code");
+    assert_eq!(saved["sessionScopeKey"], "project.test");
     let due = store
         .due_occurrences(updated.next_fire_ms.expect("next fire").saturating_add(1))
         .await;

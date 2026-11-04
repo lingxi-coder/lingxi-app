@@ -31,11 +31,6 @@ enum ConversationScope: Equatable, Hashable, Sendable {
     case project(String)
     case remote(hostID: String, sessionID: String)
 
-    /// The legacy optional-projectID spelling (`nil` == global).
-    init(projectID: String?) {
-        self = projectID.map(ConversationScope.project) ?? .global
-    }
-
     init?(workspaceKey: String) {
         if workspaceKey == "global" {
             self = .global
@@ -64,16 +59,38 @@ enum ConversationScope: Equatable, Hashable, Sendable {
         }
     }
 
-    /// The middle segment of a `ProjectScopedPreferences` key. `.global` and
-    /// `.project` MUST keep producing exactly the strings the pre-scope code
-    /// produced ("global" / the lowercased project id) so existing user state
-    /// survives.
+    /// Distinct preference namespaces for global, project and remote owners.
     var preferenceScope: String {
         switch self {
         case .global: "global"
         case .scheduled: "scheduled"
-        case let .project(id): id.lowercased()
+        case let .project(id): "project.\(id.lowercased())"
         case let .remote(hostID, sessionID): "remote.\(hostID).\(sessionID)"
         }
     }
+}
+
+/// A newer user selection supersedes an in-flight navigation, while retaining
+/// the complete latest destination until the current operation has unwound.
+struct ConversationNavigationIntents<Destination> {
+    private(set) var generation: UInt64 = 0
+    private var pending: Destination?
+
+    mutating func invalidate() {
+        generation &+= 1
+        pending = nil
+    }
+
+    mutating func submit(_ destination: Destination, whileBusy: Bool) -> Bool {
+        generation &+= 1
+        pending = whileBusy ? destination : nil
+        return !whileBusy
+    }
+
+    mutating func takePending() -> Destination? {
+        defer { pending = nil }
+        return pending
+    }
+
+    func isCurrent(_ generation: UInt64) -> Bool { self.generation == generation }
 }

@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import { useBridge } from '../../src/renderer/bridge/useBridge';
 import { fixtureAccountSnapshot } from './provider-accounts-mock';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 
 const projectPath = '/fixture/catalog', sessionId = '11111111-2222-4333-8444-555555555555';
 const reference = 'openai-chatgpt/new-published-model';
@@ -27,7 +28,8 @@ const until = async (ready: () => boolean) => {
   onConnectionStateChanged: () => () => {}, onPermission: () => () => {}, onComputerAccess: () => () => {},
   bootstrap: async () => ({ revision: 1, settings: { projects: [projectPath], activeProject: projectPath,
     activeSession: { projectPath, sessionId }, pinnedSessions: [], archivedSessions: [] },
-    activeSession: { projectPath, sessionId }, workspace: { path: projectPath, trusted: true }, connection: { status: 'connected' },
+    activeSession: { projectPath, sessionId, mode: 'code', projectId: projectPath }, workspace: { path: projectPath, trusted: true }, connection: { status: 'connected' },
+    conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: [projectPath], selectedProject: projectPath, activeSession: { projectPath, sessionId } }),
     runtimes: [{ projectPath, sessionId, connection: { status: 'connected' }, turnActive: false, pendingInteractions: 0, pendingAskUserQuestions: 0 }],
     projectCatalogs: { [projectPath]: { sessions: [] } }, providerAccountSnapshot: accounts(), diagnostics: [], versions: { app: 'fixture', electron: 'fixture' } }),
   providerAccounts: { snapshot: async () => {

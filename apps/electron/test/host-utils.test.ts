@@ -124,10 +124,94 @@ test('sidebar preferences persist only valid manual session orders', () => {
     organization: 'list',
     chatSort: 'manual',
     manualSessionOrder: { [project]: [sessionId] },
+    mode: 'home',
   });
   const publicCopy = publicSettings(settings);
   publicCopy.sidebar!.manualSessionOrder[project].push('123e4567-e89b-42d3-a456-426614174001');
   assert.deepEqual(settings.sidebar!.manualSessionOrder[project], [sessionId]);
+});
+
+test('the sidebar mode is Home unless it is one of ours, and the open Bots are unset until the owner opens or closes one', () => {
+  const sidebar = (value: Record<string, unknown>) => parseSettings({ version: 1, projects: [], sidebar: value }).sidebar;
+  const order = { organization: 'list', chatSort: 'manual', manualSessionOrder: {} };
+
+  // Nothing chosen yet: Home, and no key for the open Bots at all, not even as `undefined`.
+  assert.deepEqual(sidebar(order), { ...order, mode: 'home' });
+  assert.ok(!('expandedBots' in sidebar(order)!));
+  assert.equal(parseSettings({ version: 1, projects: [] }).sidebar, undefined, 'and a file the owner never saved a sidebar preference to has no sidebar section');
+
+  assert.deepEqual(sidebar({ ...order, mode: 'bots', expandedBots: ['a', 'b'] }), { ...order, mode: 'bots', expandedBots: ['a', 'b'] });
+  for (const mode of ['home', 'bots', 'teams']) assert.equal(sidebar({ ...order, mode })!.mode, mode);
+
+  for (const mode of ['settings', 'Bots', '', 1, null, {}, []]) assert.equal(sidebar({ ...order, mode })!.mode, 'home', `mode ${JSON.stringify(mode)}`);
+  for (const expanded of ['a', 1, null, {}]) assert.ok(!('expandedBots' in sidebar({ ...order, expandedBots: expanded })!), `expandedBots ${JSON.stringify(expanded)}`);
+
+  assert.deepEqual(sidebar({ ...order, expandedBots: ['a', 'a', '', 7, null, 'x'.repeat(129), 'b', 'y'.repeat(128)] })!.expandedBots, ['a', 'b', 'y'.repeat(128)]);
+  assert.deepEqual(sidebar({ ...order, expandedBots: [] })!.expandedBots, [], 'all Bots closed is an answer');
+  const many = Array.from({ length: 500 }, (_, index) => `bot-${index}`);
+  assert.equal(sidebar({ ...order, expandedBots: many })!.expandedBots!.length, 200);
+});
+
+test('a sidebar update leaves the keys it does not mention as saved, and an update that is not an object resets them', () => {
+  const userData = temporaryDirectory();
+  const store = new SettingsStore(userData);
+  const order = { organization: 'list', chatSort: 'manual', manualSessionOrder: {} };
+  store.update({ sidebar: order });
+  store.update({ sidebar: { mode: 'bots' } });
+  assert.deepEqual(store.getPublic().sidebar, { ...order, mode: 'bots' }, 'saving the mode does not forget the order');
+  store.update({ sidebar: { expandedBots: ['a'] } });
+  assert.deepEqual(store.getPublic().sidebar, { ...order, mode: 'bots', expandedBots: ['a'] }, 'nor the mode');
+  store.update({ sidebar: { organization: 'project', chatSort: 'manual', manualSessionOrder: {} } });
+  assert.deepEqual(store.getPublic().sidebar, { organization: 'project', chatSort: 'manual', manualSessionOrder: {}, mode: 'bots', expandedBots: ['a'] }, 'and saving the order does not forget the Bots');
+  store.update({ sidebar: { mode: 'nonsense' } });
+  assert.equal(store.getPublic().sidebar!.mode, 'home', 'a value that is not a mode puts the saved one back to Home');
+
+  assert.deepEqual(new SettingsStore(userData).getPublic().sidebar, store.getPublic().sidebar, 'what was saved is what is read back');
+  store.update({ sidebar: 'reset' });
+  assert.deepEqual(store.getPublic().sidebar, { organization: 'project', chatSort: 'updated', manualSessionOrder: {}, mode: 'home' }, 'anything else starts over from the defaults');
+
+  const copy = store.getPublic();
+  store.update({ sidebar: { expandedBots: ['x'] } });
+  const next = store.getPublic();
+  next.sidebar!.expandedBots!.push('y');
+  assert.deepEqual(store.getPublic().sidebar!.expandedBots, ['x'], 'a copy handed out is not the stored one');
+  assert.equal(copy.sidebar!.expandedBots, undefined);
+});
+
+test('the width of the Teams details panel is unset until the owner resizes it, kept when it can be a width, and dropped when it cannot', () => {
+  const sidebar = (value: Record<string, unknown>) => parseSettings({ version: 1, projects: [], sidebar: value }).sidebar;
+  const order = { organization: 'list', chatSort: 'manual', manualSessionOrder: {} };
+
+  // Unset is no key at all, not even `undefined`: the panel draws at its own default width.
+  assert.ok(!('teamsDrawerWidth' in sidebar(order)!));
+  assert.deepEqual(sidebar({ ...order, teamsDrawerWidth: 360 }), { ...order, mode: 'home', teamsDrawerWidth: 360 });
+  assert.equal(sidebar({ ...order, teamsDrawerWidth: 359.6 })!.teamsDrawerWidth, 360, 'a width is whole pixels');
+  for (const edge of [200, 480, 1200]) assert.equal(sidebar({ ...order, teamsDrawerWidth: edge })!.teamsDrawerWidth, edge, `${edge}px`);
+  // The panel clamps to its own range; the file only turns away what cannot be a width at all.
+  for (const width of [0, 199, 1201, -360, Number.NaN, Number.POSITIVE_INFINITY, '360', null, true, {}, []]) {
+    assert.ok(!('teamsDrawerWidth' in sidebar({ ...order, teamsDrawerWidth: width })!), `width ${String(width)}`);
+  }
+});
+
+test('saving the width of the Teams panel leaves the rest of the sidebar as saved, and what is saved is what is read back', () => {
+  const userData = temporaryDirectory();
+  const store = new SettingsStore(userData);
+  const order = { organization: 'list', chatSort: 'manual', manualSessionOrder: {} };
+  store.update({ sidebar: order });
+  store.update({ sidebar: { mode: 'teams' } });
+  store.update({ sidebar: { teamsDrawerWidth: 420 } });
+  assert.deepEqual(store.getPublic().sidebar, { ...order, mode: 'teams', teamsDrawerWidth: 420 }, 'saving the width forgets neither the order nor the mode');
+  store.update({ sidebar: { mode: 'home' } });
+  store.update({ sidebar: { organization: 'project', chatSort: 'manual', manualSessionOrder: {} } });
+  assert.deepEqual(store.getPublic().sidebar, { organization: 'project', chatSort: 'manual', manualSessionOrder: {}, mode: 'home', teamsDrawerWidth: 420 }, 'nor does saving the mode or the order forget the width');
+  assert.deepEqual(new SettingsStore(userData).getPublic().sidebar, store.getPublic().sidebar, 'what was saved is what is read back');
+
+  const copy = store.getPublic();
+  store.update({ sidebar: { teamsDrawerWidth: 300 } });
+  assert.equal(copy.sidebar!.teamsDrawerWidth, 420, 'a copy handed out is not the stored one');
+  assert.equal(store.getPublic().sidebar!.teamsDrawerWidth, 300);
+  store.update({ sidebar: { teamsDrawerWidth: 'wide' } });
+  assert.equal(store.getPublic().sidebar!.teamsDrawerWidth, undefined, 'a value that is not a width removes the saved one');
 });
 
 test('thought collapse preference remains optional and rejects invalid stored values', () => {
@@ -374,6 +458,13 @@ test('bridge arguments carry the actual desktop version for catalog filtering', 
   assert.equal(args.includes('--api-key-stdin'), false);
 });
 
+test('only an owned draft launch requests draft metadata restoration', () => {
+  const base = { workspace: '/w', bridgeDir: '/b', sessionId: '11111111-2222-4333-8444-555555555555', hasApiKey: false, trusted: true };
+  assert.ok(!buildBridgeArguments(base).includes('--restore-draft'));
+  assert.ok(buildBridgeArguments({ ...base, restoreDraft: true }).includes('--restore-draft'));
+  assert.ok(!buildBridgeArguments({ ...base, restoreDraft: true, listSessionsJson: true }).includes('--restore-draft'));
+});
+
 test('private bridge arguments carry explicit local Insights policy without a user CLI switch', () => {
   const allowed = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', trusted: true, allowInsights: true });
   const denied = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', trusted: true, allowInsights: false });
@@ -490,6 +581,8 @@ test('settings store persists project activation, pins, and recoverable removal'
   store.addProject(second);
   store.activateProject(first);
   store.setTrust(second, true);
+  store.conversationSpaces.addProject(second, 'code');
+  store.conversationSpaces.register({ projectPath: second, projectId: second, mode: 'code', sessionId: '22222222-2222-4222-8222-222222222222' });
   store.setSessionPinned({
     projectPath: second,
     sessionId: '22222222-2222-4222-8222-222222222222',

@@ -115,7 +115,7 @@ impl BottomPaneView for ResumePickerView {
         match handle_resume_key(&mut self.state, key) {
             ResumeOutcome::Stay => ViewOutcome::Pending,
             ResumeOutcome::Cancel => ViewOutcome::Cancelled,
-            ResumeOutcome::Resume(uuid) => ViewOutcome::SwitchSession(uuid),
+            ResumeOutcome::Resume(selection) => ViewOutcome::SwitchSession(selection),
         }
     }
 
@@ -143,6 +143,7 @@ mod tests {
     fn row(title: &str) -> ResumeRow {
         ResumeRow {
             uuid: Uuid::new_v4(),
+            transcript_path: format!("/test/{title}.jsonl").into(),
             title: title.to_string(),
             metadata_label: "1 minute ago \u{00b7} 3 messages".to_string(),
         }
@@ -156,10 +157,14 @@ mod tests {
     fn enter_on_a_row_emits_switch_session_for_that_uuid() {
         let rows = vec![row("fix bug"), row("add feature")];
         let want = rows[1].uuid;
+        let want_path = rows[1].transcript_path.clone();
         let mut v = view(rows);
         v.handle_key(press(KeyCode::Down));
         match v.handle_key(press(KeyCode::Enter)) {
-            ViewOutcome::SwitchSession(uuid) => assert_eq!(uuid, want),
+            ViewOutcome::SwitchSession(selection) => {
+                assert_eq!(selection.uuid, want);
+                assert_eq!(selection.transcript_path, want_path);
+            }
             _ => panic!("expected SwitchSession"),
         }
     }

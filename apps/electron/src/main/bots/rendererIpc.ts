@@ -199,9 +199,10 @@ export class BotsUi {
    * A new session of the Bot, or the one named, started the way the window asks
    * for it. The host calls this too, to open the session of a routine's run.
    */
-  async openSession(id: unknown, sessionId?: unknown): Promise<BotSessionRefUi> {
+  async openSession(id: unknown, sessionId?: unknown, transcriptPath?: unknown, activate = true): Promise<BotSessionRefUi> {
     if (sessionId !== undefined && !isSessionId(sessionId)) throw new Error('invalid session id');
-    return this.deps.service.openSession(botId(id), sessionId);
+    if (transcriptPath !== undefined && typeof transcriptPath !== 'string') throw new Error('invalid Bot session selection');
+    return this.deps.service.openSession(botId(id), sessionId, transcriptPath, activate);
   }
 
   /** The invoke handlers by channel. */
@@ -214,7 +215,7 @@ export class BotsUi {
       [CH_BOTS_CREATE]: (request): Promise<BotUi> => present(service.create(createRequest(request))),
       [CH_BOTS_UPDATE]: (id, expectedRevision, patch): Promise<BotUi> => present(service.update(botId(id), revision(expectedRevision), updateRequest(patch))),
       [CH_BOTS_DELETE]: async (id): Promise<void> => { await service.delete(botId(id)); },
-      [CH_BOTS_SESSION_OPEN]: (id, sessionId): Promise<BotSessionRefUi> => this.openSession(id, sessionId),
+      [CH_BOTS_SESSION_OPEN]: (id, sessionId, transcriptPath): Promise<BotSessionRefUi> => this.openSession(id, sessionId, transcriptPath),
       [CH_BOTS_SESSIONS_LIST]: async (id): Promise<BotSessionsUi> => ({ sessions: await service.listSessions(botId(id)) }),
       [CH_BOTS_PERSONA_GET]: (id) => content.persona(botId(id)),
       [CH_BOTS_PERSONA_SET]: async (id, persona): Promise<void> => { await content.setPersona(botId(id), text(persona, 'persona')); },

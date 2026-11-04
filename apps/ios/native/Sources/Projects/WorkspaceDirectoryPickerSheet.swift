@@ -13,14 +13,32 @@ struct WorkspaceDirectoryPickerSheet: View {
     let onSelectScope: (ConversationScope) -> Void
     let onPickDirectory: (String) async throws -> Void
 
-    private let paths = WorkspaceDirectoryPaths.current()
-    @State private var repository = WorkspaceDirectoryRepository()
+    private let paths: WorkspaceDirectoryPaths
+    @State private var repository: WorkspaceDirectoryRepository
     @State private var locations: [WorkspaceLocation] = []
     @State private var browser: BrowserRequest?
     @State private var editing: WorkspaceLocation?
     @State private var deleting: WorkspaceLocation?
     @State private var errorMessage: String?
     @State private var busy = false
+
+    init(paths: WorkspaceDirectoryPaths, projects: [ProjectSnapshot], activeScope: ConversationScope,
+         currentDirectory: String, contextDirectories: [String], protectedPaths: @escaping () -> [String],
+         canMutate: @escaping () -> Bool, runtimeStatus: String,
+         onSelectScope: @escaping (ConversationScope) -> Void,
+         onPickDirectory: @escaping (String) async throws -> Void) {
+        self.paths = paths
+        self.projects = projects
+        self.activeScope = activeScope
+        self.currentDirectory = currentDirectory
+        self.contextDirectories = contextDirectories
+        self.protectedPaths = protectedPaths
+        self.canMutate = canMutate
+        self.runtimeStatus = runtimeStatus
+        self.onSelectScope = onSelectScope
+        self.onPickDirectory = onPickDirectory
+        _repository = State(initialValue: WorkspaceDirectoryRepository(paths: paths))
+    }
 
     private struct BrowserRequest: Identifiable {
         let path: String
@@ -192,10 +210,7 @@ struct WorkspaceDirectoryPickerSheet: View {
     }
 
     private func isProtected(_ path: String) -> Bool {
-        !canMutate() || path == paths.guestHome + "/" + paths.settings
-            || path.hasPrefix(paths.guestHome + "/" + paths.settings + "/")
-            || ([paths.guestHome, paths.workspace, paths.projects, currentDirectory] + protectedPaths())
-                .contains { $0 == path || $0.hasPrefix(path + "/") }
+        !canMutate() || paths.protects(path, additional: [currentDirectory] + protectedPaths())
     }
 
     private func pathLabel(name: String, path: String, symbol: String, selected: Bool) -> some View {

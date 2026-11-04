@@ -5,11 +5,10 @@ import com.lingxi.code.bindings.client.CostDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.TurnOutcomeDto
 import com.lingxi.code.model.Role
-import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -42,10 +41,16 @@ class ChatViewModelExternalTurnTest {
         val sent = mutableListOf<Pair<String, List<ImageRefDto>>>()
         val dismissed = mutableListOf<String>()
         val retried = mutableListOf<String>()
+        var sendGate: CompletableDeferred<Unit>? = null
+        var sendFailure: Throwable? = null
         var cancelled = 0
         override val externalFeed: Flow<ExternalFeedItem> = feed.asSharedFlow()
         override fun submit(text: String): Flow<ReplyEvent> = error("an external source never submits a turn")
-        override suspend fun sendExternalPrompt(text: String, images: List<ImageRefDto>) { sent += text to images }
+        override suspend fun sendExternalPrompt(text: String, images: List<ImageRefDto>) {
+            sendGate?.await()
+            sendFailure?.let { throw it }
+            sent += text to images
+        }
         override suspend fun retryExternalPrompt(promptId: String) { retried += promptId }
         override suspend fun dismissExternalPrompt(promptId: String) { dismissed += promptId }
         override suspend fun cancel() { cancelled++ }
@@ -58,6 +63,7 @@ class ChatViewModelExternalTurnTest {
                 com.lingxi.code.model.Message(role = if (index % 2 == 0) Role.User else Role.Ai, text = text)
             },
             kind = SessionActivationKind.Resumed,
+            mode = com.lingxi.code.model.SessionMode.Code,
         ),
         title = null,
     )
@@ -133,15 +139,14 @@ class ChatViewModelExternalTurnTest {
         val source = FakeExternalSource()
         val vm = ChatViewModel(source)
         runCurrent()
-        val restored = mutableListOf<ExternalSendFailure>()
         val images = listOf(ImageRefDto("image/png", "AQID"))
-        val collector = launch(start = CoroutineStart.UNDISPATCHED) { vm.externalSendFailures.collect { restored += it } }
         source.feed.emit(base("old"))
         source.feed.emit(ExternalFeedItem.Outgoing(listOf(ExternalOutgoingPrompt("a", "lost", images, failed = false))))
         source.feed.emit(ExternalFeedItem.Outgoing(listOf(ExternalOutgoingPrompt("a", "lost", images, failed = true))))
         runCurrent()
         assertEquals(listOf("old"), vm.state.value.messages.map { it.text })
-        assertEquals(listOf(ExternalSendFailure("lost", images)), restored)
+        assertEquals(listOf(ExternalSendFailure("lost", images)), vm.externalSendFailures.value)
+        vm.acknowledgeExternalSendFailure(ExternalSendFailure("lost", images))
         assertTrue(source.dismissed.isEmpty())
         assertTrue(vm.state.value.error != null)
         source.feed.emit(ExternalFeedItem.Readiness(true, null))
@@ -149,7 +154,43 @@ class ChatViewModelExternalTurnTest {
         runCurrent()
         assertEquals(listOf("a"), source.retried)
         assertTrue(source.sent.isEmpty())
-        collector.cancel()
+    }
+
+    @Test fun sendRejectedAfterReadinessChangesRetainsDraftAndAttachmentsWithoutACollector() = runTest(dispatcher) {
+        val source = FakeExternalSource()
+        val gate = CompletableDeferred<Unit>()
+        source.sendGate = gate
+        source.sendFailure = IllegalStateException("remote owner is no longer writable")
+        val vm = ChatViewModel(source)
+        val images = listOf(ImageRefDto("image/png", "AQID"))
+        source.feed.emit(base("old"))
+        source.feed.emit(ExternalFeedItem.Readiness(true, null))
+        vm.send("keep this", images)
+        source.feed.emit(ExternalFeedItem.Readiness(false, "offline"))
+        gate.complete(Unit)
+        runCurrent()
+
+        val failure = ExternalSendFailure("keep this", images)
+        assertEquals(listOf(failure), vm.externalSendFailures.value)
+        assertTrue(source.sent.isEmpty())
+        vm.acknowledgeExternalSendFailure(ExternalSendFailure("another draft", emptyList()))
+        assertEquals(listOf(failure), vm.externalSendFailures.value)
+        vm.acknowledgeExternalSendFailure(failure)
+        assertTrue(vm.externalSendFailures.value.isEmpty())
+    }
+
+    @Test fun readinessLostAfterComposerAdmissionPreservesExactDraftAndAttachments() = runTest(dispatcher) {
+        val source = FakeExternalSource()
+        val vm = ChatViewModel(source)
+        val images = listOf(ImageRefDto("image/png", "AQID"))
+        source.feed.emit(base("old"))
+        source.feed.emit(ExternalFeedItem.Readiness(true, null))
+        assertTrue(vm.admitComposerSend("  keep this  ", hasImages = true))
+        source.feed.emit(ExternalFeedItem.Readiness(false, "loading"))
+        vm.send("  keep this  ", images)
+        runCurrent()
+        assertTrue(source.sent.isEmpty())
+        assertEquals(listOf(ExternalSendFailure("  keep this  ", images)), vm.externalSendFailures.value)
     }
 
     @Test fun pendingQuestionsAreTheCompleteSetOfEachUpdate() = runTest(dispatcher) {

@@ -227,6 +227,18 @@ impl Transcript {
         true
     }
 
+    /// Remove only a row which never acquired a persisted transcript identity.
+    pub fn remove_unadmitted_user_row(&mut self, row_token: &str) -> bool {
+        let Some(index) = self.row_tokens.iter().find_map(|(index, token)| {
+            (token == row_token && !self.row_uuids.contains_key(index)).then_some(*index)
+        }) else {
+            return false;
+        };
+        let marker = format!("unadmitted:{}", uuid::Uuid::new_v4());
+        self.row_uuids.insert(index, vec![marker.clone()]);
+        self.remove_transcript_rows(&[marker]) == 1
+    }
+
     /// Attach successful per-block JSONL UUIDs to the ordinary assistant
     /// text rows from a response. The internal MessageId is only a grouping
     /// key; it is never exposed to selection as a request id. If the rendered

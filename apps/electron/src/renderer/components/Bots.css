@@ -22,7 +22,8 @@
 
 .bots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 18px; padding: 0; margin: 0; list-style: none; }
 .bots-page .bots-card { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; width: 100%; height: 100%; box-sizing: border-box; padding: 20px; text-align: left; border-radius: 14px; background: var(--bots-surface); }
-.bots-avatar { width: 42px; height: 42px; display: grid; place-items: center; margin-bottom: 10px; border: 1px solid var(--bots-border); border-radius: 11px; font-size: 22px; font-weight: 550; color: var(--bots-accent); }
+/* The Bot's avatar (the one of the sidebar and the Teams views) on a tile; it holds a picture, never letters. */
+.bots-avatar { width: 42px; height: 42px; flex: none; display: grid; place-items: center; margin-bottom: 10px; border: 1px solid var(--bots-border); border-radius: 11px; }
 .bots-card-name { font-size: 16px; font-weight: 590; overflow-wrap: anywhere; }
 .bots-card-description { min-height: 38px; color: var(--bots-muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .bots-card-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; width: 100%; margin-top: auto; padding-top: 14px; }
@@ -39,6 +40,8 @@
 .bots-detail { max-width: 860px; display: flex; flex-direction: column; gap: 22px; }
 .bots-page .bots-back { align-self: flex-start; margin-left: -9px; color: var(--bots-muted); }
 .bots-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.bots-detail-identity { min-width: 0; display: flex; align-items: flex-start; gap: 14px; }
+.bots-detail-identity .bots-avatar { margin-bottom: 0; }
 .bots-detail-title { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .bots-detail-title h1 { margin: 0; }
 .bots-detail-title p { font-size: 13px; }

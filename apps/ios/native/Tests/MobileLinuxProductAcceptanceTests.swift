@@ -24,13 +24,13 @@ final class MobileLinuxProductAcceptanceTests: XCTestCase {
         let marker = "product-acceptance-\(UUID().uuidString)"
         func command(_ script: String, cwd: String? = nil) async throws -> String {
             let result = try await runtime.runCommand(request: MobileLinuxCommandRequestFfi(
-                command: "/bin/sh", args: ["-lc", "set -e; \(script)"], cwd: cwd, env: [:], stdin: nil,
+                command: "/bin/sh", args: ["-lc", "set -e; \(script)"], cwd: cwd ?? directories.guestHome, env: [:], stdin: nil,
                 timeoutMs: 30000, network: .disabled, mounts: []))
             XCTAssertEqual(result.exitCode, 0, result.stderr)
             return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         let identity = try await command("id -un; id -u; id -g; printf '%s\\n' \"$HOME\" \"$USER\"; pwd; sudo -n id -u; sudo -ni sh -c 'printf %s \"$HOME\"'")
-        XCTAssertEqual(identity, "\(directories.linuxUser)\n1000\n1000\n\(directories.guestHome)\n\(directories.linuxUser)\n\(directories.defaultGuestCwd)\n0\n/root")
+        XCTAssertEqual(identity, "\(directories.linuxUser)\n1000\n1000\n\(directories.guestHome)\n\(directories.linuxUser)\n\(directories.guestHome)\n0\n/root")
         _ = try await command("printf '\(marker)' > \"$HOME/\(marker)\"; printf project-ok > product-proof", cwd: project.workspace.guestPath)
         XCTAssertEqual(try String(contentsOf: project.workspace.hostURL.appendingPathComponent("product-proof"), encoding: .utf8), "project-ok")
         _ = try await runtime.spawnTask(request: MobileLinuxCommandRequestFfi(
@@ -65,7 +65,7 @@ final class MobileLinuxProductAcceptanceTests: XCTestCase {
         let persisted = try await command("cat \"$HOME/\(marker)\"; cp \"$HOME/\(marker)\" \"$HOME/.lingxi-product-acceptance-cold-\(marker)\"; rm \"$HOME/\(marker)\"")
         XCTAssertEqual(persisted, marker)
         _ = try await runtime.shutdown()
-        print("PRODUCT_MOBILE_LINUX_ACCEPTANCE PASS ios uid=1000 home=\(directories.guestHome) workspace=\(directories.defaultGuestCwd) project=\(project.record.id)")
+        print("PRODUCT_MOBILE_LINUX_ACCEPTANCE PASS ios uid=1000 home=\(directories.guestHome) project=\(project.record.id)")
         #endif
     }
 }

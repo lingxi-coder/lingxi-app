@@ -45,8 +45,9 @@ class FakeTransport extends EventEmitter {
 }
 
 async function openFakeRuntime(manager: SessionRuntimeManager, projectPath: string, id = sessionId) {
-  const ref = { projectPath, sessionId: id };
+  const ref = { projectPath, projectId: projectPath, sessionId: id, mode: 'code' as const };
   const runtime = await manager.ensure(ref, false);
+  runtime.sessionMode = 'code';
   const transport = new FakeTransport();
   const internal = runtime as any;
   internal.activeWorkspace = projectPath;
@@ -75,6 +76,7 @@ async function hostFixture() {
   settings.activateProject(projectPath);
   const manager = createManager();
   const opened = await openFakeRuntime(manager, projectPath);
+  settings.conversationSpaces.register(opened.ref);
   settings.setActiveSession(opened.ref);
   const catalog = {
     find: async () => undefined,
@@ -218,16 +220,20 @@ test('archive rechecks workers after cron cleanup before persisting its archive 
   const fixture = await hostFixture();
   const entered = deferred();
   const resume = deferred();
-  fixture.transport.onCommand = (command) => {
-    if (command.type !== 'cron_manage') throw new Error(`unexpected command ${command.type}`);
-    assert.equal(command.request.action, 'list');
+  (fixture.host as any).scheduled = { manage: async (scope: string, request: { action: string }) => {
+    assert.equal(scope, fixture.projectPath);
+    assert.equal(request.action, 'list');
     entered.resolve();
-    void resume.promise.then(() => fixture.transport.emit('event', {
-      type: 'cron_result', request_id: command.request_id, jobs: [],
-    }));
-  };
+    await resume.promise;
+    return [];
+  } };
+  const path = join(fixture.projectPath, `${sessionId}.jsonl`);
+  const captured = { requested: fixture.ref,
+    source: { ref: fixture.ref, transcriptPath: path }, owner: fixture.ref,
+    selection: { scope: 'current', transcriptPath: path }, runtime: fixture.runtime,
+    apply: async (action: string) => { assert.equal(action, 'verify'); } };
   try {
-    const archiving = (fixture.host as any).archiveSessionInternal(fixture.ref);
+    const archiving = (fixture.host as any).archiveSessionInternal(fixture.ref, captured);
     const rejected = assert.rejects(archiving, /Chat was not archived.*(?:active work|active turn|background|pending interactions)/i);
     await entered.promise;
     fixture.transport.workerStarts();

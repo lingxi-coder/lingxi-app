@@ -12,6 +12,10 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
     }
 
+    func newConversationMode(defaultMode: SessionMode) -> SessionMode {
+        params["mode"].flatMap(SessionMode.init(rawValue:)) ?? defaultMode
+    }
+
     func needsContextRebind(workspace: String, mode: String) -> Bool {
         guard !["session", "new", "project", "market", "apps", "remote", "team"].contains(parts[0]) else { return false }
         return params["workspace"].map { $0 != workspace } == true
@@ -71,6 +75,7 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
             return nil
         }
         guard params["mode"].map({ ["chat", "code"].contains($0) }) ?? true else { return nil }
+        if parts[0] == "session", params["mode"] == nil { return nil }
         if let message = params["message"] {
             guard parts[0] == "session", message.range(of: "^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil else { return nil }
         }

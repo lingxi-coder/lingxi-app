@@ -1,17 +1,36 @@
 import Foundation
 
+private final class SessionScopeRegistryObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var wasPresent: Bool
+
+    init(wasPresent: Bool) { self.wasPresent = wasPresent }
+
+    func observed(_ isPresent: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if isPresent { wasPresent = true }
+        return wasPresent
+    }
+}
+
 /// Persists user-editable conversation state under an explicit conversation
 /// scope. The global scope is a real scope of its own; it never shares keys
 /// with a managed project, so switching workspaces cannot leak
 /// drafts or sessions.
 struct ProjectScopedPreferences {
     private let defaults: UserDefaults
+    private let scopeRegistryObservation: SessionScopeRegistryObservation
     private static let workspacePinnedAtKey = "conversation.workspace.pinned-at"
     private static let sessionPinnedAtKey = "conversation.session.pinned-at"
     private static let cronResultsSeenAtKey = "conversation.cron.results-seen-at"
+    private static let lastModeKey = "conversation.spaces.last-mode"
+    private static let currentModeKey = "conversation.spaces.current-mode"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        self.scopeRegistryObservation = SessionScopeRegistryObservation(
+            wasPresent: defaults.object(forKey: "conversation.spaces.session-scopes") != nil)
     }
 
     /// UI tests use simulated session identifiers and must never persist them
@@ -34,68 +53,202 @@ struct ProjectScopedPreferences {
 
     // MARK: scope-keyed accessors
 
-    func draft(scope: ConversationScope) -> String {
-        defaults.string(forKey: key("draft", scope: scope)) ?? ""
+    func lastMode() -> SessionMode {
+        defaults.string(forKey: Self.lastModeKey).flatMap(SessionMode.init(rawValue:)) ?? .code
+    }
+
+    func setLastMode(_ mode: SessionMode) {
+        defaults.set(mode.rawValue, forKey: Self.lastModeKey)
+    }
+
+    func currentMode() -> SessionMode {
+        defaults.string(forKey: Self.currentModeKey).flatMap(SessionMode.init(rawValue:)) ?? lastMode()
+    }
+
+    func setCurrentMode(_ mode: SessionMode) {
+        defaults.set(mode.rawValue, forKey: Self.currentModeKey)
+    }
+
+    func lastScope(mode: SessionMode) -> ConversationScope? {
+        defaults.string(forKey: "conversation.spaces.last-scope.\(mode.rawValue)").flatMap(ConversationScope.init(workspaceKey:))
+    }
+
+    func setLastScope(_ scope: ConversationScope, mode: SessionMode) {
+        guard case .remote = scope else {
+            defaults.set(scope.workspaceKey, forKey: "conversation.spaces.last-scope.\(mode.rawValue)")
+            return
+        }
     }
 
     func draft(scope: ConversationScope, mode: SessionMode) -> String {
         defaults.string(forKey: key("draft", scope: scope, mode: mode)) ?? ""
     }
 
-    func setDraft(_ value: String, scope: ConversationScope) {
-        defaults.set(value, forKey: key("draft", scope: scope))
-    }
-
     func setDraft(_ value: String, scope: ConversationScope, mode: SessionMode) {
         defaults.set(value, forKey: key("draft", scope: scope, mode: mode))
     }
 
-    func activeSessionID(scope: ConversationScope) -> String {
-        storedActiveSessionID(scope: scope) ?? ""
+    /// A session UUID owns one draft. The mode-scoped slot is used before a
+    /// new session receives its ID.
+    func draft(scope: ConversationScope, mode: SessionMode, ownerSessionID: String) -> String {
+        let owner = canonicalSessionID(ownerSessionID)
+        guard !owner.isEmpty else { return draft(scope: scope, mode: mode) }
+        return (defaults.dictionary(forKey: key("session-drafts", scope: scope)) as? [String: String])?[owner] ?? ""
+    }
+
+    /// Distinguish a deliberately cleared draft from a draft that has never
+    /// been saved for this owner.
+    func hasDraft(scope: ConversationScope, mode: SessionMode, ownerSessionID: String) -> Bool {
+        let owner = canonicalSessionID(ownerSessionID)
+        if owner.isEmpty { return defaults.object(forKey: key("draft", scope: scope, mode: mode)) != nil }
+        return (defaults.dictionary(forKey: key("session-drafts", scope: scope)) as? [String: String])?[owner] != nil
+    }
+
+    func setDraft(_ value: String, scope: ConversationScope, mode: SessionMode, ownerSessionID: String) {
+        let owner = canonicalSessionID(ownerSessionID)
+        guard !owner.isEmpty else {
+            setDraft(value, scope: scope, mode: mode)
+            return
+        }
+        let draftsKey = key("session-drafts", scope: scope)
+        var drafts = defaults.dictionary(forKey: draftsKey) as? [String: String] ?? [:]
+        drafts[owner] = value
+        defaults.set(drafts, forKey: draftsKey)
+    }
+
+    /// Store the original UTF-16 alongside its display draft so a restored
+    /// handoff or suggestion does not normalize otherwise unrepresentable units.
+    func draftSourceCodeUnits(scope: ConversationScope, mode: SessionMode, ownerSessionID: String) -> [UInt16]? {
+        let storageKey = key("draft-source-units", scope: scope, mode: mode)
+        let owner = canonicalSessionID(ownerSessionID)
+        guard let values = defaults.dictionary(forKey: storageKey) as? [String: Data],
+              let data = values[owner],
+              let units = try? JSONDecoder().decode([UInt16].self, from: data),
+              Array(String(decoding: units, as: UTF16.self).utf16)
+                == Array(draft(scope: scope, mode: mode, ownerSessionID: ownerSessionID).utf16)
+        else { return nil }
+        return units
+    }
+
+    func setDraftSourceCodeUnits(_ units: [UInt16]?, scope: ConversationScope,
+                                 mode: SessionMode, ownerSessionID: String) {
+        let storageKey = key("draft-source-units", scope: scope, mode: mode)
+        let owner = canonicalSessionID(ownerSessionID)
+        var values = defaults.dictionary(forKey: storageKey) as? [String: Data] ?? [:]
+        if let units, let data = try? JSONEncoder().encode(units) {
+            values[owner] = data
+        } else {
+            values.removeValue(forKey: owner)
+        }
+        defaults.set(values, forKey: storageKey)
+    }
+
+    /// Save the outgoing owner before restoring the prior selection.
+    func draftForFailedSelection(
+        _ value: String,
+        scope: ConversationScope,
+        mode: SessionMode,
+        fromOwner: String,
+        toOwner: String
+    ) -> String {
+        setDraft(value, scope: scope, mode: mode, ownerSessionID: fromOwner)
+        return draft(scope: scope, mode: mode, ownerSessionID: toOwner)
     }
 
     func activeSessionID(scope: ConversationScope, mode: SessionMode) -> String {
         storedActiveSessionID(scope: scope, mode: mode) ?? ""
     }
 
-    /// Unlike `activeSessionID`, preserves the distinction between a missing
-    /// legacy key and an explicitly saved empty id (the user chose New Chat).
-    func storedActiveSessionID(scope: ConversationScope) -> String? {
-        defaults.string(forKey: key("active-session", scope: scope))
-    }
-
     func storedActiveSessionID(scope: ConversationScope, mode: SessionMode) -> String? {
         defaults.string(forKey: key("active-session", scope: scope, mode: mode))
-    }
-
-    func setActiveSessionID(_ value: String, scope: ConversationScope) {
-        defaults.set(value, forKey: key("active-session", scope: scope))
     }
 
     func setActiveSessionID(_ value: String, scope: ConversationScope, mode: SessionMode) {
         defaults.set(value, forKey: key("active-session", scope: scope, mode: mode))
     }
 
-    // MARK: legacy projectID spellings (nil == global)
-
-    func draft(projectID: String?) -> String {
-        draft(scope: ConversationScope(projectID: projectID))
+    /// Session scope is immutable even when its cwd later points into another Project.
+    func sessionScope(sessionID: String) -> ConversationScope? {
+        let id = canonicalSessionID(sessionID)
+        guard !id.isEmpty,
+              let value = sessionScopeRegistry()?[id]
+        else { return nil }
+        return ConversationScope(workspaceKey: value)
     }
 
-    func setDraft(_ value: String, projectID: String?) {
-        setDraft(value, scope: ConversationScope(projectID: projectID))
+    var sessionScopeClaims: [String: ConversationScope]? {
+        guard let owners = sessionScopeRegistry() else { return nil }
+        var claims: [String: ConversationScope] = [:]
+        for (id, value) in owners {
+            guard let scope = ConversationScope(workspaceKey: value) else { return nil }
+            claims[id] = scope
+        }
+        return claims
     }
 
-    func activeSessionID(projectID: String?) -> String {
-        activeSessionID(scope: ConversationScope(projectID: projectID))
+    var hasValidSessionScopeRegistry: Bool { sessionScopeClaims != nil }
+
+    var hasObservedScheduledSessionIndex: Bool {
+        defaults.bool(forKey: "conversation.spaces.scheduled-index-observed")
     }
 
-    func storedActiveSessionID(projectID: String?) -> String? {
-        storedActiveSessionID(scope: ConversationScope(projectID: projectID))
+    func markScheduledSessionIndexObserved() {
+        defaults.set(true, forKey: "conversation.spaces.scheduled-index-observed")
     }
 
-    func setActiveSessionID(_ value: String, projectID: String?) {
-        setActiveSessionID(value, scope: ConversationScope(projectID: projectID))
+    private func sessionScopeRegistry() -> [String: String]? {
+        let key = "conversation.spaces.session-scopes"
+        guard let stored = defaults.object(forKey: key) else {
+            return scopeRegistryObservation.observed(false) ? nil : [:]
+        }
+        _ = scopeRegistryObservation.observed(true)
+        guard let owners = stored as? [String: String], owners.allSatisfy({ id, scope in
+            !id.isEmpty && id == canonicalSessionID(id) && ConversationScope(workspaceKey: scope) != nil
+        }) else { return nil }
+        return owners
+    }
+
+    @discardableResult
+    func claimSessionScope(sessionID: String, scope: ConversationScope) -> Bool {
+        let id = canonicalSessionID(sessionID)
+        guard !id.isEmpty else { return false }
+        if case .remote = scope { return false }
+        guard var owners = sessionScopeRegistry() else { return false }
+        if let old = owners[id] { return old == scope.workspaceKey }
+        owners[id] = scope.workspaceKey
+        defaults.set(owners, forKey: "conversation.spaces.session-scopes")
+        _ = scopeRegistryObservation.observed(true)
+        return true
+    }
+
+    func setHandoffReference(_ reference: SessionHandoffReference?, sessionID: String,
+                             scope: ConversationScope, mode: SessionMode) {
+        let storageKey = key("handoff-references", scope: scope, mode: mode)
+        var values = defaults.dictionary(forKey: storageKey) as? [String: Data] ?? [:]
+        let owner = canonicalSessionID(sessionID)
+        if let reference, let data = try? JSONEncoder().encode(reference) {
+            values[owner] = data
+        } else {
+            values.removeValue(forKey: owner)
+        }
+        defaults.set(values, forKey: storageKey)
+    }
+
+    /// Preserve a handoff before its new owner has an indexed exact source.
+    /// A cold launch can reopen the blank draft if registration is interrupted.
+    func prepareUnindexedHandoffDraft(_ draft: String, sourceCodeUnits: [UInt16],
+                                      reference: SessionHandoffReference, scope: ConversationScope,
+                                      mode: SessionMode) {
+        setDraft(draft, scope: scope, mode: mode, ownerSessionID: "")
+        setDraftSourceCodeUnits(sourceCodeUnits, scope: scope, mode: mode, ownerSessionID: "")
+        setHandoffReference(reference, sessionID: "", scope: scope, mode: mode)
+        setActiveSessionID("", scope: scope, mode: mode)
+    }
+
+    func handoffReference(sessionID: String, scope: ConversationScope, mode: SessionMode) -> SessionHandoffReference? {
+        guard let values = defaults.dictionary(forKey: key("handoff-references", scope: scope, mode: mode)) as? [String: Data],
+              let data = values[canonicalSessionID(sessionID)] else { return nil }
+        return try? JSONDecoder().decode(SessionHandoffReference.self, from: data)
     }
 
     // MARK: workspace presentation preferences
@@ -169,18 +322,28 @@ struct ProjectScopedPreferences {
         return current
     }
 
-    /// `ConversationScope.preferenceScope` keeps the historical key strings
-    /// for global/project scopes byte-identical (existing user state must
-    /// survive).
     private func key(_ field: String, scope: ConversationScope) -> String {
-        "conversation.\(scope.preferenceScope).\(field)"
+        "conversation.spaces.\(scope.preferenceScope).\(field)"
     }
 
     private func key(_ field: String, scope: ConversationScope, mode: SessionMode) -> String {
-        "conversation.\(scope.preferenceScope).\(mode.rawValue).\(field)"
+        "conversation.spaces.\(scope.preferenceScope).\(mode.rawValue).\(field)"
     }
 
     private func key(_ field: String, mode: SessionMode) -> String {
-        "conversation.\(mode.rawValue).\(field)"
+        "conversation.spaces.\(mode.rawValue).\(field)"
+    }
+}
+
+enum ConversationModeRestorePolicy {
+    static func sessionID(
+        mode: SessionMode,
+        scoped: String?,
+        sessions: [ProjectSessionSummary] = []
+    ) -> String {
+        let selected = scoped ?? ""
+        guard !selected.isEmpty else { return "" }
+        if let indexed = sessions.first(where: { canonicalSessionID($0.sessionId) == canonicalSessionID(selected) }), indexed.mode != mode { return "" }
+        return selected
     }
 }

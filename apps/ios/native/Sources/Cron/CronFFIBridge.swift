@@ -4,11 +4,6 @@ import Foundation
 
 actor FfiCronStoreProvider: CronStoreProviding {
     private var stores: [String: FfiCronStoreClient] = [:]
-    private let defaults: @MainActor @Sendable () -> (String?, CronReasoning)
-
-    init(defaults: @escaping @MainActor @Sendable () -> (String?, CronReasoning) = { (nil, CronReasoning()) }) {
-        self.defaults = defaults
-    }
 
     func store(for scope: CronScope, appSandboxRoot: String) async throws -> any CronStoreClient {
         if let cached = stores[scope.scopeID] { return cached }
@@ -17,11 +12,20 @@ actor FfiCronStoreProvider: CronStoreProviding {
             managedRoot: LXISHDefaultWorkspace.managedRootPath(),
             projectCwd: scope.projectCwd
         )
-        let (model, reasoning) = await defaults()
-        try await handle.setMigrationDefaults(model: model ?? "", reasoningJson: String(decoding: try JSONEncoder().encode(reasoning), as: UTF8.self))
         let client = FfiCronStoreClient(handle: handle)
         stores[scope.scopeID] = client
         return client
+    }
+
+    func storeForAdmission(for scope: CronScope, appSandboxRoot: String) async throws -> any CronStoreClient {
+        // Strict discovery never rewrites existing task or ledger data. The
+        // native constructor and advisory lock may create their directories.
+        let handle = try buildIosCronStore(
+            appSandboxRoot: appSandboxRoot,
+            managedRoot: LXISHDefaultWorkspace.managedRootPath(),
+            projectCwd: scope.projectCwd
+        )
+        return FfiCronStoreClient(handle: handle)
     }
 }
 
@@ -33,19 +37,17 @@ final class FfiCronStoreClient: CronStoreClient, @unchecked Sendable {
     }
 
     func list() async throws -> [CronTaskRecord] {
-        await handle.list().map(Self.map)
+        try await handle.listStrict().map(Self.map)
     }
 
-    func create(cronExpr: String, prompt: String, recurring: Bool) async throws -> CronTaskRecord {
-        Self.map(try await handle.create(cronExpr: cronExpr, prompt: prompt, recurring: recurring))
-    }
-
-    func update(taskID: String, cronExpr: String, prompt: String, recurring: Bool) async throws -> CronTaskRecord {
-        Self.map(try await handle.update(id: taskID, cronExpr: cronExpr, prompt: prompt, recurring: recurring))
-    }
-
-    func migrateLegacyTasks(defaultModel: String?, reasoning: CronReasoning) async throws {
-        try await handle.setMigrationDefaults(model: defaultModel ?? "", reasoningJson: String(decoding: try JSONEncoder().encode(reasoning), as: UTF8.self))
+    func listOwnerReservations() async throws -> [CronOwnerReservation] {
+        try await handle.listOwnerReservationsStrict().map { dto in
+            guard let mode = SessionMode(rawValue: dto.sessionMode) else {
+                throw ProjectRepositoryError.conflictingSessionMode
+            }
+            return CronOwnerReservation(sessionId: dto.sessionId, sessionTranscriptPath: dto.sessionTranscriptPath,
+                                        sessionMode: mode, sessionScopeKey: dto.sessionScopeKey)
+        }
     }
 
     func saveConfigured(draft: CronTaskDraft) async throws -> CronTaskRecord {
@@ -112,15 +114,11 @@ struct ProjectCronScopeProvider: CronScopeProviding, @unchecked Sendable {
 
     func scopes(appSandboxRoot: String) async -> [CronScope] {
         let snapshot = await readProjects()
-        return [CronScope.global(appSandboxRoot: appSandboxRoot)] + snapshot.projects.map { project in
-            CronScope(
-                scopeID: project.record.id,
-                projectID: project.record.id,
-                projectName: project.record.name,
-                projectCwd: project.workspace.hostURL.path,
-                guestWorkspacePath: project.workspace.guestPath
-            )
-        }
+        return Self.scopes(appSandboxRoot: appSandboxRoot, projects: snapshot.projects)
+    }
+
+    static func scopes(appSandboxRoot: String, projects: [ProjectSnapshot]) -> [CronScope] {
+        [CronScope.global(appSandboxRoot: appSandboxRoot)] + projects.map(CronScope.project)
     }
 
     func activeScopeID(for scopes: [CronScope]) async -> String {
@@ -128,27 +126,136 @@ struct ProjectCronScopeProvider: CronScopeProviding, @unchecked Sendable {
     }
 }
 
+// UniFFI can invoke the callback from any executor. All mutable callback
+// state and every access to the UI-owned gate/closures are MainActor-isolated.
+final class FfiCronOwnerAdmission: MobileCronOwnerAdmission, @unchecked Sendable {
+    private let token = UUID()
+    private let gate: CronOwnerAdmissionGate
+    private let scope: CronScope
+    private let task: CronTaskRecord
+    private let prepare: @MainActor @Sendable (CronOwnerCandidate, CronScope, CronTaskRecord) -> Bool
+    private let confirm: @MainActor @Sendable (CronOwnerReservation, CronScope, CronTaskRecord) async throws -> Void
+    private let blockAdmission: @MainActor @Sendable (String) -> Void
+    @MainActor private(set) var callbackFinished = false
+    @MainActor private var began = false
+    @MainActor private var confirming = false
+    @MainActor private var reservedCandidate: CronOwnerCandidate?
+
+    @MainActor
+    init(gate: CronOwnerAdmissionGate, scope: CronScope, task: CronTaskRecord,
+         prepare: @escaping @MainActor @Sendable (CronOwnerCandidate, CronScope, CronTaskRecord) -> Bool,
+         confirm: @escaping @MainActor @Sendable (CronOwnerReservation, CronScope, CronTaskRecord) async throws -> Void,
+         blockAdmission: @escaping @MainActor @Sendable (String) -> Void) {
+        self.gate = gate
+        self.scope = scope
+        self.task = task
+        self.prepare = prepare
+        self.confirm = confirm
+        self.blockAdmission = blockAdmission
+    }
+
+    func beginOwner(candidate: CronOwnerCandidateDto) async -> Bool {
+        await MainActor.run {
+            guard !began, !callbackFinished else { return false }
+            began = true
+            guard let mode = SessionMode(rawValue: candidate.sessionMode) else { return false }
+            let owner = CronOwnerCandidate(sessionId: candidate.sessionId, sessionMode: mode,
+                sessionScopeKey: candidate.sessionScopeKey, sessionTranscriptPath: candidate.sessionTranscriptPath)
+            guard gate.ownerCatalogIsCurrent?() ?? true,
+                  cronCandidateMatchesTask(owner, task: task), prepare(owner, scope, task),
+                  gate.begin(sessionID: owner.sessionId, token: token) else { return false }
+            reservedCandidate = owner
+            return true
+        }
+    }
+
+    func confirmOwner(reservation: CronOwnerReservationDto) async -> Bool {
+        let owner: CronOwnerReservation? = await MainActor.run {
+            guard !callbackFinished, !confirming else { return nil }
+            guard let reservedCandidate,
+                  canonicalSessionID(reservedCandidate.sessionId) == canonicalSessionID(reservation.sessionId),
+                  reservedCandidate.sessionMode.rawValue == reservation.sessionMode,
+                  reservedCandidate.sessionScopeKey == reservation.sessionScopeKey,
+                  (reservedCandidate.sessionTranscriptPath.map { $0 == reservation.sessionTranscriptPath } ?? true) else {
+                blockAdmission("Native scheduler returned a different session owner")
+                callbackFinished = true
+                gate.finish(token)
+                return nil
+            }
+            guard let mode = SessionMode(rawValue: reservation.sessionMode) else {
+                blockAdmission("Invalid native session mode")
+                callbackFinished = true
+                gate.finish(token)
+                return nil
+            }
+            confirming = true
+            return CronOwnerReservation(sessionId: reservation.sessionId,
+                sessionTranscriptPath: reservation.sessionTranscriptPath,
+                sessionMode: mode, sessionScopeKey: reservation.sessionScopeKey)
+        }
+        guard let owner else { return false }
+        do {
+            try await confirm(owner, scope, task)
+            return await MainActor.run { callbackFinished = true; gate.finish(token); return true }
+        } catch {
+            return await MainActor.run {
+                blockAdmission(error.localizedDescription)
+                callbackFinished = true
+                gate.finish(token)
+                return false
+            }
+        }
+    }
+
+    @MainActor func finish() { gate.finish(token) }
+}
+
+// Stored configuration is immutable; the non-Sendable media composition is
+// only accessed inside MainActor.run when a native handle is constructed.
 final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
     private let appSandboxRoot: String
     private let mediaHostComposition: IOSNativeMediaHostComposition?
     private let launchSnapshot: @MainActor @Sendable () -> ProviderLaunchSnapshot
     private let terminalConfig: @MainActor @Sendable (CronScope) -> TerminalRuntimeConfig?
+    private let admissionGate: CronOwnerAdmissionGate
+    private let prepareOwner: @MainActor @Sendable (CronOwnerCandidate, CronScope, CronTaskRecord) -> Bool
+    private let confirmOwner: @MainActor @Sendable (CronOwnerReservation, CronScope, CronTaskRecord) async throws -> Void
+    private let reconcileUnconfirmed: @Sendable (CronScope) async throws -> Void
+    private let blockAdmission: @MainActor @Sendable (String) -> Void
 
     init(
         appSandboxRoot: String,
         mediaHostComposition: IOSNativeMediaHostComposition?,
         launchSnapshot: @escaping @MainActor @Sendable () -> ProviderLaunchSnapshot,
-        terminalConfig: @escaping @MainActor @Sendable (CronScope) -> TerminalRuntimeConfig?
+        terminalConfig: @escaping @MainActor @Sendable (CronScope) -> TerminalRuntimeConfig?,
+        admissionGate: CronOwnerAdmissionGate,
+        prepareOwner: @escaping @MainActor @Sendable (CronOwnerCandidate, CronScope, CronTaskRecord) -> Bool,
+        confirmOwner: @escaping @MainActor @Sendable (CronOwnerReservation, CronScope, CronTaskRecord) async throws -> Void,
+        reconcileUnconfirmed: @escaping @Sendable (CronScope) async throws -> Void,
+        blockAdmission: @escaping @MainActor @Sendable (String) -> Void
     ) {
         self.appSandboxRoot = appSandboxRoot
         self.mediaHostComposition = mediaHostComposition
         self.launchSnapshot = launchSnapshot
         self.terminalConfig = terminalConfig
+        self.admissionGate = admissionGate
+        self.prepareOwner = prepareOwner
+        self.confirmOwner = confirmOwner
+        self.reconcileUnconfirmed = reconcileUnconfirmed
+        self.blockAdmission = blockAdmission
     }
 
     func runTaskNow(scope: CronScope, task: CronTaskRecord) async throws -> CronExecutionOutcome {
         let handle = try await makeHandle(scope: scope, task: task)
-        guard let result = await handle.runCronTaskNow(taskId: task.id) else {
+        let callback = await makeAdmission(scope: scope, task: task)
+        let admission = MobileCronAdmission(owner: callback)
+        let result = await withTaskCancellationHandler {
+            await handle.runCronTaskNow(taskId: task.id, ownerAdmission: admission)
+        } onCancel: {
+            Task.detached { await admission.cancelAndWait() }
+        }
+        try await finishAdmission(callback, admission: admission, scope: scope)
+        guard let result else {
             return CronExecutionOutcome(
                 status: .failed,
                 resultText: nil,
@@ -156,16 +263,26 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
                 errorKind: .validation
             )
         }
-        return Self.map(result)
+        withExtendedLifetime(handle) {}
+        return Self.map(result, scope: scope, task: task)
     }
 
     func runTaskNow(scope: CronScope, task: CronTaskRecord, scheduledAtMs: UInt64) async throws -> CronExecutionOutcome {
         let handle = try await makeHandle(scope: scope, task: task)
-        guard let result = await handle.runCronTaskNowAt(taskId: task.id, scheduledAtMs: scheduledAtMs) else {
+        let callback = await makeAdmission(scope: scope, task: task)
+        let admission = MobileCronAdmission(owner: callback)
+        let result = await withTaskCancellationHandler {
+            await handle.runCronTaskNowAt(taskId: task.id, scheduledAtMs: scheduledAtMs, ownerAdmission: admission)
+        } onCancel: {
+            Task.detached { await admission.cancelAndWait() }
+        }
+        try await finishAdmission(callback, admission: admission, scope: scope)
+        guard let result else {
             return CronExecutionOutcome(status: .failed, resultText: nil,
                 errorMessage: String(localized: "cron_task_unavailable"), errorKind: .validation)
         }
-        return Self.map(result)
+        withExtendedLifetime(handle) {}
+        return Self.map(result, scope: scope, task: task)
     }
 
     func runTaskIfDue(
@@ -174,7 +291,43 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
         scheduledAtMs: UInt64
     ) async throws -> CronExecutionOutcome? {
         let handle = try await makeHandle(scope: scope, task: task)
-        return await handle.runCronTaskIfDue(taskId: task.id, scheduledAtMs: scheduledAtMs).map(Self.map)
+        let callback = await makeAdmission(scope: scope, task: task)
+        let admission = MobileCronAdmission(owner: callback)
+        let result = await withTaskCancellationHandler {
+            await handle.runCronTaskIfDue(taskId: task.id, scheduledAtMs: scheduledAtMs, ownerAdmission: admission)
+        } onCancel: {
+            Task.detached { await admission.cancelAndWait() }
+        }
+        try await finishAdmission(callback, admission: admission, scope: scope)
+        withExtendedLifetime(handle) {}
+        return result.map { Self.map($0, scope: scope, task: task) }
+    }
+
+    private func makeAdmission(scope: CronScope, task: CronTaskRecord) async -> FfiCronOwnerAdmission {
+        await MainActor.run {
+            FfiCronOwnerAdmission(gate: admissionGate, scope: scope, task: task,
+                                  prepare: prepareOwner,
+                                  confirm: confirmOwner, blockAdmission: blockAdmission)
+        }
+    }
+
+    private func finishAdmission(_ callback: FfiCronOwnerAdmission, admission: MobileCronAdmission, scope: CronScope) async throws {
+        if await MainActor.run(body: { !callback.callbackFinished }) {
+            // The Swift caller may be cancelled while a detached native driver
+            // still has a ledger write or callback in flight. Wait for that
+            // barrier independently of the caller's cancellation.
+            await Task.detached { await admission.cancelAndWait() }.value
+            do {
+                // A cancelled caller must still mirror any durable reservation
+                // before its short admission gate is released.
+                try await Task.detached { try await self.reconcileUnconfirmed(scope) }.value
+            }
+            catch {
+                await MainActor.run { blockAdmission(error.localizedDescription); callback.finish() }
+                throw CronExecutionError(kind: .validation, message: error.localizedDescription, statusOverride: .failed)
+            }
+        }
+        await MainActor.run { callback.finish() }
     }
 
     private func makeHandle(scope: CronScope, task: CronTaskRecord? = nil) async throws -> MobileEngineHandle {
@@ -198,7 +351,24 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
         return try await NativeEngineFactory.build(prepared, mediaHost: mediaHost)
     }
 
-    private static func map(_ fired: FiredCronJobDto) -> CronExecutionOutcome {
+    private static func map(_ fired: FiredCronJobDto, scope: CronScope, task: CronTaskRecord) -> CronExecutionOutcome {
+        let mode = fired.sessionMode.flatMap(SessionMode.init(rawValue:))
+        let sessionScopeKey: String?
+        if task.configuration.runMode == .selectedSession {
+            // SDK validates the path and mode; the opaque owner must also be
+            // the one captured by the editor for this exact selected session.
+            if canonicalSessionID(fired.sessionId ?? "") == canonicalSessionID(task.configuration.targetSessionId ?? ""),
+               fired.sessionTranscriptPath == task.configuration.targetSessionTranscriptPath,
+               mode == task.configuration.targetSessionMode,
+               fired.sessionScopeKey == task.configuration.targetSessionScopeKey {
+                sessionScopeKey = fired.sessionScopeKey
+            } else {
+                sessionScopeKey = nil
+            }
+        } else {
+            sessionScopeKey = fired.sessionScopeKey == task.configuration.sessionScopeKey &&
+                mode == task.configuration.sessionMode ? fired.sessionScopeKey : nil
+        }
         switch fired.status {
         case .ok:
             return CronExecutionOutcome(
@@ -206,7 +376,8 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
                 resultText: fired.resultText,
                 errorMessage: nil,
                 errorKind: nil,
-                sessionID: fired.sessionId
+                sessionID: fired.sessionId, sessionTranscriptPath: fired.sessionTranscriptPath,
+                sessionMode: mode, sessionScopeKey: sessionScopeKey
             )
         case .failed(let message):
             let classification = classifyFailure(message, retryable: fired.retryable)
@@ -215,7 +386,19 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
                 resultText: fired.resultText,
                 errorMessage: message,
                 errorKind: classification.kind,
-                sessionID: fired.sessionId
+                sessionID: fired.sessionId, sessionTranscriptPath: fired.sessionTranscriptPath,
+                sessionMode: mode, sessionScopeKey: sessionScopeKey
+            )
+        case .outcomeUnknown(let message):
+            // The model may already have run. Keep its exact owner receipt and
+            // never queue or automatically replay an indeterminate outcome.
+            return CronExecutionOutcome(
+                status: .interrupted,
+                resultText: fired.resultText,
+                errorMessage: message,
+                errorKind: .system,
+                sessionID: fired.sessionId, sessionTranscriptPath: fired.sessionTranscriptPath,
+                sessionMode: mode, sessionScopeKey: sessionScopeKey
             )
         }
     }

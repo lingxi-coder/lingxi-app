@@ -6,11 +6,26 @@ import com.lingxi.code.bindings.android.AndroidEventListener
 import com.lingxi.code.bindings.android.AndroidPermissionSink
 import com.lingxi.code.bindings.android.createAndroidSideChat
 import com.lingxi.code.model.EngineModelState
+import com.lingxi.code.model.canonicalSessionId
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
+/** Only explicit side-manager admission rejections prove no turn was started. */
+internal fun isKnownSideChatRejection(failure: Throwable): Boolean =
+    failure is SideChatNotAdmittedException ||
+        (failure is ClientException.Rejected && failure.message in setOf(
+            "side chat host is closed", "side chat is closing", "side chat is busy",
+            "command is unavailable in side chat",
+        ))
+
 /** One RAM-only child. Never owns or closes its parent's engine handle. */
-internal class SideChatSource(private val handle: MobileEngineHandle) : ConversationSource {
+internal class SideChatSource(
+    private val handle: MobileEngineHandle,
+    private val parentSessionId: String,
+    private val currentParentSessionId: () -> String?,
+    private val parentAdmission: () -> Boolean,
+) : ConversationSource, NativePromptReceiptSource {
+    override val turnAdmissionReady: Boolean get() = parentAdmission()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val relay = LosslessEventRelay<ClientEvent>(scope)
     val controls = MutableStateFlow<ConversationControlsDto?>(null)
@@ -28,6 +43,7 @@ internal class SideChatSource(private val handle: MobileEngineHandle) : Conversa
     override val clientEvents: Flow<ClientEvent> = relay.events
 
     suspend fun create(requestId: String) {
+        requireSideChatParentAdmission(parentAdmission())
         val info = createAndroidSideChat(handle, requestId, null, object : AndroidEventListener {
             override suspend fun onEvent(event: ClientEvent) {
                 receiveEvent(event)
@@ -68,13 +84,39 @@ internal class SideChatSource(private val handle: MobileEngineHandle) : Conversa
             ingress = PermissionIngress(permissions)
         }
     }
-    override suspend fun submitClientCommand(command: ClientCommand) {
-        check(!ended) { "Side chat has ended" }
+    override suspend fun submitClientCommand(command: ClientCommand) = submitCommand(command, { true })
+
+    private suspend fun submitCommand(
+        command: ClientCommand,
+        tryBeginNative: () -> Boolean,
+        bindNativeIdentity: (NativePromptIdentity) -> Boolean = { true },
+        onNativeResult: (Result<Unit>) -> Unit = {},
+    ) {
+        requireSideChatParentAdmission(parentAdmission())
+        if (ended) throw SideChatNotAdmittedException("Side chat has ended")
         if (command is ClientCommand.SendPrompt || command is ClientCommand.ForceCompact) {
-            check(foreground && !backgroundStopPending) { "Return to the app and wait for the side turn to stop before sending" }
+            if (!foreground || backgroundStopPending) throw SideChatNotAdmittedException("Return to the app and wait for the side turn to stop before sending")
         }
-        handle.submitSideChat(sideId, command)
+        if (command is ClientCommand.SendPrompt) {
+            val identity = currentNativePromptIdentity() ?: throw SideChatNotAdmittedException("Side chat parent session changed")
+            if (!bindNativeIdentity(identity)) throw SideChatNotAdmittedException("Side chat owner changed before submission")
+        }
+        if (!tryBeginNative()) throw CancellationException("Turn cancelled before submission")
+        if (command is ClientCommand.SendPrompt) {
+            submitWithReceipt(submit = { handle.submitSideChat(sideId, command) }, record = onNativeResult)
+        } else handle.submitSideChat(sideId, command)
     }
+
+    override suspend fun currentNativePromptIdentity(): NativePromptIdentity? {
+        if (!::sideId.isInitialized || currentParentSessionId()?.let(::canonicalSessionId) != canonicalSessionId(parentSessionId)) return null
+        return NativePromptIdentity(parentSessionId, sideId).canonical()
+    }
+
+    override suspend fun clearNotAdmitted(identity: NativePromptIdentity, turnId: Long): Boolean =
+        identity.sideId != null && currentNativePromptIdentity() == identity.canonical()
+
+    internal suspend fun submitQueuedPrompt(command: ClientCommand.SendPrompt, tryBeginNative: () -> Boolean) =
+        submitCommand(command, tryBeginNative)
     override fun submit(text: String, images: List<ImageRefDto>): Flow<ReplyEvent> =
         submitPrompt(text, images, null, null, null)
 
@@ -96,20 +138,34 @@ internal class SideChatSource(private val handle: MobileEngineHandle) : Conversa
         promptMode: PromptModeDto?,
     ): Flow<ReplyEvent> = submitPrompt(text, images, turnId, visualizationContext, promptMode)
 
+    override fun submitForComposer(
+        text: String, images: List<ImageRefDto>, turnId: Long,
+        visualizationContext: VisualizationRef?, promptMode: PromptModeDto?,
+        onNotAdmitted: () -> Unit,
+        tryBeginNative: () -> Boolean,
+        bindNativeIdentity: (NativePromptIdentity) -> Boolean,
+        onNativeResult: (Result<Unit>) -> Unit,
+    ): Flow<ReplyEvent> = submitPrompt(text, images, turnId, visualizationContext, promptMode, onNotAdmitted, tryBeginNative, bindNativeIdentity, onNativeResult)
+
     private fun submitPrompt(
         text: String,
         images: List<ImageRefDto>,
         turnId: Long?,
         visualizationContext: VisualizationRef?,
         promptMode: PromptModeDto?,
+        onNotAdmitted: (() -> Unit)? = null,
+        tryBeginNative: () -> Boolean = { true },
+        bindNativeIdentity: (NativePromptIdentity) -> Boolean = { true },
+        onNativeResult: (Result<Unit>) -> Unit = {},
     ): Flow<ReplyEvent> =
         mapReplyStream(
             relay.events.onSubscription {
                 try {
-                    submitClientCommand(
-                        sideChatSendPromptCommand(text, images, turnId, visualizationContext, promptMode),
-                    )
+                    submitCommand(sideChatSendPromptCommand(text, images, turnId, visualizationContext, promptMode), tryBeginNative, bindNativeIdentity, onNativeResult)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
                 } catch (failure: Throwable) {
+                    if (isKnownSideChatRejection(failure)) onNotAdmitted?.invoke()
                     emit(
                         ClientEvent.Error(
                             ErrorKindDto.TRANSPORT,
@@ -122,6 +178,7 @@ internal class SideChatSource(private val handle: MobileEngineHandle) : Conversa
             },
             DefaultConversationStrings,
             acceptSlashCommandResults = true,
+            expectedTurnId = turnId,
         )
     override suspend fun cancel() = cancel(null)
 

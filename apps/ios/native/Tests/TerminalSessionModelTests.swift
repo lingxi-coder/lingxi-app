@@ -413,19 +413,20 @@ final class TerminalSessionModelTests: XCTestCase {
     }
 
     /// A shell is not a property of a project. With no project open the
-    /// terminal must still start, in the runtime's own persistent home.
+    /// terminal must still start, in the runtime's persistent projects mount.
     func testTerminalOpensWithoutAProject() {
         let descriptor = TerminalRuntimeDescriptor.make(
             appSandboxRoot: NSTemporaryDirectory(),
             project: nil,
             linuxRuntime: LinuxRuntimeState()
         )
-        XCTAssertNotNil(
-            descriptor.config,
-            "a project-less terminal still needs a runtime config, or no shell can start"
-        )
-        XCTAssertEqual(descriptor.workspace.guestPath, LXISHDefaultWorkspace.guestHome)
-        XCTAssertEqual(descriptor.launchCwd, LXISHDefaultWorkspace.guestHome)
+        if (try? LXISHRuntimeBundleMetadata.current()) == nil {
+            XCTAssertNil(descriptor.config, "a missing or mismatched rootfs must leave the runtime unavailable")
+        } else {
+            XCTAssertNotNil(descriptor.config)
+        }
+        XCTAssertEqual(descriptor.workspace.guestPath, LXISHDefaultWorkspace.guestWorkspace)
+        XCTAssertEqual(descriptor.launchCwd, LXISHDefaultWorkspace.guestWorkspace)
         XCTAssertNil(descriptor.invalidRequestedCwdMessage)
     }
 
@@ -438,8 +439,8 @@ final class TerminalSessionModelTests: XCTestCase {
         let b = TerminalRuntimeDescriptor.make(
             appSandboxRoot: NSTemporaryDirectory(), project: nil, linuxRuntime: LinuxRuntimeState()
         )
-        XCTAssertEqual(a.config?.stableWorkspaceId, b.config?.stableWorkspaceId)
-        XCTAssertFalse(a.config?.stableWorkspaceId.isEmpty ?? true)
+        XCTAssertEqual(a.workspace.guestPath, b.workspace.guestPath)
+        XCTAssertFalse(LXISHDefaultWorkspace.stableID().isEmpty)
     }
 
     /// Return is the only submit path now that the Send button is gone, and a
@@ -798,11 +799,11 @@ final class TerminalSessionModelTests: XCTestCase {
         // function — `managedRootPath()` has a documented failure branch that
         // returns "", and comparing it to itself would pass on "" while the
         // terminal quietly pointed at nothing.
-        let managedRoot = try XCTUnwrap(descriptor.config).managedRoot
+        let managedRoot = LXISHDefaultWorkspace.managedRootPath()
         XCTAssertTrue(managedRoot.hasPrefix("/"), "must be absolute, got \(managedRoot)")
         XCTAssertTrue(managedRoot.hasSuffix("mobile-linux/ios-ish"), "got \(managedRoot)")
         XCTAssertFalse(managedRoot.contains("/some/sandbox"), "must not hang off appSandboxRoot")
-        XCTAssertEqual(managedRoot, LXISHDefaultWorkspace.managedRootPath())
+        if let config = descriptor.config { XCTAssertEqual(config.managedRoot, managedRoot) }
     }
 
     /// `LinuxRuntimeState.mounts` carries REAL mount specs only, so the

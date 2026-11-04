@@ -1,4 +1,5 @@
 import { fixtureAccountSnapshot, providerAccountsMock } from './provider-accounts-mock';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { useI18n } from '../../src/renderer/i18n/useI18n';
 import { LANGUAGE_STORAGE_KEY, invalidateLanguagePreference } from '../../src/renderer/i18n/locale';
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -41,6 +42,10 @@ function Fixture() {
   const [closeCalls, setCloseCalls] = useState(0);
   const [lastPermissionRuleCall, setLastPermissionRuleCall] = useState<unknown>(null);
   const [lastEngineSettingsPatch, setLastEngineSettingsPatch] = useState<unknown>(null);
+  const [lastProviderSettingsPatch, setLastProviderSettingsPatch] = useState<Record<string, unknown> | null>(null);
+  const [providerSettings, setProviderSettings] = useState<Record<string, unknown>>({ providers: {}, routing: {} });
+  const [providerSettingsApplyPending, setProviderSettingsApplyPending] = useState(false);
+  const failProviderApply = useRef(false);
   const [providerAccountSnapshot, setProviderAccountSnapshot] = useState(() => fixtureAccountSnapshot([]));
   const [credentialWrites, setCredentialWrites] = useState<string[]>([]);
   const [projectList, setProjectList] = useState<string[]>([]);
@@ -118,6 +123,17 @@ function Fixture() {
       } as SettingsSnapshotEvent;
     });
   }, []);
+  const updateProviderSettings = useCallback(async (patch: Record<string, unknown>) => {
+    if (holdSettingsWrite.current) await new Promise<void>((resolve) => { releaseSettingsWrite.current = resolve; });
+    setLastProviderSettingsPatch(patch);
+    setProviderSettings((previous) => ({ ...previous, ...patch }));
+    if (failProviderApply.current) {
+      failProviderApply.current = false;
+      setProviderSettingsApplyPending(true);
+      throw new Error('Provider settings were saved but could not be applied');
+    }
+    setProviderSettingsApplyPending(false);
+  }, []);
 
   const providerAccounts = useMemo(() => providerAccountsMock({ changed: setProviderAccountSnapshot, write: async providerId => {
     if (failNextCredential.current) { failNextCredential.current = false; throw new Error('Simulated credential storage failure'); }
@@ -125,6 +141,7 @@ function Fixture() {
   } }), []);
   const bridge = {
     activeSession: { projectPath: '/test/project', sessionId: activeSessionId },
+    providerSettings, providerSettingsApplyPending,
     bootstrap: {
       // `settings`/`diagnostics`/`runtimes`/`versions` below only matter to
       // the Task 16 pages (General/Projects/Diagnostics/About), which the
@@ -132,6 +149,8 @@ function Fixture() {
       // now render for real instead of a placeholder — a bootstrap this
       // thin would otherwise throw reading `.settings.theme` etc.
       settings: { version: 1 as const, projects: projectList, pinnedSessions: [] as never[] },
+      conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: projectList,
+        selectedProject: hasProject ? '/test/project' : null, activeSession: { projectPath: '/test/project', sessionId: activeSessionId } }),
       projectCatalogs,
       providerAccountSnapshot,
       workspace: hasProject ? { path: '/test/project', trusted: true } : { trusted: false },
@@ -282,7 +301,7 @@ function Fixture() {
     // click a save/add/remove button on them, but they are here so a future
     // scenario that does doesn't have to rediscover this same crash.
     updateEngineSettings,
-    updateProviderSettings: updateEngineSettings,
+    updateProviderSettings,
     providerAccounts,
     refreshModelPicker: noopAsyncVoid,
     setModelPickerVisibility: noopAsyncVoid,
@@ -324,6 +343,8 @@ function Fixture() {
       setSessionLoading,
       setActiveSession: (sessionId: string) => { setActiveSessionId(sessionId); setSettingsSnapshotEvent(null); },
       failNextCredential: () => { failNextCredential.current = true; },
+      failNextProviderApply: () => { failProviderApply.current = true; },
+      setProviderSettings,
       holdSettingsWrite: () => { holdSettingsWrite.current = true; },
       releaseSettingsWrite: () => { holdSettingsWrite.current = false; releaseSettingsWrite.current?.(); },
       setSnapshot: (effective: Record<string, unknown>, active: Record<string, unknown>) => {
@@ -437,12 +458,14 @@ function Fixture() {
         closeCalls,
         lastPermissionRuleCall,
         lastEngineSettingsPatch,
+        lastProviderSettingsPatch,
+        providerSettings,
         credentialWrites,
         providerAccountSnapshot,
       }),
     };
     return () => { delete window.__settingsScreenTest; };
-  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, credentialWrites, providerAccountSnapshot, settingsSnapshotEvent]);
+  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, lastProviderSettingsPatch, providerSettings, credentialWrites, providerAccountSnapshot, settingsSnapshotEvent]);
 
   return (
     <Theme.Provider value={tokens(fixtureTheme === 'dark')}>
@@ -471,6 +494,8 @@ declare global {
       setSessionLoading(value: boolean): void;
       setActiveSession(sessionId: string): void;
       failNextCredential(): void;
+      failNextProviderApply(): void;
+      setProviderSettings(settings: Record<string, unknown>): void;
       holdSettingsWrite(): void;
       releaseSettingsWrite(): void;
       setSnapshot(effective: Record<string, unknown>, active: Record<string, unknown>): void;
@@ -516,6 +541,8 @@ declare global {
         closeCalls: number;
         lastPermissionRuleCall: unknown;
         lastEngineSettingsPatch: unknown;
+        lastProviderSettingsPatch: unknown;
+        providerSettings: unknown;
         credentialWrites: string[];
         providerAccountSnapshot: unknown;
       };

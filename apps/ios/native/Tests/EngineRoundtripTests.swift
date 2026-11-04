@@ -119,6 +119,7 @@ import XCTest
         private let lock = NSLock()
         private(set) var modelList: (models: [String], current: String)?
         private(set) var changedModel: String?
+        private var nextList: XCTestExpectation?
         let gotList: XCTestExpectation
         let gotChanged: XCTestExpectation
 
@@ -129,11 +130,16 @@ import XCTest
             gotChanged.assertForOverFulfill = false
         }
 
+        func expectNextList(_ expectation: XCTestExpectation) {
+            lock.lock(); nextList = expectation; lock.unlock()
+        }
+
         func onEvent(event: ClientEvent) async {
             switch event {
             case let .modelList(models, current, _, _):
-                lock.lock(); modelList = (models, current); lock.unlock()
+                lock.lock(); modelList = (models, current); let next = nextList; nextList = nil; lock.unlock()
                 gotList.fulfill()
+                next?.fulfill()
             case let .modelChanged(model, _):
                 lock.lock(); changedModel = model; lock.unlock()
                 gotChanged.fulfill()
@@ -180,7 +186,7 @@ import XCTest
                 nativeConfigHome: directories.configHome,
                 apiBase: "https://api.anthropic.com",
                 model: snapshot.defaultModelID ?? "",
-                sessionMode: .code,
+                sessionMode: .code, initialSessionId: nil, initialSessionTranscriptPath: nil, schedulerController: false,
                 visionDelegationEnabled: snapshot.visionDelegationEnabled,
                 appSandboxRoot: sandbox.path,
                 projectCwd: nil,
@@ -381,7 +387,7 @@ import XCTest
             defer { try? FileManager.default.removeItem(at: sandbox) }
             let runtime = try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox)
             let paths = try mobileUserDirectories(managedRoot: runtime.managedRoot)
-            let cwd = paths.defaultGuestCwd
+            let cwd = paths.codeGuestCwd
             // Real transcripts are bucketed by the stable Linux cwd.
             let projectName = String(cwd.map { $0.isASCII && $0.isLetter || $0.isASCII && $0.isNumber ? $0 : "-" })
             let directory = URL(fileURLWithPath: paths.configHome, isDirectory: true)
@@ -391,6 +397,7 @@ import XCTest
             let userUUID = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
             let assistantUUID = "cccccccc-3333-4333-8333-cccccccccccc"
             let rows: [[String: Any]] = [
+                ["type": "fixed-session-mode", "sessionId": sessionID, "sessionMode": "code", "instructionEpoch": 1],
                 ["type": "user", "uuid": userUUID, "parentUuid": NSNull(),
                  "sessionId": sessionID, "timestamp": "2026-05-25T12:00:00.000Z",
                  "cwd": cwd, "version": "0.6.0", "isSidechain": false, "userType": "external",
@@ -402,7 +409,8 @@ import XCTest
             ]
             let jsonl = try rows.map { try JSONSerialization.data(withJSONObject: $0) }
                 .reduce(into: Data()) { $0.append($1); $0.append(10) }
-            try jsonl.write(to: directory.appendingPathComponent("\(sessionID).jsonl"))
+            let transcriptURL = directory.appendingPathComponent("\(sessionID).jsonl")
+            try jsonl.write(to: transcriptURL)
             let listener = CollectingListener()
             let audioConfigurationJSON = AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON
             let mediaHostComposition = try IOSNativeMediaHostComposition(
@@ -412,7 +420,7 @@ import XCTest
                 share: ShareImpl(), notifications: NotificationImpl(),
                 clipboard: ClipboardImpl(), permissions: NoopPermissionSink(),
                 secureStorage: nil, deviceControl: nil)
-            try await handle.submit(command: .resumeSession(sessionId: sessionID, cwd: nil))
+            try await handle.resumeWorkspaceSession(sessionId: sessionID, transcriptPath: transcriptURL.path)
             var restoredMessages: [MessageDto]?
             for _ in 0..<200 {
                 restoredMessages = listener.events.compactMap { event -> [MessageDto]? in
@@ -485,15 +493,23 @@ import XCTest
                                "catalog must contain only REAL engine ids, found mock id: \(id)")
             }
 
-            let target = list.models.first(where: { $0 != list.current }) ?? list.models[0]
+            let target = try XCTUnwrap(list.models.first(where: { $0 != list.current }),
+                                       "the catalog must offer a distinct switch target")
             do {
                 try await handle.submit(command: .setModel(model: target.clientTextDto))
                 XCTFail("switching without configured credentials must be rejected")
+            } catch let ClientError.Internal(message) {
+                XCTAssertTrue(message.contains("all provider accounts are unavailable"), message)
             } catch {
-                XCTAssertTrue(String(describing: error).contains("Authentication failed"), "\(error)")
+                XCTFail("expected keyless account unavailability, got: \(error)")
             }
             await fulfillment(of: [gotChanged], timeout: 0.2)
             XCTAssertNil(listener.changedModel)
+            let gotListAfterRejection = expectation(description: "same engine still answers a catalog request")
+            listener.expectNextList(gotListAfterRejection)
+            try await handle.submit(command: .listModels)
+            await fulfillment(of: [gotListAfterRejection], timeout: 30)
+            XCTAssertEqual(listener.modelList?.current, list.current, "a rejected switch must not change the active model")
 
         }
 

@@ -50,10 +50,10 @@ test('workspace reads and directory additions use correlated private controls', 
 test('selected transcript resume retains the exact path and awaits its private acknowledgement', async () => {
   const fixture = wire({ status: 'ok' });
   const session = '11111111-2222-4333-8444-555555555555';
-  await fixture.client.resumeSessionFromTranscript(session, '/store/选中.jsonl');
+  await fixture.client.resumeSessionFromTranscript(session, '/store/选中.jsonl', 'chat');
   assert.equal(fixture.sent()?.payload.method, 'resume_selected_session');
-  assert.deepEqual(fixture.sent()?.payload.params, { session_id: session, transcript_path: '/store/选中.jsonl' });
-  await assert.rejects(wire({ status: 'rejected' }).client.resumeSessionFromTranscript(session, '/other.jsonl'));
+  assert.deepEqual(fixture.sent()?.payload.params, { session_id: session, transcript_path: '/store/选中.jsonl', expected_mode: 'chat' });
+  await assert.rejects(wire({ status: 'rejected' }).client.resumeSessionFromTranscript(session, '/other.jsonl', 'code'));
 });
 
 test('a resume interaction owner replaces the fixed RPC deadline and can abort its pending request', async (t) => {
@@ -61,7 +61,7 @@ test('a resume interaction owner replaces the fixed RPC deadline and can abort i
   const fixture = wire();
   const owner = new AbortController();
   let outcome = 'pending';
-  const resume = fixture.client.resumeSessionFromTranscript('11111111-2222-4333-8444-555555555555', '/selected.jsonl', owner.signal)
+  const resume = fixture.client.resumeSessionFromTranscript('11111111-2222-4333-8444-555555555555', '/selected.jsonl', 'code', owner.signal)
     .then(() => { outcome = 'resolved'; }, () => { outcome = 'rejected'; });
   t.mock.timers.tick(30_001);
   await Promise.resolve();
@@ -77,7 +77,7 @@ test('a resume interaction owner replaces the fixed RPC deadline and can abort i
   assert.equal(outcome, 'rejected', 'a late acknowledgement cannot revive an aborted owner');
 
   const alreadyAborted = wire();
-  await assert.rejects(alreadyAborted.client.resumeSessionFromTranscript('id', '/selected.jsonl', owner.signal), /aborted/);
+  await assert.rejects(alreadyAborted.client.resumeSessionFromTranscript('id', '/selected.jsonl', 'code', owner.signal), /aborted/);
   assert.equal(alreadyAborted.sent(), undefined);
 });
 

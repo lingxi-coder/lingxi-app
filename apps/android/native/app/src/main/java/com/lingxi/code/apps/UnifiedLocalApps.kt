@@ -27,6 +27,15 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
+/** The source selection retains whether the native Local Apps service created it. */
+class AuthoringDirectory private constructor(val path: String, internal val sourceId: String, internal val sourcePath: String,
+    internal val requestId: String) {
+    internal companion object {
+        fun created(path: String, sourceId: String, sourcePath: String, requestId: String) = AuthoringDirectory(path, sourceId, sourcePath, requestId)
+    }
+}
+internal data class RestoredAuthoringSource(val directory: AuthoringDirectory, val record: AppRecord)
+
 /** Process-owned service. Constructing or browsing the library never needs a conversation. */
 class UnifiedLocalApps private constructor(private val context: Context) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -36,6 +45,9 @@ class UnifiedLocalApps private constructor(private val context: Context) {
         mutableState.value = mutableState.value.copy(error = failure.message ?: failure.toString())
     }
     private val creation = Mutex()
+    private val authoringCurrentLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+    internal suspend fun <T> withAuthoringCurrentLock(appId: String?, action: suspend () -> T): T =
+        if (appId == null) action() else authoringCurrentLocks.computeIfAbsent(appId) { Mutex() }.withLock { action() }
     private var handle: MobileLocalAppServiceHandle? = null
     private var linuxBound = false
     private val agentCreation = Mutex()
@@ -55,6 +67,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
                     context = context, model = configured.defaultModel,
                     providerProfilesJson = configured.providerProfilesJson, routingJson = configured.routingJson,
                     scenario = NativeEngineScenario.LocalAppAgent, mediaHost = mediaHost,
+                    sessionMode = com.lingxi.code.model.SessionMode.Code,
                 ) ?: error("无法初始化应用的模型服务，请检查模型配置。")
                 agentConfiguration = identity
             }
@@ -138,13 +151,72 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     }
     /** Trusted app-details UI only; no WebView message can reach this method. */
     suspend fun agentHost(request: JSONObject): Any? = withContext(Dispatchers.IO) {
+        val encoded = request.toString()
+        require(isRuntimeAgentRequest(JSONObject(encoded).getString("op"))) { "Unsupported app runtime operation" }
         ensureAgentHost()
-        decodeAppResponse(service().agentHostJson(request.toString()))
+        decodeAppResponse(service().agentHostJson(encoded))
     }
     /** Trusted native authoring only. This registration must not boot the model host. */
-    suspend fun registerAuthoring(authoring: JSONObject): AppAuthoring = withContext(Dispatchers.IO) {
-        val request = JSONObject().put("op", "registerAuthoring").put("authoring", authoring)
-        (decodeAppResponse(service().agentHostJson(request.toString())) as JSONObject).appAuthoring()
+    internal suspend fun registerAuthoring(sourceId: String, requestId: String, setCurrent: Boolean,
+        mode: com.lingxi.code.model.SessionMode, authoring: JSONObject): AppAuthoringGrant = withContext(Dispatchers.IO) {
+        requireCodeAuthoring(mode)
+        val request = JSONObject().put("op", "registerAuthoring").put("sourceId", sourceId)
+            .put("requestId", requestId).put("setCurrent", setCurrent).put("sessionMode", mode.wireValue).put("authoring", authoring)
+        (decodeAppResponse(service().agentHostJson(request.toString())) as JSONObject).appAuthoringGrant(sourceId)
+    }
+    internal suspend fun prepareAuthoringSource(sourceId: String, directory: String, requestId: String,
+        mode: com.lingxi.code.model.SessionMode): AuthoringDirectory = withContext(Dispatchers.IO) {
+        requireCodeAuthoring(mode)
+        val request = JSONObject().put("op", "prepareAuthoringSource").put("sourceId", sourceId).put("sourceDirectory", directory)
+        val result = decodeAppResponse(service().agentHostJson(request.toString())) as JSONObject
+        require(result.getString("sourceId") == sourceId && result.getString("sourceDirectory") == directory)
+        AuthoringDirectory.created(directory, sourceId, result.getString("sourcePath"), requestId)
+    }
+    internal suspend fun bindAuthoringSource(request: AuthoringRequest, mode: com.lingxi.code.model.SessionMode): AuthoringDirectory = withContext(Dispatchers.IO) {
+        requireCodeAuthoring(mode)
+        require(request.operation == "bind")
+        val payload = JSONObject().put("op", "bindAuthoringSource").put("requestId", request.selectionId)
+            .put("sourceId", checkNotNull(request.sourceId)).put("sourceDirectory", checkNotNull(request.sourceDirectory))
+            .put("targetAppId", checkNotNull(request.appId))
+        val value = decodeAppResponse(service().agentHostJson(payload.toString())) as JSONObject
+        require(value.getString("requestId") == request.selectionId && value.getString("sourceId") == request.sourceId &&
+            value.getString("sourceDirectory") == request.sourceDirectory && value.getString("targetAppId") == request.appId)
+        AuthoringDirectory.created(value.getString("sourceDirectory"), value.getString("sourceId"),
+            value.getString("sourcePath"), request.selectionId)
+    }
+    /** Read the library's immutable authoring owner receipt. */
+    internal suspend fun getAuthoringGrant(source: String, projectId: String, sessionId: String,
+        mode: com.lingxi.code.model.SessionMode): AppAuthoringGrant =
+        withContext(Dispatchers.IO) {
+            requireCodeAuthoring(mode)
+            val request = JSONObject().put("op", "getAuthoringGrant").put("sourceDirectory", source)
+                .put("projectId", projectId).put("authoringSessionId", sessionId).put("sessionMode", mode.wireValue)
+            (decodeAppResponse(service().agentHostJson(request.toString())) as JSONObject).appAuthoringGrant()
+        }
+    /** Recover an interrupted first binding only from its persisted native source identity. */
+    internal suspend fun getOrRecoverAuthoringGrant(source: String, projectId: String, sessionId: String,
+        mode: com.lingxi.code.model.SessionMode): AppAuthoring {
+        val result = lookupOrRecoverAuthoringReceipt(source, projectId, sessionId,
+            lookup = { getAuthoringGrant(source, projectId, sessionId, mode) },
+            isNotFound = { it is AppServiceException && it.code == "notFound" },
+            readIntent = { AuthoringIntentStore(context).read(sessionId) },
+            prepareSource = { intent ->
+                val prepared = prepareAuthoringSource(intent.sourceId, source, intent.sourceRequestId, mode)
+                require(prepared.path == source && prepared.sourceId == intent.sourceId && prepared.requestId == intent.sourceRequestId &&
+                    prepared.sourcePath == hostFile(source).absolutePath) { "Authoring source identity changed" }
+            },
+            submitRecovery = { intent ->
+                val authoring = JSONObject().put("workspaceId", intent.workspaceId).put("sourceDirectory", source)
+                    .put("projectRef", AppProjectRef("mobileProject", projectId = projectId).toJson())
+                    .put("authoringSessionId", sessionId)
+                intent.appId?.let { authoring.put("appId", it) }
+                registerAuthoring(intent.sourceId, intent.sourceRequestId, false, mode, authoring)
+                Unit
+            },
+            matches = { receipt, intent -> intent.sessionMode == mode &&
+                receipt.matchesOwner(intent.sourceId, source, projectId, intent.workspaceId, sessionId) },
+        )
+        return result.authoring
     }
     suspend fun agentTasks(appId: String, revision: Long): List<AppAgentTask> {
         val response = agentHost(JSONObject().put("op", "tasks.list").put("appId", appId).put("revision", revision)) as JSONObject
@@ -171,7 +243,17 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     }
 
     internal suspend fun request(op: String, appId: String? = null, fields: JSONObject.() -> Unit = {}): Any? {
-        val json = JSONObject().put("op", op).apply { appId?.let { put("appId", it) }; fields() }
+        require(isRuntimeAppRequest(op)) { "App development requires a Code owner" }
+        return rawRequest(op, appId, fields)
+    }
+    internal suspend fun authoringRequest(mode: com.lingxi.code.model.SessionMode, op: String,
+        appId: String? = null, fields: JSONObject.() -> Unit = {}): Any? {
+        requireCodeAuthoring(mode)
+        require(op == "publish" || op == "import")
+        return rawRequest(op, appId, fields)
+    }
+    private suspend fun rawRequest(op: String, appId: String? = null, fields: JSONObject.() -> Unit = {}): Any? {
+        val json = JSONObject().apply { appId?.let { put("appId", it) }; fields(); put("op", op) }
         val service = service()
         return withContext(Dispatchers.IO) { decodeAppResponse(service.requestJson(json.toString())) }
     }
@@ -247,17 +329,28 @@ class UnifiedLocalApps private constructor(private val context: Context) {
         val exists = source != null && withContext(Dispatchers.IO) { hostFile(source).isDirectory }
         val sessionBindings = JSONObject().apply { sessions.forEach { (id, binding) -> put(id, binding.toJson()) } }
         val value = request("prepareAuthoring", id) { put("sessionBindings", sessionBindings); put("sourceExists", exists) } as JSONObject
-        return AppAuthoringResolution(value.getString("action"), value.getString("sourceDirectory"), value.optJSONObject("authoring")?.appAuthoring())
+        return AppAuthoringResolution(value.getString("action"), value.getString("sourceDirectory"),
+            value.optJSONObject("authoring")?.appAuthoring(), value.optionalString("sourceId"), value.optionalString("sourcePath"))
     }
-    suspend fun importSource(sourcePath: String, marketOrigin: JSONObject? = null): AppRecord {
-        val value = request("import") { put("sourcePath", sourcePath); marketOrigin?.let { put("marketOrigin", it) } } as JSONObject
+    private suspend fun importSource(sourcePath: String, marketOrigin: JSONObject? = null): AppRecord {
+        val value = rawRequest("import") { put("sourcePath", sourcePath); marketOrigin?.let { put("marketOrigin", it) } } as JSONObject
         refresh()
         return (value.optJSONObject("record") ?: value).appRecord()
     }
-    suspend fun createAuthoring(name: String): String = (request("createAuthoring") { put("name", name) } as JSONObject).getString("sourceDirectory")
+    internal suspend fun installMarketSource(sourcePath: String, origin: JSONObject): AppRecord = importSource(sourcePath, origin)
+    internal suspend fun publishMarketUpdate(appId: String, sourcePath: String, expectedRevision: Long, origin: JSONObject): JSONObject =
+        rawRequest("publish", appId) { put("sourcePath", sourcePath); put("expectedRevision", expectedRevision); put("marketOrigin", origin) } as JSONObject
+    internal suspend fun createAuthoringDirectory(name: String, requestId: String, mode: com.lingxi.code.model.SessionMode): AuthoringDirectory {
+        requireCodeAuthoring(mode)
+        val payload = JSONObject().put("op", "createAuthoring").put("name", name).put("requestId", requestId)
+        val value = withContext(Dispatchers.IO) { decodeAppResponse(service().agentHostJson(payload.toString())) as JSONObject }
+        require(value.getString("requestId") == requestId)
+        return AuthoringDirectory.created(value.getString("sourceDirectory"), value.getString("sourceId"), value.getString("sourcePath"), requestId)
+    }
     suspend fun export(id: String, revision: Long, destination: String) { request("export", id) { put("revision", revision); put("destination", destination) } }
     suspend fun sourceArchive(id: String, revision: Long) = sourceArchive(id, revision, context.cacheDir)
-    suspend fun importArchive(uri: android.net.Uri): AppRecord = withContext(Dispatchers.IO) {
+    suspend fun importArchive(uri: android.net.Uri, mode: com.lingxi.code.model.SessionMode): AppRecord = withContext(Dispatchers.IO) {
+        requireCodeAuthoring(mode)
         val folder = File(context.cacheDir, "local-app-source-import/${java.util.UUID.randomUUID()}")
         check(folder.mkdirs()) { "Unable to prepare source import" }
         try {
@@ -309,15 +402,18 @@ class UnifiedLocalApps private constructor(private val context: Context) {
             }
         }
     }
-    suspend fun restoreSource(id: String, remix: Boolean): AppRecord {
-        val guest = MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/" + java.util.UUID.randomUUID()
-        val source = hostFile(guest)
-        val value = request(if (remix) "remix" else "restoreAuthoring", id) {
-            put("sourcePath", source.absolutePath)
-            put("authoring", JSONObject().put("sourceDirectory", guest))
-        } as JSONObject
+    internal suspend fun restoreAuthoringDirectory(request: AuthoringRequest, mode: com.lingxi.code.model.SessionMode): RestoredAuthoringSource {
+        requireCodeAuthoring(mode)
+        require(request.operation == "restore" || request.operation == "remix")
+        val nativeRequest = JSONObject().put("op", if (request.operation == "remix") "remixAuthoringSource" else "restoreAuthoringSource")
+            .put("requestId", request.selectionId).put("appId", checkNotNull(request.appId))
+        request.revision?.let { nativeRequest.put("revision", it) }
+        if (request.operation == "remix") nativeRequest.put("name", request.name)
+        val value = withContext(Dispatchers.IO) { decodeAppResponse(service().agentHostJson(nativeRequest.toString())) as JSONObject }
         refresh()
-        return (value.optJSONObject("record") ?: value).appRecord()
+        require(value.getString("requestId") == request.selectionId)
+        return RestoredAuthoringSource(AuthoringDirectory.created(value.getString("sourceDirectory"),
+            value.getString("sourceId"), value.getString("sourcePath"), request.selectionId), value.getJSONObject("record").appRecord())
     }
     fun markOpened(id: String) { opened.edit().putLong(id, System.currentTimeMillis()).apply(); mutableState.value = mutableState.value.copy(openedRevision = mutableState.value.openedRevision + 1) }
     fun drawerApps(records: List<AppRecord>) = records.map { MyApp(it.id, it.name, "", opened.getLong(it.id, 0).takeIf { time -> time > 0 }) }

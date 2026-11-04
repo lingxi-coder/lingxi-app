@@ -1,4 +1,5 @@
 import { fixtureAccountSnapshot } from './provider-accounts-mock';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { createRoot } from 'react-dom/client';
 import { App } from '../../src/renderer/App';
 import type { GitApi, GitScope, GitStatus } from '../../src/shared/git';
@@ -7,7 +8,7 @@ import '../../src/renderer/global.css';
 const params = new URLSearchParams(location.search);
 const scenario = params.get('scenario');
 const projectPath = '/fixture/Changes';
-const activeSession = scenario === 'draft' || scenario === 'empty' ? undefined : { projectPath, sessionId: 'session-a' };
+const activeSession = scenario === 'draft' || scenario === 'empty' ? undefined : { projectPath, sessionId: 'session-a', mode: 'code' as const, projectId: projectPath };
 const eventListeners = new Set<(event: unknown) => void>();
 const changedListeners = new Set<() => void>();
 const scopes: GitScope[] = [];
@@ -39,6 +40,8 @@ const git: GitApi = {
     revision: 1,
     settings: { version: 1, projects: scenario === 'empty' ? [] : [projectPath], activeProject: scenario === 'empty' ? undefined : projectPath, activeSession, pinnedSessions: [], archivedSessions: [], theme: params.get('theme') ?? 'light' },
     activeSession, workspace: { path: scenario === 'empty' ? undefined : projectPath, trusted: scenario !== 'empty' }, connection: { status: 'connected' },
+    conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: scenario === 'empty' ? [] : [projectPath],
+      selectedProject: scenario === 'empty' ? null : projectPath, activeSession }),
     runtimes: activeSession ? [{ ...activeSession, connection: { status: 'connected' }, turnActive: false, pendingInteractions: 0, pendingAskUserQuestions: 0 }] : [],
     projectCatalogs: { [projectPath]: { sessions: [] } }, diagnostics: [], providerAccountSnapshot: fixtureAccountSnapshot(['openai']),
   }),

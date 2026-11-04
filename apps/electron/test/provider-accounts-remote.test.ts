@@ -54,6 +54,16 @@ test('canonical remote enable/key replacement actions use the same scoped Deskto
   assert.equal(f.calls[1][0].accountId, 'a');
 });
 
+test('remote credential clearing uses the revision-checked account logout without removing the account', async () => {
+  const f = fixture();
+  const request = { request_json: JSON.stringify({ action: 'clear_credential', expectedRevision: 7, accountId: 'a' }) };
+  await f.commands.providerAccounts(owner, request);
+  assert.deepEqual(f.calls, [[{ action: 'logout', expectedRevision: 7, accountId: 'a' }, undefined]]);
+  f.revoke();
+  await assert.rejects(f.commands.providerAccounts(owner, request), /authenticated Host owner/);
+  assert.equal(f.calls.length, 1);
+});
+
 test('account RPC errors never echo helper diagnostics or the credential', async () => {
   const f = fixture(); f.fail();
   await assert.rejects(f.commands.providerAccounts(owner, { request_json: JSON.stringify({ action: 'list', expectedRevision: 0 }), credential: 'private-key-secret' }), error => !String(error).includes('private-key-secret'));

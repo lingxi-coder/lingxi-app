@@ -2,7 +2,7 @@ import Foundation
 
 // Product preferences and storage layout remain owned by the application.
 enum LXISHDefaultWorkspace {
-    static let guestHome = LXISHGuestPaths.workspaceRoot
+    static var guestWorkspace: String { LXISHGuestPaths.workspace("projects") }
 
     // Mount identity belongs to the runtime, independently of selected projects.
     static func stableID() -> String { "projects" }

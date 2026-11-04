@@ -32,9 +32,9 @@ class UnifiedLocalAppProcessDeathTest {
         NativeAppActivityHost(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
             if (phase == "prepare") {
                 check(!receipt.exists()) { "A previous acceptance receipt must be recovered first" }
-                val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/owner-death-${UUID.randomUUID()}")
+                val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).codeGuestCwd.trimEnd('/') + "/owner-death-${UUID.randomUUID()}")
                 check(File(context.filesDir, "local-app-acceptance-fixtures/python").copyRecursively(source))
-                val value = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
+                val value = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
                 val record = value.getJSONObject("record").appRecord()
                 val release = value.getJSONObject("release").appRelease()
                 try {
@@ -73,7 +73,7 @@ class UnifiedLocalAppProcessDeathTest {
                         .put("command", "python3 owner-build-probe.py")))
                     changed.getJSONObject("package").getJSONArray("files").put("owner-build-probe.py")
                     manifest.writeText(changed.toString())
-                    val candidate = apps.request("publish", record.id) { put("sourcePath", source.absolutePath); put("expectedRevision", record.latestRevision) } as JSONObject
+                    val candidate = apps.authoringRequest(com.lingxi.code.model.SessionMode.Code, "publish", record.id) { put("sourcePath", source.absolutePath); put("expectedRevision", record.latestRevision) } as JSONObject
                     val release2 = candidate.getJSONObject("release").appRelease()
                     apps.grant(record.id, release2.digest)
                     async { apps.start(record.id, revision = release2.revision) }

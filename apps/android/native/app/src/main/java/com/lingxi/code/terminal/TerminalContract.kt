@@ -15,8 +15,13 @@ import kotlinx.coroutines.flow.StateFlow
 @Immutable
 data class TerminalRouteArgs(
     val sessionId: String,
+    val cwd: String,
     val initCommand: String? = null,
 )
+
+/** Stable, unambiguous identity for one owner's terminal presentation. */
+internal fun terminalOwnerViewKey(sessionId: String, ownerKey: String, cwd: String, runtimeMode: String): String =
+    listOf(sessionId, ownerKey, cwd, runtimeMode).joinToString("") { "${it.length}:$it" }
 
 enum class TerminalConnectionState { IDLE, CONNECTING, CONNECTED, FAILED, CLOSED }
 

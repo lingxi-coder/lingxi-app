@@ -32,6 +32,26 @@ class WorkspaceDirectoryUiTest {
     @After fun cleanup() { root.deleteRecursively() }
     private fun text(resource: Int) = context.getString(resource)
 
+    @Test fun selectingAnotherModeRequestsThatSpace() {
+        var selected: SessionMode? = null
+        rule.setContent { LingXiTheme(darkTheme = false) {
+            SessionPanel(
+                model = SessionPanelModel(
+                    title = "Conversation", mode = SessionMode.Code,
+                    workspaceName = "Workspace", modelName = "Model", permissionLabel = null, pinned = false,
+                ),
+                onDismiss = {}, onSelectMode = { selected = it }, onContinueInOtherMode = {},
+                onOpenPermissionSettings = {}, onTogglePinned = {}, onMakeScheduled = {},
+                onOpenTerminal = {}, onArchive = {},
+            )
+        } }
+        rule.onNodeWithTag(UiTags.SESSION_PANEL_MODE).performClick()
+        rule.onNodeWithTag(UiTags.sessionPanelModeOption("code")).assertIsSelected()
+        rule.onNodeWithTag(UiTags.sessionPanelModeOption("chat")).assertIsNotSelected()
+        rule.onNodeWithTag(UiTags.sessionPanelModeOption("chat")).performClick()
+        rule.runOnIdle { assertEquals(SessionMode.Chat, selected) }
+    }
+
     @Test fun narrowToolbarAtLargeFontKeepsControlsOnOneRow() {
         rule.setContent {
             CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, fontScale = 2f)) {
@@ -56,13 +76,14 @@ class WorkspaceDirectoryUiTest {
 
     @Test fun darkLargeTextDirectoryBrowserKeepsSelectionVisible() {
         File(root, "workspace/projects").mkdirs()
-        val repo = WorkspaceDirectoryRepository(root, "/home/test", "/home/test/workspace", "/home/test/workspace/projects", File(root, ".config"))
+        val repo = WorkspaceDirectoryRepository(root, "/home/test", "/home/test/workspace", "/home/test/workspace/projects", File(root, ".config"), listOf("/home/test/workspace", "/home/test/workspace/projects"))
         rule.setContent {
             CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, fontScale = 2f)) {
                 LingXiTheme(darkTheme = true) {
                     WorkspaceDirectorySheet(emptyList(), ConversationScope.Global, repo.workspace, emptyList(), "Ready",
                         protectedPaths = { emptyList() }, canMutate = { true }, onDismiss = {}, onPick = {},
-                        onPickDirectory = {}, repositoryOverride = repo)
+                        onPickDirectory = {}, workspaceGuestPath = repo.workspace,
+                        verifiedProjects = emptyList(), verifiedScheduled = null, repositoryOverride = repo)
                 }
             }
         }
@@ -83,13 +104,14 @@ class WorkspaceDirectoryUiTest {
 
     @Test fun createSaveEditUnlinkAndConfirmDelete() {
         File(root, "workspace/projects").mkdirs()
-        val repo = WorkspaceDirectoryRepository(root, "/home/test", "/home/test/workspace", "/home/test/workspace/projects", File(root, ".config"))
+        val repo = WorkspaceDirectoryRepository(root, "/home/test", "/home/test/workspace", "/home/test/workspace/projects", File(root, ".config"), listOf("/home/test/workspace", "/home/test/workspace/projects"))
         val open = mutableStateOf(true)
         val current = mutableStateOf("/home/test/workspace")
         rule.setContent { LingXiTheme(darkTheme = false) {
             if (open.value) WorkspaceDirectorySheet(emptyList(), ConversationScope.Global, current.value, emptyList(), "Ready",
                 protectedPaths = { listOf(current.value) }, canMutate = { true }, onDismiss = { open.value = false }, onPick = {},
-                onPickDirectory = { current.value = it }, repositoryOverride = repo)
+                onPickDirectory = { current.value = it }, workspaceGuestPath = repo.workspace,
+                verifiedProjects = emptyList(), verifiedScheduled = null, repositoryOverride = repo)
         } }
         capture("android-workspace-picker")
         rule.onNodeWithTag("workspace.browse").performClick()

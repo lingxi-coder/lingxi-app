@@ -79,10 +79,10 @@ class WorkflowProgressTest {
     }
 
     @Test
-    fun viewModelPartitionsWorkflowUpdatesByOriginSession() {
+    fun viewModelsPartitionWorkflowUpdatesByOwnerSession() {
         val vm = ChatViewModel()
         vm.applyActivatedSession(
-            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
         )
 
         vm.reduceWorkflowProgress(update("session-a", "run-a", "progress", 10u))
@@ -92,16 +92,22 @@ class WorkflowProgressTest {
         assertTrue(vm.state.value.workflowRuns.values.none { it.runId == "run-b" })
 
         vm.applyActivatedSession(
-            ActivatedSession("session-b", emptyList(), SessionActivationKind.Resumed),
+            ActivatedSession("session-b", emptyList(), SessionActivationKind.Resumed, com.lingxi.code.model.SessionMode.Code),
         )
-        assertEquals("run-b", vm.state.value.workflowRuns["task-1"]?.runId)
+        assertEquals("run-a", vm.state.value.workflowRuns["task-1"]?.runId)
+        val other = ChatViewModel()
+        other.applyActivatedSession(
+            ActivatedSession("session-b", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
+        )
+        other.reduceWorkflowProgress(update("session-b", "run-b", "progress", 20u))
+        assertEquals("run-b", other.state.value.workflowRuns["task-1"]?.runId)
     }
 
     @Test
     fun statusArrivingBeforeProgressIsAppliedWhenTheRunAppears() {
         val vm = ChatViewModel()
         vm.applyActivatedSession(
-            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started, com.lingxi.code.model.SessionMode.Code),
         )
         vm.reduceClientEvent(
             ClientEvent.TaskStatusChanged(

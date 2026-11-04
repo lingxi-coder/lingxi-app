@@ -27,9 +27,11 @@ function setup(t: { after(fn: () => void): void }, options: Pick<BotServiceOptio
   let activeWork = false;
   let hold: Promise<void> | undefined;
   const controllers = new Set<string>();
+  const liveRuntimes = new Map<string, any>();
   const runtimes: BotRuntimes = {
-    newSession: async (projectPath, model) => { calls.push(['newSession', projectPath, model]); return { projectPath, sessionId: SESSION }; },
-    openSession: async (ref, empty, resumeModel) => { calls.push(['openSession', ref, empty, resumeModel]); return {}; },
+    newSession: async (projectPath, model, owner) => { calls.push(['newSession', projectPath, model, owner]); return { projectPath, sessionId: SESSION }; },
+    openSession: async (ref, empty, resumeModel, activate, path) => { calls.push(['openSession', ref, empty, resumeModel, activate, path]); return {}; },
+    get: (id) => liveRuntimes.get(id),
     closeProject: async (projectPath) => {
       calls.push(['closeProject', projectPath]);
       await hold;
@@ -47,6 +49,7 @@ function setup(t: { after(fn: () => void): void }, options: Pick<BotServiceOptio
       return {
         list: async (projectPath) => { calls.push(['list', configHome, projectPath]); return { sessions: state.sessions }; },
         find: async (projectPath, sessionId) => { calls.push(['find', configHome, projectPath, sessionId]); return state.sessions.find((session) => session.uuid === sessionId.toLowerCase()); },
+        select: async (projectPath, sessionId, selection) => { calls.push(['select', configHome, projectPath, sessionId, selection]); return state.sessions.find((session) => session.uuid === sessionId.toLowerCase() && session.path === selection.transcriptPath); },
         workspaceSettings: async (projectPath) => {
           calls.push(['workspaceSettings', configHome, projectPath]);
           return { environment: state.environment, configHome, globalConfigPath: join(configHome, '.lingxi.json') };
@@ -62,7 +65,7 @@ function setup(t: { after(fn: () => void): void }, options: Pick<BotServiceOptio
     ...options,
   });
   return {
-    ...f, service, calls, warnings, catalogs,
+    ...f, service, calls, warnings, catalogs, liveRuntimes,
     /** Make a session the controller of a Bot's routines. */
     controllerOf(workspace: string, sessionId: string) { controllers.add(`${workspace}:${sessionId}`); },
     setActiveWork(value: boolean) { activeWork = value; },
@@ -187,7 +190,7 @@ test('a new session starts in the Bot workspace with the Bot model', async (t) =
   const bot = s.service.create({ name: 'Starter', model: 'a/b' });
   const opened = await s.service.openSession(bot.bot_id);
   assert.deepEqual(opened, { botId: bot.bot_id, projectPath: s.store.workspaceDir(bot.bot_id), sessionId: SESSION });
-  assert.deepEqual(s.calls, [['newSession', s.store.workspaceDir(bot.bot_id), 'a/b']]);
+  assert.deepEqual(s.calls, [['newSession', s.store.workspaceDir(bot.bot_id), 'a/b', { mode: 'code', projectId: null }]]);
 });
 
 test('an existing session is opened only if the Bot\'s own catalog has it', async (t) => {
@@ -198,15 +201,72 @@ test('an existing session is opened only if the Bot\'s own catalog has it', asyn
   await s.service.listSessions(bot.bot_id);
   s.catalogs.get(home)!.sessions.push(row(SESSION, { resume_model: 'session/model' }), row(OTHER_SESSION, { empty_session: true }));
   s.calls.length = 0;
-  assert.deepEqual(await s.service.openSession(bot.bot_id, SESSION.toUpperCase()), { botId: bot.bot_id, projectPath: workspace, sessionId: SESSION });
-  assert.deepEqual(await s.service.openSession(bot.bot_id, OTHER_SESSION), { botId: bot.bot_id, projectPath: workspace, sessionId: OTHER_SESSION });
+  assert.deepEqual(await s.service.openSession(bot.bot_id, SESSION.toUpperCase(), row(SESSION).path), { botId: bot.bot_id, projectPath: workspace, sessionId: SESSION });
+  assert.deepEqual(await s.service.openSession(bot.bot_id, OTHER_SESSION, row(OTHER_SESSION).path), { botId: bot.bot_id, projectPath: workspace, sessionId: OTHER_SESSION });
   assert.deepEqual(s.calls.filter((call) => call[0] === 'openSession'), [
-    ['openSession', { projectPath: workspace, sessionId: SESSION }, false, 'session/model'],
-    ['openSession', { projectPath: workspace, sessionId: OTHER_SESSION }, true, 'bot/model'],
+    ['openSession', { projectPath: workspace, sessionId: SESSION, mode: 'code' }, false, 'session/model', true, row(SESSION).path],
+    ['openSession', { projectPath: workspace, sessionId: OTHER_SESSION, mode: 'code' }, true, 'bot/model', true, row(OTHER_SESSION).path],
   ]);
-  await assert.rejects(s.service.openSession(bot.bot_id, '11111111-2222-4333-8444-000000000000'), /does not belong to this Bot/);
+  await assert.rejects(s.service.openSession(bot.bot_id, '11111111-2222-4333-8444-000000000000'), /source is unavailable/);
   await assert.rejects(s.service.openSession(bot.bot_id, 'not-a-session'), /invalid session id/);
   await assert.rejects(s.service.openSession('Bot0000000000000000999'), BotNotFoundError);
+});
+
+test('a Bot stores its exact selected source privately and rejects missing or conflicting copies', async t => {
+  const s = setup(t), bot = s.service.create({ name: 'Exact source' });
+  const workspace = s.store.workspaceDir(bot.bot_id), home = s.store.homeDir(bot.bot_id);
+  await s.service.listSessions(bot.bot_id);
+  const selected = row(SESSION);
+  s.catalogs.get(home)!.sessions.push(selected);
+  await assert.rejects(s.service.openSession(bot.bot_id, SESSION), /source is unavailable/);
+  await s.service.openSession(bot.bot_id, SESSION, selected.path);
+  assert.deepEqual(s.store.sessionSource(bot.bot_id, SESSION), { path: selected.path, mode: 'code' });
+  assert.deepEqual(await s.service.resolveSavedTranscript({ projectPath: workspace, sessionId: SESSION, mode: 'code', projectId: null }), { path: selected.path, mode: 'code' });
+  await s.service.openSession(bot.bot_id, SESSION);
+  await assert.rejects(s.service.openSession(bot.bot_id, SESSION, `/other/${SESSION}.jsonl`), /different saved source/);
+  s.catalogs.get(home)!.sessions = [{ ...selected, mode: 'chat' }];
+  await assert.rejects(s.service.resolveSavedTranscript({ projectPath: workspace, sessionId: SESSION, mode: 'code' }), /source is unavailable/);
+});
+
+test('a disconnected Bot writer is reconnected through its existing owner without a catalog lookup', async t => {
+  const s = setup(t), bot = s.service.create({ name: 'Disconnected owner' });
+  const workspace = s.store.workspaceDir(bot.bot_id);
+  s.liveRuntimes.set(SESSION, { projectPath: workspace, sessionMode: 'code', connectionState: { status: 'disconnected' } });
+  assert.deepEqual(await s.service.openSession(bot.bot_id, SESSION), { botId: bot.bot_id, projectPath: workspace, sessionId: SESSION });
+  assert.deepEqual(s.calls.filter(call => call[0] === 'openSession'), [['openSession', { projectPath: workspace, sessionId: SESSION, mode: 'code' }, false, undefined, true, undefined]]);
+  assert.equal(s.calls.some(call => call[0] === 'select'), false);
+});
+
+test('an explicit Bot selection reconnects its writer and refuses a different live copy', async t => {
+  const s = setup(t), bot = s.service.create({ name: 'Selected owner' });
+  const workspace = s.store.workspaceDir(bot.bot_id), selected = row(SESSION);
+  await s.service.listSessions(bot.bot_id);
+  s.catalogs.get(s.store.homeDir(bot.bot_id))!.sessions.push(selected);
+  const live = { projectPath: workspace, sessionMode: 'code', connectionState: { status: 'disconnected' },
+    getWorkspaceState: async () => ({ transcript_path: `/other/${SESSION}.jsonl` }) };
+  s.liveRuntimes.set(SESSION, live);
+  (s.service as any).options.runtimes.openSession = async (...args: unknown[]) => {
+    s.calls.push(['openSession', ...args]);
+    live.connectionState = { status: 'connected' };
+  };
+  await assert.rejects(s.service.openSession(bot.bot_id, SESSION, selected.path), /different runtime/);
+  assert.equal(s.calls.filter(call => call[0] === 'openSession').length, 1, 'only the existing owner was reconnected');
+  assert.equal(s.store.sessionSource(bot.bot_id, SESSION), undefined, 'a rejected copy was not remembered');
+});
+
+test('a Bot first durable prompt captures its own live writer, mode and workspace', async t => {
+  const s = setup(t), bot = s.service.create({ name: 'Live source' });
+  const workspace = s.store.workspaceDir(bot.bot_id), directory = s.store.transcriptsDir(bot.bot_id);
+  mkdirSync(directory, { recursive: true });
+  const path = join(directory, `${SESSION}.jsonl`); writeFileSync(path, '{}\n');
+  await s.service.listSessions(bot.bot_id);
+  s.catalogs.get(s.store.homeDir(bot.bot_id))!.sessions.push(row(SESSION, { path, workspace_path: workspace }));
+  const runtime = { sessionId: SESSION, projectPath: workspace, sessionMode: 'code',
+    getWorkspaceState: async () => ({ cwd: workspace, transcript_path: path }), rememberTranscriptSelection: (value: string) => assert.equal(value, path) };
+  s.liveRuntimes.set(SESSION, runtime);
+  assert.equal(await s.service.captureSessionSource({ projectPath: workspace, sessionId: SESSION, mode: 'code', projectId: null }, runtime as any), path);
+  assert.deepEqual(s.store.sessionSource(bot.bot_id, SESSION), { path, mode: 'code' });
+  await assert.rejects(s.service.captureSessionSource({ projectPath: workspace, sessionId: SESSION, mode: 'chat', projectId: null }, runtime as any), /owner changed/);
 });
 
 test('the sessions listed are the Bot\'s own, without the host\'s private fields', async (t) => {
@@ -366,7 +426,7 @@ test('a Bot\'s controller session is not one of its chats, to list, to open or t
   await assert.rejects(s.service.openSession(bot.bot_id, CONTROLLER), /does not belong to this Bot/);
   await assert.rejects(s.service.openSession(bot.bot_id, CONTROLLER.toUpperCase()), /does not belong to this Bot/);
   assert.deepEqual(s.calls, [], 'nothing was looked up or started for it');
-  assert.equal((await s.service.openSession(bot.bot_id, SESSION)).sessionId, SESSION);
+  assert.equal((await s.service.openSession(bot.bot_id, SESSION, row(SESSION).path)).sessionId, SESSION);
 
   const directory = s.store.transcriptsDir(bot.bot_id);
   mkdirSync(directory, { recursive: true });
@@ -626,4 +686,17 @@ test('a listener that fails does not fail the change, and is reported', async (t
   assert.equal(s.service.update(bot.bot_id, 1, { remote: true }).remote, true);
   await s.service.delete(bot.bot_id);
   assert.equal(s.warnings.filter((message) => message.includes('could not be passed on: listener broke')).length, 3);
+});
+
+test('preparing a scheduled Bot history source never activates it during native startup', async t => {
+  const s = setup(t), bot = s.service.create({ name: 'Prepared history' });
+  const workspace = s.store.workspaceDir(bot.bot_id);
+  await s.service.listSessions(bot.bot_id);
+  s.catalogs.get(s.store.homeDir(bot.bot_id))!.sessions.push(row(SESSION));
+  await s.service.openSession(bot.bot_id, SESSION, row(SESSION).path, false);
+  assert.equal(s.calls.filter(call => call[0] === 'openSession').at(-1)?.[4], false);
+  s.calls.length = 0;
+  s.liveRuntimes.set(SESSION, { projectPath: workspace, sessionMode: 'code' });
+  await s.service.openSession(bot.bot_id, SESSION, undefined, false);
+  assert.equal(s.calls.filter(call => call[0] === 'openSession').at(-1)?.[4], false);
 });

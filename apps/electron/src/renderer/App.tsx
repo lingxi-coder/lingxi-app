@@ -5,8 +5,21 @@ import './components/LocalApps.css';
 import { Bots } from './components/Bots';
 import './components/Bots.css';
 import { useBots } from './bridge/useBots';
+import { useBotSessions } from './bridge/useBotSessions';
+import { useSidebarMode } from './bridge/useSidebarMode';
+import { modeForSettledChat, pageForMode, type AppPage } from './bridge/sidebarMode';
+import type { SidebarMode } from '../shared/settings';
+import { BotsSidebar } from './components/BotsSidebar';
+import { TeamsSidebar, focusTeamsSidebarSoon } from './components/TeamsSidebar';
+// The Teams workspace's stylesheet (sidebar, page, panel and dialogs), imported once, here, as the package asks. Its rules are scoped to its own classes.
+import '../../../../packages/teams/styles';
+import { useTeams } from './bridge/useTeams';
+import { useTeamsDrawer } from './bridge/useTeamsDrawer';
+import { teamsThemeVariables } from './theme/teamsTheme';
+import type { DrawerTab } from '../../../../packages/teams/ui';
 import { botScopesKey } from './bridge/botRoutines';
 import { localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
+import { localAppErrorMessage } from './bridge/localAppErrors';
 import type { LocalAppEditRequest } from '../shared/localApps';
 import type { TerminalScope } from '../shared/terminal';
 import { settingsLinkRequest, runtimeLinkItem, type SettingsLinkRequest, type ScheduledLinkRequest } from './deepLinkRoutes';
@@ -68,7 +81,8 @@ interface SessionPickerRequest {
   opener: HTMLElement | null;
 }
 
-const Teams = lazy(() => import('./components/Teams').then(module => ({ default: module.Teams })));
+// The Teams page loads with its first visit: the conversation and the Bot cards in it are the weight. The sidebar and the workspace behind both are not lazy, so the rail can count unread messages from the start.
+const TeamsMain = lazy(() => import('./components/TeamsMain').then(module => ({ default: module.TeamsMain })));
 
 export function App() {
   const { locale, preference } = useI18n();
@@ -84,7 +98,7 @@ export function App() {
   const [localAppNavigationError, setLocalAppNavigationError] = useState('');
   const localAppNavigation = useRef(0);
   const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
-  const [page, setPage] = useState<'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams'>('chat');
+  const [page, setPage] = useState<AppPage>('chat');
   const [teamInvite, setTeamInvite] = useState<string>();
   const handledTeamInvite = useCallback(() => setTeamInvite(undefined), []);
   const [theme, setTheme] = useState<ThemeMode>('dark');
@@ -110,27 +124,25 @@ export function App() {
   const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading || localAppBridge.current.projectCreationOpen, []);
   const openLocalAppChat = useCallback((app?: LocalAppEditRequest) => {
     if (sessionNavigationBlocked()) return;
+    const mode = localAppBridge.current.bootstrap?.conversationSpaces.activeMode;
+    if (mode !== 'code') {
+      setLocalAppNavigationError(tr('local_app_development_requires_code'));
+      return;
+    }
     const nonce = ++localAppNavigation.current;
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
     const navigate = async () => {
       const current = localAppBridge.current;
       const target = await localAppChatTarget(app, {
+        mode,
+        requiresCodeMessage: tr('local_app_development_requires_code'),
         hasProject: path => Boolean(current.bootstrap?.settings.projects.includes(path)
           || current.bootstrap?.scheduledWorkspace === path),
-        openSession: current.openSession,
+        openSession: (projectPath, sessionId) => localAppBridge.current.openSession(projectPath, sessionId, undefined, 'code', app?.id, app?.authoringVersion),
         addProject: current.addProject,
-        newSession: current.newSession,
-        bindAuthoring: (appId, session) => {
-          const api = window.lingxi?.localApps;
-          if (!api) throw new Error('Desktop application host is unavailable');
-          return api.bindAuthoring(appId, session);
-        },
-        prepareAuthoring: session => {
-          const api = window.lingxi?.localApps;
-          if (!api) throw new Error('Desktop application host is unavailable');
-          return api.prepareAuthoring(session);
-        },
+        newSession: (projectPath, intent) => localAppBridge.current.newSession(projectPath, { kind: 'local-app', intent }),
+        recoverSession: requestId => localAppBridge.current.newSession(undefined, { kind: 'recover-local-app', requestId }),
       }, () => localAppNavigation.current === nonce);
       if (!target || localAppNavigation.current !== nonce) return;
       setPage('chat');
@@ -138,7 +150,7 @@ export function App() {
       setLocalAppDraft({ id: app?.id ?? '', name: app?.name ?? '', nonce, target });
     };
     localAppNavigationQueue.current = localAppNavigationQueue.current.then(navigate, navigate).catch(error => {
-      if (localAppNavigation.current === nonce) setLocalAppNavigationError(error instanceof Error ? error.message : String(error));
+      if (localAppNavigation.current === nonce) setLocalAppNavigationError(localAppErrorMessage(error));
     });
   }, [sessionNavigationBlocked]);
   const consumeLocalAppDraft = useCallback((nonce: number) => {
@@ -149,8 +161,9 @@ export function App() {
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
   }, []);
-  const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams') => {
+  const openPage = useCallback((next: AppPage) => {
     if (sessionNavigationBlocked()) return;
+    if (next !== 'chat' && localAppBridge.current.handoffPending) void localAppBridge.current.cancelSessionHandoff();
     cancelLocalAppNavigation();
     setPage(next);
   }, [cancelLocalAppNavigation, sessionNavigationBlocked]);
@@ -185,6 +198,12 @@ export function App() {
     return () => window.removeEventListener('keydown', toggle);
   }, [settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked]);
   useEffect(() => window.lingxi?.onLocalAppEdit?.(openLocalAppChat), [openLocalAppChat]);
+  useEffect(() => window.lingxi?.onConversationShown?.(() => {
+    cancelLocalAppNavigation();
+    setSettingsRoute(null);
+    setPage('chat');
+    setActivityView(false);
+  }), [cancelLocalAppNavigation]);
   // The host made a chat of a Bot the displayed one on its own (a notification was clicked): bring the window to it.
   useEffect(() => botsApi?.onSessionShown?.((session) => {
     cancelLocalAppNavigation();
@@ -206,6 +225,73 @@ export function App() {
   const activeBotId = bridge.activeBotId;
   const botChat = activeBotId !== undefined;
   const activeBot = botChat ? bots.state.bots.find((bot) => bot.botId === activeBotId) : undefined;
+  const botSessions = useBotSessions(botsApi);
+  const { setMode: setSidebarMode, mode: sidebarMode } = useSidebarMode({
+    page, setPage, botsAvailable: bots.available, botsKnown: bots.state.availability !== undefined,
+    settings: bridge.bootstrap?.settings, save: bridge.updateSidebarPreferences,
+  });
+  // Teams: one workspace for the window, which the sidebar, the page and the rail's unread count all read.
+  const zh = locale.startsWith('zh');
+  const teams = useTeams();
+  const teamsDrawer = useTeamsDrawer({
+    savedWidth: bridge.bootstrap?.settings.sidebar?.teamsDrawerWidth,
+    save: (width) => { void bridge.updateSidebarPreferences({ teamsDrawerWidth: width }).catch(() => undefined); },
+  });
+  const { show: showTeamDetails, toggle: toggleTeamDetails } = teamsDrawer;
+  const teamsTheme = useMemo(() => teamsThemeVariables(palette), [palette]);
+  // The sidebar follows the chat on screen when that changes from a Bot's chat to a project's or back (a link, the picker, a notification),
+  // so the chat is always listed beside it. Only settled changes count: a chat that is still opening says nothing yet.
+  const settledBotChat = useRef(botChat);
+  useEffect(() => {
+    if (bridge.sessionLoading || settledBotChat.current === botChat) return;
+    settledBotChat.current = botChat;
+    const next = modeForSettledChat(sidebarMode, page, botChat);
+    if (next !== sidebarMode) setSidebarMode(next);
+  }, [botChat, bridge.sessionLoading, page, sidebarMode, setSidebarMode]);
+  // Whether the sidebar is hidden. The View menu toggles it here, and the sidebar's own button reports its change here too.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  /** Run `go`, which takes the owner off the Bots page. A Bot there with edits that are not saved is asked about first, with the question of its own Back button; `go` waits for the answer. */
+  const leaveBots = useCallback((go: () => void) => { if (page === 'bots') bots.guard.leave(go); else go(); }, [bots.guard, page]);
+  /** The rail's Home, Bots and Teams: the sidebar lists what the mode is for, and the main area goes to the page that goes with it. `after` runs once it does. */
+  const selectSidebarMode = useCallback((mode: SidebarMode, after?: () => void) => {
+    if (sessionNavigationBlocked() || (mode === 'bots' && !bots.available)) return;
+    const next = pageForMode(mode, { page, botChat });
+    const go = () => { setSidebarMode(mode); openPage(next); after?.(); };
+    // Staying on the page, or coming to it, leaves nothing behind.
+    if (next === page) go(); else leaveBots(go);
+  }, [bots.available, botChat, leaveBots, openPage, page, sessionNavigationBlocked, setSidebarMode]);
+  /** Bring the Teams page forward. The sidebar can list Teams while the main area shows the Apps, say; whatever is pressed in it is about Teams. */
+  const showTeams = useCallback(() => { if (page !== 'teams') openPage('teams'); }, [openPage, page]);
+  /** The team menu of the sidebar: the details panel beside the conversation, on a tab when one is asked for. */
+  const openTeamDetails = useCallback((tab?: DrawerTab) => { showTeams(); showTeamDetails(tab); }, [showTeams, showTeamDetails]);
+  const showChat = useCallback(() => {
+    cancelLocalAppNavigation();
+    setPage('chat');
+    setActivityView(false);
+  }, [cancelLocalAppNavigation]);
+  const botDeleteRequests = useRef(0);
+  const { available: botsAvailable, view: botsView, setView: setBotsView, guard: botsGuard } = bots;
+  /**
+   * Show a Bot's page, from the sidebar or from the title of its chat; with `delete`, the page asks whether to delete the Bot.
+   * The page of the Bot being edited keeps its edits. Another Bot's page replaces it, and them, so that asks about them first.
+   */
+  const openBot = useCallback((botId: string, intent?: 'delete') => {
+    if (sessionNavigationBlocked() || !botsAvailable) return;
+    const go = () => {
+      setBotsView({ kind: 'detail', botId, ...(intent === 'delete' ? { deleteRequest: ++botDeleteRequests.current } : {}) });
+      setSidebarMode('bots');
+      openPage('bots');
+    };
+    if (botsView.kind === 'detail' && botsView.botId === botId) go(); else botsGuard.leave(go);
+  }, [botsAvailable, botsGuard, botsView, openPage, sessionNavigationBlocked, setBotsView, setSidebarMode]);
+  const createBot = useCallback(() => {
+    if (sessionNavigationBlocked() || !botsAvailable) return;
+    botsGuard.leave(() => {
+      setBotsView({ kind: 'create' });
+      setSidebarMode('bots');
+      openPage('bots');
+    });
+  }, [botsAvailable, botsGuard, openPage, sessionNavigationBlocked, setBotsView, setSidebarMode]);
   const sessionPickerProject = (botChat ? undefined : bridge.activeSession?.projectPath) ?? bridge.bootstrap?.settings.activeProject ?? (botChat ? undefined : workspace?.path) ?? bridge.bootstrap?.settings.projects[0];
   const closeSessionPicker = useCallback(() => {
     const request = sessionPickerRequest.current;
@@ -225,6 +311,7 @@ export function App() {
   useEffect(() => {
     const openPicker = (event: Event) => {
       if (sessionNavigationBlocked()) return;
+      if (localAppBridge.current.handoffPending) void localAppBridge.current.cancelSessionHandoff();
       cancelLocalAppNavigation();
       const detail = (event as CustomEvent<{ query?: unknown }>).detail;
       const request: SessionPickerRequest = {
@@ -284,6 +371,7 @@ export function App() {
   };
   const openSettings = useCallback((route?: Pick<SettingsRoute, 'pageId' | 'providerId' | 'pendingModelReference' | 'linkRequest'>) => {
     if (sessionNavigationBlocked()) return;
+    if (localAppBridge.current.handoffPending) void localAppBridge.current.cancelSessionHandoff();
     cancelLocalAppNavigation();
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setSettingsRoute({ ...route, restoreFocus: () => opener?.focus() });
@@ -298,8 +386,17 @@ export function App() {
       setPage('chat');
       setActivityView(!activityView);
       bridge.setRuntimeCenterOverviewOpen(!activityView);
+    } else if ((action === 'home' || action === 'bots' || action === 'teams') && !settingsRoute) {
+      // Bots is ignored where Bots cannot run: the menu shows that item dimmed.
+      // A key brought the person to Teams, so the keyboard comes along: to the open conversation in the sidebar, unless it is in Teams already.
+      selectSidebarMode(action, action === 'teams' ? () => { if (!document.activeElement?.closest('.teams-sidebar, .teams-page')) focusTeamsSidebarSoon(); } : undefined);
+    } else if (action === 'toggle-sidebar' && !settingsRoute) {
+      setSidebarCollapsed((collapsed) => !collapsed);
+    } else if (action === 'team-details' && !settingsRoute) {
+      // The panel belongs to the Teams page: on any other page the menu item does nothing.
+      if (page === 'teams' && teams.workspace) toggleTeamDetails();
     }
-  }), [openSettings, settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked]);
+  }), [openSettings, settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked, selectSidebarMode, page, teams.workspace, toggleTeamDetails]);
 
   const linkBusy = useRef(false);
   const linkSurfacePending = useRef(false);
@@ -328,11 +425,15 @@ export function App() {
         // Merely changing activeProject leaves that engine in the previous cwd.
         if ((settingsTarget || kind === 'settings' || kind === 'provider') && delivery.projectPath && delivery.projectPath !== bridge.activeSession?.projectPath) {
           const catalog = await bridge.listProjectSessions(delivery.projectPath);
-          const session = catalog?.sessions[0];
+          const session = catalog?.sessions.find((row) => {
+            const owner = bridge.bootstrap?.conversationSpaces.sessions.find((entry) => entry.sessionId === row.uuid);
+            return row.mode === bridge.bootstrap?.conversationSpaces.activeMode && (!owner || owner.projectId === delivery.projectPath);
+          });
           if (!session) throw new Error(tr('desktop_link_open_project_config'));
-          if (!await bridge.openSession(delivery.projectPath, session.uuid)) throw new Error(tr('desktop_link_project_conversation_error'));
+          if (!await bridge.openSession(delivery.projectPath, session.uuid, { scope: 'current', transcriptPath: session.path })) throw new Error(tr('desktop_link_project_conversation_error'));
         }
-        if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); }
+        // The join dialog opens in the sidebar, which cannot be used while it is hidden.
+        if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); setSidebarCollapsed(false); }
         else if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
         else if (kind === 'settings') {
           if (!SETTINGS_NAV.some(page => page.id === id)) throw new Error(tr('desktop_link_settings_unavailable'));
@@ -342,7 +443,10 @@ export function App() {
         else if (kind === 'session' || kind === 'project') {
           setMessageTarget(null);
           if (!delivery.projectPath) throw new Error(tr('desktop_link_project_unregistered'));
-          if (kind === 'session' && !await bridge.openSession(delivery.projectPath, id!)) throw new Error(tr('desktop_link_conversation_error'));
+          if (kind === 'session') {
+            if (params.mode !== 'chat' && params.mode !== 'code') throw new Error(tr('desktop_link_conversation_error'));
+            if (!await bridge.openSession(delivery.projectPath, id!, undefined, params.mode)) throw new Error(tr('desktop_link_conversation_error'));
+          }
           if (kind === 'project') await bridge.activateProject(delivery.projectPath);
           setPage('chat');
           setActivityView(false);
@@ -353,9 +457,7 @@ export function App() {
             });
           }
         } else if (kind === 'new') {
-          const project = delivery.projectPath ?? bridge.bootstrap?.settings.activeProject;
-          if (!project) throw new Error(tr('desktop_link_select_project'));
-          const session = await bridge.newSession(project);
+          const session = await bridge.newSession(delivery.projectPath);
           if (!session) throw new Error(tr('desktop_link_create_error'));
           if (typeof delivery.target.payload?.prompt === 'string') bridge.offerLinkDraft({ sessionId: session.sessionId, text: delivery.target.payload.prompt, requestId: delivery.id });
           setPage('chat');
@@ -436,7 +538,7 @@ export function App() {
       <div
         className="desktop-shell"
         data-screen-label="LingXi Code Desktop Beta"
-        style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.sidebarBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent, '--rail-material': palette.sidebarBg, '--nav-panel-border': palette.border } as CSSProperties}
+        style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.sidebarBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent, '--rail-material': palette.sidebarBg, '--nav-panel-border': palette.border, ...teamsTheme } as CSSProperties}
       >
         <SettingsBackground active={bridge.projectCreationOpen || settingsRoute !== null || (sessionPicker !== null && !sessionPickerSuspended)}>
           <BetaSidebar
@@ -446,11 +548,17 @@ export function App() {
             apps={page === 'apps'}
             changes={page === 'changes'}
             onOpenApps={() => openPage('apps')}
-            teams={page === 'teams'}
-            onOpenTeams={() => openPage('teams')}
-            bots={page === 'bots'}
             botsAvailable={bots.available}
-            onOpenBots={() => openPage('bots')}
+            teamsUnread={teams.snapshot?.totalUnread ?? 0}
+            sidebarMode={sidebarMode}
+            onSelectSidebarMode={selectSidebarMode}
+            modePanel={(mode, search) => mode === 'bots'
+              ? <BotsSidebar bots={bots} sessions={botSessions} bridge={bridge} query={search} chatVisible={page === 'chat'}
+                  onOpenChat={showChat} onLeave={leaveBots} onOpenBot={openBot} onCreateBot={createBot} />
+              : <TeamsSidebar teams={teams} zh={zh} query={search} initialInvite={teamInvite} onInviteHandled={handledTeamInvite}
+                  onShowTeams={showTeams} onOpenSettings={openTeamDetails} />}
+            sidebarCollapsed={sidebarCollapsed}
+            onSidebarCollapsedChange={setSidebarCollapsed}
             scheduled={page === 'scheduled'}
             onOpenScheduled={() => openPage('scheduled')}
             onOpenChat={() => openPage('chat')}
@@ -460,7 +568,7 @@ export function App() {
               <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
-                  bot={activeBotId !== undefined ? { name: activeBot?.name ?? '', onOpen: () => { bots.setView({ kind: 'detail', botId: activeBotId }); openPage('bots'); } } : undefined}
+                  bot={activeBotId !== undefined ? { botId: activeBotId, name: activeBot?.name ?? '', onOpen: () => openBot(activeBotId) } : undefined}
                   sideChatOpen={sideChats.open && Boolean(sideChats.selected)}
                   sideChatAvailable={sideChats.sides.length > 0}
                   onToggleSideChat={() => { const next = !sideChats.open; sideChats.setOpen(next); if (!next) bridge.setRuntimeInspectorOpen(false); }}
@@ -479,11 +587,11 @@ export function App() {
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
           {localAppNavigationError && <div role="alert" className="local-app-error">{localAppNavigationError}</div>}
-          {page === 'teams' && <Suspense fallback={<p role="status">{locale.startsWith('zh') ? '正在加载团队…' : 'Loading Teams…'}</p>}><Teams zh={locale.startsWith('zh')} initialInvite={teamInvite} onInviteHandled={handledTeamInvite} /></Suspense>}
-          <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
+          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} zh={zh} drawer={teamsDrawer} /></Suspense>}
+          <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}
-              onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }}
+              onOpenChat={showChat}
               onNewRoutine={(scope) => openRoutine({ kind: 'new', scope })}
               onOpenRoutine={(scope, id) => openRoutine({ kind: 'job', id, scope })} />
           </div>}
@@ -513,7 +621,7 @@ export function App() {
                   onOpenAgent={(agentId) => bridge.openRuntimeItem({ kind: 'agent', id: agentId })}
                   collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
                   emptyMessage={emptyMessage}
-                  welcomeProject={botChat ? activeBot?.name ?? '' : (bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path)?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
+                  welcomeProject={botChat ? activeBot?.name ?? '' : bridge.activeSession?.projectId?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
                   // Item ids restart at `i1` in every session; the Stage's
                   // collapse map is scoped by this and dropped when it changes.
                   sessionKey={bridge.conversation.sessionKey}
@@ -544,10 +652,13 @@ export function App() {
                     onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
                   />
                 </ModUiParentSite>}
-                <ModUiAbovePrompt
-                  sessionId={settledSession?.sessionId ?? ''}
-                  enabled={page === 'chat' && settingsRoute === null && bridge.connected && !bridge.sessionLoading}
-                />
+                {(bridge.bootstrap?.runtimes ?? []).map((runtime) => <div
+                  key={runtime.sessionId}
+                  style={{ display: page === 'chat' && settingsRoute === null && !bridge.sessionLoading
+                    && settledSession?.sessionId === runtime.sessionId ? 'contents' : 'none' }}
+                >
+                  <ModUiAbovePrompt sessionId={runtime.sessionId} enabled={runtime.connection.status === 'connected'} />
+                </div>)}
                 <BetaComposer
                   localAppDraft={localAppDraft}
                   onLocalAppDraftConsumed={consumeLocalAppDraft}
@@ -633,7 +744,7 @@ export function App() {
         {bridge.projectCreationOpen && <CreateProjectDialog localApp={bridge.projectCreationPurpose === 'local-app'}
           onDefaultFolder={bridge.defaultAppProjectFolder} onPickFolder={bridge.pickProjectFolder}
           onCreate={bridge.confirmProjectCreation} onClose={bridge.cancelProjectCreation} />}
-        {sessionPicker && <SessionPicker key={sessionPicker.id} projectPath={sessionPicker.projectPath} initialQuery={sessionPicker.query}
+        {sessionPicker && <SessionPicker key={sessionPicker.id} projectPath={sessionPicker.projectPath} mode={bridge.bootstrap?.conversationSpaces.activeMode ?? 'chat'} initialQuery={sessionPicker.query}
           suspended={sessionPickerSuspended}
           activeSessionId={bridge.activeSession?.sessionId} listProjectSessions={bridge.listProjectSessions} openSession={bridge.openSession}
           onOpened={openedPickerSession} onClose={closeSessionPicker} />}

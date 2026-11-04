@@ -7,11 +7,11 @@ import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 
 import react from '@vitejs/plugin-react';
+import electronBinary from 'electron';
 import { createServer } from 'vite';
 
 const electronRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixtureRoot = join(electronRoot, 'test', 'fixtures');
-const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'runtime-lifecycle-electron.mjs');
 
 test('runtime disposal and metadata callbacks retain their current session owner', async () => {
@@ -38,7 +38,7 @@ test('runtime disposal and metadata callbacks retain their current session owner
     const fixtureUrl = `http://127.0.0.1:${address.port}/runtime-lifecycle-fixture.html`;
     const output = [];
     const errors = [];
-    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
+    child = spawn(electronBinary, [electronDriver, fixtureUrl], {
       cwd: electronRoot,
       env: {
         ...process.env,
@@ -54,8 +54,8 @@ test('runtime disposal and metadata callbacks retain their current session owner
     const result = await new Promise((resolveResult, rejectResult) => {
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
-        rejectResult(new Error(`Electron runtime lifecycle fixture timed out\n${errors.join('')}`));
-      }, 20_000);
+        rejectResult(new Error(`Electron runtime lifecycle fixture timed out\nstdout: ${output.join('')}\nstderr: ${errors.join('')}`));
+      }, 45_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {
         clearTimeout(timeout);
@@ -69,7 +69,7 @@ test('runtime disposal and metadata callbacks retain their current session owner
       });
     });
 
-    for (const key of ['initializationPreserved', 'disposedOwnerCleared', 'staleBootstrapIgnored', 'staleMetadataIgnored', 'backgroundOwnerPreserved', 'currentErrorsVisible', 'navigationErrorsOwned', 'replacementGapSkipped', 'replacementReattached']) assert.equal(result[key], true, key);
+    for (const key of ['initializationPreserved', 'disposedOwnerCleared', 'staleBootstrapIgnored', 'staleMetadataIgnored', 'backgroundOwnerPreserved', 'currentErrorsVisible', 'navigationErrorsOwned', 'replacementGapSkipped', 'replacementReattached', 'failedSpaceSwitchRetry', 'scheduledSpaceRefreshed', 'audioOwnerPreserved', 'admittedFlowDuringNavigation']) assert.equal(result[key], true, key);
 
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');

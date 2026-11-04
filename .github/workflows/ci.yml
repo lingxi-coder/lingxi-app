@@ -96,7 +96,11 @@ jobs:
             -ex 'set detach-on-fork on' \
             -ex 'set print thread-events off' \
             -ex 'handle SIGPIPE nostop noprint pass' \
+            -ex 'catch exec' \
             -ex run \
+            -ex 'set follow-fork-mode parent' \
+            -ex 'disable 1' \
+            -ex continue \
             -ex 'info threads' \
             -ex 'bt 80' \
             -ex 'thread apply all bt 30' \

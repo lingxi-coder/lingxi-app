@@ -1273,7 +1273,10 @@ mod tests {
     fn resolve_rejects_unknown_and_non_slash_input() {
         assert!(resolve("/frobnicate").is_none());
         assert!(resolve("/mode chat").is_none());
-        assert_eq!(resolve("/context manifest").map(|(_, args)| args), Some("manifest"));
+        assert_eq!(
+            resolve("/context manifest").map(|(_, args)| args),
+            Some("manifest")
+        );
         assert!(resolve("help").is_none());
         assert!(resolve("").is_none());
     }

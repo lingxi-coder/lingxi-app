@@ -78,7 +78,8 @@ impl ColdBootResume {
         }
         let loaded = session::jsonl::route_lines(&snapshot.content);
         let mode = session::JsonlWriter::fixed_session_mode_from_source(
-            &snapshot.content, &session_id.to_string(),
+            &snapshot.content,
+            &session_id.to_string(),
         )?;
         let (messages, _) =
             session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
@@ -203,7 +204,9 @@ impl WorkspaceSessionFacts {
 }
 
 impl WorkspaceCommands {
-    pub(crate) fn orchestrator(&self) -> Result<Arc<orchestrator::ConversationOrchestrator>, String> {
+    pub(crate) fn orchestrator(
+        &self,
+    ) -> Result<Arc<orchestrator::ConversationOrchestrator>, String> {
         Ok(self.host.runtime()?.orchestrator.clone())
     }
 
@@ -211,14 +214,20 @@ impl WorkspaceCommands {
         &self,
         expected: lingxi_core::types::SessionId,
     ) -> Result<lingxi_core::host::live_sessions::SharedSessionWriterLease, String> {
-        self.host.runtime()?.current_session_writer_lease(expected).await
+        self.host
+            .runtime()?
+            .current_session_writer_lease(expected)
+            .await
     }
 
     pub(crate) async fn capture_current_transcript(
         &self,
         expected: lingxi_core::types::SessionId,
     ) -> Result<session::jsonl::writer::CommittedTranscript, String> {
-        self.host.runtime()?.capture_current_session_transcript(expected).await
+        self.host
+            .runtime()?
+            .capture_current_session_transcript(expected)
+            .await
     }
 
     pub(crate) fn bind_cold_resume(&self, captured: Option<ColdBootResume>) {
@@ -270,7 +279,10 @@ impl WorkspaceCommands {
             return Ok(None);
         };
         if captured.mode != expected_mode {
-            return Err("session_mode_mismatch: selected session mode differs from the expected mode".into());
+            return Err(
+                "session_mode_mismatch: selected session mode differs from the expected mode"
+                    .into(),
+            );
         }
         let runtime = self.host.runtime()?;
         if runtime.orchestrator.current_session_id().await.as_uuid() != session_id

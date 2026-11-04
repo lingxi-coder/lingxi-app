@@ -12,8 +12,8 @@ use lingxi_core::host::task_registry::{
     TaskRegistryHandle, TaskUpdatePatch,
 };
 use lingxi_core::host::{
-    CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo,
-    McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, SkillInfo, StatusSnapshot,
+    CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
+    MemoryEditorOutcome, OrchestratorHandle, SkillInfo, StatusSnapshot,
 };
 #[cfg(unix)]
 use platform_posix::PosixFileSystem as NativeFileSystem;
@@ -144,8 +144,6 @@ impl OrchestratorHandle for SwitchHandle {
     }
 }
 
-
-
 struct Tasks;
 
 #[async_trait]
@@ -235,8 +233,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         next: Mutex::new(session_b),
         fail: std::sync::atomic::AtomicBool::new(false),
     });
-    let router =
-        EngineCommandRouter::new(handle.clone(), Arc::new(Tasks), None, None);
+    let router = EngineCommandRouter::new(handle.clone(), Arc::new(Tasks), None, None);
     let sink = Arc::new(Sink::default());
     router
         .route(ClientCommand::ClearSession, sink.clone())
@@ -307,13 +304,12 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         ),
     )
     .unwrap();
-    let resume_router =
-        EngineCommandRouter::new(handle.clone(), Arc::new(Tasks), None, None)
-            .with_session_store(SessionStoreContext::new(
-                lingxi_home,
-                cwd,
-                Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
-            ));
+    let resume_router = EngineCommandRouter::new(handle.clone(), Arc::new(Tasks), None, None)
+        .with_session_store(SessionStoreContext::new(
+            lingxi_home,
+            cwd,
+            Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
+        ));
     let resumed_sink = Arc::new(Sink::default());
     resume_router
         .route(

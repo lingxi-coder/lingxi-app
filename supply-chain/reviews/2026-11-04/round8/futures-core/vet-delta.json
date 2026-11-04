@@ -1,0 +1,20 @@
+{
+  "before_failures": 813,
+  "after_failures": 812,
+  "removed": [
+    {
+      "name": "futures-core",
+      "version": "0.3.32",
+      "missing_criteria": [
+        "safe-to-deploy"
+      ]
+    }
+  ],
+  "added": [],
+  "before_output_sha256": "41d64d9ead015e6ebcf0ef3686fec220f928e48b6ce0ccb664373b0ce7373cbf",
+  "after_output_sha256": "18cc4985e29ea3cc4075bffe5fc23aabe797b4b00a7eb4e5e303ec951573b8df",
+  "after_audits_sha256": "8b84a623a7ee1cea5d12e0b31dcd3f6680f90d3709e22b101ac21beeb563c894",
+  "other_inputs_unchanged": true,
+  "only_audits_toml_change": "futures-core 0.3.32 exact full record",
+  "overall_conclusion": "fail (vetting)"
+}

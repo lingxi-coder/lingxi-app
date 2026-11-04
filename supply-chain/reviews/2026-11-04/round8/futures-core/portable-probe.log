@@ -1,0 +1,82 @@
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-core-20261104/supply-chain/reviews/2026-11-04/round8/futures-core: 15687680000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T: 15687680000
+futures-core archive SHA-256: 7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d
+portable-atomic 1.15.0 archive SHA-256: 05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85
+portable-atomic cached build-source files matched: 59
+$ cargo +1.94.0 --version
+cargo 1.94.0 (85eff7c80 2026-01-15)
+exit: 0
+$ cargo +1.94.0 generate-lockfile --offline
+     Locking 2 packages to latest compatible versions
+exit: 0
+temporary Cargo.lock SHA-256: d10aa4edf1fd189ce4da4bc92c0e165a8a69b4aca8d1927cf3698c60c6820ab4
+resolved futures-core features: ["alloc", "default", "portable-atomic", "std"]
+resolved futures-core dependency edges: [{"name": "portable_atomic", "pkg": "registry+https://github.com/rust-lang/crates.io-index#portable-atomic@1.15.0", "dep_kinds": [{"kind": null, "target": null}]}]
+WARNING: panic diagnostics assert observed liveness failure, not correctness.
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-core-20261104/supply-chain/reviews/2026-11-04/round8/futures-core: 15687680000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T: 15687680000
+$ cargo +1.94.0 test --offline --locked --test behavior_probe -- --nocapture --test-threads=1
+   Compiling portable-atomic v1.15.0
+   Compiling futures-core v0.3.32 (/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-portable-wmc9drqq/core)
+   Compiling futures-core-portable-probe v0.0.0 (/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-portable-wmc9drqq/probe)
+    Finished `test` profile [unoptimized] target(s) in 2.74s
+     Running tests/behavior_probe.rs (/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-portable-wmc9drqq/target/debug/deps/behavior_probe-1d402422fdf7e91d)
+
+running 7 tests
+test assert_unwind_safe_projects_pinned_stream ... ok
+test contended_take_returns_none_and_register_wakes ... ok
+test diagnostic_clone_panic_may_leave_register_stuck ... 
+thread 'diagnostic_clone_panic_may_leave_register_stuck' (10480641) panicked at tests/behavior_probe.rs:120:51:
+diagnostic clone panic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test diagnostic_old_drop_panic_and_final_destruction ... isolated child status: exit status: 0
+
+running 1 test
+after worker panic: wake_count=0, old_drop_count=1, new_drop_count=0
+after final cell drop: old_drop_count=1, new_drop_count=1
+test diagnostic_old_drop_panic_and_final_destruction ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+thread '<unnamed>' (10480645) panicked at tests/behavior_probe.rs:143:25:
+diagnostic old-waker drop panic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test ready_macro_propagates_pending_and_value ... ok
+test sequential_replacement_take_and_wake ... ok
+test wake_during_register_is_forwarded_after_unlock ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+exit: 0
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-core-20261104/supply-chain/reviews/2026-11-04/round8/futures-core: 15646720000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T: 15646720000
+$ cargo +1.94.0 test --offline --locked --test behavior_probe wake_during_register_is_forwarded_after_unlock -- --exact --nocapture
+   Compiling futures-core v0.3.32 (/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-portable-wmc9drqq/core)
+   Compiling futures-core-portable-probe v0.0.0 (/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-portable-wmc9drqq/probe)
+    Finished `test` profile [unoptimized] target(s) in 0.36s
+     Running tests/behavior_probe.rs (/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-portable-wmc9drqq/target/debug/deps/behavior_probe-1d402422fdf7e91d)
+
+running 1 test
+
+thread 'wake_during_register_is_forwarded_after_unlock' (10480800) panicked at tests/behavior_probe.rs:74:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test wake_during_register_is_forwarded_after_unlock ... FAILED
+
+failures:
+
+failures:
+    wake_during_register_is_forwarded_after_unlock
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test behavior_probe`
+exit: 101
+isolated target files: 43, total 5304061 bytes
+all temporary files: 61, total 5359706 bytes
+temporary directory removed: True

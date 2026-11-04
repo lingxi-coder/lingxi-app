@@ -1,0 +1,30 @@
+{
+  "harness_files": {
+    "crates/core/src/host/bridge.rs": "c390a0f95d088c5e7cf65e059b0aa4ebed719a45b75f924a2da12616aa98df70",
+    "crates/core/src/host/filesystem.rs": "10b4cdd51b3bc9a570102681a679045370bfd93622fbb13dfaea63c1a061582c",
+    "crates/core/src/host/fusion.rs": "b5bbc78210c8c3b11785f9435dc2757f5d3caee2891de18265df2dd1dee08e35",
+    "crates/core/src/host/http.rs": "71923dfdcb255b841f0efd7e004edcaabd869ed40f9f201374382217c05c4ad6"
+  },
+  "harness_revision": "ae5a65b1f4816cd26a06d462573ebc9841f14f96",
+  "registry": {
+    "futures-channel-0.3.32": {
+      "archive_sha256": "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d",
+      "files_sha256": {
+        "src/mpsc/mod.rs": "fff4ec50657e5cf0ad1a14336b621cab9076abbae4eb732dc1530df637250539"
+      }
+    },
+    "futures-util-0.3.32": {
+      "archive_sha256": "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6",
+      "files_sha256": {
+        "src/abortable.rs": "d58fd321880308cb81258bdfe8519e6c4d25301ad6fbb748cf84c0b4e5bd567c",
+        "src/task/mod.rs": "781f6d7d2484d6bd88ef9533d5c4729eeb8d4ee9bb8b9f4bad7049a78e190c32"
+      }
+    },
+    "h2-0.4.19": {
+      "archive_sha256": "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16",
+      "files_sha256": {
+        "src/share.rs": "e313c11a24b649d4c9da937fb37e5c2cc7c689c53f6afd2470fd40fd030237c5"
+      }
+    }
+  }
+}

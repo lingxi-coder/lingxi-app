@@ -55,6 +55,12 @@ criteria = "safe-to-run"
 version = "0.1.13"
 notes = "AI-assisted full exact-version source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/diff-0.1.13.md (SHA-256 4266434dd83b15fe427c892214b3bd9a2ee7cf1a1145967552354eeb7a1ef4c9); cross-review: supply-chain/reviews/2026-11-03/diff-gethostname-cross-review.md (SHA-256 40963ae12dc46429d6d9bc22eaf2dedb6af492cd41e81d295557170295b1683a). Caller-controlled input can require O(m*n) memory/time; packaged tests may write their fixtures on read failure. No safe-to-deploy claim."
 
+[[audits.futures-core]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.3.32"
+notes = "AI-assisted full exact-version source review: supply-chain/reviews/2026-11-04/round8/futures-core/review.md (SHA-256 11ff1b8cf4680fcd48621d845259842319ff1f620e4ecf22552f67bd4fa59176); independent cross-review: supply-chain/reviews/2026-11-04/round8/futures-core/root-cross-review.md (SHA-256 35e0f33f7033f1dc2a82183c17839e4d9262d95269c470879474bee6b604a68a). A legitimate safe Arc<Wake> destructor panic during registration can leave the cell permanently unable to deliver notifications after unwind; no post-panic recovery is guaranteed. This is a real availability limitation, but no memory unsafety or trigger from untrusted App input was demonstrated; reviewers exercised discretion that it is not a known serious untrusted-input security vulnerability. Consumer implementations, optional portable-atomic, compiler, other versions and target behavior remain separate."
+
 [[audits.futures-io]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"

@@ -1,0 +1,525 @@
+{
+  "head": "9ae7dc324592b3c30cf10c151de1dcba3aff0964",
+  "metadata_command": "cargo +1.94.0 metadata --format-version 1 --all-features --locked --frozen",
+  "metadata_sha256": "c0bd711092230bc98a02e54306ae09b2ca6f5dc0ca4bce3964d2571498bd97fc",
+  "package_count": 1052,
+  "package_id": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+  "resolved_features": [
+    "alloc",
+    "default",
+    "std"
+  ],
+  "resolved_dependencies": [],
+  "reverse_parents_all_targets": [
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#async-broadcast@0.7.2",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#async-channel@2.5.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "924ed96dd52d1b75e9c1a3e6275715fd320f5f9439fb5a4a11fa51f4221158d2",
+      "selected_files": [
+        {
+          "path": "src/lib.rs",
+          "sha256": "96d786959c66fc32a0181a8015ff9fd06b7a9955d878bfd7760b81304ee35223",
+          "line": 65,
+          "text": "use futures_core::stream::Stream;"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#async-compat@0.2.5",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#async-signal@0.2.14",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "git+https://github.com/lingxi-coder/harness-runtime.git?rev=ae5a65b1f4816cd26a06d462573ebc9841f14f96#core@0.12.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#crossterm@0.29.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#eventsource-stream@0.2.3",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures@0.3.32",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures-channel@0.3.32",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d",
+      "selected_files": [
+        {
+          "path": "src/mpsc/mod.rs",
+          "sha256": "fff4ec50657e5cf0ad1a14336b621cab9076abbae4eb732dc1530df637250539",
+          "line": 83,
+          "text": "use futures_core::task::__internal::AtomicWaker;"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures-executor@0.3.32",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures-lite@2.6.1",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures-util@0.3.32",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6",
+      "selected_files": [
+        {
+          "path": "src/task/mod.rs",
+          "sha256": "781f6d7d2484d6bd88ef9533d5c4729eeb8d4ee9bb8b9f4bad7049a78e190c32",
+          "line": 37,
+          "text": "pub use futures_core::task::__internal::AtomicWaker;"
+        },
+        {
+          "path": "src/abortable.rs",
+          "sha256": "d58fd321880308cb81258bdfe8519e6c4d25301ad6fbb748cf84c0b4e5bd567c",
+          "line": 149,
+          "text": "self.inner.waker.register(cx.waker());"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#glib@0.22.10",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#gstreamer@0.25.3",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#gstreamer-app@0.25.2",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.19",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16",
+      "selected_files": [
+        {
+          "path": "src/share.rs",
+          "sha256": "e313c11a24b649d4c9da937fb37e5c2cc7c689c53f6afd2470fd40fd030237c5",
+          "line": 464,
+          "text": "impl futures_core::Stream for RecvStream {"
+        }
+      ]
+    },
+    {
+      "id": "git+https://github.com/lingxi-coder/harness-runtime.git?rev=ae5a65b1f4816cd26a06d462573ebc9841f14f96#harness-runtime@0.9.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#http-body-util@0.1.3",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "git+https://github.com/lingxi-coder/harness-runtime.git?rev=ae5a65b1f4816cd26a06d462573ebc9841f14f96#http-client@0.1.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#hyper@1.9.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "git+https://github.com/lingxi-coder/llm-client.git?rev=3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3#lingxi-hyper@1.9.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "git+https://github.com/lingxi-coder/llm-client.git?rev=3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3#lingxi-reqwest@0.12.29",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "git+https://github.com/lingxi-coder/harness-runtime.git?rev=ae5a65b1f4816cd26a06d462573ebc9841f14f96#mcp-wire@0.12.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#opentelemetry@0.31.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#ordered-stream@0.2.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "git+https://github.com/lingxi-coder/harness-runtime.git?rev=ae5a65b1f4816cd26a06d462573ebc9841f14f96#platform-posix@0.12.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "git+https://github.com/lingxi-coder/harness-runtime.git?rev=ae5a65b1f4816cd26a06d462573ebc9841f14f96#platform-posix-minimal@0.12.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "git+https://github.com/lingxi-coder/harness-runtime.git?rev=ae5a65b1f4816cd26a06d462573ebc9841f14f96#platform-windows@0.12.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#reqwest@0.12.28",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "git+https://github.com/lingxi-coder/harness-runtime.git?rev=ae5a65b1f4816cd26a06d462573ebc9841f14f96#sidequery@0.12.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#sync_wrapper@1.0.2",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#tokio-stream@0.1.18",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#tokio-util@0.7.18",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#tower@0.5.3",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#tower-http@0.6.11",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#zbus@5.18.0",
+      "edge": {
+        "name": "futures_core",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    }
+  ]
+}

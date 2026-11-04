@@ -1,0 +1,131 @@
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-core-20261104/supply-chain/reviews/2026-11-04/round8/futures-core: 16547840000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T: 16547840000
+release archive SHA-256: 7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d
+WARNING: diagnostic_clone_panic_may_leave_register_stuck asserts a suspected failure, not correctness.
+$ rustc +1.94.0 --version
+rustc 1.94.0 (4a4ef493e 2026-03-02)
+exit: 0
+$ rustc +1.94.0 --edition=2018 --crate-name futures_core --crate-type rlib -C debuginfo=0 /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/src/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/libbare.rlib
+exit: 0
+$ rustc +1.94.0 --edition=2018 --crate-name futures_core --crate-type rlib -C debuginfo=0 --cfg 'feature="alloc"' /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/src/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/liballoc.rlib
+exit: 0
+$ rustc +1.94.0 --edition=2018 --extern futures_core=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/libbare.rlib /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/missing.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/missing
+error[E0432]: unresolved import `futures_core::future::BoxFuture`
+  --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/missing.rs:1:5
+   |
+ 1 | use futures_core::future::BoxFuture; fn main() {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^---------
+   |     |                     |
+   |     |                     help: a similar name exists in the module: `TryFuture`
+   |     no `BoxFuture` in `future`
+   |
+note: found an item that was configured out
+  --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/src/future.rs:18:10
+   |
+17 | #[cfg(feature = "alloc")]
+   |       ----------------- the item is gated behind the `alloc` feature
+18 | pub type BoxFuture<'a, T> = Pin<alloc::boxed::Box<dyn Future<Output = T> + Send + 'a>>;
+   |          ^^^^^^^^^
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0432`.
+exit: 1
+$ rustc +1.94.0 --edition=2018 --crate-name futures_core --crate-type rlib -C debuginfo=0 --cfg 'feature="alloc"' --cfg 'feature="std"' /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/src/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/libfutures_core.rlib
+exit: 0
+$ rustc +1.94.0 --edition=2018 --extern futures_core=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/libfutures_core.rlib /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/unwind_without_assert.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/unwind_without_assert
+error[E0277]: the type `UnsafeCell<Option<Waker>>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+   --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/unwind_without_assert.rs:2:77
+    |
+  2 | fn main() { let cell = AtomicWaker::new(); let _ = std::panic::catch_unwind(|| cell.wake()); }
+    |                                                    ------------------------ ^^^^^^^^^^^^^^ `UnsafeCell<Option<Waker>>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    |                                                    |
+    |                                                    required by a bound introduced by this call
+    |
+    = help: within `AtomicWaker`, the trait `RefUnwindSafe` is not implemented for `UnsafeCell<Option<Waker>>`
+note: required because it appears within the type `AtomicWaker`
+   --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/src/task/__internal/atomic_waker.rs:96:12
+    |
+ 96 | pub struct AtomicWaker {
+    |            ^^^^^^^^^^^
+    = note: required for `&AtomicWaker` to implement `UnwindSafe`
+note: required because it's used within this closure
+   --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/unwind_without_assert.rs:2:77
+    |
+  2 | fn main() { let cell = AtomicWaker::new(); let _ = std::panic::catch_unwind(|| cell.wake()); }
+    |                                                                             ^^
+note: required by a bound in `std::panic::catch_unwind`
+   --> /Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panic.rs:358:40
+    |
+358 | pub fn catch_unwind<F: FnOnce() -> R + UnwindSafe, R>(f: F) -> Result<R> {
+    |                                        ^^^^^^^^^^ required by this bound in `catch_unwind`
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0277`.
+exit: 1
+$ rustc +1.94.0 --edition=2018 --test -C debuginfo=0 --extern futures_core=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/libfutures_core.rlib /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-core-20261104/supply-chain/reviews/2026-11-04/round8/futures-core/behavior-probe.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/probe
+exit: 0
+compiled artifact libbare.rlib: 84240 bytes
+compiled artifact liballoc.rlib: 93688 bytes
+compiled artifact libfutures_core.rlib: 100000 bytes
+compiled artifact probe: 1238184 bytes
+$ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/probe --nocapture --test-threads=1
+
+running 7 tests
+test assert_unwind_safe_projects_pinned_stream ... ok
+test contended_take_returns_none_and_register_wakes ... ok
+test diagnostic_clone_panic_may_leave_register_stuck ... 
+thread 'diagnostic_clone_panic_may_leave_register_stuck' (10446234) panicked at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-core-20261104/supply-chain/reviews/2026-11-04/round8/futures-core/behavior-probe.rs:120:51:
+diagnostic clone panic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test diagnostic_old_drop_panic_and_final_destruction ... isolated child status: exit status: 0
+
+running 1 test
+after worker panic: wake_count=0, old_drop_count=1, new_drop_count=0
+after final cell drop: old_drop_count=1, new_drop_count=1
+test diagnostic_old_drop_panic_and_final_destruction ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+thread '<unnamed>' (10446238) panicked at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-core-20261104/supply-chain/reviews/2026-11-04/round8/futures-core/behavior-probe.rs:143:25:
+diagnostic old-waker drop panic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test ready_macro_propagates_pending_and_value ... ok
+test sequential_replacement_take_and_wake ... ok
+test wake_during_register_is_forwarded_after_unlock ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+exit: 0
+$ rustc +1.94.0 --edition=2018 --crate-name futures_core --crate-type rlib -C debuginfo=0 --cfg 'feature="alloc"' --cfg 'feature="std"' /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/src/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/libfutures_core.rlib
+exit: 0
+$ rustc +1.94.0 --edition=2018 --test -C debuginfo=0 --extern futures_core=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/libfutures_core.rlib /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-core-20261104/supply-chain/reviews/2026-11-04/round8/futures-core/behavior-probe.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/mutant-probe
+exit: 0
+compiled mutant library: 99984 bytes
+compiled mutant test binary: 1238192 bytes
+$ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-core-probe-ni40pd9u/mutant-probe --exact wake_during_register_is_forwarded_after_unlock --nocapture
+
+running 1 test
+
+thread 'wake_during_register_is_forwarded_after_unlock' (10446422) panicked at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-core-20261104/supply-chain/reviews/2026-11-04/round8/futures-core/behavior-probe.rs:74:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test wake_during_register_is_forwarded_after_unlock ... FAILED
+
+failures:
+
+failures:
+    wake_during_register_is_forwarded_after_unlock
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+exit: 101
+temporary files: 14, total 2785798 bytes
+temporary directory removed: True
+Expected diagnostic outcomes observed; a passing panic diagnostic demonstrates the suspected liveness failure.

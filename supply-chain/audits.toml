@@ -55,6 +55,12 @@ criteria = "safe-to-run"
 version = "0.1.13"
 notes = "AI-assisted full exact-version source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/diff-0.1.13.md (SHA-256 4266434dd83b15fe427c892214b3bd9a2ee7cf1a1145967552354eeb7a1ef4c9); cross-review: supply-chain/reviews/2026-11-03/diff-gethostname-cross-review.md (SHA-256 40963ae12dc46429d6d9bc22eaf2dedb6af492cd41e81d295557170295b1683a). Caller-controlled input can require O(m*n) memory/time; packaged tests may write their fixtures on read failure. No safe-to-deploy claim."
 
+[[audits.futures-io]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.3.32"
+notes = "AI-assisted full exact-version source review and independent root cross-review. Evidence: supply-chain/reviews/2026-11-04/round8/futures-io/review.md (SHA-256 e29733f295672197de8f3c9e302afc37c6f363c1cd0f8982ced18e9e0a01d4e4); cross-review: supply-chain/reviews/2026-11-04/round8/futures-io/root-cross-review.md (SHA-256 d1ad9aacc03a885427612ff37944873096081afdea154f20a71807e8575f97f9). Scope is this exact package; consumer trait implementations, standard library, compiler and other versions remain separate."
+
 [[audits.gethostname]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"

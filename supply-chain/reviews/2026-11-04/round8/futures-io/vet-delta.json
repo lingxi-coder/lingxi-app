@@ -1,0 +1,20 @@
+{
+  "before_failures": 815,
+  "after_failures": 814,
+  "removed": [
+    {
+      "name": "futures-io",
+      "version": "0.3.32",
+      "missing_criteria": [
+        "safe-to-deploy"
+      ]
+    }
+  ],
+  "added": [],
+  "before_output_sha256": "417cb2cf1d2c7dccab03d56fa3675a6617294da55106bced837f3305311ba7dd",
+  "after_output_sha256": "6773bc1d3ab088e08100a775d5178d1a730b5712def258c4bd27041a184cb6c6",
+  "after_audits_sha256": "ed4c89d68f494410c5f1c8090b94368cce414a0aa20471ef23be5ae86d5d6832",
+  "other_inputs_unchanged": true,
+  "only_audits_toml_change": "futures-io 0.3.32 exact full record",
+  "overall_conclusion": "fail (vetting)"
+}

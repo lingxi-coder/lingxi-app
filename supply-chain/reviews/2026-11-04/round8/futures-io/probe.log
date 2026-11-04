@@ -1,0 +1,61 @@
+release archive SHA-256: cecba35d7ad927e23624b22ad55235f2239cfa44fd10428eecbeba6d6a717718
+source SHA-256: ff0a57a4c0eea4b7677404cdca237729f0af9c5dfc9539d23583a71ac7e9cc42
+$ rustc +1.94.0 --version
+rustc 1.94.0 (4a4ef493e 2026-03-02)
+exit: 0
+$ rustc +1.94.0 --edition=2018 --crate-name futures_io --crate-type rlib -C debuginfo=0 /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/libnostd.rlib
+exit: 0
+$ rustc +1.94.0 --edition=2018 --crate-name futures_io --crate-type rlib -C debuginfo=0 --cfg 'feature="unstable"' /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/libunstable.rlib
+exit: 0
+$ rustc +1.94.0 --edition=2018 --extern futures_io=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/libnostd.rlib /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/missing.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/missing
+error[E0432]: unresolved import `futures_io::AsyncRead`
+ --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/missing.rs:1:5
+  |
+1 | use futures_io::AsyncRead; fn main() {}
+  |     ^^^^^^^^^^^^^^^^^^^^^ no `AsyncRead` in the root
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0432`.
+exit: 1
+$ rustc +1.94.0 --edition=2018 --crate-name futures_io --crate-type rlib -C debuginfo=0 --cfg 'feature="std"' /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/libfutures_io.rlib
+exit: 0
+$ rustc +1.94.0 --edition=2018 --crate-name futures_io --crate-type rlib -C debuginfo=0 --cfg 'feature="std"' --cfg 'feature="unstable"' /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/liball.rlib
+exit: 0
+$ rustc +1.94.0 --edition=2018 --test -C debuginfo=0 --extern futures_io=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/libfutures_io.rlib /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-io-20261104/supply-chain/reviews/2026-11-04/round8/futures-io/behavior-probe.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/probe
+exit: 0
+$ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/probe --nocapture
+
+running 5 tests
+test default_vectored_read_selects_one_buffer_and_propagates ... ok
+test boxed_and_mutable_reference_forward ... ok
+test default_vectored_write_selects_one_buffer_and_propagates ... ok
+test pinned_pointer_forwards_to_non_unpin_target ... ok
+test slice_and_vec_use_memory_stdio_and_close_only_flushes ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+exit: 0
+$ rustc +1.94.0 --edition=2018 --crate-name futures_io --crate-type rlib -C debuginfo=0 --cfg 'feature="std"' /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/mutant.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/libfutures_io.rlib
+exit: 0
+$ rustc +1.94.0 --edition=2018 --test -C debuginfo=0 --extern futures_io=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/libfutures_io.rlib /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-io-20261104/supply-chain/reviews/2026-11-04/round8/futures-io/behavior-probe.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/mutant-probe
+exit: 0
+$ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-io-probe-aflws3q2/mutant-probe --exact default_vectored_read_selects_one_buffer_and_propagates --nocapture
+
+running 1 test
+
+thread 'default_vectored_read_selects_one_buffer_and_propagates' (9844863) panicked at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-io-20261104/supply-chain/reviews/2026-11-04/round8/futures-io/behavior-probe.rs:48:5:
+assertion failed: matches!(Pin::new(&mut reader).poll_read_vectored(&mut cx, &mut bufs),
+    Poll::Ready(Ok(3)))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test default_vectored_read_selects_one_buffer_and_propagates ... FAILED
+
+failures:
+
+failures:
+    default_vectored_read_selects_one_buffer_and_propagates
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+exit: 101
+All expected probe and negative-control outcomes observed.

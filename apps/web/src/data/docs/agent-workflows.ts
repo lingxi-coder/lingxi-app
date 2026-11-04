@@ -23,7 +23,7 @@ export const agentWorkflowPages: DocPage[] = [
         [t('Resume/fork a conversation', '恢复／分支对话'), t('ResumeSession; ForkSession on MobileHost', 'ResumeSession；MobileHost 上的 ForkSession'), t('Resume confirms a mounted session. MobileHost fork confirms branch creation; mount the returned branch before sending work to it. Desktop Bridge does not currently route ForkSession.', 'Resume 确认会话已挂载；MobileHost 的 Fork 确认分支已创建，向该分支提交任务前还需挂载返回的新标识。当前 Desktop Bridge 未接通 ForkSession。')],
         [t('Approve a tool call', '批准工具调用'), t('PermissionGate; AdapterPermissionGate for protocol hosts', 'PermissionGate；协议宿主可用 AdapterPermissionGate'), t('Route the real user decision to its request owner using request_id.', '使用 request_id 将真实用户决定交给请求所属执行。')],
         [t('Tools, skills, hooks and MCP', '工具、Skills、Hooks 与 MCP'), t('Host-owned registries and their lifecycle', '宿主拥有的注册表及生命周期'), t('Verify activation and dependencies in the composition you ship.', '在实际发行组合中核对激活与依赖。')],
-      ] }], note: t('This is a workflow map, not an API compatibility claim. Claude SDK option objects, TypeScript imports, Python clients and authentication are not interchangeable with LingXi’s Rust API.', '本表对应使用流程，不代表 API 兼容。Claude SDK 选项对象、TypeScript 导入、Python 客户端和认证方式不能直接替代灵犀 Rust API。') },
+      ] }], note: t('This is a workflow map for LingXi’s Rust API. Option objects, imports, and authentication from another language binding do not replace these Rust types.', '本表是灵犀 Rust API 的使用流程。其他语言绑定里的选项对象、导入路径和认证方式不能代替这些 Rust 类型。') },
       { id: 'host-contract', title: t('Write down the host contract first', '先写清宿主契约'), steps: [
         t('Choose desktop, mobile or injected SessionService/LifecycleService implementations; confirm required features and native resources.', '选择 desktop、mobile 或注入的 SessionService／LifecycleService 实现，并确认所需 feature 和原生资源。'),
         t('Define where text, tools, questions, permissions and terminal outcomes go. Related adapters should share the same connection/session owner.', '确定文本、工具、问题、权限与终态的交付位置；相关适配器应使用一致的连接／会话归属。'),
@@ -35,7 +35,7 @@ export const agentWorkflowPages: DocPage[] = [
         t('Port option intent, not names. Model choice, tool allowlists and session continuation must reach their owning host services rather than invented RunInput fields.', '迁移选项的意图而非名称。模型选择、工具允许列表与会话继续，应进入对应宿主服务，而非凭空增加 RunInput 字段。'),
         t('Verify images, tool results, cancelled approvals, follow-up context and shutdown on the target host before expanding the migration.', '扩大迁移范围前，在目标宿主核对图像、工具结果、审批取消、追问上下文与关闭。'),
       ] },
-      { id: 'use-the-reference', title: t('Read recipes and signatures together', '配合阅读配方与签名'), paragraphs: [t('Recipes describe a complete interaction; Harness chapters describe API signatures; the declaration index locates implementation. Compiler-generated Rustdoc resolves methods, feature gates and trait bounds for the built profile. A raw declaration search does not resolve those conditions.', '配方介绍完整交互，Harness 章节提供 API 签名，声明索引用于定位实现。编译器生成的 Rustdoc 解析构建配置的方法、feature 条件与 trait 约束；原始声明检索不能替代这些解析。')], links: [{ label: t('Harness API chapters', 'Harness API 章节'), href: '/docs/harness' }, { label: t('API declarations and Rustdoc', 'API 声明与 Rustdoc'), href: '/docs/api-reference' }, { label: t('Claude Agent SDK topic reference', 'Claude Agent SDK 主题参考'), href: 'https://code.claude.com/docs/en/agent-sdk/overview' }] },
+      { id: 'use-the-reference', title: t('Read recipes and signatures together', '配合阅读配方与签名'), paragraphs: [t('Recipes describe a complete interaction; Harness chapters describe API signatures; the declaration index locates implementation. Compiler-generated Rustdoc resolves methods, feature gates and trait bounds for the built profile. A raw declaration search does not resolve those conditions.', '配方介绍完整交互，Harness 章节提供 API 签名，声明索引用于定位实现。编译器生成的 Rustdoc 解析构建配置的方法、feature 条件与 trait 约束；原始声明检索不能替代这些解析。')], links: [{ label: t('Harness API chapters', 'Harness API 章节'), href: '/docs/harness' }, { label: t('API declarations and Rustdoc', 'API 声明与 Rustdoc'), href: '/docs/api-reference' }] },
     ],
   },
   {
@@ -229,7 +229,7 @@ description: Review a scoped change and report reproducible findings.
         [t('Listed hook never runs', '已列出的 Hook 不执行'), t('Event, matcher, managed policy and injected executor/runner.', '事件、matcher、managed 策略与注入 executor／runner。')],
         [t('Configured MCP has no callable tools', '已配置 MCP 没有可调用工具'), t('Connection/auth state and catalog refresh diagnostics.', '连接／认证状态与目录刷新诊断。')],
         [t('Removed plugin tools remain visible', '已移除插件工具仍可见'), t('Owner-scoped teardown and next capability snapshot.', '按归属的清理与下一次能力快照。')],
-      ] }], links: [{ label: t('Plugin activation', '插件激活'), href: '/docs/harness-plugins' }, { label: t('Extension architecture', '扩展架构'), href: '/docs/extensions-lifecycle' }, { label: t('Claude hooks topic reference', 'Claude Hooks 主题参考'), href: 'https://code.claude.com/docs/en/hooks' }] },
+      ] }], links: [{ label: t('Plugin activation', '插件激活'), href: '/docs/harness-plugins' }, { label: t('Extension architecture', '扩展架构'), href: '/docs/extensions-lifecycle' }] },
     ],
   },
   {

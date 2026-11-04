@@ -4,7 +4,7 @@ import { Brand } from '../components/Brand';
 import { IconClose, IconSearch } from '../components/Icons';
 import { RouteLink } from '../components/RouteLink';
 import { ThemeToggle } from '../components/ThemeToggle';
-import { docGroups, docPages } from '../data/docs';
+import { docGroups, docPages, userDocGroupIds } from '../data/docs';
 
 interface DocsLayoutProps extends PropsWithChildren {
   locale: Locale;
@@ -23,12 +23,16 @@ export function DocsLayout({ children, locale, pageId, theme, onThemeToggle, onL
   const topnavRef = useRef<HTMLElement>(null);
   const mobileTocRef = useRef<HTMLDetailsElement>(null);
   const t = (en: string, zh: string) => locale === 'zh' ? zh : en;
-  const activeGroup = docPages.find((page) => page.id === pageId)?.group ?? 'start';
+  const activeGroup = docPages.find((page) => page.id === pageId)?.group ?? 'guide';
   const isReference = pageId === 'api-reference';
-  const isOverview = !isReference && ['start', 'system', 'operations'].includes(activeGroup);
-  const visibleGroups = docGroups.filter((group) => group.id === 'start' || (isOverview
-    ? ['system', 'operations'].includes(group.id)
-    : !isReference && group.id === activeGroup));
+  const isUserGuide = userDocGroupIds.includes(activeGroup);
+  const isInternals = activeGroup === 'system' || activeGroup === 'operations';
+  const visibleGroups = docGroups.filter((group) => {
+    if (isUserGuide) return userDocGroupIds.includes(group.id);
+    if (isInternals) return group.id === 'system' || group.id === 'operations';
+    if (isReference) return group.id === 'start';
+    return group.id === activeGroup;
+  });
   const sdkLinks = [
     { href: '/docs/harness' as const, label: 'Harness Runtime' },
     { href: '/docs/llm-client' as const, label: 'LLM Client' },
@@ -36,11 +40,12 @@ export function DocsLayout({ children, locale, pageId, theme, onThemeToggle, onL
     { href: '/docs/bridge-client' as const, label: t('Product integrations', '产品集成') },
   ];
   const topLinks = [
-    { href: '/docs' as const, label: t('Overview', '概览'), selected: isOverview },
-    { href: '/docs/harness' as const, label: 'Harness', selected: activeGroup === 'harness' },
-    { href: '/docs/llm-client' as const, label: 'LLM Client', selected: activeGroup === 'llm' },
-    { href: '/docs/mobile-linux' as const, label: 'Mobile Linux', selected: activeGroup === 'mobile' },
-    { href: '/docs/bridge-client' as const, label: t('Integrations', '产品集成'), selected: activeGroup === 'bridge' },
+    { href: '/docs' as const, label: t('Guide', '使用指南'), selected: isUserGuide },
+    { href: '/docs/using-cli' as const, label: t('Command line', '命令行'), selected: pageId === 'using-cli' },
+    { href: '/docs/using-desktop' as const, label: t('Desktop', '桌面'), selected: pageId === 'using-desktop' },
+    { href: '/docs/using-mobile' as const, label: t('Phone', '手机'), selected: pageId === 'using-mobile' },
+    { href: '/docs/remote-control' as const, label: t('Remote', '远控'), selected: pageId === 'remote-control' },
+    { href: '/docs/harness' as const, label: t('Developers', '开发者'), selected: !isUserGuide && !isReference },
     { href: '/docs/api-reference' as const, label: t('API reference', 'API 参考'), selected: isReference },
   ];
   const sectionIds = tocItems.map((item) => item.id).join('|');
@@ -108,7 +113,7 @@ export function DocsLayout({ children, locale, pageId, theme, onThemeToggle, onL
 
   const navigation = (
     <>
-      <div className="developer-sidebar-heading"><span className="developer-sidebar-symbol" aria-hidden="true">L</span><div><strong>LingXi SDK</strong><span>{t('Developer documentation', '开发者文档')}</span></div></div>
+      <div className="developer-sidebar-heading"><span className="developer-sidebar-symbol" aria-hidden="true">L</span><div><strong>{isUserGuide ? 'LingXi' : 'LingXi SDK'}</strong><span>{isUserGuide ? t('Guides', '使用文档') : t('Developer documentation', '开发者文档')}</span></div></div>
       <nav aria-label={t('Documentation navigation', '文档目录')}>
         {visibleGroups.map((group) => {
           const pages = docPages.filter((page) => page.group === group.id);
@@ -122,7 +127,7 @@ export function DocsLayout({ children, locale, pageId, theme, onThemeToggle, onL
             ? <div className="developer-nav-group" key={group.id}><h2>{group.title[locale]}</h2>{links}</div>
             : <details className="developer-nav-group" key={`${activeGroup}-${group.id}`} open={group.id === activeGroup}><summary>{group.title[locale]}<span className="developer-nav-count">{pages.length}</span><span className="developer-nav-chevron" aria-hidden="true">⌄</span></summary><div className="developer-nav-items">{links}</div></details>;
         })}
-        {isReference || isOverview ? <div className="developer-nav-group developer-sdk-navigation"><h2>{t('SDKs & integrations', 'SDK 与集成')}</h2>{sdkLinks.map((link) => <RouteLink key={link.href} href={link.href} onClick={() => setMenuOpen(false)}><span>{link.label}</span><span aria-hidden="true">→</span></RouteLink>)}</div> : null}
+        {isUserGuide || isReference ? <div className="developer-nav-group developer-sdk-navigation"><h2>{t('SDKs & integrations', 'SDK 与集成')}</h2>{sdkLinks.map((link) => <RouteLink key={link.href} href={link.href} onClick={() => setMenuOpen(false)}><span>{link.label}</span><span aria-hidden="true">→</span></RouteLink>)}</div> : null}
       </nav>
       <a className="developer-sidebar-footer" href="https://github.com/lingxi-coder" target="_blank" rel="noreferrer"><span className="developer-status-dot" />{t('Explore the source on GitHub', '在 GitHub 探索源码')}<span aria-hidden="true">↗</span></a>
     </>
@@ -135,8 +140,8 @@ export function DocsLayout({ children, locale, pageId, theme, onThemeToggle, onL
       <a href="#doc-main" className="docs-skip-link">{t('Skip to content', '跳转至正文')}</a>
       <header className="developer-header">
         <div className="developer-header-main">
-          <RouteLink href="/" className="developer-wordmark"><Brand compact /><span className="developer-brand-divider" /><span>{t('Developer Docs', '开发者文档')}</span></RouteLink>
-          <button type="button" className="developer-header-search" onClick={onSearch}><IconSearch width={17} height={17} /><span>{t('Search documentation…', '搜索开发者文档…')}</span><kbd>⌘ K</kbd></button>
+          <RouteLink href="/" className="developer-wordmark"><Brand compact /><span className="developer-brand-divider" /><span>{isUserGuide ? t('Docs', '文档') : t('Developer Docs', '开发者文档')}</span></RouteLink>
+          <button type="button" className="developer-header-search" onClick={onSearch}><IconSearch width={17} height={17} /><span>{isUserGuide ? t('Search guides…', '搜索使用文档…') : t('Search developer docs…', '搜索开发者文档…')}</span><kbd>⌘ K</kbd></button>
           <div className="developer-controls">
             <a href="https://github.com/lingxi-coder" target="_blank" rel="noreferrer" className="developer-github">GitHub ↗</a>
             <ThemeToggle theme={theme} onToggle={onThemeToggle} locale={locale} />

@@ -1,0 +1,234 @@
+{
+  "sha": "a97fc91d318cd1142d158e7a7ea251b989280aaf",
+  "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/trees/a97fc91d318cd1142d158e7a7ea251b989280aaf",
+  "tree": [
+    {
+      "path": ".cargo",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6c350f698c88d0734e1716a837f21c07da493096",
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/trees/6c350f698c88d0734e1716a837f21c07da493096"
+    },
+    {
+      "path": ".cargo/config.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4a6a1abdd612113aea698f0f51e28cb675ea8ead",
+      "size": 51,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/4a6a1abdd612113aea698f0f51e28cb675ea8ead"
+    },
+    {
+      "path": ".clippy.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1d4c5dc66f4e229b407587965d09da9816e06eac",
+      "size": 757,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/1d4c5dc66f4e229b407587965d09da9816e06eac"
+    },
+    {
+      "path": ".github",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "c2fb7c9078be7762bcc6a74446bbcad9115dbe6a",
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/trees/c2fb7c9078be7762bcc6a74446bbcad9115dbe6a"
+    },
+    {
+      "path": ".github/renovate.json5",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a1124688280f6cd3e707e9121a2fab82880a3606",
+      "size": 2560,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/a1124688280f6cd3e707e9121a2fab82880a3606"
+    },
+    {
+      "path": ".github/settings.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e3dee6c6060e9e50bbbfaa35aad387e97a9d7f3c",
+      "size": 1657,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/e3dee6c6060e9e50bbbfaa35aad387e97a9d7f3c"
+    },
+    {
+      "path": ".github/workflows",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "c53547ef1388d9d9a4f1a4d4b56cc9aafc0b8463",
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/trees/c53547ef1388d9d9a4f1a4d4b56cc9aafc0b8463"
+    },
+    {
+      "path": ".github/workflows/audit.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1712248f65ac3592f98d04dbd6966bd75fc06879",
+      "size": 1230,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/1712248f65ac3592f98d04dbd6966bd75fc06879"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2e5e307523d037f8e3f9c95ef2812a54258303e",
+      "size": 5128,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/a2e5e307523d037f8e3f9c95ef2812a54258303e"
+    },
+    {
+      "path": ".github/workflows/committed.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e7a50fbb3c3954e45314a8755ad49cfd45251e64",
+      "size": 595,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/e7a50fbb3c3954e45314a8755ad49cfd45251e64"
+    },
+    {
+      "path": ".github/workflows/pre-commit.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "24000697fdd677f307296fd8d533befa05c426f5",
+      "size": 504,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/24000697fdd677f307296fd8d533befa05c426f5"
+    },
+    {
+      "path": ".github/workflows/rust-next.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "be8b2dbe28a140bda459a7212a4b2b182f46bf02",
+      "size": 1485,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/be8b2dbe28a140bda459a7212a4b2b182f46bf02"
+    },
+    {
+      "path": ".github/workflows/spelling.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8e58d9ec097c0d0f548b385b0850e743c0cf00fa",
+      "size": 451,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/8e58d9ec097c0d0f548b385b0850e743c0cf00fa"
+    },
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eb5a316cbd195d26e3f768c7dd8e1b47299e17f8",
+      "size": 7,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/eb5a316cbd195d26e3f768c7dd8e1b47299e17f8"
+    },
+    {
+      "path": ".pre-commit-config.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "656c68ec16e241533d24c91a2750e941e82cd8be",
+      "size": 484,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/656c68ec16e241533d24c91a2750e941e82cd8be"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "92d954aa364bb9cb3e2e4c468acc2eceb48afd6a",
+      "size": 781,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/92d954aa364bb9cb3e2e4c468acc2eceb48afd6a"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "00fbffc10ffe370fc361d19e2945553d2f3f84c5",
+      "size": 3866,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/00fbffc10ffe370fc361d19e2945553d2f3f84c5"
+    },
+    {
+      "path": "Cargo.lock",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1e795d49f42e6960af2fd1f2cd9058860db397f0",
+      "size": 163,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/1e795d49f42e6960af2fd1f2cd9058860db397f0"
+    },
+    {
+      "path": "Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "692d0eccacb3e051b5288f93988548cb70ed726f",
+      "size": 3351,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/692d0eccacb3e051b5288f93988548cb70ed726f"
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d9d805cd609994437cd58a84d3ce2aaf78e3b1b2",
+      "size": 938,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/d9d805cd609994437cd58a84d3ce2aaf78e3b1b2"
+    },
+    {
+      "path": "committed.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4211ae3842810ba7207dfc2148a5354e28276bda",
+      "size": 83,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/4211ae3842810ba7207dfc2148a5354e28276bda"
+    },
+    {
+      "path": "deny.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ee5ae89b3167c711c59f22a03e14f039a72e12cc",
+      "size": 10933,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/ee5ae89b3167c711c59f22a03e14f039a72e12cc"
+    },
+    {
+      "path": "release.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e6b902878ff6cda09f7534f148d88c914ed8f708",
+      "size": 53,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/e6b902878ff6cda09f7534f148d88c914ed8f708"
+    },
+    {
+      "path": "src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "31d55c6959260a3d68c0db2791f40a08dc6a7763",
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/trees/31d55c6959260a3d68c0db2791f40a08dc6a7763"
+    },
+    {
+      "path": "src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6d478c2bde4533e7eb1f044ff7935fc28a1283b4",
+      "size": 230,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/6d478c2bde4533e7eb1f044ff7935fc28a1283b4"
+    },
+    {
+      "path": "src/sync",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "bca998f5a98a9bb42602ba0217253d7af2edaf52",
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/trees/bca998f5a98a9bb42602ba0217253d7af2edaf52"
+    },
+    {
+      "path": "src/sync/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a580157dab4b56c743b169d60f0b03cb38c99b6a",
+      "size": 808,
+      "url": "https://api.github.com/repos/polyfill-rs/once_cell_polyfill/git/blobs/a580157dab4b56c743b169d60f0b03cb38c99b6a"
+    }
+  ],
+  "truncated": false
+}

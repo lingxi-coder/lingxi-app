@@ -305,7 +305,8 @@ body:has(.developer-mobile-menu[open], .developer-search-modal[open]) { overflow
 @media (max-width: 760px) {
   .developer-header { height: 108px; }
   .developer-header-main { height: 64px; padding: 0 20px; gap: 10px; }
-  .developer-topnav { height: 44px; padding: 0 20px; gap: 24px; font-size: 12px; }
+  .developer-topnav { height: 44px; padding: 0 16px; gap: 16px; font-size: 12px; scrollbar-width: thin; }
+  .developer-topnav::-webkit-scrollbar { display: block; height: 3px; }
   .developer-header-search { display: none; }
   .developer-wordmark { font-size: 12px; --brand-name-size: 22px; }
   .developer-wordmark .product-brand-mark { width: 34px; height: 22px; }

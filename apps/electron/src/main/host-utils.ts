@@ -601,6 +601,13 @@ function hashBuffer(hash: ReturnType<typeof createHash>, budget: FingerprintBudg
   budget.remainingBytes -= value.byteLength;
 }
 
+function hashFile(hash: ReturnType<typeof createHash>, budget: FingerprintBudget, filePath: string, size: number): void {
+  if (size > budget.remainingBytes) {
+    throw new Error('workspace executable configuration exceeds the safe trust fingerprint limit');
+  }
+  hashBuffer(hash, budget, readFileSync(filePath));
+}
+
 function hashWorkspacePath(
   hash: ReturnType<typeof createHash>,
   root: string,
@@ -628,7 +635,7 @@ function hashWorkspacePath(
     const target = statSync(path);
     if (target.isFile()) {
       hash.update(`target-file:${target.size}\0`);
-      hashBuffer(hash, budget, readFileSync(path));
+      hashFile(hash, budget, path, target.size);
       hash.update('\0');
       return;
     }
@@ -664,7 +671,7 @@ function hashWorkspacePath(
     return;
   }
   hash.update(`file:${stat.size}\0`);
-  hashBuffer(hash, budget, readFileSync(path));
+  hashFile(hash, budget, path, stat.size);
   hash.update('\0');
 }
 

@@ -2294,7 +2294,8 @@ export function useBridge(): UseBridge {
   }, [activeSession?.projectPath, bootstrap?.settings.activeProject, host, openSession]);
 
   const switchConversationSpace = useCallback(async (mode: 'chat' | 'code') => {
-    if (!host || !bootstrap || requestedSpaceRef.current === mode) return;
+    if (!host || !bootstrap) return false;
+    if (requestedSpaceRef.current === mode) return confirmedSpaceRef.current === mode && !sessionLoadingRef.current;
     requestedSpaceRef.current = mode;
     const operationId = nextOperationId(navigationOperationRef.current);
     navigationOperationRef.current = operationId;
@@ -2313,6 +2314,7 @@ export function useBridge(): UseBridge {
         pendingSessionRef.current = null;
         setPendingSession(null);
         applyBootstrap(snapshot);
+        return snapshot.conversationSpaces.activeMode === mode;
       }
     } catch (cause) {
       if (isCurrentNavigationOperation(operationId)) {
@@ -2338,6 +2340,7 @@ export function useBridge(): UseBridge {
     } finally {
       if (isCurrentNavigationOperation(operationId)) sessionLoadingRef.current = false;
     }
+    return false;
   }, [applyBootstrap, bootstrap, capture, host, isCurrentNavigationOperation, patchBootstrap]);
   const prepareSessionHandoff = useCallback(async () => {
     const sourceId = activeSessionIdRef.current;

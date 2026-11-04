@@ -1,0 +1,34 @@
+{
+  "command": "cargo +1.94.0 metadata --format-version 1 --all-features --locked --frozen",
+  "head": "9c99871132ec012d41079165485f19b41c2c5e7a",
+  "cargo_lock_sha256": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+  "metadata_json_sha256": "eef6545d345e0b2227b6c94ad86fd54e62dddf3b71074eac5916be4b0b3dacfe",
+  "package_count": 1052,
+  "package_id": "registry+https://github.com/rust-lang/crates.io-index#once_cell_polyfill@1.70.2",
+  "resolved_features": [
+    "default"
+  ],
+  "direct_dependencies": [],
+  "reverse_parents": [
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#anstyle-wincon@3.0.11",
+      "edge": {
+        "name": "once_cell_polyfill",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#once_cell_polyfill@1.70.2",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": "cfg(windows)"
+          }
+        ]
+      }
+    }
+  ],
+  "consumer_archive_sha256": "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d",
+  "consumer_checked_files": {
+    "Cargo.toml": "be7526c599f7d291150912990e4a70cef1e691c96c300c06c784d310dc00efb3",
+    "src/lib.rs": "faa64326e95cdbff9b999adafcfdbc8e576859537272200cebdb630e8cfd7d22",
+    "src/windows.rs": "ef7a56c7bc4436a46c93ce85220e5c03c0ca82fbe945521360ea9ecffce4291d",
+    "src/stream.rs": "8b0a852b1c43d9b483154a7820edd30f658409349f9db339eb18e873aafd6b32"
+  }
+}

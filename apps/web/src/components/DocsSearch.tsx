@@ -8,11 +8,13 @@ interface DocsSearchProps {
   locale: Locale;
   open: boolean;
   onClose: () => void;
+  focus?: 'product' | 'sdk';
 }
 
-const suggestedPages = ['overview', 'harness', 'llm-client', 'mobile-linux', 'bridge-client', 'api-reference'];
+const productSuggestions = ['install', 'first-session', 'sessions', 'skills', 'settings', 'help'];
+const sdkSuggestions = ['harness', 'llm-client', 'mobile-linux', 'bridge-client', 'api-reference', 'overview'];
 
-export function DocsSearch({ locale, open, onClose }: DocsSearchProps) {
+export function DocsSearch({ locale, open, onClose, focus = 'product' }: DocsSearchProps) {
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -20,10 +22,11 @@ export function DocsSearch({ locale, open, onClose }: DocsSearchProps) {
   const resultsRef = useRef<HTMLDivElement>(null);
   const instructionsId = useId();
   const countId = useId();
+  const suggestedPages = focus === 'sdk' ? sdkSuggestions : productSuggestions;
   const results = useMemo(() => query.trim() ? searchDocs(query, locale) : suggestedPages.flatMap((id) => {
     const page = getDocPage(id);
     return page ? [{ page, excerpt: page.description[locale] }] : [];
-  }), [query, locale]);
+  }), [query, locale, suggestedPages]);
   const t = (en: string, zh: string) => locale === 'zh' ? zh : en;
 
   useEffect(() => {
@@ -78,7 +81,7 @@ export function DocsSearch({ locale, open, onClose }: DocsSearchProps) {
         type="search"
         value={query}
         onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }}
-        placeholder={t('Search SDKs, APIs, and guides…', '搜索 SDK、API 和集成指南…')}
+        placeholder={focus === 'sdk' ? t('Search SDKs, APIs, and guides…', '搜索 SDK、API 和集成指南…') : t('Search install, sessions, and models…', '搜索安装、会话和模型…')}
         aria-label={t('Search documentation', '搜索文档')}
         aria-describedby={`${countId} ${instructionsId}`}
         autoComplete="off"
@@ -86,7 +89,7 @@ export function DocsSearch({ locale, open, onClose }: DocsSearchProps) {
       <button type="button" onClick={onClose} aria-label={t('Close search', '关闭搜索')}><IconClose width={18} height={18} /></button>
     </div>
     <div ref={resultsRef} className="developer-search-results">
-      <p id={countId} className="developer-search-caption" role="status" aria-live="polite">{query.trim() ? t(`${results.length} results`, `${results.length} 条结果`) : t('Explore the documentation', '探索开发者文档')}</p>
+      <p id={countId} className="developer-search-caption" role="status" aria-live="polite">{query.trim() ? t(`${results.length} results`, `${results.length} 条结果`) : (focus === 'sdk' ? t('Explore the SDKs', '探索开发者文档') : t('Suggested guides', '推荐阅读'))}</p>
       {results.length ? results.map(({ page, excerpt }, index) => <RouteLink
         key={page.id}
         href={page.id === 'overview' ? '/docs' : `/docs/${page.id}`}
@@ -99,9 +102,9 @@ export function DocsSearch({ locale, open, onClose }: DocsSearchProps) {
         <IconDocs width={19} height={19} />
         <div><span className="developer-search-result-group">{docGroups.find((group) => group.id === page.group)?.title[locale]}</span><strong>{page.title[locale]}</strong><p>{excerpt}</p></div>
         <IconArrowRight width={16} height={16} />
-      </RouteLink>) : <div className="developer-empty-results"><IconSearch width={24} height={24} /><strong>{t('No matching pages', '没有找到相关页面')}</strong><p>{t('Try a symbol like ChatRequest, HarnessBuilder, or boot.', '试试搜索 ChatRequest、HarnessBuilder 或 boot。')}</p></div>}
+      </RouteLink>) : <div className="developer-empty-results"><IconSearch width={24} height={24} /><strong>{t('No matching pages', '没有找到相关页面')}</strong><p>{focus === 'sdk' ? t('Try a symbol like ChatRequest, HarnessBuilder, or boot.', '试试搜索 ChatRequest、HarnessBuilder 或 boot。') : t('Try install, permissions, or remote control.', '试试搜索安装、权限或远控。')}</p></div>}
     </div>
     {query.trim() ? <a className="developer-api-search-link" href={`/docs/api-reference?q=${encodeURIComponent(query.trim())}`} onClick={onClose}>{t('Search all API declarations for', '在全部 API 声明中搜索')} “{query.trim()}” <IconArrowRight width={15} height={15} /></a> : null}
-    <div className="developer-search-footer" id={instructionsId}><span>{t('Search SDK guides & examples', '搜索 SDK 指南与示例')}</span><span><kbd>↑</kbd><kbd>↓</kbd> {t('navigate', '选择')} <kbd>Enter</kbd> {t('open', '打开')} <kbd>Esc</kbd> {t('close', '关闭')}</span></div>
+    <div className="developer-search-footer" id={instructionsId}><span>{focus === 'sdk' ? t('Search SDK guides & examples', '搜索 SDK 指南与示例') : t('Search product guides', '搜索使用指南')}</span><span><kbd>↑</kbd><kbd>↓</kbd> {t('navigate', '选择')} <kbd>Enter</kbd> {t('open', '打开')} <kbd>Esc</kbd> {t('close', '关闭')}</span></div>
   </dialog>;
 }

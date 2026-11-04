@@ -1,31 +1,36 @@
-# SDKs & libraries
+# LingXi
 
-Build with LingXi. Connect models, orchestrate agents, and bring a Linux runtime to mobile — with a toolkit that fits your application.
+LingXi is a personal agent for the computer and phone you already use. These pages explain how to install it, start a session, choose a model, and decide what it may do.
 
-<a id="choose-sdk"></a>
+<a id="start-here"></a>
 
-## Find your starting point
+## Start here
 
-The SDKs form distinct layers. Use LLM Client for direct model calls, Harness Runtime for the agent loop, and Mobile Linux for local execution on Android and iOS.
+Install the app for your device, open a project you trust, and connect the model provider you want LingXi to call.
 
-- [Harness Runtime](harness.md)
-- [LLM Client](llm-client.md)
-- [Mobile Linux](mobile-linux.md)
-- [Product Bridge](bridge-client.md)
+- [Install](install.md)
+- [Your first session](first-session.md)
+- [Models and API keys](accounts.md)
+- [Command line](using-cli.md)
+- [Desktop](using-desktop.md)
+- [iPhone and Android](using-mobile.md)
+- [Permissions](permissions.md)
+- [Remote control](remote-control.md)
+- [Help](help.md)
 
-<a id="agent-guides"></a>
+<a id="make-it-yours"></a>
 
-## Build an agent, step by step
+## Make it yours
 
-Follow a complete task instead of piecing together declarations. These guides connect the session lifecycle, output events, approvals, tools, and host responsibilities.
+Write project instructions, add a skill or an MCP server, and look up the settings and commands this build accepts.
 
-- [Choose the API when coming from Claude Agent SDK](agent-sdk-guide.md)
-- [Run and cancel the first turn](agent-first-turn.md)
-- [Connect agent events to your UI](agent-ui-streaming.md)
-- [Resume and fork a session](agent-session-workflows.md)
-- [Add tools and handle approvals](agent-tool-workflows.md)
-- [Compose MCP, skills, and hooks](agent-extension-recipes.md)
-- [Coordinate parallel agent tasks](agent-parallel-tasks.md)
+- [Sessions](sessions.md)
+- [Common tasks](tasks.md)
+- [Project instructions](instructions.md)
+- [Skills](skills.md)
+- [MCP](mcp.md)
+- [Settings files](settings.md)
+- [Slash commands](slash-commands.md)
 
 <a id="sdk-map"></a>
 
@@ -39,6 +44,18 @@ Three independent SDK repositories, plus the TypeScript bridge and native host i
 | LLM Client | Model protocols, transport, streams and provider services | Rust LingxiClient |
 | Mobile Linux | Local execution, PTY and verified resources | Rust contracts, Kotlin/Swift facade |
 | Product Bridge | Product host transport and client DTOs | Private Node.js client and native FFI |
+
+<a id="for-developers"></a>
+
+## Build with the SDKs
+
+The SDKs are a separate set of pages. Use LLM Client for direct model calls, Harness Runtime for the agent loop, and Mobile Linux to embed local execution in an Android or iOS app.
+
+- [Harness Runtime](harness.md)
+- [LLM Client](llm-client.md)
+- [Mobile Linux](mobile-linux.md)
+- [Product Bridge](bridge-client.md)
+- [API reference](api-reference.md)
 
 <a id="integration"></a>
 
@@ -61,14 +78,14 @@ The bridge is an internal Node.js package. Rust crates are not Python or npm SDK
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/abad4d9603ce6a0c032ddf089f69f88e927b76c4/Cargo.toml) — Committed source (abad4d9603ce6a0c032ddf089f69f88e927b76c4)
-- [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/runtime/Cargo.toml) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
-- llm-client/src/lib.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [mobile-linux-runtime/Cargo.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/Cargo.toml) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/Cargo.toml) — Committed source (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/runtime/Cargo.toml) — Committed source (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
+- [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/lib.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
+- [mobile-linux-runtime/Cargo.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/Cargo.toml) — Committed source (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
 
-- lingxi-app: HEAD abad4d9603ce6a0c032ddf089f69f88e927b76c4; Referenced input fingerprint sha256:bbb3c48b6b5761f33d3d66eb68ccaf089f9fd5ffc104138cbe084fb24e3b4f5b
-- harness-runtime: HEAD a39da75f0985d61d90fffa255f7b4d90901b0e27; Referenced input fingerprint sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; Product pin a39da75f0985d61d90fffa255f7b4d90901b0e27
-- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
-- mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; Referenced input fingerprint sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; Product pin d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
+- lingxi-app: HEAD fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64; Referenced input fingerprint sha256:a5bfcf25a49c613b97f21fc4507c7f97a198e934f9d09398cb8794e7d86f49e3
+- harness-runtime: HEAD bb7a016c305609a0b4ca7b0c1a91faead18c4db0; Referenced input fingerprint sha256:700726d3f012384673f588a15ab3a32ecaf4f3fc499f0e4e86c0b8e6bc321559; Product pin ae5a65b1f4816cd26a06d462573ebc9841f14f96
+- llm-client: HEAD 66ce76a2ecc679f0dba551e26ef6aaceb40d2f49; Referenced input fingerprint sha256:89fef6f87fb7803bec69d768fa11e408a54f2123d196e2c859d8faba79092d96; Product pin 3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3
+- mobile-linux-runtime: HEAD 25cf8a273bcd572b9be48e18fc9807e01dcdfce1; Referenced input fingerprint sha256:3f654be245e2810979441677e37d079538d03bf98bfb68f98d054e4cc79d84df; Product pin 43382a20161e371a0a31526412164b3d35545ab5
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

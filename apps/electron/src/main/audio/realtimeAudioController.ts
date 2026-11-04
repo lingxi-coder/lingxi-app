@@ -45,6 +45,7 @@ export class RealtimeAudioController {
   private inputIdentity?: string;
   private inputSequence = -1;
   private queue: AudioDelta[] = [];
+  private queueHead = 0;
   private queuedBytes = 0;
   private playback?: Promise<void>;
   private completedTurn = false;
@@ -144,7 +145,7 @@ export class RealtimeAudioController {
         if (typeof event.audioBase64 !== 'string' || event.audioBase64.length > 2 * 1024 * 1024 || !/^[A-Za-z0-9+/]*={0,2}$/.test(event.audioBase64)
           || event.encoding !== 'pcm16' || event.channels !== 1 || typeof event.sampleRateHz !== 'number' || !Number.isInteger(event.sampleRateHz) || event.sampleRateHz < 8_000 || event.sampleRateHz > 768_000) throw new Error('实时音频输出格式无效。');
         const bytes = Math.floor(event.audioBase64.length * 3 / 4);
-        if (this.queue.length >= 128 || this.queuedBytes + bytes > 8 * 1024 * 1024) throw new Error('实时音频输出队列已满，请重新开始。');
+        if (this.queue.length - this.queueHead >= 128 || this.queuedBytes + bytes > 8 * 1024 * 1024) throw new Error('实时音频输出队列已满，请重新开始。');
         this.queue.push({ audioBase64: event.audioBase64, sampleRateHz: event.sampleRateHz, ...(typeof event.itemId === 'string' ? { itemId: event.itemId } : {}) });
         this.queuedBytes += bytes;
         this.publish('speaking', '正在播放实时回复 · 轮流说话模式');
@@ -269,17 +270,31 @@ export class RealtimeAudioController {
     this.publish('thinking', '当前 Agent 正在生成实时回复…');
   }
 
+  private dequeuePlayback(): AudioDelta {
+    const delta = this.queue[this.queueHead]!;
+    this.queueHead += 1;
+    // Drop the consumed prefix in batches so playback stays in order without shifting every sample.
+    if (this.queueHead === this.queue.length) {
+      this.queue = [];
+      this.queueHead = 0;
+    } else if (this.queueHead >= 64) {
+      this.queue.splice(0, this.queueHead);
+      this.queueHead = 0;
+    }
+    return delta;
+  }
+
   private drain(generation: number) {
     if (this.playback) return;
     const task = (async () => {
-      while (this.current(generation) && this.queue.length) {
-        const delta = this.queue.shift()!; this.queuedBytes -= Math.floor(delta.audioBase64.length * 3 / 4);
+      while (this.current(generation) && this.queueHead < this.queue.length) {
+        const delta = this.dequeuePlayback(); this.queuedBytes -= Math.floor(delta.audioBase64.length * 3 / 4);
         const result = await this.options.audio.playRealtimeAudio(this.runtime!.sessionId, delta.audioBase64, delta.sampleRateHz);
         if (!this.current(generation)) return;
         if (result.type === 'failed' || result.type === 'failed_without_resource') throw new Error(result.error.message);
         if (delta.itemId) this.playedItems.add(delta.itemId);
       }
-      if (this.current(generation) && this.completedTurn && !this.queue.length) {
+      if (this.current(generation) && this.completedTurn && this.queueHead >= this.queue.length) {
         this.completedTurn = false;
         if (this.playedItems.size) for (const itemId of this.playedItems) this.runtime!.realtimeAudioInput(JSON.stringify({ type: 'playback_completed', operationId: this.operationId, itemId }));
         else this.runtime!.realtimeAudioInput(JSON.stringify({ type: 'playback_completed', operationId: this.operationId }));
@@ -289,7 +304,7 @@ export class RealtimeAudioController {
     })();
     this.playback = task;
     void task.catch((error) => { if (this.current(generation)) void this.fail(error instanceof Error ? error.message : '实时播放失败'); }).finally(() => {
-      if (this.playback === task) { this.playback = undefined; if (this.current(generation) && (this.queue.length || this.completedTurn)) this.drain(generation); }
+      if (this.playback === task) { this.playback = undefined; if (this.current(generation) && (this.queueHead < this.queue.length || this.completedTurn)) this.drain(generation); }
     });
   }
 
@@ -307,7 +322,7 @@ export class RealtimeAudioController {
     const runtime = this.runtime; this.runtime = undefined; this.operationId = undefined;
     const release = this.releaseRuntime; this.releaseRuntime = undefined;
     this.offRuntime?.(); this.offRuntime = undefined; this.offDevice?.(); this.offDevice = undefined;
-    this.capturing = false; this.queue = []; this.queuedBytes = 0; this.completedTurn = false; this.playedItems.clear(); this.playback = undefined;
+    this.capturing = false; this.queue = []; this.queueHead = 0; this.queuedBytes = 0; this.completedTurn = false; this.playedItems.clear(); this.playback = undefined;
     if (runtime) {
       try { runtime.stopRealtimeAudio(); } catch { /* A disconnected runtime still needs device capture released. */ }
     }

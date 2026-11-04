@@ -114,10 +114,12 @@ export class GitService {
             const renamed = index === 'R' || index === 'C' || working === 'R' || working === 'C';
             files.push({ path: name, oldPath: renamed ? raw[++i] : undefined, index, working, untracked: index === '?', conflict: conflicts.has(index + working), additions: 0, deletions: 0, binary: false });
         }
+        const filesByPath = new Map<string, GitFile>();
+        for (const file of files) if (!filesByPath.has(file.path)) filesByPath.set(file.path, file);
         const indexEntries = (await this.git(repo.root, ['ls-files', '--stage', '-z'])).stdout.toString().split('\0');
         for (const entry of indexEntries) {
             if (entry.startsWith('160000 ')) {
-                const file = files.find(file => file.path === entry.slice(entry.indexOf('\t') + 1));
+                const file = filesByPath.get(entry.slice(entry.indexOf('\t') + 1));
                 if (file) file.submodule = true;
             }
         }
@@ -132,7 +134,7 @@ export class GitService {
                     i++;
                     name = entries[++i];
                 }
-                const file = files.find(f => f.path === name);
+                const file = filesByPath.get(name);
                 if (file) {
                     file.binary ||= match[1] === '-';
                     file.additions += Number(match[1]) || 0;

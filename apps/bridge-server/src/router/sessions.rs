@@ -40,7 +40,26 @@ pub(super) async fn read_session_agent_summary(
     path: &std::path::Path,
     raw: &[u8],
 ) -> Option<SessionAgentSummaryDto> {
-    let messages = harness_runtime::desktop::session_agents::lower_transcript(raw);
+    // The roster only shows the newest activity block. Lower a newline-aligned
+    // tail first; parse the whole transcript only when that tail has none.
+    let messages = {
+        const ACTIVITY_TAIL_BYTES: usize = 65_536;
+        if raw.len() <= ACTIVITY_TAIL_BYTES {
+            harness_runtime::desktop::session_agents::lower_transcript(raw)
+        } else {
+            let start = raw.len() - ACTIVITY_TAIL_BYTES;
+            let aligned = raw[start..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(raw.len(), |index| start + index + 1);
+            let tail = harness_runtime::desktop::session_agents::lower_transcript(&raw[aligned..]);
+            if session_agent_activity(&tail).is_some() {
+                tail
+            } else {
+                harness_runtime::desktop::session_agents::lower_transcript(raw)
+            }
+        }
+    };
     let mut status = "unknown".to_string();
     let mut name = None;
     let mut agent_type = None;

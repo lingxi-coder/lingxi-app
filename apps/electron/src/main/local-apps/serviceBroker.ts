@@ -40,7 +40,15 @@ export class LocalAppServiceBroker {
     // Byte ranges refer to the transferred representation. Avoid transparent
     // decompression changing their offsets and Content-Range metadata.
     if (headers.has('range')) headers.set('accept-encoding', 'identity');
-    const signal = AbortSignal.any([request.signal, lease.controller.signal]);
+    // Bound a localhost peer that never accepts or never sends headers.
+    // Disarm once those headers arrive so a streamed body (including SSE)
+    // is not cut by this budget.
+    const deadline = AbortSignal.timeout(10_000);
+    const budget = new AbortController();
+    const expireBudget = (): void => budget.abort(deadline.reason);
+    if (deadline.aborted) expireBudget();
+    else deadline.addEventListener('abort', expireBudget, { once: true });
+    const signal = AbortSignal.any([request.signal, lease.controller.signal, budget.signal]);
     let body: BodyInit | null | undefined = request.body;
     // Custom protocol requests do not always retain Content-Length. Materialize
     // only those request bodies, so simple HTTP backends do not receive chunked
@@ -56,7 +64,7 @@ export class LocalAppServiceBroker {
     const response = await fetch(`http://127.0.0.1:${lease.port}${localPath(path)}`, {
       method: request.method, headers, signal, redirect: 'manual',
       ...(request.method !== 'GET' && request.method !== 'HEAD' ? { body, duplex: 'half' } : {}),
-    } as RequestInit);
+    } as RequestInit).finally(() => deadline.removeEventListener('abort', expireBudget));
     signal.throwIfAborted();
     // Node fetch transparently decodes supported Content-Encoding values while
     // retaining the upstream representation's headers. Do not advertise those

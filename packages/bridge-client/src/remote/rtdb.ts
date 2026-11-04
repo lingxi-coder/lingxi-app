@@ -520,8 +520,16 @@ class SseSubscription implements RtdbSubscription {
     this.forceRefresh = false;
     let connectedAt: number | undefined;
     let next: Next = 'backoff';
+    // Headers only. Disarm before pump so a late timeout cannot cut the body;
+    // silence after headers is still `SSE_IDLE_TIMEOUT_MS`.
+    const handshakeTimeout = AbortSignal.timeout(30_000);
+    const handshake = new AbortController();
+    const abortHandshake = (): void => handshake.abort(handshakeTimeout.reason);
+    if (handshakeTimeout.aborted) abortHandshake();
+    else handshakeTimeout.addEventListener('abort', abortHandshake, { once: true });
     try {
-      const response = await this.host.open(refreshed, controller.signal);
+      const response = await this.host.open(refreshed, AbortSignal.any([controller.signal, handshake.signal]));
+      handshakeTimeout.removeEventListener('abort', abortHandshake);
       if (this.closed) return 'stop';
       if (response.status === 401 && !refreshed) {
         await discardBody(response);
@@ -536,9 +544,11 @@ class SseSubscription implements RtdbSubscription {
       if (response.body === null) return 'backoff';
       connectedAt = this.host.clock.now();
       next = await this.pump(response.body, controller, connectedAt);
-    } catch {
+    } catch (error) {
       // Network failure, token failure, our own abort: reconnect unless closed.
+      console.warn('RTDB listen failed', error);
     } finally {
+      handshakeTimeout.removeEventListener('abort', abortHandshake);
       this.host.clock.clearTimeout(this.idleTimer);
       controller.abort();
       if (connectedAt !== undefined && this.host.clock.now() - connectedAt >= SSE_BACKOFF_RESET_MS) this.attempt = 0;

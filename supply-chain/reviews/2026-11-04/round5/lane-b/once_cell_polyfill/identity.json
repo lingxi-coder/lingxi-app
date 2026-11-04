@@ -1,0 +1,67 @@
+{
+  "archive_files": {
+    ".cargo_vcs_info.json": {
+      "git_blob": "04119482ac0c4079518744673bf1b5de9ed3f6b2",
+      "mode": "0o644",
+      "sha256": "14b06bd4f1d393dcca774f9222155a014a86d157bdc84bc2c7ae0bf29abcee4a",
+      "size": 94
+    },
+    "Cargo.lock": {
+      "git_blob": "1e795d49f42e6960af2fd1f2cd9058860db397f0",
+      "mode": "0o644",
+      "sha256": "8d356939af83be90ffeb4c11bc346e07a469828a5727a15a8ba5e727645a9f31",
+      "size": 163
+    },
+    "Cargo.toml": {
+      "git_blob": "7333c1b7564adddcbd05cc91c4ce7cd562d75e5b",
+      "mode": "0o644",
+      "sha256": "3d7e8253c14f4183fc12c849b31a21a811ece9ceb492e8bfb136958a36841404",
+      "size": 3959
+    },
+    "Cargo.toml.orig": {
+      "git_blob": "692d0eccacb3e051b5288f93988548cb70ed726f",
+      "mode": "0o644",
+      "sha256": "3dca183b628fe7e785219ccf7d87736f75f7946f93fe0fa5c721aaa909d1db62",
+      "size": 3351
+    },
+    "LICENSE-APACHE": {
+      "git_blob": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "mode": "0o644",
+      "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
+      "size": 11358
+    },
+    "LICENSE-MIT": {
+      "git_blob": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "mode": "0o644",
+      "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
+      "size": 1062
+    },
+    "README.md": {
+      "git_blob": "d9d805cd609994437cd58a84d3ce2aaf78e3b1b2",
+      "mode": "0o644",
+      "sha256": "e37bd89789ba9f0624e3a9c06595d6f45f3c87bfc69c5a1a32af91cdbfd0b456",
+      "size": 938
+    },
+    "src/lib.rs": {
+      "git_blob": "6d478c2bde4533e7eb1f044ff7935fc28a1283b4",
+      "mode": "0o644",
+      "sha256": "931f95e959cb8526ba100c198632e7a388a1c30388eebe372d8835971a846f81",
+      "size": 230
+    },
+    "src/sync/mod.rs": {
+      "git_blob": "a580157dab4b56c743b169d60f0b03cb38c99b6a",
+      "mode": "0o644",
+      "sha256": "f2a03da8556ca81a41f9610ba91151da62e4a41a5217f1dec849f01e77f149fd",
+      "size": 808
+    }
+  },
+  "archive_sha256": "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe",
+  "cache_checked": true,
+  "commit_object_verified": true,
+  "index_yanked_at_capture": false,
+  "lock_sha256": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+  "tree_objects_checked": 6,
+  "upstream_blob_files_checked": 7,
+  "upstream_commit": "a97fc91d318cd1142d158e7a7ea251b989280aaf",
+  "upstream_root_tree": "5c147105038ead0cbc59e32d8f1cfd61b736b14b"
+}

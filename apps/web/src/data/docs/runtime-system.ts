@@ -299,7 +299,7 @@ return await agent(
     id: 'multimodal-host', group: 'system', title: t('Attachments, audio and realtime hosts', '附件、音频与实时宿主'),
     description: t('Route multimodal input and audio through explicit provider capability and native resource owners.', '经显式供应商能力与原生资源负责人路由多模态输入和音频。'),
     sourceUrl,
-    sources: sources('crates/runtime/src/api.rs', 'crates/client/src/protocol/commands.rs', 'crates/orchestrator/src/image_input.rs', 'crates/audio-runtime/src/lib.rs', 'crates/audio-runtime/src/cloud.rs', 'crates/runtime/src/desktop/configuration.rs', 'crates/runtime/src/mobile/audio_service.rs', 'crates/runtime/src/mobile/host/audio_context.rs', 'crates/runtime/src/mobile/host/audio_realtime_owner.rs', 'crates/runtime/tests/mobile/realtime_owner.rs', 'crates/runtime/tests/desktop/audio_injection.rs'),
+    sources: sources('crates/runtime/src/api.rs', 'crates/client/src/protocol/commands.rs', 'crates/orchestrator/src/image_input.rs', 'crates/media-runtime/src/lib.rs', 'crates/media-runtime/src/audio/cloud.rs', 'crates/runtime/src/desktop/configuration.rs', 'crates/runtime/src/mobile/audio_service.rs', 'crates/runtime/src/mobile/host/audio_context.rs', 'crates/runtime/src/mobile/host/audio_realtime_owner.rs', 'crates/runtime/tests/mobile/realtime_owner.rs', 'crates/runtime/tests/desktop/audio_injection.rs'),
     sections: [
       {
         id: 'attachment-ingress', title: t('Attachment ingress and model capabilities', '附件输入与模型能力'),
@@ -332,7 +332,7 @@ return await agent(
       },
       {
         id: 'audio-acceptance', title: t('Verification boundaries', '验证边界'),
-        code: [{ label: t('Audio routing and injected-host checks', '音频路由与注入宿主检查'), language: 'bash', verification: 'manual', code: 'cargo test --locked -p audio-runtime --lib\ncargo test --locked -p harness-runtime --features desktop --test audio_injection\ncargo test --locked -p harness-runtime --features mobile --test realtime_owner' }],
+        code: [{ label: t('Audio routing and injected-host checks', '音频路由与注入宿主检查'), language: 'bash', verification: 'manual', code: 'cargo test --locked -p media-runtime --lib\ncargo test --locked -p harness-runtime --features desktop --test audio_injection\ncargo test --locked -p harness-runtime --features mobile --test realtime_owner' }],
         bullets: [t('Existing tests use routing fixtures and mock realtime drivers to validate owner admission, capability selection, permission routing and cleanup. Compile-only examples establish API availability, not sound output.', '现有测试用路由 fixture 与模拟实时 driver 验证 owner 准入、能力选择、权限路由和清理。仅编译示例证明接口可用，不证明声音输出。'), t('Capture/playback latency, interruption by phone calls, Bluetooth routes, permissions, offline model quality and actual cloud audio/realtime requests require device/service acceptance. Preserve model/profile, OS build and resource cleanup evidence.', '采集／播放延迟、电话中断、蓝牙路由、权限、离线模型质量及真实云端音频／实时请求需设备／服务验收。保留模型／profile、系统版本和资源清理证据。')],
       },
     ],

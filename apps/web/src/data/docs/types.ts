@@ -37,7 +37,7 @@ export interface DocSection {
 
 export interface DocPage {
   id: string;
-  group: 'start' | 'system' | 'harness' | 'llm' | 'mobile' | 'bridge' | 'operations';
+  group: 'start' | 'guide' | 'use' | 'customize' | 'reference' | 'product' | 'system' | 'harness' | 'llm' | 'mobile' | 'bridge' | 'operations';
   title: DocText;
   description: DocText;
   packageName?: string;

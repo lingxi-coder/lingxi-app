@@ -455,6 +455,131 @@ fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProject
     Utf16JsonProjection::object(fields).expect("generated skill objects have unique fields")
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct SkillDigestKey {
+    path: std::path::PathBuf,
+    mtime: std::time::SystemTime,
+    len: u64,
+}
+
+fn skill_digest_cache() -> &'static std::sync::Mutex<std::collections::HashMap<SkillDigestKey, String>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<SkillDigestKey, String>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn skill_digest_cache_lock() -> std::sync::MutexGuard<'static, std::collections::HashMap<SkillDigestKey, String>>
+{
+    skill_digest_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn cached_skill_digest(path: &std::path::Path, mtime: std::time::SystemTime, len: u64) -> Option<String> {
+    let key = SkillDigestKey {
+        path: path.to_path_buf(),
+        mtime,
+        len,
+    };
+    skill_digest_cache_lock().get(&key).cloned()
+}
+
+fn remember_skill_digest(
+    path: &std::path::Path,
+    mtime: std::time::SystemTime,
+    len: u64,
+    digest: &str,
+) {
+    let mut cache = skill_digest_cache_lock();
+    cache.retain(|key, _| key.path != path);
+    cache.insert(
+        SkillDigestKey {
+            path: path.to_path_buf(),
+            mtime,
+            len,
+        },
+        digest.to_owned(),
+    );
+}
+
+/// SHA-256 of a skill file. Unchanged `(path, mtime, len)` hits skip the read.
+/// The hash is [`crate::config_admin::sha256_hex`].
+async fn skill_file_sha256(path: &std::path::Path) -> Option<String> {
+    if let Ok(meta) = tokio::fs::metadata(path).await {
+        if let Ok(mtime) = meta.modified() {
+            if let Some(digest) = cached_skill_digest(path, mtime, meta.len()) {
+                return Some(digest);
+            }
+        }
+    }
+    let bytes = tokio::fs::read(path).await.ok()?;
+    let digest = crate::config_admin::sha256_hex(&bytes);
+    if let Ok(meta) = tokio::fs::metadata(path).await {
+        if meta.len() == bytes.len() as u64 {
+            if let Ok(mtime) = meta.modified() {
+                remember_skill_digest(path, mtime, meta.len(), &digest);
+            }
+        }
+    }
+    Some(digest)
+}
+
+struct PluginSkillCatalogRow {
+    name: Utf16JsonProjection,
+    description: Utf16JsonProjection,
+    when_to_use: Option<Utf16JsonProjection>,
+    plugin_owner: String,
+    file_path: std::path::PathBuf,
+    directory: String,
+}
+
+enum SlashCatalogExtra {
+    Plugin(PluginSkillCatalogRow),
+    Ready(Utf16JsonProjection),
+}
+
+fn plugin_skill_catalog_entry(row: &PluginSkillCatalogRow, revision: Option<String>) -> Utf16JsonProjection {
+    source_object(vec![
+        ("id".into(), source_with_prefix("command:", &row.name)),
+        ("name".into(), row.name.clone()),
+        ("source".into(), source_string("plugin")),
+        (
+            "pluginOwner".into(),
+            source_string(row.plugin_owner.clone()),
+        ),
+        ("rootDir".into(), source_string(row.directory.clone())),
+        ("directory".into(), source_string(row.directory.clone())),
+        (
+            "writable".into(),
+            Utf16JsonProjection::parse("false").expect("boolean JSON"),
+        ),
+        (
+            "readonlyReason".into(),
+            source_string("Plugin skills are managed by their owning plugin."),
+        ),
+        (
+            "revision".into(),
+            revision
+                .map(|value| source_string(value))
+                .unwrap_or_else(|| Utf16JsonProjection::parse("null").expect("null JSON")),
+        ),
+        ("description".into(), row.description.clone()),
+        (
+            "whenToUse".into(),
+            row.when_to_use
+                .clone()
+                .map(|value| source_string(value))
+                .unwrap_or_else(|| Utf16JsonProjection::parse("null").expect("null JSON")),
+        ),
+        (
+            "diagnosticsJson".into(),
+            source_string("{\"ok\":true,\"issues\":[]}"),
+        ),
+    ])
+}
+
 fn strip_source_prefix<'a>(units: &'a [u16], prefix: &str) -> Option<&'a [u16]> {
     let prefix_units = prefix.encode_utf16().collect::<Vec<_>>();
     units.strip_prefix(prefix_units.as_slice())
@@ -677,113 +802,92 @@ impl EngineCommandRouter {
                     ]));
                 }
                 if let Some(registry) = self.slash_registry.as_ref() {
-                    let registry = registry.read().await;
-                    for command in registry.list_all() {
-                        match &command.kind {
-                            command_api::SlashCommandKind::Plugin {
-                                plugin_id,
-                                file_path,
-                                ..
-                            } if command.skill_root.is_some() => {
-                                let directory = command
-                                    .skill_root
-                                    .as_deref()
-                                    .or_else(|| file_path.parent())
-                                    .unwrap_or(file_path)
-                                    .to_string_lossy()
-                                    .into_owned();
-                                let revision = std::fs::read(file_path)
-                                    .ok()
-                                    .map(|bytes| crate::config_admin::sha256_hex(&bytes));
-                                entries.push(source_object(vec![
-                                    ("id".into(), source_with_prefix("command:", &command.name)),
-                                    ("name".into(), command.name.clone()),
-                                    ("source".into(), source_string("plugin")),
-                                    ("pluginOwner".into(), source_string(plugin_id.to_string())),
-                                    ("rootDir".into(), source_string(directory.clone())),
-                                    ("directory".into(), source_string(directory)),
-                                    (
-                                        "writable".into(),
-                                        Utf16JsonProjection::parse("false").expect("boolean JSON"),
-                                    ),
-                                    (
-                                        "readonlyReason".into(),
-                                        source_string(
-                                            "Plugin skills are managed by their owning plugin.",
-                                        ),
-                                    ),
-                                    (
-                                        "revision".into(),
-                                        revision.map(|value| source_string(value)).unwrap_or_else(
-                                            || {
-                                                Utf16JsonProjection::parse("null")
-                                                    .expect("null JSON")
-                                            },
-                                        ),
-                                    ),
-                                    ("description".into(), command.description.clone()),
-                                    (
-                                        "whenToUse".into(),
-                                        command
-                                            .when_to_use
-                                            .clone()
-                                            .map(|value| source_string(value))
-                                            .unwrap_or_else(|| {
-                                                Utf16JsonProjection::parse("null")
-                                                    .expect("null JSON")
-                                            }),
-                                    ),
-                                    (
-                                        "diagnosticsJson".into(),
-                                        source_string("{\"ok\":true,\"issues\":[]}"),
-                                    ),
-                                ]));
-                            }
-                            command_api::SlashCommandKind::Mcp {
-                                connection_id,
-                                prompt_name,
-                                ..
-                            } => {
-                                let directory = source_with_affixes(
-                                    &format!("<mcp:{connection_id}:"),
+                    let extras = {
+                        let registry = registry.read().await;
+                        let mut extras = Vec::new();
+                        for command in registry.list_all() {
+                            match &command.kind {
+                                command_api::SlashCommandKind::Plugin {
+                                    plugin_id,
+                                    file_path,
+                                    ..
+                                } if command.skill_root.is_some() => {
+                                    let directory = command
+                                        .skill_root
+                                        .as_deref()
+                                        .or_else(|| file_path.parent())
+                                        .unwrap_or(file_path)
+                                        .to_string_lossy()
+                                        .into_owned();
+                                    extras.push(SlashCatalogExtra::Plugin(PluginSkillCatalogRow {
+                                        name: command.name.clone(),
+                                        description: command.description.clone(),
+                                        when_to_use: command.when_to_use.clone(),
+                                        plugin_owner: plugin_id.to_string(),
+                                        file_path: file_path.clone(),
+                                        directory,
+                                    }));
+                                }
+                                command_api::SlashCommandKind::Mcp {
+                                    connection_id,
                                     prompt_name,
-                                    ">",
-                                );
-                                entries.push(source_object(vec![
-                                    ("id".into(), source_with_prefix("command:", &command.name)),
-                                    ("name".into(), command.name.clone()),
-                                    ("source".into(), source_string("mcp")),
-                                    ("rootDir".into(), directory.clone()),
-                                    ("directory".into(), directory),
-                                    (
-                                        "writable".into(),
-                                        Utf16JsonProjection::parse("false").expect("boolean JSON"),
-                                    ),
-                                    (
-                                        "readonlyReason".into(),
-                                        source_string(
-                                            "MCP skills are provided by the connected server.",
+                                    ..
+                                } => {
+                                    let directory = source_with_affixes(
+                                        &format!("<mcp:{connection_id}:"),
+                                        prompt_name,
+                                        ">",
+                                    );
+                                    extras.push(SlashCatalogExtra::Ready(source_object(vec![
+                                        (
+                                            "id".into(),
+                                            source_with_prefix("command:", &command.name),
                                         ),
-                                    ),
-                                    ("description".into(), command.description.clone()),
-                                    (
-                                        "whenToUse".into(),
-                                        command
-                                            .when_to_use
-                                            .clone()
-                                            .map(|value| source_string(value))
-                                            .unwrap_or_else(|| {
-                                                Utf16JsonProjection::parse("null")
-                                                    .expect("null JSON")
-                                            }),
-                                    ),
-                                    (
-                                        "diagnosticsJson".into(),
-                                        source_string("{\"status\":\"runtime\"}"),
-                                    ),
-                                ]));
+                                        ("name".into(), command.name.clone()),
+                                        ("source".into(), source_string("mcp")),
+                                        ("rootDir".into(), directory.clone()),
+                                        ("directory".into(), directory),
+                                        (
+                                            "writable".into(),
+                                            Utf16JsonProjection::parse("false")
+                                                .expect("boolean JSON"),
+                                        ),
+                                        (
+                                            "readonlyReason".into(),
+                                            source_string(
+                                                "MCP skills are provided by the connected server.",
+                                            ),
+                                        ),
+                                        ("description".into(), command.description.clone()),
+                                        (
+                                            "whenToUse".into(),
+                                            command
+                                                .when_to_use
+                                                .clone()
+                                                .map(source_string)
+                                                .unwrap_or_else(|| {
+                                                    Utf16JsonProjection::parse("null")
+                                                        .expect("null JSON")
+                                                }),
+                                        ),
+                                        (
+                                            "diagnosticsJson".into(),
+                                            source_string("{\"status\":\"runtime\"}"),
+                                        ),
+                                    ])));
+                                }
+                                _ => {}
                             }
-                            _ => {}
+                        }
+                        extras
+                    };
+                    for extra in extras {
+                        match extra {
+                            SlashCatalogExtra::Plugin(row) => {
+                                let revision = skill_file_sha256(&row.file_path).await;
+                                entries.push(plugin_skill_catalog_entry(&row, revision));
+                            }
+                            SlashCatalogExtra::Ready(entry) => entries.push(entry),
                         }
                     }
                 }

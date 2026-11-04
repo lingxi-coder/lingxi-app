@@ -1931,6 +1931,10 @@ struct ClientInner {
     controllers: Mutex<HashMap<String, SessionController>>,
     listeners: Mutex<Vec<(u64, Arc<dyn RemoteClientListener>)>>,
     next_listener: AtomicU64,
+    /// Bumped on an explicit refresh (`ready`) before the cached list is cleared.
+    /// A `models()` RPC that started under an older epoch must not be stored or
+    /// returned: the connection was refreshed while it was in flight.
+    models_epoch: AtomicU64,
     models: tokio::sync::Mutex<Option<ModelsListResult>>,
     bots: bots::BotsHub,
 }
@@ -2008,6 +2012,7 @@ impl RemoteClient {
                 controllers: Mutex::new(HashMap::new()),
                 listeners: Mutex::new(Vec::new()),
                 next_listener: AtomicU64::new(1),
+                models_epoch: AtomicU64::new(0),
                 models: tokio::sync::Mutex::new(None),
                 bots: bots::BotsHub::default(),
             }),
@@ -2079,18 +2084,31 @@ impl RemoteClient {
 
     /// The models the desktop offers; asked once per connection.
     pub async fn models(&self) -> Result<ModelsListResult, RpcError> {
-        let mut cache = self.inner.models.lock().await;
-        if let Some(models) = cache.as_ref() {
-            return Ok(models.clone());
+        loop {
+            let epoch = {
+                let cache = self.inner.models.lock().await;
+                if let Some(models) = cache.as_ref() {
+                    return Ok(models.clone());
+                }
+                self.inner.models_epoch.load(Ordering::Acquire)
+            };
+            let fetched: ModelsListResult = parse(
+                self.inner
+                    .io
+                    .request(methods::MODELS_LIST, Some(json!({})), None)
+                    .await?,
+            )?;
+            let mut cache = self.inner.models.lock().await;
+            if self.inner.models_epoch.load(Ordering::Acquire) != epoch {
+                // `ready` cleared the cache while this RPC was in flight.
+                continue;
+            }
+            if let Some(models) = cache.as_ref() {
+                return Ok(models.clone());
+            }
+            *cache = Some(fetched.clone());
+            return Ok(fetched);
         }
-        let models: ModelsListResult = parse(
-            self.inner
-                .io
-                .request(methods::MODELS_LIST, Some(json!({})), None)
-                .await?,
-        )?;
-        *cache = Some(models.clone());
-        Ok(models)
     }
 
     fn publish(&self, sessions: Vec<RemoteSessionSummary>) {
@@ -2104,7 +2122,13 @@ impl RemoteClient {
     fn ready(&self) {
         let client = self.clone();
         tokio::spawn(async move {
-            *client.inner.models.lock().await = None;
+            let mut cache = client.inner.models.lock().await;
+            client
+                .inner
+                .models_epoch
+                .fetch_add(1, Ordering::AcqRel);
+            *cache = None;
+            drop(cache);
             if let Ok(value) = client
                 .inner
                 .io

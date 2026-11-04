@@ -63,7 +63,7 @@ export function PublicLayout({
     const navigation = <>
       <a href="#landing-scenarios">{t('Use cases', '使用场景')}</a>
       <RouteLink href="/download">{t('Download', '下载')}</RouteLink>
-      <RouteLink href="/docs">{t('Documentation', '开发者文档')}</RouteLink>
+      <RouteLink href="/docs">{t('Docs', '文档')}</RouteLink>
       <a href="https://github.com/lingxi-coder/lingxi-app" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
     </>;
     return (
@@ -88,7 +88,7 @@ export function PublicLayout({
             <RouteLink href="/privacy">{t('Privacy', '隐私政策')}</RouteLink>
             <RouteLink href="/data-deletion">{t('Data deletion', '数据删除')}</RouteLink>
             <RouteLink href="/download">{t('Download', '下载')}</RouteLink>
-            <RouteLink href="/docs">{t('Documentation', '开发者文档')}</RouteLink>
+            <RouteLink href="/docs">{t('Docs', '文档')}</RouteLink>
             <a href="https://github.com/lingxi-coder/lingxi-app" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
           </div>
           <span className="landing-copyright">© {new Date().getFullYear()} LingXi</span>

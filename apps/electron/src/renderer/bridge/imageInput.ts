@@ -26,11 +26,23 @@ export async function imageFileToAttachment(file: File): Promise<ImageAttachment
   const mediaType = detectImageMediaType(bytes);
   if (!mediaType) throw new Error('Only PNG, JPEG, GIF, and WebP images are supported.');
   const base64 = bytesToBase64(bytes);
+  // One base64 copy is what submit needs. A real File previews from a blob URL
+  // so the composer does not keep a second copy of that string. A stand-in
+  // that is not a Blob, or a URL implementation that rejects it, falls back
+  // to the data URL. Callers already revokeObjectURL on removal.
+  let previewUrl = `data:${mediaType};base64,${base64}`;
+  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && file instanceof Blob) {
+    try {
+      previewUrl = URL.createObjectURL(file);
+    } catch {
+      // Keep the data URL. Submit still has the base64 copy.
+    }
+  }
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     name: imageFileName(file),
     media_type: mediaType,
     base64,
-    previewUrl: `data:${mediaType};base64,${base64}`,
+    previewUrl,
   };
 }

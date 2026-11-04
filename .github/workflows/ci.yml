@@ -60,7 +60,8 @@ jobs:
         with:
           python-version: '3.12'
       - name: Restore pinned Linux GStreamer static SDK cache
-        uses: actions/cache@v6
+        id: gstreamer-sdk-cache
+        uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/gstreamer-sdk/linux-static
           key: gstreamer-linux-static-jammy-${{ hashFiles('scripts/ci/gstreamer-sdk-lock.json', 'scripts/ci/build_gstreamer_linux.py', 'scripts/ci/gstreamer_sdk.py', 'scripts/ci/gstreamer-linux-meson-requirements.txt') }}
@@ -73,6 +74,13 @@ jobs:
         run: python3 -m pip install --no-deps --require-hashes -r scripts/ci/gstreamer-linux-meson-requirements.txt
       - name: Build and validate the pinned GStreamer static SDK
         run: python3 scripts/ci/build_gstreamer_linux.py --root "$RUNNER_TEMP/gstreamer-sdk/linux-static" --static-plugins
+      # Save only after SDK validation, before unrelated tests can fail.
+      - name: Save validated Linux GStreamer static SDK cache
+        if: steps.gstreamer-sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/gstreamer-sdk/linux-static
+          key: ${{ steps.gstreamer-sdk-cache.outputs.cache-primary-key }}
       - name: Test all retained product packages
         working-directory: .
         run: cargo test --locked --workspace --all-features --no-fail-fast

@@ -1035,8 +1035,7 @@ async fn fresh_private_cd_preserves_mode_only_source_without_conversation() {
     let relocated = after_contents
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|row| row["type"] == "relocated" && row["sessionId"] == id.to_string())
-        .last()
+        .rfind(|row| row["type"] == "relocated" && row["sessionId"] == id.to_string())
         .unwrap();
     assert_eq!(relocated["relocatedCwd"].as_str(), target.to_str());
     let destination =
@@ -1487,7 +1486,7 @@ async fn cold_draft_reopens_real_session_start_attachments_for_code_and_chat() {
             &before,
             &id.to_string()
         ));
-        assert_eq!(before.contains("\"fixed-session-mode\""), true);
+        assert!(before.contains("\"fixed-session-mode\""));
 
         let second = Box::pin(assemble(cfg)).await.unwrap();
         let profile = second.runtime.orchestrator.conversation_mode().await;

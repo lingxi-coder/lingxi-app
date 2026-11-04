@@ -1,0 +1,35 @@
+{
+  "sha": "ddd322514d87a4b21342b7ab9a9d70796fc60576",
+  "node_id": "C_kwDOBtX13doAKGRkZDMyMjUxNGQ4N2E0YjIxMzQyYjdhYjlhOWQ3MDc5NmZjNjA1NzY",
+  "url": "https://api.github.com/repos/wasm-bindgen/wasm-bindgen/git/commits/ddd322514d87a4b21342b7ab9a9d70796fc60576",
+  "html_url": "https://github.com/wasm-bindgen/wasm-bindgen/commit/ddd322514d87a4b21342b7ab9a9d70796fc60576",
+  "author": {
+    "name": "Guy Bedford",
+    "email": "guybedford@gmail.com",
+    "date": "2026-05-22T16:44:12Z"
+  },
+  "committer": {
+    "name": "GitHub",
+    "email": "noreply@github.com",
+    "date": "2026-05-22T16:44:12Z"
+  },
+  "tree": {
+    "sha": "0ff6029b721a4554b641ac6e81b4c174d8d40ad4",
+    "url": "https://api.github.com/repos/wasm-bindgen/wasm-bindgen/git/trees/0ff6029b721a4554b641ac6e81b4c174d8d40ad4"
+  },
+  "message": "release: 0.2.122 - schema bump (#5162)",
+  "parents": [
+    {
+      "sha": "a64603e2d69462b68985bc95d812640b85ced578",
+      "url": "https://api.github.com/repos/wasm-bindgen/wasm-bindgen/git/commits/a64603e2d69462b68985bc95d812640b85ced578",
+      "html_url": "https://github.com/wasm-bindgen/wasm-bindgen/commit/a64603e2d69462b68985bc95d812640b85ced578"
+    }
+  ],
+  "verification": {
+    "verified": true,
+    "reason": "valid",
+    "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqEIfcCRC1aQ7uu5UhlAAASwsQAC53ACtS3cq5VTUChbGn1om3\np/RGDAUhw02RzHe/TShZff0nz9DYPs1kxSncnxP/YTmFWNP8fIwA0GBDtS8s5CHF\nPw/PufVxlAU718dv6cFZw55xcL6CPCKObSrkQb4EFhce/UbE8f1kZD0zdiUxvZee\nHUIhBcWXNTAuUsVWN23ZTE0PJHBcXbvxWHAeRrHTA5ccBa7SH0r/V4O8c3NgvwuX\n4zI4tYYiYjI1IizOmNv0OHXTstGfFjinGHszGeQe5yQ9VDrFTWhxQhSLwoJ6DtfH\nLtf53ADt5owXM0u441Y3PtKh5/5+Dyke86Ygb8xBjIVJUYNMCdFjeI2KozXL+GDd\nbn7hb2+Q3EAvHEWkL1a4pWJAsMuNkx4egKkPQpTOG8QoRcF9KxT3bN/aYCo1Kgcv\nX/9fXWjazRV1/sJmGMMAtpFQXTXGVY5G0DqVtlH4yqlcq+XM+q6hgVk/m1/bbi7N\nFb2vVlgygPWiQ8o9ckEnAe8RYv82yuCDfZGQb6LAFHTBW5LiAcZflBM864O10BL8\ntxeQWpG9UtQrMZO6MhLl0XA2AojLyR7lRP+2+0rmcs4m/nC46OugKsA12ziKbx94\nhhFpebui5j6hrqjuFCPH32XPELHmg/+uHXOqhADZnoM0gUG0a22nzUAE/9SkSDxt\nEKwxzsQPi/3q8cbx7fEe\n=30E1\n-----END PGP SIGNATURE-----\n",
+    "payload": "tree 0ff6029b721a4554b641ac6e81b4c174d8d40ad4\nparent a64603e2d69462b68985bc95d812640b85ced578\nauthor Guy Bedford <guybedford@gmail.com> 1779468252 -0700\ncommitter GitHub <noreply@github.com> 1779468252 -0700\n\nrelease: 0.2.122 - schema bump (#5162)",
+    "verified_at": "2026-05-22T16:44:13Z"
+  }
+}

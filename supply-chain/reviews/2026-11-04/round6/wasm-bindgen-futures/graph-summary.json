@@ -1,0 +1,106 @@
+{
+  "head": "5ce972b8c1a547f54808114681327cb731155fcf",
+  "cargo_lock_sha256": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+  "metadata_command": "cargo +1.94.0 metadata --format-version 1 --all-features --locked --frozen",
+  "metadata_sha256": "f7c2d42c59de86e57d5099000f354c12043b5f2c694bb4219982ad62f54961df",
+  "package_count": 1052,
+  "package_id": "registry+https://github.com/rust-lang/crates.io-index#wasm-bindgen-futures@0.4.72",
+  "resolved_features": [
+    "default",
+    "std"
+  ],
+  "resolved_dependencies": [
+    {
+      "name": "js_sys",
+      "pkg": "registry+https://github.com/rust-lang/crates.io-index#js-sys@0.3.99",
+      "dep_kinds": [
+        {
+          "kind": null,
+          "target": null
+        }
+      ]
+    },
+    {
+      "name": "wasm_bindgen",
+      "pkg": "registry+https://github.com/rust-lang/crates.io-index#wasm-bindgen@0.2.122",
+      "dep_kinds": [
+        {
+          "kind": null,
+          "target": null
+        }
+      ]
+    }
+  ],
+  "reverse_parents": [
+    {
+      "id": "git+https://github.com/lingxi-coder/llm-client.git?rev=3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3#lingxi-reqwest@0.12.29",
+      "edge": {
+        "name": "wasm_bindgen_futures",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#wasm-bindgen-futures@0.4.72",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": "cfg(target_arch = \"wasm32\")"
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#reqwest@0.12.28",
+      "edge": {
+        "name": "wasm_bindgen_futures",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#wasm-bindgen-futures@0.4.72",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": "cfg(target_arch = \"wasm32\")"
+          }
+        ]
+      }
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#wasm-streams@0.4.2",
+      "edge": {
+        "name": "wasm_bindgen_futures",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#wasm-bindgen-futures@0.4.72",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      }
+    }
+  ],
+  "consumer_registry_archive_and_selected_files": {
+    "reqwest-0.12.28": {
+      "archive_sha256": "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147",
+      "files": {
+        "Cargo.toml": "23c8a0827aaac74059965a182c6873990e75aa550e8079d3b51bb95092871205",
+        "src/wasm/mod.rs": "79c7aeac9b9d271e4cfe931b39314aef3a7ad78184a84424306e772652535e0b"
+      }
+    },
+    "wasm-streams-0.4.2": {
+      "archive_sha256": "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65",
+      "files": {
+        "Cargo.toml": "a230ab9bbc41bbda6cefb521710b2600d0f8a1b80ac31709b410ad43d510a1cb",
+        "src/util.rs": "1270a7ee5e5527e0b9b84bcbaa06c71dc1bd8533b0f290a6dbc51db5c2db204b",
+        "src/writable/into_underlying_sink.rs": "aeccf9b39537b5bcacc93c46e61cc5987d93456bd6c429b591636fd9550b96ad"
+      }
+    },
+    "js-sys-0.3.99": {
+      "archive_sha256": "142bc4740e452c1e57ade0cbc129f139c9093e354346f0872ef985f4f5cf5f11",
+      "files": {
+        "Cargo.toml": "607aa5c58ee5f25f30b037dc96c6e117e7b87ffeecdceda7041567ea0f01483a",
+        "src/lib.rs": "445e7c981658d48d544c47c4b249d3fa9b4d240747647c54a517dc3f3cc08128",
+        "src/futures/mod.rs": "966a07222bce18a58cd21291d649ddd0368580a555ae135b4a4f2770f652c03d",
+        "src/futures/stream.rs": "71432e8401092d42e5d57a885c5bb63b3706adb43a4d2c4bce20a290a0cd3cb0"
+      }
+    }
+  },
+  "lingxi_reqwest_source": {
+    "commit": "3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3",
+    "path": "vendor/lingxi-reqwest/src/wasm/mod.rs",
+    "sha256": "79c7aeac9b9d271e4cfe931b39314aef3a7ad78184a84424306e772652535e0b"
+  }
+}

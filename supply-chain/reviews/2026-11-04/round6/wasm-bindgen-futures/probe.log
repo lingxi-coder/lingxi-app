@@ -1,0 +1,42 @@
++ cargo +1.94.0 check --manifest-path /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-wasm-futures-probe-26carm86/wasm-bindgen-futures-0.4.72/Cargo.toml --target-dir /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-wasm-futures-probe-26carm86/target --locked --frozen --lib --no-default-features
+   Compiling unicode-ident v1.0.24
+   Compiling proc-macro2 v1.0.106
+   Compiling wasm-bindgen-shared v0.2.122
+   Compiling quote v1.0.45
+   Compiling rustversion v1.0.22
+   Compiling syn v2.0.117
+   Compiling bumpalo v3.20.3
+   Compiling wasm-bindgen-macro-support v0.2.122
+   Compiling wasm-bindgen v0.2.122
+   Compiling wasm-bindgen-macro v0.2.122
+    Checking once_cell v1.21.4
+    Checking cfg-if v1.0.4
+    Checking js-sys v0.3.99
+    Checking wasm-bindgen-futures v0.4.72 (/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-wasm-futures-probe-26carm86/wasm-bindgen-futures-0.4.72)
+    Finished `dev` profile [unoptimized] target(s) in 51.92s
++ cargo +1.94.0 check --manifest-path /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-wasm-futures-probe-26carm86/wasm-bindgen-futures-0.4.72/Cargo.toml --target-dir /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-wasm-futures-probe-26carm86/target --locked --frozen --example api_probe --all-features
+   Compiling wasm-bindgen v0.2.122
+    Checking futures-core v0.3.32
+    Checking pin-project-lite v0.2.17
+    Checking slab v0.4.12
+    Checking futures-task v0.3.32
+    Checking futures-util v0.3.32
+    Checking js-sys v0.3.99
+    Checking wasm-bindgen-futures v0.4.72 (/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-wasm-futures-probe-26carm86/wasm-bindgen-futures-0.4.72)
+    Finished `dev` profile [unoptimized] target(s) in 4.32s
++ cargo +1.94.0 check --manifest-path /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-wasm-futures-probe-26carm86/wasm-bindgen-futures-0.4.72/Cargo.toml --target-dir /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-wasm-futures-probe-26carm86/target --locked --frozen --example api_probe --all-features
+    Checking wasm-bindgen-futures v0.4.72 (/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-wasm-futures-probe-26carm86/wasm-bindgen-futures-0.4.72)
+error[E0432]: unresolved import `wasm_bindgen_futures::JsFuture`
+ --> examples/api_probe.rs:3:85
+  |
+3 | use wasm_bindgen_futures::{future_to_promise, future_to_promise_typed, spawn_local, JsFuture};
+  |                                                                                     ^^^^^^^^ no `JsFuture` in the root
+  |
+  = help: consider importing one of these structs instead:
+          crate::js_sys::futures::JsFuture
+          js_sys::futures::JsFuture
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `wasm-bindgen-futures` (example "api_probe") due to 1 previous error
+negative control detected: unresolved import `wasm_bindgen_futures::JsFuture`
+real dependency API type-check and re-export negative control passed

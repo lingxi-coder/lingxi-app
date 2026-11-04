@@ -1,0 +1,103 @@
+{
+  "archive_files": {
+    ".cargo_vcs_info.json": {
+      "git_blob": "6b09d8029ab3d1302c5238ac48de2eff69da609b",
+      "mode": "0o644",
+      "sha256": "084e9e7c49ccfd133f931dbea2551783ead77d307e9ae37ac290003028e51d98",
+      "size": 106
+    },
+    "Cargo.lock": {
+      "git_blob": "ec9bfb8424efd77ef35cf3cbcb8a4ec742720918",
+      "mode": "0o644",
+      "sha256": "048bd956789e2e40f3a91f07a4218fddbe6cb2aba174121d50b6c42ae978a1cc",
+      "size": 145
+    },
+    "Cargo.toml": {
+      "git_blob": "7cc868868a9d0c15523627b227629964dadf631f",
+      "mode": "0o644",
+      "sha256": "32f63e3cf3ba8660b2890fc63c07b9872cb3e3c0d955b63d220fc274a819f380",
+      "size": 1335
+    },
+    "Cargo.toml.orig": {
+      "git_blob": "80d963320e64007225493d8ea9d20a32f8e3d8f6",
+      "mode": "0o644",
+      "sha256": "08c075fcf84e4b6971739f1a29fab86d4233e09719effb3a34d4a6af84c9855c",
+      "size": 692
+    },
+    "LICENSE-APACHE": {
+      "git_blob": "9eb0b097f5d0b5e147323e043b3adf35949b9f5a",
+      "mode": "0o644",
+      "sha256": "275c491d6d1160553c32fd6127061d7f9606c3ea25abfad6ca3f6ed088785427",
+      "size": 10874
+    },
+    "LICENSE-MIT": {
+      "git_blob": "8ad082ec4f93b748959a7634b12d25da2000c59e",
+      "mode": "0o644",
+      "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
+      "size": 1094
+    },
+    "README.md": {
+      "git_blob": "64d582a22d64e31fbe154ede53982fd88a493906",
+      "mode": "0o644",
+      "sha256": "7a458e69ff008c35cffbbbcd2a14ad3ba7ad75201ce74df2d8f8d0fdcf6c4a89",
+      "size": 554
+    },
+    "src/arc_wake.rs": {
+      "git_blob": "aa6de0fc437781d0c7c82f84cac2d829d1c93806",
+      "mode": "0o644",
+      "sha256": "0e3f7d7883b75337b0b92ff55e477f0bf96f6eb08def7d953676a289fd9696ec",
+      "size": 1924
+    },
+    "src/future_obj.rs": {
+      "git_blob": "a611382193206d1e94ac64faa06b21e9e8358120",
+      "mode": "0o644",
+      "sha256": "be75a5b6f124cd25038c60961b5933062a06ccdce569e58e41c357802d3d1891",
+      "size": 10693
+    },
+    "src/lib.rs": {
+      "git_blob": "c119b6b1e46b5844cf3b1a03cee58204d9245845",
+      "mode": "0o644",
+      "sha256": "b49478700ee4d64df460c225f1b4b3ce11ff5c24065602efe88ffb0f3ce4ca59",
+      "size": 1403
+    },
+    "src/noop_waker.rs": {
+      "git_blob": "f76a8a2e95d8e2502a9a53d910dfba54643b298a",
+      "mode": "0o644",
+      "sha256": "41246601dab77f69bf09257afc3321031a5a31a7eda51787029870eda9922356",
+      "size": 1647
+    },
+    "src/spawn.rs": {
+      "git_blob": "4a9a45a44668d2171e1382efcff85ddd68874897",
+      "mode": "0o644",
+      "sha256": "cd0dafb52700e087a2793bb42d70da84e9e10181d5407ea74843d935f40cea02",
+      "size": 5868
+    },
+    "src/waker.rs": {
+      "git_blob": "ce90aa83d9a20122c67a86778a35b825f2f3fb2c",
+      "mode": "0o644",
+      "sha256": "3fd071a6e951d873aa896b3ee7b377a70d340e738a51aef85f5bb1c46d3451a8",
+      "size": 2031
+    },
+    "src/waker_ref.rs": {
+      "git_blob": "5957b4d46afc8aea39c087fa9bc5f4e637c888bf",
+      "mode": "0o644",
+      "sha256": "640264ad52ccd2ebbb650104eaab9a2d24b8d08749f8c76226bd22bd51006f2a",
+      "size": 2060
+    }
+  },
+  "archive_sha256": "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393",
+  "cache_archives_checked": [
+    "/Users/luolingfeng/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f/futures-task-0.3.32.crate",
+    "/Users/luolingfeng/.cargo/registry/cache/index.crates.io-6f17d22bba15001f/futures-task-0.3.32.crate"
+  ],
+  "cache_checked": true,
+  "commit_object_verified": true,
+  "github_signature_status_at_capture": "unsigned",
+  "index_yanked_at_capture": false,
+  "lock_sha256": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+  "signature_independently_verified": false,
+  "tree_objects_checked": 65,
+  "upstream_blob_files_checked": 11,
+  "upstream_commit": "d9bba94c239daa1175a5bb2958f37a5c72db3f6a",
+  "upstream_root_tree": "3b895ace16b630e12aabf16f10a0110036e7abd6"
+}

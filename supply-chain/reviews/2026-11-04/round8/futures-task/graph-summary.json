@@ -1,0 +1,114 @@
+{
+  "head": "e67108615b748d0e1bd330e52e19de8a64f7f3d8",
+  "metadata_command": "cargo +1.94.0 metadata --format-version 1 --all-features --locked --frozen",
+  "metadata_sha256": "57633c2110dbce4e37ef9b42d1570fe68a709b73c04f4b616cc0d3bdd575c8ad",
+  "package_count": 1052,
+  "package_id": "registry+https://github.com/rust-lang/crates.io-index#futures-task@0.3.32",
+  "resolved_features": [
+    "alloc",
+    "std"
+  ],
+  "resolved_dependencies": [],
+  "reverse_parents_all_targets": [
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures@0.3.32",
+      "edge": {
+        "name": "futures_task",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-task@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d",
+      "selected_files": [
+        {
+          "path": "Cargo.toml",
+          "sha256": "230fa7164cb1e6554a0797bf2ad9906bb67b9d88c718bb50727ff047441ac3b1",
+          "line": 364,
+          "text": "[dependencies.futures-task]"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures-executor@0.3.32",
+      "edge": {
+        "name": "futures_task",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-task@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d",
+      "selected_files": [
+        {
+          "path": "src/local_pool.rs",
+          "sha256": "eea2419bda86cb6c6e117d599859e29cde7e07bdfebbbcd2d0565cfa5246023b",
+          "line": 87,
+          "text": "let waker = waker_ref(thread_notify);"
+        },
+        {
+          "path": "src/thread_pool.rs",
+          "sha256": "82d49ecea6da5eec3bef3f08c138a8248327bb26b1af709b0a47d42134fc4620",
+          "line": 314,
+          "text": "let waker = waker_ref(&wake_handle);"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures-util@0.3.32",
+      "edge": {
+        "name": "futures_task",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-task@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6",
+      "selected_files": [
+        {
+          "path": "src/future/future/shared.rs",
+          "sha256": "bb281d9e3868a3e1f02dd61a60c357721fb804a01543606af625000c789fd8d8",
+          "line": 304,
+          "text": "let waker = waker_ref(&inner.notifier);"
+        },
+        {
+          "path": "src/task/mod.rs",
+          "sha256": "781f6d7d2484d6bd88ef9533d5c4729eeb8d4ee9bb8b9f4bad7049a78e190c32",
+          "line": 31,
+          "text": "pub use futures_task::{waker_ref, WakerRef};"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#glib@0.22.10",
+      "edge": {
+        "name": "futures_task",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-task@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "e4cf9e5bd8713f1990a92c422998826e0fb34824277b46bc59757373483c6694",
+      "selected_files": [
+        {
+          "path": "src/main_context_futures.rs",
+          "sha256": "3cb692613a70068e9fe6185b8f0e59b85ef63d72c1d6227484818d234c17be44",
+          "line": 24,
+          "text": "Send(FutureObj<'static, Box<dyn Any + Send + 'static>>),"
+        }
+      ]
+    }
+  ]
+}

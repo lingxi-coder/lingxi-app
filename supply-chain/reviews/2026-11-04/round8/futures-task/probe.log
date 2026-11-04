@@ -1,0 +1,222 @@
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T: 8888320000
+release archive SHA-256: 037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393
+$ rustc +1.94.0 --version --verbose
+rustc 1.94.0 (4a4ef493e 2026-03-02)
+binary: rustc
+commit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db
+commit-date: 2026-03-02
+host: aarch64-apple-darwin
+release: 1.94.0
+LLVM version: 21.1.8
+exit: 0
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --crate-name futures_task --crate-type rlib -C debuginfo=0 /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/src/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/libbare.rlib
+exit: 0
+compiled artifact libbare.rlib: 66272 bytes
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --crate-name futures_task --crate-type rlib -C debuginfo=0 --cfg 'feature="alloc"' /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/src/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/liballoc.rlib
+exit: 0
+compiled artifact liballoc.rlib: 149104 bytes
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --crate-name futures_task --crate-type rlib -C debuginfo=0 --cfg 'feature="alloc"' --cfg 'feature="std"' /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/src/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/libfutures_task.rlib
+exit: 0
+compiled artifact libfutures_task.rlib: 149944 bytes
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --crate-name futures_task --crate-type rlib -C debuginfo=0 --cfg 'feature="alloc"' --cfg 'feature="std"' --cfg 'feature="unstable"' --cfg 'feature="cfg-target-has-atomic"' /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/src/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/libinert.rlib
+exit: 0
+compiled artifact libinert.rlib: 149936 bytes
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --extern futures_task=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/libbare.rlib /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/no_alloc.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/no_alloc
+error[E0432]: unresolved import `futures_task::waker`
+  --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/no_alloc.rs:1:5
+   |
+ 1 | use futures_task::waker; fn main() {}
+   |     ^^^^^^^^^^^^^^-----
+   |     |             |
+   |     |             help: a similar name exists in the module (notice the capitalization): `Waker`
+   |     no `waker` in the root
+   |
+note: found an item that was configured out
+  --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/src/lib.rs:30:5
+   |
+29 | #[cfg(feature = "alloc")]
+   |       ----------------- the item is gated behind the `alloc` feature
+30 | mod waker;
+   |     ^^^^^
+note: found an item that was configured out
+  --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/src/lib.rs:33:23
+   |
+32 | #[cfg(feature = "alloc")]
+   |       ----------------- the item is gated behind the `alloc` feature
+33 | pub use crate::waker::waker;
+   |                       ^^^^^
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0432`.
+exit: 1
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --extern futures_task=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/libfutures_task.rlib /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/non_send_future.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/non_send_future
+error: future cannot be sent between threads safely
+   --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/non_send_future.rs:1:118
+    |
+  1 | ...move { drop(rc); }; let _ = FutureObj::new(Box::new(f)); }
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^ future created by async block is not `Send`
+    |
+    = help: within `{async block@/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/non_send_future.rs:1:84: 1:94}`, the trait `Send` is not implemented for `Rc<i32>`
+note: captured value is not `Send`
+   --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/non_send_future.rs:1:102
+    |
+  1 | ...let rc=Rc::new(1); let f=async move { drop(rc); }; let _ = FutureObj::new(Box::new(f)); }
+    |                                               ^^ has type `Rc<i32>` which is not `Send`
+note: required by a bound in `FutureObj::<'a, T>::new`
+   --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/src/future_obj.rs:111:44
+    |
+111 |     pub fn new<F: UnsafeFutureObj<'a, T> + Send>(f: F) -> Self {
+    |                                            ^^^^ required by this bound in `FutureObj::<'a, T>::new`
+
+error: aborting due to 1 previous error
+
+exit: 1
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --extern futures_task=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/libfutures_task.rlib /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/borrowed_waker_escape.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/borrowed_waker_escape
+error[E0597]: `n` does not live long enough
+ --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/borrowed_waker_escape.rs:1:178
+  |
+1 | ...} } fn main() { let w; { let n=Arc::new(N); w=waker_ref(&n); } w.wake_by_ref(); }
+  |                                 -                          ^^   - - borrow later used here
+  |                                 |                          |    |
+  |                                 |                          |    `n` dropped here while still borrowed
+  |                                 |                          borrowed value does not live long enough
+  |                                 binding `n` declared here
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0597`.
+exit: 1
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --extern futures_task=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/libfutures_task.rlib /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/non_static_arcwake.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/non_static_arcwake
+error[E0597]: `v` does not live long enough
+  --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/non_static_arcwake.rs:1:180
+   |
+ 1 | ...ain() { let v=1; let n=Arc::new(N(&v)); let w=waker_ref(&n); w.wake_by_ref(); }
+   |                -                     ^^          -------------                   - `v` dropped here while still borrowed
+   |                |                     |           |
+   |                |                     |           argument requires that `v` is borrowed for `'static`
+   |                |                     borrowed value does not live long enough
+   |                binding `v` declared here
+   |
+note: requirement that the value outlives `'static` introduced here
+  --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/src/waker_ref.rs:57:18
+   |
+57 |     W: ArcWake + 'static,
+   |                  ^^^^^^^
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0597`.
+exit: 1
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --extern futures_task=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/libfutures_task.rlib /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/local_future_send.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/local_future_send
+error[E0277]: `*mut (dyn Future<Output = ()> + 'static)` cannot be sent between threads safely
+   --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/local_future_send.rs:1:113
+    |
+  1 | use futures_task::LocalFutureObj; fn main() { let o=LocalFutureObj::new(Box::new(async {})); std::thread::spawn(move || drop(o)); }
+    |                                                                                              ------------------ -------^^^^^^^^
+    |                                                                                              |                  |
+    |                                                                                              |                  `*mut (dyn Future<Output = ()> + 'static)` cannot be sent between threads safely
+    |                                                                                              |                  within this `{closure@local_future_send.rs:1:113}`
+    |                                                                                              required by a bound introduced by this call
+    |
+    = help: within `{closure@local_future_send.rs:1:113}`, the trait `Send` is not implemented for `*mut (dyn Future<Output = ()> + 'static)`
+note: required because it appears within the type `LocalFutureObj<'_, ()>`
+   --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/src/future_obj.rs:16:12
+    |
+ 16 | pub struct LocalFutureObj<'a, T> {
+    |            ^^^^^^^^^^^^^^
+note: required because it's used within this closure
+   --> /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/local_future_send.rs:1:113
+    |
+  1 | use futures_task::LocalFutureObj; fn main() { let o=LocalFutureObj::new(Box::new(async {})); std::thread::spawn(move || drop(o)); }
+    |                                                                                                                 ^^^^^^^
+note: required by a bound in `spawn`
+   --> /Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/thread/functions.rs:128:8
+    |
+125 | pub fn spawn<F, T>(f: F) -> JoinHandle<T>
+    |        ----- required by a bound in this function
+...
+128 |     F: Send + 'static,
+    |        ^^^^ required by this bound in `spawn`
+    = note: the full name for the type has been written to '/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/local_future_send.long-type-2859093376290953884.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0277`.
+exit: 1
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --test -C debuginfo=0 --extern futures_task=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/libfutures_task.rlib /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task/behavior-probe.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/probe
+exit: 0
+compiled artifact probe: 1110248 bytes
+$ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/probe --nocapture --test-threads=1
+
+running 8 tests
+test borrowed_from_owned_waker_does_not_drop_owner ... ok
+test borrowed_wake_panic_keeps_original_count ... 
+thread 'borrowed_wake_panic_keeps_original_count' (10668362) panicked at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task/behavior-probe.rs:15:60:
+expected wake panic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test borrowed_waker_clone_survives_owner_and_can_wake_on_another_thread ... ok
+test future_obj_pinned_heap_stays_put_and_drops_once ... ok
+test local_borrowed_pinned_future_is_not_dropped_by_wrapper ... ok
+test noop_waker_static_reference_is_cross_thread ... ok
+test owned_waker_counts_and_consuming_wake ... ok
+test send_future_obj_can_be_polled_on_worker ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+exit: 0
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --crate-name futures_task --crate-type rlib -C debuginfo=0 --cfg 'feature="alloc"' --cfg 'feature="std"' /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/src/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/libfutures_task.rlib
+exit: 0
+compiled artifact libfutures_task.rlib: 149840 bytes
+free bytes at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task: 8888320000
+free bytes at /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz: 8888320000
+$ rustc +1.94.0 --edition=2018 --test -C debuginfo=0 --extern futures_task=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/libfutures_task.rlib /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task/behavior-probe.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/mutant-probe
+exit: 0
+compiled artifact mutant-probe: 1110224 bytes
+$ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/futures-task-probe-gjxr0kqz/mutant-probe --exact owned_waker_counts_and_consuming_wake --nocapture
+
+running 1 test
+
+thread 'owned_waker_counts_and_consuming_wake' (10668590) panicked at /Users/luolingfeng/lingxi/worktrees/media-round8-audit-futures-task-20261104/supply-chain/reviews/2026-11-04/round8/futures-task/behavior-probe.rs:37:5:
+assertion `left == right` failed
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test owned_waker_counts_and_consuming_wake ... FAILED
+
+failures:
+
+failures:
+    owned_waker_counts_and_consuming_wake
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+exit: 101
+temporary files: 19, total 2762095 bytes
+temporary directory removed: True
+Expected outcomes observed; host tests do not prove unsafe-code soundness.

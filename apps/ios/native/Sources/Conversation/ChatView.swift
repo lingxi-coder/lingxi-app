@@ -252,6 +252,8 @@ struct ChatView: View {
                          promptSuggestionSourceCodeUnits: convo.promptSuggestionSourceCodeUnits,
                          promptSuggestionNotice: convo.promptSuggestionNotice,
                          suggestionTurnKey: "\(convo.activeSessionId):\(convo.promptSuggestionUuid ?? "")",
+                         historySessionKey: convo.activeSessionId,
+                         historyMessages: convo.sessionTransitionPending ? [] : convo.messages.filter { $0.role == .user }.map(\.text),
                          onSuggestionFeedback: { action in
                              if let uuid = convo.promptSuggestionUuid {
                                  source.promptSuggestionFeedback(sessionId: convo.activeSessionId, uuid: uuid, action: action)

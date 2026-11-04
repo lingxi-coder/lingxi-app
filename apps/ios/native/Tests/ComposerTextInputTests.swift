@@ -56,6 +56,49 @@ final class ComposerTextInputTests: XCTestCase {
         XCTAssertEqual(view.textView.text, draft)
     }
 
+    func testHardwareHistoryRecallProtectsDraftAndMultilineSelection() {
+        let view = ComposerEditingTextView()
+        view.configureHistory(sessionKey: "one", messages: ["oldest", "one\ntwo", "latest"])
+        view.text = "draft"
+        view.selectedRange = NSRange(location: 0, length: 0)
+        view.recallHistory(older: true)
+        XCTAssertEqual(view.text, "draft")
+        view.text = ""
+        view.recallHistory(older: true)
+        XCTAssertEqual(view.text, "latest")
+        view.recallHistory(older: true)
+        XCTAssertEqual(view.text, "one\ntwo")
+        view.selectedRange = NSRange(location: 2, length: 0)
+        view.recallHistory(older: true)
+        XCTAssertEqual(view.text, "one\ntwo")
+        view.selectedRange = NSRange(location: 0, length: 3)
+        view.recallHistory(older: true)
+        XCTAssertEqual(view.text, "one\ntwo")
+        view.selectedRange = NSRange(location: 0, length: 0)
+        view.recallHistory(older: true)
+        XCTAssertEqual(view.text, "oldest")
+        view.recallHistory(older: false)
+        view.recallHistory(older: false)
+        XCTAssertEqual(view.text, "latest")
+        view.recallHistory(older: false)
+        XCTAssertEqual(view.text, "")
+        view.recallHistory(older: true)
+        view.text += " edited"
+        view.recallHistory(older: true)
+        XCTAssertEqual(view.text, "latest edited")
+        view.configureHistory(sessionKey: "two", messages: ["another session"])
+        view.recallHistory(older: false)
+        XCTAssertEqual(view.text, "latest edited")
+    }
+
+    func testMarkedTextDoesNotRecallHistory() {
+        let view = ComposerEditingTextView()
+        view.configureHistory(sessionKey: "one", messages: ["old"])
+        view.setMarkedText("输入", selectedRange: NSRange(location: 2, length: 0))
+        view.recallHistory(older: true)
+        XCTAssertEqual(view.text, "输入")
+    }
+
     func testSuggestionHardwareKeysAppearOnlyWhenSuggestionCanBeAccepted() {
         let view = ComposerEditingTextView()
         let before = view.keyCommands?.filter { $0.input == "\t" || $0.input == UIKeyCommand.inputRightArrow }.count ?? 0

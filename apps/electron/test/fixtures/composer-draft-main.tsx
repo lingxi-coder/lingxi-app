@@ -243,6 +243,7 @@ function Fixture() {
   const [sessionId, setSessionId] = useState<string | null>('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
   const [sessionLoading, setSessionLoading] = useState(false);
   const [running, setRunning] = useState(false);
+  const [historyItems, setHistoryItems] = useState<import('../../src/renderer/model/runItem').RunItem[]>([]);
   const [suggestionState, setSuggestionState] = useState({ enabled: true, notice: null as string | null });
   const [suggestion, setSuggestion] = useState<{ text: string; turn: number; sessionId: string }>();
   const [backgroundStatuses, setBackgroundStatuses] = useState<Record<string, string | undefined>>({});
@@ -257,6 +258,7 @@ function Fixture() {
 
   useEffect(() => {
     window.__composerDraftTest = {
+      setHistoryItems,
       switchSession: setSessionId,
       setSessionLoading,
       setFusionDefault,
@@ -312,7 +314,7 @@ function Fixture() {
               fusionAdmin: async () => undefined,
               updatePromptSuggestionContext: async (context: Record<string, unknown>) => { suggestionContexts.push(context); },
               promptSuggestionFeedback: async (sessionId: string, uuid: string, action: string) => { suggestionFeedback.push({ sessionId, uuid, action }); },
-              conversation: { ...emptyConversation(), sessionKey: sessionId, suggestionTurn: suggestion?.turn ?? 0,
+              conversation: { ...emptyConversation(), items: historyItems, sessionKey: sessionId, suggestionTurn: suggestion?.turn ?? 0,
                 promptSuggestionEnabled: suggestionState.enabled, promptSuggestionNotice: suggestionState.notice,
                 promptSuggestion: suggestion?.text && suggestion?.sessionId === sessionId ? { type: 'prompt_suggestion', suggestion: suggestion.text, session_id: sessionId, uuid: `suggestion-${suggestion.turn}` } : undefined },
             } as never}
@@ -331,6 +333,7 @@ function Fixture() {
 declare global {
   interface Window {
     __composerDraftTest?: {
+      setHistoryItems(items: import('../../src/renderer/model/runItem').RunItem[]): void;
       setSuggestion(text: string, turn: number, sessionId: string): void;
       setSuggestionState(enabled: boolean, notice: string | null): void;
       suggestionFeedback(): Array<{ sessionId: string; uuid: string; action: string }>;

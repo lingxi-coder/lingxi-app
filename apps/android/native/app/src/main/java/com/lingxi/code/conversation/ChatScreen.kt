@@ -485,6 +485,9 @@ fun ChatScreen(
             }
             Composer(
                 text = draft,
+                historySessionKey = state.session.id,
+                historyMessages = if (state.sessionTransitioning) emptyList() else state.messages
+                    .filter { it.role == com.lingxi.code.model.Role.User }.map { it.text },
                 slashCommands = state.slashCommands,
                 promptSuggestion = state.promptSuggestion,
                 promptSuggestionNotice = state.promptSuggestionNotice,

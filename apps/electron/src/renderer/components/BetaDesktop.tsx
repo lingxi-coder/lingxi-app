@@ -1806,6 +1806,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   /** The widget the next prompt follows up on; cleared on send or session switch. */
   const [visualizationChip, setVisualizationChip] = useState<VisualizationContextChip | null>(null);
   const input = useRef<HTMLDivElement>(null);
+  const promptHistory = useRef<{ entries: string[]; index: number; html: string } | null>(null);
   const commandMirror = useRef<HTMLDivElement>(null);
   const fileControl = useRef<HTMLDivElement>(null);
   const fileButton = useRef<HTMLButtonElement>(null);
@@ -2225,6 +2226,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const syncPromptState = () => {
     const editor = input.current;
     if (!editor) return { text: '', files: [] };
+    promptHistory.current = null;
     markDraftEdited();
     const snapshot = richPromptSnapshot(editor);
     setText(snapshot.text);
@@ -2281,6 +2283,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       }
     }
 
+    promptHistory.current = null;
     draftSessionId.current = activeSessionId;
     const draft = activeSessionId ? draftsBySession.current.get(activeSessionId) : undefined;
     // Adopting the live draft must preserve its nodes and browser selection.
@@ -2754,6 +2757,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     }
     imageDraftGeneration.current += 1;
     composerDraftRevision.current += 1;
+    promptHistory.current = null;
     input.current?.replaceChildren();
     savedEditorSelection.current = null;
     activeMentionRange.current = null;
@@ -3236,6 +3240,61 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       }
     }
   };
+  const recallPromptHistory = (event: KeyboardEvent<HTMLDivElement>): boolean => {
+    if ((event.key !== 'ArrowUp' && event.key !== 'ArrowDown')
+      || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return false;
+    const editor = input.current;
+    const selection = window.getSelection();
+    if (!editor || !selection?.isCollapsed || !selection.rangeCount
+      || !editor.contains(selection.getRangeAt(0).commonAncestorContainer)) return false;
+    let history = promptHistory.current;
+    if (history && history.html !== editor.innerHTML) {
+      promptHistory.current = null;
+      history = null;
+    }
+    if (!history) {
+      // Begin recall only from an empty editor; a browser placeholder <br> is empty too.
+      if (event.key !== 'ArrowUp' || (editor.textContent ?? '').split(ZERO_WIDTH_SPACE).join('').length
+        || editor.querySelector('[data-file-mention], [data-context-mention]') || imageAttachmentsRef.current.length) return false;
+      if (!activeSessionId || bridge.conversation.sessionKey !== activeSessionId) return false;
+      const entries = bridge.conversation.items.flatMap((item) => (
+        item.type === 'narration' && item.role === 'user' && item.text.trim() ? [item.text] : []
+      ));
+      if (!entries.length) return false;
+      history = { entries, index: entries.length, html: editor.innerHTML };
+    } else {
+      // Within recalled text, keep normal multiline cursor movement until its boundary.
+      const range = selection.getRangeAt(0);
+      const remaining = document.createRange();
+      remaining.selectNodeContents(editor);
+      remaining.setEnd(range.startContainer, range.startOffset);
+      const before = richPromptText(remaining.cloneContents());
+      remaining.selectNodeContents(editor);
+      remaining.setStart(range.endContainer, range.endOffset);
+      if (before.length && richPromptText(remaining.cloneContents()).length) return false;
+    }
+    event.preventDefault();
+    history.index = Math.max(0, Math.min(history.entries.length,
+      history.index + (event.key === 'ArrowUp' ? -1 : 1)));
+    editor.textContent = history.entries[history.index] ?? '';
+    const caret = document.createRange();
+    caret.selectNodeContents(editor);
+    caret.collapse(false);
+    applyEditorSelection(caret);
+    savedEditorSelection.current = caret.cloneRange();
+    syncPromptState();
+    if (history.index < history.entries.length) promptHistory.current = { ...history, html: editor.innerHTML };
+    // Recall is literal text, even when the historical message starts with / or @.
+    slashDismissed.current = true;
+    mentionDismissed.current = true;
+    setSlashQuery(null);
+    setFilePicker(null);
+    activeSlashRange.current = null;
+    activeSlashQuery.current = null;
+    activeMentionRange.current = null;
+    return true;
+  };
+
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (promptSuggestion && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
@@ -3258,6 +3317,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       if (event.defaultPrevented) return;
     }
     if (event.defaultPrevented) return;
+    if (recallPromptHistory(event)) return;
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       void submit();

@@ -924,6 +924,10 @@ impl NativeRemoteMediaSession {
                     if state_changed.is_err() { break; }
                     let state = *connection_state.borrow_and_update();
                     self.set_peer_state(state);
+                    use webrtc::peer_connection::RTCPeerConnectionState as Peer;
+                    if !matches!(state, Peer::Unspecified | Peer::New | Peer::Connecting | Peer::Connected | Peer::Disconnected | Peer::Failed | Peer::Closed) {
+                        return Err(MediaError::new(MediaErrorKind::NativeFailure, "remote media peer entered an unknown state"));
+                    }
                     if state == webrtc::peer_connection::RTCPeerConnectionState::Connected {
                         self.connected_once.store(true, Ordering::Release);
                     }
@@ -1411,6 +1415,7 @@ impl NativeRemoteMediaSession {
                 MediaSessionState::Ended
             }
             webrtc::peer_connection::RTCPeerConnectionState::Closed => MediaSessionState::Failed,
+            _ => MediaSessionState::Failed,
         };
         self.set_state(mapped);
     }

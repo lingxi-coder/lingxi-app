@@ -2590,4 +2590,5 @@
     <string name="slash_placement_messages">メッセージに記録</string>
     <string name="slash_placement_temporary">記録しない</string>
     <string name="slash_placement_conditional">操作によって異なる</string>
+    <string name="provider_account_manage_api_key">APIキーを取得・管理 ↗</string>
 </resources>

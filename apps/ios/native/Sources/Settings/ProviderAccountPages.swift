@@ -148,6 +148,25 @@ private struct ProviderDeviceCodePage: View {
     }
 }
 
+// Official credential pages; custom providers have no inferred destination.
+private func providerCredentialManagementURL(_ providerID: String) -> URL? {
+    let address: String
+    switch providerID {
+    case "anthropic": address = "https://console.anthropic.com/settings/keys"
+    case "openai": address = "https://platform.openai.com/api-keys"
+    case "deepseek": address = "https://platform.deepseek.com/api_keys"
+    case "kimi": address = "https://platform.kimi.com/console/api-keys"
+    case "kimi-code": address = "https://www.kimi.com/code/console"
+    case "gemini": address = "https://aistudio.google.com/app/apikey"
+    case "openrouter": address = "https://openrouter.ai/settings/keys"
+    case "zai": address = "https://z.ai/manage-apikey/apikey-list"
+    case "glm-coding": address = "https://bigmodel.cn/usercenter/proj-mgmt/apikeys"
+    case "github-copilot": address = "https://github.com/settings/tokens"
+    default: return nil
+    }
+    return URL(string: address)
+}
+
 private struct ProviderAccountAddPage: View {
     @Environment(\.dismiss) private var dismiss
     let providerId: String
@@ -183,6 +202,10 @@ private struct ProviderAccountAddPage: View {
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .accessibilityIdentifier("provider.account.api-key")
                         .disabled(createdAccountID != nil)
+                    if let url = providerCredentialManagementURL(selectedBinding.isEmpty ? executionBindingId : selectedBinding) {
+                        Link("Get or manage API key ↗", destination: url)
+                            .accessibilityIdentifier("provider.account.manage-api-key")
+                    }
                 }
             } footer: {
                 if usesOAuth { Text("Choose the upstream account in the browser before approving your device code.") }
@@ -325,6 +348,9 @@ private struct ProviderAccountDetailPage: View {
                     } else {
                         SecureField("Replacement API key", text: $secret)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        if let url = providerCredentialManagementURL(account.executionBindingId) {
+                            Link("Get or manage API key ↗", destination: url)
+                        }
                         Button("Replace API key") {
                             Task {
                                 if await repository.perform(.init(action: "set_credential", accountId: accountId), credential: secret) { secret = "" }

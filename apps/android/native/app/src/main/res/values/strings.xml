@@ -2590,4 +2590,5 @@
     <string name="slash_placement_messages">加入消息</string>
     <string name="slash_placement_temporary">不加入消息</string>
     <string name="slash_placement_conditional">视具体操作</string>
+    <string name="provider_account_manage_api_key">获取或管理 API Key ↗</string>
 </resources>

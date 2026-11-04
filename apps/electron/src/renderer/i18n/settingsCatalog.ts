@@ -484,7 +484,7 @@ export const settingsCatalog: Record<string, Record<string, string>> = {
     "ko": "%1$s 자격 증명은 현재 CLI/TUI에서만 구성할 수 있습니다."
   },
   "desktop_settings_aab39b9ba5": {
-    "zh-Hans": "获取或管理 API Key&nbsp;↗",
+    "zh-Hans": "获取或管理 API Key ↗",
     "zh-Hant": "取得或管理 API Key ↗",
     "en": "Get or manage API key ↗",
     "ja": "APIキーを取得・管理 ↗",

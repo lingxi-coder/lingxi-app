@@ -37,6 +37,21 @@ import org.json.JSONObject
 import java.text.DateFormat
 import java.util.Date
 
+/** Official credential pages; custom providers intentionally have no inferred destination. */
+private fun providerCredentialManagementUrl(providerId: String): String? = when (providerId) {
+    "anthropic" -> "https://console.anthropic.com/settings/keys"
+    "openai" -> "https://platform.openai.com/api-keys"
+    "deepseek" -> "https://platform.deepseek.com/api_keys"
+    "kimi" -> "https://platform.kimi.com/console/api-keys"
+    "kimi-code" -> "https://www.kimi.com/code/console"
+    "gemini" -> "https://aistudio.google.com/app/apikey"
+    "openrouter" -> "https://openrouter.ai/settings/keys"
+    "zai" -> "https://z.ai/manage-apikey/apikey-list"
+    "glm-coding" -> "https://bigmodel.cn/usercenter/proj-mgmt/apikeys"
+    "github-copilot" -> "https://github.com/settings/tokens"
+    else -> null
+}
+
 /** Stable user order is rendered directly; the Host owns temporary health and request scheduling. */
 @Composable
 internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAccountsRepository, onChanged: () -> Unit, canAddAccounts: Boolean = true) {
@@ -260,6 +275,12 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                     if (!oauth) OutlinedTextField(value = key, onValueChange = { key = it }, enabled = !busy, singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         label = { Text(stringResource(R.string.settings_provider_api_key)) })
+                    if (!oauth) providerCredentialManagementUrl(bindingId)?.let { url ->
+                        TextButton(onClick = {
+                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)) }
+                                .onFailure { message = context.getString(R.string.provider_account_device_browser_failed); messageIsError = true }
+                        }) { Text(stringResource(R.string.provider_account_manage_api_key)) }
+                    }
                     edit?.let { account ->
                         TextButton(enabled = !busy, onClick = {
                             execute("clear_credential", JSONObject().put("accountId", account.accountId)) { edit = null; key = "" }

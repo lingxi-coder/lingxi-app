@@ -2,6 +2,40 @@
   "sourceLanguage": "zh-Hans",
   "version": "1.0",
   "strings": {
+    "Get or manage API key ↗": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "获取或管理 API Key ↗"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取得或管理 API Key ↗"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Get or manage API key ↗"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "APIキーを取得・管理 ↗"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API 키 발급 또는 관리 ↗"
+          }
+        }
+      }
+    },
     "slash_result_temporary": {
       "localizations": {
         "zh-Hans": {

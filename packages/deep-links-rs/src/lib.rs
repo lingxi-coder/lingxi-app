@@ -34,6 +34,7 @@ fn valid_route(route: &str) -> bool {
             ]
             | ["import", "mcp" | "plugin" | "skill" | "provider"]
             | ["remote", _, _]
+            | ["team", "join" | "inbox"]
     )
 }
 pub fn parse(raw: &str) -> Result<Target, &'static str> {
@@ -90,7 +91,7 @@ pub fn parse(raw: &str) -> Result<Target, &'static str> {
     }
     let mut params = BTreeMap::new();
     for (key, value) in u.query_pairs() {
-        if !["workspace", "message", "mode", "scope"].contains(&key.as_ref())
+        if !["workspace", "message", "mode", "scope", "code"].contains(&key.as_ref())
             || value.is_empty()
             || value.len() > 512
             || value.chars().any(char::is_control)
@@ -106,6 +107,25 @@ pub fn parse(raw: &str) -> Result<Target, &'static str> {
         .is_some_and(|m| m != "chat" && m != "code")
     {
         return Err("Invalid mode");
+    }
+    if route.starts_with("session/") && !params.contains_key("mode") {
+        return Err("Session mode is required");
+    }
+    if route == "team/inbox" && !params.is_empty() {
+        return Err("Unexpected team inbox parameter");
+    }
+    if route == "team/join" {
+        let valid_code = params.get("code").is_some_and(|code| {
+            code.len() == 32
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        });
+        if params.len() != 1 || !valid_code {
+            return Err("Invalid team invitation");
+        }
+    } else if params.contains_key("code") {
+        return Err("Invalid team invitation");
     }
     if let Some(id) = params.get_mut("message") {
         if !route.starts_with("session/")
@@ -248,7 +268,7 @@ mod tests {
     #[test]
     fn roundtrip() {
         for raw in [
-            "lingxi://session/abc?workspace=project.a",
+            "lingxi://session/abc?workspace=project.a&mode=code",
             "https://lingxios.net/open/settings/general",
         ] {
             let target = parse(raw).unwrap();
@@ -263,6 +283,9 @@ mod tests {
         for item in corpus["valid"].as_array().unwrap() {
             let parsed = parse(item["url"].as_str().unwrap()).unwrap();
             assert_eq!(parsed.route, item["route"].as_str().unwrap());
+            for scheme in [false, true] {
+                assert_eq!(parse(&build(&parsed, scheme).unwrap()).unwrap(), parsed);
+            }
             if let Some(params) = item.get("params") {
                 assert_eq!(serde_json::to_value(&parsed.params).unwrap(), *params);
             }
@@ -272,10 +295,32 @@ mod tests {
         }
     }
     #[test]
+    fn team_invitation_requires_only_a_valid_code() {
+        let code = "aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-";
+        for scheme in ["lingxi://", "https://lingxios.net/open/"] {
+            let raw = format!("{scheme}team/join?code={code}");
+            let parsed = parse(&raw).unwrap();
+            assert_eq!(parsed.route, "team/join");
+            assert_eq!(parsed.params["code"], code);
+        }
+        for raw in [
+            "lingxi://team/join".to_owned(),
+            "lingxi://team/join?code=short".to_owned(),
+            format!("lingxi://team/join?code={code}&workspace=secret"),
+            format!("lingxi://team/join?code={code}&code={code}"),
+            format!("lingxi://team/join?code={code}#payload=%7B%7D"),
+            format!("lingxi://new?code={code}"),
+            format!("lingxi://team/join?code={}!", &code[..31]),
+        ] {
+            assert!(parse(&raw).is_err(), "{raw}");
+        }
+    }
+    #[test]
     fn message_uuid_is_canonical_without_folding_other_identities() {
         let target = Target {
             route: "session/CasePreserved".into(),
             params: BTreeMap::from([
+                ("mode".into(), "code".into()),
                 ("workspace".into(), "project.CasePreserved".into()),
                 (
                     "message".into(),

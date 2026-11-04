@@ -1,587 +1,80 @@
-# Chat / Code 上下文与跨端集成交接
+# Chat / Code 会话空间：当前交接
 
-## 2026-11-02 独立复审后收口（优先于下方 d4a6 检查点）
+状态记录：2026-11-03（America/Los_Angeles）。本页描述正在进行的集成及其验收边界，**不是最终通过声明**。产品契约详见[设计文档](../architecture/conversation-spaces-context-design.md)，独立审查和未关闭问题见[审查记录](2026-11-02-conversation-spaces-review.md)。当前范围内的源码 checkpoint 和模拟器重跑已完成；设备结果完成后须再次更新。
 
-iOS native 源码已按清单提交 `ca3113890`，仅 EOF 空行修正为 `cff83c61b`，没有提交 Generated 或证据目录。独立复审冻结的 342 项 Sources/Tests/project 输入聚合 SHA-256 为 `7e57b509cf6d7b525494c5562d195ad7d802258e6e804bf62715ac082d32df06`。真实 actor/存储/SessionHost 宿主套件 206/206；Full 产品、unit 与 UI 源码类型检查通过的检查点，以及最后测试夹具/EOF 差异均在 iOS evidence 中分别记录。它们仍不代表 simulator ABI/link/runtime 已验收。
+## 工作区和当前来源
 
-独立复审继续修复：Android admission/Stop 的精确未提交恢复、Side/Remote 完整失败稿和 ABA、当前空间 Global New Chat、抽屉 exact path；Desktop pending open 的固定 mode 校验、metadata token 显式释放、已接纳写跨 timeout/disconnect/quit 的 drain。CLI 非 fork 恢复需从目标 workspace 加载项目配置，后台 add-dir/config home 按调用来源固定，TUI deferred replay 不能在审批界面启动前等待。上述晚修尚待最终整合验证。
-
-SDK 通用 deferred replay 的来源检查修复已提交为 `bc68dcfa5ebcd78ab23f877a433ca83c81bb4663`（parent d4a6），仅四文件，工作树干净、未推送。每次派发前检查当前 writer 的 authority；新门禁为 deferred 6/6、private Chat 1/1、compaction 1/1。runtime cold replay 1/1 使用本次冻结源码编译、Mach-O/签名与 binary/dep-info/source hashes 验证的二进制直跑；其 Cargo 链接命令曾被 2 GiB 保护中断，不能算 Cargo 命令通过。**d4a6 及其双端主机绑定是中间检查点，App 正重新固定 bc68dcfa、生成并验证协议和绑定，三端真实验证仍须完成。** SDK 未修改 C ABI、协议/FFI schema 或存储格式；不得仅据此跳过 source identity 和实际生成验证。
-
-## 2026-11-02 d4a6 SDK 与原生绑定检查点（历史）
-
-Harness 最终提交为 `d4a6af84d0523102590622472e4d4a1149ba933d`，工作区干净；App 的 47 个 manifest pin 与 locked resolver 的 84 个 SDK crate 均对齐该提交。LLM 固定为 `0c2f041e856265e093e404d9b202c4238f73ef3c`。最终 source identity 校验、官方 TS 生成与 `--check` 均通过，协议为 32。此前 9c8f/186ecf40 均仅为历史基线。
-
-SDK 最终 session 为 487 unit + 177 integration，共 664 项通过；client adapter 416、rooted-fs 36、WriteTool 34 项通过。runtime 受影响定向 7 项通过，复用的可执行文件与最终 production 源码一致，仅两处 `cfg(test)` fixture 有差异，不能描述成最终 diff 的全新 runtime 重编译。原始证据分布在 `sdk/successor-577f1050/`、`sdk/successor-d5641ff1/` 与 `sdk/successor-c623e277/`。修复包含空锚点 metadata、发布后不确定状态的持久 writer fence、FileHistory 原路径/parent authority、captured rewind 与 fork 目标首次 mount 收据。
-
-最终 d4a6 iOS host staticlib 与真实 Swift metadata 生成均退出 0；7 个 Swift/header/modulemap 文件已推广到 `apps/ios/native/Generated`，输入指纹前后一致。这不等于 simulator 目标架构库、Full 链接或 XCTest 已完成。Android host metadata、实际 Direct JNI/Gradle/设备与 iOS Full 仍在闭环。
-
-Desktop 最新完整 default suite 为 3880 pass / 4 fail / 16 skip。提交 `c8c8a3b8e` 修复其中两个 fixture 合同问题，相关文件 29/29 通过；另外两项依赖真实 Bridge binary 与 Rust producer Cron fixture，仍待最终产物。该完整运行使用 provisional pin，不能充当最终原生联调结果。
-
-移动端当前仍有授权范围内未提交实现：Android admission/恢复与异步导航；iOS async send、durable recovery、草稿 revision、原 owner 音频、guarded Project/Cron 存储及 exact selected transcript path。隔离 JVM、宿主 Swift、parse 与类型检查分别记录，不互相替代。独立审查与真实单 flavor 验证继续进行，未推送，未合入 main。
-
-## 2026-11-02 先前合并后续作（历史检查点）
-
-当前 App 包含 main 合并 `0b2c85ceac1568fe76c084eaecaaf64a8dc74766`、Desktop 调度与导航修复 `484104889`、精确目录来源 `c4adeaa69`，以及 metadata writer/连接归属修复 `767993fca`。Harness 当前 SDK pin 为 `9c8f4f6c4c6cffd2d14056225ebd80d2210b0efe`，LLM 为 `0c2f041e856265e093e404d9b202c4238f73ef3c`；App 已更新 pin 与 lockfile。**独立复审发现 rename 空锚点丢失、retry/compaction 发布后错误被吞的缺口，SDK 正在集中修复，9c8f 现仅为 provisional pin。App 仍有授权范围内三端与协议修复待验证提交。未推送。**
-
-新 SDK 冻结源码 session lib 464/464、integration 177/177、fresh Desktop runtime authority/fork 1/1 通过。BridgeClient 全套 360 pass / 5 Firebase emulator skip；最后追加 socket owner guard 后真实 WS 10/10、build/typecheck 通过。metadata subprocess observer 9/9 为注入进程测试，不能代替 Rust writer/lease 验证。最终两端绑定、目标架构库、Desktop Host/UI 和原生设备验证尚在推进。
-
-独立审查进一步确认并正在修复的合同：
-
-- 移动冷恢复必须同时提供 UUID、固定 mode 和持久化的 exact transcript path；路径保留 SDK 给出的 guest/host 坐标，客户端不推导。SDK 负责可信映射、目录组件 no-follow 及 writer authority 校验；缺路径不能退回 UUID 搜索。
-- selected-session 调度持久化 ID/path/mode/opaque scope key；new/task-session 显式保存 session mode/scope key。claim、首次绑定及结果必须使用同一执行快照，不能从后来编辑的 task 或 cwd 重建逻辑归属。
-- 原始 `Automation.runs` 会被截断或随任务删除，不能充当永久 owner 证据。SDK 正加入独立持久 reservation ledger，以及 before-model owner-confirmation；分配 owner 不等于已执行。ledger 与 task 是分步持久化，不能宣称两个文件同一原子事务。
-- App 在短 admission gate 内确认并持久化 owner，确认后立即放开新会话，模型长 turn 不持全局 gate。取消需等待该次 admission 的 native 终结屏障，之后严格重扫 ledger 或冻结新 claims；既有 owner/turn 不停止。
-- Desktop/移动的冷、热恢复都必须把首次捕获的文件 authority 贯穿到 writer bootstrap/activation。独立 fork 捕获新 target authority；合法 compaction/relocation 在事务中迁移 authority。
-
-Desktop 这次提交保留跨空间编辑时的可信任务模式，调度历史打开在 Host queue、runtime activation、renderer generation 和页面回调各自校验归属。新建的全部调度会话在首次绑定前持久化空锚点。175 项调度相关回归和前后端类型检查通过；精确目录 remount 与 metadata 相关 145 项定向和 Node types 通过。完整 provisional Desktop 为 3841 pass / 3 fail / 16 skip，其中 Bot test double 已另行修复并整文件 24/24 通过，剩余需最终 Bridge binary 与实际 Rust producer Cron fixture。最终 pin 后还要重新验证真实集成。
-
-验收范围不变：Desktop default、Android Direct、iOS Full，各一个 flavor。最新证据见 `acceptance/conversation-spaces-20261101/validation-index.md`。此前 Desktop 3576/12 skip 与 Web 286/3 skip 是对应源快照的通过结果；新的 Cron DTO 和来源合同改变后仍需重跑受影响检查。iOS host 与 Android 隔离 JVM 有增量通过记录，但不等于真实 FFI/原生设备验收。
-
-旧 pin 的 iOS host staticlib 构建已在尚未到达 FFI crate 时安全停止，没有生成新库或绑定；退出 `-2` 是 superseded-source 中断，不能算通过。SDK `desktop,mobile` lib-test 编译曾通过，但其后又有 source/ledger 修复，因此仍需最终正确 feature 组合的测试。绑定必须等最终 SDK 提交、App locked resolver 后重新生成。当前 TS 生成仅 provisional，用于并行排查源类型，最终必须走 resolver 的官方 `--check`。
-
-## 2026-11-02 main 同步状态（优先于下方历史快照）
-
-按用户要求，先将各仓库的 `origin/main` 合入任务分支，保留主线账户、MCP、界面及其他修复。App 合并前的功能检查点为 `d3a32a21d`；不覆盖常规 checkout，不推送或合入 main。
-
-- llm-client 合并提交：`0c2f041e856265e093e404d9b202c4238f73ef3c`。
-- Harness 合并提交：`aad53cf713ba091c0c430d459bc92c792d5d70c4`，协议仍为 32。
-- App 三端文本冲突已解决；最终 Cargo 离线锁定依赖解析通过，84 个 SDK 包统一为上述 Harness SHA，5 个 llm 包统一为上述 llm-client SHA；TS 生成结果与暂存文件一致。App 合并提交包含本段状态。
-- 合并中修复了账户准入与 realtime handoff 的交互：分别保留捕获的 session profile、Host 选择的逻辑 audio profile、实际账户 profile/scope；不覆盖 session/mode/epoch/history。
-
-下方所有旧 pin 的测试数字均为**合并前基线**，不能作为新合并提交的验收结果。合并后的轻量检查已覆盖 Desktop 429 项通过/1 项跳过、iOS 81 项宿主测试、Web 149 项；完整编译、重生成两端 FFI、Bridge durable scheduled anchor 修复及行为回归、Android Direct 原生设备和 iOS Full 模拟器验证、最终 review 尚待完成。每个平台仅验证一个 flavor。
-
-交接日期：2026-11-01（America/Los_Angeles）。
-
-**当前结论：协议 32 的本地不可变依赖与主机绑定已经固定，最终 Rust、目标架构及设备验证尚未闭环，不能标记为已交付。**
-
-续作已将 Harness 本地提交固定为 `4676b43f7b3aee5b70a7ff2bac684f01643fca60`，并将 Harness 与 App 的 llm-client 固定为 `772612ca8124c87774eeedbfd8df5fe0258779a9`；两个提交均未推送。App 的 locked/offline resolver 与 all-features metadata 校验通过，确认没有混用这些依赖身份。TS 协议按该 SDK 生成，bridge-client 完整测试为 350 通过、5 跳过；Swift 和 Kotlin 已从同 pin 的真实主机 FFI 元数据生成，输出 SHA 和先前绑定备份均已记录。iOS Full 最终源码 typecheck 已重新通过，Android Direct 最终 JVM 测试为 1451 通过；主机绑定不代表 simulator 静态库或 Android ABI 库已验证。当前验收范围为 Android Direct、iOS Full 和 Desktop default。
-
-磁盘压力导致首次 App 四根 crate 检查被安全中断；经确认没有活动使用者，仅任务专用 Rust target 的可再生缓存已清理，源码、生成绑定和证据保留。重跑后四根 crate 的 lib/test 检查及 CLI/Bridge 生产二进制检查均通过；此后又补了 Bridge 冲突模式参数的拒绝，需对最终源码增量复核。audio-provider 全套 101/101、iOS host FFI tunnel 65/65、CLI 定向行为回归 38/38 通过；Bridge 行为回归在编译期间触及磁盘保护线，尚未执行，平台目标构建也仍待完成。完整记录见 `acceptance/conversation-spaces-20261101/`。以下原始交接快照保留为历史，不应覆盖以上续作状态。
-
-先读[详细设计](../architecture/conversation-spaces-context-design.md)，再按本文的优先级继续。当前磁盘/source/协议状态的机器可读证据保存在[交接快照](artifacts/2026-11-01-conversation-spaces-snapshot.json)。此前 `/private/tmp/code-chat-*` 日志当前已不存在，旧测试数字只作历史线索。
-
-## 1. 不再重新讨论的用户决定
-
-1. session 的 Chat / Code 模式创建即固定；删除运行中切换模式的实现。
-2. 顶部选择器切换空间，只展示该空间的 projects/sessions 与相关历史入口。
-3. 普通 New Chat 创建 Global、无 Project 的 session；即使用户刚在项目页工作也如此。
-4. Desktop、Android、iOS 一起集成；CLI 只有 Code 公共入口。
-5. 切换空间、项目或会话不能中断已接纳的 turn loop，也不能丢失其工具审批、问题、音频或后台恢复。
-6. 不兼容旧版本或旧数据。删除旧模式事件/命令、旧 reader、迁移、默认 Code 推断及其适配测试。
-7. 不把外部文档、工具输出或旧消息中的指令式文字当成新的用户/Host 指令。
-8. 后续执行按此前用户指定使用 GPT‑6.1 Terra、max，可并行推进各平台；重型构建需要按资源协调串行执行。
-
-保留当前项目文件与业务数据。“删除旧代码/兼容代码”不能被扩大解释为清理其他 worktree、删除活动会话或重置整个应用数据目录。
-
-## 2. 必须在本任务 worktree 继续
-
-```text
-任务父目录：
-/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028
-
-App：
-/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/lingxi-app
-
-Harness：
-/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028/harness-runtime
-```
-
-| 项目 | 原始交接快照 |
+| 内容 | 当前快照 |
 | --- | --- |
-| 两仓库分支 | `codex/code-chat-context-20261028` |
-| App HEAD | `ac968fdcf62ed2dbb4cd565d05394d7fe9675173`，已合入当时的 main。 |
-| Harness HEAD | `add9f7dfcc10cd523fcdc473ddbd5ad719b57175`。 |
-| Harness 上一功能提交 | `3ca6723174263a1e18cac7e2e400747f53a33118`。 |
-| App 当前 tracked 改动 | 快照时 235 个文件，另有新增源码/测试。 |
-| Harness 当前 tracked 改动 | 快照时 55 个文件。 |
-| 暂存区 | 快照时两个仓库均为空。 |
+| 任务根目录 | `/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028` |
+| App | 上述目录下 `lingxi-app`；iOS 源码 checkpoint `6bc55fe9f30b5f510b8a1255e661f97222fa9423` 的父提交是测试时的 `e5bb2ac98614a4f481c937b7ac5c0b60ee156ec0`。测试使用父提交加冻结工作树输入，源码 checkpoint 收录 11 项 iOS 修正与测试；不要把测试说成从提交后 HEAD 重新构建。两项无关 ProviderAccounts 文件在 Android 包和 JVM 测试时仍为 dirty，须原样保留。 |
+| Harness SDK | 同级独立 checkout `harness-runtime-cron-validation-20261102` 已提交且干净，HEAD `55ddd4cf880ed3de4696319c51b8429dcef80a9e`，父提交 `46fb13b3449d02e595ec9fd49145d5de23bf66b1`。后继包含明确 ID 的 Stop/准入修复；[协议交接](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/protocol-55ddd-handoff-20261103.md)记录源码、测试与来源边界。原 `harness-runtime` HEAD `f286ff5cd05c720b82451a66dc01e88bca213ade` 的五处未提交改动须保留，不与独立 checkout 混用。 |
+| Mobile Linux runtime | 独立 `mobile-linux-runtime` checkout 的产品来源为 `43382a20161e371a0a31526412164b3d35545ab5`；57 项源码清单 `build/rootfs-mode-workspaces-20261102/source-commit.json` 的 SHA-256 为 `c3b1bc8b3d77182cf724cd5bf425c6caaa2c4d63b4492e355e7891ff4f1fda30`。SDK 和 App 的锁定解析均指向该 SHA；独立测试提交 `25cf8a` 只修正两处 iOS 测试 fixture，生产树相同，见下方回归。Android 隔离包已包含核验过的双架构 rootfs，设备执行仍待验证。 |
+| llm-client | 上述目录下 `llm-client`，当前提交 `0c2f041e856265e093e404d9b202c4238f73ef3c`。 |
+| 证据 | App 内 [acceptance 验证索引](../../acceptance/conversation-spaces-20261101/validation-index.md)及同目录各平台记录；任务构建产物在同级 `build/`。这些 acceptance 与 build 材料保留在本地工作区，未纳入上述源码 checkpoint；链接用于当前工作树交接，源码提交本身不携带这些证据。 |
 
-**这些是交接时的 HEAD，不包含其后的最终实现。** 不能丢掉 dirty tree 后只凭上述 SHA 恢复任务。快照记录了去除 docs 后的改动源码聚合指纹，以及关键源码和当时绑定的 SHA‑256。
+App 的 47 处 Harness 引用锁定 `55ddd4cf880ed3de4696319c51b8429dcef80a9e`，4 处 Mobile Linux 引用锁定 `43382a`；`Cargo.lock` SHA-256 为 `4128060603475df74961172454291f2bc2d0b939a9f9995893ff2e436c89378e`。`--locked --offline --all-features` metadata 在 App 父提交上使用随后原样提交的 pin 文件通过；[来源核验](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/app-55ddd-locked-source-proof-20261103.json)记录 84 个 Harness、5 个 Mobile Linux 和 5 个 llm-client 包的精确提交。协议仍为 32；新 JNI、Bridge 和隔离包有下方各自的产物证据，不能把解析通过当成设备或全部平台验收。原始[历史快照](artifacts/2026-11-01-conversation-spaces-snapshot.json)只保存旧时点数据，已标注 superseded，不能作为当前 pin 或待办。
 
-常规产品 checkout `/Users/luolingfeng/lingxi/lingxi-app` 与 `/Users/luolingfeng/lingxi/harness-runtime` 不属于此次清理或覆盖对象。Harness 常规 checkout 的既有 `deps/`、`target-scratch-rootedfs/` 也不属于本任务缓存。
+这是一组共享的 dirty worktree。继续之前先查看各仓库 HEAD、暂存区、未提交改动及活动构建，不能重置或覆盖他人的改动。常规 checkout、现有用户项目和业务数据均不在清理范围；`apps/electron/node_modules` 链接、Generated、target、构建产物和 acceptance 日志不因交接自动提交。大型 Cargo、Gradle、Xcode 任务需协调资源，停止线和实际磁盘余量重新核实；清理只限经路径、来源和使用状态确认的本任务可重建缓存，先保留日志与指纹。
 
-App `apps/electron/node_modules` 是本任务使用的未跟踪链接，不得提交。Swift/Kotlin Generated 目录是构建产物，应从最终 pin 重新生成，不能把旧产物手改成新协议。
+此前发现的品牌隐藏根目录改动已获用户明确授权纳入：最终合同为 Global Chat `~/.品牌/chat`、Global Code `~/.品牌/code`，配置保留 `~/.品牌`；项目显式目录不变，项目和 scheduled 的管理根仍在品牌容器内，CLI 公共默认 Code。SDK `55ddd4cf` 和 App 已锁定新目录来源；各平台仅以其实际产物及测试结果为准。不把混合工作树结果当作 immutable pin 的证据，也不称原 SDK 工作树干净。
 
-## 3. 原始交接时的集成断点
+## 不变的产品与身份契约
 
-| 项目 | 交接时实测源码/文件状态 | 含义 |
+- Chat / Code 是独立导航空间，session mode 创建时固定；空间切换不是切换模型、权限或修改现有 session。普通 New Chat 使用当前空间的 mode，创建无 Project 的 Global 会话；只有显式项目内创建才绑定 Project。
+- 空间、项目和历史入口按 mode 过滤，再做数量限制。切换页面只改变当前展示；已经准入的 turn、工具、审批、问题、source、草稿和音频继续属于原 owner。
+- owner 至少由宿主命名空间、UUID、logical scope、fixed mode 与 source/engine incarnation 确定；turn、音频、导航操作还要携带各自的 token 或 generation。后台回调、迟到选择和通知不能改投当前屏幕的 owner；重复 claim 必须复用原 owner 或明确拒绝。
+- logical scope 与运行 cwd 独立。`/cd` 不改变 Global/Project 或 mode；选择历史、恢复、handoff 和冷启动必须延续选中行捕获的精确 transcript path 和 authority，不能凭当前 cwd 或相同 UUID 的其他副本重新猜测。
+- 当前格式只接受有效的 fixed-session-mode header 和当前 schema；未知/冲突 mode、损坏文件或缺失身份须拒绝，不默认 Code、不把坏目录当空状态覆盖。删除旧 API/reader/迁移并不授权删除用户数据。App 中的旧命令文本只用于拒绝旧命令的负向测试。
+- 跨空间继续是从原已提交 cutoff 产生带来源链接、可编辑的 Global 摘要草稿，目标发送后才运行。独立 fork 使用已捕获的不可变来源快照与新 instruction epoch；之后原会话继续写入不会使已发布的分支失效。认证后台 handoff 保持原 owner/epoch，不混同于 fork。
+- CLI 公共入口只提供 Code；私有已认证后台恢复可继续原捕获身份。配置、权限和后台派生按目标及捕获来源确定，不能由后来切换的 UI 推断。
+
+## 持久化、准入与回执
+
+- Desktop 的空间状态位于 `userData/conversation-spaces.v2.json`；Global 默认 workspace 按 mode 分别为 `~/.lingxi/chat` 与 `~/.lingxi/code`，配置仍在 `~/.lingxi`。Desktop 显式 `LINGXI_CONFIG_DIR` 可覆盖品牌配置容器，两个 workspace 应随容器解析；移动端 `~` 指 Linux 用户主目录，项目位于品牌容器的 `projects` 子目录。目录合同已进入 SDK checkpoint 和 App；新来源 Android 包已构建，各设备执行仍待验证。Android 使用 `filesDir/scope-state.json` version 2；iOS 的 `ProjectScopedPreferences` 按空间/scope/UUID 保存导航和草稿，项目及 Global 会话索引分别使用 `session-spaces.json` 和 `global-session-spaces.json`。Project 索引是否有效取决于完整 schema 与必要字段，不能仅凭 version 1 判为旧数据。
+- Mobile Linux 新 rootfs manifest 必须含与运行 profile 精确一致的 `brand_profile`；缺失或不匹配时拒绝安装/启动。旧 release manifest 只能作为显式转换生成新产物的输入，不能在运行时默认为 LingXi。相应源码及派生物已有分层测试，Android 隔离包中双架构 rootfs 已核对；设备行为仍待验证。
+- 当前 transcript 先写严格的固定 mode/UUID/epoch 首行；消息保持原有文本保真。冷恢复先捕获并验证 root/leaf、mode 和文件身份，再取得对应 writer/UUID claim。可观测替换必须拒绝或报告结果不确定。合作 SDK writer 受 lease 与各 scope 事务保护；不声称跨所有 scope 的原子 claim、跨文件 WAL 或抵御绕过锁的同用户进程在最后检查后替换命名空间。
+- Desktop metadata 对话框和归档预检携带选中来源的 opaque receipt；热来源走原连接 writer，冷来源走持 lease 的私有进程。写入已接纳后，timeout、断线或窗口关闭不证明完成；应保留原 runtime/lease，等待权威 drain 或原进程退出，不重投到新来源。
+- 移动端恢复账本按 session/turn 精确拥有。同步检查在消费 composer 前执行，异步准备与 Stop 必须在 native 提交边界作出同一准入决定；确定未准入时将草稿、附件与上下文 chip 恢复或保存在原 owner，并用 revision 防止 ABA 覆盖。ledger/witness 缺失、损坏、不匹配或写入结果不确定时保持 fenced；仅凭本进程已同步的精确回执进行允许的重试，不以文件形状猜测修复。
+- Cron 新目标先预留 UUID/owner，再发布持久空锚点及 reservation，App 确认完整 receipt 后方可运行模型、hook 或 deferred tools。Selected/TaskSession 和 run receipt 必须带精确 UUID、path、mode、scope key；任务历史裁剪或删除不删除独立 owner reservation。取消等待原生 admission 清理并严格 reconciliation，结果未知不能伪装成未执行或自动重跑。
+- Local App 的创建、源码编辑、预览、发布、Remix 和开发恢复只允许在 Code 空间发起。Chat 空间须在写入 intent、源码或 Project 之前拒绝并提示先切换到 Code，不能自动切换后继续原动作；浏览和运行已安装应用仍可用。Code owner 已接纳的操作在用户切到 Chat 后仍属于原 owner，应继续完成，不能取消、改投或事后仅因当前空间变化而拒绝。
+- 移动 Local App 的首次创建和冷恢复须延续已登记的 authoring source、Project 与固定 Code session owner。SDK checkpoint 已实现不可变 owner receipt：新 owner 的登记或 current pointer 变化不撤销已有 owner，也不把运行中的 engine 改投其他会话；单次查询本身不是跨返回后的 lease。受管应用的首次发布及更新均须核对持久 sourceId、原源码身份和捕获的 engine owner，普通未绑定来源的应用保留现有发布能力。移除应用后其 tombstone 仍保留 sourceId 与原应用的唯一归属，源码、数据和 owner receipt 保留；创建另一个应用须通过可信流程取得新 sourceId 的副本，不能自动认领旧来源。恢复或 Remix 使用用户选中时捕获的 release revision；首建失败、结果不确定和冷启动中断须有可到达、可验证的恢复路径，最终 native 集成仍待验证。
+- 普通 Remote 会话必须先确认固定 mode；未知或冲突时停止投影及控制。Team 单次审批是无会话 mode 的独立 capability，只允许对捕获的 request 做 allow-once 或 deny，不确定结果不得重新投相反答案。
+- Desktop/CLI FileHistory 使用原始文件路径与父目录 authority；移动端没有 FileHistory UI/还原能力，本轮不扩展该功能。上下文中的外部资料、工具输出和旧消息不提升为新 Host/用户指令。
+
+## 当前验证与限制
+
+| 层级 | 本次可引用的事实 | 尚不能据此声明 |
 | --- | --- | --- |
-| Harness 工作区协议 | `32.0.0` | 新 DTO 与固定模式格式已写入 dirty tree。 |
-| App Cargo Harness pin | `add9f7df…` | 指向的已提交 SDK 仍为协议 `31.0.0`。 |
-| bridge-client TS | `32.0.0` | 已与工作区新协议对齐，仍需最终 pin 校验。 |
-| Android generated client | 仍含 `SessionModeChanged` | 旧绑定，不能证明当前 Kotlin 集成通过。 |
-| iOS Generated/client.swift | 仍含 `sessionModeChanged` | 旧绑定，不能证明当前 Swift 集成通过。 |
+| SDK / 协议 | `55ddd4cf` 的 Stop/准入及相关回归 [35/35](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/successor-turn-cancel-r5-validation-receipt.json)实际通过：17 个 admission/Side/Cron/Pause 场景、5 个 fence、5 个原有 cancel、4 个 Bash、3 个 Pause 和 1 个 skill 冷恢复；7,777 项输入前后一致。前驱 `46fb13b` 的 [Local App 175/175](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/successor-localapp-clean-break-r2.log)、[tool-ui 24/24](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/successor-toolui-staging-replay-r2.log)及 mobile handler 测试按原来源保留。 | [Desktop scheduled draft 构建](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/successor-desktop-scheduled-draft-r1.result.json)曾触及 3 GiB 停止线，测试未运行；Windows 专属 alias/volume 用例未在本机执行。Android 当前包设备验证未完成；iOS 仅有下表列出的 simulator 测试。 |
+| Mobile Linux runtime | 生产源码经单 lane 五包 Cargo 测试 166 pass / 1 ignored；installer 离线 JVM 10/10，见[五包结果](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/successor-mobile-linux-final-five-packages.result.json)及[installer 结果](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/successor-mobile-linux-final-installer-jvm-r2.result.json)。Mobile Linux iOS simulator [NativeRegression 42/42](../../acceptance/conversation-spaces-20261101/ios/git55-native-run/native-regression-25cf-r2.result.json)在产品源码 `43382a` 加仅更改两处测试路径的测试提交 `25cf8a273bcd572b9be48e18fc9807e01dcdfce1` 上通过；[来源](../../../build/ios-native-regression-25cf-20261104/test-source-provenance.json)记录生产树相同。 | [原 `43382a` 测试源首次执行](../../acceptance/conversation-spaces-20261101/ios/git55-native-run/native-regression-43382-r1.result.json)为 42 tests / 7 断言失败，不能写成原样通过；测试源修正后才通过。模拟器 stub 不是物理 iSH 启动或设备验收。 |
+| Desktop default / Web | `55ddd4cf` 的[生产 Bridge 来源](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/successor-app-git55-bridge-production-provenance-r1.json)和[桌面综合回执](../../acceptance/conversation-spaces-20261101/desktop/sdk55-desktop-final-provenance-20261103.json)记录 binary SHA-256 `6786dea2ab6b4caaaf4ffba60b274b0303ee719b88eac4b3e576f379d3205fe7`；Local App、scheduled、durable draft 的私有 Bridge 测试分别 8/8、5/5、3/3，真实 Electron + Bridge 2/2，真实 Rust handler fixture 经 Desktop CoreClient/CoreStore 解码 1/1。前驱路径别名源码测试 108/108 按原来源保留。 | CoreStore 测试使用相关联的 fixture 重放，不是新的 live Rust handler；Electron 输入清单未枚举 Vite 全部运行依赖。正式签名打包、发布、真实 provider 和物理音频仍未由此证明；此前触及磁盘 guard 中止的构建也不能记为通过。 |
+| Android Direct | `55ddd4cf` 真正的 ARM64 JNI 和三个生成绑定已用于隔离 Direct 包；[包核验](../../../build/android-native-validation/successor-jni-git55-20261103-r1/isolated-apk-validation.json)记录 193 suites / 1,653 JVM tests 全通过、0 failure/error/skip，instrumentation 编译完成。app APK SHA-256 `f0280b21bd13e65bbef8ea6dbf7fb2b80c80c3bd319e1af98fad01c03c09bcfb`，test APK `e4fd3b29c1ca8fbd1c639856c30df982cb8bf994c942641818704f7adca92a9f`；两包均无 INTERNET 权限，签名一致。构建时两项无关 ProviderAccounts dirty 源码仍在，见[回执](../../../build/android-native-validation/successor-jni-git55-20261103-r1/postpackage-validation-receipt.json)。 | 手机暂不可用；新包未安装或执行，设备 JNI、UI、音频及真实 provider 均未验证。旧 bc68 [设备分进程](../../acceptance/conversation-spaces-20261101/android/postfinal-direct-device-per-process-bc68-summary.log)为 2 pass / 3 fail，不套用新产物。 |
+| iOS Full | `55ddd4cf` simulator FFI archive 和七个生成绑定已生成；原组装 wrapper 中断，随后以同一不可变输入手动执行 simulator-only 组装步骤，89 项 native 输入核对一致，见[组装回执](../../../build/ios-ffi-git55-20261103-r1/manual-assembly-sim-r1/receipt.json)。包含 Factory 和 mock 恢复修复的 [r4 Full 重建](../../acceptance/conversation-spaces-20261101/ios/git55-native-run/full-build-for-testing-r4.result.json)及[24 类 XCTest 批次](../../acceptance/conversation-spaces-20261101/ios/git55-native-run/app-host-batch-r4.summary.json)通过：535 pass、0 fail、1 预期 Store-only skip。另有 16 个独立 native 用例和 6 个 UI 用例按下方分阶段结果通过。build 基于 App `e5bb2ac` 加冻结工作树输入，[479 项清单](../../acceptance/conversation-spaces-20261101/ios/git55-native-run/full-build-inputs-r4-before.json)的内容聚合 SHA-256 `8640f838e445af43979f73b8610edfee8acdfceae5f2a54ae074e6894ebd680f` 且构建前后一致。 | 手动 simulator slice 不等于完整 wrapper、真机或签名包；运行中导航 UI 使用 mock，不能证明真实 provider。UI01 通过结果记录 1 个 SwiftUI reparenting runtime warning。bc68 首批 XCTest 424 pass / 9 fail / 1 预期 Store-only skip 与单项 [Project → Global UI](../../acceptance/conversation-spaces-20261101/ios/final-global-chat-ui-r7.log)均为旧来源。 |
+| CLI | 本轮静态核对 [Code 初始化和固定 mode 校验](../../apps/cli/host/src/init.rs)、[headless 恢复](../../apps/cli/host/src/headless_host.rs)及 [Code 列表过滤](../../apps/cli/host/src/run/resume.rs)。 | 这不是新的 CLI 编译或运行；旧二进制和测试仍按各自历史来源引用。 |
 
-继续顺序必须是：**修复 SDK 当前失败 → 用当前源码完成必要回归 → 固化 SDK 提交 → App 改为该完整 SHA → resolver/lockfile 校验 → 生成协议与两端 FFI → 原生编译和回归**。
+iOS [最终回执](../../acceptance/conversation-spaces-20261101/ios/git55-native-run/final-receipt.json) SHA-256 为 `c09d2cdc9a1105daf8a5c1615683d67c7a0ff731c1c7445a279b0cd0cd5ddf79`，逐项记录来源、日志和结果。16 个独立新进程 native 用例中，01–06 和 11 取 [r3 序列](../../acceptance/conversation-spaces-20261101/ios/git55-native-run/native-sequence-r3.json)，07–10 和 12–16 取 [r2 序列](../../acceptance/conversation-spaces-20261101/ios/git55-native-run/native-sequence-r2.json)，各自实际通过，不重复计数。6 个 UI 用例分别取 [01 r4](../../acceptance/conversation-spaces-20261101/ios/git55-native-run/ui-01-r4.summary.json)、[04 r3](../../acceptance/conversation-spaces-20261101/ios/git55-native-run/ui-04-r3.summary.json)、[06 r3](../../acceptance/conversation-spaces-20261101/ios/git55-native-run/ui-06-r3.summary.json)及 02/03/05 r2；它们是分阶段来源，并非同一次完整 suite。01 为 mock 流与真实 owner 导航，06 通过实际 Side FFI。
 
-不要通过 Cargo path patch、邻近 checkout 或手改绑定绕过这条链。
+历史 bc68 Android 隔离 app APK SHA-256 `29363f6972fe83b36e1b517227045279f70dce18dd4645f64303cc7f3a3f81c2`，test APK `132843e18dc4936f92334e9ba6393677ea188cd57c667158e881bedb2000fe49`。当时的 657 项构建输入清单见 `android/postfinal-bc68-android-source-before-v4.sha256`；这两包不代表当前来源。iOS 运行日志和命令记录在 acceptance/ios；部分旧 xcresult 与生成文件已按授权清理，其原始测试摘要和清理清单保留在 [iOS 清理证据](../../acceptance/conversation-spaces-20261101/ios/old-test-output-cleanup-20261103/removal-result.json)，不能假定所有原路径仍存在。其他历史数字和资源受限的直接二进制运行只按原记录所属层级引用，不能改写为完整 Cargo/原生测试通过。
 
-交接快照之后，实时音频输入的驱动边界修复产生了新的 llm-client 本地提交；SDK 与 App 已一起固定到该提交，避免同一进程解析出两个 llm-client 类型身份。该提交尚未推送，其他依赖保持原 pin：
+新 Local App 候选还使用 SDK 真实 mobile handler 输出的同一份 fixture（SHA-256 `9cea0f8bbd647586c0ccc4bf999d5d2a0470f8db549b0d256c3e4e0f46bd0277`）：Android [DTO/store JUnit 3/3](../../acceptance/conversation-spaces-20261101/android/native-authoring-fixture-candidate-r2b-junit.log)，iOS [Swift host 6/6](../../acceptance/conversation-spaces-20261101/ios/native-handler-fixture-r2-ios-host-r1.log)；iOS 另有[失败准备和原 ZIP 暂存 host 17/17](../../acceptance/conversation-spaces-20261101/ios/ordinary-preparation-market-zip-host-20261103-r3.log)。这些测试使用平台或 writer stub，不能替代新 JNI、FFI、模拟器或设备结果。
 
-```text
-llm-client    772612ca8124c87774eeedbfd8df5fe0258779a9
-mobile-linux  bfd17e346f7ebbb2bcd5206f3c05f56b83a1858b
-Askama        d47daf8767805c0c4dfb456145fc857bfd9c1d2c
-```
+两份已关闭的历史 bc68 CLI / Bridge 验证二进制已从原路径压缩归档，原路径不再直接可执行；如需复用，先按[归档及恢复元数据](../../acceptance/conversation-spaces-20261101/root-old-host-binary-archive-20261103.json)恢复并核对指纹。压缩文件及各自的 `.restore.json` 位于任务根目录 [retained-bc68-host-binaries-20261103](../../../validation-artifacts/protocol-post-merge-20261102/retained-bc68-host-binaries-20261103/)；临时恢复的字节 SHA 和 codesign 检查均已记录，原有源码、包、日志与 `.d` 文件未随之移除。
 
-## 4. 各层实现进度
+为缓解磁盘不足，364 个经 14 次运行记录、SHA、inode 和 `.d` 来源核对的旧 mutable SDK 可重建 `.rlib`/`.rmeta` 已按[清理回执](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/sdk-path-rlib-rmeta-removal-r2-result.json)移除；观察到可用空间增加 2,424,832,000 bytes。清理后源码和依赖信息已复核，`.d`、测试可执行文件、源码、日志和包证据均保留。实际空余和活动进程仍须在后续构建前重新检查。
 
-“已写入”只说明有源码和相应测试；下表不等于最终编译、运行或设备验收通过。
+已完成的四次用户授权清理见[汇总回执](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/root-authorized-build-cache-cleanup-summary-20261103-r2.json)：共 18,873 项，各次观测的空余增量合计 5,115,904,000 bytes；并行文件系统活动使其不等于精确物理回收量。JNI、archive、绑定、包、`.d`、日志、来源证据及各次列出的受保护项保留，旧 Android 外部符号链接目标未递归核验。后续清理以独立回执为准；构建前须重新检查实时空余空间。
 
-| 范围 | 已写入内容 | 尚需关闭 |
-| --- | --- | --- |
-| SDK 固定模式 | 固定 header、只读 mode snapshot、required new/resume mode、旧事件删除。 | 新 parser/UUID 用例及最终协议合约重跑。 |
-| 上下文 | Chat/Code profile、manifest、Skill 来源/epoch、模型排除、静态 prompt snapshot 边界。 | 新 fork/恢复路径与现有 compaction 的最终回归。 |
-| SDK owner | UUID claim、冷恢复、精确 transcript source、调度借用与 drain。 | cron 隔离进程及 Desktop durable anchor 实际运行。 |
-| Desktop | 独立空间存储、Global New Chat、UUID runtime、后台 lease、handoff 与调度创建。 | 最终 SDK pin 的 Bridge 联调；签名包与真实界面验收。 |
-| Android | SessionHost/OwnerRegistry、导航 fencing、草稿/附件、多 owner recovery、engine-scoped CU/audio。 | 新 FFI 下 Direct 编译、最终 JVM 与设备用例。 |
-| iOS | MainActor SessionHost、按 owner 保留 source/草稿、release receipt、通知/Live Activity 与远程 gate。 | 新 FFI 下 Full 编译、测试、链接及设备用例。 |
-| CLI/Bridge | 公共 Code-only、expected-mode 校验、background fork epoch、私有 scheduled anchor flag。 | 最终 pin 下 Rust production/test 编译及回归。 |
-| 远程共享层 | mode 确认/冲突拒绝、写入 Result 传播、Team 单次审批例外。 | 两个遗漏 fixture、共享 crate 与 FFI tunnel 测试。 |
-| realtime | local input admission、typed Agent terminal、OpenAI/Gemini 完成证据、采集 gate。 | 最新源码实际回归；真实 provider 和设备音频。 |
+另一次已授权的 [Desktop 旧输出清理](../../acceptance/conversation-spaces-20261101/desktop/old-output-cleanup-20261103/result.json)移除三份已验证 ZIP 对应的解包应用，保留三个 ZIP 与 272 项保护材料；内容、模式和符号链接目标已核对，扩展属性未核验。清理前盘点目标的 APFS 独占占用约 2.94 GB；观测可用空间变化包含并发活动，不能等同于该操作的精确回收量。
 
-## 5. 本次重新确认的待修复项
+Android bc68 离线隔离包的手动设备观察确认了 Global picker、Chat/Code 切换，以及 Chat 中 New Chat 保持 Chat/Global；截图和层级见 [Android 状态](../../acceptance/conversation-spaces-20261101/android/postfinal-direct-validation-status-20261102.md)的 Device follow-up。用户又授权在该隔离包私有目录创建空项目 `Context32-NewChat-Verification`：手动观察到选择 Project 后普通 New Chat 回到 Global，Code mode 保持，前后[界面层级](../../acceptance/conversation-spaces-20261101/android/postfinal-device-manual-project-before-newchat-bc68.txt)和[结果层级](../../acceptance/conversation-spaces-20261101/android/postfinal-device-manual-project-to-global-bc68.txt)已保存。这些是旧目录策略下的 bc68 观察，新 SDK 新目录与设备上的 media drain 仍须重验；它们不是 instrumentation 通过，也未覆盖真实模型或运行中的 turn。空索引 fixture 已包含在重新编译的当前 test APK 中，尚未在设备执行。
 
-### P0-1：依赖与生成产物不是同一协议
+## 未关闭事项与续作顺序
 
-见第 3 节。SDK 未提交改动先完成检查再固化；App 的完整 pin 与 lockfile 同步，随后从解析出的真实源码重新生成。不能把“TS 可编译”当作 native runtime 已更新。
+SDK `55ddd4cf` 的 Stop/准入修复及 App pin 已提交本地 checkpoint；Android 当前 JNI、隔离包与 JVM 和 iOS 分阶段模拟器回归均有上表证据，物理设备和真实 provider 验收尚未完成。具体复现、已测范围与未完成项见[审查记录](2026-11-02-conversation-spaces-review.md)。`46fb13b` 的 JNI、FFI 和旧设备结果均为前驱证据，不能冒充当前 pin 的验证。
 
-### P0-2：跨空间 handoff retry 测试仍使用旧 fixture
-
-文件：Harness `crates/runtime/src/handoff.rs`。
-
-测试：`explicit_retry_uses_the_original_capture_and_prepare_never_retries`。
-
-当前 fixture 直接以 user 消息开头，缺少当前必须的 `fixed-session-mode` 首行。前序执行记录报告 mock provider 调用次数为 0，而断言期望 1；当前源码仍可确认这一 fixture 缺陷。
-
-处理：给测试 source 添加真实 UUID、Code、epoch 0 的固定首行；保留测试原本“Prepare 不暗中重试、Retry 使用原 cutoff”的断言。然后重跑整个 `handoff::tests`，不能降低断言或恢复缺 header 默认 Code。
-
-### P0-3：远程集成测试遗漏 mode
-
-文件与入口：
-
-- App `packages/remote-control-client/tests/e2e.rs`：snapshot begin 的 fixture。
-- App `packages/remote-control-client/tests/bots.rs`：`hold_records`。
-
-这两处当前仍不给普通会话提供 mode，新 gate 会保持 Loading，原 Live 断言或等待将无法成立。补入当前 wire 字段的明确 Code mode，保持原测试语义；参考 `tests/session.rs` 已更新的 fixture。
-
-**不能修改生产 gate 让未知 mode 自动变成 Code。**
-
-### P0-4：最新补丁缺少最终运行证据
-
-严格 header、independent fork、cron stack、Desktop anchor、最新 realtime frame-tail、远程冲突/Team capability 和移动端最后一轮提交保护均有晚于部分历史测试的改动。需要以最终源码重跑，不能直接继承旧通过数。
-
-## 6. 已处理的 code review 问题
-
-以下修复已进入源码；仍由第 5 节及验证清单决定是否关闭：
-
-| 原问题 | 当前处理 |
-| --- | --- |
-| 切换空间销毁正在运行的 source | 提升到进程级 owner host/runtime manager。 |
-| `/cd` 被当作更换逻辑项目 | UUID/scope/mode 固定，cwd 单独更新。 |
-| slash/Fusion 尚未显示 streaming 时被回收 | 发送前建立 pending lease，并按相关终态/权威 roster 移交。 |
-| AttachTurn 的同步事件丢失 | Android 先完成订阅 barrier。 |
-| 旧终态清除新 turn recovery | checkpoint 带 owner/turn，精确匹配后清理。 |
-| Computer Use 或音频回调落到当前屏幕 | engine/operation owner 注册，不使用 currentEngine 兜底。 |
-| 独立 fork 继承 Skill 权威和计算 prompt | 新 epoch、退役复制激活、丢弃 computed snapshot；exact handoff 保留。 |
-| JSON 对象重复键被普通 map 解析吞掉 | 固定首行强类型 deny-unknown-fields，验证重复键与 UUID。 |
-| 绑定调度 UUID 后尚无可发现 transcript | 固定首行后持久化空锚点，再确认 bind。 |
-| cron worker 栈溢出 | 8 MiB stack 与大型 future 装箱，增加隔离进程回归。 |
-| Provider complete 提前结束 Agent | typed local terminal，核对 response/frame/interaction status。 |
-| 远程未知模式就允许输入 | 等待确认，冲突保持 Error；FFI 传播写入失败并保留草稿。 |
-| Team 审批因没有 Chat/Code 被阻断 | 精确保留 ID 分类，仅放行单次 permission.respond。 |
-
-## 7. 建议的并行责任边界
-
-快照时没有仍可复用的活动子 agent；需重新建立工作分工。所有 worker 都必须知道共享 dirty tree 不可回滚他人改动。
-
-| 工作线 | 文件/责任 | 不应修改 |
-| --- | --- | --- |
-| SDK / CLI | Harness core/session/client/runtime 与 App CLI/Bridge 的相关测试。 | Electron、Android、iOS UI。 |
-| Desktop | `apps/electron/**`；Bridge 接口变动先协调。 | SDK realtime 与两端 native。 |
-| Android | `apps/android/**`，新绑定之后的 Direct 与测试。 | Swift、共享 remote controller。 |
-| iOS | `apps/ios/**`，新绑定之后的 Full 与测试。 | Kotlin、共享 remote controller。 |
-| realtime | Harness realtime driver/test 与 `apps/audio-provider/**`。 | 空间存储和导航 UI。 |
-| shared remote / review | `packages/remote-control-client/**`、`packages/mobile-ffi/src/remote*`。 | 两端页面；需要跨端改变时先说明合约。 |
-
-协议、Cargo pin、FFI 生成由一人统一协调。静态检查与轻量测试可并行；Cargo codegen、Gradle 与 Swift/Xcode 大型构建避免同时占满磁盘与内存。
-
-## 8. 恢复工作后的第一轮检查
-
-以下为待执行命令，不代表本次文档工作已运行这些构建。
-
-```bash
-export TASK_ROOT=/Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028
-export APP_ROOT="$TASK_ROOT/lingxi-app"
-export SDK_ROOT="$TASK_ROOT/harness-runtime"
-export EVIDENCE_ROOT="$APP_ROOT/acceptance/conversation-spaces-20261101"
-mkdir -p "$EVIDENCE_ROOT"
-
-cd "$APP_ROOT"
-git status --short --branch
-git diff --check
-
-cd "$SDK_ROOT"
-git status --short --branch
-git diff --check
-
-df -h "$TASK_ROOT"
-```
-
-再检查任务目录下实际运行的 Cargo、rustc、Gradle、Xcode 和测试进程；不能根据旧会话的 session id 假设构建还在运行。不要直接调用旧工具 session id。
-
-默认 `python3` 曾是 3.9，缺少 `tomllib`；相关脚本使用 `python3.11`，或为构建建立任务专用 PATH shim，不替换系统 Python。
-
-## 9. SDK 测试优先级
-
-先修第 5 节 fixture，再运行。资源有限时使用：
-
-```bash
-cd "$SDK_ROOT"
-export CARGO_PROFILE_DEV_DEBUG=0
-export CARGO_PROFILE_TEST_DEBUG=0
-export CARGO_INCREMENTAL=0
-export CARGO_BUILD_JOBS=2
-export CARGO_TARGET_DIR="$TASK_ROOT/validation-runtime-target"
-
-cargo test --locked --offline -p session --lib -- --test-threads=1
-cargo test --locked --offline -p client
-cargo test --locked --offline -p orchestrator --test realtime_agent_test -- --test-threads=1
-```
-
-runtime Mobile 的定向组使用相同参数前缀，例如：
-
-```bash
-cargo test --locked --offline -p harness-runtime --lib \
-  --no-default-features --features mobile \
-  handoff::tests -- --test-threads=1
-```
-
-同样覆盖这些 filter：
-
-```text
-mobile::host::tests::initial_profile_tests
-mobile::host::tests::session_owner_tests
-mobile::transcript::owner_tests
-mobile::host::shutdown_tests
-mobile::host::automation::owned_cron_tests
-mobile::host::cron_automation_tests::cancelled_automation_waits_for_non_abortable_cleanup_before_persisting
-committed_source_tests
-idle_scheduled_run_survives_default_thread_stack_in_isolated_process
-```
-
-最后一个隔离进程用例必须验证实际调度 assembly，不只是 thread builder 配置。若 feature 或测试名称调整，先用 `-- --list` 确认目标存在；**0 tests 不算通过**。
-
-Desktop anchor 在 mobile-only build 中不会被编译。需要启用 desktop 的 SDK lib 测试，并实际运行：
-
-```text
-scheduled_draft_is_discoverable_before_desktop_build_returns
-scheduled_anchor_is_idempotent_and_rejects_foreign_owner
-```
-
-同时执行 orchestrator 的 profile recovery、session append、Skill/compaction、fork epoch 与 prompt snapshot 相关回归。保留每条命令、源码身份、退出码、实际通过/失败数量，写入持久 acceptance 目录。
-
-## 10. 固化 SDK、更新 App pin
-
-1. 审核 Harness 当前 dirty manifest，只提交本任务源码/测试/协议快照；不得包含 target 或凭据。
-2. 获取新的完整 40 位 SHA。它应包含协议 32 与本轮最终修复。
-3. App `Cargo.toml` 中本 SDK 的 47 处 rev 要统一，lockfile 同步到同一 source identity；实际数量以重新检索为准。
-4. 必要时将本地提交导入 Cargo 使用的 Git object cache；这是本地 fetch，不是向远程发布。
-5. 运行锁定的 resolver，确认 App 真正使用该提交。
-
-```bash
-cd "$APP_ROOT"
-CARGO_NET_OFFLINE=true python3.11 scripts/checks/check-runtime-dependency.py
-cargo metadata --locked --offline --format-version 1 > "$EVIDENCE_ROOT/cargo-metadata.json"
-```
-
-前序解析范围为 79 个 Harness packages 和 5 个 mobile-linux packages；若最终数量有合理变化，应记录原因。禁止混用两个 Harness rev，也不引入 `[patch]` 本地 override。
-
-本地 Cargo Git DB 的已知位置为：
-
-```text
-/Users/luolingfeng/.cargo/git/db/harness-runtime-8d2473fb8c2fadbd
-```
-
-使用前重新验证该 DB 对应 URL 和权限。需要 fetch/push 外部远程时使用仓库 owner 对应 SSH alias `github.com-lingxi-coder`，不能假设默认 GitHub 身份。
-
-本次文档不包含新的 push、合并 main 或发布授权；不要因写好交接就执行发布。
-
-## 11. 协议与 bridge-client
-
-在完成 pin 后，从 App resolver 选定的不可变源码生成：
-
-```bash
-cd "$APP_ROOT"
-CARGO_NET_OFFLINE=true python3.11 scripts/checks/generate-client-protocol.py
-CARGO_NET_OFFLINE=true python3.11 scripts/checks/generate-client-protocol.py --check
-CARGO_NET_OFFLINE=true python3.11 scripts/checks/generate-client-protocol.py --test
-CARGO_NET_OFFLINE=true python3.11 scripts/checks/test_bridge_protocol_generator.py
-CARGO_NET_OFFLINE=true python3.11 scripts/checks/check_client_protocol.py
-
-cd "$APP_ROOT/packages/bridge-client"
-npm run build
-npm test
-```
-
-检查当前源码、validator、序列化快照与消费端，不应留下旧模式行为：
-
-```text
-set_session_mode / SetSessionMode
-session_mode_changed / SessionModeChanged / sessionModeChanged
-SessionModeTransition
-pendingMode / pending_mode（模式选择语义）
-协议 31 的当前版本声明或 fixture
-```
-
-负向测试中的旧字符串可以用于断言拒绝；历史归档或其他独立语义中的 pending 不能机械删除。Generated 中的旧 event 必须通过重新生成消失。
-
-## 12. App Rust production 与 test 编译
-
-统一 pin 后检查四个根 crate 的非测试和测试目标。此前 `--tests` 没有提供所需的非测试 FFI metadata；不要只跑 tests 然后假定 production 已编译。
-
-```bash
-cd "$APP_ROOT"
-cargo check --locked --offline \
-  -p ios-framework -p android-aar -p bridge-server -p cli \
-  --lib --tests
-
-cargo test --locked --offline -p remote-control-client
-```
-
-Mobile FFI 源码由两端 packager 编入，不存在独立 `packages/mobile-ffi/Cargo.toml`。其 remote tunnel 测试应通过 `ios-framework` / `android-aar` 相应 test target 运行。
-
-App 关键行为测试定位：
-
-```text
-CLI / background fork：
-independent_background_fork_retires_copied_skill_authority
-independent_fork_rebuilds_computed_prompt_but_handoff_retains_it
-exhausted_fork_epoch_fails_before_filesystem_publication
-
-Bridge / scheduled draft：
-scheduled_durable_anchor_requires_a_new_owned_draft
-scheduled_draft_is_discoverable_and_resumable_before_first_turn
-scheduled_draft_cannot_adopt_an_existing_conversation
-
-audio-provider：
-pending_admission_blocks_capture_even_if_playback_unpauses
-interruptible_capture_stays_paused_until_deferred_input_is_admitted
-gemini_audio_resumes_after_interrupting_thinking_without_provider_start
-```
-
-还应运行 CLI public Chat 拒绝、exact admitted Chat background recovery、mode mismatch 无副作用、busy handoff 与 hot-resume owner 校验的已修改测试。只检查 Cargo 编译不能代替执行。
-
-## 13. FFI 生成与原生验证
-
-### 13.1 先生成同一版本
-
-标准入口：
-
-- Android：`apps/android/native/scripts/build-jni.sh`，以及当前项目配置的 UniFFI Kotlin 生成步骤。
-- iOS：`apps/ios/native/scripts/build-xcframework.sh`。
-
-iOS 现有脚本负责三份 Swift 绑定的 runtime/scaffolding 去重、callback 初始化和 modulemap。不能手动覆盖其中一份文件后跳过后处理。
-
-前序使用过的 UniFFI 0.32.2 generator：
-
-```text
-/Users/luolingfeng/lingxi/acceptance/mobile-local-app-20261023/uniffi-bindgen
-SHA256 335f0fdf986055bd5c57ab5b5b2bf80b93f8a95846fbf54201c2749ea33f1570
-```
-
-复用前验证文件存在与 SHA。generator 可复用不代表输入 metadata 可复用；当前旧协议 metadata/静态库全部不构成协议 32 的证明。
-
-### 13.2 仅用于绑定检查的资源受限路径
-
-已有脚本支持：
-
-```bash
-cd "$APP_ROOT"
-LINGXI_FFI_BINDINGS_ONLY=1 \
-LINGXI_FFI_METADATA_LIBRARY=/absolute/path/to/current-ios-metadata.a \
-LINGXI_BINDGEN_PATH=/absolute/path/to/verified-uniffi-bindgen \
-CARGO_NET_OFFLINE=true \
-bash apps/ios/native/scripts/build-xcframework.sh
-```
-
-`current-ios-metadata.a` 必须来自最终 pin 的真实编译产物，包含 client、harness_runtime 和 ios_framework 的 UniFFI metadata；Android archive 则使用 android_aar root。不能把两端 root 无差别混在一个 archive。
-
-前序尝试已证明可从编码 MIR 的 cargo-check 记录生成 metadata object，但临时 wrapper/helper 当前不可依赖。若重建这条优化路径，必须重新保存工具源码与 provenance，验证每个 `_UNIFFI_META` 符号及 const section 字节与原 object 一致。
-
-资源经验：完整单个 runtime object 会导致严重 LLVM 内存/交换压力。分 CGU 的对象输出可使用较高 `codegen-units`、`--emit=obj --out-dir` 且不带单一 `-o`，再提取确实包含 metadata 的 const sections。此路径只证明生成绑定，**不证明平台静态链接、包内 native ELF 或设备 ABI**。
-
-### 13.3 Android
-
-用户最新指定每个平台只验证一个 flavor：Android Direct、iOS Full、Desktop default。以下最终验收只统计该范围；历史其他 flavor 检查不表示已按最终源码验证。
-
-生成后至少完成 DirectDebug Kotlin 编译和当前 JVM 测试。必要时先用 Gradle `--dry-run` 核对 native 依赖任务。
-
-```bash
-cd "$APP_ROOT/apps/android/native"
-./gradlew --offline --max-workers=1 \
-  :app:compileDirectDebugKotlin
-./gradlew --offline --max-workers=1 :app:testDirectDebugUnitTest
-```
-
-只做 Kotlin/JVM 检查时，如排除 `stageDirectMobileLinuxAssets` 或对应 native verification 任务，必须把排除项与原因写入证据，不能把结果叫作 APK build。先核对当前 task graph，再选择具体 `-x`，不要盲目复制历史命令。
-
-已知依赖为 Gradle 9.6.1、匹配当前 manifest 的 mobile-linux-native-support 本地 Maven 工件与精确 pin 的 sherpa。缓存缺失时明确报告，不替换为邻近版本。
-
-重点测试：SessionOwnerRegistry、OrderedSelectionWriter、recovery routing、draft/attachment restore、RemoteConversationSource、TeamApproval UI、ComputerUseOwnerRegistry、AudioOwnerBindingRegistry、FlowVoiceController、VoiceSpeechPlayer 与 realtime lane。
-
-### 13.4 iOS
-
-新绑定之后至少覆盖 FullDebug 的 product source、生成 Swift 和受影响 XCTest target。前序检查范围为约 215 个 product source 加 3 份 generated Swift，最终数量以当前工程为准。
-
-- 完整 Swift typecheck 需要实际 Swift Observation 宏及真实第三方 module，parser-only 不算。
-- 使用缓存时核对 Firebase 12.19.2、GoogleSignIn 9.2.0、ZIPFoundation 0.9.20 等当前 `project.yml` pin。
-- 曾使用 `teams-sdk-cache-20261030` Products；必须补充正确的 `GoogleUtilities-NSData` modulemap，且排除旧 FFI include/modulemap。
-- 该缓存是否仍存在需要重新检查，不能把另一个 worktree 的旧 FFI 当作依赖。
-- 独立的宿主 XCTest/stub 测试可验证纯业务逻辑；不得代替 iOS Simulator/真机链接和交互测试。
-
-重点测试：NewSessionModeReadiness、SessionDraftOwnership、SessionResume、ProjectScopedPreferences、ConversationSourceReplacement、BackgroundSupport、RemoteModeAdmission/RemoteControl、VoiceInteraction 与 IOSRealtimeAudioLifecycle。
-
-## 14. Desktop 验证
-
-bridge-client build 完成后，再检查 Electron：
-
-```bash
-cd "$APP_ROOT/apps/electron"
-npm run typecheck:node
-npm run typecheck:web
-```
-
-使用项目现有 Node/tsx runner 运行相关测试，至少覆盖：
-
-```text
-conversation-spaces.test.ts
-session-mode-runtime.test.ts
-session-workspace-runtime.test.ts
-session-workspace-host.test.ts
-session-catalog.test.ts / session-catalog-workspace.test.ts
-session-archive.test.ts / submitted-session-catalog.test.ts
-runtime-command-readiness.test.ts / resume-ownership.test.ts
-scheduled-service.test.ts / scheduled-replay.test.ts / scheduled-reconnect.test.ts
-remote-snapshot.test.ts / remote-runtime.test.ts
-runtime-lifecycle-interaction.test.mjs
-```
-
-真实 Electron lifecycle fixture 涉及 loopback listener，前序 sandbox EPERM 后在允许的环境下通过。若当前受限，准确记录权限或运行条件，不将其归因于业务逻辑。
-
-签名打包只用仓库要求的 `npm run package:mac:flare`。未执行签名和包内静态/运行验证之前，不声明 Desktop package 完成。开发进程也不能证明 Credential Broker 持久性。
-
-## 15. 验证记录：历史与本次分开
-
-### 本次文档核对
-
-已读取实际工作区并确认：
-
-- 两仓库 HEAD、branch、dirty manifest、暂存区状态。
-- SDK 工作区 32 / App pinned SDK 31 / TS 32 的版本断点。
-- Kotlin 与 Swift 生成 client 中的旧 mode event。
-- handoff 与两个 remote fixture 的当前缺字段问题。
-- 两仓库 `git diff --check` 通过。
-- 选取的旧 `/private/tmp` 日志均缺失；旧 artifact manifest 不能视为当前测试二进制证明。
-
-完整结果见机器快照。本次未重新运行下列历史测试。
-
-### 前序执行记录，仅供定位
-
-| 范围 | 前序报告 | 使用限制 |
-| --- | --- | --- |
-| Session lib | 437/437。 | 晚于该次运行的 strict header/UUID 测试需重跑。 |
-| Runtime mobile | 协议 32 no-run 编译通过；定向组中 handoff fixture 有失败。 | 不代表完整 runtime suite 通过；原日志缺失。 |
-| realtime | 一轮 24/24。 | 早于最新 completion/frame-tail/no-playback 改动。 |
-| bridge-client | 协议 32 build 通过；更早全套 350 pass / 5 skip。 | 全套数字来自此前状态，不能移作最终 32。 |
-| Electron 32 | 分组 251、193、150，通过；另有 model 11、disposition 4、remote 7、lifecycle 1。 | 分组可能重叠，不合计独立测试数；3 个 Firebase emulator 用例跳过。 |
-| Android | 旧绑定下 Direct/Play 编译，部分 recovery 组 88/88。 | 发生在最终 clean-break/音频/remote 修改前，需新绑定重跑。 |
-| iOS | 旧绑定下 Full/Store typecheck；realtime mock 10/10；存储/偏好隔离测试 37/37；remote 纯 Swift 6/6。 | 含 mock/stub 与宿主检查，不是当前 FFI32 或真机验收。 |
-| App Rust | 旧 SDK pin 下四根 crate production/test check 通过。 | 已被协议 32 源码变更取代。 |
-
-这些数字来自前序执行记录，不是此次重新验证的结果。应为最终版本重新生成原始日志、退出码和 source/ABI 身份。
-
-## 16. 三端验收矩阵
-
-| 场景 | Desktop | Android | iOS | 通过条件 |
-| --- | --- | --- | --- | --- |
-| 项目页点击普通 New Chat | 必测 | 必测 | 必测 | project=null / Global，mode 来自新建时捕获。 |
-| 项目内明确新建 | 必测 | 必测 | 必测 | 仅此入口绑定项目。 |
-| Chat/Code 往返 | 必测 | 必测 | 必测 | 各自恢复导航与草稿；空项目仍可见。 |
-| A 工具运行时切到 B | 必测 | 必测 | 必测 | A 不取消、不重启，返回后结果连续。 |
-| A 等审批时切到 B | 必测 | 必测 | 必测 | 审批只回复 A；B 不接收其状态。 |
-| 提交后 Started 到来前切换 | 必测 | 必测 | 必测 | admitted/pending owner 被保留，输入不丢。 |
-| 相同 UUID 重复挂载 | 必测 | 必测 | 必测 | 复用 owner 或明确拒绝第二次 claim。 |
-| `/cd` 与重定位 | 必测 | 必测 | 必测 | 固定 mode/scope 不变，cold resume 路径正确。 |
-| recent/search/pin/archive | 必测 | 必测 | 必测 | mode 过滤在 limit 前。 |
-| 连接延迟且连续切换 | 必测 | 必测 | 必测 | 旧结果不抢前台，不错写草稿。 |
-| 空会话重启恢复 | 必测 | 必测 | 必测 | 使用明确 expected mode 与原 owner。 |
-| 调度新目标 ACK 后立刻退出 | 必测 | 按宿主支持 | 按宿主支持 | UUID 有 durable anchor，可发现且可恢复。 |
-| 跨空间摘要期间源 turn 继续 | 必测 | 必测 | 必测 | source 不取消，target 仅草稿。 |
-| Retry/Cancel 摘要 | 必测 | 必测 | 必测 | cutoff 固定，只影响 summary。 |
-| 后台通知与 Stop | 必测 | 必测 | 必测 | 按源 UUID/turn 路由，不操作当前选择。 |
-| 两个 owner recovery journal | 按宿主支持 | 必测 | 必测 | 旧终态不清新 turn，A 不清 B。 |
-| 语音等待工具时切换 | 必测 | 必测 | 必测 | 音频/审批 lane 仍归原 owner。 |
-| OpenAI / Gemini 中断后新输入 | 必测 | 必测 | 必测 | 旧完成帧不结束新输入，采集 gate 正确。 |
-| unknown/conflicting remote mode | viewer 按支持 | 必测 | 必测 | 不猜 Code，冲突后停止投影与控制。 |
-| Team 单次远程审批 | host 必测 | viewer 必测 | viewer 必测 | 无虚构 mode；仅 allow-once/deny。 |
-| 旧数据/缺 header/重复键 | 必测 | 必测 | 必测 | 明确拒绝，原文件不被空状态覆盖。 |
-
-CLI 单独验证公共 list/search/resume/fork 都不暴露 Chat，以及认证的 exact background Chat handoff 仍能继续原任务。
-
-每个“必测”需要实际结果与所在层级。宿主假对象、JVM/XCTest、模拟器、真机和真实 provider 不能互相替代。
-
-## 17. 资源与清理边界
-
-本次核对可用空间约 2.2 GiB，属于瞬时值，开始构建前重新查看。历史上完整 rustc object 与并行编译导致大量 swap，空间曾不足 1 GiB。
-
-当前任务目录可见：
-
-```text
-build/
-validation-runtime-target/
-validation-artifacts/artifact-manifest.json
-```
-
-`validation-runtime-target` 仍有构建缓存；其 freshness 要由当前源码和 Cargo 验证。旧 manifest 指向的二进制可能已经删掉；快照逐个记录是否存在，不可仅凭 manifest 文件存在宣称可复现。
-
-仅清理由本任务生成、可重建、无人使用的缓存：先核对路径和 owner、进程与 open file，保留日志/hash/provenance，再按明确 target-dir 清理。保护 Git 对象、源码、lockfile 引用、业务数据、活动会话及其他任务缓存。
-
-日志今后写在持久 acceptance 目录，而不是仅 `/private/tmp`。清理构建产物前先复制需要保存的真实验收证据。
-
-## 18. 已知未覆盖与后续设计
-
-- 移动端驻留 SessionHost 尚无完整容量上限和安全 idle eviction；频繁访问大量会话可能增加进程内存。不要为回收而破坏活动 owner。
-- ASR 迟到文本的 JSONL 顺序仍有局限，本轮没有重排历史。不要宣称已验证所有语音历史的时间顺序。
-- 最新协议 32 的两端完整 native 链接、签名包、物理设备与真实 provider 尚未验收。
-- Firebase emulator 的历史 skip 需要在具备环境时执行，或保留明确未覆盖项。
-- catalog 可共享不意味着指令/授权状态可全局共享；后续新增 cache 必须说明 owner、epoch、版本和授权失效边界。
-
-## 19. 最终收口清单
-
-- [ ] 修复 handoff 与 remote 遗留 fixture，相关测试真实运行通过。
-- [ ] strict header / fork epoch / cold recovery / cron / realtime / scheduled anchor 最终回归完成。
-- [ ] 新 Harness 本地提交固化；App pin 和 lockfile 完全一致。
-- [ ] 协议生成、validator、snapshot/ordinal、Swift/Kotlin 绑定一致为 32。
-- [ ] App production + test 编译及 CLI/Bridge/audio/shared remote 回归完成。
-- [ ] Electron typecheck、相关 host/UI lifecycle 用例完成。
-- [ ] Android Direct、iOS Full 和 Desktop default 用当前绑定完成验证。
-- [ ] 三端核心交互验收明确记录，包/设备/provider 缺口不冒充通过。
-- [ ] 再做一次针对最终 diff 的 code review；修复问题后只重跑受影响检查。
-- [ ] 仅按本任务 manifest 做局部提交，排除 node_modules、Generated、target、密钥与无关改动。
-- [ ] 更新本文当前状态、最终 SHA 和验收索引；任何发布/合并动作另外按用户授权处理。
-
-## 20. 可直接用于续接的任务说明
-
-```text
-继续 /Users/luolingfeng/lingxi/worktrees/code-chat-context-20261028 下的 App 与 Harness dirty worktree。
-先读 docs/architecture/conversation-spaces-context-design.md 和本交接，不要丢弃未提交实现。
-核心契约：普通 New Chat=Global；session mode 创建固定；切换只改导航且不取消 turn；CLI 公共入口 Code-only。
-仅支持当前协议/数据格式，删除旧兼容，保留无关代码与业务数据。
-先修 SDK handoff retry fixture、remote e2e/bots 缺 mode fixture；完成最终 SDK 回归后提交并更新 App 完整 pin。
-当前 App 仍 pin 协议31，而 SDK/TS源码已32，Swift/Kotlin绑定仍旧，必须重新生成和跑跨端检查。
-使用 GPT‑6.1 Terra max 按平台并行，统一协调协议与FFI；重型构建按资源串行。
-历史/tmp日志已缺失；所有新结果写入 acceptance/conversation-spaces-20261101，记录 source/ABI身份、命令和退出码。
-完成最终 code review 并修复；只提交授权范围，不自动 push、merge、打包安装或删除其他缓存。
-```
+1. SDK `mobile/host.rs` 三个 public Cron 入口的 `begin_owner` 若在任何 claim、ledger、transcript 或工具执行前返回 false，bc68 经 `fired_cron_dto` 将其标成 `retryable=false`。这是已在真实 iOS simulator 用例中捕获的预准入分类错误。callback 的 Bool 不区分暂时占用和 catalog/prepare 失效；只证明同一 occurrence 尚未执行。在锁内重新核验 occurrence/authority 后才可安全重试，后续仍受 Host 校验，不保证拒绝是暂态。本轮不扩 callback ABI。修复已进入 SDK `46fb13b`；当前 SDK 的模拟器 native 回归已覆盖选定的 scheduler 准入及 callback 期间取消场景，仍应按实际入口和设备分别验证，不把已准入或结果不确定的失败宽泛改成可重试。
+2. 在 REDMI 可用时，对上表的当前隔离包完成已经授权的 USB headless/UI 测试，记录设备、包哈希、命令和结果；优先复核 media drain、重连、目录授权、终端关闭/后台输出、logical scope 和普通 New Chat。`55ddd4cf` 的 JNI 和 APK 已构建，bc68 设备结果仍是历史证据，不冒充当前产物。
+3. iOS 的 Cron owner gate 已改为与持久的 SessionHost/ProjectStore/CronRepository 保持同一 SwiftUI 生命周期；当前 pin 的选定 Full、隔离 FFI、UI 与 Mobile Linux simulator 回归结果见上表，按实际阶段、跳过、fixture 来源及硬件限制引用。物理 iOS 设备、iSH、真实 provider 和音频仍待相应目标验证；移动 Local App 的不可变 owner receipt、首建/冷恢复及失败重试须按实际 native 覆盖报告。
+4. 按 Desktop default、Android Direct、iOS Full 分别核对固定 mode、Global 新建、运行中导航、审批/音频 owner、exact path 恢复、Cron reservation/cancel 和失败输入保留；用真实目标执行的证据关闭相应场景，区分 mock、host、native、package、device 和 live-provider 层级。
+5. 后续操作前核对源码/产物指纹并保留其他 dirty 工作。源码 checkpoint 已在本地完成；未经新的明确授权不 push、merge 到 main 或发布。

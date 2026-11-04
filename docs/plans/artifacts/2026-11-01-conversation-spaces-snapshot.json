@@ -1,4 +1,8 @@
 {
+  "status": "historical_snapshot",
+  "superseded": true,
+  "current_status_document": "../2026-11-01-conversation-spaces-handoff.md",
+  "warning": "Historical 2026-11-01 source and validation checkpoint. Do not use its revisions, missing artifacts, or test counts as current acceptance.",
   "document_date": "2026-11-01",
   "timezone": "America/Los_Angeles",
   "purpose": "documentation handoff snapshot; no new runtime acceptance claimed",

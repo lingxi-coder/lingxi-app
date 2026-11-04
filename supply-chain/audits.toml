@@ -1,6 +1,12 @@
 
 # cargo-vet audits file
 
+[[audits.anstyle-query]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.1.5"
+notes = "AI-assisted full package source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/batch002-lane-a-continuation.md (SHA-256 957c4eade00b63db081f53cac4ffa7c3639f5fd84b17dae862b2afd00cb1264f); cross-review: supply-chain/reviews/2026-11-03/batch002-lane-a-continuation-cross.md (SHA-256 597e868245e601e4f79a743f1e63c215570dd4fcc46412fd86defc8df2109189). Exact crates.io package source and documented API use; dependencies and cross-package conformance reviewed separately. Explicit limits and corrected IDNA consumer summary are recorded."
+
 [[audits.askama_macros]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
@@ -102,6 +108,18 @@ who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
 version = "2.3.0"
 notes = "AI-assisted full source review; evidence: supply-chain/reviews/2026-10-30/icu_locale_fallback_data-2.3.0.md (SHA-256 fd702f0450612676a79065d354513a9ad4970edf052552037a928638da568998). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.idna_adapter]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.1.0"
+notes = "AI-assisted full package source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/batch002-lane-a-continuation.md (SHA-256 957c4eade00b63db081f53cac4ffa7c3639f5fd84b17dae862b2afd00cb1264f); cross-review: supply-chain/reviews/2026-11-03/batch002-lane-a-continuation-cross.md (SHA-256 597e868245e601e4f79a743f1e63c215570dd4fcc46412fd86defc8df2109189). Exact crates.io package source and documented API use; dependencies and cross-package conformance reviewed separately. Explicit limits and corrected IDNA consumer summary are recorded."
+
+[[audits.instability]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.3.1"
+notes = "AI-assisted full package source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/batch002-lane-a-continuation.md (SHA-256 957c4eade00b63db081f53cac4ffa7c3639f5fd84b17dae862b2afd00cb1264f); cross-review: supply-chain/reviews/2026-11-03/batch002-lane-a-continuation-cross.md (SHA-256 597e868245e601e4f79a743f1e63c215570dd4fcc46412fd86defc8df2109189). Exact crates.io package source and documented API use; dependencies and cross-package conformance reviewed separately. Explicit limits and corrected IDNA consumer summary are recorded."
 
 [[audits.is_terminal_polyfill]]
 who = "Codex AI-assisted"

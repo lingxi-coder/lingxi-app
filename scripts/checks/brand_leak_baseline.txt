@@ -27,7 +27,6 @@ G1	Cargo.toml	LingXi
 G1	apps/android/native/app/src/androidTest/java/com/lingxi/code/NativeSettingsEngineRoundtripTest.kt	\.lingxi(?![A-Za-z0-9_.\-])
 G1	apps/android/native/app/src/androidTest/java/com/lingxi/code/cron/CronNativeRoundtripTest.kt	\.lingxi(?![A-Za-z0-9_.\-])
 G1	apps/android/native/app/src/main/java/com/lingxi/code/settings/PermissionModeSettingsRepository.kt	\.lingxi(?![A-Za-z0-9_.\-])
-G1	apps/android/native/app/src/main/java/com/lingxi/code/settings/ProviderSettingsRepository.kt	LINGXI_
 G1	apps/android/native/app/src/test/java/com/lingxi/code/settings/DesktopSettingsContractTest.kt	\.claude(?![A-Za-z0-9_.\-])
 G1	apps/android/native/app/src/test/java/com/lingxi/code/settings/DesktopSettingsContractTest.kt	\.lingxi(?![A-Za-z0-9_.\-])
 G1	apps/android/native/scripts/build-jni.sh	LINGXI_
@@ -159,7 +158,6 @@ G1	apps/cli/host/src/process_wrapper.rs	LINGXI
 G1	apps/cli/host/src/repl.rs	LingXi
 G1	apps/cli/host/src/repl.rs	\.lingxi
 G1	apps/cli/host/src/session_cost.rs	\.lingxi
-G1	apps/cli/host/src/startup_resources.rs	LINGXI
 G1	apps/cli/host/src/startup_trace.rs	LINGXI
 G1	apps/cli/host/src/teammate_worker.rs	LINGXI
 G1	apps/cli/host/tests/cli_agents.rs	LINGXI
@@ -181,7 +179,6 @@ G1	apps/ios/ffi/src/mobile_linux_sdk.rs	\.lingxi
 G1	apps/ios/ffi/swift/Package.swift	Lingxi
 G1	apps/ios/ffi/uniffi.toml	Lingxi
 G1	apps/cli/tui-core/src/background_detach.rs	LINGXI
-G1	apps/cli/tui-core/src/collapse/group.rs	\.lingxi
 G1	apps/cli/tui/src/app.rs	LINGXI
 G1	apps/cli/tui/src/bottom_pane/permission_view.rs	LingXi
 G1	apps/cli/tui/src/bottom_pane/screen_view.rs	LINGXI
@@ -238,10 +235,6 @@ G1	packages/bridge-client/test/fusion-protocol.test.ts	\.lingxi(?![A-Za-z0-9_.\-
 G2	apps/cli/host/src/argv.rs	CLAUDE_CODE_FORWARD_SUBAGENT_TEXT
 G2	apps/cli/host/src/argv.rs	CLAUDE_CODE_RESTRICTED
 G2	apps/cli/host/src/argv_test.rs	CLAUDE_CODE_FORWARD_SUBAGENT_TEXT
-G2	apps/cli/host/src/commands/auth.rs	CLAUDE_CODE_USE_BEDROCK
-G2	apps/cli/host/src/commands/auth.rs	CLAUDE_CODE_USE_FOUNDRY
-G2	apps/cli/host/src/commands/auth.rs	CLAUDE_CODE_USE_VERTEX
-G2	apps/cli/host/src/init.rs	CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR
 G2	apps/cli/host/src/lib/tests/startup_notice_tests.rs	CLAUDE_CODE_USE_BEDROCK
 G2	apps/cli/host/src/lib/tests/startup_notice_tests.rs	CLAUDE_CODE_USE_FOUNDRY
 G2	apps/cli/host/src/lib/tests/startup_notice_tests.rs	CLAUDE_CODE_USE_VERTEX
@@ -384,7 +377,6 @@ G3	apps/cli/host/tests/cli_resume.rs	LINGXI_CONFIG_DIR
 G3	apps/cli/host/tests/mcp_serve.rs	LINGXI_CONFIG_DIR
 G3	apps/ios/ffi/src/lib/tests/tests.rs	.lingxi
 G3	apps/ios/ffi/src/mobile_linux_sdk.rs	.lingxi
-G3	apps/cli/tui-core/src/collapse/group.rs	.lingxi
 G3	apps/cli/tui/src/bottom_pane/screen_view.rs	.lingxi
 G3	apps/cli/tui/src/bottom_pane/screen_view.rs	LINGXI.md
 G3	apps/cli/tui/src/chat_widget.rs	.lingxi

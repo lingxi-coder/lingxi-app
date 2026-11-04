@@ -25,6 +25,8 @@ struct AdaptiveConversationSidebar<Sidebar: View, Detail: View>: View {
                     set: { if $0 { navigation.showSidebar() } else { navigation.closeSidebar() } }
                 ),
                 gesturesEnabled: gesturesEnabled,
+                // The tab bar leaves as soon as the drawer starts to open (§2.2), not when it lands.
+                onRevealChange: { navigation.drawerRevealed = $0 },
                 menu: { NavigationStack { sidebar() } },
                 content: detail
             )
@@ -38,6 +40,9 @@ private struct ConversationSideDrawer<Menu: View, Content: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var isOpen: Bool
     let gesturesEnabled: Bool
+    /// Called with `true` while any part of the menu is revealed (dragging or open), `false` when it is
+    /// fully closed.
+    let onRevealChange: (Bool) -> Void
     @ViewBuilder let menu: () -> Menu
     @ViewBuilder let content: () -> Content
     @GestureState private var drag = DrawerDrag()
@@ -87,11 +92,13 @@ private struct ConversationSideDrawer<Menu: View, Content: View>: View {
             )
             .animation(settlingAnimation, value: isOpen)
             .animation(settlingAnimation, value: drag.direction == .horizontal)
+            .onChange(of: reveal > 0) { _, revealed in onRevealChange(revealed) }
         }
         .onChange(of: isOpen) { _, open in
             dismissKeyboard()
             menuFocused = open
         }
+        .onDisappear { onRevealChange(false) }
     }
 
     private func drawerGesture(width: CGFloat) -> some Gesture {

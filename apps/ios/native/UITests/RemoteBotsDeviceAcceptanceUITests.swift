@@ -17,12 +17,8 @@ final class RemoteBotsDeviceAcceptanceUITests: XCTestCase {
         let marker = "BOT_E2E_IOS_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
 
         func openBot() {
-            let drawer = app.buttons["drawer.open"]
-            XCTAssertTrue(drawer.waitForExistence(timeout: 30), "Real app must finish starting")
-            drawer.tap()
-            let remote = app.buttons["drawer.remote-control"]
-            XCTAssertTrue(remote.waitForExistence(timeout: 10))
-            remote.tap()
+            // Remote Control is the Bots tab now (it left the drawer); the bar button appears once the real app has started.
+            app.openBotsTab(timeout: 30)
             let host = app.buttons["remote.host.\(hostID)"]
             XCTAssertTrue(host.waitForExistence(timeout: 45), "Acceptance host must be available to the existing account")
             host.tap()

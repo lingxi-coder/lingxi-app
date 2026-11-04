@@ -1,33 +1,19 @@
 import SwiftUI
 
-struct RemoteControlDestination: Identifiable {
-    let id = UUID()
-    var hostID: String?
-    var sessionID: String?
-}
-
 #if canImport(harness_runtimeFFI)
+/// Remote Control as the root of the Bots tab. The manager is app-level (created by `RootView`, read
+/// from the environment) so it outlives this view; the tab's `TabCoordinator` carries the deep-link
+/// request in and receives the stack depth and the re-tap requests.
 @MainActor
 struct RemoteControlView: View {
-    let destination: RemoteControlDestination
     let openAccount: () -> Void
-    @Environment(\.dismiss) private var dismiss
-    @State private var manager: RemoteControlManager
+    @Environment(RemoteControlManager.self) private var manager
+    @Environment(TabCoordinator.self) private var tabs
     @State private var path: [RemoteRoute] = []
     @State private var configuredUID: String?
 
-    init(
-        destination: RemoteControlDestination,
-        openAccount: @escaping () -> Void,
-        mediaHostComposition: IOSNativeMediaHostComposition?,
-        mediaHostInitializationError: String?
-    ) {
-        self.destination = destination
+    init(openAccount: @escaping () -> Void) {
         self.openAccount = openAccount
-        _manager = State(initialValue: RemoteControlManager(
-            mediaHostComposition: mediaHostComposition,
-            mediaHostInitializationError: mediaHostInitializationError
-        ))
     }
 
     var body: some View {
@@ -37,7 +23,7 @@ struct RemoteControlView: View {
                     ContentUnavailableView {
                         Label("remote_signed_out_title", systemImage: "person.crop.circle")
                     } description: { Text("remote_signed_out_body") } actions: {
-                        Button("remote_sign_in") { dismiss(); openAccount() }
+                        Button("remote_sign_in", action: openAccount)
                     }
                 } else if let error = manager.error {
                     ContentUnavailableView {
@@ -70,7 +56,6 @@ struct RemoteControlView: View {
                 }
             }
             .navigationTitle("remote_title")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("common_close") { dismiss() } } }
             .navigationDestination(for: RemoteRoute.self) { route in
                 switch route {
                 case let .host(id):
@@ -94,22 +79,32 @@ struct RemoteControlView: View {
         .task(id: FirebaseAccount.shared.user?.uid) {
             let uid = FirebaseAccount.shared.user?.uid
             // Full-screen UIKit capture hides this navigation stack and starts
-            // its task again on return. Reset routes only for an account change,
-            // so the session and its captured draft survive the camera.
-            guard configuredUID != uid else { return }
+            // its task again on return, and so does leaving and re-entering the
+            // tab. Reset routes only for an account change, so the session and
+            // its captured draft survive the camera and a tab switch.
+            guard configuredUID != uid else { applyPendingRequest(); return }
             path = []
             configuredUID = nil
             await manager.configure(uid: uid)
             guard !Task.isCancelled, uid == FirebaseAccount.shared.user?.uid else { return }
             configuredUID = uid
-            if uid != nil, let host = destination.hostID {
-                // A session id is unique across computers, so a push for a Bot's chat is routed like any other;
-                // its Bot is only known if this connection has already been told.
-                path = RemoteRoute.stack(host: host, session: destination.sessionID,
-                    title: String(localized: "remote_untitled"),
-                    bot: destination.sessionID.flatMap { manager.botOfThread($0) })
-            }
+            applyPendingRequest()
         }
+        .onChange(of: tabs.botsRequest) { _, _ in applyPendingRequest() }
+        .onChange(of: path) { _, routes in tabs.reportDepth(.bots, routes.count) }
+        .onChange(of: tabs.popToRootRequests[.bots]) { _, _ in path = [] }
+    }
+
+    /// A deep link or push for a computer / chat: opens its stack once the manager is configured for the
+    /// signed-in account (until then, or while signed out, the request waits in the coordinator).
+    private func applyPendingRequest() {
+        guard configuredUID != nil, let request = tabs.botsRequest else { return }
+        tabs.botsRequest = nil
+        // A session id is unique across computers, so a push for a Bot's chat is routed like any other;
+        // its Bot is only known if this connection has already been told.
+        path = RemoteRoute.stack(host: request.hostID, session: request.sessionID,
+            title: String(localized: "remote_untitled"),
+            bot: request.sessionID.flatMap { manager.botOfThread($0) })
     }
 }
 

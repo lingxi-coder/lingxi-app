@@ -182,7 +182,12 @@ struct RootView: View {
     @State private var externalEngineReady = false
     @State private var externalActionApproval: LingxiAppAction?
     @State private var approvedExternalActions: [LingxiAppAction] = []
-    @State private var remoteDestination: RemoteControlDestination?
+    /// App-level, not per presentation: the Bots tab, its badge and the deep links share one manager.
+    #if canImport(harness_runtimeFFI)
+    @State private var remoteManager: RemoteControlManager
+    #endif
+    @State private var botsBadge = BotsBadge()
+    @State private var teamsWorkspace = TeamsWorkspace()
     @State private var externalImport: CanonicalDeepLink?
     @State private var externalLinkError: String?
     @State private var externalAsyncRouteID = UUID()
@@ -333,6 +338,12 @@ struct RootView: View {
         let projectID = projects.activeProjectId
         _settingsStore = State(initialValue: settings)
         _navigation = State(initialValue: AppNavigationModel())
+        #if canImport(harness_runtimeFFI)
+        _remoteManager = State(initialValue: RemoteControlManager(
+            mediaHostComposition: mediaHostComposition,
+            mediaHostInitializationError: mediaHostInitializationError
+        ))
+        #endif
         _projectStore = State(initialValue: projects)
         _cronRepository = State(initialValue: cron)
         let eventCenter = ClientEventCenter()
@@ -421,7 +432,45 @@ struct RootView: View {
 
     }
 
+    /// The app shell: four tabs (Chats / Bots / Teams / Settings) with the onboarding wizard and the
+    /// engine's permission-prompt presenter above them.
     private var rootStack: some View {
+        ZStack {
+            TabShell(navigation: navigation) {
+                chatsTab
+            } settings: {
+                settingsTab
+            }
+
+            // Onboarding owns the whole window, tab bar included, so it sits above the shell.
+            if !app.setupDone {
+                SetupWizardView()
+                    .zIndex(100)
+                    .transition(.opacity)
+            }
+
+            #if canImport(harness_runtimeFFI)
+                // Keep one root-mounted native sheet presenter so permission
+                // requests work over both the chat and any active SwiftUI sheet.
+                // A remote session in the Bots tab mounts its own for the remote engine.
+                if navigation.tabs.selected != .bots {
+                    EnginePermissionPromptHost(
+                        model: source.model,
+                        onApprove: { source.approvePermission($0, $1) },
+                        onDeny: { source.denyPermission($0) }
+                    )
+                }
+            #endif
+        }
+        .environment(botsBadge)
+        .environment(teamsWorkspace)
+        #if canImport(harness_runtimeFFI)
+        .environment(remoteManager)
+        #endif
+    }
+
+    /// The Chats tab: the conversation, its drawer and the pages pushed above it.
+    private var chatsTab: some View {
         @Bindable var navigation = navigation
         return GeometryReader { geometry in
           ZStack {
@@ -481,32 +530,14 @@ struct RootView: View {
                                 }
                             }
                         }
-                        .navigationDestination(for: AppRoute.self, destination: destination)
+                        .navigationDestination(for: AppRoute.self) { route in
+                            destination(route).hidesTabBarWhenPushed(in: .chats, overlay: route.isTerminal)
+                        }
                         .id(localization.language)
                 }
             }
 
             .environment(\.horizontalSizeClass, UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 840 ? .regular : .compact)
-
-            // Onboarding owns the whole window, sidebar and navigation bars
-            // included, so it sits outside the split view rather than in a column.
-            if !app.setupDone {
-                SetupWizardView()
-                    .zIndex(100)
-                    .transition(.opacity)
-            }
-
-            #if canImport(harness_runtimeFFI)
-                // Keep one root-mounted native sheet presenter so permission
-                // requests work over both the chat and any active SwiftUI sheet.
-                if remoteDestination == nil {
-                    EnginePermissionPromptHost(
-                        model: source.model,
-                        onApprove: { source.approvePermission($0, $1) },
-                        onDeny: { source.denyPermission($0) }
-                    )
-                }
-            #endif
           }
           .onAppear { workspaceWidth = geometry.size.width }
           .onChange(of: geometry.size.width) { _, width in
@@ -602,6 +633,15 @@ struct RootView: View {
         let presentationLifecycle = stateLifecycle
             .onChange(of: externalEngineReady) { _, ready in if ready { retryDeferredAppActions() } }
             .onChange(of: app.setupDone) { _, ready in if ready { retryDeferredAppActions() } }
+            // "Settings dismissed" no longer exists: the Settings tab is left, or its Voice page popped.
+            .onChange(of: navigation.tabs.selected) { old, new in
+                if old == .settings, new != .settings { handleSettingsDismissed() }
+            }
+            .onChange(of: navigation.settingsPath) { old, new in
+                if old.contains(.voice), !new.contains(.voice) {
+                    Task { @MainActor in await VoicePreviewPlayback.shared.stop() }
+                }
+            }
             .onChange(of: source.model.sessionTransitionPending) { _, pending in
                 if !pending { retryDeferredAppActions(); resolvePendingMessageLink() }
             }
@@ -726,17 +766,6 @@ struct RootView: View {
 
     private func withPresentations(_ content: some View) -> some View {
         content
-            .fullScreenCover(item: $remoteDestination) { destination in
-                #if canImport(harness_runtimeFFI)
-                RemoteControlView(
-                    destination: destination,
-                    openAccount: { navigation.showSettings(.account) },
-                    mediaHostComposition: mediaHostComposition,
-                    mediaHostInitializationError: mediaHostInitializationError
-                )
-                    .id(destination.id)
-                #endif
-            }
             .sheet(item: $externalImport, onDismiss: retryDeferredAppActions) { target in
                 DeepLinkImportPreview(target: target)
             }
@@ -780,70 +809,65 @@ struct RootView: View {
                     .environment(\.theme, theme)
                 }
             }
-            .fullScreenCover(
-                isPresented: Binding(
-                    get: { navigation.settingsOpen },
-                    set: { if !$0 { navigation.closeSettings() } }
-                ),
-                onDismiss: handleSettingsDismissed
-            ) {
-                SettingsHost(
-                    store: settingsStore,
-                    convo: source.model,
-                    projectCwd: projectStore.activeProject?.workspace.hostURL.path,
-                    projectStore: projectStore,
-                    // 设置页里的「切换项目」必须真的把引擎换过去：项目层/本地层写到
-                    // 哪个目录由引擎进程的 cwd 决定，只更新「当前项目」这个记号是不够
-                    // 的。关掉设置页再走同一条 `switchScope`，与抽屉里换项目走的是完全
-                    // 相同的一条路径，而不是另起一套只在设置页生效的切换逻辑。
-                    onSwitchProject: { projectID in
-                        navigation.closeSettings()
-                        _ = switchScope(to: .project(projectID))
-                    },
-                    onReconnectAfterSecretChange: {
-                        #if canImport(harness_runtimeFFI)
-                            let hasPendingPermission = !source.model.pendingPermissions.isEmpty
-                        #else
-                            let hasPendingPermission = false
-                        #endif
-                        guard !hasPendingPermission, source.model.pendingQuestions.isEmpty,
-                              !source.model.streaming, !source.model.sessionTransitionPending,
-                              !source.model.isCancelling,
-                              !source.model.backgroundTasks.contains(where: { !$0.status.isTerminal }),
-                              !source.model.agentSummaries.contains(where: { ["running", "working"].contains($0.status.lowercased()) })
-                        else { throw NSError(domain: "LingXi.Settings", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "voice_session_busy_retry")]) }
-                        try await rebuildSource(snapshot: providerRepository.makeLaunchSnapshot())
-                    },
-                    onRefreshMcp: { source.refreshMcpServers() },
-                    onRefreshSkills: {
-                        #if canImport(harness_runtimeFFI)
-                            Task {
-                                try? await source.submitEngineCommand(
-                                    .refreshListings(which: [.slashCommands])
-                                )
-                            }
-                        #endif
-                    },
-                    openTerminal: {
-                        navigation.closeSettings()
-                        openCurrentWorkspaceTerminal()
-                    },
-                    onPermissionModeChanged: { mode in
-                        #if canImport(harness_runtimeFFI)
-                            try await source.submitEngineCommand(.setPermissionMode(mode: mode))
-                        #endif
-                    },
-                    onTypescriptLspModeChanged: { mode in
-                        #if canImport(harness_runtimeFFI)
-                            try await source.submitEngineCommand(.setTypescriptLspMode(mode: mode))
-                        #endif
-                    },
-                    onClose: { navigation.closeSettings() },
-                    navigation: navigation
-                )
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-            }
+    }
+
+    /// The Settings tab: today's settings host as a tab root. "Done" (`onClose`) leaves to the tab the
+    /// jump came from, else Chats.
+    private var settingsTab: some View {
+        SettingsHost(
+            store: settingsStore,
+            convo: source.model,
+            projectCwd: projectStore.activeProject?.workspace.hostURL.path,
+            projectStore: projectStore,
+            // 设置页里的「切换项目」必须真的把引擎换过去：项目层/本地层写到
+            // 哪个目录由引擎进程的 cwd 决定，只更新「当前项目」这个记号是不够
+            // 的。离开设置页再走同一条 `switchScope`，与抽屉里换项目走的是完全
+            // 相同的一条路径，而不是另起一套只在设置页生效的切换逻辑。
+            onSwitchProject: { projectID in
+                navigation.leaveSettings()
+                _ = switchScope(to: .project(projectID))
+            },
+            onReconnectAfterSecretChange: {
+                #if canImport(harness_runtimeFFI)
+                    let hasPendingPermission = !source.model.pendingPermissions.isEmpty
+                #else
+                    let hasPendingPermission = false
+                #endif
+                guard !hasPendingPermission, source.model.pendingQuestions.isEmpty,
+                      !source.model.streaming, !source.model.sessionTransitionPending,
+                      !source.model.isCancelling,
+                      !source.model.backgroundTasks.contains(where: { !$0.status.isTerminal }),
+                      !source.model.agentSummaries.contains(where: { ["running", "working"].contains($0.status.lowercased()) })
+                else { throw NSError(domain: "LingXi.Settings", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "voice_session_busy_retry")]) }
+                try await rebuildSource(snapshot: providerRepository.makeLaunchSnapshot())
+            },
+            onRefreshMcp: { source.refreshMcpServers() },
+            onRefreshSkills: {
+                #if canImport(harness_runtimeFFI)
+                    Task {
+                        try? await source.submitEngineCommand(
+                            .refreshListings(which: [.slashCommands])
+                        )
+                    }
+                #endif
+            },
+            openTerminal: {
+                navigation.leaveSettings()
+                openCurrentWorkspaceTerminal()
+            },
+            onPermissionModeChanged: { mode in
+                #if canImport(harness_runtimeFFI)
+                    try await source.submitEngineCommand(.setPermissionMode(mode: mode))
+                #endif
+            },
+            onTypescriptLspModeChanged: { mode in
+                #if canImport(harness_runtimeFFI)
+                    try await source.submitEngineCommand(.setTypescriptLspMode(mode: mode))
+                #endif
+            },
+            onClose: { navigation.closeSettings() },
+            navigation: navigation
+        )
     }
 
     private var sidebar: some View {
@@ -866,12 +890,7 @@ struct RootView: View {
             sessionPinnedAt: sessionPinnedAt,
             newCronResults: newCronResultCount,
             account: account,
-            openSettings: { navigation.showSettings() },
-            openAccount: { navigation.showSettings(.account) },
-            openRemoteControl: {
-                navigation.closeSidebar()
-                remoteDestination = RemoteControlDestination()
-            },
+            openAccount: { navigation.showSettings(.account, origin: .chats) },
             openTerminal: openCurrentWorkspaceTerminal,
             openCron: { scopeID, taskID in navigation.openCron(scopeID: scopeID, taskID: taskID) },
             openProjects: { navigation.openProjects() },
@@ -883,7 +902,6 @@ struct RootView: View {
             appLibrary: LocalApps.library,
             appInfo: LocalApps.info,
             openApps: { navigation.openApps() },
-            openTeams: { navigation.openTeams() },
             openApp: { navigation.runApp($0) }
         )
         .id(sourceGeneration)
@@ -921,7 +939,7 @@ struct RootView: View {
                 onNewChat: activeScope == .scheduled
                     ? { startNewChat(in: .global, mode: activeMode) }
                     : nil,
-                onOpenVoiceSettings: { navigation.showSettings(.voice) },
+                onOpenVoiceSettings: { navigation.showSettings(.voice, origin: .chats) },
                 onOpenSessionDetails: {
                     if workspaceWidth >= 840 {
                         selectedPlanDocument = nil
@@ -1132,7 +1150,7 @@ struct RootView: View {
             TerminalView(
                 descriptor: descriptor,
                 onDismiss: { popRoute() },
-                onOpenRuntimeSettings: { popRoute(); navigation.showSettings(.linuxRuntime) },
+                onOpenRuntimeSettings: { popRoute(); navigation.showSettings(.linuxRuntime, origin: .chats) },
                 onDraftChanged: { hasUnsavedTerminalInput = $0 }
             )
         case .cron(let scopeID, let taskID):
@@ -1162,8 +1180,6 @@ struct RootView: View {
                 markCronResultsSeen()
             }
             .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
-        case .teams(let invite):
-            TeamsPage(initialInvite: invite, onOpenAccount: { navigation.showSettings(.account) })
         case .apps:
             AppsPage(library: LocalApps.library, market: LocalApps.market,
                 onOpenApp: { navigation.runApp($0) }, onShowDetails: { navigation.openLocalApp($0) },
@@ -2090,14 +2106,15 @@ struct RootView: View {
     /// (including the cases that never touch session selection).
     @discardableResult
     private func applyAppAction(_ action: LingxiAppAction, approvedDraftChange: Bool = false) -> Bool {
-        // A remote overlay preserves the local source and draft. It also works
+        // The Bots and Teams tabs preserve the local source and draft. They also work
         // when the local engine has not booted or is waiting for an answer.
         if case let .canonical(target) = action, ["remote", "team"].contains(target.parts.first ?? "") {
             guard app.setupDone else { return false }
             return applyCanonicalLink(target)
         }
+        // Settings is a tab, not a blocking surface: its own unsaved edits are guarded by the pages.
         guard app.setupDone, externalEngineReady, !projectSwitching, !source.model.sessionTransitionPending,
-              !navigation.settingsOpen, externalImport == nil, externalActionApproval == nil else { return false }
+              externalImport == nil, externalActionApproval == nil else { return false }
         if !approvedDraftChange && !approvedExternalActions.contains(action) && (!draft.isEmpty || hasUnsavedConversationMedia || (hasUnsavedTerminalInput && navigation.path.contains(where: { if case .terminal = $0 { return true }; return false })) || cronRepository.hasUnsavedChanges) {
             externalActionApproval = action
             return true
@@ -2105,8 +2122,10 @@ struct RootView: View {
 
         externalAsyncRouteID = UUID()
         navigation.closeSidebar()
-        navigation.closeSettings()
-        navigation.path.removeAll()
+        // The action opens in its own tab (§2.6); each tab keeps its stack, so only Chats is unwound.
+        let landing = landingTab(for: action)
+        if let landing { navigation.selectedTab = landing }
+        if landing == .chats { navigation.path.removeAll() }
 
         switch action {
         case let .canonical(target):
@@ -2166,11 +2185,19 @@ struct RootView: View {
         }
     }
 
+    /// The tab an action lands on (§2.6). `nil` keeps the current tab: `import` opens a sheet over it, and
+    /// a route this build does not know only shows the "unavailable" alert.
+    private func landingTab(for action: LingxiAppAction) -> AppTab? {
+        guard case let .canonical(target) = action else { return .chats }
+        return TabLogic.tabForLink(target.route).tab
+    }
+
     private func applyCanonicalLink(_ target: CanonicalDeepLink) -> Bool {
         let parts = target.parts
         if parts.count == 3, parts[0] == "remote" {
             navigation.closeSidebar()
-            remoteDestination = RemoteControlDestination(hostID: parts[1], sessionID: parts[2])
+            navigation.tabs.botsRequest = BotsRequest(hostID: parts[1], sessionID: parts[2])
+            navigation.selectedTab = .bots
             return true
         }
         let id = parts.last ?? ""
@@ -2233,7 +2260,10 @@ struct RootView: View {
         case "terminal":
             navigation.openTerminal(sessionID: id, initialCommand: target.payload["command"] as? String, projectID: activeScope.projectID)
         case "team":
-            navigation.openTeams(invite: target.params["code"])
+            // `team/join?code=` only fills the join form (never joins by itself); `team/inbox` has no code.
+            navigation.closeSidebar()
+            navigation.tabs.teamsJoinCode = target.params["code"]
+            navigation.selectedTab = .teams
         case "apps":
             let requestID = externalAsyncRouteID
             Task { @MainActor in

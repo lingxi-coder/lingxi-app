@@ -167,12 +167,7 @@ final class ProviderAccountsNativeUITests: XCTestCase {
             let entered = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: welcome)
             XCTAssertEqual(XCTWaiter.wait(for: [entered], timeout: 8), .completed)
         }
-        let settings = app.buttons["drawer.settings"]
-        let drawer = app.buttons["drawer.open"]
-        XCTAssertTrue(drawer.waitForExistence(timeout: 30), app.debugDescription)
-        drawer.tap()
-        XCTAssertTrue(settings.waitForExistence(timeout: 10), app.debugDescription)
-        settings.tap()
+        app.openSettingsTab(timeout: 30)
         let models = app.buttons["settings.group.models"]
         XCTAssertTrue(models.waitForExistence(timeout: 8), app.debugDescription)
         models.tap()

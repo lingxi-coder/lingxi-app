@@ -11,14 +11,7 @@ final class DesktopSettingsUITests: XCTestCase {
             XCUIDevice.shared.orientation = .landscapeLeft
         }
         app.launch()
-        let settings = app.buttons["drawer.settings"]
-        if !settings.isHittable {
-            let drawer = app.buttons["drawer.open"]
-            XCTAssertTrue(drawer.waitForExistence(timeout: 12), app.debugDescription)
-            drawer.tap()
-        }
-        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
-        settings.tap()
+        app.openSettingsTab(timeout: 12)
         XCTAssertTrue(app.searchFields.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
         return app
     }

@@ -6,14 +6,7 @@ final class FirebaseAccountUITests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
 
     private func openAccount(_ app: XCUIApplication) {
-        let settings = app.buttons["drawer.settings"]
-        if !settings.isHittable {
-            let drawer = app.buttons["drawer.open"]
-            XCTAssertTrue(drawer.waitForExistence(timeout: 20))
-            drawer.tap()
-        }
-        XCTAssertTrue(settings.waitForExistence(timeout: 10))
-        settings.tap()
+        app.openSettingsTab()
         let account = app.buttons["settings.page.account"]
         XCTAssertTrue(account.waitForExistence(timeout: 10))
         account.tap()

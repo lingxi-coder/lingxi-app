@@ -50,14 +50,7 @@ final class NativeStyleUITests: XCTestCase {
         app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-theme", theme]
         app.launch()
         defer { app.terminate() }
-        let settings = app.buttons["drawer.settings"]
-        if !settings.isHittable {
-            let drawer = app.buttons["drawer.open"]
-            XCTAssertTrue(drawer.waitForExistence(timeout: 15), app.debugDescription)
-            drawer.tap()
-        }
-        XCTAssertTrue(settings.waitForExistence(timeout: 8), app.debugDescription)
-        settings.tap()
+        app.openSettingsTab(timeout: 15)
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.exists || search.waitForExistence(timeout: 8), app.debugDescription)
         capture(app, "Settings-home-\(theme)")

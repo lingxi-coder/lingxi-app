@@ -278,8 +278,7 @@ final class LingxiCodeUITests: XCTestCase {
         add(listeningScreenshot)
 
         app.buttons["voice.close"].tap()
-        openDrawer()
-        app.buttons["drawer.settings"].tap()
+        app.openSettingsTab()
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 8), app.debugDescription)
 
         // Voice has its own row on the grouped settings home.
@@ -818,9 +817,8 @@ final class LingxiCodeUITests: XCTestCase {
     /// Closing the container and navigating in the same update must retain
     /// both sheet and pushed-page presentations.
     func testEverySidebarRoutePresentsAndLeavesTheSidebar() {
-        // Settings — a sheet.
-        openDrawer()
-        app.buttons["drawer.settings"].tap()
+        // Settings — a tab; "Done" returns to Chats.
+        app.openSettingsTab()
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 8), app.debugDescription)
         let settingsClose = app.descendants(matching: .any)["settings.close"].firstMatch
         XCTAssertTrue(settingsClose.waitForExistence(timeout: 5), app.debugDescription)
@@ -847,11 +845,9 @@ final class LingxiCodeUITests: XCTestCase {
     /// leaves the drawer intact. See the trailing assertions for what the two
     /// vacuous cron checks it used to end on were replaced with.
     func testProviderManagementDoesNotExposeScheduledTasksInDrawer() {
-        openDrawer()
-        app.buttons["drawer.settings"].tap()
+        app.openSettingsTab()
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 5))
-        // Let the drawer removal and settings sheet presentation finish before
-        // targeting a control at the same screen coordinates.
+        // Let the tab switch finish before targeting a control at the same screen coordinates.
         Thread.sleep(forTimeInterval: 1)
 
         let modelsGroup = app.buttons["settings.group.models"]
@@ -1043,8 +1039,7 @@ final class LingxiCodeUITests: XCTestCase {
     }
 
     func testAppIntegrationExposesRealSystemActions() {
-        openDrawer()
-        app.buttons["drawer.settings"].tap()
+        app.openSettingsTab()
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 5))
         Thread.sleep(forTimeInterval: 1)
 

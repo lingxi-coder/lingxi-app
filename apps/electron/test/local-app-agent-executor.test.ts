@@ -23,6 +23,7 @@ lines.on('close', () => {
 lines.on('line', raw => {
  const message=JSON.parse(raw);
  if(message.type==='catalog') {
+  if(mode==='record_global_config') fs.writeFileSync('catalog.json',JSON.stringify(message));
   const marker=message.configHome+'/.config.json';
   if(mode==='initializes_config' && !fs.existsSync(marker)) fs.writeFileSync(marker,'{"initialized":true}');
   if(mode==='changes_config') fs.writeFileSync(marker,JSON.stringify({updated:Date.now(),pid:process.pid}));
@@ -54,7 +55,7 @@ lines.on('line', raw => {
 async function fixture(t: { after(fn: () => Promise<void>): void }, mode='success', overrides: Partial<LocalAppAgentExecutorOptions>={}) {
  const root=await fs.mkdtemp(join(tmpdir(),'lingxi-agent-executor-'));
  const children: ReturnType<typeof spawn>[]=[];
- const options: LocalAppAgentExecutorOptions={configHome:root,root,serverBin:'test-bridge',
+ const options: LocalAppAgentExecutorOptions={configHome:root,globalConfigPath:join(root,'global-config.json'),root,serverBin:'test-bridge',
   credentials:async()=>accountEnvelope(),permission:async()=>false,question:async()=>null,
   spawnProcess:((_bin:unknown,_args:unknown,opts:unknown)=>{
    const child=spawn(process.execPath,['-e',CHILD,mode],opts as Parameters<typeof spawn>[2]);children.push(child);return child;
@@ -249,6 +250,19 @@ test('catalog caches native model eligibility but observes configuration edits b
  await fs.writeFile(join(root, 'settings.json'), '{"model":"updated"}');
  await executor.catalog(); assert.equal(children.length, 2, 'a settings mutation invalidates the private catalog immediately');
  executor.invalidateCatalog(); await executor.catalog(); assert.equal(children.length, 3);
+});
+
+test('catalog and execution use the native global config path, and its edits invalidate the catalog', async t => {
+ const {root,executor,execution,children}=await fixture(t,'record_global_config');
+ const globalConfigPath=join(root,'global-config.json');
+ await executor.catalog();
+ assert.equal(JSON.parse(await fs.readFile(join(root,'catalog/catalog.json'),'utf8')).globalConfigPath,globalConfigPath);
+ await executor.catalog(); assert.equal(children.length,1);
+ await fs.writeFile(globalConfigPath,'{"mcpServers":{}}');
+ await executor.catalog(); assert.equal(children.length,2);
+ await executor.execute(execution);
+ const start=JSON.parse(await fs.readFile(join(taskCwd(root,execution),'start.json'),'utf8'));
+ assert.equal(start.globalConfigPath,globalConfigPath);
 });
 
 test('fresh host configuration initialization is re-read before publishing the catalog', async t => {

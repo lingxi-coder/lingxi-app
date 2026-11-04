@@ -1689,19 +1689,32 @@ fn initialize_live_session(
 /// Resolve product directories independently of settings, policy, and credentials.
 pub fn product_paths_json(cwd: &Path) -> Result<String, String> {
     let brand_home = brand_home().ok_or("product paths require a brand home")?;
-    product_paths_json_from(cwd, &brand_home)
+    let global_config_path = migrations::global_config::global_config_path();
+    product_paths_json_from(cwd, &brand_home, global_config_path.as_deref())
 }
 
-fn product_paths_json_from(cwd: &Path, brand_home: &Path) -> Result<String, String> {
+fn product_paths_json_from(
+    cwd: &Path,
+    brand_home: &Path,
+    global_config_path: Option<&Path>,
+) -> Result<String, String> {
     let brand_home = if brand_home.is_absolute() {
         brand_home.to_path_buf()
     } else {
         cwd.join(brand_home)
     };
+    let global_config_path = global_config_path.map(|path| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        }
+    });
     serde_json::to_string(&serde_json::json!({
         "version": 1,
         "app_projects_root": brand_home.join(".apps"),
         "brand_home": brand_home,
+        "global_config_path": global_config_path,
     }))
     .map_err(|_| "failed to encode product paths".into())
 }
@@ -2985,10 +2998,11 @@ mod tests {
         let settings = home.join("settings.json");
         std::fs::write(&settings, "invalid settings").unwrap();
         let paths: serde_json::Value =
-            serde_json::from_str(&product_paths_json_from(root.path(), &home).unwrap()).unwrap();
+            serde_json::from_str(&product_paths_json_from(root.path(), &home, None).unwrap())
+                .unwrap();
         assert_eq!(
             paths,
-            serde_json::json!({"version": 1, "brand_home": home, "app_projects_root": home.join(".apps")})
+            serde_json::json!({"version": 1, "brand_home": home, "app_projects_root": home.join(".apps"), "global_config_path": null})
         );
         assert_eq!(
             std::fs::read_to_string(settings).unwrap(),
@@ -3001,7 +3015,12 @@ mod tests {
     fn product_paths_resolve_relative_overrides_against_the_discovery_directory() {
         let root = tempfile::tempdir().unwrap();
         let paths: serde_json::Value = serde_json::from_str(
-            &product_paths_json_from(root.path(), Path::new("custom-product")).unwrap(),
+            &product_paths_json_from(
+                root.path(),
+                Path::new("custom-product"),
+                Some(Path::new("custom-product/config.json")),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -3011,6 +3030,10 @@ mod tests {
         assert_eq!(
             paths["app_projects_root"],
             serde_json::json!(root.path().join("custom-product/.apps"))
+        );
+        assert_eq!(
+            paths["global_config_path"],
+            serde_json::json!(root.path().join("custom-product/config.json"))
         );
     }
 

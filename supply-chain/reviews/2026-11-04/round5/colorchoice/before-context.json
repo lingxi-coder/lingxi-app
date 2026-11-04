@@ -1,0 +1,20 @@
+{
+  "captured_utc": "2026-11-04T11:00:00.923224+00:00",
+  "head": "304d0bf82a00c68d7bf6587adce7df91668d54d0",
+  "cargo_version": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+  "rustc_version": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "cargo_vet_version": "0.10.3",
+  "cargo_vet_executable_sha256": "bc8d963023f8a8a9102d2261922a817d59ceeabf41c55f1c9d7fa8ee8382ea82",
+  "cargo_vet_provenance": "../is-terminal/cargo-vet-release.json and cargo-vet-release.sha256",
+  "command": "cargo vet check --locked --frozen --no-minimize-exemptions --no-registry-suggestions --cache-dir <fresh temp> --output-format json",
+  "exit_code": 255,
+  "failure_count": 818,
+  "input_sha256": {
+    "Cargo.toml": "64b16f7acf3b9cb45f25564ce0c1143eefbbc6fa5fe67d11ff69abac3c39194e",
+    "Cargo.lock": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+    "supply-chain/config.toml": "8e1b2dc287f3a81dc84dda3de41984d17f2fed4d115347b6d3d85f979a93d5f2",
+    "supply-chain/audits.toml": "bbd85301d00f50ea2095ba3cbfc2c2d0028e0ce2ade581d1c53041e426a64c5c",
+    "supply-chain/imports.lock": "38691e1bfc73d11d3fb1b46a820afff4bf5344d67d5852c7a1697d58e4dfb536"
+  },
+  "output_sha256": "195efd6be79b093cf10bee918e1c998625a7038cbc40e783e4c5bd77836bf378"
+}

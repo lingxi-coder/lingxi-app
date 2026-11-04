@@ -1,0 +1,35 @@
+{
+  "sha": "0fe6f0ff6d52e9f91d4071199bd0b24bd46f3d35",
+  "node_id": "C_kwDOHW8dYtoAKDBmZTZmMGZmNmQ1MmU5ZjkxZDQwNzExOTliZDBiMjRiZDQ2ZjNkMzU",
+  "url": "https://api.github.com/repos/rust-cli/anstyle/git/commits/0fe6f0ff6d52e9f91d4071199bd0b24bd46f3d35",
+  "html_url": "https://github.com/rust-cli/anstyle/commit/0fe6f0ff6d52e9f91d4071199bd0b24bd46f3d35",
+  "author": {
+    "name": "Ed Page",
+    "email": "eopage@gmail.com",
+    "date": "2026-03-13T18:59:22Z"
+  },
+  "committer": {
+    "name": "Ed Page",
+    "email": "eopage@gmail.com",
+    "date": "2026-03-13T18:59:22Z"
+  },
+  "tree": {
+    "sha": "69dd6b3dbf25114676d274cca8b9dbaad18103a3",
+    "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/69dd6b3dbf25114676d274cca8b9dbaad18103a3"
+  },
+  "message": "chore: Release",
+  "parents": [
+    {
+      "sha": "332016ed167c53752a4ab11f22317745b2aa6763",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/commits/332016ed167c53752a4ab11f22317745b2aa6763",
+      "html_url": "https://github.com/rust-cli/anstyle/commit/332016ed167c53752a4ab11f22317745b2aa6763"
+    }
+  ],
+  "verification": {
+    "verified": false,
+    "reason": "unsigned",
+    "signature": null,
+    "payload": null,
+    "verified_at": null
+  }
+}

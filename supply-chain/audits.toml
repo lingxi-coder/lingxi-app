@@ -61,6 +61,12 @@ criteria = "safe-to-deploy"
 version = "0.3.32"
 notes = "AI-assisted full exact-version source review and independent root cross-review. Evidence: supply-chain/reviews/2026-11-04/round8/futures-io/review.md (SHA-256 e29733f295672197de8f3c9e302afc37c6f363c1cd0f8982ced18e9e0a01d4e4); cross-review: supply-chain/reviews/2026-11-04/round8/futures-io/root-cross-review.md (SHA-256 d1ad9aacc03a885427612ff37944873096081afdea154f20a71807e8575f97f9). Scope is this exact package; consumer trait implementations, standard library, compiler and other versions remain separate."
 
+[[audits.futures-sink]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.3.32"
+notes = "AI-assisted full exact-version source review and independent root cross-review. Evidence: supply-chain/reviews/2026-11-04/round8/futures-sink/review.md (SHA-256 a6a751389387d5d22d4c1d3ea4a08e6ee5b71caf1281ce59179d180b99428d40); cross-review: supply-chain/reviews/2026-11-04/round8/futures-sink/root-cross-review.md (SHA-256 c462695a09c229deef47a4a1bab0b2b88518df84cc61f5861cd8b0a749bc672a). Unsafe collection pinning rationale and unbounded allocation limits are recorded; consumer implementations, standard library, compiler and other versions remain separate."
+
 [[audits.gethostname]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"

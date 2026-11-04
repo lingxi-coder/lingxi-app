@@ -1,0 +1,38 @@
+{
+  "app_candidate_commit": "87dab5825af2cbfc0c1ee8100ef2a4fc600acb36",
+  "app_main_baseline": "9b0ad700f95c1535c083a103c6f541330dd490fd",
+  "harness_candidate_commit": "1957be86b1e19d3c87810bca8f611f19d3db68c0",
+  "harness_webrtc_tree": "e60e95c559d72e9ea4e0abd110f3fe655322431d",
+  "advisory_db_commit": "965bf9ad083b58e6340d65829d85217b18be9290",
+  "cargo_vet_binary_sha256": "bc8d963023f8a8a9102d2261922a817d59ceeabf41c55f1c9d7fa8ee8382ea82",
+  "baseline_vet_sha256": "417cb2cf1d2c7dccab03d56fa3675a6617294da55106bced837f3305311ba7dd",
+  "inputs_sha256": {
+    "Cargo.toml": "12ba6c1222e3c35f5cb0ccb79c79242f52980d5ecf17040ce84d5a4146446f6b",
+    "Cargo.lock": "3fb9e86a60470c7d215ee235c1bb6652f53925c938fbafc5b76ca533694fa16d",
+    "packages/remote-control-client/Cargo.toml": "dd3808c4f9f17e99f6d62887cc7deac9de4dc9a4eecc5b8d36e6315e2b092479",
+    "supply-chain/config.toml": "7f17c0e9ee2171a578af72ffcb3ccb371cdec79447948f1ee2f6d33ee00f80ff",
+    "supply-chain/audits.toml": "6e6eef2b5ad086de4357c3b27f00695f6a5a49588d3a0965594623e96ccece41",
+    "supply-chain/imports.lock": "38691e1bfc73d11d3fb1b46a820afff4bf5344d67d5852c7a1697d58e4dfb536"
+  },
+  "evidence_sha256": {
+    "cargo-deny.stderr.gz": "1d499dca1dc8584a171da9598674803e1a95d8cf864767a17c168fb85593f714",
+    "cargo-deny.stdout.gz": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64",
+    "cargo-vet.json.gz": "99a72f3c8769562874d57c22f9277a1a09a4fd2de8892e3f9e9bd55fe4ed1261",
+    "cargo-vet.stderr.gz": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64",
+    "media-loopback.log.gz": "0fe62f8a505e30ecc2d35fc65e9f0bfa0d7d38b6cbd72ab0b9dc80fd24badc85",
+    "metadata.json.gz": "168ebc3a6ac3006d265f3b073bb1146c11ed30ecf80881a19f6e076ee53a6c1d",
+    "native-peer.log.gz": "fcee766bd0253f2059fcbf5e782881f8393ba533412eaad85d855953a34e31aa",
+    "vet-delta.json": "0bc81415ff141e26c112c5f6b24a7c8378d1d86b6157f99f7a52e80efc172bda"
+  },
+  "uncompressed_sha256": {
+    "metadata.json": "f7f9ce45c4a0633ec4e008e0728c74c0921b81dcb854c6c2cb2cca4ecf404202",
+    "cargo-vet.json": "cf789c5ceae3d7f18f849fe2ca3b11a5da329175d097327e7e099492caadf932",
+    "cargo-vet.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cargo-deny.stderr": "3d4e20af818dd6f7efcba0b55f2a86612bca715b2829a1b048b0f430ae373931",
+    "cargo-deny.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "media-loopback.log": "118249d4032cb5a5b9e961c70fc39a572602cba8699c05942ab0b2caa7bbc2d2",
+    "native-peer.log": "7f39c9d2ea2cdae2dedfec14e3309e28a7e8c622dd17dfd67bda43f2ed288e66"
+  },
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)"
+}

@@ -72,7 +72,7 @@ for (const uid of ['alice', 'reader']) test(`T3 rendered question grants answer 
   const card = renderer.root.findByProps({ className: 'team-bot-grid' });
   assert.match(textOf(card), /Offline/); assert.match(textOf(card), /owner/);
   const cardButton = card.findByType('button'); assert.equal(Boolean(cardButton.props.disabled), uid !== 'alice');
-  assert.match(textOf(renderer.root), /Open Teams in LingXi Desktop/);
+  assert.match(textOf(renderer.root), /Open Teams on Desktop to share a local Bot or change its permissions\./);
   await act(async () => { renderer.root.findByProps({ className: 'team-thread' }).props.onClick(); await settle(); });
   const prompt = renderer.root.findByProps({ className: 'team-bot-question' });
   if (uid === 'alice') {

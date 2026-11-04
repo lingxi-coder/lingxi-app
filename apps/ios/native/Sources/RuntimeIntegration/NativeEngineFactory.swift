@@ -72,7 +72,16 @@ enum NativeEngineFactory {
     static func prepare(
         _ scenario: Scenario
     ) throws -> Prepared {
-        let directories = MobileUserStorage.directories()
+        // All launch fields, including a scheduled default cwd, must refer to
+        // the account selected by the runtime configuration.
+        let managedRoot: String?
+        switch scenario {
+        case let .interactive(config, _, _): managedRoot = config.mobileLinux?.managedRoot
+        case let .scheduled(_, _, _, _, runtime): managedRoot = runtime?.managedRoot
+        case .appAgent: managedRoot = nil
+        }
+        let directories = managedRoot.map { MobileUserStorage.directories(managedRoot: $0) }
+            ?? MobileUserStorage.directories()
         let settings: LaunchSettings
         let policy: Policy
         switch scenario {
@@ -291,7 +300,7 @@ enum NativeEngineFactory {
         appSandboxRoot: String
     ) -> IosMobileLinuxConfigFfi {
         LXISHRuntimeResourceBootstrap.prepare()
-        let directories = MobileUserStorage.directories()
+        let directories = MobileUserStorage.directories(managedRoot: config.managedRoot)
         return IosMobileLinuxConfigFfi(
             mode: config.mode == .legacy ? .legacy : .mobileLinux,
             brandId: directories.brandId,

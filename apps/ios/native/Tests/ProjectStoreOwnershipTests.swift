@@ -118,7 +118,7 @@ final class ProjectStoreOwnershipTests: XCTestCase {
         let secondEntry = try host.retain(source: second, scope: .global, mode: .code,
             sessionID: second.model.activeSessionId, workspace: "/home/other", draft: "")
         host.select(firstEntry)
-        let state = SessionWorkspaceState(sessionId: id, cwd: "/home/lingxi/lingxi/projects/linked",
+        let state = SessionWorkspaceState(sessionId: id, cwd: LXISHGuestPaths.workspace("projects") + "/linked",
             projectRoot: project.record.directory, additionalDirectories: [], transcriptPath: path)
         let authority = firstEntry.workspaceWriteAuthority
         let revision = authority.currentRevision()
@@ -178,7 +178,7 @@ final class ProjectStoreOwnershipTests: XCTestCase {
         host.select(firstEntry)
         let authority = firstEntry.workspaceWriteAuthority
         let revision = authority.currentRevision()
-        let stale = SessionWorkspaceState(sessionId: id, cwd: "/home/lingxi/lingxi/projects/linked",
+        let stale = SessionWorkspaceState(sessionId: id, cwd: LXISHGuestPaths.workspace("projects") + "/linked",
             projectRoot: project.record.directory, additionalDirectories: [], transcriptPath: path)
         let entered = expectation(description: "long project operation holds its queue")
         let release = DispatchSemaphore(value: 0)
@@ -417,7 +417,7 @@ final class ProjectStoreOwnershipTests: XCTestCase {
         let project = try repository.createInternal(name: "Project")
         let linked = root.appendingPathComponent("linked", isDirectory: true)
         try FileManager.default.createDirectory(at: linked, withIntermediateDirectories: true)
-        let projectCwd = "/home/lingxi/lingxi/projects/linked"
+        let projectCwd = LXISHGuestPaths.workspace("projects") + "/linked"
         let globalID = "11111111-1111-4111-8111-111111111111"
         let projectID = "22222222-2222-4222-8222-222222222222"
         let source = "/home/lingxi/.lingxi/projects/original.jsonl"

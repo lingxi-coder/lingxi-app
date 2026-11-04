@@ -34,6 +34,28 @@ final class MockConversationSource: ConversationSource {
     }
 
     #if DEBUG
+        /// Supply an exact, isolated owner for the UI navigation fixture. This
+        /// is a mock workspace, not evidence that a Linux runtime is available.
+        func prepareUIOwnerProbeWorkspace(sessionID: String? = nil, cwd: String? = nil, transcriptPath: String? = nil,
+                                          enabled: Bool = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_OWNER_PROBE"] == "1") {
+            guard enabled else { return }
+            if let sessionID, UUID(uuidString: sessionID) != nil { model.activeSessionId = sessionID }
+            guard UUID(uuidString: model.activeSessionId) != nil else { return }
+            let workspace = cwd ?? LXISHGuestPaths.conversationWorkspace(for: model.sessionMode)
+            model.workspaceState = SessionWorkspaceState(sessionId: model.activeSessionId, cwd: workspace,
+                projectRoot: workspace, additionalDirectories: [],
+                transcriptPath: transcriptPath ?? "\(workspace)/ui-test-\(model.activeSessionId).jsonl")
+        }
+
+        func authenticatedWorkspaceState(sessionID: String, mode: SessionMode) async -> SessionWorkspaceState? {
+            guard ProcessInfo.processInfo.environment["LINGXI_UI_TEST_OWNER_PROBE"] == "1",
+                  model.sessionMode == mode,
+                  canonicalSessionID(model.activeSessionId) == canonicalSessionID(sessionID),
+                  let workspace = model.workspaceState,
+                  canonicalSessionID(workspace.sessionId) == canonicalSessionID(sessionID) else { return nil }
+            return workspace
+        }
+
         static func uiTestFixture(
             sessionMode: SessionMode = .code,
             cancelledRun: Bool = false,
@@ -553,13 +575,15 @@ final class MockConversationSource: ConversationSource {
             initial.streamed = true
             model.messages.append(initial)
             model.items.append(.message(initial))
+            let ownerProbe = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_OWNER_PROBE"] == "1"
             Task { @MainActor [weak self] in
                 var paragraphs: [String] = []
-                for index in 1...80 {
-                    try? await Task.sleep(for: .milliseconds(300))
+                for index in 1...(ownerProbe ? Int.max : 80) {
+                    try? await Task.sleep(for: ownerProbe ? .seconds(2) : .milliseconds(300))
                     guard let self, !Task.isCancelled,
                           self.turnToken == generation, self.activeTurnToken == token else { return }
                     paragraphs.append("Scroll delta \(index). A streamed paragraph keeps growing in this same message.")
+                    if ownerProbe, paragraphs.count > 80 { paragraphs.removeFirst() }
                     var reply = Message(id: messageID, role: .ai,
                         text: paragraphs.joined(separator: "\n\n") + "\n\nScroll stream tail \(index)")
                     reply.streamed = true

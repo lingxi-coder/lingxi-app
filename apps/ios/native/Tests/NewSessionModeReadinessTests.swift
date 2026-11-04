@@ -5,6 +5,23 @@ import XCTest
 
 @MainActor
 final class SessionHostOwnershipTests: XCTestCase {
+    #if DEBUG
+    func testUIOwnerProbeRestoresTheExactRequestedOwnerAndWorkspace() throws {
+        let id = "11111111-1111-4111-8111-111111111111"
+        let mock = MockConversationSource(sessionMode: .code)
+        mock.model.activeSessionId = "different-fixture-owner"
+        mock.prepareUIOwnerProbeWorkspace(sessionID: id, cwd: "/workspace/exact",
+                                          transcriptPath: "/transcripts/exact.jsonl", enabled: true)
+        let host = SessionHost()
+        let owner = try host.retain(source: mock, scope: .global, mode: .code,
+                                    sessionID: id, workspace: "/workspace/exact", draft: "")
+        XCTAssertEqual(owner.sessionID, id)
+        XCTAssertEqual(mock.model.workspaceState?.sessionId, id)
+        XCTAssertEqual(mock.model.workspaceState?.cwd, "/workspace/exact")
+        XCTAssertEqual(mock.model.workspaceState?.transcriptPath, "/transcripts/exact.jsonl")
+    }
+    #endif
+
     func testChatLocalAppIngressRejectsBeforeSDKAndFiles() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

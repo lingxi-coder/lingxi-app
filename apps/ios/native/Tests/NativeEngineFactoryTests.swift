@@ -58,6 +58,7 @@ final class NativeEngineFactoryTests: XCTestCase {
         XCTAssertEqual(launch.projectAdditionalDirectories, config.additionalWorkspaceDirectories)
         XCTAssertEqual(launch.projectMountGrants, config.projectMountGrants)
         XCTAssertEqual(launch.mobileLinux?.appSandboxRoot, launch.appSandboxRoot)
+        XCTAssertEqual(launch.nativeConfigHome, MobileUserStorage.directories(managedRoot: runtime.managedRoot).configHome)
         XCTAssertEqual(launch.hostEnvironment?.launchMode, .interactive)
         XCTAssertEqual(launch.providerConfig?.providerProfilesJson, "profiles")
         XCTAssertEqual(launch.providerConfig?.routingJson, "routing")
@@ -102,6 +103,23 @@ final class NativeEngineFactoryTests: XCTestCase {
         )).configuration
         XCTAssertEqual(noTask.projectCwd, MobileUserStorage.directories().scheduledCwd)
         XCTAssertEqual(noTask.model, "default-model")
+    }
+
+    func testScheduledConfigurationUsesTheSelectedRuntimeAccount() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let runtimeRoot = root.appendingPathComponent("runtime").path
+        let paths = MobileUserStorage.directories(managedRoot: runtimeRoot)
+        let runtime = TerminalRuntimeConfig(mode: .mobileLinux, managedRoot: runtimeRoot,
+            workspaceHostPath: paths.projects, stableWorkspaceId: "projects", abi: "arm64",
+            rootfsVersion: "test", archiveSha256: nil, authorizationFile: nil)
+        let launch = try NativeEngineFactory.prepare(.scheduled(appSandboxRoot: root.path,
+            scope: .global(appSandboxRoot: root.path), task: nil, snapshot: makeSnapshot(), runtime: runtime)).configuration
+        XCTAssertEqual(launch.nativeConfigHome, paths.configHome)
+        XCTAssertEqual(launch.projectCwd, paths.scheduledCwd)
+        XCTAssertEqual(launch.mobileLinux?.managedRoot, runtimeRoot)
+        XCTAssertEqual(launch.brandId, launch.mobileLinux?.brandId)
+        XCTAssertEqual(launch.linuxUser, launch.mobileLinux?.linuxUser)
+        XCTAssertEqual(launch.configDirName, launch.mobileLinux?.configDirName)
     }
 
     func testColdRestoreRequiresExactTranscriptPathBeforeNativeBuild() throws {

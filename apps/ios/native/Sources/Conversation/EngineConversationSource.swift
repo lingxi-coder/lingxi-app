@@ -159,6 +159,7 @@ final class EngineConversationSource: ConversationSource {
     private var durableLoadWillStartForTesting: (() -> Void)?
     private var noAdmissionProofObserverForTesting: ((ConversationTurnToken) -> Void)?
     private var cancelSubmissionObserverForTesting: ((UInt64) -> Void)?
+    private var promptFailureHandledForTesting: ((ConversationTurnToken) -> Void)?
     #endif
     private var durableLookupPending = false
     private var authoringWorkspaceValidation: UUID?
@@ -178,8 +179,11 @@ final class EngineConversationSource: ConversationSource {
     }
     private var sideEnded = false
     private var sideClosing = false
-    private var pendingSideInput: (String, [UInt16]?, [ImageRefDto])?
-    private var failedSideInput: (String, [UInt16]?, [ImageRefDto])?
+    private typealias SideInput = (text: String, sourceCodeUnits: [UInt16]?, images: [ImageRefDto],
+                                   visualizationContext: VisualizationContextChip?)
+    private var pendingSideInput: SideInput?
+    private var failedSideInput: SideInput?
+    private var unconfirmedSideInputs: [SideInput] = []
     var onSideSubmissionFailure: ((String, [UInt16]?, [ImageRefDto]) -> Void)? {
         didSet { deliverFailedSideSubmission() }
     }
@@ -1441,6 +1445,7 @@ final class EngineConversationSource: ConversationSource {
         model.visualizationFollowup = nil
         pendingSideInput = nil
         failedSideInput = nil
+        unconfirmedSideInputs.removeAll()
         onSideSubmissionFailure = nil
     }
 
@@ -1454,7 +1459,12 @@ final class EngineConversationSource: ConversationSource {
         let parentEpoch = sideParentSessionEpoch
         let sideEpoch = sessionEpoch
         archivedSideEpoch = sideEpoch
-        var outstanding = originalPrompts.filter { !acceptedSidePrompts.contains($0.key) }.map { element in
+        var outstanding = unconfirmedSideInputs.map { input in
+            ExpiredSideChatInput(parentSessionID: parentID, sideID: sideID, sideOwnerEpoch: sideEpoch,
+                text: input.text, sourceCodeUnits: input.sourceCodeUnits,
+                images: input.images, visualizationContext: input.visualizationContext)
+        }
+        outstanding += originalPrompts.filter { !acceptedSidePrompts.contains($0.key) }.map { element in
             let original = element.value
             return ExpiredSideChatInput(parentSessionID: original.item.sessionID, sideID: original.item.sideID,
                 sideOwnerEpoch: original.item.ownerEpoch,
@@ -1463,13 +1473,13 @@ final class EngineConversationSource: ConversationSource {
         }
         if originalPrompts.isEmpty, let pendingSideInput {
             outstanding.append(ExpiredSideChatInput(parentSessionID: parentID, sideID: sideID, sideOwnerEpoch: sideEpoch,
-                text: pendingSideInput.0, sourceCodeUnits: pendingSideInput.1,
-                images: pendingSideInput.2, visualizationContext: model.visualizationChip))
+                text: pendingSideInput.text, sourceCodeUnits: pendingSideInput.sourceCodeUnits,
+                images: pendingSideInput.images, visualizationContext: pendingSideInput.visualizationContext))
         }
         if let failedSideInput {
             outstanding.append(ExpiredSideChatInput(parentSessionID: parentID, sideID: sideID, sideOwnerEpoch: sideEpoch,
-                text: failedSideInput.0, sourceCodeUnits: failedSideInput.1,
-                images: failedSideInput.2, visualizationContext: nil))
+                text: failedSideInput.text, sourceCodeUnits: failedSideInput.sourceCodeUnits,
+                images: failedSideInput.images, visualizationContext: failedSideInput.visualizationContext))
         }
         sideEnded = true
         audioContextGeneration &+= 1
@@ -1831,6 +1841,9 @@ final class EngineConversationSource: ConversationSource {
                 } catch {
                     if let token = admittedToken {
                         onFailure(token, error)
+                        #if DEBUG
+                        promptFailureHandledForTesting?(token)
+                        #endif
                     } else {
                         if !(error is CancellationError) {
                             model.error = ConversationError(kind: .host, message: "\(error)")
@@ -1879,6 +1892,7 @@ final class EngineConversationSource: ConversationSource {
                 try await self.submitCommand(.runSlashCommand(raw: raw, images: images, turnId: turnId))
             } catch {
                 guard self.activeConversationTurnToken == token else { return }
+                self.retainPendingSideInputAsUnconfirmed()
                 self.fail(.host, "\(error)")
             }
         }
@@ -2066,7 +2080,8 @@ final class EngineConversationSource: ConversationSource {
             var rawUnits: [UInt16] = [0x002f]
             rawUnits.append(contentsOf: tokenUnits)
             rawUnits.append(contentsOf: inputUnits.dropFirst(suffixStart))
-            if isSideChat { pendingSideInput = (text, sourceCodeUnits, images) }
+            // Slash commands do not send or consume the visualization chip.
+            if isSideChat { pendingSideInput = (text, sourceCodeUnits, images, nil) }
             model.isNew = false
             model.notice = nil
             var prompt = Message(role: .user, text: text, images: uiImages(from: images))
@@ -2098,7 +2113,7 @@ final class EngineConversationSource: ConversationSource {
                       unresolvedRecoveryTurnID == nil, !model.isSelectedAgentReadOnly,
                       submittedOwner.isEmpty || model.activeSessionId.isEmpty ||
                         canonicalSessionID(model.activeSessionId) == submittedOwner else { return nil }
-                if isSideChat { pendingSideInput = (text, sourceCodeUnits, images) }
+                if isSideChat { pendingSideInput = (text, sourceCodeUnits, images, chip) }
                 model.isNew = false
                 model.notice = nil
                 let chipUnchanged = model.visualizationChip == chip && model.visualizationChipRevision == chipRevision
@@ -2147,6 +2162,7 @@ final class EngineConversationSource: ConversationSource {
                     #endif
                     return
                 }
+                retainPendingSideInputAsUnconfirmed()
                 fail(.host, "\(error)", clearDurable: false)
             })
         if token == nil { clearDurableCheckpoint(turnId) }
@@ -4825,6 +4841,13 @@ final class EngineConversationSource: ConversationSource {
             // PR-4 item 4: a terminal error is a persistent, kind-aware banner.
             finishActiveRun(.failed)
             model.updateMainAgent(status: "failed", latestActivity: displayMessage)
+            if isSideChat {
+                if let token = activeConversationTurnToken, acceptedSidePrompts.contains(token) {
+                    pendingSideInput = nil
+                } else {
+                    retainPendingSideInputAsUnconfirmed()
+                }
+            }
             fail(Self.kind(from: kind), displayMessage)
 
         case let .modelList(models, current, currentModelSource, details):
@@ -5264,6 +5287,10 @@ final class EngineConversationSource: ConversationSource {
 
     func setNoAdmissionProofObserverForTesting(_ observer: ((ConversationTurnToken) -> Void)?) {
         noAdmissionProofObserverForTesting = observer
+    }
+
+    func setPromptFailureHandledForTesting(_ observer: ((ConversationTurnToken) -> Void)?) {
+        promptFailureHandledForTesting = observer
     }
 
     func setCancelSubmissionObserverForTesting(_ observer: ((UInt64) -> Void)?) {
@@ -6276,6 +6303,12 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
+    private func retainPendingSideInputAsUnconfirmed() {
+        guard isSideChat, let pendingSideInput else { return }
+        unconfirmedSideInputs.append(pendingSideInput)
+        self.pendingSideInput = nil
+    }
+
     private func restoreFailedSideSubmission() {
         guard isSideChat, let pendingSideInput else { return }
         self.pendingSideInput = nil
@@ -6286,7 +6319,7 @@ final class EngineConversationSource: ConversationSource {
     private func deliverFailedSideSubmission() {
         guard let failedSideInput, let onSideSubmissionFailure else { return }
         self.failedSideInput = nil
-        onSideSubmissionFailure(failedSideInput.0, failedSideInput.1, failedSideInput.2)
+        onSideSubmissionFailure(failedSideInput.text, failedSideInput.sourceCodeUnits, failedSideInput.images)
     }
 
     // MARK: model selection (SHIP-BLOCKER #2)

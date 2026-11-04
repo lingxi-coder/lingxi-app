@@ -198,10 +198,11 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(summary.waitForExistence(timeout: 10), app.debugDescription)
         summary.tap()
         app.buttons["conversation.summary.category.tools"].tap()
-        let batch = app.buttons["conversation.timeline.tool-batch.timeline-tools:ui-local-app-requires-code"]
+        let sheet = app.otherElements["conversation.summary-sheet.tools"]
+        let batch = sheet.buttons["conversation.timeline.tool-batch.timeline-tools:ui-local-app-requires-code"]
         XCTAssertTrue(batch.waitForExistence(timeout: 5), app.debugDescription)
         batch.tap()
-        let result = app.buttons["conversation.tool-call.ui-local-app-requires-code.toggle"]
+        let result = sheet.buttons["conversation.tool-call.ui-local-app-requires-code.toggle"]
         XCTAssertTrue(result.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(result.label.contains("Chat mode does not support Local App development. Switch to Code mode to continue."),
                       result.label)
@@ -797,6 +798,96 @@ final class LingxiCodeUITests: XCTestCase {
             (input.value as? String ?? "").isEmpty
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 10), .completed, app.debugDescription)
+    }
+
+    func testModeNavigationKeepsTheOriginalOwnerTurnRunning() throws {
+        // This fixture drives the real UI and owner routing with a mock stream;
+        // native engine and model behavior are covered by separate tests.
+        app.terminate()
+        app.launchArguments = ["-AppleLanguages", "(en)"]
+        app.launchEnvironment["LINGXI_UI_TEST_OWNER_PROBE"] = "1"
+        app.launchEnvironment["LINGXI_UI_TEST_TRANSCRIPT_SCROLL"] = "1"
+        app.launch()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
+
+        let current = app.staticTexts["test.owner.current"]
+        XCTAssertTrue(current.waitForExistence(timeout: 5), app.debugDescription)
+        let previous = current.label.components(separatedBy: "|")
+        app.buttons["conversation.new-chat"].tap()
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let fields = current.label.components(separatedBy: "|")
+            return fields.count == 4 && fields[3] == "ready" &&
+                UUID(uuidString: fields[2]) != nil && (previous.count != 4 || fields[1] != previous[1])
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 12), .completed, app.debugDescription)
+        let initial = current.label.components(separatedBy: "|")
+        guard initial.count == 4 else { XCTFail(app.debugDescription); return }
+        let originalMode = initial[0]
+        let originalEntry = initial[1]
+        let originalSession = initial[2]
+        XCTAssertTrue(originalMode == "chat" || originalMode == "code")
+        let otherMode = originalMode == "chat" ? "code" : "chat"
+
+        let input = app.textViews["composer.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
+        input.tap()
+        input.typeText("Stream scroll probe")
+        app.buttons["composer.send"].tap()
+        let original = app.staticTexts["test.owner.\(originalEntry)"]
+        XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)
+        let running = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let fields = original.label.components(separatedBy: "|")
+            return fields.count == 6 && fields[2] == "running" && (Int(fields[5]) ?? -1) >= 1
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [running], timeout: 8), .completed, app.debugDescription)
+        let turn = original.label.components(separatedBy: "|")
+        guard turn.count == 6 else { XCTFail(app.debugDescription); return }
+        XCTAssertEqual(turn[0], originalMode)
+        XCTAssertEqual(turn[1], originalSession)
+        XCTAssertNotEqual(turn[3], "0")
+
+        func selectMode(_ mode: String) {
+            app.buttons["conversation.project-context"].tap()
+            let picker = app.buttons["session-panel.mode"]
+            XCTAssertTrue(picker.waitForExistence(timeout: 5), app.debugDescription)
+            picker.tap()
+            let title = mode == "chat" ? "Chat" : "Code"
+            let choice = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "\(title) — ")).firstMatch
+            XCTAssertTrue(choice.waitForExistence(timeout: 5), app.debugDescription)
+            choice.tap()
+        }
+
+        selectMode(otherMode)
+        let switched = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let fields = current.label.components(separatedBy: "|")
+            return fields.count == 4 && fields[0] == otherMode && fields[1] != originalEntry
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [switched], timeout: 10), .completed, app.debugDescription)
+        let hidden = original.label.components(separatedBy: "|")
+        guard hidden.count == 6, let hiddenTail = Int(hidden[5]) else { XCTFail(app.debugDescription); return }
+        XCTAssertEqual(Array(hidden[0...4]), Array(turn[0...4]))
+        let advanced = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let fields = original.label.components(separatedBy: "|")
+            return fields.count == 6 && Array(fields[0...4]) == Array(turn[0...4]) &&
+                (Int(fields[5]) ?? -1) > hiddenTail
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 8), .completed, app.debugDescription)
+        let advancedFields = original.label.components(separatedBy: "|")
+        let advancedTail = try XCTUnwrap(Int(advancedFields.last ?? ""))
+
+        selectMode(originalMode)
+        let returned = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let fields = current.label.components(separatedBy: "|")
+            return fields.count == 4 && fields[0] == originalMode && fields[1] == originalEntry && fields[2] == originalSession
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [returned], timeout: 10), .completed, app.debugDescription)
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Scroll stream tail ")).firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 8), app.debugDescription)
+        let suffix = tail.label.components(separatedBy: "Scroll stream tail ").last ?? ""
+        let displayedTail = try XCTUnwrap(Int(suffix.prefix(while: { $0.isNumber })))
+        XCTAssertGreaterThanOrEqual(displayedTail, advancedTail)
+        XCTAssertEqual(Array(original.label.components(separatedBy: "|").prefix(5)), Array(turn.prefix(5)))
+        app.buttons["composer.stop"].tap()
     }
 
     /// The drawer supports edge opening while leaving the chat visible.

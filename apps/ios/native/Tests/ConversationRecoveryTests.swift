@@ -896,6 +896,121 @@ final class ConversationRecoveryTests: XCTestCase {
         XCTAssertTrue(parent.model.unsentPrompts.isEmpty)
     }
 
+    func testSideExpiryPreservesEachUnknownSubmissionAndItsCapturedChip() async throws {
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: try root().path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let parent = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        parent.model.activeSessionId = a
+        let child = EngineConversationSource(config: config, memoryOnly: true)
+        child.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a")
+        let entry = SideChatEntry(source: child, id: "side-a")
+        parent.sideChats.entries.append(entry)
+        let firstChip = VisualizationContextChip(id: "first", revision: 1, title: "First")
+        let secondChip = VisualizationContextChip(id: "second", revision: 2, title: "Second")
+        let draftChip = VisualizationContextChip(id: "draft", revision: 3, title: "Draft")
+        let images = [ImageRefDto(mediaType: "image/png", base64: "YQ=="),
+                      ImageRefDto(mediaType: "image/png", base64: "Yg==")]
+
+        for (index, chip) in [firstChip, secondChip].enumerated() {
+            child.dismissError()
+            child.model.visualizationChip = chip
+            let dispatched = expectation(description: "submission \(index) reached the transport")
+            let failed = expectation(description: "submission \(index) returned an unknown error")
+            var releaseSend: CheckedContinuation<Void, Never>?
+            let observation = child.model.$error.dropFirst().sink { if $0 != nil { failed.fulfill() } }
+            child.setCommandSubmitterForTesting { command in
+                if case .sendPrompt = command {
+                    await withCheckedContinuation { releaseSend = $0; dispatched.fulfill() }
+                    throw POSIXError(.ECONNRESET)
+                }
+            }
+            let text = "input \(index)"
+            let send = Task { await child.send(text, sourceCodeUnits: Array(text.utf16),
+                                                images: [images[index]], selectedSlashCommand: nil) }
+            await fulfillment(of: [dispatched], timeout: 2)
+            let token = await send.value
+            XCTAssertNotNil(token)
+            XCTAssertNil(child.model.visualizationChip)
+            releaseSend?.resume()
+            await fulfillment(of: [failed], timeout: 2)
+            observation.cancel()
+        }
+
+        entry.draft = "new draft"
+        child.model.visualizationChip = draftChip
+        parent.sideChats.removeEnded("side-a")
+        let archive = try XCTUnwrap(parent.sideChats.expiredArchives.first)
+        XCTAssertEqual(archive.parentSessionID, a)
+        XCTAssertEqual(archive.id, "side-a")
+        XCTAssertEqual(archive.draft, "new draft")
+        XCTAssertEqual(archive.visualizationContext, draftChip)
+        XCTAssertEqual(archive.outstanding.count, 2)
+        for (index, input) in archive.outstanding.enumerated() {
+            XCTAssertEqual(input.parentSessionID, a)
+            XCTAssertEqual(input.sideID, "side-a")
+            XCTAssertEqual(input.sideOwnerEpoch, archive.sideOwnerEpoch)
+            XCTAssertEqual(input.text, "input \(index)")
+            XCTAssertEqual(input.sourceCodeUnits, Array("input \(index)".utf16))
+            XCTAssertEqual(input.images, [images[index]])
+            XCTAssertEqual(input.visualizationContext, [firstChip, secondChip][index])
+        }
+        XCTAssertTrue(archive.rejected.isEmpty)
+        XCTAssertTrue(parent.model.unsentPrompts.isEmpty)
+    }
+
+    func testSideErrorBeforeSendReturnsKeepsOriginalPayloadThroughNextTurn() async throws {
+        let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: try root().path,
+                                  sessionMode: .code, visionDelegationEnabled: false)
+        let parent = EngineConversationSource(config: config, recoveryLedger: DurableConversationTurnLedger())
+        parent.model.activeSessionId = a
+        let child = EngineConversationSource(config: config, memoryOnly: true)
+        child.setSideOwnerForTesting(parentSessionID: a, sideID: "side-a")
+        let entry = SideChatEntry(source: child, id: "side-a")
+        parent.sideChats.entries.append(entry)
+        let firstChip = VisualizationContextChip(id: "first", revision: 1, title: "First")
+        let nextChip = VisualizationContextChip(id: "next", revision: 2, title: "Next")
+        let firstDispatched = expectation(description: "first send is suspended")
+        let nextDispatched = expectation(description: "next send is suspended")
+        let firstReturned = expectation(description: "old send returns after next admission")
+        var firstContinuation: CheckedContinuation<Void, Never>?
+        var nextContinuation: CheckedContinuation<Void, Never>?
+        var sends = 0
+        child.setCommandSubmitterForTesting { command in
+            guard case .sendPrompt = command else { return }
+            sends += 1
+            if sends == 1 {
+                await withCheckedContinuation { firstContinuation = $0; firstDispatched.fulfill() }
+                throw POSIXError(.ECONNRESET)
+            }
+            await withCheckedContinuation { nextContinuation = $0; nextDispatched.fulfill() }
+        }
+        child.model.visualizationChip = firstChip
+        let first = Task { await child.send("first") }
+        await fulfillment(of: [firstDispatched], timeout: 2)
+        let firstToken = await first.value
+        XCTAssertNotNil(firstToken)
+        child.setPromptFailureHandledForTesting { if $0 == firstToken { firstReturned.fulfill() } }
+        child.applyForTesting(.error(kind: .rejected, message: "unconfirmed".clientTextDto))
+        XCTAssertTrue(entry.unsentPrompts.isEmpty)
+
+        child.model.visualizationChip = nextChip
+        let next = Task { await child.send("next") }
+        await fulfillment(of: [nextDispatched], timeout: 2)
+        let nextToken = await next.value
+        XCTAssertNotNil(nextToken)
+        firstContinuation?.resume()
+        await fulfillment(of: [firstReturned], timeout: 2)
+        XCTAssertEqual(child.model.activeTurnToken, nextToken, "the old FFI failure must not settle the new turn")
+
+        parent.sideChats.removeEnded("side-a")
+        let archive = try XCTUnwrap(parent.sideChats.expiredArchives.first)
+        XCTAssertEqual(archive.outstanding.map(\.text), ["first", "next"])
+        XCTAssertEqual(archive.outstanding.map(\.visualizationContext), [firstChip, nextChip])
+        XCTAssertTrue(archive.outstanding.allSatisfy { $0.parentSessionID == a && $0.sideID == "side-a" })
+        XCTAssertTrue(archive.rejected.isEmpty)
+        nextContinuation?.resume()
+    }
+
     func testSideExpiryDuringInitialAdmissionKeepsParentDraft() async throws {
         let config = EngineConfig(apiBase: "", model: "", appSandboxRoot: try root().path,
                                   sessionMode: .code, visionDelegationEnabled: false)

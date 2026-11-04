@@ -888,6 +888,27 @@ struct RootView: View {
                 .padding(.top, 90)
                 .zIndex(200)
             }
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_OWNER_PROBE"] == "1" {
+                let selected = sessionHost.entry(for: source)
+                let ready = selected.map {
+                    !$0.sessionID.isEmpty && isRestorableSession($0.sessionID, scope: $0.scope, mode: $0.mode) &&
+                        canonicalSessionID(scopedPreferences.storedActiveSessionID(scope: $0.scope, mode: $0.mode) ?? "") ==
+                            canonicalSessionID($0.sessionID)
+                } ?? false
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text("\(selected?.mode.rawValue ?? "")|\(selected?.id.uuidString ?? "")|\(selected?.sessionID ?? "")|\(ready ? "ready" : "pending")")
+                        .accessibilityIdentifier("test.owner.current")
+                    Text("busy=\(projectSwitching)|code=\(restoredSessionID(scope: .global, mode: .code))|chat=\(restoredSessionID(scope: .global, mode: .chat))|error=\(projectStore.errorMessage ?? "")")
+                        .accessibilityIdentifier("test.owner.navigation")
+                    ForEach(sessionHost.entries, id: \.id) { entry in
+                        UITestConversationOwnerProbe(entry: entry)
+                    }
+                }
+                .font(.system(size: 1))
+                .allowsHitTesting(false)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .zIndex(200)
+            }
             #endif
 
             #if canImport(harness_runtimeFFI)
@@ -2675,6 +2696,15 @@ struct RootView: View {
             mock.startNewConversation()
             mock.model.activeSessionId = UUID().uuidString
             mock.model.workspaceState = nil
+            mock.prepareUIOwnerProbeWorkspace()
+        } else if let sessionID, !sessionID.isEmpty,
+                  ProcessInfo.processInfo.environment["LINGXI_UI_TEST_OWNER_PROBE"] == "1",
+                  let mock = replacement as? MockConversationSource {
+            // An indexed fixture must restore the requested owner and exact
+            // transcript, so SessionHost can apply its ordinary identity gate.
+            mock.startNewConversation()
+            mock.model.workspaceState = nil
+            mock.prepareUIOwnerProbeWorkspace(sessionID: sessionID, cwd: projectCwd, transcriptPath: transcriptPath)
         }
         #endif
         return replacement
@@ -4802,6 +4832,33 @@ private struct ConversationProjectBridge: View {
         }
     }
 }
+
+#if DEBUG
+/// Read-only UI-test observation of each retained mock owner, including while
+/// its conversation is hidden. It never changes navigation or turn state.
+@MainActor
+private struct UITestConversationOwnerProbe: View {
+    @ObservedObject private var model: ConversationModel
+    private let entryID: String
+    private let sessionID: String
+    private let mode: SessionMode
+
+    init(entry: SessionHost.Entry) {
+        _model = ObservedObject(wrappedValue: entry.source.model)
+        entryID = entry.id.uuidString
+        sessionID = entry.sessionID
+        mode = entry.mode
+    }
+
+    var body: some View {
+        let text = model.messages.last(where: { $0.text.contains("Scroll stream tail ") })?.text ?? ""
+        let tail = Int(text.components(separatedBy: "Scroll stream tail ").last ?? "") ?? -1
+        let token = model.activeTurnToken
+        let value = "\(mode.rawValue)|\(sessionID)|\(model.streaming ? "running" : "idle")|\(token?.clientTurnId ?? 0)|\(token?.sessionEpoch ?? 0)|\(tail)"
+        return Text(value).accessibilityIdentifier("test.owner.\(entryID)")
+    }
+}
+#endif
 
 /// The app running full screen, as the item of its cover.
 private struct RunningApp: Identifiable {

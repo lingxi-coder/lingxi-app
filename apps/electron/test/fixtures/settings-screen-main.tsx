@@ -41,6 +41,8 @@ function Fixture() {
   const [closeCalls, setCloseCalls] = useState(0);
   const [lastPermissionRuleCall, setLastPermissionRuleCall] = useState<unknown>(null);
   const [lastEngineSettingsPatch, setLastEngineSettingsPatch] = useState<unknown>(null);
+  const [providerSettings, setProviderSettings] = useState<Record<string, unknown>>({});
+  const [lastProviderSettingsPatch, setLastProviderSettingsPatch] = useState<unknown>(null);
   const [providerAccountSnapshot, setProviderAccountSnapshot] = useState(() => fixtureAccountSnapshot([]));
   const [credentialWrites, setCredentialWrites] = useState<string[]>([]);
   const [projectList, setProjectList] = useState<string[]>([]);
@@ -117,6 +119,13 @@ function Fixture() {
         provenance_json: '{}', active_json: JSON.stringify(effective), layers_json: JSON.stringify(layers),
       } as SettingsSnapshotEvent;
     });
+  }, []);
+
+  // Provider settings are owned by the Host, not an engine settings layer.
+  const updateProviderSettings = useCallback(async (patch: Record<string, unknown>) => {
+    if (holdSettingsWrite.current) await new Promise<void>((resolve) => { releaseSettingsWrite.current = resolve; });
+    setLastProviderSettingsPatch(patch);
+    setProviderSettings(previous => ({ ...previous, ...patch }));
   }, []);
 
   const providerAccounts = useMemo(() => providerAccountsMock({ changed: setProviderAccountSnapshot, write: async providerId => {
@@ -282,7 +291,8 @@ function Fixture() {
     // click a save/add/remove button on them, but they are here so a future
     // scenario that does doesn't have to rediscover this same crash.
     updateEngineSettings,
-    updateProviderSettings: updateEngineSettings,
+    providerSettings,
+    updateProviderSettings,
     providerAccounts,
     refreshModelPicker: noopAsyncVoid,
     setModelPickerVisibility: noopAsyncVoid,
@@ -323,6 +333,7 @@ function Fixture() {
       setConnected,
       setSessionLoading,
       setActiveSession: (sessionId: string) => { setActiveSessionId(sessionId); setSettingsSnapshotEvent(null); },
+      setProviderSettings,
       failNextCredential: () => { failNextCredential.current = true; },
       holdSettingsWrite: () => { holdSettingsWrite.current = true; },
       releaseSettingsWrite: () => { holdSettingsWrite.current = false; releaseSettingsWrite.current?.(); },
@@ -363,7 +374,7 @@ function Fixture() {
       // standard workaround.
       setFieldValue: (selector: string, value: string) => {
         const field = document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement | null;
-        if (!field) return;
+        if (!field) throw new Error(`Missing settings field: ${selector}`);
         const proto = field.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
         setter?.call(field, value);
@@ -437,12 +448,14 @@ function Fixture() {
         closeCalls,
         lastPermissionRuleCall,
         lastEngineSettingsPatch,
+        lastProviderSettingsPatch,
+        providerSettings,
         credentialWrites,
         providerAccountSnapshot,
       }),
     };
     return () => { delete window.__settingsScreenTest; };
-  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, credentialWrites, providerAccountSnapshot, settingsSnapshotEvent]);
+  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, lastProviderSettingsPatch, providerSettings, credentialWrites, providerAccountSnapshot, settingsSnapshotEvent]);
 
   return (
     <Theme.Provider value={tokens(fixtureTheme === 'dark')}>
@@ -470,6 +483,7 @@ declare global {
       setConnected(value: boolean): void;
       setSessionLoading(value: boolean): void;
       setActiveSession(sessionId: string): void;
+      setProviderSettings(value: Record<string, unknown>): void;
       failNextCredential(): void;
       holdSettingsWrite(): void;
       releaseSettingsWrite(): void;
@@ -516,6 +530,8 @@ declare global {
         closeCalls: number;
         lastPermissionRuleCall: unknown;
         lastEngineSettingsPatch: unknown;
+        lastProviderSettingsPatch: unknown;
+        providerSettings: Record<string, unknown>;
         credentialWrites: string[];
         providerAccountSnapshot: unknown;
       };

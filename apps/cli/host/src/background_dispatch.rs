@@ -2028,7 +2028,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let origin = root.path().join("origin");
         let target = root.path().join("target");
-        let home = origin.join(".lingxi-test");
+        let home = origin.join(branding::DOT_DIR);
         std::fs::create_dir_all(origin.join("relative")).unwrap();
         std::fs::create_dir_all(target.join("relative")).unwrap();
         let id = uuid::Uuid::new_v4();

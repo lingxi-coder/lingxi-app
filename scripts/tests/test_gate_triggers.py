@@ -77,6 +77,24 @@ BLOCK_RE = re.compile(
 )
 
 
+def comparable_output(gate: str, output: str) -> str:
+    """Keep gate output exact except for measured test durations in this gate."""
+    if gate != "check-client-protocol.sh":
+        return output.strip()
+    output = re.sub(
+        r"(?m)^(Ran \d+ tests? in )\d+(?:\.\d+)?s$",
+        r"\1<elapsed>s",
+        output,
+    )
+    output = re.sub(
+        r"(?m)^(test result: (?:ok|FAILED)\. \d+ passed; \d+ failed; "
+        r"\d+ ignored; \d+ measured; \d+ filtered out; finished in )\d+(?:\.\d+)?s$",
+        r"\1<elapsed>s",
+        output,
+    )
+    return output.strip()
+
+
 def discover_gates() -> set:
     """Enumerate gate scripts straight from the filesystem — never a
     hardcoded list. Top-level scripts/ only (excludes lap_gate_fixtures/
@@ -171,8 +189,10 @@ def every_checked_in_gate_has_an_execution_trigger() -> list:
 
     # The "not just a comment" check: re-run every discovered gate
     # standalone, independent of check-all.sh, and require BOTH the exit
-    # code AND the actual printed output to match what check-all.sh
-    # captured. Exit code alone is not enough: a stub that swaps a gate's
+    # code AND the printed output to match what check-all.sh captured.
+    # Only the protocol gate's measured test durations are normalized;
+    # counts, outcomes, and all other output remain exact. Exit code alone
+    # is not enough: a stub that swaps a gate's
     # real invocation for a no-op (`true`) reports exit=0, which matches
     # the reference run whenever that gate is currently green in the repo
     # -- a vacuously-true comparison in the only state this repo is
@@ -190,7 +210,11 @@ def every_checked_in_gate_has_an_execution_trigger() -> list:
                 f"script standalone (independent of check-all.sh) gives exit={reference_rc} "
                 "-- check-all.sh is not actually invoking this gate's real engine"
             )
-        elif invoked_text.strip() != reference_text.strip():
+        elif not invoked_text.strip() or not reference_text.strip():
+            failures.append(
+                f"{gate}: gate output is empty -- a real engine must report what it checked"
+            )
+        elif comparable_output(gate, invoked_text) != comparable_output(gate, reference_text):
             failures.append(
                 f"{gate}: exit codes agree but the output check-all.sh captured for this gate "
                 f"({invoked_text.strip()[:120]!r}) does not match an independent standalone run "

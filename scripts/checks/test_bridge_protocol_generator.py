@@ -1,5 +1,7 @@
 """Regression tests for the checked-in protocol generation gate."""
 from pathlib import Path
+from contextlib import redirect_stdout
+from io import StringIO
 import sys
 import tempfile
 import unittest
@@ -16,15 +18,22 @@ class ProtocolGeneratorCheckTests(unittest.TestCase):
             with patch.object(generator, "ROOT", Path(tmp)), patch.object(generator, "OUTPUT", output), patch.object(
                 generator, "generated_bytes", return_value=b"generated\n"
             ):
-                with self.assertRaisesRegex(SystemExit, "stale"):
+                captured = StringIO()
+                with redirect_stdout(captured):
+                    with self.assertRaisesRegex(SystemExit, "stale"):
+                        generator.check_or_write(Path(tmp), check=True)
+                    generator.check_or_write(Path(tmp), check=False)
                     generator.check_or_write(Path(tmp), check=True)
-                generator.check_or_write(Path(tmp), check=False)
-                generator.check_or_write(Path(tmp), check=True)
-                output.write_bytes(b"generated\r\n")
-                generator.check_or_write(Path(tmp), check=True)
-                output.write_bytes(b"generated but edited\n")
-                with self.assertRaisesRegex(SystemExit, "stale"):
+                    output.write_bytes(b"generated\r\n")
                     generator.check_or_write(Path(tmp), check=True)
+                    output.write_bytes(b"generated but edited\n")
+                    with self.assertRaisesRegex(SystemExit, "stale"):
+                        generator.check_or_write(Path(tmp), check=True)
+                self.assertEqual(
+                    captured.getvalue(),
+                    f"Generated protocol.generated.ts from {tmp}\n"
+                    + "CLIENT-PROTOCOL OK: generated TypeScript matches the resolved runtime\n" * 2,
+                )
 
     def test_invokes_locked_generator_on_resolved_runtime(self):
         with patch.object(generator.subprocess, "run") as run:

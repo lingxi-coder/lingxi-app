@@ -2,8 +2,11 @@
 """Check the reviewed, immutable third-party cargo-vet attestations.
 
 The pinned manifests describe other people's attestations; this check neither
-performs a source audit nor grants publisher-wide trust. Updating the pins or
-adding an import requires a new review of the sources and their provenance.
+performs a source audit nor grants publisher-wide trust. It constrains the three
+curated imports; legacy peers retain their existing lock data, including any
+publisher or wildcard records, which this guard does not certify or eliminate.
+Updating the pins or adding an import requires a new review of the sources and
+their provenance.
 """
 from collections import Counter
 from dataclasses import dataclass

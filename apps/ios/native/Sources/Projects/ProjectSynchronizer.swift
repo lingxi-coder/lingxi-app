@@ -8,11 +8,6 @@ private let maxSyncFileBytes: Int64 = 2 * 1024 * 1024 * 1024
 private let maxSyncTotalBytes: Int64 = 8 * 1024 * 1024 * 1024
 private let minFreeSpaceBytes: Int64 = 64 * 1024 * 1024
 
-// These two files are local scheduler ownership state, not workspace content.
-private func isLocalSchedulerOwnershipPath(_ path: String) -> Bool {
-    path == ".lingxi/scheduled_owner_reservations.jsonl" || path == ".lingxi/scheduled_tasks.lock"
-}
-
 protocol ProjectPathCoordinating: Sendable {
     func coordinateRead<T>(at url: URL, _ block: (URL) throws -> T) throws -> T
     func coordinateWrite<T>(at url: URL, _ block: (URL) throws -> T) throws -> T
@@ -80,6 +75,7 @@ private struct SyncBudget {
 
 final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
     private let repository: ProjectRepository
+    private let configDirName: String
     private let bookmarkResolver: ProjectBookmarkResolving
     private let coordinator: ProjectPathCoordinating
     private let now: @Sendable () -> Date
@@ -88,6 +84,7 @@ final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
 
     init(
         repository: ProjectRepository,
+        configDirName: String = MobileUserStorage.directories().configDirName,
         bookmarkResolver: ProjectBookmarkResolving = SecurityScopedProjectBookmarkResolver(),
         coordinator: ProjectPathCoordinating = NSFileProjectCoordinator(),
         now: @escaping @Sendable () -> Date = { Date() },
@@ -98,11 +95,17 @@ final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
         }
     ) {
         self.repository = repository
+        self.configDirName = configDirName
         self.bookmarkResolver = bookmarkResolver
         self.coordinator = coordinator
         self.now = now
         self.hooks = hooks
         self.availableCapacity = availableCapacity
+    }
+
+    // These two files are local scheduler ownership state, not workspace content.
+    private func isLocalSchedulerOwnershipPath(_ path: String) -> Bool {
+        path == "\(configDirName)/scheduled_owner_reservations.jsonl" || path == "\(configDirName)/scheduled_tasks.lock"
     }
 
     func importInitial(projectId: String) throws -> ProjectSyncResult {
@@ -181,7 +184,7 @@ final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
                         .union(internalFiles.keys)
                         .union(baseline.files.keys)
                     for path in allPaths.sorted() {
-                        guard !isLocalSchedulerOwnershipPath(path) else { continue }
+                        guard !self.isLocalSchedulerOwnershipPath(path) else { continue }
                         let externalFile = externalFiles[path]
                         let internalFile = internalFiles[path]
                         let baselineHash = baseline.files[path]?.sha256
@@ -236,7 +239,7 @@ final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
                         .union(internalFiles.keys)
                         .union(baseline.files.keys)
                     for path in allPaths.sorted() {
-                        guard !isLocalSchedulerOwnershipPath(path) else { continue }
+                        guard !self.isLocalSchedulerOwnershipPath(path) else { continue }
                         let externalFile = externalFiles[path]
                         let internalFile = internalFiles[path]
                         let baselineHash = baseline.files[path]?.sha256

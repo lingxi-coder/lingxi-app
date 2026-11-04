@@ -115,9 +115,9 @@ internal fun isLingxiSyncArtifact(name: String): Boolean =
         syncArtifactOriginalName(name, SYNC_BACKUP_MARKER) != null
 
 /** These are local owner evidence and its SDK lock, never workspace content. */
-internal fun isLocalSchedulerOwnerState(relativePath: String): Boolean =
-    relativePath == ".lingxi/scheduled_owner_reservations.jsonl" ||
-        relativePath == ".lingxi/scheduled_tasks.lock"
+internal fun isLocalSchedulerOwnerState(relativePath: String, configDirName: String): Boolean =
+    relativePath == "$configDirName/scheduled_owner_reservations.jsonl" ||
+        relativePath == "$configDirName/scheduled_tasks.lock"
 
 private fun syncArtifactOriginalName(name: String, marker: String): String? {
     val markerIndex = name.lastIndexOf(marker)
@@ -197,6 +197,7 @@ internal suspend fun commitExternalDocument(
 internal class SafProjectSynchronizer(
     context: Context,
     private val repository: ProjectRepository,
+    private val configDirName: String,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     private val resolver: ContentResolver = context.applicationContext.contentResolver
@@ -390,7 +391,7 @@ internal class SafProjectSynchronizer(
             if (isLingxiSyncArtifact(safeName)) continue
             val path = if (prefix.isEmpty()) safeName else "$prefix/$safeName"
             if (!isSafeRelativePath(path)) continue
-            if (isLocalSchedulerOwnerState(path)) continue
+            if (isLocalSchedulerOwnerState(path, configDirName)) continue
             val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, child.documentId)
             if (child.mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
                 scanExternalDirectory(
@@ -453,7 +454,7 @@ internal class SafProjectSynchronizer(
                 currentCoroutineContext().ensureActive()
                 budget.includeEntry()
                 val relativePath = rootPath.relativize(entry).toString().replace(File.separatorChar, '/')
-                if (isLocalSchedulerOwnerState(relativePath)) continue
+                if (isLocalSchedulerOwnerState(relativePath, configDirName)) continue
                 val attributes = Files.readAttributes(
                     entry,
                     BasicFileAttributes::class.java,

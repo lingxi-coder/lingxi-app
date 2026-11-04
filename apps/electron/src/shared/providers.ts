@@ -159,6 +159,15 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
     transcriptionCapable: false,
   },
   {
+    id: 'xai', label: 'xAI Grok', description: 'Grok models', popular: false,
+    authMethod: 'api_key', authMethods: ['api_key'], keyLabel: 'xAI API key', keyPlaceholder: 'xai-…',
+    defaultApiBase: 'https://api.x.ai/v1',
+    credentialManagementUrl: 'https://console.x.ai',
+    defaultModel: 'xai/grok-4.20', available: true,
+    // Voice input support is not inferred from chat model capabilities.
+    transcriptionCapable: false,
+  },
+  {
     id: 'openai-chatgpt', label: 'Codex Auth', description: '使用 ChatGPT 账号登录', popular: true,
     authMethod: 'oauth', authMethods: ['api_key', 'oauth'], keyLabel: 'ChatGPT 账号', keyPlaceholder: '',
     defaultApiBase: 'https://chatgpt.com/backend-api/codex',
@@ -191,7 +200,7 @@ export function providersFromCatalog(entries: readonly ProviderModelCatalogEntry
       keyLabel: local?.keyLabel ?? `${entry.provider_label} API key`,
       keyPlaceholder: local?.keyPlaceholder ?? '',
       defaultApiBase: definition.base_url,
-      credentialManagementUrl: local?.credentialManagementUrl ?? (entry.provider_id === 'xai' ? 'https://console.x.ai' : ''),
+      credentialManagementUrl: local?.credentialManagementUrl ?? '',
       defaultModel: `${entry.provider_id}/${definition.default_model_id}`,
       available: true,
       transcriptionCapable: local?.transcriptionCapable ?? false,

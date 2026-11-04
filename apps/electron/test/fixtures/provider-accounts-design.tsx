@@ -56,43 +56,43 @@ const click = (selector: string) => { const element = document.querySelector<HTM
 (window as any).accountDesign = {
   ready: () => document.querySelectorAll('.pa-account').length === 2,
   show: async (dark: boolean, directory = false) => { show(dark, directory); await new Promise(resolve => setTimeout(resolve, 80)); },
-  open: async () => { click('.pa-toolbar .pa-primary'); await until(() => Boolean(document.querySelector('.pa-inline-form'))); },
+  open: async () => { click('.pa-toolbar .pa-primary'); await until(() => Boolean(document.querySelector('.pa-account-dialog[open] form'))); },
   run: async () => {
     const assert = (value: unknown, message: string) => { if (!value) throw new Error(message); };
     click('.pa-toolbar .pa-primary');
-    await until(() => Boolean(document.querySelector('.pa-inline-form')));
-    assert(document.activeElement === document.querySelector('.pa-inline-form button[type=submit]'), 'The primary authentication action receives focus');
-    const bounds = document.querySelector('.pa-inline-form')!.getBoundingClientRect();
-    assert(bounds.width <= 640 && bounds.x >= 0 && bounds.right <= innerWidth && !document.querySelector('dialog[open]'), 'Account entry stays inline without another modal layer');
-    click('.pa-inline-form button[type=submit]');
+    await until(() => Boolean(document.querySelector('.pa-account-dialog[open] form')));
+    assert(document.activeElement === document.querySelector('.pa-account-dialog[open] form button[type=submit]'), 'The primary authentication action receives focus');
+    const bounds = document.querySelector('.pa-account-dialog[open] form')!.getBoundingClientRect();
+    assert(bounds.width <= 640 && bounds.x >= 0 && bounds.right <= innerWidth && document.querySelector('.pa-account-dialog[open]'), 'Account entry uses a centered modal within the viewport');
+    click('.pa-account-dialog[open] form button[type=submit]');
     await until(() => Boolean(document.querySelector('.pa-progress')));
     assert(pending?.request.authKind === 'oauth', 'OAuth remains the default');
-    assert(document.querySelector<HTMLButtonElement>('.pa-inline-form button[type=submit]')!.disabled, 'Duplicate login prevented');
-    click('.pa-inline-form footer button[type=button]');
+    assert(document.querySelector<HTMLButtonElement>('.pa-account-dialog[open] form button[type=submit]')!.disabled, 'Duplicate login prevented');
+    click('.pa-account-dialog[open] form footer button[type=button]');
     await until(() => !document.querySelector('.pa-progress'));
-    assert(document.querySelector('.pa-inline-form [role=alert]'), 'Cancellation feedback visible');
-    click('.pa-inline-form footer button[type=button]');
-    await until(() => !document.querySelector('.pa-inline-form'));
+    assert(document.querySelector('.pa-account-dialog[open] form [role=alert]'), 'Cancellation feedback visible');
+    click('.pa-account-dialog[open] form footer button[type=button]');
+    await until(() => !document.querySelector('.pa-account-dialog[open] form'));
     assert(document.activeElement === document.querySelector('.pa-toolbar .pa-primary'), 'Focus returns to Add');
     click('.pa-toolbar .pa-primary');
-    await until(() => Boolean(document.querySelector('.pa-inline-form')));
+    await until(() => Boolean(document.querySelector('.pa-account-dialog[open] form')));
     click('.pa-segment button:last-child');
     await until(() => Boolean(document.querySelector('input[type=password]')));
     const secret = document.querySelector<HTMLInputElement>('input[type=password]')!;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(secret, 'synthetic-test-key');
     secret.dispatchEvent(new Event('input', { bubbles: true }));
-    await until(() => !document.querySelector<HTMLButtonElement>('.pa-inline-form button[type=submit]')!.disabled);
-    click('.pa-inline-form button[type=submit]'); await until(() => Boolean(pending));
+    await until(() => !document.querySelector<HTMLButtonElement>('.pa-account-dialog[open] form button[type=submit]')!.disabled);
+    click('.pa-account-dialog[open] form button[type=submit]'); await until(() => Boolean(pending));
     assert(lastCredential === 'synthetic-test-key' && pending?.request.authKind === 'api_key', 'Key uses credential channel');
     pending!.resolve(); pending = undefined;
-    await until(() => !document.querySelector('.pa-inline-form'));
+    await until(() => !document.querySelector('.pa-account-dialog[open] form'));
     assert(!document.querySelector('input[type=password]'), 'Secret field unmounted after save');
     assert(state.accounts.length === 3 && state.accounts.filter(a => a.authKind === 'oauth').length === 1 && state.accounts.filter(a => a.authKind === 'api_key').length === 2, 'Adding a key preserves existing OAuth and key accounts');
     assert(state.accounts[2].displayName === 'OpenAI', 'Optional name defaults to the provider');
-    click('.pa-toolbar .pa-primary'); await until(() => Boolean(document.querySelector('.pa-inline-form')));
+    click('.pa-toolbar .pa-primary'); await until(() => Boolean(document.querySelector('.pa-account-dialog[open] form')));
     click('.pa-segment button:last-child'); await until(() => Boolean(document.querySelector('input[type=password]')));
     assert(document.querySelector<HTMLInputElement>('input[type=password]')!.value === '', 'Reopening never retains the previous secret');
-    click('.pa-inline-form footer button[type=button]'); await until(() => !document.querySelector('.pa-inline-form'));
+    click('.pa-account-dialog[open] form footer button[type=button]'); await until(() => !document.querySelector('.pa-account-dialog[open] form'));
     click('.pa-account:first-child .pa-test'); await until(() => Boolean(document.querySelector('.pa-test .pa-spinner')));
     pending!.resolve(); pending = undefined; await until(() => !document.querySelector('.pa-test .pa-spinner'));
     click('.pa-account:first-child .pa-reorder button:last-child');
@@ -115,10 +115,13 @@ const click = (selector: string) => { const element = document.querySelector<HTM
     assert(providerStatus('openai')?.getAttribute('data-status') !== 'unconfigured', 'Read failures never mean unconfigured');
     failSnapshot = false;
     click('[data-testid="provider-list-item-anthropic"]');
-    await until(() => Boolean(document.querySelector('.pa-inline-form input[type=password]')));
-    assert(!document.querySelector('dialog[open]') && !document.querySelector('.pa-toolbar .pa-primary'), 'First account setup opens directly on the provider page');
+    await until(() => Boolean(document.querySelector('.pa-toolbar .pa-primary')));
+    assert(!document.querySelector('dialog[open]'), 'Empty provider keeps the account list visible');
+    click('.pa-toolbar .pa-primary');
+    await until(() => Boolean(document.querySelector('.pa-account-dialog[open] form input[type=password]')));
+    assert(document.querySelector('.pa-account-dialog[open]'), 'First account uses the same modal');
     assert(document.querySelector<HTMLAnchorElement>('.pa-key-link a')?.href === 'https://console.anthropic.com/settings/keys', 'Key management follows the selected provider');
-    return { initialSetup: true, multiAccount: true, directoryStatuses: true, inline: true, focus: true, oauthCancel: true, apiKeyClear: true, testingFeedback: true, reorder: true, removalConfirmation: true };
+    return { initialSetup: true, multiAccount: true, directoryStatuses: true, modal: true, focus: true, oauthCancel: true, apiKeyClear: true, testingFeedback: true, reorder: true, removalConfirmation: true };
   },
 };
 createRoot(document.getElementById('root')!).render(<Fixture />);

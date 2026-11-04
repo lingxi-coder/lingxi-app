@@ -77,8 +77,4 @@
 @container(max-width:480px){.provider-directory .provider-directory-item.settings-provider-row{flex-wrap:wrap;gap:10px}.provider-directory-copy{flex-basis:calc(100% - 60px)}.provider-directory-status{margin-left:50px;justify-items:start;text-align:left;flex:1}.provider-directory-item>svg{margin-left:auto}}
 @media(prefers-contrast:more){.provider-directory-status,.provider-directory-status small{color:var(--pa-text)}}
 
-.pa-inline-form{box-sizing:border-box;max-width:640px;padding:22px;border:1px solid var(--pa-border);border-radius:13px;background:var(--pa-bg);margin-top:16px}
-.pa-inline-form header{margin-bottom:18px}.pa-inline-form h3{margin:0;font-size:16px;font-weight:600;line-height:1.4;letter-spacing:-.02em}
-.pa-inline-form footer{display:flex;justify-content:flex-end;gap:8px;margin-top:20px;flex-wrap:wrap}.pa-inline-form .pa-segment{max-width:360px}.pa-inline-form .pa-field input{min-height:40px}
-.pa-form-options{margin:16px 0;color:var(--pa-secondary);font-size:12px}.pa-form-options summary{cursor:pointer;padding:5px 0;width:fit-content}.pa-form-options[open] summary{margin-bottom:10px}.pa-form-options .pa-field{color:var(--pa-text);margin-bottom:0}
-@container(max-width:480px){.pa-inline-form{padding:16px}.pa-inline-form footer .pa-primary{flex:1}}
+.pa-account-dialog .pa-field input{min-height:40px}

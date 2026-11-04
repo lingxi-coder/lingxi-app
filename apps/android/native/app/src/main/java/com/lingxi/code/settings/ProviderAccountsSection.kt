@@ -8,6 +8,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -54,6 +60,7 @@ private fun providerCredentialManagementUrl(providerId: String): String? = when 
 }
 
 /** Stable user order is rendered directly; the Host owns temporary health and request scheduling. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAccountsRepository, onChanged: () -> Unit, canAddAccounts: Boolean = true, providerName: String = bindingId) {
     val context = LocalContext.current
@@ -77,6 +84,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
     var loginJob by remember(bindingId) { mutableStateOf<Job?>(null) }
     var deviceAuthorization by remember(bindingId, state.bindingGeneration) { mutableStateOf<ProviderDeviceAuthorization?>(null) }
     val palette = LingXiTheme.palette
+    val accountSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = { !busy })
     ReportSettingsDraft("provider-account-$bindingId", key.isNotEmpty() || adding || edit != null)
     LaunchedEffect(bindingId, state.bindingGeneration, lifecycleOwner) {
         edit = null; adding = false; key = ""; confirmMetered = false; confirmRemove = null
@@ -265,17 +273,20 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
         dismissButton = { TextButton(onClick = { confirmMetered = false }) { Text(stringResource(android.R.string.cancel)) } },
     )
     if (adding || edit != null) {
-        AlertDialog(
+        ModalBottomSheet(
             onDismissRequest = { if (!busy) { adding = false; edit = null; key = "" } },
-            title = { Text(stringResource(if (adding) R.string.provider_account_add_title else R.string.provider_account_edit)) },
-            text = {
-                Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
+            sheetState = accountSheetState,
+            containerColor = palette.surface,
+        ) {
+                Column(Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp),
+                    verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
+                    Text(stringResource(if (adding) R.string.provider_account_add_title else R.string.provider_account_edit), style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
                     if (adding) Text(providerName, color = palette.text3)
                     if (busy) androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
                     if (message != null) Text(message.orEmpty(), color = palette.danger)
-                    if (!adding) OutlinedTextField(value = name, onValueChange = { name = it }, enabled = !busy, singleLine = true,
+                    if (!adding) OutlinedTextField(modifier = Modifier.fillMaxWidth(), value = name, onValueChange = { name = it }, enabled = !busy, singleLine = true,
                         label = { Text(stringResource(R.string.settings_display_name)) })
-                    if (!oauth) OutlinedTextField(value = key, onValueChange = { key = it }, enabled = !busy, singleLine = true,
+                    if (!oauth) OutlinedTextField(modifier = Modifier.fillMaxWidth(), value = key, onValueChange = { key = it }, enabled = !busy, singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         label = { Text(stringResource(R.string.settings_provider_api_key)) })
                     if (!oauth) providerCredentialManagementUrl(bindingId)?.let { url ->
@@ -288,6 +299,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                         Text(stringResource(R.string.settings_section_advanced))
                     }
                     if (adding && showAccountOptions) OutlinedTextField(
+                        modifier = Modifier.fillMaxWidth(),
                         value = name, onValueChange = { name = it }, enabled = !busy, singleLine = true,
                         placeholder = { Text(providerName) },
                         label = { Text(stringResource(R.string.provider_account_optional_name)) },
@@ -300,9 +312,9 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                             confirmRemove = account
                         }) { Text(stringResource(R.string.provider_account_remove), color = palette.danger) }
                     }
-                }
-            },
-            confirmButton = { TextButton(enabled = !busy && (adding || name.isNotBlank()) && (!adding || oauth || key.isNotBlank()), onClick = {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End) {
+                    TextButton(enabled = !busy, onClick = { adding = false; edit = null; key = "" }) { Text(stringResource(android.R.string.cancel)) }
+                    TextButton(enabled = !busy && (adding || name.isNotBlank()) && (!adding || oauth || key.isNotBlank()), onClick = {
                 val account = edit
                 if (account == null) {
                     val fields = JSONObject().put("displayName", name.trim().ifEmpty { providerName }).put("providerId", logicalProviderId)
@@ -318,9 +330,10 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                         } finally { busy = false }
                     }
                 }
-            }) { Text(stringResource(if (adding) { if (oauth) R.string.provider_account_add_oauth else R.string.provider_account_add_key } else R.string.voice_save_button)) } },
-            dismissButton = { TextButton(enabled = !busy, onClick = { adding = false; edit = null; key = "" }) { Text(stringResource(android.R.string.cancel)) } },
-        )
+            }) { Text(stringResource(if (adding) { if (oauth) R.string.provider_account_add_oauth else R.string.provider_account_add_key } else R.string.voice_save_button)) }
+                    }
+                }
+        }
     }
 }
 

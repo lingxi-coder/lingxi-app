@@ -37,6 +37,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
   const activeOperation = useRef<number>();
   const form = useRef<HTMLFormElement>(null);
   const confirmation = useRef<HTMLDialogElement>(null);
+  const accountDialog = useRef<HTMLDialogElement>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const current = ++generation.current;
@@ -56,12 +57,15 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
   const locked = busy || running || !snapshot;
   const supportsKey = provider.authMethods.includes('api_key') || provider.authMethods.includes('token');
   const supportsOAuth = provider.authMethods.includes('oauth');
-  const showForm = Boolean(snapshot) && provider.available && (formOpen || accounts.length === 0);
+  const showForm = Boolean(snapshot) && provider.available && formOpen;
   useEffect(() => {
-    if (!showForm) return;
+    if (!showForm) {
+      if (accountDialog.current?.open) { accountDialog.current.close(); addButton.current?.focus(); }
+      return;
+    }
+    if (!accountDialog.current?.open) accountDialog.current?.showModal();
     const target = form.current?.querySelector<HTMLElement>('input[type="password"]:not(:disabled), button[type="submit"]');
     target?.focus({ preventScroll: true });
-    if (formOpen) form.current?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
   }, [showForm, authKind, formOpen]);
   const perform = async (command: Omit<ProviderAccountCommand, 'expectedRevision'>, credential?: string) => {
     if (!snapshot || busyRef.current) return;
@@ -94,7 +98,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
   };
   const closeForm = () => {
     if (busy) return;
-    setFormOpen(false); setKey(''); setName(''); setReplacementId(undefined); setError(undefined); addButton.current?.focus();
+    setFormOpen(false); setKey(''); setName(''); setReplacementId(undefined); setError(undefined);
   };
   const openForm = (accountId?: string) => {
     const existing = accounts.find(account => account.accountId === accountId);
@@ -110,14 +114,14 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
   const theme = { '--pa-bg': t.surface, '--pa-text': t.text, '--pa-secondary': t.text3, '--pa-border': t.border, '--pa-accent': t.accent, '--pa-ok': t.ok, '--pa-danger': t.danger } as CSSProperties;
   const menuAction = (button: HTMLButtonElement, action: () => void) => { button.closest('details')?.removeAttribute('open'); action(); };
   return <section className="pa-panel" style={theme} aria-label={tr('provider_accounts_accounts')} aria-busy={busy}>
-    {(!snapshot || accounts.length > 0) && <header className="pa-section-heading">
+    <header className="pa-section-heading">
       <div><h3>{tr('provider_accounts_accounts')} {snapshot && <span className="pa-count">{accounts.length}</span>}</h3>{accounts.length > 1 && <p>{tr('provider_accounts_priority_desc')}</p>}</div>
       <div className="pa-toolbar">
         <button className="pa-icon-button" aria-label={tr('provider_accounts_refresh')} disabled={busy} onClick={() => void api.snapshot().then(setSnapshot).catch(() => setError(tr('provider_accounts_status_error')))}><Icon name="refresh" size={16} /></button>
         {provider.available && <button ref={addButton} className="pa-button pa-primary" disabled={locked} onClick={() => openForm()}><Icon name="plus" size={15} />{tr('provider_accounts_add')}</button>}
       </div>
-    </header>}
-    {(!snapshot || accounts.length > 0) && <div className="pa-list">
+    </header>
+    <div className="pa-list">
       {!snapshot ? <div className="pa-empty" role="status"><span className="pa-spinner" />{tr('provider_accounts_loading')}</div>
         : accounts.length === 0 ? <div className="pa-empty"><span className="pa-empty-icon"><Icon name="user" size={24} /></span><h4>{tr('provider_accounts_empty')}</h4><p>{tr('provider_accounts_empty_desc')}</p></div>
         : accounts.map((account, index) => {
@@ -146,12 +150,13 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
             </div>
           </article>;
         })}
-    </div>}
+    </div>
     {running && <p className="pa-caption">{tr('provider_accounts_running')}</p>}
     {logicalProviderId(provider.id) === 'openai' && snapshot && accounts.length > 0 && <div className="pa-billing"><div><h4>{tr('provider_accounts_billing')}</h4><p>{tr('provider_accounts_billing_desc')}</p></div><label className="pa-switch"><input type="checkbox" role="switch" aria-label={tr('provider_accounts_billing_allow')} checked={snapshot.providerPolicies?.openai?.allowSubscriptionToMetered === true} disabled={locked} onChange={event => void perform({ action: 'set_policy', providerId: 'openai', allowSubscriptionToMetered: event.currentTarget.checked })} /><span /></label></div>}
     {error && !showForm && !removalId && <p className="pa-feedback pa-error" role="alert">{error}</p>}
     {notice && <p className="pa-feedback pa-success" role="status"><Icon name="check" size={15} />{notice}</p>}
-    {showForm && <form ref={form} className="pa-inline-form" aria-labelledby="pa-form-title" onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); if (busy && oauthBusy) cancelLogin(); else closeForm(); } }} onSubmit={event => { event.preventDefault(); if (!locked && (authKind === 'oauth' || key.trim())) { setFormOpen(true); void perform({ action: replacementId ? 'reconnect' : 'add', accountId: replacementId, providerId: logicalProviderId(provider.id), displayName: name.trim() || provider.label, authKind, executionBindingId: authKind === 'oauth' ? 'openai-chatgpt' : logicalProviderId(provider.id) }, authKind === 'api_key' ? key : undefined); } }}>
+    <dialog ref={accountDialog} className="pa-dialog pa-account-dialog" aria-labelledby="pa-form-title" onCancel={event => { event.preventDefault(); if (busy && oauthBusy) cancelLogin(); else closeForm(); }}>
+    {showForm && <form ref={form} aria-labelledby="pa-form-title" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (busy && oauthBusy) cancelLogin(); else closeForm(); } }} onSubmit={event => { event.preventDefault(); if (!locked && (authKind === 'oauth' || key.trim())) { setFormOpen(true); void perform({ action: replacementId ? 'reconnect' : 'add', accountId: replacementId, providerId: logicalProviderId(provider.id), displayName: name.trim() || provider.label, authKind, executionBindingId: authKind === 'oauth' ? 'openai-chatgpt' : logicalProviderId(provider.id) }, authKind === 'api_key' ? key : undefined); } }}>
         <header><h3 id="pa-form-title">{tr(replacementId ? authKind === 'oauth' ? 'provider_accounts_reconnect' : 'provider_accounts_replace' : 'provider_accounts_add')}</h3></header>
         {supportsKey && supportsOAuth && !replacementId && <div className="pa-segment" aria-label={tr('provider_accounts_method')}><button type="button" aria-pressed={authKind === 'oauth'} disabled={busy} onClick={() => setAuthKind('oauth')}>ChatGPT</button><button type="button" aria-pressed={authKind === 'api_key'} disabled={busy} onClick={() => setAuthKind('api_key')}>{tr('provider_accounts_key')}</button></div>}
 
@@ -165,6 +170,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
         {error && <p className="pa-feedback pa-error" role="alert">{error}</p>}
         <footer>{(accounts.length > 0 || formOpen || (busy && oauthBusy)) && <button type="button" className="pa-button" disabled={busy && !oauthBusy} onClick={() => busy && oauthBusy ? cancelLogin() : closeForm()}>{tr(busy && oauthBusy ? 'provider_accounts_cancel_login' : 'provider_accounts_cancel')}</button>}<button type="submit" className="pa-button pa-primary" disabled={locked || (authKind === 'api_key' && !key.trim())}>{tr(replacementId ? authKind === 'oauth' ? 'provider_accounts_reconnect' : 'provider_accounts_save' : authKind === 'oauth' ? 'provider_accounts_add_oauth' : 'provider_accounts_add_key')}</button></footer>
     </form>}
+    </dialog>
     <dialog ref={confirmation} className="pa-dialog" aria-labelledby="pa-remove-title" onCancel={event => { event.preventDefault(); if (!busy) setRemovalId(undefined); }} onKeyDown={event => { if (event.key === 'Escape') event.stopPropagation(); }}><h3 id="pa-remove-title">{tr('provider_accounts_remove')} {accounts.find(account => account.accountId === removalId)?.displayName}?</h3><p className="pa-dialog-note">{tr('provider_accounts_remove_hint')}</p>{error && <p className="pa-feedback pa-error" role="alert">{error}</p>}<footer><button className="pa-button" disabled={busy} onClick={() => setRemovalId(undefined)}>{tr('provider_accounts_cancel')}</button><button className="pa-button pa-danger-button" disabled={locked} onClick={() => removalId && void perform({ action: 'remove', accountId: removalId })}>{tr('provider_accounts_remove')}</button></footer></dialog>
   </section>;
 }

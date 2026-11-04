@@ -1,5 +1,5 @@
 import { fixtureAccountSnapshot } from './fixtures/provider-accounts-mock';
-import { providersFromCatalog } from '../src/shared/providers';
+import { providerById, providersFromCatalog, PROVIDERS } from '../src/shared/providers';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as React from 'react';
@@ -292,4 +292,18 @@ test('official setup metadata supports a new provider without a desktop binary e
   assert.equal(providers[0].defaultApiBase, 'https://new.example/v1');
   assert.equal(providers[0].defaultModel, 'new-provider/new-model');
   assert.deepEqual(providersFromCatalog([]), []);
+});
+
+test('xAI is a single API Key provider in presets and the official catalog', () => {
+  assert.equal(PROVIDERS.filter(provider => provider.id === 'xai').length, 1);
+  assert.equal(PROVIDERS.some(provider => provider.id === 'grok'), false);
+  assert.deepEqual(providerById('xai')?.authMethods, ['api_key']);
+  assert.equal(providerById('xai')?.credentialManagementUrl, 'https://console.x.ai');
+  const providers = providersFromCatalog([{ provider_id: 'xai', provider_label: 'xAI Grok', models: [],
+    definition: { base_url: 'https://api.x.ai/v1', protocol: 'open_ai_chat', auth: 'api_key',
+      credential_env: 'XAI_API_KEY', default_model_id: 'grok-4.20', description: 'Grok models' } }]);
+  assert.equal(providers.length, 1);
+  assert.equal(providers[0].id, 'xai');
+  assert.equal(providers[0].defaultModel, 'xai/grok-4.20');
+  assert.deepEqual(providers[0].authMethods, ['api_key']);
 });

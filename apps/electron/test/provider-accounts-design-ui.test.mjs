@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import react from '@vitejs/plugin-react';
 import { createServer } from 'vite';
 
-test('inline account setup preserves multiple auth accounts, focus, progress and secret clearing', async () => {
+test('modal account setup preserves multiple auth accounts, focus, progress and secret clearing', async () => {
   const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
   const temporary = mkdtempSync(join(tmpdir(), 'lingxi-account-design-'));
   const vite = await createServer({ root: join(root, 'test/fixtures'), cacheDir: join(temporary, 'vite'), configFile: false,
@@ -28,7 +28,7 @@ test('inline account setup preserves multiple auth accounts, focus, progress and
       child.once('exit', code => { clearTimeout(timer); code === 0 ? resolveExit() : reject(new Error(`Account design fixture failed: ${errors}`)); });
     });
     const result = JSON.parse(output.trim().split('\n').at(-1));
-    for (const key of ['initialSetup', 'multiAccount', 'directoryStatuses', 'inline', 'focus', 'oauthCancel', 'apiKeyClear', 'testingFeedback', 'reorder', 'removalConfirmation']) assert.equal(result[key], true, key);
+    for (const key of ['initialSetup', 'multiAccount', 'directoryStatuses', 'modal', 'focus', 'oauthCancel', 'apiKeyClear', 'testingFeedback', 'reorder', 'removalConfirmation']) assert.equal(result[key], true, key);
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close(); rmSync(temporary, { recursive: true, force: true });

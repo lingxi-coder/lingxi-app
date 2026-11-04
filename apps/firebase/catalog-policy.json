@@ -45,5 +45,8 @@
   ],
   "openrouter": [
     "openrouter/auto"
+  ],
+  "xai": [
+    "grok-4.20"
   ]
 }

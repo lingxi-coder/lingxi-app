@@ -19,7 +19,7 @@ async function main() {
       await capture('accounts-light'); await js('window.accountDesign.show(true)'); await capture('accounts-dark');
       window.setSize(660, 900); await capture('accounts-narrow'); window.setSize(1024, 900);
       await js('window.accountDesign.show(false)'); await js('window.accountDesign.open()'); await capture('add-account');
-      await js("document.querySelector('.pa-inline-form footer button[type=button]').click()");
+      await js("document.querySelector('.pa-account-dialog[open] form footer button[type=button]').click()");
       await js('window.accountDesign.show(false, true)'); await capture('providers');
       await js('window.accountDesign.show(false)');
     }

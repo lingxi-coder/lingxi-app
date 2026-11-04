@@ -2,8 +2,8 @@
   "source": "llm-client/data/providers",
   "revision": "39f64b37e686a2eef4fc4bef2283836415d945a0",
   "workingTreeChanges": false,
-  "sourceSha256": "5e2b1f907200e8e5515f6a74ec0deb560cd0ea6b8c0ee87ea07da15859b9058d",
-  "seedSha256": "56db848469dceec2ece619e0e77bf5adf1a402707e877cf94dcf7b6785a3b486",
-  "providers": 11,
-  "models": 25
+  "sourceSha256": "b5cdf8ae8811f4d9ec6f83650006c24907c30dc67eb081f291a5ba2eb210d95a",
+  "seedSha256": "5021ea4f174783367bc83d6fb6ca810dfaec27675fe109cd76d5648ed147c9d9",
+  "providers": 12,
+  "models": 26
 }

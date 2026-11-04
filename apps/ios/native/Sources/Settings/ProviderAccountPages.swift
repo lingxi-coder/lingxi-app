@@ -101,6 +101,8 @@ struct ProviderAccountsPage: View {
                     ProviderDeviceCodePage()
                 }
             }
+            .presentationDetents(page == .add ? [.medium, .large] : [.large])
+            .presentationDragIndicator(.visible)
         }
     }
 

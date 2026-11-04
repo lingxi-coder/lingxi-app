@@ -6,7 +6,7 @@ Desktop、Android、iOS（以及 CLI）使用 Harness `provider-config::StartupC
 
 只接受 `schemaVersion: 2`。不读取或转换旧版目录、缓存和云端草稿。Firebase 使用 `catalogV2State`、`catalogV2Payloads`、`catalogV2Parts`、`catalogV2Releases`；客户端缓存位于 `cache/provider-catalog-v2`。旧目录数据不删除。
 
-`apps/firebase/catalog-policy.json` 明确列出初始精选模型，首个模型为 provider 默认推荐。`generate-seed.py` 从 SDK 提取这些型号的完整 TOML 执行定义，生成 Firebase seed 及 Harness 内置目录。当前为 11 个 provider、25 个模型；OpenAI 仅选 GPT 6/6.1，DeepSeek 仅选 V4 系列，Google 默认 Gemini 3.8 Flash。
+`apps/firebase/catalog-policy.json` 明确列出初始精选模型，首个模型为 provider 默认推荐。`generate-seed.py` 从 SDK 提取这些型号的完整 TOML 执行定义，生成 Firebase seed 及 Harness 内置目录。当前为 12 个 provider、26 个模型（包含 xAI Grok）；OpenAI 仅选 GPT 6/6.1，DeepSeek 仅选 V4 系列，Google 默认 Gemini 3.8 Flash。
 
 后台保存、预览、发布互相独立。发布生成不可变快照并原子切换当前指针。历史恢复只恢复草稿，重新发布后才对客户端生效。新版命名空间第一次使用需先保存 seed 草稿再发布；没有已发布目录时客户端继续使用有效缓存或内置目录。
 

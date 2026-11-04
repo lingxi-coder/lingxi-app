@@ -13,7 +13,7 @@ const admin = async () => ({ uid: 'admin', model_catalog_admin: true, email_veri
 const request = (path, init) => new Request(`https://api.test${path}${path.includes('schemaVersion=') ? capabilitiesQuery : ''}`, init);
 
 test('SDK seed preserves all provider/model identities and fits bounded payload size', () => {
-  const c = validateCatalog(seed); assert.equal(c.providers.length, 11); assert.equal(c.models.length, 25);
+  const c = validateCatalog(seed); assert.equal(c.providers.length, 12); assert.equal(c.models.length, 26);
   for (const p of c.providers) {
     assert.equal(p.executionDefinition.format, 'llm-client-preset-toml');
     assert.equal(createHash('sha256').update(p.executionDefinition.source, 'utf8').digest('hex'), p.executionDefinition.sha256);
@@ -93,4 +93,18 @@ test('runtime capability requirements are enforced and disabled records remain e
   assert.equal(select(c, 'ios', '1.0.0').models[0].status, 'disabled');
   c.providers[0].requiredCapabilities.push('protocol.future');
   assert.equal(select(c, 'ios', '1.0.0').providers.length, 0);
+});
+
+// xAI is stored as grok.toml in the SDK; publication must use its canonical ID.
+test('xAI is published once with Grok models on every supported platform', () => {
+  for (const platform of ['desktop', 'android', 'ios', 'cli']) {
+    const catalog = select(seed, platform, '1.0.0');
+    const providers = catalog.providers.filter(provider => provider.id === 'xai');
+    assert.equal(providers.length, 1);
+    assert.equal(catalog.providers.some(provider => provider.id === 'grok'), false);
+    assert.equal(providers[0].baseUrl, 'https://api.x.ai/v1');
+    assert.match(providers[0].executionDefinition.source, /provider_id = "xai"/);
+    assert.match(providers[0].executionDefinition.source, /auth = "api_key"/);
+    assert.equal(catalog.models.some(model => model.providerId === 'xai' && model.id === 'grok-4.20'), true);
+  }
 });

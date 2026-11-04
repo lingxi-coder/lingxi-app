@@ -18,9 +18,21 @@ policy = json.loads((Path(__file__).resolve().parents[1] / 'catalog-policy.json'
 digest = hashlib.sha256()
 for provider_id in policy:
     path = source / 'data/providers' / f'{provider_id}.toml'
-    identity = path.stem
-    if identity not in policy:
-        continue
+    # SDK filenames are not provider identities (xai's primary preset is grok.toml).
+    # Alternate wires must stay connections of that provider, not duplicate entries.
+    if not path.exists():
+        candidates = []
+        for preset in sorted((source / 'data/providers').glob('*.toml')):
+            metadata = tomllib.loads(preset.read_text())
+            connection = metadata.get('connection', {})
+            if (metadata.get('provider_id') == provider_id
+                    and connection.get('group', provider_id) == provider_id
+                    and connection.get('order', 0) == 0):
+                candidates.append(preset)
+        if len(candidates) != 1:
+            raise SystemExit(f'{provider_id}: expected one primary SDK preset, found {len(candidates)}')
+        path = candidates[0]
+    identity = provider_id
     full_source = path.read_text()
     parts = re.split(r'(?m)^\[\[model\]\]\s*$', full_source)
     rows = {tomllib.loads('[[model]]' + part)['model'][0]['id']: part for part in parts[1:]}
@@ -34,7 +46,6 @@ for provider_id in policy:
     url = data.get('base_url', '')
     if not url.startswith('https://'):
         continue
-    identity = path.stem
     providers.append(dict(id=identity, name=data.get('display_name', identity).strip(),
         description=data.get('description', '')[:4000], baseUrl=url, protocol=data.get('protocol', 'open_ai_chat'),
         enabled=True, order=len(providers), regions=data.get('regions', []),

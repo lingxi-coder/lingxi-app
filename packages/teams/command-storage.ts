@@ -14,9 +14,6 @@ export function indexedDbCommandStorage(): CommandStorage {
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains('projections')) db.createObjectStore('projections');
-      // Drop only the obsolete history replica, retaining immutable pending commands.
-      const cursor = request.transaction!.objectStore('projections').openCursor();
-      cursor.onsuccess = () => { const entry = cursor.result; if (entry) { entry.update(pendingCommands(entry.value as PendingCommands)); entry.continue(); } };
     };
     request.onsuccess = () => { if (abandoned) { request.result.close(); return; } request.result.onversionchange = () => { request.result.close(); opening = undefined; }; resolve(request.result); };
     request.onerror = () => { opening = undefined; reject(request.error); };

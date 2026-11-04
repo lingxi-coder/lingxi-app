@@ -1,20 +1,27 @@
 import type { ToolRunItem } from '../model/runItem';
 import { toolDisplayHeader } from '../model/runItem';
+import { tr } from '../i18n/locale';
 
-const actions: Record<string, [string, string]> = {
-  read: ['Reading', 'Read'], update: ['Editing', 'Edited'], create: ['Creating', 'Created'],
-  shell: ['Running', 'Ran'], search: ['Searching', 'Searched'], fetch: ['Fetching', 'Fetched'],
-};
+/** Only adjacent calls with the same meaning share a disclosure. */
+export function transcriptToolKey(item: ToolRunItem): string | undefined {
+  if (item.agentId || /^(Agent|Task|Skill|spawn_agent|fork_agent|AskUserQuestion|ExitPlanMode|EnterPlanMode|SubmitPlan)$/i.test(item.tool)
+    || /permission/i.test(`${item.tool} ${item.view.label}`)
+    || ['task', 'todo', 'skill'].includes(item.view.verb)) return undefined;
+  if (/^(?:mcp__|mcp[.:/])/i.test(item.tool)) return item.tool;
+  if (['read', 'update', 'create', 'shell', 'search', 'fetch'].includes(item.view.verb)) return item.view.verb;
+  return item.tool || undefined;
+}
+
+const PRESENTED_VERBS = new Set(['read', 'update', 'create', 'shell', 'search', 'fetch']);
 
 /** Change presentation using the engine header; never reconstruct it from raw input. */
 export function toolRowPresentation(item: ToolRunItem) {
   const view = toolDisplayHeader(item);
-  const action = actions[view.verb];
   const argument = view.primary || (view.verb === 'shell' ? view.sub_line?.text : undefined);
-  if (!action || !argument) return null;
+  if (!PRESENTED_VERBS.has(view.verb) || !argument) return null;
   const file = ['read', 'update', 'create'].includes(view.verb);
   return {
-    action: action[item.status === 'running' ? 0 : 1],
+    action: tr(`desktop_ui_tool_${view.verb}_${item.status}`),
     argument,
     displayArgument: file ? argument.split(/[\\/]/).filter(Boolean).at(-1) || argument : argument,
     file,
@@ -22,22 +29,18 @@ export function toolRowPresentation(item: ToolRunItem) {
   };
 }
 
-/** A compact account of all calls, in the order their activity first appeared. */
+/** Neutral activity labels do not imply that a failed or running call succeeded. */
 export function toolGroupSummary(tools: readonly ToolRunItem[]): string {
-  const counts = new Map<string, number>();
-  for (const item of tools) counts.set(item.view.verb, (counts.get(item.view.verb) ?? 0) + 1);
-  const phrases = [...counts].map(([verb, count]) => {
-    const files = count === 1 ? 'a file' : 'files';
-    switch (verb) {
-      case 'read': return `read ${files}`;
-      case 'update': return `edited ${files}`;
-      case 'create': return `created ${files}`;
-      case 'shell': return `ran ${count === 1 ? 'a command' : 'commands'}`;
-      case 'search': return count === 1 ? 'searched' : 'ran searches';
-      case 'fetch': return `fetched ${count === 1 ? 'a page' : 'pages'}`;
-      default: return tools.find(item => item.view.verb === verb)!.view.label;
-    }
-  });
-  const summary = phrases.slice(0, 3).join(', ') + (phrases.length > 3 ? ` and ${phrases.length - 3} more` : '');
-  return summary ? summary[0]!.toUpperCase() + summary.slice(1) : '';
+  const groups: { key: string; first: ToolRunItem; count: number }[] = [];
+  for (const item of tools) {
+    const key = transcriptToolKey(item) ?? item.id;
+    const last = groups.at(-1);
+    if (last?.key === key) last.count++;
+    else groups.push({ key, first: item, count: 1 });
+  }
+  return groups.map(({ first, count }) => {
+    const label = ['read', 'update', 'create', 'shell', 'search', 'fetch'].includes(first.view.verb)
+      ? tr(`desktop_ui_tool_group_${first.view.verb}`) : first.view.label;
+    return `${label} · ${tr(count === 1 ? 'desktop_ui_tool_call_one' : 'desktop_ui_tool_call_count', count)}`;
+  }).join(' / ');
 }

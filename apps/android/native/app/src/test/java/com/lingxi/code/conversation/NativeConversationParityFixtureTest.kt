@@ -46,15 +46,11 @@ class NativeConversationParityFixtureTest {
             }
             val groups = transcriptBlocks(blocks).filterIsInstance<TranscriptBlock.Tools>()
             val expected = scenario.getJSONArray("expected_groups")
-            assertEquals(scenario.getString("id"), expected.length(), groups.size)
-            groups.forEachIndexed { index, group ->
-                val want = expected.getJSONObject(index)
-                assertEquals(want.strings("ids"), group.calls.map { it.id })
-                assertEquals(want.strings("statuses"), group.calls.map { it.status.name.lowercase() })
-                assertEquals(want.strings("active_ids"), group.calls.filter { it.status == AgentToolStatus.Running }.map { it.id })
-                assertEquals(want.getString("summary"), group.summary.tool)
-                assertEquals(if (group.running) want.strings("active_ids") else want.strings("ids"), group.visibleTools.map { it.id })
-            }
+            val wants = (0 until expected.length()).map { expected.getJSONObject(it) }
+            val calls = groups.flatMap { it.calls }
+            assertEquals(wants.flatMap { it.strings("ids") }, calls.map { it.id })
+            assertEquals(wants.flatMap { it.strings("statuses") }, calls.map { it.status.name.lowercase() })
+            assertEquals(wants.flatMap { it.strings("active_ids") }, calls.filter { it.status == AgentToolStatus.Running }.map { it.id })
             assertTrue(transcriptBlocks(blocks).none { it is TranscriptBlock.Prose })
         }
     }

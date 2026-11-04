@@ -1,6 +1,22 @@
 # Chat / Code 集成：当前审查记录
 
-状态记录：2026-11-03（America/Los_Angeles）。这是正在进行的审查台账；完整产品契约见[设计文档](../architecture/conversation-spaces-context-design.md)，当前工作区、来源和接续顺序见[交接文档](2026-11-01-conversation-spaces-handoff.md)。App iOS 源码 checkpoint 为 `6bc55fe9f30b5f510b8a1255e661f97222fa9423`；测试时为其父提交 `e5bb2ac98614a4f481c937b7ac5c0b60ee156ec0` 加冻结工作树输入，未以提交后 HEAD 重新运行；独立 SDK checkout 固定 `55ddd4cf880ed3de4696319c51b8429dcef80a9e`，父提交为 `46fb13b3449d02e595ec9fd49145d5de23bf66b1`。原 SDK 工作树 `f286ff5cd05c720b82451a66dc01e88bca213ade` 的未提交改动须保留。最终合同要求 Global Chat `~/.品牌/chat`、Global Code `~/.品牌/code`、配置保留 `~/.品牌`。[locked 离线来源核验](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/app-55ddd-locked-source-proof-20261103.json)通过；Android 和 Desktop 当前 pin 的产物及测试见下方，设备和完整平台验收尚未完成。
+状态记录：2026-11-03（America/Los_Angeles）。这是正在进行的审查台账；完整产品契约见[设计文档](../architecture/conversation-spaces-context-design.md)，当前工作区、来源和接续顺序见[交接文档](2026-11-01-conversation-spaces-handoff.md)。合并前 App iOS 源码 checkpoint 为 `6bc55fe9f30b5f510b8a1255e661f97222fa9423`；测试时为其父提交 `e5bb2ac98614a4f481c937b7ac5c0b60ee156ec0` 加冻结工作树输入，未以提交后 HEAD 重新运行；该阶段独立 SDK checkout 固定 `55ddd4cf880ed3de4696319c51b8429dcef80a9e`，父提交为 `46fb13b3449d02e595ec9fd49145d5de23bf66b1`。原 SDK 工作树 `f286ff5cd05c720b82451a66dc01e88bca213ade` 的未提交改动须保留。最终合同要求 Global Chat `~/.品牌/chat`、Global Code `~/.品牌/code`、配置保留 `~/.品牌`。[locked 离线来源核验](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/app-55ddd-locked-source-proof-20261103.json)通过；Android 和 Desktop 当时的产物及测试见下方，设备和完整平台验收尚未完成。
+
+## 2026-11-03 本地 main 同步记录
+
+App 合并的双方来源是功能分支 `58eb629b1965435a79fc0278875091ae443cd36d` 和本地 main `46049b8ec3f386cb4e00e206da6ec652e89fca4b`；回到本地 main 的最终 ref 与保全结果以任务目录 `merge-main-20261103/final-receipt.json` 为准。保留 main 的 Teams workspace、新 Bots 侧栏及未保存修改确认，也保留固定 session mode、普通 Global New Chat、原 owner 和 Local App Code 准入；Bot 侧栏通过所选行捕获的精确 transcript path 打开历史记录，待宿主校验。恢复重试保留原 owner、同一 runtime 和精确 transcript；未保存的 Bot 修改仍通过 main 的确认交互处理。
+
+Harness SDK 的本地 main 与功能分支现为 `38ea730f503f318283cd4e26684f1abded10b6ec`；双方父提交是 `55ddd4cf880ed3de4696319c51b8429dcef80a9e` 和 `e0a8ae09607d361fc0b94d92fe51756238347302`。定向测试 122 pass、1 个 cache performance probe ignored，测试时的暂存树与合并提交树同为 `e54249690af5e4c2934c9de2bae2f55c0e4118df`；[快进和保全回执](../../../merge-main-20261103/harness/canonical-main-fast-forward.json)保留在任务目录。[App locked/offline/all-features 来源证明](../../../merge-main-20261103/app-pin-proof.json)共 1,052 packages，84 个 Harness、5 个 llm-client、5 个 Mobile Linux 包分别单源锁定 `38ea`、`3cb37e3`、`43382a`。这是源码依赖解析，不是新原生包或设备结果。
+
+本轮 App [Bridge 恢复与 runtime manager 组合测试](../../../merge-main-20261103/bridge-manager-final.log) 238/238、0 skip；[转录/工具定向测试](../../../merge-main-20261103/transcript-focused-final.log) 104/104；Electron [web](../../../merge-main-20261103/electron-web-typecheck-final.log) 和 [node](../../../merge-main-20261103/electron-node-typecheck-final.log) TypeScript 检查通过。Bots 侧栏单测 15/15、相关 UI/导航 SSR 54/54、host fixture 的 Electron 侧栏交互 1/1 通过。翻译生成检查覆盖 2,752 keys / 5 locales，生成器测试 21/21；`check_i18n_pairing.py` 仍报告已有同名参数资源、`provider_accounts.xml` 和其他文案缺项，未记为通过。
+
+SDK `55ddd4cf` → `38ea` 的 client/mobile/core types 和 UDL 公共 ABI 核对无差异；llm-client message 结构没有 schema 差异，Rust API 和持久化行为则包含新的 logical message ID。此次未发现必须重新生成绑定的差异，但已有 native 二进制仍是旧 `55ddd4cf`，不证明新 SDK 行为；要运行新 SDK，仍须重新编译 native runtime。
+
+`llm-client` 已在本地合并并将 main 快进到 `3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3`，[定向测试](../../../merge-main-20261103/llm/cargo-targeted.log)151/151；Mobile Linux 本地 main 快进到 `25cf8a273bcd572b9be48e18fc9807e01dcdfce1`，该提交只更改测试路径，App 的产品 pin 仍为其父提交 `43382a`。本次仅做 main 同步与必要的源码/定向检查，没有以新 SDK 合并 pin 重新跑完整原生构建或设备验收，也没有 push。
+
+以下审查和产物结果属于合并前 `55ddd4cf` 阶段；它们说明当时实际测试的来源与范围，不是新合并 pin 的产物或设备通过记录。合并前其他工作树 dirty 内容由[保全清单](../../../merge-main-20261103/baseline.json)记录，须按实际状态保留。
+
+## 合并前 `55ddd4cf` 审查和验证记录
 
 独立 `mobile-linux-runtime` 的 App 锁定产品来源为 `43382a20161e371a0a31526412164b3d35545ab5`，其目录、managed mount 和 rootfs profile 改动已由 SDK 和 App 的锁定解析引用。该 runtime 的五包 Cargo 为 166 pass / 1 ignored，installer 离线 JVM 为 10/10；旧的真实 ARM64 staging 曾在磁盘阈值处中断。后续 Android 隔离包已核对两架构 rootfs，但设备执行仍待验证。
 

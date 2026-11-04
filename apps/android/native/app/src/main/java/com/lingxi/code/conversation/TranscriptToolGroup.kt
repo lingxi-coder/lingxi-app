@@ -1,7 +1,6 @@
 package com.lingxi.code.conversation
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
@@ -18,6 +17,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.stringResource
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.theme.LingXiTheme
@@ -40,6 +41,29 @@ internal sealed interface TranscriptBlock {
     }
 }
 
+/** A nil key makes questions, permissions, deliverables and agents standalone. */
+internal fun toolGroupingKey(call: ToolCallUi): String? {
+    if (call.planMarkdown != null || call.questionAnswers != null || call.localApp != null ||
+        call.tool.lowercase() in setOf("agent", "task", "skill", "spawn_agent", "fork_agent", "askuserquestion", "exitplanmode", "enterplanmode", "submitplan") ||
+        call.tool.contains("permission", ignoreCase = true) ||
+        call.header?.verb in setOf(ToolVerbUi.Task, ToolVerbUi.Todo, ToolVerbUi.Skill)) return null
+    if (call.tool.startsWith("mcp", ignoreCase = true)) return call.tool
+    return call.header?.verb?.takeIf { it != ToolVerbUi.Generic }?.name ?: call.tool.takeIf { it.isNotEmpty() }
+}
+
+internal fun sameToolGroup(first: ToolCallUi, next: ToolCallUi): Boolean =
+    toolGroupingKey(first)?.let { it == toolGroupingKey(next) } == true
+
+internal fun consecutiveToolGroups(calls: List<ToolCallUi>): List<List<ToolCallUi>> {
+    val groups = mutableListOf<MutableList<ToolCallUi>>()
+    calls.forEach { call ->
+        val last = groups.lastOrNull()
+        if (last != null && sameToolGroup(last.last(), call)) last.add(call)
+        else groups.add(mutableListOf(call))
+    }
+    return groups
+}
+
 internal fun transcriptBlocks(blocks: List<MessageContent>): List<TranscriptBlock> = buildList {
     val pending = mutableListOf<ToolCallUi>()
     var visualizations = 0
@@ -51,7 +75,10 @@ internal fun transcriptBlocks(blocks: List<MessageContent>): List<TranscriptBloc
             is MessageContent.Tool -> if (block.call.planMarkdown != null) {
                 flush()
                 add(TranscriptBlock.Plan(block.call.planMarkdown, block.call.status == AgentToolStatus.Running, block.call.id))
-            } else pending.add(block.call)
+            } else {
+                if (pending.lastOrNull()?.let { !sameToolGroup(it, block.call) } == true) flush()
+                pending.add(block.call)
+            }
             is MessageContent.Text -> if (block.text.isNotBlank()) {
                 flush()
                 add(TranscriptBlock.Prose(block.text))
@@ -82,11 +109,16 @@ internal fun toolIconName(verb: ToolVerbUi?, tool: String = "") = when {
 
 @Composable
 internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String>, onToggle: (String) -> Unit) {
-    // Answered questions and published apps are cards, never folded into a group.
-    if (group.calls.any { it.questionAnswers != null || it.localApp != null }) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            group.calls.forEach { call -> ToolCallView(call, call.id in expandedIds, { onToggle(call.id) }) }
+    val groups = consecutiveToolGroups(group.calls)
+    if (groups.size > 1) {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            groups.forEach { calls -> ToolGroupView(TranscriptBlock.Tools(calls), expandedIds, onToggle) }
         }
+        return
+    }
+    if (group.calls.size == 1) {
+        val call = group.calls.single()
+        ToolCallView(call, call.id in expandedIds, { onToggle(call.id) })
         return
     }
     val t = LingXiTheme.palette
@@ -94,31 +126,36 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val hovered by interaction.collectIsHoveredAsState()
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (!group.running) {
-            val last = group.summary
-            val title = toolCallTitle(last)
-            val detail = last.header?.subLine?.let { " · ${it.prefix}${it.text}" }.orEmpty()
-            val failed = group.calls.count { it.status == AgentToolStatus.Failed }
-            Row(
-                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
-                    .clickable(interactionSource = interaction, indication = LocalIndication.current, role = Role.Button) { onToggle(group.id) }
-                    .testTag("conversation.tool.group"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                LXIcon(toolIconName(last.header?.verb, last.tool), size = 18.dp, color = t.text3)
-                Text(title + detail, modifier = Modifier.weight(1f), color = t.text3, fontSize = 13.sp,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (failed > 0) Text("! $failed", color = t.danger, fontSize = 12.sp)
-                LXIcon(if (open) LXIconName.Chevron else LXIconName.ChevronR,
-                    modifier = Modifier.alpha(if (open || focused || hovered) 1f else 0f), size = 12.dp, color = t.text4)
-            }
+    val first = group.calls.first()
+    val label = first.header?.verb?.let { verb -> when (verb) {
+        ToolVerbUi.Read -> stringResource(R.string.chat_tool_verb_read)
+        ToolVerbUi.Search -> stringResource(R.string.chat_tool_verb_search)
+        ToolVerbUi.Update -> stringResource(R.string.chat_tool_verb_update)
+        ToolVerbUi.Create -> stringResource(R.string.chat_tool_verb_create)
+        ToolVerbUi.Fetch -> stringResource(R.string.chat_tool_verb_fetch)
+        ToolVerbUi.Shell -> stringResource(R.string.chat_tool_group_shell)
+        else -> first.header.label
+    } } ?: first.tool
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
+                .clickable(interactionSource = interaction, indication = null, role = Role.Button) { onToggle(group.id) }
+                .testTag("conversation.tool.group"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            LXIcon(toolIconName(first.header?.verb, first.tool), size = 18.dp, color = t.text3)
+            Text(label + " · " + stringResource(R.string.chat_tool_calls_count, group.calls.size),
+                modifier = Modifier.weight(1f), color = if (focused || hovered) t.text else t.text3,
+                fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (group.running) Text(stringResource(R.string.chat_tool_running_count, group.calls.count { it.status == AgentToolStatus.Running }), color = t.text3, fontSize = 12.sp)
+            else if (group.calls.all { it.status == AgentToolStatus.Failed }) Text(stringResource(R.string.chat_tool_calls_unsuccessful), color = t.text3, fontSize = 12.sp)
+            LXIcon(if (open) LXIconName.Chevron else LXIconName.ChevronR,
+                modifier = Modifier.alpha(if (open || focused || hovered) 1f else 0f), size = 12.dp, color = t.text4)
         }
-        if (group.running || open) {
-            group.visibleTools.forEach { call ->
-                ToolCallView(call, call.id in expandedIds, { onToggle(call.id) })
-            }
+        val visible = if (open) group.calls else group.calls.filter { it.status == AgentToolStatus.Running }
+        Column(Modifier.padding(start = 24.dp)) {
+            visible.forEach { call -> ToolCallView(call, call.id in expandedIds, { onToggle(call.id) }) }
         }
     }
 }

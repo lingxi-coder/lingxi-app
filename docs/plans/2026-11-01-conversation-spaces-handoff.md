@@ -1,8 +1,24 @@
 # Chat / Code 会话空间：当前交接
 
-状态记录：2026-11-03（America/Los_Angeles）。本页描述正在进行的集成及其验收边界，**不是最终通过声明**。产品契约详见[设计文档](../architecture/conversation-spaces-context-design.md)，独立审查和未关闭问题见[审查记录](2026-11-02-conversation-spaces-review.md)。当前范围内的源码 checkpoint 和模拟器重跑已完成；设备结果完成后须再次更新。
+状态记录：2026-11-03（America/Los_Angeles）。本页描述正在进行的集成及其验收边界，**不是最终通过声明**。产品契约详见[设计文档](../architecture/conversation-spaces-context-design.md)，独立审查和未关闭问题见[审查记录](2026-11-02-conversation-spaces-review.md)。先前 `55ddd4cf` 来源的源码 checkpoint 和模拟器重跑已完成；后续 main 同步的来源和证据边界见本页开头的同步记录。
 
-## 工作区和当前来源
+## 2026-11-03 本地 main 同步
+
+这次任务是把各仓库本地 main 与功能分支合并并回到本地 main，保留其他工作树的未提交内容；未 push。App 合并的双方来源是功能分支 `58eb629b1965435a79fc0278875091ae443cd36d` 和本地 main `46049b8ec3f386cb4e00e206da6ec652e89fca4b`；后者包含新的 Teams workspace、Bots 侧栏和未保存修改确认。开始时本地 main 领先 `origin/main` 的 `1f73edb020e7f35590e03818f43bbe01d31369a8`；回到本地 main 的最终 ref 与保全结果以任务目录 `merge-main-20261103/final-receipt.json` 为准。本地证据文件不随源码提交自动发布。
+
+Harness SDK 的功能分支和本地 main 已合至 `38ea730f503f318283cd4e26684f1abded10b6ec`，双亲为 `55ddd4cf880ed3de4696319c51b8429dcef80a9e` 和 `e0a8ae09607d361fc0b94d92fe51756238347302`，见[本地快进回执](../../../merge-main-20261103/harness/canonical-main-fast-forward.json)。SDK 合并工作树定向测试 122 pass、1 个 cache performance probe ignored；测试时暂存树与合并提交树均为 `e54249690af5e4c2934c9de2bae2f55c0e4118df`。App 47 处 Harness 引用指向 `38ea`；[locked/offline/all-features 来源证明](../../../merge-main-20261103/app-pin-proof.json)记录 1,052 packages 中 84 个 Harness 包均为 `38ea`、5 个 llm-client 包均为 `3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3`、5 个 Mobile Linux 包均为 `43382a20161e371a0a31526412164b3d35545ab5`。该证明是依赖解析，不能代替产品编译或设备测试。
+
+`llm-client` 本地 main 已与功能分支合为 `3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3`，定向测试 151/151，见[测试日志](../../../merge-main-20261103/llm/cargo-targeted.log)。Mobile Linux 的本地 main 已快进至 `25cf8a273bcd572b9be48e18fc9807e01dcdfce1`；其仅修改两处测试 fixture，产品源码与父提交 `43382a` 一致，App 的 runtime pin 仍为 `43382a`。
+
+本轮 App 侧相关检查：[Bridge 恢复和 runtime manager 组合测试](../../../merge-main-20261103/bridge-manager-final.log) 238/238、0 skip；Electron [web](../../../merge-main-20261103/electron-web-typecheck-final.log) 和 [node](../../../merge-main-20261103/electron-node-typecheck-final.log) TypeScript 检查通过；[转录/工具定向测试](../../../merge-main-20261103/transcript-focused-final.log) 104/104。Bots 侧栏单测 15/15、相关 UI/导航 SSR 54/54、使用 host fixture 的 Electron 侧栏交互 1/1 通过。翻译生成检查覆盖 2,752 keys / 5 locales，生成器测试 21/21；`check_i18n_pairing.py` 本轮仍报已有同名参数资源、`provider_accounts.xml` 和其他文案缺项，不能记为通过。
+
+SDK `55ddd4cf` 到 `38ea` 的 client/mobile/core types 和 UDL 公共 ABI 检查无差异；llm-client message 结构无 schema 变化，Rust API 及持久化行为包含新的 logical message ID。未发现此次合并要求重新生成绑定，但现有 native 二进制仍源自 `55ddd4cf`，不能代表 `38ea` 的行为；运行新 SDK 仍须重新编译相应 native runtime，本次合并没有重新发包。
+
+下文保留合并前 `55ddd4cf` 快照的完整 Android APK、iOS 模拟器、Desktop Bridge 和 SDK 验收记录，**不能将这些结果当作新 SDK 合并 pin 的重新打包或设备验收**。本次范围是本地 main 同步和必要的源码、定向检查，不额外重复全部平台原生构建；Android 新来源真机、iOS 物理设备/真实 provider 和签名包仍无相应新证据。
+
+合并前[工作树保全清单](../../../merge-main-20261103/baseline.json)记录了任务 App 的两项 ProviderAccounts 未提交文件，以及主 App 工作树的 `Cargo.lock`、`ConversationDetailHost.kt`、`modUiAbovePrompt.tsx` 和其他目录；后续检查应按清单核实，不覆盖它们。
+
+## 合并前 `55ddd4cf` 工作区快照
 
 | 内容 | 当前快照 |
 | --- | --- |
@@ -13,11 +29,11 @@
 | llm-client | 上述目录下 `llm-client`，当前提交 `0c2f041e856265e093e404d9b202c4238f73ef3c`。 |
 | 证据 | App 内 [acceptance 验证索引](../../acceptance/conversation-spaces-20261101/validation-index.md)及同目录各平台记录；任务构建产物在同级 `build/`。这些 acceptance 与 build 材料保留在本地工作区，未纳入上述源码 checkpoint；链接用于当前工作树交接，源码提交本身不携带这些证据。 |
 
-App 的 47 处 Harness 引用锁定 `55ddd4cf880ed3de4696319c51b8429dcef80a9e`，4 处 Mobile Linux 引用锁定 `43382a`；`Cargo.lock` SHA-256 为 `4128060603475df74961172454291f2bc2d0b939a9f9995893ff2e436c89378e`。`--locked --offline --all-features` metadata 在 App 父提交上使用随后原样提交的 pin 文件通过；[来源核验](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/app-55ddd-locked-source-proof-20261103.json)记录 84 个 Harness、5 个 Mobile Linux 和 5 个 llm-client 包的精确提交。协议仍为 32；新 JNI、Bridge 和隔离包有下方各自的产物证据，不能把解析通过当成设备或全部平台验收。原始[历史快照](artifacts/2026-11-01-conversation-spaces-snapshot.json)只保存旧时点数据，已标注 superseded，不能作为当前 pin 或待办。
+该验收快照中 App 的 47 处 Harness 引用锁定 `55ddd4cf880ed3de4696319c51b8429dcef80a9e`，4 处 Mobile Linux 引用锁定 `43382a`；`Cargo.lock` SHA-256 为 `4128060603475df74961172454291f2bc2d0b939a9f9995893ff2e436c89378e`。`--locked --offline --all-features` metadata 在 App 父提交上使用随后原样提交的 pin 文件通过；[来源核验](../../acceptance/conversation-spaces-20261101/protocol/post-merge-20261102/app-55ddd-locked-source-proof-20261103.json)记录 84 个 Harness、5 个 Mobile Linux 和 5 个 llm-client 包的精确提交。协议仍为 32；新 JNI、Bridge 和隔离包有下方各自的产物证据，不能把解析通过当成设备或全部平台验收。原始[历史快照](artifacts/2026-11-01-conversation-spaces-snapshot.json)只保存旧时点数据，已标注 superseded，不能作为当前 pin 或待办。
 
 这是一组共享的 dirty worktree。继续之前先查看各仓库 HEAD、暂存区、未提交改动及活动构建，不能重置或覆盖他人的改动。常规 checkout、现有用户项目和业务数据均不在清理范围；`apps/electron/node_modules` 链接、Generated、target、构建产物和 acceptance 日志不因交接自动提交。大型 Cargo、Gradle、Xcode 任务需协调资源，停止线和实际磁盘余量重新核实；清理只限经路径、来源和使用状态确认的本任务可重建缓存，先保留日志与指纹。
 
-此前发现的品牌隐藏根目录改动已获用户明确授权纳入：最终合同为 Global Chat `~/.品牌/chat`、Global Code `~/.品牌/code`，配置保留 `~/.品牌`；项目显式目录不变，项目和 scheduled 的管理根仍在品牌容器内，CLI 公共默认 Code。SDK `55ddd4cf` 和 App 已锁定新目录来源；各平台仅以其实际产物及测试结果为准。不把混合工作树结果当作 immutable pin 的证据，也不称原 SDK 工作树干净。
+合并前发现的品牌隐藏根目录改动已获用户明确授权纳入：最终合同为 Global Chat `~/.品牌/chat`、Global Code `~/.品牌/code`，配置保留 `~/.品牌`；项目显式目录不变，项目和 scheduled 的管理根仍在品牌容器内，CLI 公共默认 Code。SDK `55ddd4cf` 和 App 已锁定新目录来源；各平台仅以其实际产物及测试结果为准。不把混合工作树结果当作 immutable pin 的证据，也不称原 SDK 工作树干净。
 
 ## 不变的产品与身份契约
 
@@ -42,7 +58,7 @@ App 的 47 处 Harness 引用锁定 `55ddd4cf880ed3de4696319c51b8429dcef80a9e`�
 - 普通 Remote 会话必须先确认固定 mode；未知或冲突时停止投影及控制。Team 单次审批是无会话 mode 的独立 capability，只允许对捕获的 request 做 allow-once 或 deny，不确定结果不得重新投相反答案。
 - Desktop/CLI FileHistory 使用原始文件路径与父目录 authority；移动端没有 FileHistory UI/还原能力，本轮不扩展该功能。上下文中的外部资料、工具输出和旧消息不提升为新 Host/用户指令。
 
-## 当前验证与限制
+## 合并前 `55ddd4cf` 验证与限制
 
 | 层级 | 本次可引用的事实 | 尚不能据此声明 |
 | --- | --- | --- |
@@ -69,7 +85,7 @@ iOS [最终回执](../../acceptance/conversation-spaces-20261101/ios/git55-nativ
 
 Android bc68 离线隔离包的手动设备观察确认了 Global picker、Chat/Code 切换，以及 Chat 中 New Chat 保持 Chat/Global；截图和层级见 [Android 状态](../../acceptance/conversation-spaces-20261101/android/postfinal-direct-validation-status-20261102.md)的 Device follow-up。用户又授权在该隔离包私有目录创建空项目 `Context32-NewChat-Verification`：手动观察到选择 Project 后普通 New Chat 回到 Global，Code mode 保持，前后[界面层级](../../acceptance/conversation-spaces-20261101/android/postfinal-device-manual-project-before-newchat-bc68.txt)和[结果层级](../../acceptance/conversation-spaces-20261101/android/postfinal-device-manual-project-to-global-bc68.txt)已保存。这些是旧目录策略下的 bc68 观察，新 SDK 新目录与设备上的 media drain 仍须重验；它们不是 instrumentation 通过，也未覆盖真实模型或运行中的 turn。空索引 fixture 已包含在重新编译的当前 test APK 中，尚未在设备执行。
 
-## 未关闭事项与续作顺序
+## 合并前未关闭事项与续作顺序（历史记录）
 
 SDK `55ddd4cf` 的 Stop/准入修复及 App pin 已提交本地 checkpoint；Android 当前 JNI、隔离包与 JVM 和 iOS 分阶段模拟器回归均有上表证据，物理设备和真实 provider 验收尚未完成。具体复现、已测范围与未完成项见[审查记录](2026-11-02-conversation-spaces-review.md)。`46fb13b` 的 JNI、FFI 和旧设备结果均为前驱证据，不能冒充当前 pin 的验证。
 

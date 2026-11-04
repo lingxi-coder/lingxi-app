@@ -2582,4 +2582,8 @@
     <string name="local_app_market_remix_confirm">從此版本建立可編輯的原始碼副本？</string>
     <string name="side_chat_expired_read_only">此旁聊已過期。以下內容僅供檢視與複製。</string>
     <string name="side_chat_delivery_unconfirmed">提交狀態未確認</string>
+    <string name="chat_tool_calls_count">%1$d 次</string>
+    <string name="chat_tool_running_count">%1$d 項執行中</string>
+    <string name="chat_tool_calls_unsuccessful">呼叫未成功</string>
+    <string name="chat_tool_group_shell">執行命令</string>
 </resources>

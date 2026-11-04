@@ -69,6 +69,12 @@ export interface Tokens {
   text2: string;
   text3: string;
   text4: string;
+  /**
+   * Secondary text on a selected row (`surfaceActive`). `text4` falls short of
+   * 4.5:1 there in both palettes (4.04:1 light, 3.24:1 dark), so a selected
+   * row's metadata takes this instead: 4.77:1 light, 4.71:1 dark.
+   */
+  text3OnActive: string;
   accent: string;
   accentBg: string;
   accentBorder: string;
@@ -106,6 +112,7 @@ export const tokens = (dark: boolean): Tokens =>
         text2: '#c2c2c7',
         text3: '#a1a1a6',
         text4: '#919196',
+        text3OnActive: '#b0b0b5',
         accent: '#0a84ff',
         accentBg: 'rgba(10,132,255,0.18)',
         accentBorder: 'rgba(10,132,255,0.38)',
@@ -137,6 +144,7 @@ export const tokens = (dark: boolean): Tokens =>
         text2: '#515154',
         text3: '#636366',
         text4: '#6e6e73',
+        text3OnActive: '#636366',
         // A deeper system blue keeps small labels legible on light surfaces.
         accent: '#0066d6',
         accentBg: 'rgba(0,102,214,0.10)',

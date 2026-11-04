@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ActivityToolGroup, activityToolSummary } from '../src/renderer/components/ActivityToolGroup';
+import { ToolGroup } from '../src/renderer/components/ToolGroup';
 import { AskUserQuestionSummary } from '../src/renderer/components/AskUserQuestionSummary';
 import { CompactionStatus } from '../src/renderer/components/CompactionStatus';
 import { DESKTOP_LOCALES, LANGUAGE_STORAGE_KEY, translate, type DesktopLocale } from '../src/renderer/i18n/locale';
@@ -65,17 +65,15 @@ test('question summaries use canonical plural forms and preserve question and an
   });
 });
 
-test('activity badges and accessible summaries localize running and failed counts', () => {
+test('activity summaries localize current work and keep unsuccessful attempts in details', () => {
   const item = (id: string, status: ToolRunItem['status']): ToolRunItem => ({ type: 'tool', id, tool: 'Read', status, view: { verb: 'read', label: 'Read', title: 'Read user file', primary: '/opaque/file.txt' } });
   const group = { type: 'tool-group' as const, id: 'tools', tools: [item('r1', 'running'), item('r2', 'running'), item('f1', 'error')] };
   for (const locale of DESKTOP_LOCALES) inLocale(locale, () => {
-    const summary = activityToolSummary(group);
-    const html = render(React.createElement(ActivityToolGroup, { group, children: 'Opaque tool output %1$s' }));
-    for (const [key, count] of [['desktop_ui_running_count', 2], ['desktop_ui_failed_count', 1]] as const) {
-      assert.ok(summary.includes(translate(key, locale, count)), locale);
-      assert.ok(html.includes(textHTML(translate(key, locale, count))), locale);
-    }
-    assert.ok(html.includes('Opaque tool output %1$s'));
-    assert.doesNotMatch(html, /desktop_ui_activity_/);
+    const html = render(React.createElement(ToolGroup, { group, open: false, toolOpen: () => false, onSetOpen() {} }));
+    assert.ok(html.includes(textHTML(translate('desktop_ui_running_count', locale, 2))), locale);
+    assert.ok(!html.includes(textHTML(translate('desktop_ui_failed_count', locale, 1))), locale);
+    const failed = render(React.createElement(ToolGroup, { group: { ...group, tools: [item('f1', 'error'), item('f2', 'error')] }, open: false, toolOpen: () => false, onSetOpen() {} }));
+    assert.ok(failed.includes(textHTML(translate('desktop_ui_tool_calls_unsuccessful', locale))), locale);
+    assert.doesNotMatch(html + failed, /desktop_ui_/);
   });
 });

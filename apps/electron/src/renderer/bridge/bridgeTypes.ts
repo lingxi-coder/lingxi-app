@@ -213,7 +213,8 @@ export interface UseBridge {
   cancelProjectCreation(): void;
   activateProject(path: string): Promise<WorkspaceMetadata | null>;
   removeProject(path: string): Promise<void>;
-  updateSidebarPreferences(preferences: import('../../shared/settings').SidebarPreferences): Promise<void>;
+  /** Save sidebar preferences; the keys left out keep their saved value. */
+  updateSidebarPreferences(preferences: Partial<import('../../shared/settings').SidebarPreferences>): Promise<void>;
   prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
   releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
   preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;

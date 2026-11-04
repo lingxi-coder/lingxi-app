@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { BotUi, BotsApi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
-import { botDraftProblems, botPeers, hasBotDraftProblems, ipcErrorMessage } from '../bridge/botForm';
+import { botDraftProblems, botPeers, hasBotDraftProblems } from '../bridge/botForm';
 import { BotEditorController, botEditorDirty, type BotEditorState } from '../bridge/botEditor';
+import type { BotLeaveGuard } from '../bridge/botLeaveGuard';
 import { BotMemoryController } from '../bridge/botMemory';
 import { BotRoutinesController, routineScopeOf } from '../bridge/botRoutines';
 import { BotSkillsController } from '../bridge/botSkills';
@@ -11,7 +12,8 @@ import { relativeActivity, removeBot, startBotChat, type BotActivity } from '../
 import { botRemoteAvailability, useRemoteControl } from '../bridge/remoteControl';
 import type { BotsController } from '../bridge/botsStore';
 import type { UseBridge } from '../bridge/bridgeTypes';
-import { BotChatsPanel, BotMemoryPanel, BotRoutinesPanel, BotSkillsPanel, BotTasksPanel, type BotChats } from './BotPanels';
+import { AgentAvatar } from './AgentAvatar';
+import { BotMemoryPanel, BotRoutinesPanel, BotSkillsPanel, BotTasksPanel } from './BotPanels';
 import {
   BotAcceptField,
   BotConfirm,
@@ -24,15 +26,14 @@ import {
   type ModelChoices,
 } from './BotFields';
 
-export type BotTab = 'chats' | 'routines' | 'tasks' | 'general' | 'persona' | 'memory' | 'skills' | 'folders' | 'permissions';
+export type BotTab = 'routines' | 'tasks' | 'general' | 'persona' | 'memory' | 'skills' | 'folders' | 'permissions';
 
-const TABS: readonly BotTab[] = ['chats', 'routines', 'tasks', 'general', 'persona', 'memory', 'skills', 'folders', 'permissions'];
+const TABS: readonly BotTab[] = ['routines', 'tasks', 'general', 'persona', 'memory', 'skills', 'folders', 'permissions'];
 /** The tabs whose fields are one draft, saved together. */
 const DRAFT_TABS: ReadonlySet<BotTab> = new Set<BotTab>(['general', 'persona', 'folders', 'permissions']);
 
 function tabLabel(tab: BotTab): string {
   switch (tab) {
-    case 'chats': return tr('bots_tab_chats');
     case 'routines': return tr('bots_tab_routines');
     case 'tasks': return tr('bots_tab_tasks');
     case 'general': return tr('bots_tab_general');
@@ -87,22 +88,24 @@ export function BotDeleteTasksNote({ state }: { state: Pick<BotTasksState, 'view
 /** What of the Scheduled page's data a Bot's routines panel reads. */
 export type BotRoutinesBridge = Pick<UseBridge, 'scheduledScopes' | 'manageScheduled'>;
 
-export function BotDetail({ botId, listed, api, bots, activity, models, pickFolder, visible, sessionLoading, routines: routinesBridge, onBack, onOpenChat, onOpenTaskChat, onNewRoutine, onOpenRoutine, onDelete }: {
+export function BotDetail({ botId, listed, api, bots, guard, activity, models, pickFolder, visible, sessionLoading, routines: routinesBridge, onBack, onOpenChat, onOpenTaskChat, onNewRoutine, onOpenRoutine, onDelete, deleteRequest }: {
   botId: string;
   /** The Bot as the list has it: its name is there to show before the Bot itself has been read. */
   listed: BotUi | undefined;
   api: BotsApi;
   bots: BotsController;
+  /** Asked before the page lets go of edits that are not saved: by its Back button, and by whatever else takes the owner away from it. */
+  guard: BotLeaveGuard;
   activity: BotActivity;
   models: ModelChoices;
   pickFolder(): Promise<{ path: string } | null>;
-  /** The page is the one on screen. Coming back to it reads the chats again. */
+  /** The page is the one on screen. Coming back to it reads the tasks and routines again. */
   visible: boolean;
   sessionLoading: boolean;
   routines: BotRoutinesBridge;
   onBack(): void;
-  /** Show a chat of this Bot (a new one without an id) in the chat view. Rejects with the reason it could not start. */
-  onOpenChat(sessionId?: string, transcriptPath?: string): Promise<void>;
+  /** Show a new chat of this Bot in the chat view. Rejects with the reason it could not start. Its earlier chats are listed in the sidebar. */
+  onOpenChat(): Promise<void>;
   /** Show the chat that does a task, which is a chat of the Bot that was given the task: this one or another. Rejects with the reason it could not start. */
   onOpenTaskChat(botId: string, sessionId: string): Promise<void>;
   /** Go to the Scheduled page to make a task that runs as this Bot, in the scope the scheduler lists for it. */
@@ -110,6 +113,8 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   /** Go to the Scheduled page to see one of this Bot's tasks. */
   onOpenRoutine(scopeId: string, jobId: string): void;
   onDelete(): Promise<void>;
+  /** Each new number asks whether to delete the Bot, as the Delete button does: the sidebar's "Delete Bot…" leads here. */
+  deleteRequest?: number;
 }) {
   const [editor] = useState(() => new BotEditorController(api, botId, (bot) => bots.put(bot), () => botPeers(bots.getSnapshot().bots, botId)));
   const [memory] = useState(() => new BotMemoryController(api.memory, botId));
@@ -118,25 +123,21 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   const [tasks] = useState(() => new BotTasksController(api.tasks, botId));
   const routineScope = routineScopeOf(routinesBridge.scheduledScopes, botId);
   const state = useObservable(editor);
+  const leaving = useObservable(guard);
   const taskState = useObservable(tasks);
   const known = useObservable(bots);
   const remoteAvailability = botRemoteAvailability(useRemoteControl().status);
-  const [tab, setTab] = useState<BotTab>('chats');
-  const [chats, setChats] = useState<BotChats>({ status: 'loading' });
+  const [tab, setTab] = useState<BotTab>('general');
   const [opening, setOpening] = useState<string | undefined>();
   const [openError, setOpenError] = useState('');
-  const [discarding, setDiscarding] = useState(false);
-  const [deleting, setDeleting] = useState<{ busy: boolean; error: string } | undefined>();
+  const [deleting, setDeleting] = useState<{ busy: boolean; error: string } | undefined>(() => deleteRequest === undefined ? undefined : { busy: false, error: '' });
 
   useEffect(() => { void editor.load(); }, [editor]);
 
-  const loadChats = useCallback(async () => {
-    try { setChats({ status: 'ready', sessions: (await api.listSessions(botId)).sessions }); }
-    catch (cause) { setChats({ status: 'failed', message: ipcErrorMessage(cause) }); }
-  }, [api, botId]);
+  // A request that comes after the page is up asks the question too; one already being answered is not asked again.
   useEffect(() => {
-    if (visible && tab === 'chats') void loadChats();
-  }, [visible, tab, loadChats]);
+    if (deleteRequest !== undefined) setDeleting((current) => current ?? { busy: false, error: '' });
+  }, [deleteRequest]);
   useEffect(() => { if (tab === 'memory') void memory.load(); }, [tab, memory]);
   useEffect(() => { if (tab === 'skills') void skills.load(); }, [tab, skills]);
   // The tasks are read when their tab is shown, or the question whether to delete the Bot is asked, and then follow the host's word that they changed.
@@ -146,7 +147,7 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
     void tasks.load();
     return tasks.watch();
   }, [watchingTasks, tasks]);
-  // The routines are read again whenever the page comes back, as the chats are: they run and finish while it is away.
+  // The routines are read again whenever the page comes back: they run and finish while it is away.
   useEffect(() => {
     if (visible && tab === 'routines' && routineScope !== undefined) void routines.load(routineScope);
   }, [visible, tab, routines, routineScope]);
@@ -155,6 +156,9 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   const description = state.bot?.description ?? listed?.description ?? '';
   const peers = botPeers(known.bots, botId);
   const dirty = botEditorDirty(state, peers);
+  // The window is told whether there are edits to lose, so that whatever takes the owner away from this page asks first.
+  useEffect(() => { guard.hold(dirty); }, [guard, dirty]);
+  useEffect(() => () => guard.hold(false), [guard]);
   const problems = botDraftProblems(state.draft, peers);
   // The list is read again whenever the page comes back, so it knows more recent activity than the copy opened here.
   const lastActive = listed?.lastActivityAt ?? state.bot?.lastActivityAt;
@@ -167,7 +171,7 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
     if (!outcome.ok) setOpenError(outcome.message);
     setOpening(undefined);
   };
-  const open = (sessionId?: string, transcriptPath?: string) => openWith(sessionId ?? 'new', () => onOpenChat(sessionId, transcriptPath));
+  const open = () => openWith('new', onOpenChat);
   const remove = async () => {
     setDeleting({ busy: true, error: '' });
     const outcome = await removeBot(onDelete);
@@ -175,15 +179,18 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   };
 
   return <div className="bots-detail">
-    <button type="button" className="bots-back" data-variant="quiet" onClick={() => { if (dirty) setDiscarding(true); else onBack(); }}>← {tr('bots_back')}</button>
+    <button type="button" className="bots-back" data-variant="quiet" onClick={() => guard.leave(onBack)}>← {tr('bots_back')}</button>
     <header className="bots-detail-header">
-      <div className="bots-detail-title">
-        <h1>{name}</h1>
-        <div className="bots-detail-meta">
-          <BotStateChip activity={activity} />
-          <span className="bots-muted">{lastActive !== undefined ? tr('bots_last_active', relativeActivity(lastActive)) : tr('bots_no_chats_yet')}</span>
+      <div className="bots-detail-identity">
+        <span className="bots-avatar" aria-hidden="true"><AgentAvatar agentId={botId} size={40} /></span>
+        <div className="bots-detail-title">
+          <h1>{name}</h1>
+          <div className="bots-detail-meta">
+            <BotStateChip activity={activity} />
+            <span className="bots-muted">{lastActive !== undefined ? tr('bots_last_active', relativeActivity(lastActive)) : tr('bots_no_chats_yet')}</span>
+          </div>
+          {description ? <p className="bots-muted">{description}</p> : null}
         </div>
-        {description ? <p className="bots-muted">{description}</p> : null}
       </div>
       <div className="bots-detail-actions">
         <button type="button" data-variant="primary" disabled={opening !== undefined || sessionLoading || state.phase === 'failed'} aria-busy={opening === 'new' || undefined} onClick={() => void open()}>
@@ -198,7 +205,6 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
     <nav className="bots-tabs" aria-label={tr('bots_sections_label')}>
       {TABS.map((id) => <button key={id} type="button" aria-current={tab === id ? 'page' : undefined} onClick={() => setTab(id)}>{tabLabel(id)}</button>)}
     </nav>
-    {tab === 'chats' ? <BotChatsPanel chats={chats} opening={opening} disabled={sessionLoading} onOpen={(sessionId, transcriptPath) => void open(sessionId, transcriptPath)} onRetry={() => { setChats({ status: 'loading' }); void loadChats(); }} /> : null}
     {tab === 'routines' ? <BotRoutinesPanel controller={routines} scopeId={routineScope} onNew={onNewRoutine} onOpen={onOpenRoutine} /> : null}
     {tab === 'tasks' ? <BotTasksPanel controller={tasks} opening={opening} disabled={sessionLoading}
       onOpen={(task) => void openWith(task.taskId, () => onOpenTaskChat(task.botId, task.sessionId))} /> : null}
@@ -215,7 +221,7 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
       </> : null}
       <BotSaveBar state={state} dirty={dirty} problems={hasBotDraftProblems(problems)} onSave={() => void editor.save()} onReload={() => void editor.load()} />
     </> : null}
-    {discarding ? <BotConfirm title={tr('bots_discard_title')} icon="info" danger={false} confirmLabel={tr('bots_discard_confirm')} onCancel={() => setDiscarding(false)} onConfirm={onBack}>
+    {leaving.asking ? <BotConfirm title={tr('bots_discard_title')} icon="info" danger={false} confirmLabel={tr('bots_discard_confirm')} onCancel={() => guard.cancel()} onConfirm={() => guard.confirm()}>
       <p>{tr('bots_discard_body')}</p>
     </BotConfirm> : null}
     {deleting ? <BotConfirm title={tr('bots_delete_title', name)} confirmLabel={tr('bots_delete')} busyLabel={tr('bots_deleting')} busy={deleting.busy} disabled={activity !== 'idle'}

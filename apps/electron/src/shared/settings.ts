@@ -56,12 +56,21 @@ export interface ProviderModelPickerVisibility {
 
 export type ModelPickerVisibilitySettings = Record<string, ProviderModelPickerVisibility>;
 
+/** What the desktop sidebar lists; the left rail's Home, Bots and Teams buttons switch it. */
+export type SidebarMode = 'home' | 'bots' | 'teams';
+
 /** Preferences that govern how project chats are organized in the desktop sidebar. */
 export interface SidebarPreferences {
   organization: 'project' | 'list';
   chatSort: 'priority' | 'updated' | 'manual';
   /** Session IDs in user-defined order, keyed by their canonical project path. */
   manualSessionOrder: Record<string, string[]>;
+  /** The mode the owner last chose: Home until they first switch it. */
+  mode: SidebarMode;
+  /** The Bots whose chats the Bots sidebar lists open. Omitted until the owner first opens or closes one. */
+  expandedBots?: string[];
+  /** The width, in CSS pixels, the owner gave the Teams details panel. Omitted until they first resize it. */
+  teamsDrawerWidth?: number;
 }
 
 /**

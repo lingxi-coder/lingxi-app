@@ -1,6 +1,7 @@
 import type { RunItem, ToolRunItem } from '../model/runItem';
 import { localAppReference } from '../model/localAppReference';
 import { localAppToolRequiresCode } from '../bridge/localAppErrors';
+import { transcriptToolKey } from './toolPresentation';
 
 export interface TranscriptToolGroup {
   readonly type: 'tool-group';
@@ -10,7 +11,7 @@ export interface TranscriptToolGroup {
 
 export type TranscriptRow = Exclude<RunItem, ToolRunItem> | TranscriptToolGroup;
 
-/** Thinking never divides tools; messages and application deliverables retain boundaries. */
+/** Adjacent, related tools share a group; prose and deliverables retain their place. */
 export function transcriptRows(items: readonly RunItem[], running: boolean, hasPendingActivity = false): TranscriptRow[] {
   const rows: TranscriptRow[] = [];
   let group: TranscriptToolGroup | undefined;
@@ -28,14 +29,15 @@ export function transcriptRows(items: readonly RunItem[], running: boolean, hasP
       continue;
     }
     if (item.type === 'tool') {
-      // A published application is a deliverable. Keep its open action visible
-      // when surrounding tools collapse or a following start is still running.
+      // Deliverables and Code-required errors must remain visible when
+      // surrounding tool groups collapse.
       if (localAppReference(item) || localAppToolRequiresCode(item.tool, item.status, item.result?.headline, item.result?.body)) {
         rows.push({ type: 'tool-group', id: `tool-group:${item.id}`, tools: [item] });
         group = undefined;
         continue;
       }
-      if (!group) {
+      const key = transcriptToolKey(item);
+      if (!group || !key || key !== transcriptToolKey(group.tools[0]!)) {
         group = { type: 'tool-group', id: `tool-group:${item.id}`, tools: [] };
         rows.push(group);
       }

@@ -12,9 +12,9 @@ import {
   isPermissionModeId,
   parseModelPickerVisibility,
   parseNotificationPreferences,
-  parseSidebarPreferences,
   parseSettings,
   parseVoicePreferences,
+  patchSidebarPreferences,
   publicSettings,
   setWorkspaceTrust,
   withActiveProject,
@@ -499,7 +499,7 @@ export class SettingsStore {
       else delete this.settings.modelPickerVisibility;
     }
     if ('sidebar' in patch) {
-      this.settings.sidebar = parseSidebarPreferences(patch.sidebar, this.settings.projects);
+      this.settings.sidebar = patchSidebarPreferences(this.settings.sidebar, patch.sidebar, this.settings.projects);
     }
     if (typeof patch.collapseThoughtsByDefault === 'boolean') {
       this.settings.collapseThoughtsByDefault = patch.collapseThoughtsByDefault;

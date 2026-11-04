@@ -2750,5 +2750,11 @@
   "local_app_market_remix": "建立可編輯副本",
   "local_app_market_remix_confirm": "從此版本建立可編輯的原始碼副本？",
   "side_chat_expired_read_only": "此旁聊已過期。以下內容僅供檢視與複製。",
-  "side_chat_delivery_unconfirmed": "提交狀態未確認"
+  "side_chat_delivery_unconfirmed": "提交狀態未確認",
+  "chat_tool_calls_count": "%1$d 次",
+  "chat_tool_running_count": "%1$d 項執行中",
+  "chat_tool_calls_unsuccessful": "呼叫未成功",
+  "chat_tool_group_shell": "執行命令",
+  "chat_tool_calls_count %lld": "%1$lld 次",
+  "chat_tool_running_count %lld": "%1$lld 項執行中"
 }

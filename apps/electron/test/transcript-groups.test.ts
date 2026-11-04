@@ -29,6 +29,24 @@ test('only live thinking remains in its original position; it never splits tools
 test('tool group identity survives status updates and additional calls', () => {
   assert.equal(transcriptRows([tool('a', 'running')], true)[0]?.id, transcriptRows([tool('a'), thought, tool('b')], true)[0]?.id);
 });
+test('only adjacent calls of the same activity type merge without reordering', () => {
+  const edit = { ...tool('edit'), tool: 'Edit', view: { verb: 'update' as const, label: 'Edit', title: 'Edit config' } };
+  const items = [tool('read-1'), thought, tool('read-2'), edit, tool('read-3')];
+  assert.deepEqual(transcriptRows(items, false).flatMap(row => row.type === 'tool-group' ? [row.tools.map(tool => tool.id)] : []), [
+    ['read-1', 'read-2'], ['edit'], ['read-3'],
+  ]);
+});
+test('generic tools and MCP endpoints retain distinct groups despite sharing a verb', () => {
+  const generic = (id: string, name: string): ToolRunItem => ({ ...tool(id), tool: name, view: { verb: 'generic', label: name, title: name } });
+  const items = [generic('one', 'ToolSearch'), generic('two', 'ToolSearch'), generic('three', 'mcp__docs__search'), generic('four', 'mcp__web__search')];
+  assert.deepEqual(transcriptRows(items, false).flatMap(row => row.type === 'tool-group' ? [row.tools.map(tool => tool.id)] : []), [['one', 'two'], ['three'], ['four']]);
+});
+test('questions, permissions, plans and agent launches remain individually reachable', () => {
+  for (const name of ['AskUserQuestion', 'PermissionRequest', 'SubmitPlan', 'Agent', 'Skill']) {
+    const items = [1, 2].map(index => ({ ...tool(`${name}-${index}`), tool: name }));
+    assert.equal(transcriptRows(items, false).filter(row => row.type === 'tool-group').length, 2, name);
+  }
+});
 function renderGroup(tools: ToolRunItem[], open = false, toolExpanded?: boolean) {
   return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, React.createElement(ToolGroup, {
     group: { type: 'tool-group', id: 'group', tools }, open, toolOpen: () => toolExpanded, onSetOpen: () => {},
@@ -65,43 +83,49 @@ test('a lone tool with result details has one disclosure without a repeated grou
   assert.equal((html.match(/<button/g) ?? []).length, 1);
   assert.doesNotMatch(html, /tool-group-trigger/);
 });
-test('running groups show only active calls, even when disclosure was open', () => {
-  const html = renderGroup([tool('finished'), tool('active', 'running')], true);
-  assert.match(html, /Read active/);
-  assert.doesNotMatch(html, /Read finished|Used 2 tools|Output/);
+test('running groups keep a stable summary, show current work, and honor expanded history', () => {
+  const tools = [tool('finished'), tool('retry', 'error'), tool('active', 'running')];
+  const closed = renderGroup(tools);
+  assert.match(closed, /Read files · 3 calls · 1 running/);
+  assert.match(closed, /Read active/);
+  assert.doesNotMatch(closed, /Read finished|Read retry|unsuccessful|Output/);
+  const opened = renderGroup(tools, true);
+  for (const id of ['finished', 'retry', 'active']) assert.match(opened, new RegExp(`Read ${id}`));
+  assert.equal((opened.match(/data-status="running"/g) ?? []).length, 1);
 });
-test('settled groups collapse to one row, expose failures and expand summaries', () => {
+test('settled mixed results collapse neutrally and preserve unsuccessful attempts in details', () => {
   const tools = [tool('a'), tool('b', 'error')];
   const closed = renderGroup(tools);
-  assert.match(closed, /Read files · 1 failed · 2 tools/);
+  assert.match(closed, /Read files · 2 calls/);
+  assert.doesNotMatch(closed, /failed|unsuccessful|Call unsuccessful/);
   assert.doesNotMatch(closed, /Used 2 tools|Read a/);
   assert.match(closed, /aria-expanded="false"/);
   assert.doesNotMatch(closed, /Summary a|Summary b/);
   const opened = renderGroup(tools, true);
   assert.match(opened, /Summary a/);
-  assert.match(opened, /Failed/);
+  assert.match(opened, /Call unsuccessful/);
   assert.doesNotMatch(opened, /Summary b/);
   assert.doesNotMatch(opened, /Output a|Output b/);
 });
 
-test('a successful final tool keeps the group neutral while counting earlier failures', () => {
+test('a successful final call keeps earlier unsuccessful attempts out of the summary', () => {
   const tools = [tool('first', 'error'), tool('second', 'error'), tool('recovered')];
   for (const open of [false, true]) {
     const html = renderGroup(tools, open);
     const trigger = html.match(/<button\b[^>]*>/)?.[0];
     assert.ok(trigger);
     assert.ok(trigger.includes(`color:${tokens(true).text3}`));
-    assert.match(html, /Read files · 2 failed · 3 tools/);
-    assert.ok(html.includes(`color:${tokens(true).danger}"> · 2 failed</span>`));
+    assert.match(trigger, /Read files · 3 calls/);
+    assert.doesNotMatch(trigger, /failed|unsuccessful/);
   }
 });
 
-test('a failed final tool marks only the failure status in red', () => {
-  const html = renderGroup([tool('success'), tool('last', 'error')]);
+test('a fully unsuccessful group states the call outcome without a task-level failure banner', () => {
+  const html = renderGroup([tool('first', 'error'), tool('last', 'error')]);
   const trigger = html.match(/<button\b[^>]*>/)?.[0];
   assert.ok(trigger?.includes(`color:${tokens(true).text3}`));
-  assert.ok(html.includes(`color:${tokens(true).danger}`));
-  assert.match(html, /Read files · 1 failed · 2 tools/);
+  assert.ok(!html.includes(`color:${tokens(true).danger}`));
+  assert.match(html, /Read files · 2 calls · Calls unsuccessful/);
 });
 
 test('waiting turns show thinking even before any reasoning delta arrives', () => {
@@ -120,7 +144,7 @@ test('thinking resumes after tools settle without competing with active tools or
 test('summary describes the whole group and uses its first activity icon', () => {
   const last = { ...tool('last'), view: { verb: 'shell', label: 'Run', title: 'Run tests', sub_line: { prefix: '$ ', text: 'npm test' } } };
   const html = renderGroup([tool('first'), last]);
-  assert.match(html, /Read a file, ran a command/);
+  assert.match(html, /Read files · 1 call \/ Run commands · 1 call/);
   assert.doesNotMatch(html, /Read first|npm test|Used 2 tools/);
   assert.equal(html.match(/<svg.*?<\/svg>/s)?.[0], renderGroup([tool('read')]).match(/<svg.*?<\/svg>/s)?.[0]);
   assert.equal(renderGroup([]), '');
@@ -140,7 +164,7 @@ test('a single failed search reveals its full error only in its own disclosure',
   const closed = renderGroup([item], true, false);
   assert.equal((closed.match(/<button/g) ?? []).length, 1);
   assert.doesNotMatch(closed, /not supported|tool-group-trigger/);
-  assert.match(closed, /Failed/);
+  assert.match(closed, /Call unsuccessful/);
   const opened = renderGroup([item], false, true);
   assert.equal((opened.match(/not supported/g) ?? []).length, 1);
   assert.match(opened, /tool-result-error/);

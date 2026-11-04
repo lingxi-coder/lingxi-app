@@ -69,6 +69,13 @@ export const navigationCatalog: Record<string, Record<string, string>> = {
     "ja": "サイドチャットを隠す",
     "ko": "사이드 채팅 숨기기"
   },
+  "desktop_navigation_side_temporary": {
+    "zh-Hans": "侧边会话是临时的，关闭应用后便会消失。",
+    "zh-Hant": "側邊對話是暫時的，關閉應用程式後便會消失。",
+    "en": "Side chats are temporary and disappear when you close the app.",
+    "ja": "サイドチャットは一時的なもので、アプリを閉じると消えます。",
+    "ko": "사이드 채팅은 임시 대화이며 앱을 닫으면 사라집니다."
+  },
   "desktop_navigation_side_empty": {
     "zh-Hans": "使用此会话的上下文提问。",
     "zh-Hant": "使用此對話的上下文提問。",
@@ -481,5 +488,33 @@ export const navigationCatalog: Record<string, Record<string, string>> = {
     "en": "Goal",
     "ja": "目標",
     "ko": "목표"
+  },
+  "desktop_teams_rail_unread": {
+    "zh-Hans": "团队，%1$d 条未读",
+    "zh-Hant": "團隊，%1$d 則未讀",
+    "en": "Teams, %1$d unread",
+    "ja": "チーム、未読 %1$d 件",
+    "ko": "팀, 읽지 않음 %1$d개"
+  },
+  "desktop_teams_sign_in_title": {
+    "zh-Hans": "登录后使用团队",
+    "zh-Hant": "登入後使用團隊",
+    "en": "Sign in to use Teams",
+    "ja": "サインインしてチームを使う",
+    "ko": "로그인하여 팀 사용하기"
+  },
+  "desktop_teams_sign_in_body": {
+    "zh-Hans": "请登录灵犀账号以使用团队。",
+    "zh-Hant": "請登入靈犀帳號以使用團隊。",
+    "en": "Sign in to your LingXi account to use Teams.",
+    "ja": "チームを使うには LingXi アカウントにサインインしてください。",
+    "ko": "팀을 사용하려면 LingXi 계정에 로그인하세요."
+  },
+  "desktop_teams_loading": {
+    "zh-Hans": "正在加载团队…",
+    "zh-Hant": "正在載入團隊…",
+    "en": "Loading Teams…",
+    "ja": "チームを読み込み中…",
+    "ko": "팀을 불러오는 중…"
   }
 };

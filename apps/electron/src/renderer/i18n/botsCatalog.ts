@@ -118,13 +118,6 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "ja": "Bot を削除",
     "ko": "Bot 삭제"
   },
-  "bots_tab_chats": {
-    "zh-Hans": "对话",
-    "zh-Hant": "對話",
-    "en": "Chats",
-    "ja": "チャット",
-    "ko": "채팅"
-  },
   "bots_tab_general": {
     "zh-Hans": "基本信息",
     "zh-Hant": "基本資訊",
@@ -173,13 +166,6 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "en": "Bot settings",
     "ja": "Bot の設定",
     "ko": "Bot 설정"
-  },
-  "bots_chats_empty": {
-    "zh-Hans": "还没有和这个 Bot 的对话。开始一个吧。",
-    "zh-Hant": "還沒有和這個 Bot 的對話。開始一個吧。",
-    "en": "No chats with this Bot yet. Start one to talk to it.",
-    "ja": "この Bot とのチャットはまだありません。始めてみましょう。",
-    "ko": "이 Bot과의 채팅이 아직 없습니다. 시작해 보세요."
   },
   "bots_chats_loading": {
     "zh-Hans": "正在加载对话…",
@@ -1195,5 +1181,33 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "en": "Remote control is off on this computer. Turn it on in Settings first.",
     "ja": "このコンピュータではリモート操作がオフです。先に「設定」でオンにしてください。",
     "ko": "이 컴퓨터에서는 원격 제어가 꺼져 있습니다. 먼저 설정에서 켜세요."
+  },
+  "bots_sidebar_new_chat_named": {
+    "zh-Hans": "与 %1$s 开始新对话",
+    "zh-Hant": "與 %1$s 開始新對話",
+    "en": "New chat with %1$s",
+    "ja": "%1$sと新しいチャット",
+    "ko": "새 채팅: %1$s"
+  },
+  "bots_sidebar_settings": {
+    "zh-Hans": "Bot 设置",
+    "zh-Hant": "Bot 設定",
+    "en": "Bot settings",
+    "ja": "Bot の設定",
+    "ko": "Bot 설정"
+  },
+  "bots_sidebar_delete": {
+    "zh-Hans": "删除 Bot…",
+    "zh-Hant": "刪除 Bot…",
+    "en": "Delete Bot…",
+    "ja": "Bot を削除…",
+    "ko": "Bot 삭제…"
+  },
+  "bots_sidebar_no_results": {
+    "zh-Hans": "没有匹配的 Bot 或对话。",
+    "zh-Hant": "沒有相符的 Bot 或對話。",
+    "en": "No matching Bots or chats.",
+    "ja": "一致する Bot やチャットはありません。",
+    "ko": "일치하는 Bot 또는 채팅이 없습니다."
   }
 };

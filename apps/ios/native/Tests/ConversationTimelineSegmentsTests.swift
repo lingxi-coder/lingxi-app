@@ -167,10 +167,20 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         ), ["thought:bottom-slot"])
     }
 
+    func testConsecutiveActivityGroupsKeepInvocationOrder() {
+        let calls = [trace("read-1"), trace("read-2"), ConversationToolTrace(id: "edit", tool: "Edit", status: .completed), trace("read-3")]
+        let projected = ConversationDesktopTimeline.groups([toolGroup(calls)])
+        let ids = projected.map { group in group.rows.compactMap { row -> String? in
+            if case let .tool(_, trace) = row { return trace.id }; return nil
+        } }
+        XCTAssertEqual(ids, [["read-1", "read-2"], ["edit"], ["read-3"]])
+        XCTAssertEqual(Set(projected.map(\.id)).count, projected.count)
+    }
+
     func testDesktopToolSummaryUsesLastToolAndShowsOnlyActiveWork() {
-        let tools = [trace("done"), ConversationToolTrace(id: "live", tool: "Read", status: .running)]
+        let tools = [ConversationToolTrace(id: "done", tool: "Read", status: .completed), ConversationToolTrace(id: "live", tool: "Read", status: .running)]
         XCTAssertEqual(ConversationDesktopTimeline.activeTools(tools).map(\.id), ["live"])
-        XCTAssertEqual(ConversationDesktopTimeline.summary(tools), "Read")
+        XCTAssertTrue(ConversationDesktopTimeline.summary(tools).hasPrefix("Read · "))
     }
 
     #if canImport(harness_runtimeFFI)
@@ -260,9 +270,12 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
                 transcriptAgents: model.orderedAgentSummaries,
                 transcriptAgentAnchors: model.transcriptAgentAnchors
             ),
-            ["timeline-tools:spawn-tool", "agents:after:spawn-tool", "timeline-tools:later-tool", "thought:bottom-slot"]
+            ["agents:after:spawn-tool", "timeline-tools:later-tool", "thought:bottom-slot"]
         )
         XCTAssertEqual(model.transcriptAgentAnchors["child"], "spawn-tool")
+        XCTAssertEqual(ConversationTimelineView.toolDestinationID(toolID: "spawn-tool",
+            groups: model.visibleTimelineGroups, transcriptAgents: model.orderedAgentSummaries,
+            transcriptAgentAnchors: model.transcriptAgentAnchors), "agents:after:spawn-tool")
     }
 
     @MainActor

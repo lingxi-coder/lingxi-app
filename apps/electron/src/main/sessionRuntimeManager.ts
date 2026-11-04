@@ -539,7 +539,11 @@ export class SessionRuntimeManager {
           empty && !selectedPath ? expectedMode : undefined, durableDraftTitle);
         if (durableDraftTitle && this.opts.captureSessionSource) {
           const path = await this.opts.captureSessionSource(ref, runtime, true);
-          if (path) this.sessionTranscriptPaths.set(ref.sessionId, path);
+          if (this.runtimes.get(ref.sessionId) !== runtime) throw new Error('The session runtime changed while its source was being recorded.');
+          if (path) {
+            this.sessionTranscriptPaths.set(ref.sessionId, path);
+            runtime.rememberTranscriptSelection(path);
+          }
         }
       }
       if (runtime.needsSessionResume || (!empty && !runtime.recoveredLiveConnection)) await runtime.resumeOwnedSession(transcriptPath);
@@ -551,11 +555,13 @@ export class SessionRuntimeManager {
         existing?.rememberTranscriptSelection(previousTranscriptPath);
       }
       if (!existing && runtime) {
-        this.runtimes.delete(ref.sessionId);
-        this.sourceCaptureWanted.delete(ref.sessionId);
-        this.visualizations.forgetSession(ref.sessionId);
-        this.lastUsed.delete(ref.sessionId);
-        this.sessionModelHints.delete(ref.sessionId);
+        if (this.runtimes.get(ref.sessionId) === runtime) {
+          this.runtimes.delete(ref.sessionId);
+          this.sourceCaptureWanted.delete(ref.sessionId);
+          this.visualizations.forgetSession(ref.sessionId);
+          this.lastUsed.delete(ref.sessionId);
+          this.sessionModelHints.delete(ref.sessionId);
+        }
         await runtime.dispose().catch(() => undefined);
       }
       throw error;
@@ -1025,7 +1031,10 @@ export class SessionRuntimeManager {
         try {
           const path = await this.opts.captureSessionSource!(wanted.ref, runtime, wanted.scheduled);
           if (this.runtimes.get(ref.sessionId) !== runtime) return;
-          if (path) this.sessionTranscriptPaths.set(ref.sessionId, path);
+          if (path) {
+            this.sessionTranscriptPaths.set(ref.sessionId, path);
+            runtime.rememberTranscriptSelection(path);
+          }
           this.sourceCaptureWanted.delete(ref.sessionId);
           return;
         } catch (error) { failure = error; }

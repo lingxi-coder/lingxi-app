@@ -1887,7 +1887,7 @@ export function useBridge(): UseBridge {
     }
     catch (cause) { if (isLatestOperation(operationId, pinOperationRef.current)) capture(cause); }
   }, [capture, host, patchBootstrap]);
-  const updateSidebarPreferences = useCallback(async (sidebar: import('../../shared/settings').SidebarPreferences) => {
+  const updateSidebarPreferences = useCallback(async (sidebar: Partial<import('../../shared/settings').SidebarPreferences>) => {
     if (!host) return;
     try { patchBootstrap({ settings: await host.updateSettings({ sidebar }) }); }
     catch (cause) { capture(cause); }

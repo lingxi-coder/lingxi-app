@@ -2582,4 +2582,8 @@
     <string name="local_app_market_remix_confirm">Create an editable source copy from this release?</string>
     <string name="side_chat_expired_read_only">This side chat has expired. Content below is available to view and copy.</string>
     <string name="side_chat_delivery_unconfirmed">Delivery status unconfirmed</string>
+    <string name="chat_tool_calls_count">%1$d calls</string>
+    <string name="chat_tool_running_count">%1$d running</string>
+    <string name="chat_tool_calls_unsuccessful">Calls unsuccessful</string>
+    <string name="chat_tool_group_shell">Run commands</string>
 </resources>

@@ -2750,5 +2750,11 @@
   "local_app_market_remix": "編集可能なコピーを作成",
   "local_app_market_remix_confirm": "このバージョンから編集可能なソースのコピーを作成しますか？",
   "side_chat_expired_read_only": "このサイドチャットは期限切れです。以下の内容は表示とコピーのみ可能です。",
-  "side_chat_delivery_unconfirmed": "送信状況は未確認です"
+  "side_chat_delivery_unconfirmed": "送信状況は未確認です",
+  "chat_tool_calls_count": "%1$d 回",
+  "chat_tool_running_count": "%1$d 件実行中",
+  "chat_tool_calls_unsuccessful": "呼び出し未成功",
+  "chat_tool_group_shell": "コマンドを実行",
+  "chat_tool_calls_count %lld": "%1$lld 回",
+  "chat_tool_running_count %lld": "%1$lld 件実行中"
 }

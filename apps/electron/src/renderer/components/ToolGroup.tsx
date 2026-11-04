@@ -15,50 +15,51 @@ interface ToolGroupProps {
   group: TranscriptToolGroup;
   modUiSessionId?: string;
   open: boolean;
-  /** An outer activity disclosure already supplies the group heading. */
-  ungrouped?: boolean;
   toolOpen(id: string): boolean | undefined;
   onSetOpen(id: string, next: boolean): void;
 }
 
-export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen, ungrouped = false }: ToolGroupProps) {
+export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: ToolGroupProps) {
   const t = useT();
   useI18n();
-  if (ungrouped || group.tools.some((tool) => questionAnswers(tool))) {
+  if (group.tools.some((tool) => questionAnswers(tool))) {
     return <div className="transcript-tool-group">
       {group.tools.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
     </div>;
   }
   const active = group.tools.filter((tool) => tool.status === 'running');
-  if (active.length > 0) {
-    return <div className="transcript-tool-group" aria-label={tr("desktop_ui_running_tools")}>
-      {active.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
-    </div>;
-  }
   const singleTool = group.tools.length === 1 ? group.tools[0] : undefined;
   if (singleTool) {
-    return <div className="transcript-tool-group">
+    return <div className="transcript-tool-group" aria-label={active.length ? tr('desktop_ui_running_tools') : undefined}>
       <ToolCall item={singleTool} modUiSessionId={modUiSessionId} open={toolOpen(singleTool.id)} onSetOpen={onSetOpen} />
     </div>;
   }
-  const failed = group.tools.filter((tool) => tool.status === 'error').length;
   const lastTool = group.tools.at(-1);
   if (!lastTool) return null;
   const summary = toolGroupSummary(group.tools);
   const firstTool = group.tools[0]!;
-  const failureSummary = failed ? ` · ${tr('desktop_ui_failed_count', failed)}` : '';
-  return <div className="transcript-tool-group">
+  // A failed attempt says nothing about the turn's outcome. Mixed results stay
+  // in the details; only an entirely unsuccessful batch earns a summary note.
+  const allFailed = group.tools.every(tool => tool.status === 'error');
+  const state = active.length ? tr('desktop_ui_running_count', active.length)
+    : allFailed ? tr('desktop_ui_tool_calls_unsuccessful') : '';
+  const calls = (tools: typeof group.tools) => <div className="tool-group-calls">
+    {tools.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
+  </div>;
+  return <div className="transcript-tool-group" data-tool-group-id={group.id}
+    style={{ '--tool-focus-color': t.text, '--tool-group-border': t.border } as CSSProperties}>
     <Disclosure id={group.id} open={open} onToggle={() => onSetOpen(group.id, !open)}
       buttonClassName="tool-group-trigger"
-      label={`${summary}${failureSummary} · ${tr('chat_tool_batch_count %lld', group.tools.length)}`}
-      buttonStyle={{ width: '100%', borderRadius: 6, background: 'var(--tool-group-background, transparent)', '--tool-hover-background': t.surfaceHover, maxWidth: '100%', minWidth: 0, minHeight: 28, fontSize: 13, fontWeight: 400, gap: 8, color: t.text3, '--tool-focus-color': t.text } as CSSProperties}
+      label={[summary, state].filter(Boolean).join(' · ')}
+      buttonStyle={{ width: '100%', borderRadius: 6, background: 'transparent', maxWidth: '100%', minWidth: 0, minHeight: 28, fontSize: 13, fontWeight: 400, gap: 9, color: t.text3 }}
       summary={<>
-        <span aria-hidden="true" style={{ display: 'inline-flex', flexShrink: 0 }}><ComputerApplicationIcon item={groupComputerApplication(group.tools)} fallback={<ToolActivityIcon name={toolIconName(firstTool.view.verb, firstTool.tool, firstTool.view.icon)} />} /></span>
+        <span className="tool-group-icon" aria-hidden="true"><ComputerApplicationIcon item={groupComputerApplication(group.tools)} fallback={<ToolActivityIcon name={toolIconName(firstTool.view.verb, firstTool.tool, firstTool.view.icon)} />} /></span>
         <span className="tool-group-summary-text" title={summary} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary}</span>
-        {failed > 0 && <span style={{ flexShrink: 0, color: t.danger }}>{failureSummary}</span>}
+        {state && <span className="tool-group-state">{state}</span>}
       </>}
-      bodyStyle={{ margin: '2px 0 0', minWidth: 0 }}>
-      {group.tools.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
+      bodyStyle={{ minWidth: 0 }}>
+      {calls(group.tools)}
     </Disclosure>
+    {!open && active.length > 0 && calls(active)}
   </div>;
 }

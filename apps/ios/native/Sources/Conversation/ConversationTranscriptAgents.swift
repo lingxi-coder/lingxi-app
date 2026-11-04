@@ -46,7 +46,7 @@ struct ConversationTranscriptAgents: View {
                                 .font(.caption)
                                 .foregroundStyle(agent.reportDelivery == "withheld" ? t.danger : statusColor(agent.status))
                                 .lineLimit(1)
-                            if let activity = agent.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines), !activity.isEmpty {
+                            if let activity = agent.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines), !activity.isEmpty, activity != "SubagentHandback" {
                                 Text(activity)
                                     .font(.caption)
                                     .foregroundStyle(t.text3)
@@ -60,10 +60,6 @@ struct ConversationTranscriptAgents: View {
                         }
                         .frame(minHeight: 28)
                         .padding(.horizontal, 6)
-                        .background {
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(t.accent.opacity(isFocused || isExpanded ? 0.12 : 0))
-                        }
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -96,7 +92,7 @@ struct ConversationTranscriptAgents: View {
 
     private func accessibilityLabel(for agent: ConversationAgentSummary) -> String {
         var values = [agent.name, agent.reportStatusText ?? statusText(agent.status)]
-        if let activity = agent.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines), !activity.isEmpty {
+        if let activity = agent.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines), !activity.isEmpty, activity != "SubagentHandback" {
             values.append(activity)
         }
         return values.joined(separator: " · ")

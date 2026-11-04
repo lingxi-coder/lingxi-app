@@ -2582,4 +2582,8 @@
     <string name="local_app_market_remix_confirm">이 버전에서 편집 가능한 소스 사본을 만들까요?</string>
     <string name="side_chat_expired_read_only">이 사이드 채팅은 만료되었습니다. 아래 내용은 확인하고 복사할 수 있습니다.</string>
     <string name="side_chat_delivery_unconfirmed">전송 상태가 확인되지 않았습니다</string>
+    <string name="chat_tool_calls_count">%1$d 회</string>
+    <string name="chat_tool_running_count">%1$d 개 실행 중</string>
+    <string name="chat_tool_calls_unsuccessful">호출이 성공하지 못함</string>
+    <string name="chat_tool_group_shell">명령 실행</string>
 </resources>

@@ -173,6 +173,116 @@ function resumeProof(client: WorkspaceClient, id = sessionId) {
   client.emit('event', { type: 'model_changed', model: 'anthropic/restored-model' });
 }
 
+test('a manager-captured source is used by automatic recovery of that runtime', async (t) => {
+  const ref = { projectPath: '/project', sessionId, mode: 'code' as const };
+  const selectedPath = '/saved/selected-copy.jsonl', selectedCalls: string[] = [];
+  const manager = new SessionRuntimeManager({
+    launchConfig: () => ({ workspace: ref.projectPath, trusted: true, sessionId }),
+    captureSessionSource: async (owner, runtime, scheduled) => {
+      assert.equal(owner.sessionId, sessionId);
+      assert.equal(runtime, manager.get(sessionId));
+      assert.equal(scheduled, false);
+      return selectedPath;
+    },
+  });
+  t.after(() => manager.dispose());
+  const runtime = await manager.ensure(ref, false, undefined, undefined, 'code');
+  const internal = runtime as any;
+  assert.equal(internal.opts.onFirstPromptSent(), true);
+  await (manager as any).sourceCapturePending.get(sessionId);
+  assert.equal((manager as any).sessionTranscriptPaths.get(sessionId), selectedPath);
+
+  const child = new EventEmitter(), client = new WorkspaceClient();
+  Object.assign(client, { resumeSessionFromTranscript: (id: string, path: string) => {
+    selectedCalls.push(path);
+    queueMicrotask(() => resumeProof(client, id));
+    return Promise.resolve();
+  } });
+  Object.assign(internal, {
+    child, desiredRunning: true, sessionHasHistory: true, draftSessionMode: undefined,
+    draftModeRestorationRequired: false, activeWorkspace: ref.projectPath, activeWorkspaceTrusted: true,
+    ensureModelProviderCredential: async () => {}, restoreModel: async () => {},
+    restorePermissionMode: async () => {}, restoreFastMode: async () => {}, requestAudioSessionContext: () => {},
+    stopBridge: async () => { internal.child = null; internal.client = null; ++internal.generation; },
+    startInternal: async (publishConnected: boolean) => {
+      assert.equal(publishConnected, false);
+      internal.child = new EventEmitter();
+      internal.wireClient(client, internal.generation);
+    },
+  });
+  internal.setState({ status: 'connected' });
+  internal.managedChildExited(child, 1, null, true);
+  await runtime.start();
+  assert.deepEqual(selectedCalls, [selectedPath]);
+  assert.ok(!client.calls.some((call: any) => call[0] === 'command' && call[1].type === 'resume_session'));
+  assert.equal(runtime.needsSessionResume, false);
+  assert.equal(runtime.connectionState.status, 'connected');
+});
+
+test('a delayed source capture cannot retarget a replacement runtime', async (t) => {
+  const ref = { projectPath: '/project', sessionId, mode: 'code' as const };
+  const capture = deferred<string>(), entered = deferred<void>();
+  const manager = new SessionRuntimeManager({
+    launchConfig: () => ({ workspace: ref.projectPath, trusted: true, sessionId }),
+    captureSessionSource: async () => { entered.resolve(undefined); return capture.promise; },
+  });
+  t.after(() => manager.dispose());
+  const old = await manager.ensure(ref, false, undefined, undefined, 'code');
+  assert.equal((old as any).opts.onFirstPromptSent(), true);
+  await entered.promise;
+  const pending = (manager as any).sourceCapturePending.get(sessionId) as Promise<void>;
+  await manager.closeSession(ref);
+  const replacement = await manager.ensure(ref, false, undefined, undefined, 'code');
+  (replacement as any).setState({ status: 'connected' });
+  await manager.openSession(ref, false, undefined, false, '/saved/new-copy.jsonl');
+  capture.resolve('/saved/old-copy.jsonl');
+  await pending;
+  assert.equal(manager.get(sessionId), replacement);
+  assert.equal((manager as any).sessionTranscriptPaths.get(sessionId), '/saved/new-copy.jsonl');
+  assert.equal((replacement as any).ownedTranscriptPath, '/saved/new-copy.jsonl');
+});
+
+test('a durable draft capture binds the exact source to its new runtime', async (t) => {
+  const ref = { projectPath: '/project', sessionId, mode: 'code' as const };
+  const originalStart = SessionRuntime.prototype.start;
+  SessionRuntime.prototype.start = async function () { (this as any).setState({ status: 'connected' }); };
+  const manager = new SessionRuntimeManager({
+    launchConfig: () => ({ workspace: ref.projectPath, trusted: true, sessionId }),
+    captureSessionSource: async (_owner, _runtime, scheduled) => {
+      assert.equal(scheduled, true);
+      return '/saved/durable-draft.jsonl';
+    },
+  });
+  t.after(async () => { SessionRuntime.prototype.start = originalStart; await manager.dispose(); });
+  const runtime = await manager.openSession(ref, true, undefined, false, undefined, undefined, 'Scheduled task');
+  assert.equal((manager as any).sessionTranscriptPaths.get(sessionId), '/saved/durable-draft.jsonl');
+  assert.equal((runtime as any).ownedTranscriptPath, '/saved/durable-draft.jsonl');
+});
+
+test('a delayed durable draft capture cannot replace or remove a new runtime', async (t) => {
+  const ref = { projectPath: '/project', sessionId, mode: 'code' as const };
+  const capture = deferred<string>(), entered = deferred<void>();
+  const originalStart = SessionRuntime.prototype.start;
+  SessionRuntime.prototype.start = async function () { (this as any).setState({ status: 'connected' }); };
+  const manager = new SessionRuntimeManager({
+    launchConfig: () => ({ workspace: ref.projectPath, trusted: true, sessionId }),
+    captureSessionSource: async () => { entered.resolve(undefined); return capture.promise; },
+  });
+  t.after(async () => { SessionRuntime.prototype.start = originalStart; await manager.dispose(); });
+  const opening = manager.openSession(ref, true, undefined, false, undefined, undefined, 'Scheduled task');
+  const rejected = assert.rejects(opening, /session runtime changed/);
+  await entered.promise;
+  await manager.closeSession(ref);
+  const replacement = await manager.ensure(ref, false, undefined, undefined, 'code');
+  (manager as any).sessionTranscriptPaths.set(sessionId, '/saved/new-copy.jsonl');
+  replacement.rememberTranscriptSelection('/saved/new-copy.jsonl');
+  capture.resolve('/saved/old-copy.jsonl');
+  await rejected;
+  assert.equal(manager.get(sessionId), replacement);
+  assert.equal((manager as any).sessionTranscriptPaths.get(sessionId), '/saved/new-copy.jsonl');
+  assert.equal((replacement as any).ownedTranscriptPath, '/saved/new-copy.jsonl');
+});
+
 test('a failed owned restore cannot be reused as ready and retries require full engine proof', async t => {
   for (const firstOperation of ['open', 'restart'] as const) {
     await t.test(firstOperation, async t => {

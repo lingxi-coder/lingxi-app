@@ -37,6 +37,12 @@ criteria = "safe-to-deploy"
 version = "0.2.2"
 notes = "AI-assisted full source review and independent root cross-review; evidence: supply-chain/reviews/2026-11-03/batch002-lane-a.md (SHA-256 a0282f61bee7952f4b57d9d87f14bd5ca4cfd43612abd2a79845195c8325d47f). Scope: exact crates.io source and documented API use; dependencies reviewed separately. Explicit RNG limits recorded in evidence."
 
+[[audits.colorchoice]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.0.5"
+notes = "AI-assisted full exact-version source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-04/round5/colorchoice/review.md (SHA-256 015d08561055117ad139ec707c26679193096e75e2561464d7259421e87d468b); cross-review: supply-chain/reviews/2026-11-04/round5/colorchoice/root-cross-review.md (SHA-256 0e7379df52b8ea81764d61ef81ec5283def107431ab40e9a8acd788260e8553d). Shared atomic state and consumer, compiler, atomic implementation and platform boundaries are recorded."
+
 [[audits.crypto-common]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"

@@ -29,6 +29,7 @@ def run(command, expected=0, contains=None):
 def main():
     for path in (HERE, Path(tempfile.gettempdir())):
         available = shutil.disk_usage(path).free
+        print(f'free bytes at {path}: {available}', flush=True)
         if available < 8 * 1024**3:
             raise RuntimeError(f'free space below 8 GiB at {path}: {available} bytes; probes not run')
     archive = (HERE / 'futures-core-0.3.32.crate').read_bytes()
@@ -64,10 +65,18 @@ def main():
              '-o', temp / 'missing'], expected=1, contains='no `BoxFuture` in `future`')
         lib = temp / 'libfutures_core.rlib'
         compile_lib(lib, 'alloc', 'std')
+        unwind = temp / 'unwind_without_assert.rs'
+        unwind.write_text('use futures_core::task::__internal::AtomicWaker;\n'
+                          'fn main() { let cell = AtomicWaker::new(); '
+                          'let _ = std::panic::catch_unwind(|| cell.wake()); }\n')
+        run(['rustc', '+1.94.0', '--edition=2018', '--extern', f'futures_core={lib}', unwind,
+             '-o', temp / 'unwind_without_assert'], expected=1, contains='RefUnwindSafe')
         probe = temp / 'probe'
         run(['rustc', '+1.94.0', '--edition=2018', '--test', '-C', 'debuginfo=0',
              '--extern', f'futures_core={lib}', HERE / 'behavior-probe.rs', '-o', probe])
-        run([probe, '--nocapture', '--test-threads=1'], contains='6 passed; 0 failed')
+        for artifact in (bare, temp / 'liballoc.rlib', lib, probe):
+            print(f'compiled artifact {artifact.name}: {artifact.stat().st_size} bytes', flush=True)
+        run([probe, '--nocapture', '--test-threads=1'], contains='7 passed; 0 failed')
 
         atomic = temp / 'src/task/__internal/atomic_waker.rs'
         source = atomic.read_bytes()
@@ -78,8 +87,14 @@ def main():
         mutant = temp / 'mutant-probe'
         run(['rustc', '+1.94.0', '--edition=2018', '--test', '-C', 'debuginfo=0',
              '--extern', f'futures_core={lib}', HERE / 'behavior-probe.rs', '-o', mutant])
+        print(f'compiled mutant library: {lib.stat().st_size} bytes', flush=True)
+        print(f'compiled mutant test binary: {mutant.stat().st_size} bytes', flush=True)
         run([mutant, '--exact', 'wake_during_register_is_forwarded_after_unlock', '--nocapture'],
             expected=101, contains='wake_during_register_is_forwarded_after_unlock ... FAILED')
+        files = [path for path in temp.rglob('*') if path.is_file()]
+        print(f'temporary files: {len(files)}, total {sum(path.stat().st_size for path in files)} bytes', flush=True)
+    print(f'temporary directory removed: {not Path(tmp).exists()}', flush=True)
+    assert not Path(tmp).exists()
     print('Expected diagnostic outcomes observed; a passing panic diagnostic demonstrates the suspected liveness failure.', flush=True)
 
 

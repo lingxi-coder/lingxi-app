@@ -134,3 +134,57 @@ fn diagnostic_clone_panic_may_leave_register_stuck() {
     // This asserts the *suspected failure*, not a safety or correctness pass.
     assert_eq!(counter.0.load(Ordering::SeqCst), 0);
 }
+
+struct PanicOldDrop { drops: Arc<AtomicUsize> }
+impl Wake for PanicOldDrop { fn wake(self: Arc<Self>) {} }
+impl Drop for PanicOldDrop {
+    fn drop(&mut self) {
+        let count = self.drops.fetch_add(1, Ordering::SeqCst);
+        if count == 0 { panic!("diagnostic old-waker drop panic"); }
+    }
+}
+
+struct CountNewDrop { drops: Arc<AtomicUsize> }
+impl Wake for CountNewDrop { fn wake(self: Arc<Self>) {} }
+impl Drop for CountNewDrop { fn drop(&mut self) { self.drops.fetch_add(1, Ordering::SeqCst); } }
+
+#[test]
+fn diagnostic_old_drop_panic_and_final_destruction() {
+    const CHILD_FLAG: &str = "FUTURES_CORE_DROP_DIAGNOSTIC_CHILD";
+    if std::env::var_os(CHILD_FLAG).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "diagnostic_old_drop_panic_and_final_destruction", "--nocapture"])
+            .env(CHILD_FLAG, "1").output().expect("run isolated diagnostic child");
+        println!("isolated child status: {}", output.status);
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "isolated diagnostic child failed");
+        return;
+    }
+    let cell = Arc::new(AtomicWaker::new());
+    let old_drops = Arc::new(AtomicUsize::new(0));
+    let old = Waker::from(Arc::new(PanicOldDrop { drops: old_drops.clone() }));
+    cell.register(&old);
+    drop(old);
+    let new_drops = Arc::new(AtomicUsize::new(0));
+    let new = Waker::from(Arc::new(CountNewDrop { drops: new_drops.clone() }));
+    let worker_cell = cell.clone();
+    let worker = std::thread::spawn(move || worker_cell.register(&new));
+    assert!(worker.join().is_err(), "old waker Drop should unwind worker");
+    let count = Arc::new(CountWake::default());
+    let witness = Waker::from(count.clone());
+    cell.register(&witness);
+    cell.wake();
+    let wakes = count.0.load(Ordering::SeqCst);
+    let old_after_join = old_drops.load(Ordering::SeqCst);
+    let new_after_join = new_drops.load(Ordering::SeqCst);
+    drop(cell);
+    let old_after_drop = old_drops.load(Ordering::SeqCst);
+    let new_after_drop = new_drops.load(Ordering::SeqCst);
+    println!("after worker panic: wake_count={wakes}, old_drop_count={old_after_join}, new_drop_count={new_after_join}");
+    println!("after final cell drop: old_drop_count={old_after_drop}, new_drop_count={new_after_drop}");
+    assert_eq!(wakes, 0, "diagnostic expects stalled notification");
+    assert_eq!(old_after_join, 1);
+    assert_eq!(old_after_drop, 1);
+    assert_eq!(new_after_drop, 1);
+}

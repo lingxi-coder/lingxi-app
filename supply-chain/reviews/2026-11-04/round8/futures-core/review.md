@@ -1,10 +1,10 @@
-# futures-core 0.3.32 — static full-source review, further validation pending
+# futures-core 0.3.32 — full-source review proposal, independent review pending
 
 Reviewer: Codex AI-assisted, 2026-11-04. This is a source-review proposal,
 **not yet a `safe-to-deploy` recommendation or registration**. The complete
-package was inspected, but the concurrency and unwind diagnostics below have
-not been compiled or executed, and the unwind-contract question needs an
-independent assessment. No exemption, publisher trust or wildcard is proposed.
+package was inspected and bounded host diagnostics were run; the unwind
+contract and remaining concurrency risks still need independent assessment.
+No exemption, publisher trust or wildcard is proposed.
 Consumers, Rust's compiler and standard library, optional dependencies, other
 versions and product acceptance remain separate.
 
@@ -49,14 +49,16 @@ enables `alloc` and the `AssertUnwindSafe` implementations. `unstable` and
 `portable-atomic` is an optional dependency feature, with its atomic operations
 used instead of `core::sync::atomic` when enabled. On `target_os = "none"`,
 the `AtomicWaker` module is omitted unless pointer atomics or that feature are
-available. Target and feature combinations have not been compiled here.
+available. The host feature checks below do not cover that bare-metal branch.
 
 The packaged lock resolves optional `portable-atomic 1.11.1`; it is not the
 App lock. Frozen App all-features workspace metadata resolves `alloc`,
 `default`, `std` for this package and **does not enable** `portable-atomic` or
-resolve it as this package's dependency. Enabling that feature requires a
-separate dependency audit and target-specific validation. The declared Rust
-1.36 minimum is not tested.
+resolve it as this package's dependency. A separate temporary host harness
+enabled it with `portable-atomic 1.15.0`, a version present elsewhere in the
+App lock; this did not change the App lock or its dependency graph. Enabling
+that feature still requires a separate dependency audit and target-specific
+validation. The declared Rust 1.36 minimum is not tested.
 
 `future.rs` re-exports `core::future::Future`, defines `FusedFuture` forwarding
 and a sealed `TryFuture` blanket adapter for `Future<Output = Result<...>>`.
@@ -117,34 +119,41 @@ The successful `register` path executes a supplied `Waker::clone`, and may
 drop the previously stored waker, **while state is `REGISTERING`**, with no
 unwind guard. If either callback unwinds before the state-reset CAS, static
 inspection predicts state remains `1` or `3`: later registrations cannot
-acquire the cell and `wake`/`take` cannot take it. This is a possible
-post-panic **liveness/recoverability** issue, not evidence of undefined
-behavior, data race, exploitable vulnerability or failed `safe-to-deploy`
-criteria. It is not reproduced yet.
+acquire the cell and `wake`/`take` cannot take it. The bounded host diagnostics
+below observed this post-panic **liveness/recoverability** behavior in two
+constructed cases. That observation is not evidence of undefined behavior,
+data race, exploitable vulnerability or failed `safe-to-deploy` criteria.
 
 The package docs do not promise that an `AtomicWaker` remains usable after a
 callback panics and the caller catches the unwind. Under Rust's standard
 auto-trait rules, `UnsafeCell` makes `AtomicWaker` not `RefUnwindSafe`, so a
-shared `&AtomicWaker` does not satisfy `UnwindSafe`; the planned test explicitly
-uses `AssertUnwindSafe` to cross that boundary.
+shared `&AtomicWaker` does not satisfy `UnwindSafe`; direct `catch_unwind` was
+confirmed to fail compilation, while the clone-panic diagnostic explicitly
+uses `AssertUnwindSafe` to cross that boundary. A separate safe
+`Arc<impl Wake + Drop>` case retains another `Arc` and observes a worker panic
+through `thread::spawn().join()` without `AssertUnwindSafe`.
 The installed Rust 1.94 [RawWakerVTable contract](https://doc.rust-lang.org/std/task/struct.RawWakerVTable.html)
 requires thread-safe callbacks for `Waker`, resource retention for a returned
 clone, matching wake behavior, and resource release on wake/drop; the
 documented text does not state an explicit no-panic rule. Whether a particular
 panicking raw callback fulfills its full unsafe contract on unwind needs
 independent review; no general permission to violate those obligations is
-assumed. A safe `Arc<impl Wake>` can also run user destructor code when its
-last reference is dropped, but no actual application waker has been shown to
-panic. With `panic=abort`, there is no recovered execution to assess.
+assumed. A safe `Arc<impl Wake>` can run user destructor code when its last
+reference is dropped, as the diagnostic demonstrates, but no actual application
+waker has been shown to panic. With `panic=abort`, there is no recovered
+execution to assess.
 
-The source includes a bounded diagnostic using a synthetic resource-free raw
-waker whose clone panics, and a normal waker afterward. If it passes, that
-particular test would **confirm the predicted lack of notification**, not
-establish a security defect or package approval. The callback's contract and
-the result still need expert review. The probe also includes deterministic
-register-vs-wake/take scheduling and a deliberately broken-state negative
-control. See [behavior-probe.rs](behavior-probe.rs) and
-[run-probes.py](run-probes.py); **neither has been compiled or run**.
+The synthetic resource-free raw-waker clone panic, explicitly caught through
+`AssertUnwindSafe`, was followed by zero notifications to a newly registered
+normal waker. In the isolated safe-`Arc<Wake + Drop>` case, the old waker's
+last destructor panicked on a worker; after `join` the retained cell again
+produced zero notifications. In that host run the old waker was dropped once,
+and the replacement's final drop occurred once when the cell was dropped. This
+is an observation for this test and toolchain, not proof that all panic paths
+are memory-safe or a finding about the callback's contract. Both diagnostics
+assert the observed stalled notification, so their passing status is **not**
+a correctness pass. See [behavior-probe.rs](behavior-probe.rs) and
+[probe.log](probe.log).
 
 ## Consumers, reachability and validation status
 
@@ -174,13 +183,30 @@ Frozen normal-edge reverse graphs show paths from default-feature
 [Android](android-default-tree.txt), [iOS](ios-default-tree.txt)). These are
 resolution evidence, not target builds or device execution.
 
-Free space was below the 8 GiB threshold, so no Rust compilation, Miri or
-concurrency-model test was started. When space and authorization permit,
-independently review the raw-waker contract and panic implications, run and
-inspect the bounded probe including its negative control, and consider a Loom
-or equivalent interleaving model for the exact atomic code. The prepared
-runner refuses to build when either its worktree or temp filesystem has less
-than 8 GiB free. A separate optional-`portable-atomic` feature/target check
-would require its own resolved dependency and cannot be inferred from this
-App's default graph. No dynamic result or final approval should be inferred
-from the prepared source alone.
+After free space rose above 8 GiB, Rust 1.94.0 on macOS arm64 compiled the
+exact archive source with no features, `alloc`, and `std` plus `alloc`.
+Importing `BoxFuture` without `alloc` and directly catching a shared
+`AtomicWaker` without `AssertUnwindSafe` failed as expected. Seven bounded
+host diagnostics completed with expected results, including two single
+forced register/wake or register/take interleavings and the two panic cases
+described above. Deliberately clearing the waking bit in a temporary copy
+made the wake-contention test fail as expected. [probe.log](probe.log) records
+commands and output; the runner measured 2,785,798 bytes in 14 temporary files
+and confirmed their removal.
+
+A separate offline, temporary Cargo harness used this exact package archive
+with `portable-atomic 1.15.0` and `require-cas`; its cached build files matched
+the archive checksum already in the App lock. It resolved the optional feature,
+ran the same seven host diagnostics and detected the same deliberately broken
+state transition. [portable-probe.log](portable-probe.log) records the
+synthetic lock, results, 5,359,706 temporary bytes and cleanup. This is an
+optional-feature test on one native host, not a test of a target without native
+atomics, a dependency source audit, or evidence that this feature is enabled in
+the App graph. The App lock, config and imports were not modified.
+
+The probes are selected observations, not an exhaustive weak-memory proof.
+No Miri, Loom or other interleaving model, older compiler, target build or
+device execution was run. Both runners refuse to build below 8 GiB free.
+Independent review must assess the raw-waker contract and panic implications
+and decide whether further model checking or target coverage is required
+before considering any audit registration.

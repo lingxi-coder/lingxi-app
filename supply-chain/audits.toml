@@ -19,6 +19,12 @@ criteria = "safe-to-deploy"
 version = "1.2.1"
 notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/by_address-1.2.1.md (SHA-256 bf38e8f0fce77333dfd693bba92075cd5b54b6422ea2ab4ea2a1988410f30a3a); independent review: supply-chain/reviews/2026-11-03/batch002-lane-b-cross-1.md (SHA-256 c8d5660bcde576172e6069013ba2997f6394473e6b00224421a9b18d7db15036). Exact crates.io version; documented API and disclosure limits in reports; dependencies reviewed separately."
 
+[[audits.cfg-if]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.0.4"
+notes = "AI-assisted full exact-version source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-04/round4/lane-a/review.md (SHA-256 df4dcf530c75a39faab7c3fd636c3afcbfcf97f08c2514d1cccfbcce9df76c08); cross-review: supply-chain/reviews/2026-11-04/round4/lane-b/cross-cfg-if.md (SHA-256 30e4fc6f8ff1881bdd164f06e3f1e9a754152968fd3b9d12cda954cb987089c9). Package-local documented semantics and explicit caller/dependency limitations are recorded; no consumer or toolchain certification."
+
 [[audits.cfg_aliases]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
@@ -72,6 +78,12 @@ who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
 version = "0.1.1"
 notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/memmem-0.1.1.md (SHA-256 98ac1ebca85ab781f8a35274b179c1d5e31d8e3140fb83909af1e94a8b2f1862); independent review: supply-chain/reviews/2026-11-03/batch002-lane-b-cross-3.md (SHA-256 3ae895feedbf790e9f6b0be20649e310d39fd10951c1702ec0e0a5e8e5df09fe). Exact crates.io version; documented API and disclosure limits in reports; dependencies reviewed separately."
+
+[[audits.opaque-debug]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.3.1"
+notes = "AI-assisted full exact-version source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-04/round4/lane-b/review.md (SHA-256 b31087777a0c9affb9e1ac74a92f7bd43ad75fc57382b929cd916a6b09caad8d); cross-review: supply-chain/reviews/2026-11-04/round4/lane-a/cross-opaque-debug.md (SHA-256 d8ea3898a465d9c4ef154a44af91f5a674f552cf1e2239d14bb99907c06afc4f). Package-local documented semantics and explicit caller/dependency limitations are recorded; no consumer or toolchain certification."
 
 [[audits.rand_xorshift]]
 who = "Codex AI-assisted"

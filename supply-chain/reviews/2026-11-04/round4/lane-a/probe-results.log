@@ -1,0 +1,44 @@
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --version
+rustc 1.94.0 (4a4ef493e 2026-03-02)
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --edition=2018 --crate-name=cfg_if --crate-type=lib /Users/luolingfeng/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cfg-if-1.0.4/src/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/libcfg_if.rlib
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --edition=2018 --test /Users/luolingfeng/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cfg-if-1.0.4/src/lib.rs -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/unit
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/unit
+
+running 2 tests
+test tests::it_works ... ok
+test tests::test_usage_within_a_function ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --edition=2018 --test /Users/luolingfeng/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cfg-if-1.0.4/tests/xcrate.rs --extern cfg_if=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/libcfg_if.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/xcrate
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/xcrate
+
+running 1 test
+test smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --edition=2018 /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round4-20261104/lane-a/cfg-if-probe.rs --extern cfg_if=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/libcfg_if.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe
+a=false b=false c=false: selected=3 OK
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --edition=2018 /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round4-20261104/lane-a/cfg-if-probe.rs --extern cfg_if=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/libcfg_if.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe --cfg flag_c
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe
+a=false b=false c=true: selected=2 OK
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --edition=2018 /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round4-20261104/lane-a/cfg-if-probe.rs --extern cfg_if=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/libcfg_if.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe --cfg flag_b
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe
+a=false b=true c=false: selected=1 OK
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --edition=2018 /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round4-20261104/lane-a/cfg-if-probe.rs --extern cfg_if=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/libcfg_if.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe --cfg flag_b --cfg flag_c
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe
+a=false b=true c=true: selected=1 OK
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --edition=2018 /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round4-20261104/lane-a/cfg-if-probe.rs --extern cfg_if=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/libcfg_if.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe --cfg flag_a
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe
+a=true b=false c=false: selected=0 OK
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --edition=2018 /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round4-20261104/lane-a/cfg-if-probe.rs --extern cfg_if=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/libcfg_if.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe --cfg flag_a --cfg flag_c
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe
+a=true b=false c=true: selected=2 OK
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --edition=2018 /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round4-20261104/lane-a/cfg-if-probe.rs --extern cfg_if=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/libcfg_if.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe --cfg flag_a --cfg flag_b
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe
+a=true b=true c=false: selected=0 OK
++ /Users/luolingfeng/.cargo/bin/rustc +1.94.0 --edition=2018 /Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/source-audits/round4-20261104/lane-a/cfg-if-probe.rs --extern cfg_if=/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/libcfg_if.rlib -o /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe --cfg flag_a --cfg flag_b --cfg flag_c
++ /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/cfg-if-audit-ccwajrhz/probe
+a=true b=true c=true: selected=1 OK

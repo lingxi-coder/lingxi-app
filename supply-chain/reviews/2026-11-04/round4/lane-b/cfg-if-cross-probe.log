@@ -1,0 +1,5 @@
+a=false, b=false: first match, empty branch, gating, hygiene OK
+a=false, b=true: first match, empty branch, gating, hygiene OK
+a=true, b=false: first match, empty branch, gating, hygiene OK
+a=true, b=true: first match, empty branch, gating, hygiene OK
+negative control: removing grouped cfg gate exposed false branch (expected)

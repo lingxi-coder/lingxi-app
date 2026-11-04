@@ -1,0 +1,4 @@
+Changed previous-branch exclusion to unconditional all().
+Probe rejected the changed macro when both first branches matched.
+compiler exit: 1
+duplicate-definition diagnostic: True

@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/luolingfeng/.cargo/bin/cargo",
+    "+1.94.0",
+    "metadata",
+    "--locked",
+    "--offline",
+    "--all-features",
+    "--format-version",
+    "1",
+    "--manifest-path",
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/delivery-round1/lingxi-app/Cargo.toml"
+  ],
+  "target_id": "registry+https://github.com/rust-lang/crates.io-index#cfg-if@1.0.4",
+  "features": [],
+  "deps": []
+}

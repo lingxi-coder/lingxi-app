@@ -1,0 +1,112 @@
+{
+  "command": [
+    "/Users/luolingfeng/.cargo/bin/cargo",
+    "+1.94.0",
+    "metadata",
+    "--locked",
+    "--offline",
+    "--all-features",
+    "--format-version",
+    "1",
+    "--manifest-path",
+    "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/delivery-round1/lingxi-app/Cargo.toml"
+  ],
+  "package": {
+    "name": "opaque-debug",
+    "version": "0.3.1",
+    "id": "registry+https://github.com/rust-lang/crates.io-index#opaque-debug@0.3.1",
+    "license": "MIT OR Apache-2.0",
+    "license_file": null,
+    "description": "Macro for opaque Debug trait implementation",
+    "source": "registry+https://github.com/rust-lang/crates.io-index",
+    "dependencies": [],
+    "targets": [
+      {
+        "kind": [
+          "lib"
+        ],
+        "crate_types": [
+          "lib"
+        ],
+        "name": "opaque_debug",
+        "src_path": "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/opaque-debug-0.3.1/src/lib.rs",
+        "edition": "2018",
+        "doc": true,
+        "doctest": true,
+        "test": true
+      },
+      {
+        "kind": [
+          "test"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "mod",
+        "src_path": "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/opaque-debug-0.3.1/tests/mod.rs",
+        "edition": "2018",
+        "doc": false,
+        "doctest": false,
+        "test": true
+      }
+    ],
+    "features": {},
+    "manifest_path": "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/opaque-debug-0.3.1/Cargo.toml",
+    "metadata": null,
+    "publish": null,
+    "authors": [
+      "RustCrypto Developers"
+    ],
+    "categories": [],
+    "keywords": [],
+    "readme": "README.md",
+    "repository": "https://github.com/RustCrypto/utils",
+    "homepage": null,
+    "documentation": "https://docs.rs/opaque-debug",
+    "edition": "2018",
+    "links": null,
+    "default_run": null,
+    "rust_version": null
+  },
+  "node": {
+    "id": "registry+https://github.com/rust-lang/crates.io-index#opaque-debug@0.3.1",
+    "dependencies": [],
+    "deps": [],
+    "features": []
+  },
+  "direct_parents": [
+    {
+      "name": "ghash",
+      "version": "0.5.1",
+      "manifest_path": "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/ghash-0.5.1/Cargo.toml",
+      "kinds": [
+        {
+          "kind": null,
+          "target": null
+        }
+      ]
+    },
+    {
+      "name": "poly1305",
+      "version": "0.8.0",
+      "manifest_path": "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.8.0/Cargo.toml",
+      "kinds": [
+        {
+          "kind": null,
+          "target": null
+        }
+      ]
+    },
+    {
+      "name": "polyval",
+      "version": "0.6.2",
+      "manifest_path": "/Users/luolingfeng/lingxi/worktrees/media-architecture/validation/gates-fix-20261030/audit-finding-fixes/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/Cargo.toml",
+      "kinds": [
+        {
+          "kind": null,
+          "target": null
+        }
+      ]
+    }
+  ]
+}

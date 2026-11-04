@@ -1,0 +1,223 @@
+{
+  "package_count": 1052,
+  "target": "registry+https://github.com/rust-lang/crates.io-index#opaque-debug@0.3.1",
+  "target_enabled_features": [],
+  "direct_consumers": [
+    {
+      "package": "ghash@0.5.1",
+      "direct_dependency_kinds": [
+        {
+          "kind": null,
+          "target": null
+        }
+      ],
+      "example_workspace_path": [
+        {
+          "package": "remote-control-client@0.1.0",
+          "edge_from_parent": null
+        },
+        {
+          "package": "lingxi-webrtc-core@0.1.0",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "rtc@0.20.3",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "rtc-shared@0.20.5",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "aes-gcm@0.10.3",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "ghash@0.5.1",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "opaque-debug@0.3.1",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "package": "poly1305@0.8.0",
+      "direct_dependency_kinds": [
+        {
+          "kind": null,
+          "target": null
+        }
+      ],
+      "example_workspace_path": [
+        {
+          "package": "remote-control-client@0.1.0",
+          "edge_from_parent": null
+        },
+        {
+          "package": "lingxi-webrtc-core@0.1.0",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "rtc@0.20.3",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "rtc-dtls@0.20.5",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "chacha20poly1305@0.10.1",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "poly1305@0.8.0",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "opaque-debug@0.3.1",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "package": "polyval@0.6.2",
+      "direct_dependency_kinds": [
+        {
+          "kind": null,
+          "target": null
+        }
+      ],
+      "example_workspace_path": [
+        {
+          "package": "remote-control-client@0.1.0",
+          "edge_from_parent": null
+        },
+        {
+          "package": "lingxi-webrtc-core@0.1.0",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "rtc@0.20.3",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "rtc-shared@0.20.5",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "aes-gcm@0.10.3",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "ghash@0.5.1",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "polyval@0.6.2",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "package": "opaque-debug@0.3.1",
+          "edge_from_parent": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

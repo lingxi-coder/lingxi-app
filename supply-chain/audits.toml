@@ -186,3 +186,27 @@ who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
 delta = "0.1.5 -> 0.1.8"
 notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/zerofrom-derive-0.1.8.md (SHA-256 ea0a4b7e09107f0e90a8096850c709d38f3cfdb8b22ec2b0a1ca8c403a9b5a66). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.ciborium-io]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.2.2"
+notes = "AI-assisted full source review and independent root cross-review; evidence: supply-chain/reviews/2026-11-03/batch002-lane-a.md (SHA-256 a0282f61bee7952f4b57d9d87f14bd5ca4cfd43612abd2a79845195c8325d47f). Scope: exact crates.io source and documented API use; dependencies reviewed separately. Explicit RNG limits recorded in evidence."
+
+[[audits.borrow-or-share]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.2.4"
+notes = "AI-assisted full source review and independent root cross-review; evidence: supply-chain/reviews/2026-11-03/batch002-lane-a.md (SHA-256 a0282f61bee7952f4b57d9d87f14bd5ca4cfd43612abd2a79845195c8325d47f). Scope: exact crates.io source and documented API use; dependencies reviewed separately. Explicit RNG limits recorded in evidence."
+
+[[audits.rand_xorshift]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.4.0"
+notes = "AI-assisted full source review and independent root cross-review; evidence: supply-chain/reviews/2026-11-03/batch002-lane-a.md (SHA-256 a0282f61bee7952f4b57d9d87f14bd5ca4cfd43612abd2a79845195c8325d47f). Scope: exact crates.io source and documented API use; dependencies reviewed separately. Explicit RNG limits recorded in evidence."
+
+[[audits.crypto-common]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.1.7"
+notes = "AI-assisted full source review and independent root cross-review; evidence: supply-chain/reviews/2026-11-03/batch002-lane-a.md (SHA-256 a0282f61bee7952f4b57d9d87f14bd5ca4cfd43612abd2a79845195c8325d47f). Scope: exact crates.io source and documented API use; dependencies reviewed separately. Explicit RNG limits recorded in evidence."

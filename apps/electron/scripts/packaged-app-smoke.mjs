@@ -1214,13 +1214,15 @@ export function assertPackagedLocalAppAuthoring(app, sourceSession) {
   if (authoring.appId !== undefined) assert.equal(authoring.appId, app.id, 'authoring binding must be owned by the published app');
 }
 
-export function assertPackagedLocalAppPendingAuthoring(index, sourceSession) {
-  assert(index && typeof index === 'object' && index.version === 1 && Array.isArray(index.entries),
-    'Native Create must persist the host-owned pending authoring index');
-  const matches = index.entries.filter(entry => entry?.authoring?.authoringSessionId === sourceSession.sessionId);
+export function assertPackagedLocalAppPendingAuthoring(receipts, sourceSession) {
+  assert(Array.isArray(receipts), 'Native Create must persist host-owned authoring receipts');
+  const matches = receipts.filter(entry => entry?.authoring?.authoringSessionId === sourceSession.sessionId);
   assert.equal(matches.length, 1, 'Native Create must persist exactly one pending binding for its Code session');
   const entry = matches[0];
-  assert.equal(entry.state, 'pending', 'the pending binding must remain unconsumed before first publish');
+  assert.equal(entry.sessionMode, 'code', 'the native receipt must authorize a Code session');
+  assert.equal(typeof entry.sourceId, 'string');
+  assert(entry.sourceId.length > 0, 'the native receipt must identify its verified source');
+  assert(entry.sourceIdentity && typeof entry.sourceIdentity === 'object', 'the native receipt must retain its rooted source identity');
   const authoring = entry.authoring;
   assert.equal(typeof authoring.workspaceId, 'string');
   assert(authoring.workspaceId.length > 0, 'pending authoring must have a stable workspace identity');
@@ -1228,7 +1230,6 @@ export function assertPackagedLocalAppPendingAuthoring(index, sourceSession) {
   assert.deepEqual(authoring.projectRef, { kind: 'desktopPath', path: sourceSession.projectPath }, 'pending projectRef must match the native Project');
   assert.equal(authoring.authoringSessionId, sourceSession.sessionId, 'pending authoring must identify the real Code session');
   assert.equal(authoring.appId, undefined, 'a new pending binding cannot already belong to a published app');
-  assert.equal(typeof entry.registeredAtMs, 'number');
   return authoring;
 }
 
@@ -1304,14 +1305,15 @@ async function createPackagedLocalAppSourceSession(page, creatorSessionId, confi
   assert.notEqual(sourceSession.projectPath, creator.projectPath, 'Local App creation must leave the ordinary creator workspace');
   assert.equal(sourceSession.projectRegistered, true, 'the dedicated source Project must be registered in Desktop');
   assert.equal(sourceSession.mode, 'code', 'the source chat must be a real Code session');
-  const pendingPath = join(configHome, 'local-apps', 'v2', 'authoring-pending.v1.json');
-  const pendingIndex = await waitFor(() => {
+  const pendingRoot = join(configHome, 'local-apps', 'v2', 'pending-authoring');
+  const receipts = await waitFor(() => {
     try {
-      const index = JSON.parse(readFileSync(pendingPath, 'utf8'));
-      return index?.entries?.some(entry => entry?.authoring?.authoringSessionId === sourceSession.sessionId) ? index : undefined;
+      const entries = readdirSync(pendingRoot).filter(name => name.startsWith('owner-') && name.endsWith('.json'))
+        .map(name => JSON.parse(readFileSync(join(pendingRoot, name), 'utf8')));
+      return entries.some(entry => entry?.authoring?.authoringSessionId === sourceSession.sessionId) ? entries : undefined;
     } catch { return undefined; }
-  }, { label: 'Native Create host-persisted pending AuthoringRef' });
-  assertPackagedLocalAppPendingAuthoring(pendingIndex, sourceSession);
+  }, { label: 'Native Create host-persisted authoring receipt' });
+  assertPackagedLocalAppPendingAuthoring(receipts, sourceSession);
   return sourceSession;
 }
 

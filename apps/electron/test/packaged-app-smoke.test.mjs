@@ -119,12 +119,14 @@ test('Native Create smoke requires the host-persisted pending binding before fir
   const sourceSession = { projectPath: '/tmp/native-app-source', sessionId: '12345678-1234-4234-8234-123456789abc', mode: 'code' };
   const authoring = { workspaceId: '12345678-1234-4234-8234-abcdef123456', sourceDirectory: sourceSession.projectPath,
     projectRef: { kind: 'desktopPath', path: sourceSession.projectPath }, authoringSessionId: sourceSession.sessionId };
-  const index = { version: 1, entries: [{ authoring, registeredAtMs: 123, state: 'pending' }] };
-  assert.strictEqual(assertPackagedLocalAppPendingAuthoring(index, sourceSession), authoring);
-  assert.throws(() => assertPackagedLocalAppPendingAuthoring(undefined, sourceSession), /host-owned pending authoring index/);
-  assert.throws(() => assertPackagedLocalAppPendingAuthoring({ ...index, entries: [] }, sourceSession), /exactly one pending binding/);
-  assert.throws(() => assertPackagedLocalAppPendingAuthoring({ ...index, entries: [{ ...index.entries[0], state: 'consumed' }] }, sourceSession), /remain unconsumed/);
-  assert.throws(() => assertPackagedLocalAppPendingAuthoring({ ...index, entries: [{ ...index.entries[0], authoring: { ...authoring, sourceDirectory: '/tmp/other' } }] }, sourceSession), /sourceDirectory/);
+  const receipt = { authoring, sourceId: 'native-source', sourceIdentity: { device: 1, inode: 2 }, sessionMode: 'code' };
+  assert.strictEqual(assertPackagedLocalAppPendingAuthoring([receipt], sourceSession), authoring);
+  assert.throws(() => assertPackagedLocalAppPendingAuthoring(undefined, sourceSession), /host-owned authoring receipts/);
+  assert.throws(() => assertPackagedLocalAppPendingAuthoring([], sourceSession), /exactly one pending binding/);
+  assert.throws(() => assertPackagedLocalAppPendingAuthoring([receipt, receipt], sourceSession), /exactly one pending binding/);
+  assert.throws(() => assertPackagedLocalAppPendingAuthoring([{ ...receipt, sessionMode: 'chat' }], sourceSession), /Code session/);
+  assert.throws(() => assertPackagedLocalAppPendingAuthoring([{ ...receipt, sourceIdentity: null }], sourceSession), /rooted source identity/);
+  assert.throws(() => assertPackagedLocalAppPendingAuthoring([{ ...receipt, authoring: { ...authoring, sourceDirectory: '/tmp/other' } }], sourceSession), /sourceDirectory/);
 });
 
 test('packaged Local App smoke checks the persisted public Code catalog after the first prompt', () => {

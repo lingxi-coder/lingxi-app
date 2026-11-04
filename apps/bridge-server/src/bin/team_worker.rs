@@ -1,6 +1,7 @@
 //! Private one-invocation worker plus a private crash-safe shell guardian role.
 //! Neither role exposes settings, credentials refresh or a public RPC server.
 
+#[cfg(target_os = "macos")]
 fn main() {
     use platform_posix::process::team_guardian;
     if team_guardian::is_team_guardian_invocation() {
@@ -22,4 +23,9 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 70 });
     }
     std::process::exit(harness_runtime::desktop::team_process::worker_main());
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    std::process::exit(78);
 }
